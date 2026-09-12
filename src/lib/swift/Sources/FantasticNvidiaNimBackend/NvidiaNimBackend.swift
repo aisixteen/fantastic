@@ -38,28 +38,12 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                 provider: "nvidia_nim",
                 sentence:
                     "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
-                verbs: [
-                    "send": "args: text, client_id?. Streams a response via SSE.",
-                    "history": "args: client_id?. Returns prior turns.",
-                    "cancel": .string(CANCEL_DOC),
-                    "status":
-                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
-                    "backend_state": "Reports availability + in-flight.",
-                ] as JSON,
                 // NIM's `done` error path keeps `accumulated`.
                 includeAccumulatedOnError: true,
                 reflectExtra: { agent in
                     [
                         "host": .string(Self.host(agent: agent)),
                         "model": .string(Self.model(agent: agent)),
-                    ]
-                },
-                backendStateExtra: { agent in
-                    [
-                        "host": .string(Self.host(agent: agent)),
-                        "model": .string(Self.model(agent: agent)),
-                        "configured":
-                            .bool(agent.metaValue(forKey: "api_key")?.asString != nil),
                     ]
                 },
                 makeProvider: { agent, _, _ in
@@ -84,7 +68,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? {
         """
         nvidia_nim_backend — NVIDIA NIM LLM agent (OpenAI-compatible); thin over FantasticAICore.
-        Verbs: send, history, interrupt, backend_state; api_key stored in agent meta (set via update_agent); 429 rate-limit retry.
+        Verbs: the shared ai_core set (reflect it); api_key stored in agent meta (set via update_agent); 429 rate-limit retry.
         Tool-calling is RAW: no native OpenAI tools — provider streams text, FantasticAICore parses the <call name=…> envelope (tool_parse).
         """
     }

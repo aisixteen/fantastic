@@ -418,7 +418,7 @@
         private func snap(_ jobId: String, _ j: Job, full: Bool) -> JSON {
             var o: OrderedDictionary<String, JSON> = [
                 "job_id": .string(jobId),
-                "task_id": j.taskId.map { JSON.string($0.value) } ?? .null,
+                "task_id": j.taskId.map { JSON.integer($0.value) } ?? .null,
                 "status": .string(j.status),
                 "exit_code": j.exitCode.map { JSON.integer(Int64($0)) } ?? .null,
                 "started_at": .double(j.startedAt),
@@ -658,25 +658,14 @@
                 "allowed": .array(allowedPatterns(record).map(JSON.string)),
                 "running": .integer(Int64(running)),
                 "verbs": .object([
+                    "start": .string("args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra"),
+                    "status": .string("args: job_id:str? — one job (with full stdout/stderr), or all of this agent's"),
+                    "stop": .string("args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs."),
+                    "interrupt": .string("args: job_id:str? — SIGINT one job or ALL of this agent's running jobs."),
+                    "clear": .string("args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM"),
+                    "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
                     "reflect": .string("Identity + running job count + auth posture. No args."),
-                    "start": .string(
-                        "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes or the start is refused naming the patterns. Spawns in the BACKGROUND; returns {job_id, status:'running'} at once and streams progress/job_done."
-                    ),
-                    "status": .string(
-                        "args: job_id:str?. One job (with full output) or all of this agent's jobs."
-                    ),
-                    "clear": .string("args: job_id:str?. Drop finished rows of this agent."),
-                    "connector": .string(
-                        "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
-                    "interrupt": .string(
-                        "args: job_id:str?. SIGINT in-flight subprocesses. Returns {interrupted:int}."
-                    ),
-                    "stop": .string(
-                        "args: job_id:str?. SIGKILL in-flight subprocesses. Returns {killed:int}."
-                    ),
-                    "boot": .string(
-                        "No-op. Nothing auto-restarts: a command is started by a caller, not the record."
-                    ),
+                    "boot": .string("No-op. Nothing auto-restarts: a command is started by a caller, not by the"),
                 ]),
                 "emits": .object([
                     "job_started": .string("{type:'job_started', job_id}"),

@@ -195,13 +195,6 @@ def main(scenario_id: str) -> int:
         # and the ledger must make the second press harmless.
         pressed = None
         if any("human_double_click" in c for c in (sc.get("expect") or [])):
-            # FROM THE DURABLE HISTORY, not from the send reply. The `send`
-            # reply shape is NOT uniform: python and rust return the finished
-            # text (`{response, final}`), while swift returns immediately with
-            # `{queued, stream_id, message_id}` and the text lands later. That
-            # divergence is real and is reported as such — but the assistant
-            # turn reaches the chat store on every runtime, so reading it there
-            # poses the same problem to all three.
             # READ THE PROPOSAL OFF THE HUMAN. It used to be scraped out of the
             # model's prose; it is a real call now, so the human HOLDS what it
             # was handed and the runner reads it. "The person was consulted" is

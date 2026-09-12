@@ -391,6 +391,9 @@ let package = Package(
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticTextFile", "FantasticKernelStartup",
                 "FantasticFoundationModelsBackend",
+                // The scenario fixtures are unit-tested here; only their
+                // REGISTRATION is behind -DSCENARIO_PROBES.
+                "FantasticScenarioProbes",
                 // The agentic runner boots the rosters the shared corpus at
                 // `contract/agentic/` declares, so it needs the bundles those
                 // manifests name — and Yams to read the corpus itself.

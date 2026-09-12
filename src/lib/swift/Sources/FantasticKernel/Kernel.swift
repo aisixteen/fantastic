@@ -54,6 +54,24 @@ public enum KernelTaskLocals {
     /// handler woken by its child's death cannot register fresh work while its
     /// own kill is in flight. Mirrors Rust's `CURRENT_KILLED`.
     @TaskLocal public static var currentKilled: KilledFlag? = nil
+
+    /// THE KERNEL'S OWN SHUTDOWN TRAFFIC. `shutdownAgents` sets the drain flag
+    /// FIRST (so nothing new enters while it works) and only then sends every
+    /// advertiser its `shutdown` verb — which the drain gate would otherwise
+    /// refuse as new work. Python `_in_shutdown` / `shutdown_context()`.
+    @TaskLocal public static var inShutdown: Bool = false
+
+    /// The row THIS Swift task runs under — stamped only by the table's own
+    /// runners (`spawnTask`, `runDispatch`), never inherited as a parent link
+    /// the way `currentTask` may be. `TaskTable.isRegistered` reads it: python
+    /// compares the asyncio task object against every row's handle.
+    @TaskLocal static var ownTask: TaskId? = nil
+
+    /// Run `body` as the kernel's own shutdown traffic — exempt from the drain
+    /// gate. Python `shutdown_context()`, rust `with_shutdown`.
+    public static func withShutdown<T>(_ body: () async -> T) async -> T {
+        await $inShutdown.withValue(true) { await body() }
+    }
 }
 
 /// Subscriber token returned by `Kernel.subscribe`; pass to
@@ -101,6 +119,12 @@ public final class Kernel: @unchecked Sendable {
     /// the `ps` system verb reads it, `cancel` kills a subtree. See `Tasks.swift`.
     public let tasks = TaskTable()
 
+    /// THE MESSAGE STORE — every message the kernel ever made, id-addressed by
+    /// the one counter. See `RowStore`.
+    public let rows = RowStore()
+    /// The loader's message pump, once installed (see `MessagesLog.swift`).
+    public var messagePump: MessagePump?
+
     /// EVERY execution and what it became — named (a caller's dedup contract) or
     /// unnamed (under its minted pid). Session lifetime, retention-ringed; the
     /// DURABLE half is written through the discovered store, because the kernel
@@ -112,6 +136,24 @@ public final class Kernel: @unchecked Sendable {
     /// die with the process, exactly like the tree's own auto-flush law.
     let ledgerFlusherLock = NSLock()
     var _ledgerFlusher: (@Sendable () -> Void)?
+
+    /// LIFECYCLE STATE — the methods live in `Lifecycle.swift`.
+    /// DRAINING: the first phase of a graceful stop (`shutdownAgents`). New
+    /// roots are refused `{reason:"draining"}`; sends with a live parent task,
+    /// and the kernel's own `shutdown` verbs, still pass.
+    let lifecycleLock = NSLock()
+    var _draining = false
+    /// `shutdown()` ran to the end — the SIGTERM path and any safety net
+    /// collapse to one walk. Python `_shutdown_complete`.
+    var _shutdownComplete = false
+    /// The daemon's stop signal: `requestShutdown` flips it and wakes every
+    /// `shutdownRequested()` waiter; a late waiter returns at once.
+    var _shutdownRequested = false
+    var _shutdownWaiters: [CheckedContinuation<Void, Never>] = []
+    /// How long in-flight work may take to settle before it is cancelled. An
+    /// instance value so a test can tighten it, exactly as python's test sets
+    /// `k.QUIET_TIMEOUT`; the constant is `Kernel.QUIET_TIMEOUT`.
+    var quietTimeout: Double = Kernel.QUIET_TIMEOUT
 
     public init(
         storage: StorageMode = .inMemory,

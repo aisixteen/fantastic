@@ -4,7 +4,7 @@ id: implicit_constraint
 group: coding
 title: constraints in PROSE — one positive, one negative with the forbidden string planted as bait
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [python, rust, swift]
 costs: turns
 limits:
   idle_seconds: 60

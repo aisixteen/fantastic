@@ -374,7 +374,6 @@ final class EventSink: @unchecked Sendable {
 // MARK: - config + kernel boot
 
 func baseConfig(
-    stateless: Bool = false,
     includeAccumulatedOnError: Bool = false,
     provider: @escaping @Sendable () -> ProviderResult
 ) -> AIBackendConfig {
@@ -382,13 +381,8 @@ func baseConfig(
         kind: "mock_backend",
         provider: "mock",
         sentence: "Mock LLM agent.",
-        verbs: [
-            "send": "s", "history": "h", "cancel": .string(CANCEL_DOC), "backend_state": "b",
-        ] as JSON,
-        stateless: stateless,
         includeAccumulatedOnError: includeAccumulatedOnError,
         reflectExtra: { _ in ["extra": .string("yes")] },
-        backendStateExtra: { _ in ["configured": .bool(true)] },
         makeProvider: { _, _, _ in provider() }
     )
 }
@@ -548,12 +542,12 @@ func psRows(_ kernel: Kernel) async -> [JSON] {
 }
 
 /// Poll until `agent`'s `verb` task shows up in the table; return its id.
-func waitForTask(kernel: Kernel, agent: AgentId, verb: String) async throws -> String {
+func waitForTask(kernel: Kernel, agent: AgentId, verb: String) async throws -> Int64 {
     for _ in 0..<300 {
         let row = await psRows(kernel).first {
             $0["agent"].asString == agent.value && $0["verb"].asString == verb
         }
-        if let id = row?["id"].asString { return id }
+        if let id = row?["id"].asInt { return id }
         try await Task.sleep(nanoseconds: 10_000_000)
     }
     Issue.record("timed out waiting for \(agent)'s \(verb) task")
@@ -570,46 +564,25 @@ func waitUntil(_ what: String, _ cond: () async -> Bool) async throws {
     Issue.record("timed out waiting for \(what)")
 }
 
-/// Poll the `history` verb until it reaches `count` messages (the
-/// stream runs in a spawned Task, so persistence is async). Bounded so
+/// The agent's CONVERSATION as the kernel row store holds it — every row for
+/// the agent minus the kernel's own bookkeeping kinds (`call`, `task`, `body`,
+/// `view`, `settle`). AGENT ID IS CONVERSATION ID: there is no client axis.
+func conversationRows(kernel: Kernel, id: AgentId) -> [JSON] {
+    let bookkeeping: Set<String> = ["call", "task", "body", "view", "settle"]
+    return kernel.rows.forAgent(id).filter { r in
+        guard let k = r["kind"]?.asString else { return true }
+        return !bookkeeping.contains(k)
+    }.map { JSON.object($0) }
+}
+
+/// Poll the row store until the conversation reaches `count` rows (routing
+/// runs in a spawned task, so a chain's turns land asynchronously). Bounded so
 /// a hung stream fails the test instead of hanging the run.
-func waitForHistory(
-    kernel: Kernel, id: AgentId, client: String, count: Int
-) async throws {
+func waitForHistory(kernel: Kernel, id: AgentId, count: Int) async throws {
     for _ in 0..<200 {
-        let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string(client)]))])[0].result
-        if (h["messages"].asArray ?? []).count >= count { return }
+        if conversationRows(kernel: kernel, id: id).count >= count { return }
         try await Task.sleep(nanoseconds: 5_000_000)
     }
-}
-
-/// The turns as the SIDECAR itself holds them: an append-only JSONL file
-/// `agents/<self>/chat_<client>.jsonl` on the backend's own leg, one JSON line
-/// per turn. Reading the leg directly is what proves the transcript is durable
-/// rather than only in the backend's reply.
-func chatStoreRows(kernel: Kernel, id: AgentId, client: String) async -> [JSON] {
-    let (r, body) = await kernel.sendWithBinary(
-        AgentId("store_\(id.value)"),
-        .object([
-            "type": .string("read_stream"),
-            "path": .string("agents/\(id.value)/chat_\(client).jsonl"),
-        ]), Data())
-    guard r["error"].asString == nil, let text = String(data: body, encoding: .utf8) else {
-        return []
-    }
-    var turns: [JSON] = []
-    for line in text.components(separatedBy: "\n") {
-        let t = line.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty, let parsed = try? JSON.parse(Data(t.utf8)) else { continue }
-        turns.append(parsed)
-    }
-    return turns
-}
-
-/// This client's persisted turns.
-func historyRows(kernel: Kernel, id: AgentId, client: String) async -> [JSON] {
-    let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string(client)]))])[0].result
-    return h["messages"].asArray ?? []
 }
 
 /// The explicit end-of-chain call, as the model writes it.

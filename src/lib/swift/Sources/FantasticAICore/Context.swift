@@ -24,9 +24,18 @@ public enum AIContext {
     public static let defaultOutputReserve: Int64 = 1024
     /// Never project to a budget below this.
     public static let budgetFloor: Int64 = 256
-    /// Fixed token budget reserved at the seam for the notice WRAPPER prose
-    /// (everything except the summary the strategy already pays for).
-    public static let noticeEnvelopeReserve: Int64 = 80
+    /// A fixed token budget reserved at the seam for the notice WRAPPER prose
+    /// (everything in the notice except the summary itself, which the strategy
+    /// already pays for). Keeps ONE budget authority — the strategy nets this out
+    /// before fitting its tail.
+    ///
+    /// MEASURED, not guessed. It was 80 against a real envelope of ~132, and that
+    /// 50-token shortfall was not harmless: it put the strategy's projection just
+    /// over budget, which woke the seam's backstop, which trimmed from the FRONT —
+    /// where `compact` had just pinned the goal turn. The under-reserve was
+    /// therefore the mechanism that undid "PIN THE GOAL". Re-measure this if the
+    /// notice text changes. Python `NOTICE_ENVELOPE_RESERVE`.
+    public static let noticeEnvelopeReserve: Int64 = 160
 
     /// Rough token estimate for ONE message — counts the SERIALIZED form,
     /// because role + content + tool_calls + the JSON envelope all consume
@@ -74,6 +83,49 @@ public enum AIContext {
     /// Token budget for the INPUT (window minus output headroom), floored.
     public static func budget(_ agent: Agent) -> Int64 {
         max(resolveContextWindow(agent) - outputReserve(agent), budgetFloor)
+    }
+
+    /// Tokens a reply may occupy INLINE in the model's next turn. Above this it
+    /// is stored and digested. An eighth of the input budget: a 12k window
+    /// inlines ~1.4k tokens (a reflect, an error, a short read) and digests a
+    /// 6.8KB file body. Python `_inline_cap`.
+    public static func inlineCap(_ agent: Agent) -> Int64 {
+        max(budgetFloor, budget(agent) / 8)
+    }
+
+    /// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER
+    /// the inline cap, or its answer is stored and digested and the model pulls
+    /// its own reply (measured 2026-09-06: a 4788-byte grep result came back as
+    /// a receipt; the run drowned in pulls). Keep items from the front while the
+    /// rendered reply fits. Returns (kept, truncated). Python `_fit_reply`.
+    ///
+    /// MEASURED ON THE SERIALIZED FORM, with headroom for the envelope the verb
+    /// wraps around these items (`total`, `next`, …). JSON escaping inflates raw
+    /// text by up to ~30% on newline-heavy bodies; the margin is what keeps
+    /// "fits" true at the seam.
+    public static func fitReply(_ items: [JSON], capTokens: Int64, limit: Int? = nil) -> ([JSON], Bool) {
+        let cap = Int64(Double(capTokens) * 0.8)
+        var kept: [JSON] = []
+        for it in items {
+            if let limit, kept.count >= limit { return (kept, true) }
+            let trial = kept + [it]
+            let probe: JSON = .object(["role": .string("user"), "content": .string(JSON.array(trial).serialize())])
+            if estimateOne(probe) > cap { return (kept, true) }
+            kept = trial
+        }
+        return (kept, false)
+    }
+
+    /// The most a single `pull` may return — EXACTLY the inline cap, in chars.
+    ///
+    /// It was half the window, and that ate its own tail: a full page was larger
+    /// than the inline cap, so the page itself got stored and digested, so the
+    /// model pulled the pull, forever, and never saw a byte. A pull page must
+    /// ALWAYS inline; making the two caps one number makes that arithmetic
+    /// rather than a special case. More pages at a tiny window is the price, and
+    /// it is the right one. Python `_pull_cap_chars`.
+    public static func pullCapChars(_ agent: Agent) -> Int {
+        Int(inlineCap(agent)) * charsPerToken
     }
 
     /// The agent's configured `recent_n` (verbatim recent turns), clamped to

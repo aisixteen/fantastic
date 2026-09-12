@@ -4,7 +4,7 @@ id: spread_rules
 group: coding
 title: rules arriving in THREE files across a 12-filler run — checkpointing must keep happening after cuts start
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [python, rust, swift]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:

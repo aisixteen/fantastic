@@ -110,8 +110,10 @@ async def connect(
                     # ...and the EVENT face, which dispatches a `watch`
                     # as itself. The gate is two-sided: without this the
                     # subscription is refused at ingress and the stream
-                    # reads as an agent that simply never emits.
-                    getattr(root, "watch_id", "web"): "*",
+                    # reads as an agent that simply never emits (measured
+                    # 2026-09-12, compaction:swift — every `context:compacted`
+                    # event fired and none was counted).
+                    **{i: "*" for i in getattr(root, "watch_ids", ())},
                 }
             }
             if getattr(root, "leg_id", None)

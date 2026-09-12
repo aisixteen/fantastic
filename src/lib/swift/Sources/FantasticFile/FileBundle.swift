@@ -199,10 +199,38 @@ public struct FileBundle: AgentBundle {
             return reflect(agent: agent, kernel: kernel)
         case "boot", "shutdown":
             return .null
-        case "read_stream", "write_stream":
-            // Stream verbs carry RAW BYTES — binary channel only. A CODED
-            // refusal: a consumer that lands here must be able to branch (#85).
-            return Refusal.bad(verb, "bytes", "raw bytes on the binary channel (send_with_binary)")
+        // THE STREAM VERBS ON THE TEXT CHANNEL, as python serves them: a model
+        // writes a document VERBATIM between `<bytes>` and `</bytes>` and the
+        // tag grammar delivers it as utf-8 bytes to the same handler; a chunk
+        // read back renders utf-8 in the reply. Swift refused both here with
+        // "raw bytes on the binary channel" — the `subai_graph` routine's
+        // program write failed on it every turn (measured 2026-09-13, the same
+        // refusal rust carried in 43 e2e logs). The binary channel stays for
+        // real blobs.
+        case "read_stream":
+            guard let root = clampedRoot(agent: agent, kernel: kernel) else {
+                return Refusal.make(Refusal.transportError, rootEscapeError(agent: agent))
+            }
+            let (reply, body) = readStream(root: root, header: payload)
+            guard case .object(var o) = reply, o["error"] == nil else { return reply }
+            o["bytes"] = .string(String(decoding: body, as: UTF8.self))
+            return .object(o)
+        case "write_stream":
+            if agent.metaValue(forKey: "readonly")?.asBool == true { return readonlyRefusal() }
+            guard let root = clampedRoot(agent: agent, kernel: kernel) else {
+                return Refusal.make(Refusal.transportError, rootEscapeError(agent: agent))
+            }
+            switch payload["bytes"] {
+            case .string(let text):
+                return writeStream(root: root, header: payload, blob: Data(text.utf8))
+            // The tag grammar types a bare number; a number is a document too.
+            case .integer(let n):
+                return writeStream(root: root, header: payload, blob: Data(String(n).utf8))
+            case .double(let d):
+                return writeStream(root: root, header: payload, blob: Data("\(d)".utf8))
+            default:
+                return Refusal.missing("write_stream", "bytes (one raw chunk)")
+            }
         case "pump":
             // The PUMP coordinates a SOURCE→SINK copy over the binary channel
             // (it never touches bytes itself), so it rides the text channel.
@@ -296,21 +324,16 @@ public struct FileBundle: AgentBundle {
             "egress_rule": .string(egress),
             "sealed": .bool(ingress != "allow_all_ingress"),
             "verbs": [
-                "reflect":
-                    "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed). No args.",
+                "reflect": "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
                 "boot": "No-op. Returns None.",
-                "list": "args: path?. Returns {path, files}.",
-                "read_stream":
-                    "args: path, offset?, length?. SOURCE — one raw chunk; reply {bytes, next_offset, eof, size} on the binary channel.",
-                "write_stream":
-                    "args: path, bytes, offset?, truncate?. SINK — one raw chunk (a model composes it via send_binary's fenced form); reply {written, offset, size}. Refuses non-bytes.",
-                "pump":
-                    "args: source:str? + source_path:str (req) + sink:str? + sink_path:str? + chunk:int=65536. Server-side SOURCE→SINK copy.",
-                "delete":
-                    "args: path (req), recursive:bool=false. Returns {path, deleted: true}.",
-                "rename": "args: old_path, new_path. Returns {old_path, new_path}.",
-                "mkdir": "args: path. Returns {path, created: true}.",
-            ],
+                "list": "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …).",
+                "read_stream": "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns",
+                "write_stream": "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default =",
+                "pump": "The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE",
+                "delete": "args: path:str (req), recursive:bool=False. Returns {path, deleted:true}.",
+                "rename": "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
+                "mkdir": "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
+            ] as JSON,
         ]
         if clampedRoot(agent: agent, kernel: kernel) == nil {
             // Reflect NEVER refuses — the configured root is shown + the violation.

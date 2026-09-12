@@ -119,15 +119,15 @@ struct LedgerTests {
         let rows = await k.send([
             Item(AgentId("kernel"), .object(["type": .string("ledger")]))
         ])[0].result["executions"].asArray ?? []
-        let row = rows.first { $0["id"].asString == pid.value }
+        let row = rows.first { $0["id"].asInt == pid.value }
         #expect(row?["named"].asBool == false)
         #expect(row?["status"].asString == "completed")
 
-        // Re-fetch BY PID returns the recorded outcome; it never re-runs.
-        let refetched = await k.send([
-            Item(AgentId("desk"), .object(["type": .string("work")]), id: pid.value)
-        ])[0]
-        #expect(refetched.result["run"].asInt == 1)
+        // NO RE-FETCH BY PID. Python's contract: a caller supplies a NAME, never
+        // an id — "a name it has seen JOINS that execution, a name it has not
+        // opens a new one". An unnamed pid is not a name; its outcome is read
+        // off the `ledger`, above. (The old assertion here was a swift-only
+        // shortcut, deleted 2026-09-12.)
         #expect(runs.count == 1)
     }
 
@@ -164,7 +164,8 @@ struct LedgerTests {
         let rows = await k.send([
             Item(AgentId("kernel"), .object(["type": .string("ledger")]))
         ])[0].result["executions"].asArray ?? []
-        let dead = rows.first { $0["id"].asString == "dead-1" }
+        // BY NAME: a caller-named row carries `name`; its `id` is the kernel's int.
+        let dead = rows.first { $0["name"].asString == "dead-1" }
         #expect(dead?["status"].asString == "failed")
         #expect(dead?["attempts"].asInt == 2)
 
@@ -235,8 +236,8 @@ extension LedgerTests {
             Item(AgentId("kernel"), .object(["type": .string("ledger")]))
         ])[0].result
         // BY PID — the agent also has a child-boot row under the same target.
-        let pid = out.pid.map { String($0.value) }
-        let row = (led["executions"].asArray ?? []).first { $0["id"].asString == pid }
+        let pid = out.pid?.value
+        let row = (led["executions"].asArray ?? []).first { $0["id"].asInt == pid }
         #expect(row != nil, "the errored execution vanished: \(led.serialize())")
         #expect(row?["status"].asString == "errored", "\(row?.serialize() ?? "-")")
     }

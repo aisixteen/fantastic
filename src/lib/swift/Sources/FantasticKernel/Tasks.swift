@@ -55,10 +55,15 @@ import FantasticJSON
 import Foundation
 
 /// A task id — `"<agent_id>:<n>"`. A pid.
+/// A task id IS a message id: one int64 from the kernel's one counter, so
+/// `ps`, `cancel`, the ledger, a reply tag and the message log name the same
+/// number. It was `"<agent>:<8 hex>"` from a salted per-agent sequence until
+/// 2026-09-12 — python reversed that trade (a number that names one thing
+/// everywhere is worth more than one that hides its order), rust followed.
 public struct TaskId: Sendable, Hashable, CustomStringConvertible {
-    public let value: String
-    public init(_ value: String) { self.value = value }
-    public var description: String { value }
+    public let value: Int64
+    public init(_ value: Int64) { self.value = value }
+    public var description: String { String(value) }
 }
 
 /// "My own task is inside a subtree the kernel is killing." Set by
@@ -192,6 +197,11 @@ private struct TaskEntry {
     /// `startedAt` clock is too coarse to sort by).
     let order: UInt64
     let handle: TaskHandle
+    /// A loop that is SUPPOSED to outlive a graceful agent shutdown — a
+    /// persister tailing the row store, a scheduler tick. `shutdown_agents`
+    /// neither waits for it nor cancels it; it dies with the process. Python
+    /// `_keepalive`.
+    let keepalive: Bool
 }
 
 /// The live table of in-flight work. Lives on the `Kernel`; `ps` reads it,
@@ -210,10 +220,6 @@ public final class TaskIdBox: @unchecked Sendable {
 public final class TaskTable: @unchecked Sendable {
     private let lock = NSLock()
     private var tasks: [TaskId: TaskEntry] = [:]
-    /// Per-agent task counter (the `n` in `"<agent_id>:<n>"`).
-    private var seq: [AgentId: UInt64] = [:]
-    /// Per-table, never persisted — makes the minted token opaque across runs.
-    private let salt = UInt64.random(in: .min ... .max)
     private var order: UInt64 = 0
 
     public init() {}
@@ -221,34 +227,12 @@ public final class TaskTable: @unchecked Sendable {
     /// Seconds since the epoch — the `started_at` clock (Python's `time.time()`).
     private func nowSecs() -> Double { Date().timeIntervalSince1970 }
 
-    /// Next task id for `agentId` — `"<agent_id>:<8 lowercase hex>"`.
-    ///
-    /// OPAQUE on purpose. A visible counter reads as a SEQUENCE, and messaging here is
-    /// fully async: a send may return once, several times, or never, and replies arrive
-    /// out of order. Measured 2026-08-20 (python): with `<agent>:<n>` a model inferred
-    /// ordering from the number, decided "the reply queue is running ahead of me", and
-    /// re-polled forever instead of matching on the id. The monotonic `seq` is KEPT — it
-    /// is what guarantees non-reuse — but hashed out of view, and a collision with a live
-    /// row re-rolls rather than aliasing two dispatches onto one id.
-    ///
-    /// The salt is per-table and never persisted, so ids carry no meaning outside this
-    /// process. Matching the SHAPE is what parity needs; the hash is an implementation
-    /// detail (python uses keyed blake2b).
-    func mint(_ agentId: AgentId) -> TaskId {
-        lock.lock()
-        defer { lock.unlock() }
-        while true {
-            let n = (seq[agentId] ?? 0) + 1
-            seq[agentId] = n
-            var h = Hasher()
-            h.combine(salt)
-            h.combine(agentId.value)
-            h.combine(n)
-            let token = String(format: "%08x", UInt32(truncatingIfNeeded: h.finalize()))
-            let id = TaskId("\(agentId.value):\(token)")
-            if tasks[id] == nil { return id }
-        }
-    }
+    // NO MINTER HERE. `mint` used to hand out `"<agent>:<8 hex>"` from a salted
+    // per-agent counter, hashed so a visible sequence could not be read as an
+    // ordering. Python reversed that trade: ONE int64 counter allocates every id
+    // in the kernel, so `ps`, `cancel`, the ledger, a reply tag and the message
+    // log all name the same number. The allocator is `kernel.rows.mintId()`;
+    // the caller mints, and this table only registers.
 
     /// Put one in-flight task in the table.
     ///
@@ -256,14 +240,33 @@ public final class TaskTable: @unchecked Sendable {
     /// is a root, adopted by init. Not defensive slack: a bundle's long-lived
     /// work outlives the dispatch that forked it, and a `send` it issues later
     /// must not claim a dead parent or the `ps` tree would lie.
-    func register(id: TaskId, agent: AgentId, verb: String, parent: TaskId?, handle: TaskHandle) {
+    func register(
+        id: TaskId, agent: AgentId, verb: String, parent: TaskId?, handle: TaskHandle,
+        keepalive: Bool = false
+    ) {
         lock.lock()
         defer { lock.unlock() }
         let parent = parent.flatMap { tasks[$0] != nil ? $0 : nil }
         order += 1
         tasks[id] = TaskEntry(
             agent: agent, parent: parent, verb: verb,
-            startedAt: nowSecs(), order: order, handle: handle)
+            startedAt: nowSecs(), order: order, handle: handle, keepalive: keepalive)
+    }
+
+    /// Every live task that is NOT a keepalive loop and not `except` — what
+    /// `shutdown_agents` waits to drain, then cancels. Python `pending()`.
+    public func pending(except: TaskId?) -> [TaskId] {
+        lock.lock()
+        defer { lock.unlock() }
+        return tasks.filter { !$0.value.keepalive && $0.key != except }.map { $0.key }
+    }
+
+    /// `true` iff `id` is a live ROOT task — the only tasks `shutdown_agents`
+    /// cancels, since a subtree dies with its root.
+    public func isRoot(_ id: TaskId) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return tasks[id].map { $0.parent == nil } ?? false
     }
 
     /// Drop one row. Surviving children are RE-PARENTED to the dead task's
@@ -283,6 +286,16 @@ public final class TaskTable: @unchecked Sendable {
         return tasks[id] != nil
     }
 
+    /// Whether the CURRENT Swift task IS a row of the table (a spawned loop,
+    /// e.g. the loader's pump) — live work by definition, whatever its
+    /// `currentTask` says. Python compares the asyncio task object against
+    /// every row's handle; here the table's own runners stamp the row id they
+    /// run under as `KernelTaskLocals.ownTask`, which nothing else sets.
+    public func isRegistered() -> Bool {
+        guard let own = KernelTaskLocals.ownTask else { return false }
+        return contains(own)
+    }
+
     /// The public table — the `ps` reply rows `{id, agent, parent, verb,
     /// started_at}`, oldest first. The stop handle stays behind.
     public func rows() -> [JSON] {
@@ -293,9 +306,9 @@ public final class TaskTable: @unchecked Sendable {
             .sorted { $0.value.order < $1.value.order }
             .map { id, e in
                 .object([
-                    "id": .string(id.value),
+                    "id": .integer(id.value),
                     "agent": .string(e.agent.value),
-                    "parent": e.parent.map { JSON.string($0.value) } ?? .null,
+                    "parent": e.parent.map { JSON.integer($0.value) } ?? .null,
                     "verb": .string(e.verb),
                     "started_at": .double(e.startedAt),
                 ])
@@ -339,7 +352,7 @@ public final class TaskTable: @unchecked Sendable {
     /// SYNCHRONOUS, no `await`, so a parent cannot resume between its child's
     /// death and its own. Returns the ids actually killed (the table only ever
     /// holds LIVE work).
-    func abortSubtree(_ ids: [TaskId]) -> [String] {
+    func abortSubtree(_ ids: [TaskId]) -> [Int64] {
         lock.lock()
         var handles: [(TaskId, TaskHandle)] = []
         for tid in ids {
@@ -393,13 +406,21 @@ extension Kernel {
     public func spawnTask(
         agent: AgentId,
         verb: String,
+        keepalive: Bool = false,
         work: @escaping @Sendable () async -> Void
     ) -> TaskId {
-        let taskId = tasks.mint(agent)
+        // THE COUNTER, not a table-local sequence: a fork is a message, and its
+        // id comes from the one allocator like every other id in the kernel.
+        // The `task` row names the fork for the trace, parented to the dispatch
+        // that forked it.
+        let parent = KernelTaskLocals.currentTask
+        var row: Row = ["kind": .string("task"), "verb": .string(verb)]
+        row["parent"] = parent.map { JSON.integer($0.value) } ?? .null
+        let taskId = TaskId((try? rows.put(agent, row)) ?? rows.mintId())
         let handle = TaskHandle()
         tasks.register(
             id: taskId, agent: agent, verb: verb,
-            parent: KernelTaskLocals.currentTask, handle: handle)
+            parent: parent, handle: handle, keepalive: keepalive)
 
         let table = tasks
         let t = Task {
@@ -408,8 +429,10 @@ extension Kernel {
             // this task's OWN id + killed flag so its `send`s nest under IT and
             // its own kill (not its forker's) is what refuses its work.
             await KernelTaskLocals.$currentTask.withValue(taskId) {
-                await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
-                    await work()
+                await KernelTaskLocals.$ownTask.withValue(taskId) {
+                    await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
+                        await work()
+                    }
                 }
             }
         }
@@ -449,7 +472,7 @@ extension Kernel {
         let killed = tasks.abortSubtree(ids)
         return .object([
             "cancelled": .bool(true),
-            "killed": .array(killed.map { .string($0) }),
+            "killed": .array(killed.map { .integer($0) }),
         ])
     }
 }

@@ -63,42 +63,27 @@ async def store_rows(root, core, aid: str) -> list[dict]:
     """The agent's whole durable store, for SCORING. In process it is read directly
     (`history` now answers at digest resolution, under the inline cap — a probe that
     scores calls and tokens needs the rows themselves). Over the wire it asks the
-    kernel for the same rows (`rows_read`), and falls back to paging `recall` for a
-    runtime that has no such verb — `recall` carries the text but not the ids, so a
-    probe that scores ROWS needs the first path."""
+    kernel for the same rows (`rows_read`) — every runtime answers it; there is no
+    second path (a `recall` fallback carried text without ids, and a probe that
+    scores ROWS was silently scoring something else)."""
     if core is not None:
         return await core._load_history(aid, root)
     whole = await call(root, "kernel", {"type": "rows_read", "agent": aid, "limit": 200})
-    if isinstance(whole, dict) and "rows" in whole:
-        out = list(whole.get("rows") or [])
-        after = whole.get("next")
-        while after is not None:
-            whole = await call(
-                root, "kernel", {"type": "rows_read", "agent": aid, "limit": 200, "after": after}
-            )
-            out += list((whole or {}).get("rows") or [])
-            after = (whole or {}).get("next")
-        # THE CONVERSATION, as `_load_history` reads it in process: `rows_read`
-        # returns the agent's rows WHOLE — the kernel's own bookkeeping included
-        # — so the wire path must hide the same kinds, or a probe counts a
-        # planted `body` row as a fourth turn (measured 2026-09-12,
-        # messages_gate:rust: `[13, 16, 19, 22]` against an expected 3).
-        return [r for r in out if r.get("kind") not in _BOOKKEEPING]
-    out: list[dict] = []
-    before = None
-    while True:
-        payload = {"type": "recall", "limit": 100}
-        if before is not None:
-            payload["before"] = before
-        r = await call(root, aid, payload)
-        page = (r or {}).get("messages") or []
-        if not page:
-            break
-        out = page + out
-        before = page[0]["index"]
-        if before == 0:
-            break
-    return out
+    assert isinstance(whole, dict) and "rows" in whole, f"rows_read refused: {whole}"
+    out = list(whole.get("rows") or [])
+    after = whole.get("next")
+    while after is not None:
+        whole = await call(
+            root, "kernel", {"type": "rows_read", "agent": aid, "limit": 200, "after": after}
+        )
+        out += list((whole or {}).get("rows") or [])
+        after = (whole or {}).get("next")
+    # THE CONVERSATION, as `_load_history` reads it in process: `rows_read`
+    # returns the agent's rows WHOLE — the kernel's own bookkeeping included
+    # — so the wire path must hide the same kinds, or a probe counts a
+    # planted `body` row as a fourth turn (measured 2026-09-12,
+    # messages_gate:rust: `[13, 16, 19, 22]` against an expected 3).
+    return [r for r in out if r.get("kind") not in _BOOKKEEPING]
 
 
 #: The kernel's own bookkeeping kinds — in the same table, never the

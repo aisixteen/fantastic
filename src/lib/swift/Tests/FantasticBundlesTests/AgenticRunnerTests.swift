@@ -457,6 +457,215 @@ private func dehydrate(_ k: Kernel) -> (ids: [String], children: [String: [Strin
     return (ids.sorted(), children)
 }
 
+// ─── the CORE PHASE — PC-1..PC-5 on every config, by construction ─
+//
+// Python `tests/agentic/_core.py`, check for check: every assertion is tagged
+// with the requirement it pins, so the run prints a coverage matrix — and the
+// counts are the PARITY PROOF, since python pins the identical set from its own
+// runner over the same corpus. A twin that asserted the same facts under
+// `#expect` alone would be green and still leave the matrix short by five ids.
+
+/// Python `check(rid, condition, detail)`: count the pin, record the failure.
+private func check(_ pinned: inout [String: Int], _ rid: String, _ cond: Bool, _ detail: String) {
+    pinned[rid, default: 0] += 1
+    if !cond { Issue.record("[\(rid)] \(detail)") }
+}
+
+/// Python `MINTED_ID`: `^[A-Za-z0-9_.]+_[0-9a-f]{6}$` — what an id-less
+/// manifest entry looks like after a boot.
+private func isMintedId(_ id: String) -> Bool {
+    id.range(of: "^[A-Za-z0-9_.]+_[0-9a-f]{6}$", options: .regularExpression) != nil
+}
+
+/// The roster entries a loader is expected to build — empty when the manifest
+/// is raw text or absent (python `LoaderSpec.declared_agents`).
+private func declaredAgents(_ loader: JSON) -> [JSON] {
+    guard case .object = loader["manifest"] else { return [] }
+    return (loader["manifest"]["agents"].asArray ?? []).filter { if case .object = $0 { return true } else { return false } }
+}
+
+private func declaresRoster(_ loader: JSON) -> Bool {
+    if case .object = loader["manifest"] { return true }
+    return false
+}
+
+/// Python `Hydration.outcome()` — what the hydration ACTUALLY did, in the
+/// config's own vocabulary.
+private func outcome(_ h: Hydration, _ sc: Scenario) -> String {
+    let loaders = sc.config["loaders"].asArray ?? []
+    for l in loaders {
+        let lid = l["id"].asString ?? ""
+        if (h.creates[lid]?["id"].asString ?? "").isEmpty { return "refused_at_write" }
+    }
+    for l in loaders {
+        let lid = l["id"].asString ?? ""
+        if h.boots[lid]?["booted"] != .bool(true) { return "boot_error" }
+    }
+    return "ok"
+}
+
+/// Python `Hydration.outcome_error()` — the message the refusal carried.
+private func outcomeError(_ h: Hydration, _ sc: Scenario) -> String {
+    let loaders = sc.config["loaders"].asArray ?? []
+    for l in loaders {
+        let lid = l["id"].asString ?? ""
+        let rec = h.creates[lid] ?? .object([:])
+        if (rec["id"].asString ?? "").isEmpty { return pyStr(rec["error"]) }
+    }
+    for l in loaders {
+        let lid = l["id"].asString ?? ""
+        let boot = h.boots[lid] ?? .object([:])
+        if boot["booted"] != .bool(true) { return pyStr(boot["error"]) }
+    }
+    return ""
+}
+
+/// Python `str(x)` for the few shapes a reply error takes.
+private func pyStr(_ v: JSON) -> String {
+    switch v {
+    case .null: return ""
+    case .string(let s): return s
+    default: return v.serialize()
+    }
+}
+
+/// Python `_built(h)`: a config declaring a refusal has no tree to match; the
+/// other four core checks are inapplicable, not failures.
+private func built(_ h: Hydration, _ sc: Scenario) -> Bool {
+    if (sc.spec["expect"]["hydration"].asString ?? "ok") != "ok" { return false }
+    let got = outcome(h, sc)
+    if got != "ok" {
+        Issue.record("\(sc.name): declared hydration ok but got \(got) — \(outcomeError(h, sc))")
+        return false
+    }
+    return true
+}
+
+// PC-5 · the hydration verdict, on the loud channel
+private func coreTheHydrationVerdictMatchesTheDeclaration(_ h: Hydration, _ sc: Scenario, _ pinned: inout [String: Int]) {
+    let want = sc.spec["expect"]["hydration"].asString ?? "ok"
+    let got = outcome(h, sc)
+    let loaders = sc.config["loaders"].asArray ?? []
+    check(&pinned, "PC-5", got == want, "\(sc.name): declared \(want), got \(got) (creates=\(h.creates) boots=\(h.boots))")
+    if want == "ok" {
+        for l in loaders {
+            let lid = l["id"].asString ?? ""
+            check(&pinned, "PC-5", h.creates[lid]?["id"].asString == lid, "\(lid): \(h.creates[lid]?.serialize() ?? "nil")")
+            check(&pinned, "PC-5", h.boots[lid]?["booted"] == .bool(true), "\(lid): an explicit boot is the ONLY loud channel — \(h.boots[lid]?.serialize() ?? "nil")")
+        }
+        return
+    }
+    let err = outcomeError(h, sc)
+    let contains = sc.spec["expect"]["error_contains"].asString ?? ""
+    check(&pinned, "PC-5", err.contains(contains), "refusal must name why: \(contains) not in \(err)")
+    if want == "refused_at_write" {
+        for l in loaders {
+            let lid = l["id"].asString ?? ""
+            let rec = h.creates[lid] ?? .object([:])
+            check(&pinned, "PC-5", rec["reason"].asString == "invalid_meta", "\(lid): \(rec.serialize())")
+            check(&pinned, "PC-5", rec["id"] == .null, "\(lid): refused create must mint no id: \(rec.serialize())")
+            check(&pinned, "PC-5", h.kernel.agent(AgentId(lid)) == nil, "\(lid) was refused yet exists in the roster")
+        }
+    } else {
+        let broken = loaders.map { $0["id"].asString ?? "" }.filter { h.boots[$0]?["booted"] != .bool(true) }
+        check(&pinned, "PC-5", !broken.isEmpty, "declared boot_error but every loader booted green")
+        for lid in broken {
+            check(&pinned, "PC-5", h.creates[lid]?["id"].asString == lid, "\(lid): a boot failure is SWALLOWED at create — the create reply is expected to look clean, got \(h.creates[lid]?.serialize() ?? "nil")")
+        }
+    }
+}
+
+// PC-1 · declared shape == running tree, both directions
+private func coreTheRunningTreeMatchesTheDeclaredShape(_ h: Hydration, _ sc: Scenario, _ pinned: inout [String: Int]) {
+    guard built(h, sc) else { return }
+    let (ids, children) = dehydrate(h.kernel)
+    for l in sc.config["loaders"].asArray ?? [] {
+        let lid = l["id"].asString ?? ""
+        check(&pinned, "PC-1", ids.contains(lid), "loader \(lid) is not in the running tree: \(ids)")
+        if !declaresRoster(l) { continue }
+        for spec in declaredAgents(l) {
+            let aid = spec["id"].asString ?? ""
+            check(&pinned, "PC-1", !aid.isEmpty, "\(lid): an id-less entry duplicates on EVERY boot: \(spec.serialize())")
+            let node = h.kernel.agent(AgentId(aid))
+            check(&pinned, "PC-1", node != nil, "\(aid) declared by \(lid) but not running")
+            check(&pinned, "PC-1", node?.handlerModule == spec["handler_module"].asString, "\(aid): declared \(spec["handler_module"].asString ?? "nil"), running \(node?.handlerModule ?? "nil")")
+            check(&pinned, "PC-1", node?.parentId?.value == lid, "\(aid): a manifest entry is a child of its LOADER — parent is \(node?.parentId?.value ?? "nil"), expected \(lid)")
+        }
+        let expected = Set(declaredAgents(l).compactMap { $0["id"].asString }.filter { !$0.isEmpty })
+        let owns = Set(children[lid] ?? [])
+        check(&pinned, "PC-1", owns == expected, "\(lid) owns \(owns.sorted()), declared \(expected.sorted())")
+    }
+}
+
+// PC-2 · reachability, never a config field — the GUARD only; the reach
+// steps themselves are the declared edges and assert as they execute.
+private func coreEveryDeclaredEdgeIsReachable(_ h: Hydration, _ sc: Scenario, _ pinned: inout [String: Int]) {
+    guard built(h, sc) else { return }
+    let reaches = (sc.spec["expect"]["steps"].asArray ?? []).filter { if case .object = $0["reach"] { return true } else { return false } }
+    check(&pinned, "PC-2", !reaches.isEmpty, "\(sc.name): declares no `reach:` step — PC-2 has nothing to walk")
+}
+
+// PC-3 · the roster is closed after boot
+private func coreTheRosterIsClosedAfterBoot(_ h: Hydration, _ sc: Scenario, _ pinned: inout [String: Int]) async {
+    guard built(h, sc) else { return }
+    let roster = (sc.config["loaders"].asArray ?? []).flatMap { declaredAgents($0).compactMap { $0["id"].asString }.filter { !$0.isEmpty } }
+    guard let sender = sc.spec["expect"]["closed_roster_sender"].asString ?? roster.first else { return }
+    check(&pinned, "PC-3", h.kernel.agent(AgentId(sender)) != nil, "closure probe \(sender) is not a running agent")
+    let before = dehydrate(h.kernel).ids
+    let r = await reach(h.kernel, sender, ROOT, .object([
+        "type": .string("create_agent"), "parent_id": .string(ROOT),
+        "handler_module": .string("file_bridge.tools"), "id": .string("smuggled"),
+    ]))
+    check(&pinned, "PC-3", denied(r), "\(sender) could create_agent on the root: \(r.serialize())")
+    check(&pinned, "PC-3", denialSide(r) == "egress", "expected an egress refusal, got \(r.serialize())")
+    check(&pinned, "PC-3", dehydrate(h.kernel).ids == before, "a refused create changed the roster: \(before) → \(dehydrate(h.kernel).ids)")
+    let s = await reach(h.kernel, sender, sender, .object([
+        "type": .string("update_agent"), "id": .string(sender),
+        "can_call": .object([ROOT: .array([.string("create_agent")])]),
+    ]))
+    check(&pinned, "PC-3", denied(s), "\(sender) raised its own authority: \(s.serialize())")
+    check(&pinned, "PC-3", denialSide(s) == "self-grant", "expected a self-grant refusal, got \(s.serialize())")
+    let r2 = await reach(h.kernel, sender, ROOT, .object([
+        "type": .string("create_agent"), "handler_module": .string("file_bridge.tools"), "id": .string("smuggled"),
+    ]))
+    check(&pinned, "PC-3", denied(r2), "the self-grant took effect after all: \(r2.serialize())")
+}
+
+// PC-4 · a reboot rehydrates the same tree, once
+private func coreARebootRehydratesTheIdenticalRoster(_ h: Hydration, _ sc: Scenario, _ pinned: inout [String: Int]) async -> Hydration? {
+    guard built(h, sc) else { return nil }
+    if sc.spec["expect"]["reboot"].asBool == false { return nil }
+    let before = dehydrate(h.kernel).ids
+    let mintedBefore = before.filter(isMintedId)
+    let snapshot = h.kernel.save()
+    let fresh = makeKernel(workdir: h.workdir)
+    do { try fresh.load(json: snapshot) } catch {
+        Issue.record("\(sc.name): reload refused the snapshot: \(error)")
+        return nil
+    }
+    var boots: [String: JSON] = [:]
+    for a in fresh.allAgents() where a.parentId != nil {
+        boots[a.id.value] = await operatorSend(fresh, a.id.value, .object(["type": .string("boot")]))
+    }
+    let h2 = Hydration(kernel: fresh, workdir: h.workdir, fixture: h.fixture, creates: h.creates, boots: boots)
+    let after = dehydrate(h2.kernel).ids
+    check(&pinned, "PC-4", after == before, "roster changed across a reboot: \(before) → \(after)")
+    let mintedAfter = after.filter(isMintedId)
+    check(&pinned, "PC-4", mintedAfter == mintedBefore, "auto-minted ids appeared across the reboot (\(mintedBefore) → \(mintedAfter)) — that is what an id-less manifest entry looks like")
+    for l in sc.config["loaders"].asArray ?? [] {
+        let lid = l["id"].asString ?? ""
+        let boot = h2.boots[lid] ?? .object([:])
+        check(&pinned, "PC-4", boot["booted"] == .bool(true), "\(lid) did not re-boot: \(boot.serialize())")
+        check(&pinned, "PC-4", boot["created"].asArray?.isEmpty == true, "\(lid) CREATED agents on a reboot instead of skipping them: \(boot.serialize())")
+        if declaresRoster(l) {
+            let declared = Set(declaredAgents(l).compactMap { $0["id"].asString }.filter { !$0.isEmpty })
+            let reapplied = Set((boot["reapplied"].asArray ?? []).compactMap { $0.asString })
+            check(&pinned, "PC-4", reapplied == declared, "\(lid): reapplied \(reapplied.sorted()), declared \(declared.sorted())")
+        }
+    }
+    return h2
+}
+
 private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: Int]) async {
     var h = h0
     var bound: [String: JSON] = [:]
@@ -579,7 +788,7 @@ private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: 
                 await KernelTaskLocals.$currentSender.withValue(AgentId(from)) {
                     let out = await k.send([Item(AgentId(to), send)])[0]
                     return JSON.object([
-                        "pid": out.pid.map { JSON.string($0.value) } ?? .null,
+                        "pid": out.pid.map { JSON.integer($0.value) } ?? .null,
                         "status": .string("\(out.status)"),
                         "result": out.result,
                     ])
@@ -694,28 +903,26 @@ struct AgenticCorpusTests {
                 }
             }
 
-            let declared = sc.spec["expect"]["hydration"].asString ?? "ok"
-            let h = try await hydrate(sc, workdir: workdir)
+            var h = try await hydrate(sc, workdir: workdir)
             defer { try? FileManager.default.removeItem(at: h.fixture) }
 
-            // PC-5 reads BOTH loud channels: `create_agent`'s reply (a
-            // write-time refusal — the loader never became an agent) and the
-            // explicit boot's (a manifest that parses but cannot build).
-            let loaders = sc.config["loaders"].asArray ?? []
-            let allCreated = loaders.allSatisfy { h.creates[$0["id"].asString ?? ""]?["error"] == JSON.null }
-            let allBooted = loaders.allSatisfy {
-                let b = h.boots[$0["id"].asString ?? ""]
-                return b != nil && b!["error"] == .null && b!["booted"] != .bool(false)
+            // CORE FIRST, REBOOT INCLUDED, then the scenario's own steps
+            // (python `test_agentic.py`). PC-4 asserts that rebooting the
+            // DECLARED system rehydrates it identically, so it has to run
+            // before any step has mutated the tree — a scenario that deletes
+            // an agent (lifecycle's C15) would otherwise fail it for the right
+            // reason at the wrong target, since the manifest still declares
+            // that agent and a reboot correctly builds it back. Running it
+            // first also makes the steps STRONGER: they execute against a
+            // kernel that has been persisted and rehydrated, not just built.
+            coreTheHydrationVerdictMatchesTheDeclaration(h, sc, &pinned)
+            coreTheRunningTreeMatchesTheDeclaredShape(h, sc, &pinned)
+            coreEveryDeclaredEdgeIsReachable(h, sc, &pinned)
+            await coreTheRosterIsClosedAfterBoot(h, sc, &pinned)
+            if let h2 = await coreARebootRehydratesTheIdenticalRoster(h, sc, &pinned) { h = h2 }
+            if built(h, sc) {
+                await runSteps(h, sc, &pinned)
             }
-            let built = allCreated && allBooted
-            if declared == "ok" {
-                #expect(built, "\(sc.name): declared hydration ok, creates=\(h.creates)")
-                if !built { continue }
-            } else {
-                #expect(!built, "\(sc.name): declared hydration \(declared) but every loader built")
-                continue  // nothing to reach in a system that was refused
-            }
-            await runSteps(h, sc, &pinned)
             ran += 1
         }
 

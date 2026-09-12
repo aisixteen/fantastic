@@ -40,27 +40,10 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
                 kind: "llamacpp_backend",
                 provider: "llamacpp",
                 sentence:
-                    "llama.cpp-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
-                verbs: [
-                    "send": "args: text, client_id?. Streams a response via SSE.",
-                    "history": "args: client_id?. Returns prior turns.",
-                    "cancel": .string(CANCEL_DOC),
-                    "status":
-                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
-                    "backend_state": "Reports availability + in-flight.",
-                ] as JSON,
+                    "llama.cpp-backed local LLM agent (raw prompt-and-parse tool-calling).",
                 includeAccumulatedOnError: true,
                 reflectExtra: { agent in
                     ["endpoint": .string(Self.endpoint(agent: agent))]
-                },
-                backendStateExtra: { agent in
-                    [
-                        "endpoint": .string(Self.endpoint(agent: agent)),
-                        // No api_key gate: a local server usually has none, so
-                        // this backend is available by default rather than
-                        // refusing the way the hosted ones do.
-                        "configured": .bool(true),
-                    ]
                 },
                 makeProvider: { agent, _, _ in
                     .provider(
@@ -78,7 +61,7 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? {
         """
         llamacpp_backend — local llama-server LLM agent (OpenAI-compatible); thin over FantasticAICore.
-        Verbs: send, history, cancel, status, backend_state. `endpoint` defaults to http://127.0.0.1:8080/v1.
+        Verbs: the shared ai_core set (reflect it). `endpoint` defaults to http://127.0.0.1:8080/v1.
         Tool-calling is RAW: the provider streams text and FantasticAICore parses the <call name=…> envelope.
         `think` toggles the template's `enable_thinking` per request — gemma-4 gates its thought channel behind it and defaults it FALSE; a server that sets neither streams thinking text with EMPTY content.
         The model and the context window belong to the server (`-hf`/`-m`, `-c N`), not to the record.

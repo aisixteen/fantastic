@@ -251,7 +251,9 @@ struct BlobChannelTests {
         #expect(doc != nil, "the sidecar never reached the store")
         let parsed = try! JSON.parse(doc!)
         #expect(parsed["v"].asInt == 1, "the sidecar is version-stamped")
-        #expect(parsed["rows"]["job-1"] != .null)
+        // Keyed by the int id; the caller's name rides the row.
+        let named = (parsed["rows"].asObject ?? [:]).values.first { $0["name"].asString == "job-1" }
+        #expect(named != nil, "\(parsed.serialize())")
 
         // Only SETTLED rows cross: every persisted row carries a terminal outcome.
         for (_, row) in parsed["rows"].asObject ?? [:] {
@@ -262,7 +264,8 @@ struct BlobChannelTests {
         // A FRESH ledger rehydrates it DONE.
         let fresh = ExecutionLedger()
         #expect(fresh.rehydrate(parsed) >= 1)
-        if case .settled = fresh.open("job-1", target: AgentId("desk"), verb: "probe", retries: 0, named: true, origin: nil) {
+        let jid = fresh.resolveName("job-1") ?? -1
+        if case .settled = fresh.open(jid, target: AgentId("desk"), verb: "probe", retries: 0, name: "job-1", origin: nil) {
         } else {
             Issue.record("a rehydrated row must dedup a re-send")
         }

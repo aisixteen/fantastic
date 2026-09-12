@@ -32,7 +32,10 @@ public func page<T>(
 ) -> (page: [T], next: String?) {
     var items = items
 
-    if let after = payload["after"].asString, !after.isEmpty {
+    // A cursor is the id of the last row handed over — an int for kernel rows
+    // now, a string for records. Both read as the ident string.
+    let cursor = payload["after"].asString ?? payload["after"].asInt.map(String.init)
+    if let after = cursor, !after.isEmpty {
         if let i = items.firstIndex(where: { ident($0) == after }) {
             items = Array(items[(i + 1)...])
         } else {

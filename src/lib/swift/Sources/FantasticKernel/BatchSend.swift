@@ -79,15 +79,37 @@ extension Kernel {
             if id.isEmpty {
                 return .settled(Outcome.refused(Refusal.bad("send", "id", "a non-empty string")))
             }
-            if id.contains(":") && !ledger.has(id) {
+        }
+
+        // A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks the whole
+        // subtree before it aborts anything, because `onCancel` hooks await —
+        // so a doomed handler gets scheduling turns on its way out, and what it
+        // sent there used to start fresh dispatches that outlived the cancel.
+        // Settled here, before an id is minted: a refused send costs nothing.
+        if KernelTaskLocals.currentKilled?.isKilled == true {
+            return .settled(
+                Outcome(pid: nil, status: .cancelled, result: .object(["cancelled": .bool(true)])))
+        }
+        // WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent
+        // task in the table — including an agent's own `shutdown` turn using its
+        // tools) passes; the kernel's own shutdown traffic passes; everything
+        // else is a new root and is refused before it costs an id.
+        // The root's own control surface stays open while draining: kernel verbs
+        // (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`,
+        // `ledger`) and `reflect` are how an operator watches and finishes the
+        // stop. Python `Agent._launch` (`kernel/_agent.py`).
+        if draining && !KernelTaskLocals.inShutdown {
+            let toRoot = item.target.value == "kernel" || root?.id == item.target
+            let control = toRoot && (Kernel.isSystemVerb(verb) || verb == "reflect")
+            let cur = KernelTaskLocals.currentTask
+            let insideLiveWork = cur.map { tasks.contains($0) } ?? false
+            if !control && !insideLiveWork && !tasks.isRegistered() {
                 return .settled(
                     Outcome.refused(
                         Refusal.make(
-                            Refusal.badArg,
-                            "send: id \"\(id)\" is in the kernel-minted pid namespace (':') "
-                                + "and names no known execution — minted ids can be "
-                                + "referenced, never created",
-                            extra: [("arg", .string("id"))])))
+                            Refusal.draining,
+                            "send: the kernel is draining for shutdown — no new work is "
+                                + "accepted; in-flight work may finish")))
             }
         }
 
@@ -118,21 +140,24 @@ extension Kernel {
         // handle. Minting a second, private pid for a named item meant the
         // caller could not cancel or find its own execution (measured
         // 2026-09-02). An unnamed item still mints, synchronously.
-        let named = item.id != nil
-        let taskId = item.id.map(TaskId.init) ?? tasks.mint(target.id)
-        let execId = item.id ?? taskId.value
+        // ONE ID SPACE. A caller-named execution JOINS the id its name opened;
+        // an unnamed one takes the next int — the same allocator that mints
+        // every row, so a pid, a reply tag and a ledger row agree.
+        let name = item.id
+        let execId: Int64 = name.flatMap { ledger.resolveName($0) } ?? rows.mintId()
+        let taskId = TaskId(execId)
         let retries = item.retries ?? 0
         let origin = KernelTaskLocals.currentSender
 
         switch ledger.open(
-            execId, target: target.id, verb: verb, retries: retries, named: named,
+            execId, target: target.id, verb: verb, retries: retries, name: name,
             origin: origin)
         {
         case .refused(let r):
             return .settled(Outcome.refused(r))
         // ALREADY SETTLED — the recorded outcome IS the answer, and the handler
         // must not run a second time. Idempotency and once-only in one field.
-        case .settled(let o, let origVerb):
+        case .settled(let o, let origVerb, _):
             // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded outcome
             // belongs to whoever ran it, so handing it back is equivalent to
             // having made THAT call — the gate must be asked that question, not
@@ -145,19 +170,30 @@ extension Kernel {
             return .settled(o)
         // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS wait: it
         // does not own the execution and must not kill it.
-        case .join(let origVerb):
+        case .join(let origVerb, let jid):
             if let d = joinDenial(origin: origin, verb: origVerb, target: target) {
                 return .settled(Outcome.refused(d))
             }
-            return .joining(execId, item.timeout)
+            return .joining(jid, item.timeout)
         case .fresh:
-            break
+            // THE CALL ROW, on the TARGET, under the pre-minted id — the trace of
+            // who was asked what, parented to the dispatch that asked. Python
+            // `rows_put(target, {id, kind:"call", verb, parent})`.
+            var callRow: Row = [
+                "id": .integer(execId), "kind": .string("call"), "verb": .string(verb),
+            ]
+            callRow["parent"] = KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null
+            // `origin` says who asked; absent (an operator's call) is what the
+            // loader's message pump keys its own-traffic skip on.
+            callRow["origin"] = origin.map { JSON.string($0.value) } ?? .null
+            if let name { callRow["name"] = .string(name) }
+            _ = try? rows.put(target.id, callRow)
         }
 
         return .dispatch(
             Dispatch(
                 target: target, payload: item.payload, verb: verb,
-                timeout: item.timeout, execId: execId, taskId: taskId, named: named,
+                timeout: item.timeout, execId: execId, taskId: taskId,
                 binary: item.binary))
     }
 
@@ -194,7 +230,7 @@ extension Kernel {
                 // is absorbing.
                 // A retry is the SAME execution, so it re-registers under the
                 // SAME handle: cancelling that id kills the attempt AND the loop.
-                nextPid = d.named ? TaskId(d.execId) : tasks.mint(d.target.id)
+                nextPid = d.taskId
             }
 
             if d.verb == "reflect" && status == .completed {
@@ -213,6 +249,26 @@ extension Kernel {
             fanoutToWatchers(d.target, d.payload)
 
             let out = ledger.settle(d.execId, Outcome(pid: pid, status: status, result: reply))
+            // THE OUTCOME IS A ROW TOO: the call row learns how it ended, and a
+            // `settle` row lands on the ROOT — never on the target's own list,
+            // which readers treat as the CONVERSATION. Python `_stamp_call`.
+            // The stamp is python's `{status, error?, reason?}` — an error's first
+            // 200 characters, so a cold read of the log can say how a call ended.
+            var stamp: Row = ["status": .string(status.rawValue)]
+            if let err = reply["error"].asString, !err.isEmpty {
+                stamp["error"] = .string(String(err.prefix(200)))
+                if let reason = reply["reason"].asString, !reason.isEmpty {
+                    stamp["reason"] = .string(reason)
+                }
+            }
+            rows.stamp(d.execId, ["outcome": .object(stamp)])
+            if let r = root {
+                let settleRow: Row = [
+                    "kind": .string("settle"), "parent": .integer(d.execId),
+                    "settled": .string(d.target.id.value), "outcome": .object(stamp),
+                ]
+                _ = try? rows.put(r.id, settleRow)
+            }
             // The DURABLE half, if a store was wired. The kernel does not know
             // what this writes or where.
             ledgerSettled()
@@ -225,7 +281,7 @@ extension Kernel {
     /// The joiner's `timeout` bounds only its OWN wait — on expiry it settles
     /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not own
     /// it and killing another caller's work would be a surprise.
-    func joinExecution(_ execId: String, timeout: Double?) async -> Outcome {
+    func joinExecution(_ execId: Int64, timeout: Double?) async -> Outcome {
         let deadline = timeout.map { Date().addingTimeInterval($0) }
         while true {
             if let o = ledger.settledOutcome(execId) { return o }
@@ -246,7 +302,7 @@ enum Launched {
     /// Nothing entered the task table — `pid` stays nil.
     case settled(Outcome)
     /// Already in flight under this id: wait for ITS outcome, run nothing.
-    case joining(String, Double?)
+    case joining(Int64, Double?)
     /// Passed the gate and claimed its row.
     case dispatch(Dispatch)
 }
@@ -257,14 +313,10 @@ struct Dispatch {
     let payload: JSON
     let verb: String
     let timeout: Double?
-    /// The ledger key: the caller's id, or the minted pid for an unnamed item.
-    let execId: String
-    /// The task-table handle. For a NAMED execution this IS `execId`, so `ps`
-    /// and `cancel` speak the caller's own id; an unnamed one carries its minted
-    /// pid. A retry re-registers under the same handle either way.
+    /// The ledger key AND the task-table handle: one int from the one counter.
+    /// A caller's name resolves to it; a retry re-registers under the same id.
+    let execId: Int64
     let taskId: TaskId
-    /// Whether the caller named this execution (its id is the handle).
-    let named: Bool
     /// A RAW request body: present ⇒ dispatch through the BINARY channel.
     let binary: Data?
 }

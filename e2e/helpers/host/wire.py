@@ -32,9 +32,13 @@ class WireRoot:
 
     #: The REST leg the driver arrives as. Seeded by `HostKernel.seed`.
     leg_id = "rest"
-    #: The agent a `watch` frame is dispatched AS — the web host itself, not the
-    #: ws leg that carried the frame. It needs the target's ingress like anyone.
-    watch_id = "web"
+    #: The agents a `watch` frame may be dispatched AS — each needs the target's
+    #: ingress like anyone. Python (canonical) and swift dispatch it as the WS LEG
+    #: (`web_ws`'s own id, the record its ingress rule hangs on); rust dispatches
+    #: it as the web HOST (`fantastic-web/src/lib.rs`, `with_sender(host_agent_id)`)
+    #: — a rust deviation to fix, not a second contract. Until it is, the fixture
+    #: grants both so the SAME probe measures the model on every runtime.
+    watch_ids = ("ws", "web")
 
     def __init__(self, k: Any):
         self.k = k
@@ -118,11 +122,17 @@ class WireTranscript:
         # BOUNDED. A poll is a status check, not the work — it must fail fast
         # and let the loop keep counting rather than inherit the driver's
         # 300-second default (see `WireRoot.send`).
-        h = self.k.send(
-            self.aid, {"type": "history", "client_id": self.client_id}, timeout=15)
-        msgs = h.get("messages") if isinstance(h, dict) else None
-        if not isinstance(msgs, list):
+        # THE STORE, not the backend's `history` verb: python's `history` answers
+        # a DIGEST page ({rows:[{id, head, bytes…}], next, total}) and never the
+        # bodies, so the text this reader scores lives only in the kernel's
+        # `rows_read` — the same rows the in-process reader walks, bookkeeping
+        # (call/task/body/view/settle) filtered the same way.
+        r = self.k.send(
+            "kernel", {"type": "rows_read", "agent": self.aid}, timeout=15)
+        rows = r.get("rows") if isinstance(r, dict) else None
+        if not isinstance(rows, list):
             return
+        msgs = [m for m in rows if m.get("kind") not in WireCtx.BOOKKEEPING]
         # PRINT BOTH SIDES, count ONE. `n` and `transcript` stay assistant-only so
         # the tripwires and `distinct_calls` see exactly what the in-process
         # reader sees — but a routed reply arrives as a USER turn, and without

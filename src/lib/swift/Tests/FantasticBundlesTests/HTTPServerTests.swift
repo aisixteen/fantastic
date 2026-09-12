@@ -19,7 +19,7 @@ struct HTTPServerTests {
         #expect(kernelPort == UInt16(port))
 
         // Cleanup.
-        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
     }
 
     @Test func servesIndexRoute() async throws {
@@ -27,7 +27,7 @@ struct HTTPServerTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -45,7 +45,7 @@ struct HTTPServerTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -62,7 +62,7 @@ struct HTTPServerTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -80,7 +80,7 @@ struct HTTPServerTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -118,7 +118,7 @@ struct HTTPServerTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -162,7 +162,7 @@ struct HTTPServerTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(restId)]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -245,7 +245,7 @@ struct HTTPServerTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(restId)]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()

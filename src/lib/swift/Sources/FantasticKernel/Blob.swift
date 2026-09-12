@@ -260,7 +260,11 @@ extension Kernel {
                     + "this kernel reads 1 — starting empty (no migration written)")
             return 0
         }
-        return ledger.rehydrate(doc)
+        let n = ledger.rehydrate(doc)
+        // ONE ID SPACE: a settled execution's id is a row id too, so the
+        // counter must start above every one of them. Never lowered.
+        if let top = ledger.highestId() { rows.setNextId(top + 1) }
+        return n
     }
 
     /// Rehydrate, then install the write-through.

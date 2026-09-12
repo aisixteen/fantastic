@@ -270,61 +270,80 @@ extension Kernel {
         return ""
     }
 
-    /// `(key, body)` topics for an agent: the seeded on-disk `docs/` tree if
-    /// present, else the embedded canonical docs for the root (in-memory mode).
-    /// FLAT for this runtime.
-    private func docsFor(_ target: Agent) -> [(key: String, body: String)] {
+    /// The topic TREE for an agent: the seeded on-disk `docs/` dir if present,
+    /// else the embedded canonical docs for the root (in-memory mode). Nested
+    /// dirs are tiers — python's `_readme_index` walk (`RootDocs.walk`).
+    private func docsFor(_ target: Agent) -> [RootDocs.Node] {
         let dir = target.rootPath.appendingPathComponent("docs")
-        let fm = FileManager.default
-        if storage.isDisk, let names = try? fm.contentsOfDirectory(atPath: dir.path) {
-            let mds = names.filter { $0.hasSuffix(".md") }.sorted()
-            if !mds.isEmpty {
-                return mds.compactMap { name in
-                    guard
-                        let s = try? String(
-                            contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
-                    else { return nil }
-                    return (String(name.dropLast(3)), s)
-                }
-            }
+        if storage.isDisk {
+            let onDisk = RootDocs.walk(dir)
+            if !onDisk.isEmpty { return onDisk }
         }
-        return target.parentId == nil ? RootDocs.all : []
+        return target.parentId == nil ? RootDocs.tree : []
     }
 
-    /// Token-annotated topic index `[{key, desc, tokens}]` — no bodies.
-    private func readmeIndex(_ target: Agent) -> JSON {
+    /// Token-annotated topic index `[{key, desc, tokens, children?}]` — no
+    /// bodies, nesting preserved. Python `_readme_index`.
+    private func readmeIndex(_ nodes: [RootDocs.Node]) -> JSON {
         .array(
-            docsFor(target).map { key, body in
-                .object([
-                    "key": .string(key),
-                    "desc": .string(readDesc(body)),
-                    "tokens": .integer(Int64(estTokens(body))),
-                ])
+            nodes.map { n in
+                var e: OrderedDictionary<String, JSON> = [
+                    "key": .string(n.key),
+                    "desc": .string(readDesc(n.body)),
+                    "tokens": .integer(Int64(estTokens(n.body))),
+                ]
+                if !n.children.isEmpty { e["children"] = readmeIndex(n.children) }
+                return .object(e)
             })
     }
 
+    private func readmeIndex(_ target: Agent) -> JSON { readmeIndex(docsFor(target)) }
+
     /// Polymorphic `readme=<str>`: `"index"` → the token-annotated tree; a
-    /// `<key>` → that topic's body; unknown/escaping key → `{error, keys}`.
+    /// `<key>` → that topic's body + its immediate sub-docs' index; an
+    /// unknown/escaping key → `{error, keys}` (the reply stays well-formed).
+    /// Python `_readme_view`, its texts included: `bad key` is a path that
+    /// resolves OUTSIDE `docs/`, `no doc` is one inside it with no file.
     private func readmeView(_ target: Agent, _ sel: String) -> JSON {
-        if sel == "index" { return .object(["index": readmeIndex(target)]) }
         let docs = docsFor(target)
-        let keys = JSON.array(docs.map { .string($0.key) })
+        if sel == "index" { return .object(["index": readmeIndex(docs)]) }
+        let keys = JSON.array(RootDocs.keys(docs).map { .string($0) })
         let safe =
             sel
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             .replacingOccurrences(of: "\\", with: "/")
-        if safe.isEmpty || safe.split(separator: "/").contains("..") {
-            return .object(["error": .string("bad key '\(sel)'"), "keys": keys])
+        // `docs/<safe>.md` resolved the way pathlib resolves it: `.` and empty
+        // segments vanish, `..` pops — and popping past the root is the clamp.
+        var stack: [String] = []
+        for part in safe.split(separator: "/", omittingEmptySubsequences: true) {
+            if part == "." { continue }
+            if part == ".." {
+                if stack.popLast() == nil {
+                    return .object(["error": .string("bad key \(pyRepr(sel))"), "keys": keys])
+                }
+                continue
+            }
+            stack.append(String(part))
         }
-        guard let hit = docs.first(where: { $0.key == safe }) else {
-            return .object(["error": .string("no doc '\(sel)'"), "keys": keys])
+        let lookup = stack.joined(separator: "/")
+        func find(_ nodes: [RootDocs.Node]) -> RootDocs.Node? {
+            for n in nodes {
+                if n.key == lookup { return n }
+                if let hit = find(n.children) { return hit }
+            }
+            return nil
         }
-        return .object([
-            "key": .string(hit.key),
+        guard !lookup.isEmpty, let hit = find(docs) else {
+            return .object(["error": .string("no doc \(pyRepr(sel))"), "keys": keys])
+        }
+        var view: OrderedDictionary<String, JSON> = [
+            "key": .string(safe),
             "desc": .string(readDesc(hit.body)),
             "tokens": .integer(Int64(estTokens(hit.body))),
             "body": .string(hit.body),
-        ])
+        ]
+        if !hit.children.isEmpty { view["children"] = readmeIndex(hit.children) }
+        return .object(view)
     }
 
     // ── internals ───────────────────────────────────────────────
@@ -434,12 +453,8 @@ extension Kernel {
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
         taskId: TaskId?, binary: Data?
     ) async -> JSON {
-        // My own task is in a subtree the kernel is killing: register no new work
-        // and run no handler. The kernel is INERT to a killed task from the
-        // moment of the kill.
-        if KernelTaskLocals.currentKilled?.isKilled == true {
-            return .object(["cancelled": .bool(true)])
-        }
+        // (A killed sender never reaches here: `launch` settles it `cancelled`
+        // before an id is minted.)
 
         // Register BEFORE spawning: the row (and its stop handle) must exist the
         // instant the handler can run, or a nested `send` could claim a parent
@@ -448,7 +463,7 @@ extension Kernel {
         // ledger key for an unnamed execution — minting a second one here would
         // split the two apart, so the row and the reply would name different
         // things and a pid could not re-fetch its own outcome.
-        let taskId = taskId ?? tasks.mint(target.id)
+        let taskId = taskId ?? TaskId(rows.mintId())
         // Hand the PID back SYNCHRONOUSLY, at dispatch — before any reply exists. A
         // caller that wants to correlate the answer needs the id at send time, not
         // after; that is the whole point of the id.
@@ -472,6 +487,7 @@ extension Kernel {
             let reply = await KernelTaskLocals.$currentOrigin.withValue(origin) {
                 await KernelTaskLocals.$currentSender.withValue(target.id) {
                 await KernelTaskLocals.$currentTask.withValue(taskId) {
+                await KernelTaskLocals.$ownTask.withValue(taskId) {
                     await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
                             // A blob rides the BINARY channel under this same
                             // row/ledger/timeout. The reply BODY is dropped here
@@ -487,6 +503,7 @@ extension Kernel {
                             }()
                         }
                     }
+                }
                 }
             }
             box.resolve(reply)
@@ -588,6 +605,15 @@ extension Kernel {
         // needs to know which bundle it faces. Plain verbs — an AGENT can call
         // them on another agent's work.
         case "ps", "cancel":
+            return true
+        // THE ROW STORE — `messages` is the digest read every agent may be
+        // granted; `rows_read`/`rows_write` are hydration, PRIVILEGED.
+        case "messages", "rows_read", "rows_write":
+            return true
+        // Root-only control verbs — gated inside their handler to the tree
+        // root. `shutdown_agents` stops the agents; `shutdown_kernel` stops
+        // the whole kernel process gracefully.
+        case "shutdown_agents", "shutdown_kernel":
             return true
         default:
             return false

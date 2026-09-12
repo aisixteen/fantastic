@@ -35,9 +35,9 @@ struct FoundationModelsProvider: AIProvider {
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
         // The shared core supplies the assembled messages: a `system`
         // turn (substrate primer + agent menu + send how-to + this
-        // backend's always-inject memory) and — in stateless mode — the
-        // single `user` turn. Map system → Apple session instructions,
-        // the last user message → the prompt.
+        // backend's always-inject memory) and the projected conversation.
+        // Map system → Apple session instructions, the last user message →
+        // the prompt.
         let instructions =
             messages
             .filter { $0["role"].asString == "system" }

@@ -8,8 +8,9 @@
 //   2. Boot all persisted agents.
 //   3. If any persisted `web` agent → run a `_block_forever()` task.
 //   4. If `stdin.isatty()` → also run the `_repl_loop` task.
-//   5. Race those tasks; first to finish (REPL exit, signal, fatal
-//      error) wins and triggers shutdown.
+//   5. Race those tasks against the stop signal (SIGINT/SIGTERM/SIGHUP,
+//      or the root-only `shutdown_kernel` verb); first to finish (REPL
+//      exit, signal, fatal error) wins and triggers `Kernel.shutdown()`.
 //   6. If neither web nor TTY → exit silently with no lock acquired.
 //
 // Swift's startup gap (carried over from Phase 8H): the substrate
@@ -71,6 +72,18 @@ enum DaemonMode {
             exit(1)
         }
 
+        // THE MESSAGE STORE, hydrated COLD — before any agent boots, from
+        // above (python `hydrate_messages` in the bootstrap). A file of another
+        // version or a cut row refuses the boot rather than hydrating half a
+        // conversation.
+        do {
+            try hydrateMessages(kernel, rootDir: workdirURL.appendingPathComponent(".fantastic"))
+        } catch {
+            FileHandle.standardError.write(
+                "fantastic: \(error)\n".data(using: .utf8) ?? Data())
+            exit(1)
+        }
+
         // Step 3 — Identify composition: does a persisted web agent
         // exist? Is stdin a tty?
         //
@@ -110,6 +123,12 @@ enum DaemonMode {
                         .data(using: .utf8) ?? Data())
             }
         }
+        // AFTER the boot loop: the store agent must be live before the ledger
+        // can rehydrate through it, and THE PUMP SUBSCRIBES HERE — after
+        // hydration (cold, above) and the ledger, at the highest id present.
+        // `subscribe(after:)` replays what the boot loop minted meanwhile.
+        await kernel.installLedgerPersistence()
+        kernel.installMessagePump(after: kernel.rows.nextId - 1)
         if webExists,
             let webReflect = kernel.agent(AgentId("web"))
         {
@@ -128,8 +147,10 @@ enum DaemonMode {
                     .data(using: .utf8) ?? Data())
         }
 
-        // Step 5 — Race the REPL task (if tty) and the block task
-        // (if web). First to finish wins.
+        // Step 5 — Race the REPL task (if tty), the block task (if web) and
+        // the stop signal (an OS signal, or `shutdown_kernel` over the web
+        // surface, which deferred its trigger so its ack flushed first).
+        // First to finish wins.
         await withTaskGroup(of: Void.self) { group in
             if isTTY {
                 group.addTask {
@@ -141,17 +162,22 @@ enum DaemonMode {
                     await blockForever()
                 }
             }
+            group.addTask {
+                await Bootstrap.awaitStop(kernel: kernel)
+            }
             // Race — first task to return ends the group; other tasks
             // get cancelled by the task group's structured concurrency.
             await group.next()
             group.cancelAll()
         }
 
-        // Step 6 — Graceful shutdown. Send {type:"shutdown"} to the
-        // web agent so its NWListener stops cleanly.
-        if webExists {
-            _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
-        }
+        // Step 6 — Graceful shutdown: drain the agents, land the last message
+        // window (provider still alive), then the depth-first
+        // `onShutdown`/`onDelete` walk that stops the listener and frees every
+        // PTY and subprocess. Records and tree untouched. Python `longrun`.
+        FileHandle.standardError.write(
+            "[kernel] tearing down agents...\n".data(using: .utf8) ?? Data())
+        await kernel.shutdown()
         FileHandle.standardError.write(
             "[kernel] down\n".data(using: .utf8) ?? Data())
     }

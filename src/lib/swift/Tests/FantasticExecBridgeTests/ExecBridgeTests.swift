@@ -73,8 +73,8 @@
         return r["tasks"].asArray ?? []
     }
 
-    private func cancelTask(_ kernel: Kernel, _ taskId: String) async -> JSON {
-        await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(taskId)]))])[0].result
+    private func cancelTask(_ kernel: Kernel, _ taskId: Int64) async -> JSON {
+        await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .integer(taskId)]))])[0].result
     }
 
     private func waitForRow(_ kernel: Kernel, agent: String, verb: String) async throws -> JSON {
@@ -300,7 +300,7 @@
             _ = await kernel.send([Item(a, pyStart(py, sleepForeverCode(file)))])[0].result
             let pid = try await waitForPid(file)
             let row = try await waitForRow(kernel, agent: a.value, verb: "start")
-            #expect(row["id"].asString?.hasPrefix(a.value + ":") == true, "\(row.serialize())")
+            #expect(row["id"].asInt != nil, "a task id is an int from the one counter: \(row.serialize())")
 
             let reflect = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
             #expect(reflect["running"].asInt == 1, "\(reflect.serialize())")
@@ -325,13 +325,13 @@
             #expect(!processGone(pid), "the child must really be running before we cancel")
 
             let row = try await waitForRow(kernel, agent: a.value, verb: "start")
-            let taskId = try #require(row["id"].asString)
+            let taskId = try #require(row["id"].asInt)
             let cancelled = await cancelTask(kernel, taskId)
             #expect(cancelled["cancelled"].asBool == true, "\(cancelled.serialize())")
             #expect(await waitProcessGone(pid), "pid \(pid) survived cancel — ORPHANED")
 
             let rows = await psRows(kernel)
-            #expect(!rows.contains { $0["id"].asString == taskId }, "the cancelled row is gone")
+            #expect(!rows.contains { $0["id"].asInt == taskId }, "the cancelled row is gone")
             let reflect = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
             #expect(reflect["running"].asInt == 0, "\(reflect.serialize())")
         }
@@ -363,7 +363,7 @@
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
             #expect(rows.count == 2, "both jobs must hold a row")
-            let taskA = try #require(rows.first?["id"].asString)
+            let taskA = try #require(rows.first?["id"].asInt)
 
             let cancelled = await cancelTask(kernel, taskA)
             #expect(cancelled["cancelled"].asBool == true)
@@ -752,7 +752,7 @@
             _ = await kernel.send([Item(a, pyStart(py, sleepForeverCode(file)))])[0].result
             let pid = try await waitForPid(file)
             let row = try await waitForRow(kernel, agent: a.value, verb: "start")
-            _ = await cancelTask(kernel, try #require(row["id"].asString))
+            _ = await cancelTask(kernel, try #require(row["id"].asInt))
             #expect(await waitProcessGone(pid), "pid \(pid) survived cancel")
 
             var status = ""

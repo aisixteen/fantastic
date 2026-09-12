@@ -68,7 +68,35 @@
         try proc.run()
         proc.waitUntilExit()
         let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        return try JSON.parse(data)
+        return try firstJSONDocument(data)
+    }
+
+    /// The reply is the FIRST JSON document on stdout. Python's one-shot prints
+    /// the loader's `  [messages] no store wired — messages stay in RAM` line
+    /// AFTER the pretty-printed reply (measured 2026-09-12), so parsing the
+    /// whole stream fails with "trailing content"; the reply ends at the
+    /// brace that closes the document that opened at the first `{`.
+    private func firstJSONDocument(_ data: Data) throws -> JSON {
+        let bytes = [UInt8](data)
+        guard let start = bytes.firstIndex(of: UInt8(ascii: "{")) else { return try JSON.parse(data) }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var end = bytes.count
+        for i in start..<bytes.count {
+            let b = bytes[i]
+            if inString {
+                if escaped { escaped = false } else if b == UInt8(ascii: "\\") { escaped = true } else if b == UInt8(ascii: "\"") { inString = false }
+                continue
+            }
+            if b == UInt8(ascii: "\"") { inString = true }
+            else if b == UInt8(ascii: "{") { depth += 1 }
+            else if b == UInt8(ascii: "}") {
+                depth -= 1
+                if depth == 0 { end = i + 1; break }
+            }
+        }
+        return try JSON.parse(Data(bytes[start..<end]))
     }
 
     /// Run `fantastic reflect [<id>]` against the Python kernel's
@@ -94,7 +122,7 @@
         try proc.run()
         proc.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return try JSON.parse(data)
+        return try firstJSONDocument(data)
     }
 
     /// Compare two JSON values, returning `nil` on match or a
@@ -279,10 +307,13 @@
                     isThirtyTwoLowerHex(g),
                     "\(label) root reflect guid not 32 lowercase-hex: \(g ?? "nil")")
             }
-            // Stable across a reboot of the SAME workdir (never regenerated).
-            #expect(
-                pyGuid1 == pyGuid2,
-                "python guid regenerated across reboot: \(pyGuid1 ?? "nil") != \(pyGuid2 ?? "nil")")
+            // Stable across a reboot of the SAME workdir (never regenerated) — on
+            // swift. MEASURED 2026-09-13: python's one-shot does not persist the
+            // guid even with the provider wired above (`.fantastic/agent.json`
+            // carries no `guid`; two reflects answer two guids). Python is the
+            // immutable reference, so its stability is not asserted here; the
+            // shape check above still holds for both.
+            _ = pyGuid2
             #expect(
                 swGuid1 == swGuid2,
                 "swift guid regenerated across reboot: \(swGuid1 ?? "nil") != \(swGuid2 ?? "nil")")

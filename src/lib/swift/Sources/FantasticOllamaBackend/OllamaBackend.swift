@@ -29,21 +29,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                 kind: "ollama_backend",
                 provider: "ollama",
                 sentence: "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
-                verbs: [
-                    "send": "args: text, client_id?. Streams a response.",
-                    "history": "args: client_id?. Returns prior turns.",
-                    "cancel": .string(CANCEL_DOC),
-                    "status":
-                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
-                    "backend_state": "Reports availability + in-flight.",
-                ] as JSON,
                 reflectExtra: { agent in
-                    [
-                        "host": .string(Self.host(agent: agent)),
-                        "model": Self.model(agent: agent).map(JSON.string) ?? .null,
-                    ]
-                },
-                backendStateExtra: { agent in
                     [
                         "host": .string(Self.host(agent: agent)),
                         "model": Self.model(agent: agent).map(JSON.string) ?? .null,
@@ -73,7 +59,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? {
         """
         ollama_backend — local LLM agent; thin over FantasticAICore.
-        Per-client chat threads, FIFO lock; verbs: send, history, status, backend_state. \
+        Per-client chat threads, FIFO lock; verbs: the shared ai_core set (reflect it). \
         No `interrupt`: an in-flight `send` IS a kernel task — kill it with `ps` + `cancel`.
         Tool-calling is RAW: no native ollama tools — provider streams text, FantasticAICore parses the <call name=…> envelope (tool_parse).
         """

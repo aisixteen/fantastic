@@ -125,7 +125,7 @@ public struct ToolsBundle: AgentBundle {
         case "boot":
             return .object(["ok": .bool(true)])
         case "shutdown":
-            return .object(["ok": .bool(true)])
+            return .null
         case "register":
             return registerVerb(payload: payload)
         case "unregister":

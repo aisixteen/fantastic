@@ -78,7 +78,7 @@ async def main():
         # agent it is driving — step 4's `own` send was refused `ai does not
         # accept "send" from rest` (2026-09-12). In process the probe is the
         # operator and never notices.
-        leg = {getattr(root, "leg_id"): "*", getattr(root, "watch_id", "web"): "*"} \
+        leg = {getattr(root, "leg_id"): "*", **{i: "*" for i in getattr(root, "watch_ids", ())}} \
             if getattr(root, "leg_id", None) else {}
         r = await call(root, root.id, {"type": "update_agent", "id": "ai",
                                        "callable_by": {"user": "*", "peer": ["messages"], **leg}})

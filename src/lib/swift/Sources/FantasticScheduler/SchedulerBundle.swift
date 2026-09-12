@@ -37,8 +37,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public init() {}
 
     private let lock = NSLock()
-    /// Live tick tasks keyed by scheduler agent id. `boot` populates; `shutdown`
-    /// / `onDelete` cancel.
+    /// Live tick tasks keyed by scheduler agent id. `boot` populates;
+    /// `onShutdown` / `onDelete` cancel.
     /// Each booted scheduler's TICK LOOP, by its row in the kernel task table.
     /// Not a bare `Task`: the loop outlives the `boot` dispatch and fires a send
     /// per due schedule for the life of the agent, so it belongs in `ps` and
@@ -54,7 +54,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         State persists THROUGH the loader (nothing to wire; a write failfasts only
         when no store is wired): `agents/<id>/schedules.json` + `history.jsonl`.
 
-        Verbs: reflect · boot · shutdown · schedule {target, payload, interval_seconds, timeout?} ·
+        Verbs: reflect · boot · schedule {target, payload, interval_seconds, timeout?} ·
         unschedule {schedule_id} · list · pause/resume {schedule_id?} · tick_now {schedule_id} ·
         history {limit?, schedule_id?}. A tick bumps run_count/next_run of every DUE schedule,
         persists FIRST, then fires them all as ONE batch `kernel.send([{target, payload, timeout?}, …])`
@@ -72,7 +72,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         switch verb {
         case "reflect": return reflectReply(agentId, kernel: kernel)
         case "boot": return await bootReply(agentId, kernel: kernel)
-        case "shutdown": return await shutdownReply(agentId, kernel: kernel)
+        // A lifecycle no-op; the tick loop is cancelled in `onShutdown`/`onDelete`.
+        case "shutdown": return .null
         case "schedule": return await scheduleReply(agentId, payload: payload, kernel: kernel)
         case "unschedule": return await unscheduleReply(agentId, payload: payload, kernel: kernel)
         case "list": return await listReply(agentId, kernel: kernel)
@@ -121,11 +122,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
-        _ = await shutdownReply(agentId, kernel: kernel)
+        _ = await stopTick(agentId, kernel: kernel)
     }
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
-        _ = await shutdownReply(agentId, kernel: kernel)
+        _ = await stopTick(agentId, kernel: kernel)
     }
 
     // ── persistence (THROUGH the loader) ────────────────────────
@@ -325,20 +326,14 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             "running": .bool(running),
             "verbs": .object([
                 "reflect": .string("Identity + tick state. No args."),
-                "boot": .string(
-                    "Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write failfasts only when no store is wired."
-                ),
-                "shutdown": .string("Idempotent. Cancels the tick loop."),
-                "schedule": .string(
-                    "args: target:str, payload:dict, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever)."
-                ),
-                "unschedule": .string("args: schedule_id:str."),
-                "list": .string("No args. Returns {schedules:[...]}."),
-                "pause": .string("args: schedule_id:str?. Pauses one or all."),
-                "resume": .string("args: schedule_id:str?. Resumes one or all."),
-                "tick_now": .string(
-                    "args: schedule_id:str. Bumps run_count, persists, then fires immediately."),
-                "history": .string("args: limit:int?, schedule_id:str?."),
+                "boot": .string("Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write"),
+                "schedule": .string("args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."),
+                "unschedule": .string("args: schedule_id:str (req). Returns {removed:bool, schedule_id}."),
+                "list": .string("No args. Returns {schedules: [<schedule record>, ...]}."),
+                "pause": .string("args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler."),
+                "resume": .string("args: schedule_id:str?. With id resumes one; without, resumes the whole scheduler."),
+                "tick_now": .string("args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately. Returns {fired:true, schedule_id}."),
+                "history": .string("args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count}."),
             ]),
             "emits": .object([
                 "schedule_fired": .string(
@@ -374,7 +369,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         return .object(["running": .bool(true)])
     }
 
-    private func shutdownReply(_ agentId: AgentId, kernel: Kernel) async -> JSON {
+    /// Cancel the tick loop through the TABLE. Idempotent.
+    private func stopTick(_ agentId: AgentId, kernel: Kernel) async -> JSON {
         let removed: TaskId? = {
             lock.lock()
             defer { lock.unlock() }

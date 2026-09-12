@@ -4,7 +4,7 @@ id: recall_early
 group: coding
 title: "after a long run, recall and grep reach the very first instruction and a stored body"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [python, rust, swift]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:

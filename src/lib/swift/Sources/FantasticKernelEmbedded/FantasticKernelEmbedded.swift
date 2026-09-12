@@ -7,7 +7,7 @@
 //
 //     let kernel = try await startKernelInMemory(portHint: 0)
 //     let port = kernel.httpPort()
-//     defer { kernel.shutdown() }
+//     // ... and `await kernel.shutdown()` when the app stops
 //
 //     class MyHost: ProxyAgentHost { ... }
 //     registerHost(AgentId("my_agent"), MyHost())

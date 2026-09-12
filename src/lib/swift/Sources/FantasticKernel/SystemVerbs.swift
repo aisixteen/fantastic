@@ -21,6 +21,14 @@ extension Kernel {
         // Refused HERE, in the handler — not at the call gate — so probes
         // asserting a denial `side` for a non-root privileged send stay valid.
         if target.parentId != nil {
+            // The two stop verbs answer with python's own text, not the
+            // generic `not_here`: a non-root agent is not a control surface.
+            if verb == "shutdown_agents" || verb == "shutdown_kernel" {
+                return .object([
+                    "error": .string(
+                        "\(verb): root control surface only; address the kernel root (alias 'kernel')")
+                ])
+            }
             return Refusal.notHere(verb, target.id.value)
         }
         switch verb {
@@ -45,16 +53,22 @@ extension Kernel {
             return await loadBlob(payload)
         case "ledger":
             let rows = ledger.rows(for: KernelTaskLocals.currentOrigin)
-            let (paged, next) = page(rows, payload) { $0["id"].asString ?? "" }
+            let (paged, next) = page(rows, payload) { $0["id"].asInt.map(String.init) ?? ($0["id"].asString ?? "") }
             return .object([
                 "executions": .array(paged),
                 "next": next.map { JSON.string($0) } ?? .null,
             ])
+        case "messages":
+            return messagesReply(payload)
+        case "rows_read":
+            return rowsReadReply(payload)
+        case "rows_write":
+            return rowsWriteReply(payload)
         case "ps":
             // PAGED like `list_agents` — same cursor law: the id of the last row
             // handed over. Over a LIVE table a cursor may miss a row that
             // finished mid-walk; this is a kernel, not a snapshot store.
-            let (rows, next) = page(tasks.rows(), payload) { $0["id"].asString ?? "" }
+            let (rows, next) = page(tasks.rows(), payload) { $0["id"].asInt.map(String.init) ?? ($0["id"].asString ?? "") }
             return .object([
                 "tasks": .array(rows),
                 "next": next.map { JSON.string($0) } ?? .null,
@@ -67,10 +81,42 @@ extension Kernel {
             // CODED. `{error: "cancel: task_id (str) required"}` could only be
             // branched on by matching prose, so the shared corpus' `reason`
             // matcher could never be satisfied here.
-            guard let t = payload["task_id"].asString, !t.isEmpty else {
+            // An int, its decimal string (a model quotes what it copied out of
+            // a tag), or a caller's own execution NAME. Absent/empty/other types
+            // are MISSING; a name nobody holds is an unknown id — `{cancelled:
+            // false}`, not an error (python `_verb_cancel`).
+            let resolved: Int64?
+            switch payload["task_id"] {
+            case .integer(let n): resolved = n
+            case .string(let s) where !s.isEmpty:
+                resolved = Int64(s) ?? ledger.resolveName(s)
+            default:
                 return Refusal.missing("cancel", "task_id")
             }
-            return await cancelTask(TaskId(t))
+            guard let tid = resolved else {
+                return .object(["cancelled": .bool(false), "killed": .array([])])
+            }
+            return await cancelTask(TaskId(tid))
+        // The agent half of a graceful stop: drain, the `shutdown` verb to
+        // every agent that advertises it, quiet, cancel the rest. The kernel
+        // keeps serving; the persister catches up. Root control surface only.
+        case "shutdown_agents":
+            return await shutdownAgents()
+        // Gracefully stop the whole kernel PROCESS. Order: (1) ack
+        // `{type:"shutdown_kernel", ok:true}`; (2) AFTER the reply is on the
+        // wire, trigger the daemon's normal graceful path; (3) exit 0. The
+        // trigger is DEFERRED 100 ms so the in-flight REST body / WS frame is
+        // fully written before the serve loop tears the listeners down —
+        // never signal synchronously here or the caller sees a dropped
+        // socket, not an ack. Idempotent: `requestShutdown` collapses a racing
+        // signal to one shutdown. With no serve loop there is nothing to stop
+        // — it still acks. Python `_verb_shutdown_kernel`.
+        case "shutdown_kernel":
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                self?.requestShutdown()
+            }
+            return .object(["type": .string("shutdown_kernel"), "ok": .bool(true)])
         default:
             return Refusal.make(
                 Refusal.unhandled, "unhandled system verb '\(verb)'",
@@ -136,10 +182,34 @@ extension Kernel {
                     + "originated. Failed/timed_out/cancelled rows are the dead-letter "
                     + "queue: inspect, then retry with a NEW id if you choose — nothing "
                     + "is retried silently."),
+            "messages": .string(
+                "args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, "
+                    + "at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, bytes, "
+                    + "title?, level?, refs?}], refused:[ids], next?}. Your own rows always; another "
+                    + "agent's only if its callable_by names you for `messages`. Bodies are behind "
+                    + "that agent's `pull`."),
+            "rows_read": .string(
+                "args: agent:str (req), after:int?, limit:int?. PRIVILEGED (a wildcard does "
+                    + "not carry it). That agent's "
+                    + "rows WHOLE (content included), oldest first — {rows:[…], next?}. The "
+                    + "hydration read; agents read digests through `messages` instead."),
+            "rows_write": .string(
+                "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a wildcard does "
+                    + "not carry it). Appends rows "
+                    + "to that agent's conversation, each under a FRESH id — {ids:[int]}. A row "
+                    + "may not carry an `id`; re-ids are the caller's to remap."),
             "cancel": .string(
                 "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
                     + "own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's "
                     + "batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."
+            ),
+            "shutdown_agents": .string(
+                "No args. Stops the AGENTS, not the process: drains (new roots refused), "
+                    + "sends `shutdown` to every agent advertising it, waits for in-flight work, "
+                    + "cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
+            ),
+            "shutdown_kernel": .string(
+                "No args. Stops the kernel PROCESS — under env:'container', the container."
             ),
         ])
     }
@@ -677,4 +747,174 @@ extension Kernel {
             .sorted { $0.name < $1.name }
     }
 
+}
+
+// MARK: - THE ROW STORE's verbs (python `_verb_messages`/`_verb_rows_read`/`_verb_rows_write`)
+
+/// A message id as an int: an int, or its decimal string (a model may quote
+/// what it copied out of a tag). Anything else is not an id. Python `_as_id`.
+public func asMessageId(_ v: JSON?) -> Int64? {
+    switch v {
+    case .integer(let n)?: return n > 0 ? n : nil
+    case .string(let s)? where !s.isEmpty && s.allSatisfy(\.isNumber):
+        return Int64(s)
+    default: return nil
+    }
+}
+
+extension Kernel {
+    /// Rows by id at DIGEST resolution, gated INSIDE: the caller's own rows
+    /// always; another agent's only when that owner's `callable_by` names the
+    /// caller for `messages` (the same ingress check the call gate runs, re-run
+    /// here against the OWNER because a root verb skips ingress); the operator
+    /// sees all. Refused ids are LISTED, never silently dropped. Bodies stay
+    /// behind the owner's `pull`.
+    func messagesReply(_ payload: JSON) -> JSON {
+        let raw = payload["ids"].asArray ?? []
+        let parsed = raw.map { asMessageId($0) }
+        guard !parsed.isEmpty, !parsed.contains(where: { $0 == nil }) else {
+            return Refusal.make(
+                Refusal.badArg, "messages: `ids` must be a non-empty list of message ids (ints)",
+                extra: [("arg", .string("ids"))])
+        }
+        var ids = parsed.map { $0! }
+        let caller = KernelTaskLocals.currentOrigin
+        let loaderId = root?.id.value
+        var decided: [String: Bool] = [:]
+        func mayRead(_ ownerId: String) -> Bool {
+            guard let caller, caller.value != ownerId else { return true }
+            if let d = decided[ownerId] { return d }
+            guard let owner = agent(AgentId(ownerId)) else {
+                decided[ownerId] = false
+                return false
+            }
+            let d = authorizeCall(
+                grant: owner.metaValue(forKey: "callable_by") ?? .null, verb: "messages",
+                otherId: caller.value, holderId: owner.id.value,
+                parentId: owner.parentId?.value,
+                childIds: Set(owner.childIds().map { $0.value }), loaderId: loaderId,
+                enforcePrivileged: false)
+            decided[ownerId] = d.allowed
+            return d.allowed
+        }
+        if let after = asMessageId(payload["after"]), let i = ids.firstIndex(of: after) {
+            ids = Array(ids[(i + 1)...])
+        }
+        var out: [JSON] = []
+        var refused: [JSON] = []
+        for rid in ids {
+            guard let row = rows.getOne(rid) else {
+                refused.append(.integer(rid))
+                continue
+            }
+            let ownerId = row["agent"]?.asString ?? ""
+            guard mayRead(ownerId) else {
+                refused.append(.integer(rid))
+                continue
+            }
+            let content = row["content"]?.asString ?? ""
+            let kind = row["kind"]?.asString
+            var d: OrderedDictionary<String, JSON> = [
+                "id": .integer(rid),
+                "agent": row["agent"] ?? .null,
+                "parent": row["parent"] ?? .null,
+                "kind": kind.map(JSON.string) ?? (row["role"] ?? .null),
+                "role": row["role"] ?? .null,
+                "head": .string(String(content.prefix(120)).replacingOccurrences(of: "\n", with: " ")),
+                "bytes": .integer(Int64(content.count)),
+            ]
+            if let t = row["title"]?.asString, !t.isEmpty { d["title"] = .string(t) }
+            if let l = row["level"], l != .null, l != .integer(0), l != .string("") { d["level"] = l }
+            if let refs = row["refs"]?.asArray, !refs.isEmpty { d["refs"] = .integer(Int64(refs.count)) }
+            if kind == "call" || kind == "task" {
+                d["verb"] = row["verb"] ?? .null
+                if let n = row["name"]?.asString, !n.isEmpty { d["name"] = .string(n) }
+                if let o = row["outcome"], case .object = o { d["status"] = o["status"] }
+            } else if kind == "view" {
+                // a view digest says how much it holds, never the array itself
+                d["ids"] = .integer(Int64(row["ids"]?.asArray?.count ?? 0))
+                d["budget"] = row["budget"] ?? .null
+                d["title"] = row["why"] ?? .null
+            }
+            out.append(.object(d))
+        }
+        // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
+        let limit = Int(payload["limit"].asInt ?? 0)
+        let capBytes = 32 * 1024
+        var kept: [JSON] = []
+        var used = 0
+        for d in out {
+            if limit > 0 && kept.count >= limit { break }
+            let n = d.serialize().utf8.count
+            if used + n > capBytes { break }
+            kept.append(d)
+            used += n
+        }
+        let next: JSON = kept.count < out.count ? (kept.last?["id"] ?? .null) : .null
+        return .object(["rows": .array(kept), "refused": .array(refused), "next": next])
+    }
+
+    /// That agent's rows WHOLE — content included, oldest first —
+    /// {rows:[…], next:int|None}. PRIVILEGED: a wildcard grant never carries
+    /// it; this is hydration's read, the one `messages` deliberately is not.
+    func rowsReadReply(_ payload: JSON) -> JSON {
+        guard let agentArg = payload["agent"].asString,
+            !agentArg.trimmingCharacters(in: .whitespaces).isEmpty
+        else {
+            return Refusal.make(
+                Refusal.badArg, "rows_read: `agent` must be an agent id",
+                extra: [("arg", .string("agent"))])
+        }
+        var list = rows.forAgent(AgentId(agentArg.trimmingCharacters(in: .whitespaces)))
+        if let after = asMessageId(payload["after"]) {
+            if let i = list.firstIndex(where: { $0["id"]?.asInt == after }) {
+                list = Array(list[(i + 1)...])
+            } else {
+                list = []
+            }
+        }
+        let limit = Int(payload["limit"].asInt ?? 0)
+        let truncated = limit > 0 && list.count > limit
+        let kept = truncated ? Array(list.prefix(limit)) : list
+        return .object([
+            "rows": .array(kept.map { JSON.object($0) }),
+            "next": truncated ? (kept.last?["id"] ?? .null) : .null,
+        ])
+    }
+
+    /// Append rows to that agent's conversation, each under a FRESH id —
+    /// {ids:[int]}, in the order given. A row may not carry its own `id`: the
+    /// store is the only allocator; re-ids are the CALLER's to remap.
+    func rowsWriteReply(_ payload: JSON) -> JSON {
+        guard let agentArg = payload["agent"].asString,
+            !agentArg.trimmingCharacters(in: .whitespaces).isEmpty
+        else {
+            return Refusal.make(
+                Refusal.badArg, "rows_write: `agent` must be an agent id",
+                extra: [("arg", .string("agent"))])
+        }
+        guard let list = payload["rows"].asArray, !list.isEmpty,
+            list.allSatisfy({ if case .object = $0 { return true } else { return false } })
+        else {
+            return Refusal.make(
+                Refusal.badArg, "rows_write: `rows` must be a non-empty list of rows",
+                extra: [("arg", .string("rows"))])
+        }
+        if list.contains(where: { $0["id"] != .null }) {
+            return Refusal.make(
+                Refusal.badArg,
+                "rows_write: a row may not carry an `id` — the store mints every "
+                    + "id, and a copy is a NEW row",
+                extra: [("arg", .string("rows"))])
+        }
+        let aid = AgentId(agentArg.trimmingCharacters(in: .whitespaces))
+        var ids: [JSON] = []
+        for r in list {
+            var row = r.asObject ?? [:]
+            row.removeValue(forKey: "id")
+            // `put` refuses only a present id; a null one was stripped above.
+            ids.append(.integer((try? rows.put(aid, row)) ?? 0))
+        }
+        return .object(["ids": .array(ids)])
+    }
 }

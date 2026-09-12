@@ -3,7 +3,7 @@
 // `AIProvider` (built per send by `makeProvider`) is the streaming
 // seam; this struct carries the few behavioural / shape differences
 // that remain between ollama, NIM, and Apple FM so a single shared
-// `send`/`history`/`interrupt`/`backend_state` serves all three.
+// `send`/`history`/`status`/`recall`/… serves all of them.
 
 import FantasticJSON
 import FantasticKernel
@@ -23,21 +23,11 @@ public enum ProviderResult: Sendable {
 public struct AIBackendConfig: Sendable {
     /// `kind` / `handler_module` short name, e.g. `"ollama_backend"`.
     public var kind: String
-    /// Stable provider tag echoed in `reflect` + `backend_state`,
+    /// Stable provider tag echoed in `reflect`,
     /// e.g. `"ollama"`, `"nvidia_nim"`, `"apple_foundation_models"`.
     public var provider: String
     /// One-line `reflect.sentence`.
     public var sentence: String
-    /// `reflect.verbs` map (verb name → human description). Kept
-    /// per-backend because the wording differs (SSE vs atomic call).
-    public var verbs: JSON
-
-    /// Stateless mode (Apple FM): the shared `send` does NOT feed prior
-    /// history back as model context (history stays UI-only), and the
-    /// per-turn user/assistant history rows carry an `id` field. When
-    /// `false` (ollama / NIM), history IS the model context and rows
-    /// carry no `id`.
-    public var stateless: Bool
 
     /// NIM-only: the `done` event on the ERROR path still carries the
     /// `accumulated` field (NIM's old `emitDone` always included it).
@@ -59,20 +49,14 @@ public struct AIBackendConfig: Sendable {
     /// tokens and the canonical `SEND_TO_HOWTO` is ~2100 of them, so the full
     /// block plus the primer reflect exceeded the window before the user's text
     /// was added — the session refused with `exceededContextWindowSize` and every
-    /// send failed. The compaction block is dropped for a second reason: FM is
-    /// STATELESS by design (history is never fed back), so `recall` and
-    /// `context_status` name affordances that agent does not have.
+    /// send failed. The compaction block is dropped too: at 4096 tokens it costs
+    /// more of the window than the discipline it teaches saves.
     public var compactPrompt: Bool
 
     /// Extra fields merged into the `reflect` reply (e.g. ollama/NIM add
     /// `host` + `model`; FM adds `available` + `model`). Receives the
     /// agent so it can read meta. Pure function — no side effects.
     public var reflectExtra: @Sendable (Agent) -> [String: JSON]
-
-    /// Extra fields merged into the `backend_state` reply, same
-    /// contract as `reflectExtra`. The shared base always supplies
-    /// `provider`; the closure adds the rest.
-    public var backendStateExtra: @Sendable (Agent) -> [String: JSON]
 
     /// Build the provider for one send. Async because FM may probe
     /// on-device availability + assemble instructions. Returns
@@ -85,12 +69,9 @@ public struct AIBackendConfig: Sendable {
         kind: String,
         provider: String,
         sentence: String,
-        verbs: JSON,
-        stateless: Bool = false,
         compactPrompt: Bool = false,
         includeAccumulatedOnError: Bool = false,
         reflectExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
-        backendStateExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         systemPromptExtra: @escaping @Sendable (Agent, Kernel) async -> String = { _, _ in "" },
         makeProvider:
             @escaping @Sendable (Agent, String, Kernel) async -> ProviderResult
@@ -98,12 +79,9 @@ public struct AIBackendConfig: Sendable {
         self.kind = kind
         self.provider = provider
         self.sentence = sentence
-        self.verbs = verbs
-        self.stateless = stateless
         self.compactPrompt = compactPrompt
         self.includeAccumulatedOnError = includeAccumulatedOnError
         self.reflectExtra = reflectExtra
-        self.backendStateExtra = backendStateExtra
         self.systemPromptExtra = systemPromptExtra
         self.makeProvider = makeProvider
     }
