@@ -220,20 +220,25 @@
                 // THE PROGRAM'S WATCH IS THIS AGENT'S WATCH, and THE KERNEL DECIDES.
                 // Off the handler's task-local this relay watched as the OPERATOR —
                 // ungated, so a refusal was not merely discarded, it could never
-                // happen. Re-enter the owner's identity (as the `send` case does) and
-                // register NOTHING when the answer is no: the inbox row is created by
-                // `watch` itself, only on the path that succeeds.
+                // happen. Re-enter the owner's identity (as the `send` case does)
+                // and register NOTHING when the answer is no.
+                //
+                // THE READER REGISTERS FIRST: `watch` refuses a watcher with no
+                // inbox, and the drain task below is what reads this one — so
+                // claim the stream before asking to be watched, and drop it
+                // again if the answer is no.
+                let stream = kernel.ensureInbox(proxy)
                 let denial = KernelTaskLocals.$currentSender.withValue(owner) {
                     kernel.watch(src: srcId, watcher: proxy)
                 }
                 if let denial {
+                    kernel.removeInbox(proxy)
                     push(
                         .object([
                             "op": .string("event"), "src": .string(src), "payload": denial,
                         ]))
                     return
                 }
-                let stream = kernel.ensureInbox(proxy)
                 let t = Task { [weak self] in
                     for await p in stream {
                         self?.queue.async {
@@ -256,17 +261,18 @@
                 supersedePredecessor(kernel)
                 let proxy = AgentId("_xbself_\(jobId)")
                 let o = owner
+                let stream = kernel.ensureInbox(proxy)
                 let denial = KernelTaskLocals.$currentSender.withValue(o) {
                     kernel.watch(src: o, watcher: proxy)
                 }
                 if let denial {
+                    kernel.removeInbox(proxy)
                     push(
                         .object([
                             "op": .string("event"), "src": .string(o.value), "payload": denial,
                         ]))
                     return
                 }
-                let stream = kernel.ensureInbox(proxy)
                 let t = Task { [weak self] in
                     for await p in stream {
                         // The job's own telemetry echoes back through the owner's

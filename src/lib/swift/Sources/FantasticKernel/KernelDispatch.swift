@@ -402,13 +402,29 @@ extension Kernel {
         return classify(r)
     }
 
-    /// A reply's terminal state. A handler's own `{error:…}` is a COMPLETED
-    /// answer — the kernel does not introspect domain replies; only a THROW
-    /// (`raised`) or a kill is a non-completion.
+    /// A reply's terminal state. FAILURE IS A STATUS: a handler that RAN and
+    /// said no — a missing path, a patch that did not match, a refusal it
+    /// composed itself — settles `errored`. A THROW (`raised`) is `failed`; a
+    /// kill is `cancelled`. The reply is kept verbatim either way; what changes
+    /// is that a reader learns the outcome from `status` instead of parsing
+    /// `result`.
     private func classify(_ r: JSON) -> (JSON, Status) {
         if r["cancelled"].asBool == true { return (r, .cancelled) }
         if r["raised"].asBool == true { return (r, .failed) }
+        if errorShaped(r) { return (r, .errored) }
         return (r, .completed)
+    }
+
+    /// Whether a handler's reply is a REFUSAL — an object carrying a truthy
+    /// `error`. The same test every consumer used to make for itself off the
+    /// result body.
+    private func errorShaped(_ r: JSON) -> Bool {
+        switch r["error"] {
+        case .null: return false
+        case .bool(let b): return b
+        case .string(let s): return !s.isEmpty
+        default: return true
+        }
     }
 
     /// `binary` has NO DEFAULT, deliberately: it defaulted to `nil` until

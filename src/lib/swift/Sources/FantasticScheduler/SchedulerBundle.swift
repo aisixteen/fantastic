@@ -39,7 +39,13 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     private let lock = NSLock()
     /// Live tick tasks keyed by scheduler agent id. `boot` populates; `shutdown`
     /// / `onDelete` cancel.
-    private var tasks: [String: Task<Void, Never>] = [:]
+    /// Each booted scheduler's TICK LOOP, by its row in the kernel task table.
+    /// Not a bare `Task`: the loop outlives the `boot` dispatch and fires a send
+    /// per due schedule for the life of the agent, so it belongs in `ps` and
+    /// within reach of `cancel` — and its fires are then parented to work that
+    /// is still alive (measured 2026-09-11: `p_slow/hit`, `p_fast/hit`,
+    /// `p_cap/hit` all landed under a dispatch that had already ended).
+    private var tasks: [String: TaskId] = [:]
 
     public var readme: String? {
         """
@@ -66,7 +72,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         switch verb {
         case "reflect": return reflectReply(agentId, kernel: kernel)
         case "boot": return await bootReply(agentId, kernel: kernel)
-        case "shutdown": return shutdownReply(agentId)
+        case "shutdown": return await shutdownReply(agentId, kernel: kernel)
         case "schedule": return await scheduleReply(agentId, payload: payload, kernel: kernel)
         case "unschedule": return await unscheduleReply(agentId, payload: payload, kernel: kernel)
         case "list": return await listReply(agentId, kernel: kernel)
@@ -115,11 +121,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
-        _ = shutdownReply(agentId)
+        _ = await shutdownReply(agentId, kernel: kernel)
     }
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
-        _ = shutdownReply(agentId)
+        _ = await shutdownReply(agentId, kernel: kernel)
     }
 
     // ── persistence (THROUGH the loader) ────────────────────────
@@ -306,7 +312,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         let running: Bool = {
             lock.lock()
             defer { lock.unlock() }
-            return tasks[agentId.value] != nil
+            // LIVENESS COMES FROM THE TABLE, which holds only running work.
+            guard let tid = tasks[agentId.value] else { return false }
+            return kernel.tasks.contains(tid)
         }()
         let agent = kernel.agent(agentId)
         return .object([
@@ -343,7 +351,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// Atomically start + register the tick task if none is live for `id`.
     /// Returns false if one was already running (idempotent boot). Synchronous
     /// so the NSLock never spans an `await`.
-    private func startTaskIfAbsent(_ id: String, _ make: () -> Task<Void, Never>) -> Bool {
+    private func startTaskIfAbsent(_ id: String, _ make: () -> TaskId) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         if tasks[id] != nil { return false }
@@ -355,7 +363,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         // Boot never needs a store (python): the tick loop starts; a WRITE
         // surfaces the loader's error when none is wired.
         let started = startTaskIfAbsent(agentId.value) {
-            Task { [weak self] in
+            kernel.spawnTask(agent: agentId, verb: "tick_loop") { [weak self] in
                 guard let self else { return }
                 await self.tickLoop(agentId, kernel)
             }
@@ -366,12 +374,15 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         return .object(["running": .bool(true)])
     }
 
-    private func shutdownReply(_ agentId: AgentId) -> JSON {
-        lock.lock()
-        let removed = tasks.removeValue(forKey: agentId.value)
-        lock.unlock()
+    private func shutdownReply(_ agentId: AgentId, kernel: Kernel) async -> JSON {
+        let removed: TaskId? = {
+            lock.lock()
+            defer { lock.unlock() }
+            return tasks.removeValue(forKey: agentId.value)
+        }()
         if let removed {
-            removed.cancel()
+            // Through the TABLE — the same path an operator's `cancel` takes.
+            _ = await kernel.cancelTask(removed)
             return .object(["stopped": .bool(true), "id": .string(agentId.value)])
         }
         return .object([

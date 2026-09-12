@@ -144,6 +144,9 @@ private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Deci
     let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
     let src = Agent(id: "src", handlerModule: nil, parentId: nil)
     kernel.register(src)
+        // The watcher REGISTERS FIRST: `watch` mirrors into an inbox, it does
+        // not create one for the caller.
+        _ = kernel.ensureInbox(AgentId("cli"))
     #expect(kernel.watch(src: AgentId("src"), watcher: AgentId("cli")) == nil)
     #expect(src.watcherIds().contains(AgentId("cli")))
 }

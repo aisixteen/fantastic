@@ -668,8 +668,10 @@ struct BundleSmokeTests {
         // Synthetic local watcher of the bridge agent's inbox. Every
         // re-emitted event lands here.
         let watcherId: AgentId = "test_local_watcher"
-        kernelA.watch(src: "br", watcher: watcherId)
+        // THE WATCHER REGISTERS FIRST — `watch` mirrors into an inbox, it does
+        // not create one on the caller's behalf.
         let inbox = kernelA.ensureInbox(watcherId)
+        kernelA.watch(src: "br", watcher: watcherId)
 
         // Trigger an emit on B.core. The substrate's `emit` fans out
         // to watcher inboxes — our synthetic in-memory relay drains
