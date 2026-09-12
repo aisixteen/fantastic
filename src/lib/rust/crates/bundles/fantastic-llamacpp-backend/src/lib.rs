@@ -23,6 +23,7 @@
 
 use async_trait::async_trait;
 use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::retrieval;
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
 use fantastic_ai_core::{agent_loop::BackendConfig, events::CallerRoute, helpers, state, verbs};
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
@@ -191,15 +192,17 @@ fn meta_u64(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str) -> Option<u64> 
         .and_then(Value::as_u64)
 }
 
-async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let client_id = helpers::safe_client(
-        payload
-            .get("client_id")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
-    let _ = client_id;
-    let provider: Arc<dyn Provider> = Arc::new(LlamaCppProvider {
+/// The provider this agent is configured for. Built per call (it is cheap and the
+/// record can change between turns), and shared by `send` and the verbs that need
+/// a completion of their own — `context_recall` asks the model which rows to keep
+/// in full. `None` when the backend is not configured to reach a model at all;
+/// the caller says so in its own words rather than guessing a provider.
+fn build_provider(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    _client_id: &str,
+) -> Option<Arc<dyn Provider>> {
+    Some(Arc::new(LlamaCppProvider {
         endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
         requested_model: helpers::meta_string(agent_id, kernel, "model"),
         api_key: helpers::meta_string(agent_id, kernel, "api_key"),
@@ -208,7 +211,18 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
             .get("temperature")
             .and_then(Value::as_f64),
         think: meta_bool(agent_id, kernel, "think"),
-    });
+    }))
+}
+
+async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let client_id = helpers::safe_client(
+        payload
+            .get("client_id")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let provider = build_provider(agent_id, kernel, &client_id)
+        .expect("llamacpp: the provider is record-driven and always buildable");
     verbs::send(provider, agent_id, payload, kernel, CFG).await
 }
 
@@ -237,6 +251,9 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?. Streams tokens to ONLY the caller. Failfast if file_bridge_id unset.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store.",
+            "pull": "args: pid:int (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with offset: next_offset until eof.",
+            "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int?, width:int? (chars of each matched line, default 200). Finds the LINE that mentions something, wherever it is. Returns {matches:[{id, line, text}], total, truncated}.",
+            "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuilds this agent's VIEW from its store: fits the head to the budget at digest resolution, asks the model which rows it wants in full, persists the id list, logs the decision as a row. Returns {kept, expanded, dropped, budget, why, degraded}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction.",
             "status": "args: client_id?. In-flight phase + this client's pending queue.",
         },
@@ -268,7 +285,23 @@ impl Bundle for LlamaCppBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel).await,
-            "boot" | "shutdown" => Value::Null,
+            "shutdown" => Value::Null,
+            // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`.
+            "boot" => {
+                if fantastic_ai_core::history::load_history(
+                    agent_id,
+                    kernel,
+                    helpers::DEFAULT_CLIENT_ID,
+                )
+                .await
+                .is_empty()
+                {
+                    Value::Null
+                } else {
+                    let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
+                    retrieval::context_recall(agent_id, &json!({}), kernel, p.as_ref()).await
+                }
+            }
             "send" => send_reply(agent_id, payload, kernel).await,
             // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
             // record, this agent answers it by THINKING, and the asker writes
@@ -279,6 +312,14 @@ impl Bundle for LlamaCppBundle {
             },
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
+            // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
+            "pull" => retrieval::pull(agent_id, payload, kernel).await,
+            "grep" => retrieval::grep(agent_id, payload, kernel).await,
+            // Rebuild the view from the store: on boot, after folds, on request.
+            "context_recall" => {
+                let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
+                retrieval::context_recall(agent_id, payload, kernel, p.as_ref()).await
+            }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("llamacpp_backend: unknown type {other:?}")}),

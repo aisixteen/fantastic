@@ -73,13 +73,33 @@ pub fn hydrate_messages(kernel: &Kernel, root_dir: &Path) -> Result<usize, Strin
     let (rows, next_id) = read_messages(root_dir)?;
     kernel.rows.set_next_id(next_id);
     let mut n = 0;
+    let mut settles: Vec<(i64, Value)> = Vec::new();
     for row in rows {
         let agent = row
             .get("agent")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("{MESSAGES_FILE}: a row carries no `agent`"))?;
+        // Remember the endings; the calls they settle may not be in yet.
+        if row.get("kind").and_then(Value::as_str) == Some("settle") {
+            if let (Some(parent), Some(out)) = (
+                row.get("parent").and_then(Value::as_i64),
+                row.get("outcome").cloned(),
+            ) {
+                settles.push((parent, out));
+            }
+        }
         kernel.rows.put(&AgentId::from(agent), row)?;
         n += 1;
+    }
+    // REPLAY THE ENDINGS onto the calls they ended. A call comes back off disk
+    // as it was WRITTEN — at launch, with no outcome — because a row is
+    // append-only and the settle is its own append. Stamping here rebuilds the
+    // state a live kernel had, and it is the only reason a cold read can answer
+    // "how did this end".
+    for (parent, out) in settles {
+        let mut stamp = serde_json::Map::new();
+        stamp.insert("outcome".to_string(), out);
+        kernel.rows.stamp(parent, &stamp);
     }
     Ok(n)
 }
@@ -94,7 +114,15 @@ pub fn hydrate_messages(kernel: &Kernel, root_dir: &Path) -> Result<usize, Strin
 /// wires one is what makes anything durable.
 pub fn install_message_pump(kernel: &Arc<Kernel>, after: i64) {
     let k = Arc::clone(kernel);
-    tokio::spawn(async move {
+    // A KEEPALIVE KERNEL TASK, not a bare `tokio::spawn`. Two things follow
+    // from being in the table: `ps` shows the pump, and `shutdown_agents`
+    // neither waits for it (it never ends) nor cancels it — the pump has to be
+    // alive AFTER the shutdown verb to append what that verb just wrote. Python
+    // marks `persist_writer` `keepalive=True` for exactly that.
+    let root = kernel
+        .root()
+        .map_or_else(|| AgentId::from("kernel"), |r| r.id.clone());
+    kernel.spawn_keepalive_task(&root, "message_pump", async move {
         let mut tail = k.rows.subscribe(after);
         let mut said_no_store = false;
         loop {

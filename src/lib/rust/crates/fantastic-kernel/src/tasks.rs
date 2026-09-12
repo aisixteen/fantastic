@@ -178,6 +178,12 @@ struct TaskEntry {
     /// `started_at` clock is too coarse to sort by).
     order: u64,
     handle: TaskHandle,
+    /// A loop that is SUPPOSED to outlive a graceful agent shutdown — a
+    /// persister tailing the row store, a scheduler tick. `shutdown_agents`
+    /// neither waits for it (it never ends) nor cancels it (the persister has
+    /// to be alive to catch up on what the shutdown verb just wrote); it dies
+    /// with the process. Python marks these `_keepalive` for the same reason.
+    keepalive: bool,
 }
 
 #[derive(Default)]
@@ -230,6 +236,19 @@ impl TaskTable {
         parent: Option<TaskId>,
         handle: TaskHandle,
     ) {
+        self.register_marked(id, agent_id, verb, parent, handle, false);
+    }
+
+    /// [`Self::register`], saying whether this task is a keepalive loop.
+    pub fn register_marked(
+        &self,
+        id: &TaskId,
+        agent_id: &AgentId,
+        verb: &str,
+        parent: Option<TaskId>,
+        handle: TaskHandle,
+        keepalive: bool,
+    ) {
         let mut inner = self.inner.lock().expect("task table poisoned");
         let parent = parent.filter(|p| inner.tasks.contains_key(p));
         inner.order += 1;
@@ -243,8 +262,28 @@ impl TaskTable {
                 started_at: now_secs(),
                 order,
                 handle,
+                keepalive,
             },
         );
+    }
+
+    /// Every live task that is NOT a keepalive loop and not `except` — what
+    /// `shutdown_agents` waits to drain, then cancels. Python's `pending()`.
+    pub fn pending(&self, except: Option<TaskId>) -> Vec<TaskId> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner
+            .tasks
+            .iter()
+            .filter(|(id, e)| !e.keepalive && Some(**id) != except)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// `true` iff `id` is a live ROOT task (no parent) — the only tasks
+    /// `shutdown_agents` cancels, since a subtree dies with its root.
+    pub fn is_root(&self, id: &TaskId) -> bool {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner.tasks.get(id).is_some_and(|e| e.parent.is_none())
     }
 
     /// Drop one row. Surviving children are RE-PARENTED to the dead task's
@@ -397,15 +436,56 @@ impl Kernel {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        self.spawn_task_marked(agent_id, verb, work, false)
+    }
+
+    /// [`Self::spawn_task`] for a loop that must SURVIVE `shutdown_agents` — a
+    /// persister, a scheduler tick. See [`TaskTable::pending`].
+    pub fn spawn_keepalive_task<F>(
+        self: &Arc<Self>,
+        agent_id: &AgentId,
+        verb: &str,
+        work: F,
+    ) -> TaskId
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.spawn_task_marked(agent_id, verb, work, true)
+    }
+
+    fn spawn_task_marked<F>(
+        self: &Arc<Self>,
+        agent_id: &AgentId,
+        verb: &str,
+        work: F,
+        keepalive: bool,
+    ) -> TaskId
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         // THE COUNTER, not a table-local sequence: a fork is a message, and its
         // id comes from the one allocator like every other id in the kernel.
         let task_id = TaskId(self.rows.mint_id());
         let handle = TaskHandle::new();
-        self.tasks
-            .register(&task_id, agent_id, verb, current_task(), handle.clone());
+        self.tasks.register_marked(
+            &task_id,
+            agent_id,
+            verb,
+            current_task(),
+            handle.clone(),
+            keepalive,
+        );
 
         let cancel = handle.cancel_signal();
         let killed = handle.killed_flag();
+        // A FORK ACTS AS WHOEVER FORKED IT. `tokio::spawn` inherits no
+        // task-locals, so the identity the gate reads was dropped at the spawn
+        // and every send the fork made arrived as OPERATOR — ungated, and
+        // attributed to nobody in the row. Bundles papered over it by wrapping
+        // the future in `with_sender` by hand at each site, which is a rule
+        // that has to be remembered rather than one that holds.
+        let sender = crate::send::current_sender();
+        let origin = crate::send::current_origin();
         let guard = ForgetOnDrop {
             kernel: Arc::clone(self),
             id: task_id,
@@ -416,13 +496,19 @@ impl Kernel {
             CURRENT_TASK
                 .scope(
                     tid,
-                    CURRENT_KILLED.scope(killed, async move {
-                        tokio::select! {
-                            biased;
-                            _ = cancel.notified() => {}
-                            _ = work => {}
-                        }
-                    }),
+                    CURRENT_KILLED.scope(
+                        killed,
+                        crate::send::CURRENT_SENDER.scope(
+                            sender,
+                            crate::send::CURRENT_ORIGIN.scope(origin, async move {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.notified() => {}
+                                    _ = work => {}
+                                }
+                            }),
+                        ),
+                    ),
                 )
                 .await;
         });

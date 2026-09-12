@@ -54,7 +54,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
-use tokio::task::JoinHandle;
 
 // The authorization rule registries live in the shared `fantastic-io-bridge` base
 // (every io derivation imports them); re-export so existing `authorizer::` paths hold.
@@ -138,7 +137,7 @@ type PendingReply = oneshot::Sender<Result<(Value, Vec<u8>), String>>;
 pub(crate) struct BridgeState {
     pub(crate) transport: Arc<dyn BridgeTransport>,
     pub(crate) transport_kind: String,
-    pub(crate) read_task: AsyncMutex<Option<JoinHandle<()>>>,
+    pub(crate) read_task: AsyncMutex<Option<fantastic_kernel::TaskId>>,
     pub(crate) pending: Mutex<HashMap<String, PendingReply>>,
     pub(crate) corr_counter: AtomicU64,
     /// The per-leg INGRESS rule (default `AllowAll`); consulted by the read loop
@@ -176,7 +175,10 @@ async fn dispatch(
     let reply = match verb {
         "reflect" => reflect_reply(agent_id, kernel),
         "boot" => boot_reply(family, agent_id, kernel).await,
-        "shutdown" => shutdown_reply(agent_id, kernel).await,
+        // A LIFECYCLE NO-OP, as in python: the teardown lives in `on_delete`
+        // (which `on_shutdown` defaults to), never behind a verb a caller could
+        // send. `shutdown_agents` tells only bundles that ADVERTISE the verb.
+        "shutdown" => Value::Null,
         "reconnect" => reconnect_reply(family, agent_id, kernel).await,
         "forward" => forward_reply(agent_id, payload, kernel).await,
         "watch_remote" => watch_remote_reply(agent_id, payload, "watch").await,
@@ -476,7 +478,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "verbs": {
             "reflect": "Identity + transport + connectivity. No args.",
             "boot": "Open the transport, spawn the read loop, emit bridge_up. Idempotent.",
-            "shutdown": "Cancel read loop, close transport, reject pending forwards.",
             "reconnect": "shutdown + boot — no auto-reconnect by design.",
             "forward": "args: target:str, payload:dict, timeout:float? (default 30s). Ships a raw call frame to the remote, awaits the reply, returns it unwrapped.",
             "watch_remote": "args: target:str. Streams a remote agent's emits onto this bridge's inbox via the remote's watch protocol.",
@@ -663,19 +664,19 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     let read_state = Arc::clone(&state);
     let read_agent = agent_id.clone();
     let read_kernel = Arc::clone(kernel);
-    // UNDER THE LEG'S OWN IDENTITY. `tokio::spawn` does NOT inherit the task-local
-    // `CURRENT_SENDER`, so an inbound `call` used to reach `Kernel::launch` with
-    // `current_sender() == None` — the OPERATOR — and the two-sided gate was
-    // skipped entirely for every frame a peer sent. Scoping the whole read loop to
-    // the bridge agent id makes an inbound frame a call BY THIS LEG, gated by its
-    // `can_call` and the target's `callable_by`, exactly as python's read task is
-    // (it inherits the boot dispatch's contextvar) and exactly as exec_bridge
-    // already does for its relay.
-    let sender_id = agent_id.clone();
-    let task = tokio::spawn(fantastic_kernel::send::with_sender(sender_id, async move {
+    // REGISTERED, AND UNDER THE LEG'S OWN IDENTITY. The read loop outlives the
+    // `boot` dispatch and issues a send per inbound frame, so it is real work:
+    // `spawn_task` gives it a `ps` row and a `cancel` that reaches it, and
+    // carries this dispatch's sender into the fork — an inbound `call` used to
+    // reach `Kernel::launch` with `current_sender() == None`, the OPERATOR, and
+    // the two-sided gate was skipped for every frame a peer sent. The
+    // hand-rolled `with_sender` that used to close that hole here is gone: the
+    // kernel carries identity into every fork now, so it is a property rather
+    // than a rule each site has to remember.
+    let task_id = kernel.spawn_task(&agent_id.clone(), "bridge_read", async move {
         read_loop(read_agent, read_state, read_kernel).await;
-    }));
-    *state.read_task.lock().await = Some(task);
+    });
+    *state.read_task.lock().await = Some(task_id);
 
     BRIDGES.lock().insert(agent_id.clone(), Arc::clone(&state));
 
@@ -683,15 +684,17 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     json!({"booted": true, "transport": kind})
 }
 
-async fn shutdown_reply(agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Value {
+async fn shutdown_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let removed = BRIDGES.lock().remove(agent_id);
     let Some(state) = removed else {
         return json!({"stopped": true, "reason": "not running"});
     };
-    // Tear down the read task — abort first so the close below
-    // doesn't race a frame mid-parse.
-    if let Some(task) = state.read_task.lock().await.take() {
-        task.abort();
+    // Tear down the read task — cancelled first so the close below doesn't race
+    // a frame mid-parse. Through the TABLE, not a raw abort: the task is a `ps`
+    // row now, and cancelling it runs the same path an operator's `cancel`
+    // would.
+    if let Some(tid) = state.read_task.lock().await.take() {
+        kernel.cancel_task(&tid).await;
     }
     state.transport.close().await;
     // Reject every in-flight forward — same semantics as the

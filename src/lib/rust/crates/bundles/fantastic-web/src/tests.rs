@@ -1570,27 +1570,32 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
 /// they are exactly what `teardown` has to abort on disconnect.
 #[tokio::test]
 async fn finished_call_handles_are_pruned_before_the_next_push() {
-    let pending: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> =
+    // THE TABLE IS THE LIVENESS TRUTH now: a frame handler is a registered task,
+    // so pruning asks the kernel what is still running rather than polling a
+    // JoinHandle. The bound is the same one this test always pinned — a
+    // dashboard polling `status` once a second must not accumulate a handle per
+    // call for the life of the socket.
+    let kernel = std::sync::Arc::new(fantastic_kernel::Kernel::new());
+    let agent = AgentId::from("web_track");
+    let pending: std::sync::Mutex<Vec<fantastic_kernel::TaskId>> =
         std::sync::Mutex::new(Vec::new());
 
-    // 50 quick calls, the dashboard-polling shape. Each push prunes the ones
-    // already done, so the vector never carries the whole history.
     for _ in 0..50 {
-        let h = tokio::spawn(async {});
-        h.await.expect("quick call");
-        // A finished handle can still be pushed; the NEXT push must drop it.
-        super::track_call(&pending, tokio::spawn(async {}));
+        let t = kernel.spawn_task(&agent, "ws_call", async {});
+        // Let it finish, then push: the NEXT push must prune it.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        super::track_call(&kernel, &pending, t);
         tokio::task::yield_now().await;
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    super::track_call(&pending, tokio::spawn(std::future::pending::<()>()));
+    let live = kernel.spawn_task(&agent, "ws_call", std::future::pending::<()>());
+    super::track_call(&kernel, &pending, live);
     let held = pending.lock().unwrap().len();
-    assert!(held <= 2, "pending grew unbounded: {held} handles held");
+    assert!(held <= 2, "pending grew unbounded: {held} ids held");
 
     // The one still running is KEPT — pruning must not drop what a disconnect
     // has to cancel.
-    assert_eq!(held, 1, "the in-flight handle was pruned away");
-    let live = pending.lock().unwrap().pop().unwrap();
-    assert!(!live.is_finished());
-    live.abort();
+    assert_eq!(held, 1, "the in-flight id was pruned away");
+    assert!(kernel.tasks.contains(&live));
+    kernel.cancel_task(&live).await;
 }

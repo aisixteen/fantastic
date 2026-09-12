@@ -72,8 +72,16 @@ async def main():
         # 1. nobody named the peer: every id refused, nothing returned
         cold = await as_peer()
         # 2. the owner names the peer for `messages`: digests come back
+        # `update_agent` REPLACES `callable_by` whole. Over the wire the driver's
+        # own ingress (`rest`, and `web` for watch) was granted at create by
+        # `connect`; restating the map without it locks the driver out of the
+        # agent it is driving — step 4's `own` send was refused `ai does not
+        # accept "send" from rest` (2026-09-12). In process the probe is the
+        # operator and never notices.
+        leg = {getattr(root, "leg_id"): "*", getattr(root, "watch_id", "web"): "*"} \
+            if getattr(root, "leg_id", None) else {}
         r = await call(root, root.id, {"type": "update_agent", "id": "ai",
-                                       "callable_by": {"user": "*", "peer": ["messages"]}})
+                                       "callable_by": {"user": "*", "peer": ["messages"], **leg}})
         assert not (isinstance(r, dict) and r.get("error")), f"grant: {r}"
         warm = await as_peer()
         # 3. the operator sees all

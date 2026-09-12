@@ -25,7 +25,11 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 /// The kernel's own bookkeeping kinds. In the same table, never the conversation.
-const BOOKKEEPING: [&str; 4] = ["call", "task", "body", "view"];
+/// WHAT IS NOT CONVERSATION. An allow-list of kinds to HIDE, so a kind added to
+/// the kernel and forgotten here lands in the model's prompt — which is how
+/// `settle` first arrived as a turn reading `null` (python, 2026-09-11). Settle
+/// rows live on the ROOT for that reason, but the guard belongs here too.
+const BOOKKEEPING: [&str; 5] = ["call", "task", "body", "view", "settle"];
 
 /// The agent's conversation, oldest first.
 ///
@@ -56,7 +60,8 @@ pub async fn append_history(
     kernel: &Arc<Kernel>,
     _client_id: &str,
     new_turns: &[Value],
-) {
+) -> Vec<i64> {
+    let mut ids = Vec::with_capacity(new_turns.len());
     for turn in new_turns {
         let row: Map<String, Value> = match turn {
             Value::Object(m) => m.clone(),
@@ -68,8 +73,10 @@ pub async fn append_history(
         };
         // A refused row is the hydrator's mistake, not the model's — say it and
         // keep the rest of the turn, rather than dropping a conversation.
-        if let Err(e) = kernel.rows.put(self_id, row) {
-            eprintln!("  [history] {self_id}: {e}");
+        match kernel.rows.put(self_id, row) {
+            Ok(id) => ids.push(id),
+            Err(e) => eprintln!("  [history] {self_id}: {e}"),
         }
     }
+    ids
 }

@@ -4,7 +4,7 @@ id: recall_after_fold
 group: coding
 title: "every fold batch is followed by a recall; grep answers inline; the marker under a fold comes back"
 runner: probe.py
-runtimes: [python]
+runtimes: [python, rust]
 costs: turns
 long: true  # hit the 180 s proxy limit at 6 lanes (2026-09-08); at most 2 long run at once
 limits:

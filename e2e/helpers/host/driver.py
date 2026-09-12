@@ -245,7 +245,7 @@ class HostKernel:
             {"id": "web", "handler_module": "web.tools",
              "parent_id": self.root_id, "port": port,
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          **{t: "*" for t in self.reach}}}, indent=2))
+                          **{t: "*" for t in self.reach if t != self.root_id}}}, indent=2))
         # The WS leg — the EVENT face. REST cannot push, so a failed pass (which
         # announces itself as a `status` event on the agent's own stream) is
         # invisible without this; see `helpers/host/ws.py`.
@@ -254,7 +254,7 @@ class HostKernel:
             {"id": "ws", "handler_module": "web_ws.tools", "parent_id": "web",
              "ingress_rule": "allow_all_ingress",
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          **{t: "*" for t in self.reach}}}, indent=2))
+                          **{t: "*" for t in self.reach if t != self.root_id}}}, indent=2))
         (w / "agents/web/agents/rest/agent.json").write_text(json.dumps(
             {"id": "rest", "handler_module": "web_rest.tools", "parent_id": "web",
              # SEALED BY DEFAULT: an io leg with no rule denies every inbound
@@ -262,7 +262,7 @@ class HostKernel:
              # record through — a parity difference worth knowing.
              "ingress_rule": "allow_all_ingress",
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          **{t: "*" for t in self.reach}}}, indent=2))
+                          **{t: "*" for t in self.reach if t != self.root_id}}}, indent=2))
         return port
 
     def boot(self) -> "HostKernel":
@@ -285,7 +285,12 @@ class HostKernel:
         # the kernel dies with the process — so a dump that lived only in `close`
         # never ran and the capture was worth nothing (measured 2026-09-03).
         atexit.register(self.close)
-        for _ in range(150):  # wait on the PORT, never on a guessed sleep
+        # WAIT ON THE PORT, never on a guessed sleep — and long enough for a
+        # HYDRATED host: booting an agent with a store runs `context_recall`,
+        # a model call per AI agent, before the listener comes up (measured
+        # 2026-09-12, kernel_restart:rust: 324 rows hydrated, then `did not
+        # serve` at the old 15 s cap). 120 s, bounded.
+        for _ in range(1200):
             with socket.socket() as s:
                 if s.connect_ex(("127.0.0.1", self.port)) == 0:
                     return self

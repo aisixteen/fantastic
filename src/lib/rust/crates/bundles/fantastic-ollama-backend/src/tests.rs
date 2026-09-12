@@ -100,8 +100,8 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
 fn rebind_backend_inbox(
     kernel: &Arc<Kernel>,
     backend: &AgentId,
-) -> tokio::sync::mpsc::Receiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::channel(kernel.inbox_bound);
+) -> fantastic_kernel::inbox::InboxReceiver {
+    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel.inboxes.insert(backend.clone(), tx);
     rx
 }
@@ -116,10 +116,10 @@ fn ndjson_body(parts: &[Value]) -> String {
     out
 }
 
-async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Value>) -> Vec<Value> {
+async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
     let mut out = Vec::new();
     for _ in 0..40 {
-        while let Ok(v) = rx.try_recv() {
+        while let Some(v) = rx.try_recv() {
             out.push(v);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -127,7 +127,7 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Value>) -> Vec<Value> {
             v.get("type").and_then(Value::as_str) == Some("status")
                 && v.get("phase").and_then(Value::as_str) == Some("done")
         }) {
-            while let Ok(v) = rx.try_recv() {
+            while let Some(v) = rx.try_recv() {
                 out.push(v);
             }
             break;

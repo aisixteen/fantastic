@@ -127,11 +127,11 @@ async fn unwatch_stops_fanout() {
     kernel
         .emit(&AgentId::from("src"), json!({"type": "after_unwatch"}))
         .await;
-    // try_recv: nothing queued.
-    match rx_w.try_recv() {
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-        other => panic!("expected Empty, got {other:?}"),
-    }
+    // Nothing queued.
+    assert!(
+        rx_w.try_recv().is_none(),
+        "an unwatched mirror still delivered"
+    );
 }
 
 #[tokio::test]
@@ -375,6 +375,9 @@ async fn an_operator_watch_stays_ungated() {
     let kernel = Arc::new(Kernel::new());
     let src = make_agent("src");
     let _s = kernel.register(Arc::clone(&src));
+    // The watcher REGISTERS FIRST — `watch` mirrors into an inbox, it does not
+    // create one on the caller's behalf.
+    let _cli = kernel.register(make_agent("cli"));
     assert!(kernel
         .watch(&AgentId::from("src"), AgentId::from("cli"))
         .await

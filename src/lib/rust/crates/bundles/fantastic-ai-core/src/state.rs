@@ -63,6 +63,18 @@ pub struct BackendState {
     /// compaction notice landed in the durable store, so `derive_reaction`
     /// can scan from there. Never surfaced in a verb reply.
     pub compaction_mark: Mutex<Option<(usize, String)>>,
+    /// Fold rows written since the last automatic `context_recall` — python
+    /// `_folds_since`. Every `RECALL_EVERY`-th batch marks a recall due.
+    pub folds_since: Mutex<usize>,
+    /// A `context_recall` is owed at the start of the next turn — python
+    /// `_recall_due`. "When it feels it folded, it runs context_recall": at the
+    /// start of the NEXT turn, over the new head. Debounced, because a recall is
+    /// a model call and one after every fold batch doubled the turn price.
+    pub recall_due: Mutex<bool>,
+    /// Where the last assembled body came from — `"array"` (the view array),
+    /// `"store"` (no view yet) or `"store (stale array)"`. Python `_view_source`,
+    /// reported by `context_status`.
+    pub view_source: Mutex<Option<String>>,
 }
 
 impl BackendState {
@@ -73,6 +85,9 @@ impl BackendState {
             queue: Mutex::new(VecDeque::new()),
             projection: Mutex::new(None),
             compaction_mark: Mutex::new(None),
+            folds_since: Mutex::new(0),
+            recall_due: Mutex::new(false),
+            view_source: Mutex::new(None),
         })
     }
 }

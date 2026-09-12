@@ -35,6 +35,17 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::task_local;
 
+/// Whether a handler's reply is a REFUSAL — a map carrying a truthy `error`.
+/// The same test every consumer used to make for itself off the result body.
+fn error_shaped(v: &Value) -> bool {
+    match v.get("error") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(_) => true,
+    }
+}
+
 task_local! {
     /// The originator of the send currently dispatching. `Some(id)` inside an
     /// agent's handler (a nested send is attributed to that agent — the CALL
@@ -71,6 +82,28 @@ task_local! {
 /// and duplicating it here would be a second truth.
 pub fn current_origin() -> Option<AgentId> {
     CURRENT_ORIGIN.try_with(|s| s.clone()).ok().flatten()
+}
+
+tokio::task_local! {
+    /// THE KERNEL'S OWN SHUTDOWN TRAFFIC. `shutdown_agents` sets the drain flag
+    /// FIRST (so nothing new enters while it works) and only then sends every
+    /// agent its `shutdown` verb — which the drain gate would otherwise refuse
+    /// as new work. Python `_in_shutdown` / `shutdown_context()`.
+    pub static IN_SHUTDOWN: bool;
+}
+
+/// Is this send part of the kernel's own shutdown sequence?
+#[must_use]
+pub fn in_shutdown() -> bool {
+    IN_SHUTDOWN.try_with(|v| *v).unwrap_or(false)
+}
+
+/// Run `fut` as the kernel's own shutdown traffic — exempt from the drain gate.
+pub async fn with_shutdown<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    IN_SHUTDOWN.scope(true, fut).await
 }
 
 /// Run `fut` with `sender` set as `CURRENT_SENDER` for its duration.
@@ -258,6 +291,27 @@ impl Kernel {
             )));
         };
 
+        // WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent
+        // task in the table — including an agent's own `shutdown` turn using its
+        // tools) passes; everything else is a new root and is refused BEFORE it
+        // costs an id. The root's own control surface stays open: kernel verbs
+        // (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`,
+        // `ledger`) and `reflect` are how an operator watches and finishes the
+        // stop. Python `Agent._send` (`kernel/_agent.py`).
+        if self.draining() && !in_shutdown() {
+            let to_root = item.target.as_str() == "kernel"
+                || self.root().is_some_and(|r| r.id == item.target);
+            let control = to_root && (is_kernel_verb(&verb) || verb == "reflect");
+            let inside_live_work = current_task().is_some_and(|t| self.tasks.contains(&t));
+            if !control && !inside_live_work {
+                return Launched::Settled(Outcome::refused(crate::refusal::refusal(
+                    crate::refusal::DRAINING,
+                    "send: the kernel is draining for shutdown — no new work is \
+                     accepted; in-flight work may finish",
+                )));
+            }
+        }
+
         // ── CALL GATE — fully-gated, two-sided, from-above ──────────────
         // Trust boundary = who ORIGINATED the send. An operator send
         // (`current_sender()` is None: CLI/bootstrap/loader-at-boot/test, or a
@@ -422,6 +476,28 @@ impl Kernel {
         let out = self
             .ledger
             .settle(exec_id, Outcome::new(pid, status, reply));
+        // A SETTLE IS A ROW. Without one the message log records only
+        // BEGINNINGS: a `call` row is appended at launch and nothing is ever
+        // appended for its ending, so a cold read cannot tell "never settled"
+        // from "settled". (Python had the same hole from the other side — it
+        // mutated the launch row in place and the pump's debounce usually missed
+        // the stamp.) A row is append-only by contract, so the ending has to be
+        // an append.
+        //
+        // ON THE ROOT, not on the settled call's agent: an agent's row list is
+        // read as its CONVERSATION — by the model's own history, by a fork's
+        // row copy — and each of those readers filters bookkeeping by an
+        // enumerated set of kinds it was told about. A new kind on an agent's
+        // list is conversation to whichever reader was not. `settled` names the
+        // agent as a FIELD, so the ending still says what it ended.
+        if let Some(root) = self.root() {
+            let mut row = Map::new();
+            row.insert("kind".to_string(), Value::from("settle"));
+            row.insert("parent".to_string(), Value::from(pid.map(|t| t.get())));
+            row.insert("settled".to_string(), Value::from(target.id.0.clone()));
+            row.insert("outcome".to_string(), out.to_value());
+            let _ = self.rows.put(&root.id, row);
+        }
         // The DURABLE half, if a loader installed one. The kernel does not know
         // what this writes or where.
         self.ledger_settled();
@@ -623,10 +699,18 @@ impl Kernel {
         match outcome {
             // `raised` marks a terminal handler failure (a bundle `Err`, or a
             // panic below) — retryable, and a dead-letter row when the budget
-            // runs out. A plain error-shaped reply is a completed dispatch.
+            // runs out.
             Ok(Some(v)) if v.get("raised").and_then(Value::as_bool) == Some(true) => {
                 (v, Status::Failed)
             }
+            // FAILURE IS A STATUS. A handler that RAN and said no — a missing
+            // path, a patch that did not match, a refusal it composed itself —
+            // settles `errored`, not `completed`. The reply is kept verbatim
+            // either way; what changes is that a reader learns the outcome from
+            // `status` instead of parsing `result`. Retries are unchanged:
+            // `is_retryable` covers the transport classes only, so a semantic
+            // no is never re-sent.
+            Ok(Some(v)) if error_shaped(&v) => (v, Status::Errored),
             Ok(Some(v)) => (v, Status::Completed),
             Ok(None) => {
                 if current_killed() {
@@ -731,19 +815,19 @@ impl Kernel {
     /// immediately. Fans the event out to watchers; publishes a state
     /// event of type `"emit"`.
     ///
-    /// The target's inbox is auto-vivified if missing (synthetic
-    /// browser-client ids land here).
+    /// AN INBOX EXISTS IFF A READER REGISTERED IT. An emit to an id nobody
+    /// holds a receiver for is a no-op, exactly as in python.
+    ///
+    /// This used to auto-vivify: it inserted a sender whose receiver was dropped
+    /// on the same line, so the channel was closed from birth — every later
+    /// `try_send` failed and the map entry stayed forever, one per synthetic id
+    /// that was ever emitted to. A queue nobody reads is not a queue.
     pub async fn emit(self: &Arc<Self>, target_id: &AgentId, payload: Value) {
-        // Auto-vivify the inbox for synthetic ids (any id not in
-        // `agents` is treated as a watch-only listener).
-        if !self.inboxes.contains_key(target_id) {
-            let (tx, _rx) = tokio::sync::mpsc::channel(self.inbox_bound);
-            self.inboxes.insert(target_id.clone(), tx);
-        }
         if let Some(tx) = self.inboxes.get(target_id) {
-            // try_send so a slow consumer doesn't deadlock the emitter.
-            // Drops on full match Python's bounded-deque behaviour.
-            let _ = tx.try_send(payload.clone());
+            // Never blocks the emitter, and at the bound the OLDEST payload is
+            // evicted — python's `_put_drop_oldest` and swift's
+            // `.bufferingNewest` rule, which rust used to invert.
+            tx.send(payload.clone());
         }
 
         let sender = current_sender().unwrap_or_else(|| target_id.clone());
@@ -794,14 +878,25 @@ impl Kernel {
                 return Some(denial);
             }
         }
+        // A WATCHER MUST ALREADY BE A READER. This used to lazy-create the
+        // watcher's inbox — a sender whose receiver was dropped on the same
+        // line, so the mirror went nowhere and the caller had no way to know.
+        // Registering a consumer is what `watch` requires, not what it does.
+        if !self.inboxes.contains_key(&watcher_id) {
+            let mut r = crate::refusal::refusal(
+                crate::refusal::NO_CONSUMER,
+                format!(
+                    "watch: {:?} has no registered inbox, so nothing would read \
+                     what is mirrored there",
+                    watcher_id.0
+                ),
+            );
+            crate::refusal::with(&mut r, "watcher", json!(watcher_id.0));
+            crate::refusal::with(&mut r, "src", json!(src_id.0));
+            return Some(r);
+        }
         {
             src.watcher_ids.write().await.insert(watcher_id.clone());
-        }
-        // Auto-vivify the watcher's inbox so fanout has a destination
-        // even if `watcher_id` is a synthetic browser-client id.
-        if !self.inboxes.contains_key(&watcher_id) {
-            let (tx, _rx) = tokio::sync::mpsc::channel(self.inbox_bound);
-            self.inboxes.insert(watcher_id, tx);
         }
         None
     }
@@ -835,7 +930,7 @@ impl Kernel {
         let watchers: Vec<AgentId> = target.watcher_ids.read().await.iter().cloned().collect();
         for w in watchers {
             if let Some(tx) = self.inboxes.get(&w) {
-                let _ = tx.try_send(payload.clone());
+                tx.send(payload.clone());
             }
         }
     }

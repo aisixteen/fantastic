@@ -184,7 +184,7 @@ impl Bundle for ToolsBundle {
         let reply = match verb {
             "reflect" => reflect(agent_id),
             "boot" => json!({"ok": true}),
-            "shutdown" => json!({"ok": true}),
+            "shutdown" => Value::Null,
             "register" => register_verb(payload),
             "unregister" => unregister_verb(payload),
             "unregister_by_sender" => unregister_by_sender_verb(payload),

@@ -78,7 +78,12 @@ async def store_rows(root, core, aid: str) -> list[dict]:
             )
             out += list((whole or {}).get("rows") or [])
             after = (whole or {}).get("next")
-        return out
+        # THE CONVERSATION, as `_load_history` reads it in process: `rows_read`
+        # returns the agent's rows WHOLE — the kernel's own bookkeeping included
+        # — so the wire path must hide the same kinds, or a probe counts a
+        # planted `body` row as a fourth turn (measured 2026-09-12,
+        # messages_gate:rust: `[13, 16, 19, 22]` against an expected 3).
+        return [r for r in out if r.get("kind") not in _BOOKKEEPING]
     out: list[dict] = []
     before = None
     while True:
@@ -96,17 +101,100 @@ async def store_rows(root, core, aid: str) -> list[dict]:
     return out
 
 
+#: The kernel's own bookkeeping kinds — in the same table, never the
+#: conversation. What `_load_history` hides in process; the wire hides the same.
+_BOOKKEEPING = ("call", "task", "body", "view", "settle")
+
+#: Fields of a planted row that hold REFERENCES to other planted rows. A remap
+#: has to know these by name: the kernel deliberately does not guess which of a
+#: row's fields are ids, because guessing would corrupt a fold's `refs`.
+_REF_FIELDS = ("parent",)
+_REF_LIST_FIELDS = ("refs",)
+
+
+def _remap_row(row: dict, seen: dict[int, int]) -> dict:
+    """Replace placeholder ids with the ids the store assigned. An id that is not
+    in `seen` passes through untouched — which is what makes this the IDENTITY on
+    the in-process path, where the planter already holds real ids."""
+    out = dict(row)
+    out.pop("id", None)  # the store is the only allocator
+    for f in _REF_FIELDS:
+        v = out.get(f)
+        if isinstance(v, int) and v in seen:
+            out[f] = seen[v]
+    for f in _REF_LIST_FIELDS:
+        v = out.get(f)
+        if isinstance(v, list):
+            out[f] = [seen.get(x, x) if isinstance(x, int) else x for x in v]
+    # The reply TAG carries the pid in its text — remap it there too, or a
+    # planted reply names a row that does not exist and `grep`/`pull` find
+    # nothing (which is exactly what the fold probes measure).
+    c = out.get("content")
+    if isinstance(c, str) and c.startswith("[reply to "):
+        try:
+            old_pid = int(c[len("[reply to "):].split(" ", 1)[0])
+        except (ValueError, IndexError):
+            old_pid = None
+        if old_pid is not None and old_pid in seen:
+            out["content"] = c.replace(
+                f"[reply to {old_pid} ", f"[reply to {seen[old_pid]} ", 1)
+    return out
+
+
 async def plant_store(core, root, aid: str, rows: list[dict], bodies: dict[str, str] | None = None) -> None:
     """Write a conversation FROM ABOVE before the agent exists (or beside it): rows into
     the kernel's row store under the agent's id, dehydrated bodies under their pids. The
-    agent need not exist yet — agent id is conversation id, and rows outlive the agent."""
-    await core._save_history(aid, root, rows)
+    agent need not exist yet — agent id is conversation id, and rows outlive the agent.
+
+    IN PROCESS the rows already carry real ids and go down in one call. OVER THE
+    WIRE they cannot: `rows_write` refuses a caller-chosen id, so the rows go one
+    at a time IN DEPENDENCY ORDER and every reference is remapped to the id the
+    store just assigned. Every reference a planted history holds points BACKWARD
+    (a reply to its call, a fold to rows it collapsed, a turn to its parent), so
+    one forward pass is enough.
+    """
+    if core is not None:
+        await core._save_history(aid, root, rows)
+        for pid, body in (bodies or {}).items():
+            await core._store_reply(aid, root, pid, body)
+        return
+    seen: dict[int, int] = {}
+    for row in rows:
+        placeholder = row.get("id")
+        got = await call(root, "kernel", {
+            "type": "rows_write", "agent": aid, "rows": [_remap_row(row, seen)]})
+        ids = (got or {}).get("ids")
+        assert isinstance(ids, list) and ids, f"rows_write refused a planted row: {got}"
+        if isinstance(placeholder, int):
+            seen[placeholder] = ids[0]
+        # THE CALLER'S ROW LEARNS ITS REAL ID. A probe scores against the id it
+        # planted (`planted["id"] in store`); on the wire that was a placeholder
+        # and could never match (measured 2026-09-12, misleading_fold:rust).
+        row["id"] = ids[0]
+    # THE BODIES, under the pids the store actually assigned.
     for pid, body in (bodies or {}).items():
-        await core._store_reply(aid, root, pid, body)
+        real = seen.get(pid, pid)
+        got = await call(root, "kernel", {
+            "type": "rows_write", "agent": aid,
+            "rows": [{"kind": "body", "parent": real, "content": body}]})
+        assert (got or {}).get("ids"), f"rows_write refused a planted body: {got}"
 
 
 async def read_view(core, root, aid: str) -> dict | None:
-    return await core._load_view(aid, root)
+    """The agent's VIEW — the ordered ids it sees, each at a resolution.
+
+    In process that is `_load_view`. Over the wire the view IS a row (`kind:
+    "view"`), so the newest one in the agent's store is the same document —
+    `rows_read` carries rows whole. No verb exposes it directly and none should
+    be added for a probe's convenience."""
+    if core is not None:
+        return await core._load_view(aid, root)
+    whole = await call(root, "kernel", {"type": "rows_read", "agent": aid})
+    latest = None
+    for r in (whole or {}).get("rows") or []:
+        if r.get("kind") == "view" and isinstance(r.get("ids"), list):
+            latest = r
+    return latest
 
 
 async def connect_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict):
@@ -377,8 +465,21 @@ async def send_payload_later(root, aid: str, payload: dict, delay: float):
 async def inject_row(core, root, aid: str, row: dict) -> None:
     """Append a row to the agent's OWN store from above — how a probe plants a
     MISLEADING fold (a summary that contradicts its members) to see if the model
-    verifies by descending. In-process only."""
-    await core._save_history(aid, root, [row])
+    verifies by descending.
+
+    In process the row goes down under the id the probe minted. Over the wire
+    the store mints: `rows_write` refuses a caller-chosen id, so the row's own
+    `id` is dropped and everything it REFERS TO (a fold's `refs`, its `parent`)
+    stays as written — those name rows the running agent already holds, which
+    are real ids on both paths."""
+    if core is not None:
+        await core._save_history(aid, root, [row])
+        return
+    got = await call(root, "kernel", {
+        "type": "rows_write", "agent": aid, "rows": [_remap_row(row, {})]})
+    ids = (got or {}).get("ids")
+    assert ids, f"rows_write refused the injected row: {got}"
+    row["id"] = ids[0]  # the caller's row learns its real id (see plant_store)
 
 
 async def copy_rows(root, src: str, dst: str) -> int:
@@ -407,8 +508,11 @@ async def copy_rows(root, src: str, dst: str) -> int:
             row["refs"] = [remap.get(x, x) for x in row["refs"]]
         return row
 
+    # `rows_put` is the IN-PROCESS allocator — it takes a pre-minted id, which
+    # the wire's `rows_write` refuses by design. Its presence is what says this
+    # is the in-process kernel.
     ctx = getattr(root, "ctx", None)
-    if ctx is not None:
+    if getattr(ctx, "rows_put", None) is not None:
         for r in ctx.rows_for(src):
             row = forked(r)
             if row is not None:

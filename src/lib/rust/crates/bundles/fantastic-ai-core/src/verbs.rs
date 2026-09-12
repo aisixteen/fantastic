@@ -28,6 +28,13 @@ reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the 
 `send` resolves to {cancelled:true}. Cancel kills the task's whole SUBTREE, so any work the turn \
 spawned dies with it.";
 
+/// A scalar as python prints it in a header: a string bare, anything else as JSON.
+fn scalar_text(v: &Value) -> String {
+    v.as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| v.to_string())
+}
+
 /// `status` verb.
 pub fn status(agent_id: &AgentId, payload: &Value) -> Value {
     status_snapshot(agent_id, payload)
@@ -114,15 +121,20 @@ pub async fn history(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         digest.drain(..at);
     }
     let total = messages.len();
-    let truncated = limit > 0 && digest.len() > limit;
-    if truncated {
-        digest.truncate(limit);
-    }
+    // THE CAP INVARIANT, as python's `_make_history`: a digest page must answer
+    // UNDER the inline cap or it is stored and dehydrated and the model pulls
+    // its own history. `limit` bounds the count; the cap bounds the bytes.
+    let meta = agent_meta(agent_id, kernel);
+    let (kept, truncated) = crate::context::fit_reply(
+        &digest,
+        crate::context::inline_cap(&meta),
+        (limit > 0).then_some(limit),
+    );
     let next = truncated
-        .then(|| digest.last().and_then(|d| d["id"].as_i64()))
+        .then(|| kept.last().and_then(|d| d["id"].as_i64()))
         .flatten();
     json!({
-        "rows": digest,
+        "rows": kept,
         "next": next,
         "total": total,
         "messages": messages,
@@ -199,14 +211,52 @@ pub async fn recall(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     }
     let total = indexed.len();
     let truncated = total > limit;
-    let page = &indexed[total.saturating_sub(limit)..];
-    let messages: Vec<Value> = page
-        .iter()
-        .map(|(i, m)| {
-            json!({"index": i, "role": m.get("role").and_then(Value::as_str), "content": recall_render(m)})
-        })
-        .collect();
-    let mut reply = json!({"messages": messages, "total": total, "truncated": truncated, "client_id": client_id});
+    let mut page: Vec<&(usize, &Value)> = indexed[total.saturating_sub(limit)..].iter().collect();
+    // A PAGE MUST FIT THE WINDOW IT IS GOING INTO. Measured 2026-09-05 (python):
+    // the default 20 turns of 6.8KB reads came back as one 14,786-token reply
+    // against a 12,000 window; `too_small` fired as a failfast and the chain
+    // died. The page is trimmed from the OLDEST end (the newest of what was
+    // asked for is kept) and says so, with the index to page further back
+    // from — the caller loses a page, never the run. Measured on the WHOLE
+    // reply serialized as one user turn, which is the unit delivery measures.
+    let cap = crate::context::inline_cap(&agent_meta(agent_id, kernel));
+    let render_page = |pg: &[&(usize, &Value)]| -> Vec<Value> {
+        pg.iter()
+            .map(|(i, m)| {
+                json!({"index": i, "role": m.get("role").and_then(Value::as_str), "content": recall_render(m)})
+            })
+            .collect()
+    };
+    let serialized = |pg: &[&(usize, &Value)]| -> i64 {
+        let probe = json!({
+            "messages": render_page(pg), "total": total, "truncated": true,
+            "note": format!(
+                "page trimmed by 999 older turn(s) to fit your window (cap {cap} tok); \
+                 pass before=999999 to page further back."
+            ),
+        });
+        crate::context::estimate_one(&json!({
+            "role": "user",
+            "content": crate::tool_parse::render_reply(&probe),
+        }))
+    };
+    let mut trimmed = 0usize;
+    while page.len() > 1 && serialized(&page) > (cap as f64 * 0.8) as i64 {
+        page.remove(0);
+        trimmed += 1;
+    }
+    let messages = render_page(&page);
+    let mut reply = json!({
+        "messages": messages, "total": total,
+        "truncated": truncated || trimmed > 0, "client_id": client_id,
+    });
+    if trimmed > 0 {
+        reply["note"] = json!(format!(
+            "page trimmed by {trimmed} older turn(s) to fit your window (cap {cap} tok); \
+             pass before={} to page further back.",
+            page[0].0
+        ));
+    }
     if page.is_empty() {
         // An empty page with no reason reads as "your history is lost" — the
         // opposite of what it usually means (py-canonical `note`).
@@ -263,6 +313,7 @@ pub async fn context_status(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "strategy": strategy,
         "last_projection": last_projection,
         "last_reaction": last_reaction,
+        "view_source": state.view_source.lock().expect("view_source poisoned").clone(),
     })
 }
 
@@ -344,11 +395,38 @@ pub async fn send(
     cfg: BackendConfig,
 ) -> Value {
     let route = cfg.route;
-    let text = payload
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let mut text = match payload.get("text") {
+        Some(Value::String(s)) => s.clone(),
+        // The tag grammar types a bare number; a number is text too (python).
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
+    // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
+    // inquiry arrives as bare prose and the receiver cannot tell it is being
+    // asked (measured 2026-09-12: six straight `peer_review:rust` runs whose
+    // reviewer never emitted `inquiry_answer`). The operator's own sends carry
+    // no header, exactly as in python.
+    if let Some(sender) = fantastic_kernel::current_origin() {
+        if sender != *agent_id {
+            let mut parts = vec![format!("from {}", sender.as_str())];
+            if let Some(to) = payload
+                .get("to")
+                .and_then(Value::as_array)
+                .filter(|a| !a.is_empty())
+            {
+                let names: Vec<String> = to.iter().map(scalar_text).collect();
+                parts.push(format!("to {}", names.join(", ")));
+            }
+            if let Some(m) = payload.get("msg").filter(|v| !v.is_null()) {
+                parts.push(format!("msg {}", scalar_text(m)));
+            }
+            if let Some(r) = payload.get("re").filter(|v| !v.is_null()) {
+                parts.push(format!("re {}", scalar_text(r)));
+            }
+            text = format!("[{}]\n{text}", parts.join(" \u{b7} "));
+        }
+    }
     // captured for routing before any shadowing below
     let incoming_text = text.clone();
     // Optional caller-supplied system block (a caller teaches its own tool convention).
@@ -503,8 +581,10 @@ pub async fn send(
     )
     .await;
 
+    let mut turn_id: Option<i64> = None;
     let reply = match outcome {
-        Ok(Ok(final_text)) => {
+        Ok(Ok((final_text, tid))) => {
+            turn_id = Some(tid);
             json!({
                 "response": final_text,
                 "final": final_text,
@@ -611,6 +691,7 @@ pub async fn send(
                 // router dispatches. The kernel defaults nothing.
                 timeout_secs as f64,
                 route,
+                turn_id,
             )
             .await;
         });

@@ -256,7 +256,10 @@ fn clean_title(raw: Option<&Value>) -> Option<String> {
 
 /// Expand every `<to>` list into one call per recipient, each carrying the whole
 /// list in its payload. A call with no `<to>` passes through untouched.
-fn fan_out(calls: Vec<crate::tool_parse::ToolCall>) -> Vec<crate::tool_parse::ToolCall> {
+fn fan_out(
+    calls: Vec<crate::tool_parse::ToolCall>,
+    turn_id: Option<i64>,
+) -> Vec<crate::tool_parse::ToolCall> {
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
         let recipients: Vec<String> = match call.arguments.get("to") {
@@ -269,6 +272,27 @@ fn fan_out(calls: Vec<crate::tool_parse::ToolCall>) -> Vec<crate::tool_parse::To
             _ => Vec::new(),
         };
         if call.name != "send" || recipients.is_empty() {
+            // A PLAIN SEND TO A PEER AI carries `msg` too — the sending turn's
+            // id — so the peer's `[from … · msg N]` header names something the
+            // sender can be asked about (python: `payload.setdefault("msg")`).
+            let mut call = call;
+            let is_peer_send = call
+                .arguments
+                .get("payload")
+                .and_then(|p| p.get("type"))
+                .and_then(Value::as_str)
+                == Some("send");
+            if call.name == "send" && is_peer_send {
+                let re = call.arguments.remove("re");
+                if let Some(Value::Object(p)) = call.arguments.get_mut("payload") {
+                    if let Some(t) = turn_id {
+                        p.entry("msg".to_string()).or_insert(json!(t));
+                    }
+                    if let Some(r) = re {
+                        p.insert("re".to_string(), r);
+                    }
+                }
+            }
             out.push(call);
             continue;
         }
@@ -284,6 +308,9 @@ fn fan_out(calls: Vec<crate::tool_parse::ToolCall>) -> Vec<crate::tool_parse::To
                 "to".to_string(),
                 Value::Array(recipients.iter().map(|x| json!(x)).collect()),
             );
+            if let Some(t) = turn_id {
+                payload.insert("msg".to_string(), json!(t));
+            }
             if let Some(v) = &re {
                 payload.insert("re".to_string(), v.clone());
             }
@@ -356,6 +383,7 @@ pub async fn route_reply(
     incoming: String,
     send_timeout: f64,
     route: CallerRoute,
+    turn_id: Option<i64>,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
     // detached, and a tokio spawn does NOT inherit the task-local sender
@@ -376,6 +404,7 @@ pub async fn route_reply(
             incoming,
             send_timeout,
             route,
+            turn_id,
         )
         .await
     })
@@ -435,6 +464,7 @@ async fn route_reply_gated(
     incoming: String,
     send_timeout: f64,
     route: CallerRoute,
+    turn_id: Option<i64>,
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
@@ -492,7 +522,7 @@ async fn route_reply_gated(
     // agent. What the list buys is that each copy carries the WHOLE list, so a
     // recipient can see who else heard it and reply to the same group instead of
     // forking a private conversation the others never see.
-    let calls = fan_out(calls);
+    let calls = fan_out(calls, turn_id);
 
     for call in calls {
         if call.name == "done" || call.name == "await" || call.name == "inquiry_answer" {
@@ -672,6 +702,12 @@ async fn route_reply_gated(
     // model: "the reply queue is running ahead of me", then re-polled forever).
     // The PID is the same id `ps`/`cancel` use, so a reply names a row the
     // model can act on.
+    let meta = crate::helpers::agent_meta(&self_id, &kernel);
+    let async_on = meta
+        .get("context_async")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let cap = crate::context::inline_cap(&meta);
     let blocks: Vec<Block> = units
         .into_iter()
         .map(|u| {
@@ -687,6 +723,36 @@ async fn route_reply_gated(
                     // the distillation notice.
                     if u.verb == "reflect" {
                         body.push_str(REFLECT_NUDGE);
+                    }
+                    // FULL ASYNC. A reply is DATA, not a question — the model
+                    // needs to be able to SEE it, not be forced to swallow it
+                    // whole as its next turn. Anything over the inline cap is
+                    // stored under its pid and replaced by its digest; the model
+                    // pulls pages when it wants them. This is what makes an
+                    // unbounded reply (a 240KB ledger dump) non-fatal: it becomes
+                    // a row to page, never a turn to fit.
+                    if async_on {
+                        if let Some(p) = out.pid {
+                            let over = crate::context::estimate_one(
+                                &json!({"role": "user", "content": body}),
+                            ) > cap;
+                            if over && kernel.rows.body_put(&self_id, p.0, &body).is_ok() {
+                                let size = body.len();
+                                // THE STUB NAMES GREP FIRST. It used to offer only
+                                // `pull`, and a model hunting one line paged 16
+                                // bodies (measured 2026-09-06, python
+                                // recall_after_fold: 24 pulls, 0 greps, marker
+                                // not found).
+                                body = format!(
+                                    "(settled, {size} bytes — NOT inlined. To find a line \
+                                     in it: send yourself <type>grep</type> \
+                                     <query>substring</query> <ids><item>{}</item></ids>. \
+                                     To read it: <type>pull</type> <pid>{}</pid> \
+                                     <offset>0</offset>)",
+                                    p.0, p.0
+                                );
+                            }
+                        }
                     }
                     (pid, body)
                 }
@@ -751,7 +817,7 @@ async fn route_reply_gated(
         nudging
     ));
     if any_blocks {
-        deliver_grouped(&kernel, blocks, &client_id, sp, route).await;
+        deliver_grouped(&kernel, blocks, &client_id, sp, route, turn_id).await;
         trace("delivered");
     }
     if done_called {
@@ -860,6 +926,7 @@ async fn deliver_grouped(
     client_id: &str,
     sp: Option<&str>,
     route: CallerRoute,
+    turn_id: Option<i64>,
 ) {
     // Destination order = first appearance, so the model reads them in the order
     // it wrote the calls.
@@ -873,7 +940,9 @@ async fn deliver_grouped(
     }
     // A FRESH token per TURN, shared across destinations: it names the batch, and
     // a model reading two destinations' messages can see they came from one turn.
-    let token = mint_batch_token();
+    // THE BATCH TOKEN IS THE TURN'S OWN ID when one exists (python), so every
+    // `↑` and every `batch` on a reply points at a row the model can see.
+    let token = turn_id.map_or_else(mint_batch_token, |t| t.to_string());
     for dest in order {
         let parts = by_dest.remove(&dest).unwrap_or_default();
         let m = parts.len();
@@ -888,6 +957,9 @@ async fn deliver_grouped(
                 let mut tag = format!("[reply to {} \u{b7} {} {}", b.pid, b.target, b.verb);
                 if let Some(t) = &b.title {
                     tag.push_str(&format!(" \u{b7} \"{t}\""));
+                }
+                if let Some(t) = turn_id {
+                    tag.push_str(&format!(" \u{b7} \u{2191}{t}"));
                 }
                 if m > 1 {
                     tag.push_str(&format!(" \u{b7} {} of {m} in batch {token}]", i + 1));

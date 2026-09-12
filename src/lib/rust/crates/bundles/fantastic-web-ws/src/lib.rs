@@ -59,7 +59,6 @@ impl Bundle for WebWsBundle {
                     "verbs": {
                         "reflect": "Identity + parent web agent id + URL pattern. No args.",
                         "boot": "No-op (the WS endpoint comes up with the parent web agent).",
-                        "shutdown": "No-op.",
                         "get_routes": "Returns {routes:[{kind:'websocket', path:'/<parent>/ws'}]}.",
                     }
                 })

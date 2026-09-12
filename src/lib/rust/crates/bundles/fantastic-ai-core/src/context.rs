@@ -4,7 +4,7 @@
 //! WRONG tokenizer for gemma/nemotron). Plus window/budget resolution off
 //! the agent record meta. Mirrors the Python `ai_core/context.py`.
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 /// ~chars per token for the estimate.
 pub const CHARS_PER_TOKEN: usize = 4;
@@ -23,7 +23,14 @@ pub const BUDGET_FLOOR: i64 = 256;
 /// Fixed token budget reserved at the seam for the notice WRAPPER prose
 /// (everything in the notice except the summary the strategy already
 /// pays for). Keeps ONE budget authority.
-pub const NOTICE_ENVELOPE_RESERVE: i64 = 80;
+///
+/// MEASURED, not guessed. It was 80 against a real envelope of ~132, and that
+/// 50-token shortfall was not harmless: it put the strategy's projection just
+/// over budget, which woke the seam's backstop, which trims from the FRONT —
+/// where `compact` had just pinned the goal turn. The under-reserve was
+/// therefore the mechanism that undid "PIN THE GOAL". Re-measure this if the
+/// notice text changes. Python `ai_core/strategies/base.py`.
+pub const NOTICE_ENVELOPE_RESERVE: i64 = 160;
 
 /// Rough token estimate for ONE message — counts the SERIALIZED form,
 /// because role + content + tool_calls + role:tool replies + the JSON
@@ -96,4 +103,54 @@ pub fn recent_n(meta: &Map<String, Value>) -> usize {
         _ => 6,
     };
     n.clamp(1, 50) as usize
+}
+
+/// Tokens a reply may occupy INLINE in the model's next turn. Above this it is
+/// stored and digested. An eighth of the input budget: a 12k window inlines
+/// ~1.4k tokens (a reflect, an error, a short read) and digests a 6.8KB file
+/// body. Python `_inline_cap`.
+#[must_use]
+pub fn inline_cap(meta: &Map<String, Value>) -> i64 {
+    (budget(meta) / 8).max(BUDGET_FLOOR)
+}
+
+/// The most a single `pull` may return — EXACTLY the inline cap, in chars.
+///
+/// It was half the window, and that ate its own tail: a full page was larger
+/// than the inline cap, so the page itself got stored and digested, so the model
+/// pulled the pull, forever, and never saw a byte. A pull page must ALWAYS
+/// inline; making the two caps one number makes that arithmetic rather than a
+/// special case. Python `_pull_cap_chars`.
+#[must_use]
+pub fn pull_cap_chars(meta: &Map<String, Value>) -> usize {
+    inline_cap(meta) as usize * CHARS_PER_TOKEN
+}
+
+/// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER the
+/// inline cap, or its answer is stored and digested and the model pulls its own
+/// reply (measured 2026-09-06, python: a 4788-byte grep result came back as a
+/// receipt; the run drowned in pulls). Keep items from the front while the
+/// rendered reply fits. Returns `(kept, truncated)`.
+///
+/// MEASURED ON THE SERIALIZED FORM, with headroom for the envelope the verb
+/// wraps around these items (`total`, `next`, …). JSON escaping inflates raw
+/// text by up to ~30% on newline-heavy bodies; the margin is what keeps "fits"
+/// true at the seam. Python `_fit_reply`.
+#[must_use]
+pub fn fit_reply(items: &[Value], cap_tokens: i64, limit: Option<usize>) -> (Vec<Value>, bool) {
+    let cap = (cap_tokens as f64 * 0.8) as i64;
+    let mut kept: Vec<Value> = Vec::new();
+    for it in items {
+        if limit.is_some_and(|l| kept.len() >= l) {
+            return (kept, true);
+        }
+        let mut trial = kept.clone();
+        trial.push(it.clone());
+        let rendered = serde_json::to_string(&trial).unwrap_or_default();
+        if estimate_one(&json!({"role": "user", "content": rendered})) > cap {
+            return (kept, true);
+        }
+        kept = trial;
+    }
+    (kept, false)
 }

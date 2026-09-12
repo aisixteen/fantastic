@@ -456,16 +456,42 @@ async fn reflect_carries_posture_and_boot_is_null() {
 }
 
 #[tokio::test]
-async fn text_stream_verbs_are_refused_with_bad_arg_on_the_text_channel() {
+async fn the_stream_verbs_serve_a_document_on_the_text_channel() {
+    // PYTHON'S SHAPE. A model writes a document VERBATIM between `<bytes>` and
+    // `</bytes>`; python's parser hands that to `write_stream` as utf-8 bytes on
+    // the ordinary channel, and `read_stream` answers the chunk in `bytes`.
+    // Rust refused both on the text channel until 2026-09-12 — 43 e2e logs
+    // carried "raw bytes on the binary channel" against python's one, and the
+    // `subai_graph` routine died on it five times in a run.
     let tmp = tempfile::TempDir::new().unwrap();
     served(&tmp);
     let kernel = mk_kernel(&tmp).await;
-    for verb in ["read_stream", "write_stream"] {
-        let r = call(&kernel, json!({"type": verb, "path": "a.txt"})).await;
-        assert_eq!(r["reason"], "bad_arg", "{r}");
-        assert_eq!(r["arg"], "bytes");
-        assert!(r["error"].as_str().unwrap().contains("send_with_binary"));
-    }
+    let w = call(
+        &kernel,
+        json!({"type": "write_stream", "path": "a.txt", "truncate": true,
+        "bytes": "line one\nline two, with \"quotes\"\n"}),
+    )
+    .await;
+    assert!(w.get("error").is_none(), "{w}");
+    assert_eq!(w["written"], 33, "{w}");
+    let r = call(
+        &kernel,
+        json!({"type": "read_stream", "path": "a.txt", "offset": 0}),
+    )
+    .await;
+    assert_eq!(r["bytes"], "line one\nline two, with \"quotes\"\n", "{r}");
+    assert_eq!(r["eof"], true, "{r}");
+    // A number is a document too (the tag grammar types a bare number).
+    let n = call(
+        &kernel,
+        json!({"type": "write_stream", "path": "n.txt", "truncate": true, "bytes": 76}),
+    )
+    .await;
+    assert!(n.get("error").is_none(), "{n}");
+    // No document at all is still a coded refusal, naming the argument.
+    let m = call(&kernel, json!({"type": "write_stream", "path": "b.txt"})).await;
+    assert_eq!(m["reason"], "missing_arg", "{m}");
+    assert_eq!(m["arg"], "bytes (one raw chunk)", "{m}"); // python names the chunk
     let r = call(&kernel, json!({"type": "frobnicate"})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "frobnicate");

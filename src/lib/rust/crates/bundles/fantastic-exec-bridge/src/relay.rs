@@ -28,7 +28,6 @@ use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// ONE frame bound on this wire, both ends, every runtime. A corrupt length must
@@ -106,11 +105,11 @@ fn unframe(body: &[u8]) -> Option<(Value, Vec<u8>)> {
 
 /// Make a proxy inbox, then watch through it.
 ///
-/// Rust's `kernel.inboxes` holds only the Sender, and `Kernel::watch` auto-vivifies with
-/// a Receiver it immediately drops — so the receiver must be created HERE, before the
-/// watch. `watch` guards on `contains_key`, which is what makes pre-inserting safe.
-fn make_proxy(kernel: &Arc<Kernel>, proxy: &AgentId) -> mpsc::Receiver<Value> {
-    let (tx, rx) = mpsc::channel(kernel.inbox_bound);
+/// THE READER REGISTERS FIRST: `watch` refuses a watcher with no inbox, and the
+/// drain task is what reads this one — so the receiver is created HERE, before
+/// the watch.
+fn make_proxy(kernel: &Arc<Kernel>, proxy: &AgentId) -> fantastic_kernel::inbox::InboxReceiver {
+    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel.inboxes.insert(proxy.clone(), tx);
     rx
 }

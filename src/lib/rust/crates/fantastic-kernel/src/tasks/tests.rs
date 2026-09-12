@@ -69,7 +69,13 @@ impl Bundle for SlowBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "boot" | "shutdown" => Value::Null,
-            "reflect" => json!({"id": agent_id.0, "sentence": "slow test agent"}),
+            // ADVERTISES `shutdown`: that is what `shutdown_agents` selects on,
+            // so the slow agent is one it tells.
+            "reflect" => json!({
+                "id": agent_id.0,
+                "sentence": "slow test agent",
+                "verbs": {"shutdown": "no-op"},
+            }),
             // Returns immediately — the peer a batch uses to prove the slow item
             // did not serialize the fast one.
             "fast" => json!({"fast": true}),
@@ -233,7 +239,7 @@ pub(crate) async fn mk_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
 
 /// Create a slow agent with an explicit `can_call` grant. Two-sided deny-all: a
 /// `chain` send to a SIBLING is lateral egress, so the chain tests grant that edge.
-async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Value) -> AgentId {
+pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Value) -> AgentId {
     let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools", "id": id});
     if !can_call.is_null() {
         payload["can_call"] = can_call;
@@ -731,4 +737,126 @@ async fn every_reflect_advertises_the_kernel_verbs() {
     let full_ps = full["kernel_verbs"]["ps"].as_str().expect("ps doc");
     assert!(full_ps.contains("tasks"), "full detail keeps the shape");
     assert!(full_ps.contains('—'));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// shutdown_agents — the AGENT half of a graceful stop.
+// ─────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {
+    // THE POINT OF A GRACEFUL STOP. An agent must get the chance to persist
+    // what matters before the process goes — so it is TOLD, its tools still
+    // work, and only then does the door close. A stop that just killed tasks
+    // would lose exactly the state the shutdown exists to save.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let a = mk_agent(&kernel, "sd_a").await;
+    let b = mk_agent(&kernel, "sd_b").await;
+    let out = kernel.shutdown_agents().await;
+    assert_eq!(out["drained"], true, "{out}");
+    let shut = out["shut"].as_array().expect("shut is a list").clone();
+    for id in [&a, &b] {
+        assert!(
+            shut.iter().any(|s| s.as_str() == Some(id.as_str())),
+            "every agent that ADVERTISES `shutdown` is told: {id} missing from {out}"
+        );
+    }
+    assert!(kernel.draining(), "the drain flag holds after the verb");
+
+    // A NEW ROOT IS REFUSED — and refused BEFORE it costs an id. An agent
+    // send, not an operator one: the operator's control surface is how the stop
+    // is watched and finished, so it is never what the drain closes.
+    let peer = mk_agent(&kernel, "sd_peer").await;
+    let out = crate::send::with_sender(
+        AgentId::from("core"),
+        kernel.send(vec![Item::new(peer, json!({"type": "chain"}))]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(out.status, crate::outcome::Status::Failed, "{out:?}");
+    assert_eq!(
+        out.result.get("reason").and_then(Value::as_str),
+        Some(crate::refusal::DRAINING),
+        "a new root while draining is refused, coded: {}",
+        out.result
+    );
+    assert!(out.pid.is_none(), "and refused before it costs an id");
+}
+
+#[tokio::test]
+async fn a_second_shutdown_agents_answers_the_same_and_shuts_nothing_new() {
+    // IDEMPOTENT. An operator watching a stop will call it twice; the second
+    // call must not be a second teardown.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let first = kernel.shutdown_agents().await;
+    let second = kernel.shutdown_agents().await;
+    assert_eq!(first["drained"], second["drained"]);
+    assert_eq!(
+        second["cancelled"].as_array().map(Vec::len),
+        Some(0),
+        "nothing new to cancel the second time: {second}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_agents_is_the_roots_control_surface_only() {
+    // A CHILD MAY NOT STOP THE TREE. The verb is addressed to the kernel root
+    // (or its `kernel` alias); anything else answers with an error rather than
+    // quietly draining the whole process on one agent's say-so.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let child = AgentId::from("sd_child");
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({
+                "type": "create_agent", "parent_id": "core",
+                "handler_module": "slow.tools", "id": child.as_str(),
+            }),
+        )])
+        .await;
+    let out = kernel
+        .send(vec![Item::new(
+            child.clone(),
+            json!({"type": "shutdown_agents"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // THE ROUTER REFUSES IT FIRST, and more usefully than the handler's own
+    // guard would: a coded `not_here` naming the verb and where to send it.
+    // The guard inside the handler stays as the second line, for a target that
+    // resolves to a non-root agent.
+    assert_eq!(
+        out.get("reason").and_then(Value::as_str),
+        Some("not_here"),
+        "a child must be refused: {out}"
+    );
+    assert!(!kernel.draining(), "a refused call drains nothing");
+}
+
+#[tokio::test]
+async fn a_keepalive_loop_is_neither_waited_for_nor_cancelled() {
+    // THE PERSISTER MUST OUTLIVE THE STOP. It is the thing that writes what the
+    // `shutdown` turns just produced; waiting for it would never return, and
+    // cancelling it would drop the very rows the shutdown was for.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let live = kernel.spawn_keepalive_task(
+        &AgentId::from("core"),
+        "persist_writer",
+        std::future::pending::<()>(),
+    );
+    assert!(
+        kernel.tasks.pending(None).iter().all(|t| *t != live),
+        "a keepalive task is not pending work"
+    );
+    let out = kernel.shutdown_agents().await;
+    assert!(
+        !out["cancelled"]
+            .as_array()
+            .expect("cancelled is a list")
+            .iter()
+            .any(|v| v.as_i64() == Some(live.0)),
+        "the keepalive loop must survive the stop: {out}"
+    );
+    assert!(kernel.tasks.contains(&live), "and still be running");
 }

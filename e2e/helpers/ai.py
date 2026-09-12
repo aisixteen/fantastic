@@ -136,8 +136,11 @@ async def connect(
         # IN-PROCESS ONLY. A spawned kernel is reached over REST, which has no
         # handle on the live agent objects; there the render sink is whatever
         # the roster wired, and its ingress was opened when it was created.
-        ctx = getattr(root, "ctx", None)
-        _peer = ctx.agents.get(stream_to) if ctx is not None else None
+        # LIVE AGENT OBJECTS, which only the in-process kernel has — the wire
+        # ctx answers rows and tasks, never `agents`. Ask for the capability;
+        # the attribute's mere presence no longer means in-process.
+        agents = getattr(getattr(root, "ctx", None), "agents", None)
+        _peer = agents.get(stream_to) if agents is not None else None
         peer = dict(_peer._meta) if _peer is not None else None
         if peer is not None:
             # READ, add one key, write back — never replace. Clobbering the map

@@ -14,7 +14,6 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::mpsc::Receiver;
 
 const HANDLER_MODULE: &str = "mock_backend.tools";
 
@@ -212,6 +211,16 @@ impl Bundle for MockBundle {
             }
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
+            // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
+            "pull" => crate::retrieval::pull(agent_id, payload, kernel).await,
+            "grep" => crate::retrieval::grep(agent_id, payload, kernel).await,
+            // Rebuild the view from the store: on boot, after folds, on request.
+            "context_recall" => {
+                let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+                    script: script_for(agent_id),
+                });
+                crate::retrieval::context_recall(agent_id, payload, kernel, Some(&provider)).await
+            }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("mock_backend: unknown type {other:?}")}),
@@ -387,16 +396,19 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
 }
 
 /// Rebind the backend's inbox (CliRoundTrip emits non-cli events there).
-fn rebind_backend_inbox(kernel: &Arc<Kernel>, backend: &AgentId) -> Receiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::channel(kernel.inbox_bound);
+fn rebind_backend_inbox(
+    kernel: &Arc<Kernel>,
+    backend: &AgentId,
+) -> fantastic_kernel::inbox::InboxReceiver {
+    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel.inboxes.insert(backend.clone(), tx);
     rx
 }
 
-async fn drain(rx: &mut Receiver<Value>) -> Vec<Value> {
+async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
     let mut out = Vec::new();
     for _ in 0..40 {
-        while let Ok(v) = rx.try_recv() {
+        while let Some(v) = rx.try_recv() {
             out.push(v);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -404,7 +416,7 @@ async fn drain(rx: &mut Receiver<Value>) -> Vec<Value> {
             v.get("type").and_then(Value::as_str) == Some("status")
                 && v.get("phase").and_then(Value::as_str) == Some("done")
         }) {
-            while let Ok(v) = rx.try_recv() {
+            while let Some(v) = rx.try_recv() {
                 out.push(v);
             }
             break;
@@ -736,16 +748,38 @@ fn truncate_returns_projection_no_summary() {
 
 #[test]
 fn context_notice_shapes() {
-    let n = crate::projection::context_notice("compact", Some("MY SUMMARY"), false, 7);
+    let n = crate::projection::context_notice("compact", Some("MY SUMMARY"), false, 7, 0, 0);
     assert_eq!(n["role"], "user");
     assert!(n.get("tool_calls").is_none());
     let c = n["content"].as_str().unwrap();
     assert!(c.contains("[context-notice]") && c.contains("MY SUMMARY"));
-    assert!(c.contains("recall") && c.contains("memory agent"));
+    assert!(c.contains("memory agent"));
+    // THE RECALL AFFORDANCE IN THE ONE GRAMMAR. The notice taught
+    // `{type:'recall', query?, limit?}` — JSON the harness refuses — until
+    // 2026-09-12. Python's bytes, pinned.
+    assert!(
+        c.contains("send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`)"),
+        "{c}"
+    );
+    assert!(!c.contains("{type:'recall'"), "{c}");
     assert!(c.contains("7 earlier turn"));
-    let t = crate::projection::context_notice("truncate", None, true, 3);
+    assert!(
+        !c.contains("STRIPPED"),
+        "no stripped line when nothing was stripped: {c}"
+    );
+    let t = crate::projection::context_notice("truncate", None, true, 3, 0, 0);
     let tc = t["content"].as_str().unwrap();
     assert!(tc.contains("omitted in place") && !tc.contains("Summary of the dropped span"));
+    // A strip reports what left the view, and how to get it back.
+    let s = crate::projection::context_notice("strip", None, false, 0, 4, 27_000);
+    let sc = s["content"].as_str().unwrap();
+    assert!(
+        sc.contains(
+            "4 reply bod(ies) were STRIPPED to their tag+title line (27000 bytes left your view)"
+        ),
+        "{sc}"
+    );
+    assert!(sc.contains("recall it by the pid on its line"), "{sc}");
 }
 
 // ── Context Protocol: recall + context_status (kernel-driven) ────────
@@ -1179,8 +1213,10 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
     let turn2 = s.request(1);
     // PID, then target AND verb — a bare `[reply to core]` is unmatchable with two in
     // flight, and target+verb alone is not unique either
+    // ...then `↑<turn>`, the assistant row this reply answers — python's tag,
+    // the link the fold machinery derives chains from (ported 2026-09-12).
     assert!(
-        turn2.contains(" \u{b7} core list_agents]") && turn2.contains("[reply to "),
+        turn2.contains(" \u{b7} core list_agents \u{b7} \u{2191}") && turn2.contains("[reply to "),
         "untagged reply: {turn2}"
     );
     assert!(
@@ -2074,6 +2110,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         String::new(),
         0.2,
         CallerRoute::CliRoundTrip,
+        None,
     )
     .await;
     assert!(
@@ -2370,7 +2407,7 @@ async fn contended_sends_emit_one_queued_status_and_no_bare_queued_event() {
         .result;
     let _ = first.await.expect("first send");
     let mut events = drain(&mut rx).await;
-    while let Ok(v) = rx.try_recv() {
+    while let Some(v) = rx.try_recv() {
         events.push(v);
     }
     assert!(
@@ -2529,6 +2566,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         "[reply to x · y z]".to_string(),
         30.0,
         CallerRoute::CliRoundTrip,
+        None,
     )
     .await;
     assert!(
@@ -2846,7 +2884,7 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
 
     let client = "browser_tok";
     let client_id = AgentId::from(client);
-    let (ctx, mut client_rx) = tokio::sync::mpsc::channel(kernel.inbox_bound);
+    let (ctx, mut client_rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel.inboxes.insert(client_id.clone(), ctx);
 
     for route in [CallerRoute::CliRoundTrip, CallerRoute::PerClientInbox] {
@@ -2861,7 +2899,7 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
     }
 
     let mut seen = Vec::new();
-    while let Ok(v) = agent_rx.try_recv() {
+    while let Some(v) = agent_rx.try_recv() {
         seen.push(v);
     }
     assert_eq!(seen.len(), 2, "both routes must reach the agent: {seen:?}");
@@ -2870,7 +2908,491 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
         assert_eq!(ev["source"], backend.as_str());
     }
     assert!(
-        client_rx.try_recv().is_err(),
+        client_rx.try_recv().is_none(),
         "nothing may be emitted on an inbox named after the client"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// FULL ASYNC: a reply too large to inline becomes a row to page.
+//
+// These drive the three verbs python has carried since 2026-09-06 and rust
+// gained 2026-09-11 (`pull`, `grep`, `context_recall`) through the kernel, the
+// way an agent reaches them.
+// ─────────────────────────────────────────────────────────────────
+
+/// Put a row on the agent's conversation directly — the store is the kernel's,
+/// and a test that wants a history writes one rather than acting out ten turns.
+fn put_row(kernel: &Arc<Kernel>, agent: &AgentId, row: Value) -> i64 {
+    let Value::Object(m) = row else {
+        panic!("a row is an object")
+    };
+    kernel.rows.put(agent, m).expect("row rejected")
+}
+
+#[tokio::test]
+async fn a_stored_body_is_paged_by_pull_and_the_page_fits_inline() {
+    // WHY THIS EXISTS. A 240KB reply is not a turn the model can swallow; it is
+    // data it must be able to LOOK AT. Without paging the only options are
+    // "drop it" or "die", and both lose the answer the call was made for.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "pull").await;
+    let pid = kernel.rows.mint_id();
+    let body = "line one\n".repeat(4000);
+    kernel.rows.body_put(&backend, pid, &body).unwrap();
+
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "pull", "pid": pid, "offset": 0}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r.get("pid").and_then(Value::as_i64), Some(pid), "{r}");
+    assert_eq!(r.get("eof").and_then(Value::as_bool), Some(false), "{r}");
+    let text = r.get("text").and_then(Value::as_str).unwrap_or("");
+    assert!(!text.is_empty(), "a page must carry bytes: {r}");
+    // THE PAGE FITS WHERE IT IS GOING. A page over the inline cap would itself
+    // be stored and digested — the model would pull its own pull, forever.
+    let meta = crate::helpers::agent_meta(&backend, &kernel);
+    let serialized = serde_json::to_string(&r).unwrap();
+    assert!(
+        crate::context::estimate_one(&json!({"role": "user", "content": serialized}))
+            <= crate::context::inline_cap(&meta),
+        "a pull page must fit the inline cap"
+    );
+
+    // `next_offset` continues it, and the last page says `eof`.
+    let mut offset = r.get("next_offset").and_then(Value::as_i64).unwrap();
+    let mut guard = 0;
+    loop {
+        let p = kernel
+            .send(vec![Item::new(
+                backend.clone(),
+                json!({"type": "pull", "pid": pid, "offset": offset}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        if p.get("eof").and_then(Value::as_bool) == Some(true) {
+            break;
+        }
+        offset = p.get("next_offset").and_then(Value::as_i64).unwrap();
+        guard += 1;
+        assert!(guard < 500, "paging did not terminate at offset {offset}");
+    }
+}
+
+#[tokio::test]
+async fn pull_on_an_unstored_pid_says_so_rather_than_inventing_a_page() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "pullmiss").await;
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "pull", "pid": 999_999}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r.get("reason").and_then(Value::as_str),
+        Some("not_found"),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn grep_finds_the_line_inside_a_body_that_was_never_pulled() {
+    // THE OPERATION THE MODEL ACTUALLY WANTS. Measured 2026-09-06 (python): four
+    // ~10k-token thinking turns byte-scanning one 6.8KB body in 300-char windows
+    // hunting a single line. "Find the line that mentions X" is one call.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "grep").await;
+    let pid = kernel.rows.mint_id();
+    let mut body = String::new();
+    for i in 0..800 {
+        body.push_str(&format!("filler line {i}\n"));
+    }
+    body.push_str("the AUDIT MARKER is 7f3a\n");
+    kernel.rows.body_put(&backend, pid, &body).unwrap();
+    // The conversation row whose tag carries that pid — how grep knows the body
+    // is in reach at all.
+    put_row(
+        &kernel,
+        &backend,
+        json!({
+            "role": "user",
+            "content": format!("[reply to {pid} · notes read · \"survey\"]\n(settled, {} bytes)", body.len()),
+        }),
+    );
+
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "grep", "query": "audit marker"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let matches = r
+        .get("matches")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        matches.iter().any(|m| m
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("7f3a")),
+        "the marker line must be found INSIDE the stored body: {r}"
+    );
+    assert_eq!(
+        matches[0].get("id").and_then(Value::as_i64),
+        Some(pid),
+        "a body hit is addressed by its pid: {r}"
+    );
+}
+
+#[tokio::test]
+async fn grep_answers_under_the_inline_cap_even_when_everything_matches() {
+    // THE CAP INVARIANT. A verb the agent calls ON ITSELF that answers over the
+    // cap is stored and digested — and then the model pulls its own grep
+    // (measured 2026-09-06, python: the run drowned in pulls).
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "grepcap").await;
+    for i in 0..400 {
+        put_row(
+            &kernel,
+            &backend,
+            json!({"role": "user", "content": format!("needle {i} {}", "x".repeat(300))}),
+        );
+    }
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "grep", "query": "needle"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r.get("truncated").and_then(Value::as_bool),
+        Some(true),
+        "{r}"
+    );
+    let meta = crate::helpers::agent_meta(&backend, &kernel);
+    let serialized = serde_json::to_string(&r).unwrap();
+    assert!(
+        crate::context::estimate_one(&json!({"role": "user", "content": serialized}))
+            <= crate::context::inline_cap(&meta),
+        "grep must answer under the inline cap"
+    );
+}
+
+#[tokio::test]
+async fn a_fold_id_in_grep_scope_descends_to_its_members() {
+    // A FOLD IS ONE DESCENT AWAY. If `grep <fold id>` searched only the fold row
+    // the mark would be a wall, not a door.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "grepfold").await;
+    let a = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "the SECRET is in here"}),
+    );
+    let b = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "nothing"}),
+    );
+    let fid = kernel.rows.mint_id();
+    put_row(
+        &kernel,
+        &backend,
+        crate::folds::make_fold(&[a, b], "old work", "a summary", false, fid, 1, None),
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "grep", "query": "secret", "ids": [fid]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let matches = r
+        .get("matches")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        matches
+            .iter()
+            .any(|m| m.get("id").and_then(Value::as_i64) == Some(a)),
+        "the fold's MEMBER must be searched: {r}"
+    );
+}
+
+#[tokio::test]
+async fn context_recall_fits_the_head_and_writes_the_view_it_chose() {
+    // THE VIEW ARRAY IS THE STATE. Without it the next turn (and the next
+    // PROCESS) rebuilds a freshly-guessed prefix, and every cached token is lost.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ctxrecall").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "THE GOAL: audit the ledger"}),
+    );
+    for i in 0..60 {
+        let pid = kernel.rows.mint_id();
+        put_row(
+            &kernel,
+            &backend,
+            json!({
+                "role": "user",
+                "content": format!("[reply to {pid} · notes read · \"chunk {i}\"]\n{}", "y".repeat(2000)),
+            }),
+        );
+    }
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "context_recall", "dry": true}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let kept = r.get("kept").and_then(Value::as_u64).unwrap_or(0);
+    assert!(kept > 0, "a recall must keep something: {r}");
+    assert_eq!(
+        r.get("degraded").and_then(Value::as_bool),
+        Some(true),
+        "a dry recall is the mechanical fit, and says so: {r}"
+    );
+
+    let view = crate::view::load_view(&backend, &kernel).expect("the view must be persisted");
+    let ids = view.get("ids").and_then(Value::as_array).cloned().unwrap();
+    assert_eq!(
+        ids.len() as u64,
+        kept,
+        "the view holds exactly what was kept"
+    );
+    // The GOAL is pinned: it is the oldest row, so it is the first thing a
+    // newest-first fit would drop.
+    assert!(
+        ids.iter()
+            .any(|e| e.get("res").and_then(Value::as_str) == Some("stub")),
+        "the replies that did not earn full resolution ride as stubs: {ids:?}"
+    );
+
+    // The decision is a ROW — the next reload reads why the last recall chose.
+    let rows = crate::history::load_history(&backend, &kernel, "cli").await;
+    assert!(
+        rows.iter()
+            .any(|r| r.get("kind").and_then(Value::as_str) == Some("recall")),
+        "the recall must log its own decision"
+    );
+}
+
+#[tokio::test]
+async fn context_recall_on_an_empty_store_says_so_instead_of_failing() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ctxempty").await;
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "context_recall", "dry": true}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r.get("why").and_then(Value::as_str),
+        Some("empty store"),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn a_fold_projection_over_budget_writes_folds() {
+    // MEASURED 2026-09-12 (fold_descent:rust): four compactions under
+    // `context_strategy: fold`, every one `folded=0 stripped=0` — the seam
+    // fired, the strategy did nothing, the cut did the work. A fold arm that
+    // never folds is the control arm with extra steps.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "foldproj").await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": backend.as_str(),
+                   "context_strategy": "fold", "context_window": 2600,
+                   "output_reserve": 200, "context_titles": true, "context_async": true}),
+        )])
+        .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "THE GOAL: survey the fillers"}),
+    );
+    let goal = kernel
+        .rows
+        .for_agent(&backend)
+        .last()
+        .and_then(|r| r.get("id").and_then(Value::as_i64))
+        .unwrap();
+    let mut prev = goal;
+    for i in 0..16 {
+        let call = put_row(
+            &kernel,
+            &backend,
+            json!({"role": "assistant", "parent": prev,
+            "content": format!("Reading filler_{i}. <call name=\"send\"><target_id>notes</target_id><title>survey filler_{i}</title><type>read</type><path>filler_{i}.txt</path></call>")}),
+        );
+        let pid = kernel.rows.mint_id();
+        prev = put_row(
+            &kernel,
+            &backend,
+            json!({"role": "user", "parent": call,
+            "content": format!("[reply to {pid} · notes read · \"survey filler_{i}\"]\n{}", "filler text ".repeat(60))}),
+        );
+    }
+    script(
+        &backend,
+        vec![pass("A title\n\nA short summary of the stretch.")],
+        Duration::ZERO,
+    );
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+        script: script_for(&backend),
+    });
+    let state = crate::state::state_for(&backend);
+    let (messages, store_len) =
+        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys"))
+            .await;
+    let ids_in_body = messages.iter().filter(|m| m.get("id").is_some()).count();
+    let out = crate::projection::project_context(
+        &provider,
+        &backend,
+        &state,
+        &kernel,
+        "cli",
+        CallerRoute::CliRoundTrip,
+        "mock",
+        messages.clone(),
+        store_len,
+    )
+    .await;
+    assert!(out.is_ok(), "{out:?}");
+    let proj = state.projection.lock().unwrap().clone().unwrap();
+    eprintln!(
+        "rows in body with id: {ids_in_body}/{}  projection: {proj}",
+        messages.len()
+    );
+    assert_eq!(proj["fired"], true, "{proj}");
+    assert!(
+        proj["folded"].as_u64().unwrap_or(0) > 0,
+        "a fold arm over budget must FOLD: {proj}"
+    );
+}
+
+#[tokio::test]
+async fn successive_fold_projections_do_not_nest_into_a_chain() {
+    // MEASURED 2026-09-12: rust reached fold levels 1..11 on `nested_folds` where
+    // python reached 1..2 on the same test. The strategy code was identical; the
+    // BODY was not — rust fed the whole store, python feeds the VIEW ARRAY, on
+    // which an old fold's members are absent and `render` does not re-place it
+    // at the head. Three adjacent folds then wrapped into a deeper one every
+    // other turn. This pins the python shape: depth stays flat.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "folddepth").await;
+    let _ = kernel.send(vec![Item::new(AgentId::from("core"), json!({"type": "update_agent", "id": backend.as_str(),
+        "context_strategy": "fold", "context_window": 2600, "output_reserve": 200, "context_titles": true, "context_async": true}))]).await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "THE GOAL"}),
+    );
+    let mut prev = kernel
+        .rows
+        .for_agent(&backend)
+        .last()
+        .and_then(|r| r.get("id").and_then(Value::as_i64))
+        .unwrap();
+    let state = crate::state::state_for(&backend);
+    for step in 0..14 {
+        for i in 0..4 {
+            let call = put_row(
+                &kernel,
+                &backend,
+                json!({"role": "assistant", "parent": prev, "content": format!("Reading f{step}_{i}. <call name=\"send\"><target_id>notes</target_id><title>survey f{step}_{i}</title><type>read</type><path>f.txt</path></call>")}),
+            );
+            let pid = kernel.rows.mint_id();
+            prev = put_row(
+                &kernel,
+                &backend,
+                json!({"role": "user", "parent": call, "content": format!("[reply to {pid} · notes read · \"survey f{step}_{i}\"]\n{}", "filler text ".repeat(60))}),
+            );
+        }
+        script(
+            &backend,
+            vec![
+                pass("A title\n\nSummary."),
+                pass("A title\n\nSummary."),
+                pass("A title\n\nSummary."),
+                pass("A title\n\nSummary."),
+            ],
+            Duration::ZERO,
+        );
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+            script: script_for(&backend),
+        });
+        let (messages, store_len) = crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "next",
+            &kernel,
+            "cli",
+            Some("sys"),
+        )
+        .await;
+        let _ = crate::projection::project_context(
+            &provider,
+            &backend,
+            &state,
+            &kernel,
+            "cli",
+            CallerRoute::CliRoundTrip,
+            "mock",
+            messages,
+            store_len,
+        )
+        .await;
+        let rows: Vec<Value> = crate::history::load_history(&backend, &kernel, "cli").await;
+        let mut levels: Vec<i64> = rows
+            .iter()
+            .filter(|r| crate::folds::is_fold(r))
+            .map(|r| crate::folds::level(&rows, r))
+            .collect();
+        levels.sort_unstable();
+        levels.dedup();
+        let view = crate::folds::render(&rows);
+        let shape: String = view
+            .iter()
+            .map(|r| {
+                if crate::folds::is_fold(r) {
+                    format!("F{}", crate::folds::level(&rows, r))
+                } else {
+                    ".".to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        eprintln!(
+            "step {step:2}: rows={} folds={} levels={levels:?} view={shape}",
+            rows.len(),
+            rows.iter().filter(|r| crate::folds::is_fold(r)).count()
+        );
+    }
 }

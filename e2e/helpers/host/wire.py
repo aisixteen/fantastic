@@ -64,6 +64,25 @@ class WireRoot:
             out.append({"result": r})
         return out
 
+    @property
+    def ctx(self) -> "WireCtx":
+        """THE STORE, REACHED OVER THE WIRE.
+
+        A probe's SCORER reads the row store directly — a conversation whole, a
+        planted history, the id counter. In-process that is `root.ctx`; across a
+        socket there is no kernel object, and every such probe died at its last
+        step with `'WireRoot' object has no attribute 'ctx'` AFTER the run had
+        finished and paid for itself (measured 2026-09-11: `subai` and
+        `subai_graph`, 27 minutes each).
+
+        This is NOT the in-process bypass wearing a wire coat: every method here
+        goes through the kernel's own `rows_read` / `rows_write` verbs, which the
+        driver is granted by name (`ROOT_VERBS`) precisely because they are
+        privileged. One probe, one code path, every runtime — which is the rule
+        the scenario suite exists under.
+        """
+        return WireCtx(self.k)
+
     def watch(self, *_a, **_kw) -> None:
         """No-op. Status-event spying needs an inbox subscription this face does
         not carry; a dead chain is caught by the drive loop's `ps` check
@@ -161,3 +180,134 @@ class WireTranscript:
         if name in ("n", "transcript"):
             object.__getattribute__(self, "_refresh")()
         return object.__getattribute__(self, name)
+
+
+class WireCtx:
+    """`root.ctx`-shaped reader over a spawned kernel's REST face.
+
+    BLOCKING, like `WireTranscript._refresh` and for the same reason: the
+    scorers that use it are plain synchronous functions called from async code,
+    and `HostKernel.send` is blocking `urllib` anyway. Every call is bounded, so
+    a dead kernel fails the check rather than hanging the probe.
+    """
+
+    #: Kernel bookkeeping — in the same table, never the conversation.
+    BOOKKEEPING = ("call", "task", "body", "view", "settle")
+
+    #: Placeholder ids start here — far above anything the kernel's counter will
+    #: reach in a test, so a remap can tell a placeholder from a real id by value
+    #: alone. See `mint_id`.
+    PLACEHOLDER_BASE = 1_000_000_000
+
+    def __init__(self, k: Any):
+        self.k = k
+        self._next_placeholder = self.PLACEHOLDER_BASE
+
+    def mint_id(self) -> int:
+        """A PLACEHOLDER id for a row that is about to be planted.
+
+        In process this returns a real id from the kernel's counter, because the
+        planter can write a row under an id it chose. Over the wire it cannot:
+        `rows_write` refuses a row that carries its own `id` on purpose — the
+        store is the only allocator, and re-ids are the caller's to remap.
+
+        So the wire mints a placeholder and `facts_arm.plant_store` remaps it to
+        the id the store actually assigned, writing rows in dependency order. A
+        probe writes the SAME code either way; only the remap differs, and in
+        process it is the identity.
+        """
+        self._next_placeholder += 1
+        return self._next_placeholder
+
+    def _kernel(self, payload: dict, timeout: float = 30) -> dict:
+        r = self.k.send("kernel", payload, timeout=timeout)
+        return r if isinstance(r, dict) else {}
+
+    def rows_for(self, aid: str) -> list[dict]:
+        """That agent's rows WHOLE, oldest first — the kernel's `rows_read`.
+
+        An agent that has never been written to answers with an empty list, not
+        an error: a scorer counting turns on an agent the model never built is
+        asking a legitimate question and the answer is zero.
+        """
+        r = self._kernel({"type": "rows_read", "agent": aid})
+        rows = r.get("rows")
+        return rows if isinstance(rows, list) else []
+
+    def rows_write(self, aid: str, rows: list[dict]) -> list[int]:
+        """Append rows under FRESH ids — the kernel's `rows_write`. Returns the
+        ids the store assigned, in order. The store is the only allocator."""
+        r = self._kernel({"type": "rows_write", "agent": aid, "rows": rows})
+        ids = r.get("ids")
+        return ids if isinstance(ids, list) else []
+
+    def body_get(self, pid: int, offset: int = 0, length: int = 4096):
+        """One page of a stored reply body by pid — read off the `body` row the
+        store keeps, which `rows_read` returns whole. `None` when nothing is
+        stored under that pid."""
+        for owner in self.agent_ids():
+            for r in self.rows_for(owner):
+                if r.get("kind") == "body" and r.get("parent") == pid:
+                    text = str(r.get("content") or "")
+                    chunk = text[offset:offset + length]
+                    return chunk, offset + len(chunk), offset + len(chunk) >= len(text), len(text)
+        return None
+
+    def agent_ids(self) -> list[str]:
+        r = self._kernel({"type": "list_agents"})
+        agents = r.get("agents")
+        if not isinstance(agents, list):
+            return []
+        return [a.get("id") for a in agents if isinstance(a, dict) and a.get("id")]
+
+    @property
+    def tasks(self) -> list:
+        """The live task table — `ps`. A list, so `len(root.ctx.tasks)` reads the
+        same number it reads in process."""
+        r = self._kernel({"type": "ps"})
+        t = r.get("tasks")
+        return t if isinstance(t, list) else []
+
+    def view_for(self, aid: str) -> dict | None:
+        """That agent's VIEW — the newest `view` row in its store. There is no
+        verb that returns it directly; the view IS a row, and `rows_read` carries
+        rows whole, so this reads the same document `_load_view` reads."""
+        latest = None
+        for r in self.rows_for(aid):
+            if r.get("kind") == "view" and isinstance(r.get("ids"), list):
+                latest = r
+        return latest
+
+    @property
+    def next_id(self) -> int:
+        """The id the store will mint NEXT. Derived from the highest id in the
+        table, which is what the counter guarantees — there is no verb that
+        exposes the counter itself, and inventing one to satisfy a probe would
+        be a product change made for a test."""
+        top = 0
+        for aid in self.agent_ids():
+            for r in self.rows_for(aid):
+                rid = r.get("id")
+                if isinstance(rid, int) and rid > top:
+                    top = rid
+        return top + 1
+
+    async def shutdown(self) -> dict:
+        """The kernel's TEARDOWN — the wire twin of the in-process
+        `Kernel.shutdown()`. Over the wire the kernel is a process, so this is
+        `shutdown_kernel` (the root-only verb that stops it) followed by waiting
+        for that process to be gone. The agent half (`shutdown_agents`) is the
+        probe's own call, made before this exactly as it is in process."""
+        import asyncio
+
+        ack = await asyncio.to_thread(
+            self.k.send, "kernel", {"type": "shutdown_kernel"}, 30)
+        proc = getattr(self.k, "proc", None)
+        if proc is not None:
+            for _ in range(300):  # the verb defers its exit ~100ms; wait on the PROCESS
+                if proc.poll() is not None:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError("shutdown_kernel acked but the kernel process is still alive")
+        return ack if isinstance(ack, dict) else {"ok": ack}

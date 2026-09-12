@@ -67,7 +67,6 @@ impl Bundle for WebRestBundle {
                     "verbs": {
                         "reflect": "Identity + parent web agent id + URL patterns. No args.",
                         "boot": "No-op (REST routes come up with the parent web agent).",
-                        "shutdown": "No-op.",
                         "get_routes": "Returns {routes:[…]} for the POST + _reflect surface.",
                     }
                 })

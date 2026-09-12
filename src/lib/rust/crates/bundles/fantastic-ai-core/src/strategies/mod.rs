@@ -13,8 +13,12 @@
 //! `compact`); there is no runtime try-X-else-Y (NO-FALLBACKS). `memgpt`
 //! was removed — its persist nudge is now universal in the seam notice.
 
+pub mod fold;
+pub mod strip;
+
 use crate::context::{estimate_one, NOTICE_ENVELOPE_RESERVE};
 use crate::provider::{Provider, ProviderEvent};
+use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -34,6 +38,34 @@ pub struct Projection {
     pub summary: Option<String>,
     /// truncate: an earlier span was elided in place.
     pub omitted_marker: bool,
+    /// `strip`: reply blocks reduced to their stub this projection.
+    pub stripped: usize,
+    /// `strip`: bytes that left the view with those stubs.
+    pub stripped_bytes: usize,
+    /// `fold`: fold rows written this projection.
+    pub folded: usize,
+}
+
+/// Everything a strategy needs, WITHOUT importing the seam. `budget` is the
+/// budget for the conversation BODY (the window budget minus the already
+/// measured system block) — strategies fit the body to it.
+///
+/// Mirrors python `ai_core.context.ProjectionCtx`. `client_id` is here for the
+/// same reason python carries it: `fold` is the one strategy that WRITES, and a
+/// fold row is a mark that must persist.
+pub struct ProjectionCtx<'a> {
+    /// Token budget for the conversation BODY.
+    pub budget: i64,
+    /// Verbatim recent turns `compact`/`truncate` keep.
+    pub recent_n: usize,
+    /// The backend provider, for the strategies that summarize.
+    pub provider: &'a Arc<dyn Provider>,
+    /// The agent this projection is for.
+    pub self_id: &'a AgentId,
+    /// The kernel — the row store `fold` writes its marks to.
+    pub kernel: &'a Arc<Kernel>,
+    /// The conversation this projection is for.
+    pub client_id: &'a str,
 }
 
 fn is_tool(turn: &Value) -> bool {
@@ -141,6 +173,9 @@ pub async fn compact(
             body: fit_tail(body, budget),
             summary: None,
             omitted_marker: false,
+            stripped: 0,
+            stripped_bytes: 0,
+            folded: 0,
         };
     }
     let summary = safe_summary(provider, &overflow).await;
@@ -161,6 +196,9 @@ pub async fn compact(
             body: fit_tail(&recent_turns, avail),
             summary: Some(summary),
             omitted_marker: false,
+            stripped: 0,
+            stripped_bytes: 0,
+            folded: 0,
         };
     };
     let head_cost = estimate_one(first);
@@ -177,6 +215,9 @@ pub async fn compact(
         body,
         summary: Some(summary),
         omitted_marker: false,
+        stripped: 0,
+        stripped_bytes: 0,
+        folded: 0,
     }
 }
 
@@ -188,6 +229,9 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
             body: fit_tail(body, budget),
             summary: None,
             omitted_marker: false,
+            stripped: 0,
+            stripped_bytes: 0,
+            folded: 0,
         };
     }
     let first = body[0].clone();
@@ -200,10 +244,13 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
         body: out,
         summary: None,
         omitted_marker: true,
+        stripped: 0,
+        stripped_bytes: 0,
+        folded: 0,
     }
 }
 
 /// The known strategy names (config validity check; unknown ⇒ caller errors).
 pub fn is_known_strategy(name: &str) -> bool {
-    matches!(name, "compact" | "truncate")
+    matches!(name, "compact" | "truncate" | "strip" | "fold")
 }

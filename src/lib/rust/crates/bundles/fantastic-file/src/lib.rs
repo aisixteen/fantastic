@@ -155,14 +155,45 @@ impl Bundle for FileBundle {
             // The PUMP coordinates a SOURCE→SINK copy by id; it never touches
             // bytes/root itself, so it rides the text channel without a clamp.
             "pump" => pump_reply(agent_id, payload, kernel).await,
-            // Stream verbs carry RAW BYTES — binary channel only. A CODED
-            // refusal (python serves these on the text channel; a consumer
-            // that lands here must be able to branch, not string-match).
-            "read_stream" | "write_stream" => rf::bad(
-                verb,
-                "bytes",
-                "raw bytes on the binary channel (send_with_binary)",
-            ),
+            // THE STREAM VERBS ON THE TEXT CHANNEL, as python serves them: a
+            // model writes a document VERBATIM between `<bytes>` and `</bytes>`
+            // and python's parser delivers that as utf-8 bytes to the same
+            // handler; a chunk read back renders utf-8 in the reply. Rust
+            // refused both here with "raw bytes on the binary channel" — 43
+            // e2e logs carry that refusal against python's one, and the
+            // `subai_graph` routine failed on it five times in one run
+            // (2026-09-12). The binary channel stays for real blobs.
+            "read_stream" => {
+                let root = match clamp_root(&raw_root, &workdir_base(kernel)) {
+                    Ok(r) => r,
+                    Err(e) => return Ok(Some(rf::refusal(rf::TRANSPORT_ERROR, e))),
+                };
+                let (mut reply, body) = read_stream_reply(&root, payload);
+                if let Some(o) = reply.as_object_mut() {
+                    if !o.contains_key("error") {
+                        o.insert("bytes".to_string(), json!(String::from_utf8_lossy(&body)));
+                    }
+                }
+                reply
+            }
+            "write_stream" => {
+                if readonly {
+                    readonly_refusal()
+                } else {
+                    let root = match clamp_root(&raw_root, &workdir_base(kernel)) {
+                        Ok(r) => r,
+                        Err(e) => return Ok(Some(rf::refusal(rf::TRANSPORT_ERROR, e))),
+                    };
+                    match payload.get("bytes") {
+                        Some(Value::String(s)) => write_stream_reply(&root, payload, s.as_bytes()),
+                        // The tag grammar types a bare number; a number is a document too.
+                        Some(Value::Number(n)) => {
+                            write_stream_reply(&root, payload, n.to_string().as_bytes())
+                        }
+                        _ => rf::missing("write_stream", "bytes (one raw chunk)"),
+                    }
+                }
+            }
             // Every data verb clamps the root to the running dir FIRST (a root
             // that escapes it refuses — the running-dir law).
             _ => {

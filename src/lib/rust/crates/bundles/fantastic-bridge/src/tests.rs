@@ -346,13 +346,14 @@ async fn pending_futures_rejected_on_close() {
     // Tiny delay so the forward registers its pending oneshot
     // before we slam the door.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    // Shut A down — its read loop tears down + every pending
-    // forward fails with a ConnectionError-flavored reply via the
-    // shutdown drain path.
+    // Delete A — its read loop tears down in `on_delete` and every pending
+    // forward fails with a close-flavoured reply. Through DELETE, not a
+    // `shutdown` verb: as in python, `shutdown` is a lifecycle no-op a caller
+    // may send and nothing tears down behind it (2026-09-12).
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from(a_id.as_str()),
-            json!({"type": "shutdown"}),
+            AgentId::from("core"),
+            json!({"type": "delete_agent", "id": a_id.as_str()}),
         )])
         .await
         .remove(0)

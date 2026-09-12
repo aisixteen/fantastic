@@ -27,6 +27,7 @@
 use async_trait::async_trait;
 use fantastic_ai_core::events::{emit_status, to_caller, CallerRoute};
 use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::retrieval;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
@@ -107,6 +108,21 @@ impl OnceLockHttpMap {
     }
 }
 
+/// An error WITH ITS CAUSES — reqwest's `Display` prints only the outer layer
+/// ("error sending request for url"), which hid whether a dead request was DNS,
+/// TLS, a reset or a timeout across 29 e2e logs. Python's exception text names
+/// the cause; this walks `source()` so rust's does too.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(c) = cur {
+        out.push_str(" ← ");
+        out.push_str(&c.to_string());
+        cur = c.source();
+    }
+    out
+}
+
 fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     let key_hv = reqwest::header::HeaderValue::from_str(api_key)
@@ -123,6 +139,20 @@ fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .default_headers(headers)
         .connect_timeout(Duration::from_secs(10))
+        // NO IDLE CONNECTION REUSE — python opens a fresh `httpx.AsyncClient`
+        // per send, so every request rides a new connection. This client is
+        // cached per agent, and a pooled keep-alive connection the proxy has
+        // closed idle fails the next POST with "error sending request" (hyper
+        // does not retry a non-idempotent request): 29 of 620 rust e2e logs
+        // died that way at a test's first request, against 10 of 1131 python
+        // logs (measured 2026-09-12).
+        .pool_max_idle_per_host(0)
+        // HTTP/1.1, as python's httpx speaks it. reqwest negotiates HTTP/2 over
+        // ALPN by default, and through the CloudFront proxy the h2 streams
+        // died mid-request with "error sending request" / "error decoding
+        // response body" even with idle reuse off (2 more in run
+        // 20260912-195846). One protocol on both runtimes, no guessing.
+        .http1_only()
         .build()
         .map_err(|e| format!("build client: {e}"))
 }
@@ -212,6 +242,14 @@ struct AnthropicProvider {
     endpoint: String,
     model: String,
     max_tokens: u64,
+    /// RUNNER (meta) PARAMS — the record's `sampling` object, merged VERBATIM
+    /// into the request body after the fixed fields, exactly as python's
+    /// provider does (`body.update(self._sampling)`). This is what bounds a
+    /// reasoning model's deliberation (`thinking_token_budget`) and kills the
+    /// CoT-repetition loop (`no_repeat_ngram_size`, `repetition_penalty`):
+    /// without it every long rust turn ran to ~41k chars and the proxy's 180s
+    /// cap (measured 2026-09-12: build, implicit_constraint, graph_shape).
+    sampling: Map<String, Value>,
     kernel: Arc<Kernel>,
     client_id: String,
 }
@@ -255,6 +293,9 @@ impl Provider for AnthropicProvider {
         if let Some(sys) = system {
             body.insert("system".into(), json!(sys));
         }
+        for (k, v) in &self.sampling {
+            body.insert(k.clone(), v.clone());
+        }
         let body = Value::Object(body);
 
         // Retry-once-on-429 (before any chunk yielded). Emits a rate-limit
@@ -270,7 +311,7 @@ impl Provider for AnthropicProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("http: {e}"))?;
+                .map_err(|e| format!("http: {}", error_chain(&e)))?;
             let status = resp.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 if attempt < RATE_LIMIT_MAX_RETRIES {
@@ -516,7 +557,7 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                     Ok(bytes) => st.buf.extend_from_slice(&bytes),
                     Err(e) => {
                         finished = true;
-                        pending.push_back(Err(format!("stream: {e}")));
+                        pending.push_back(Err(format!("stream: {}", error_chain(&e))));
                         continue;
                     }
                 }
@@ -570,7 +611,23 @@ impl Bundle for AnthropicBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel).await,
-            "boot" | "shutdown" => Value::Null,
+            "shutdown" => Value::Null,
+            // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`.
+            "boot" => {
+                if fantastic_ai_core::history::load_history(
+                    agent_id,
+                    kernel,
+                    helpers::DEFAULT_CLIENT_ID,
+                )
+                .await
+                .is_empty()
+                {
+                    Value::Null
+                } else {
+                    let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
+                    retrieval::context_recall(agent_id, &json!({}), kernel, p.as_ref()).await
+                }
+            }
             "send" => send_reply(agent_id, payload, kernel).await,
             // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
             // record, this agent answers it by THINKING, and the asker writes
@@ -581,6 +638,14 @@ impl Bundle for AnthropicBundle {
             },
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
+            // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
+            "pull" => retrieval::pull(agent_id, payload, kernel).await,
+            "grep" => retrieval::grep(agent_id, payload, kernel).await,
+            // Rebuild the view from the store: on boot, after folds, on request.
+            "context_recall" => {
+                let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
+                retrieval::context_recall(agent_id, payload, kernel, p.as_ref()).await
+            }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("anthropic_backend: unknown type {other:?}")}),
@@ -612,28 +677,52 @@ impl Bundle for AnthropicBundle {
     }
 }
 
+/// The provider this agent is configured for. Built per call (it is cheap and the
+/// record can change between turns), and shared by `send` and the verbs that need
+/// a completion of their own — `context_recall` asks the model which rows to keep
+/// in full. `None` when the backend is not configured to reach a model at all;
+/// the caller says so in its own words rather than guessing a provider.
+fn build_provider(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    client_id: &str,
+) -> Option<Arc<dyn Provider>> {
+    read_api_key()?;
+    let max_tokens = helpers::agent_meta(agent_id, kernel)
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+    let sampling: Map<String, Value> = helpers::agent_meta(agent_id, kernel)
+        .get("sampling")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Arc::new(AnthropicProvider {
+        self_id: agent_id.clone(),
+        endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
+        model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
+        max_tokens,
+        sampling,
+        kernel: Arc::clone(kernel),
+        client_id: client_id.to_string(),
+    }))
+}
+
 async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if read_api_key().is_none() {
-        return json!({ "error": no_key_error() });
-    }
     let client_id = helpers::safe_client(
         payload
             .get("client_id")
             .and_then(Value::as_str)
             .unwrap_or(""),
     );
-    let max_tokens = helpers::agent_meta(agent_id, kernel)
-        .get("max_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_MAX_TOKENS);
-    let provider: Arc<dyn Provider> = Arc::new(AnthropicProvider {
-        self_id: agent_id.clone(),
-        endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
-        model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
-        max_tokens,
-        kernel: Arc::clone(kernel),
-        client_id,
-    });
+    let Some(provider) = build_provider(agent_id, kernel, &client_id) else {
+        return json!({ "error": no_key_error() });
+    };
     verbs::send(provider, agent_id, payload, kernel, CFG).await
 }
 
@@ -674,6 +763,9 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Failfast if file_bridge_id unset OR no api key in the environment.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
+            "pull": "args: pid:int (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with offset: next_offset until eof.",
+            "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int?, width:int? (chars of each matched line, default 200). Finds the LINE that mentions something, wherever it is. Returns {matches:[{id, line, text}], total, truncated}.",
+            "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuilds this agent's VIEW from its store: fits the head to the budget at digest resolution, asks the model which rows it wants in full, persists the id list, logs the decision as a row. Returns {kept, expanded, dropped, budget, why, degraded}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
             "status": "args: client_id:str?. Privacy-filtered queue/in-flight snapshot.",
         },

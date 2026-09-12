@@ -44,7 +44,19 @@ from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
 
 CREATOR = "ai"
 ORACLES, SOLVERS, LEDGER_NAMES, N = S.ORACLES, S.SOLVERS, S.LEDGER_NAMES, S.N
-MINE = {"kernel_state", "core", "kernel_store", "brain", "notes", "user", CREATOR, *ORACLES}
+# EVERY ID THE BUILDER'S RECORD NAMES is declared here, `cli` included: over the
+# wire the probe is the `rest` agent, and a creator may delegate only what it
+# holds — a `can_call` on an id the driver never reached is refused as
+# `cannot delegate '*' on cli` (measured 2026-09-12; python's rule is the same,
+# it just never fires in process where the probe is the operator).
+# EVERYTHING E30'S SHARED BUILDER RECORD NAMES, plus this probe's own. Over the
+# wire the probe is the `rest` agent and a creator delegates only what it
+# holds, so every id `_ai_meta` puts on `can_call` (cli, clock, readings,
+# totals, runner, …) must be declared here or the create is refused
+# `cannot delegate '*' on <id>` — python's rule too; it never fires in process
+# where the probe is the operator (measured 2026-09-12, three refusals in a row
+# while the set was hand-listed). E30's own set is the authority.
+MINE = {*P.MINE, "kernel_store", "notes", "user", CREATOR, *ORACLES}
 UNATTENDED = S.UNATTENDED
 
 

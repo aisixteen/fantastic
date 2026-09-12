@@ -24,6 +24,7 @@
 
 use async_trait::async_trait;
 use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::retrieval;
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, events::CallerRoute, helpers, state, verbs};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
@@ -254,11 +255,27 @@ impl Bundle for OllamaBackendBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel),
-            "boot" => Value::Null,
-            "shutdown" => {
-                state::drop_state(agent_id);
-                Value::Null
+            // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`: an
+            // agent hydrated with a history rebuilds its view before its first
+            // turn, so a rebooted process sees the same head the last one saw.
+            "boot" => {
+                if fantastic_ai_core::history::load_history(
+                    agent_id,
+                    kernel,
+                    helpers::DEFAULT_CLIENT_ID,
+                )
+                .await
+                .is_empty()
+                {
+                    Value::Null
+                } else {
+                    let p = build_provider(agent_id, kernel);
+                    retrieval::context_recall(agent_id, &json!({}), kernel, Some(&p)).await
+                }
             }
+            // A LIFECYCLE NO-OP, as in python's `ollama_backend` (`return None`):
+            // process state drops in `on_delete`, never behind a verb.
+            "shutdown" => Value::Null,
             "send" => send_reply(agent_id, payload, kernel).await,
             // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
             // record, this agent answers it by THINKING, and the asker writes
@@ -270,6 +287,14 @@ impl Bundle for OllamaBackendBundle {
             "list_models" => list_models_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
+            // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
+            "pull" => retrieval::pull(agent_id, payload, kernel).await,
+            "grep" => retrieval::grep(agent_id, payload, kernel).await,
+            // Rebuild the view from the store: on boot, after folds, on request.
+            "context_recall" => {
+                let p = build_provider(agent_id, kernel);
+                retrieval::context_recall(agent_id, payload, kernel, Some(&p)).await
+            }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("ollama: unknown type {other:?}")}),
@@ -300,24 +325,34 @@ impl Bundle for OllamaBackendBundle {
     }
 }
 
-async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+/// The provider this agent is configured for. Built per call (it is cheap and the
+/// record can change between turns), and shared by `send` and the verbs that need
+/// a completion of their own — `context_recall` asks the model which rows to keep
+/// in full.
+fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
     let meta = helpers::agent_meta(agent_id, kernel);
-    let temperature = meta
-        .get("temperature")
-        .and_then(Value::as_f64)
-        .unwrap_or(DEFAULT_TEMPERATURE);
-    let num_ctx = meta.get("num_ctx").and_then(Value::as_u64);
-    let num_predict = meta.get("num_predict").and_then(Value::as_u64);
-    let think = meta.get("think").and_then(Value::as_bool);
-    let provider: Arc<dyn Provider> = Arc::new(OllamaProvider {
+    Arc::new(OllamaProvider {
         endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
         model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
-        temperature,
-        num_ctx,
-        num_predict,
-        think,
-    });
-    verbs::send(provider, agent_id, payload, kernel, CFG).await
+        temperature: meta
+            .get("temperature")
+            .and_then(Value::as_f64)
+            .unwrap_or(DEFAULT_TEMPERATURE),
+        num_ctx: meta.get("num_ctx").and_then(Value::as_u64),
+        num_predict: meta.get("num_predict").and_then(Value::as_u64),
+        think: meta.get("think").and_then(Value::as_bool),
+    })
+}
+
+async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    verbs::send(
+        build_provider(agent_id, kernel),
+        agent_id,
+        payload,
+        kernel,
+        CFG,
+    )
+    .await
 }
 
 /// `list_models` — model autocomplete + reachability probe. Resolves the endpoint
@@ -404,11 +439,13 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "verbs": {
             "reflect": "Identity + model + endpoint + generating flag + file_bridge_id binding. No args.",
             "boot": "No-op. Returns null.",
-            "shutdown": "Drops process-memory state. Returns null.",
             "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. Per-backend FIFO lock. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Returns {response, final, client_id}.",
             "list_models": "args: endpoint:str? (default the record's endpoint, else http://localhost:11434). GET {endpoint}/api/tags. Returns {models:[name,...]} in order on success, or {error:'<msg naming the endpoint>'} on any failure — doubles as the reachability probe.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id} — that client's persisted chat.",
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
+            "pull": "args: pid:int (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with offset: next_offset until eof.",
+            "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int?, width:int? (chars of each matched line, default 200). Finds the LINE that mentions something, wherever it is. Returns {matches:[{id, line, text}], total, truncated}.",
+            "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuilds this agent's VIEW from its store: fits the head to the budget at digest resolution, asks the model which rows it wants in full, persists the id list, logs the decision as a row. Returns {kept, expanded, dropped, budget, why, degraded}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
             "status": "args: client_id:str?. Returns the in-flight/queue snapshot (text redacted for other clients).",
         },

@@ -221,7 +221,6 @@ fn default_reflect(agent_id: &AgentId, host_registered: bool) -> Value {
         "verbs": {
             "reflect": "Identity + host_registered probe. Host overrides shape if registered.",
             "boot": "Fire host.on_boot() if registered. Returns {ok: true}.",
-            "shutdown": "Forward to host if registered. Returns {ok: true}.",
             "*": "Any other verb forwards to host.handle(payload_json) -> reply_json. No host = {error, reason: \"no_host\"}.",
         },
     })

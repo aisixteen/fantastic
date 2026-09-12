@@ -100,8 +100,8 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
 fn open_client_inbox(
     kernel: &Arc<Kernel>,
     agent_id: &AgentId,
-) -> tokio::sync::mpsc::Receiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::channel(256);
+) -> fantastic_kernel::inbox::InboxReceiver {
+    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel.inboxes.insert(agent_id.clone(), tx);
     rx
 }

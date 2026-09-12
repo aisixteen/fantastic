@@ -11,7 +11,6 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::task::JoinHandle;
 
 /// One in-flight (or finished) program.
 pub struct Job {
@@ -23,8 +22,10 @@ pub struct Job {
     /// The PUMP's row in the kernel task table. Liveness is derived from this and
     /// nothing else, so there is no second flag to drift.
     pub task: TaskId,
-    /// The relay task serving this job's control socket.
-    pub ctrl: JoinHandle<()>,
+    /// The relay task serving this job's control socket — its row in the kernel
+    /// task table, like the pump above. It is real work (a send per frame the
+    /// program writes), so it is visible to `ps` and reachable by `cancel`.
+    pub ctrl: TaskId,
     /// The relay's STOP SIGNAL — raised by [`teardown`] instead of aborting
     /// `ctrl`. An abort drops `serve` at its await point, so the release code
     /// that runs AFTER its read loop never runs: every proxy the job held would

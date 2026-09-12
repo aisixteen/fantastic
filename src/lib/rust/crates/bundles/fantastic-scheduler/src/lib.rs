@@ -36,7 +36,6 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::task::JoinHandle;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "scheduler.tools";
@@ -58,12 +57,12 @@ static SCHEDULE_CACHE: OnceLockScheduleCache = OnceLockScheduleCache::new();
 
 // ── once-lock map helpers ───────────────────────────────────────────
 
-struct OnceLockTaskMap(OnceLock<Mutex<HashMap<AgentId, JoinHandle<()>>>>);
+struct OnceLockTaskMap(OnceLock<Mutex<HashMap<AgentId, fantastic_kernel::TaskId>>>);
 impl OnceLockTaskMap {
     const fn new() -> Self {
         Self(OnceLock::new())
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, JoinHandle<()>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, fantastic_kernel::TaskId>> {
         self.0
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
@@ -125,7 +124,9 @@ impl Bundle for SchedulerBundle {
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel),
             "boot" => boot_reply(agent_id, kernel).await,
-            "shutdown" => shutdown_reply(agent_id),
+            // A LIFECYCLE NO-OP, as in python: the tick loop dies in `on_delete`
+            // (which `on_shutdown` defaults to), never behind a verb.
+            "shutdown" => Value::Null,
             "schedule" => schedule_reply(agent_id, payload, kernel).await,
             "unschedule" => unschedule_reply(agent_id, payload, kernel).await,
             "list" => list_reply(agent_id, kernel).await,
@@ -138,12 +139,8 @@ impl Bundle for SchedulerBundle {
         Ok(Some(reply))
     }
 
-    async fn on_delete(
-        &self,
-        agent_id: &AgentId,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        let _ = shutdown_reply(agent_id);
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        let _ = shutdown_reply(agent_id, kernel).await;
         SCHEDULE_CACHE.lock().remove(agent_id);
         Ok(())
     }
@@ -481,10 +478,12 @@ fn mint_id() -> String {
 // ── verb implementations ────────────────────────────────────────────
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    // LIVENESS COMES FROM THE TABLE, which holds only running work — there is no
+    // second flag to drift from it.
     let running = SCHEDULER_TASKS
         .lock()
         .get(agent_id)
-        .map(|t| !t.is_finished())
+        .map(|t| kernel.tasks.contains(t))
         .unwrap_or(false);
     json!({
         "id": agent_id.as_str(),
@@ -495,7 +494,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "verbs": {
             "reflect": "Identity + tick state. No args.",
             "boot": "Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write failfasts only when no store is wired.",
-            "shutdown": "Idempotent. Cancels the tick loop.",
             "schedule": "args: target:str, payload:dict, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever).",
             "unschedule": "args: schedule_id:str.",
             "list": "No args. Returns {schedules:[...]}.",
@@ -513,23 +511,29 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let mut tasks = SCHEDULER_TASKS.lock();
     if let Some(existing) = tasks.get(agent_id) {
-        if !existing.is_finished() {
+        // LIVENESS COMES FROM THE TABLE, which holds only running work.
+        if kernel.tasks.contains(existing) {
             return json!({"running": true, "already_booted": true});
         }
     }
     let id = agent_id.clone();
     let k = Arc::clone(kernel);
-    let task = tokio::spawn(async move {
+    // REGISTERED: the tick loop outlives this `boot` dispatch and fires a send
+    // per due schedule for the life of the agent. A bare spawn left the clock
+    // invisible to `ps`, beyond `cancel`, and sending under no identity — so
+    // every fire reached the gate as the OPERATOR.
+    let task = kernel.spawn_task(agent_id, "tick_loop", async move {
         tick_loop(id, k).await;
     });
     tasks.insert(agent_id.clone(), task);
     json!({"running": true})
 }
 
-fn shutdown_reply(agent_id: &AgentId) -> Value {
+async fn shutdown_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let removed = SCHEDULER_TASKS.lock().remove(agent_id);
-    if let Some(task) = removed {
-        task.abort();
+    if let Some(tid) = removed {
+        // Through the TABLE — the same path an operator's `cancel` takes.
+        kernel.cancel_task(&tid).await;
         json!({"stopped": true, "id": agent_id.as_str()})
     } else {
         json!({"stopped": false, "id": agent_id.as_str(), "reason": "not running"})

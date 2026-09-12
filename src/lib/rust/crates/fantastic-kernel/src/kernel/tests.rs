@@ -89,20 +89,24 @@ fn remove_state_subscriber_detaches() {
 }
 
 #[tokio::test]
-async fn inbox_channel_back_pressure_at_bound() {
-    // Sender to a bound=2 inbox accepts 2 then blocks on the 3rd
-    // (try_send returns Err). Verifies the bound is actually wired.
+async fn an_inbox_at_its_bound_drops_the_oldest() {
+    // THE BOUND IS WIRED, AND THE TIP SURVIVES. An emitter never blocks and
+    // never fails; at the bound the OLDEST payload is evicted, so a consumer
+    // that fell behind catches up on the freshest events rather than freezing on
+    // stale ones. Python's `_put_drop_oldest` and swift's `.bufferingNewest`
+    // rule; rust used to invert it (`try_send` discards what is being sent)
+    // under a comment claiming they matched.
     let k = Kernel::new_with_inbox_bound(2);
     let a = make_agent("bp");
-    let _rx = k.register(Arc::clone(&a));
+    let mut rx = k.register(Arc::clone(&a));
     let tx = k.inboxes.get(&AgentId::from("bp")).unwrap().clone();
-    tx.send(json!({"type": "one"})).await.unwrap();
-    tx.send(json!({"type": "two"})).await.unwrap();
-    // The 3rd push would block — try_send must report full.
-    match tx.try_send(json!({"type": "three"})) {
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
-        other => panic!("expected Full, got {other:?}"),
-    }
+    tx.send(json!({"type": "one"}));
+    tx.send(json!({"type": "two"}));
+    tx.send(json!({"type": "three"}));
+
+    assert_eq!(rx.try_recv().expect("held")["type"], "two");
+    assert_eq!(rx.try_recv().expect("held")["type"], "three");
+    assert!(rx.try_recv().is_none(), "the bound holds exactly two");
 }
 
 // ─── #3 / #4 / #5 — record hygiene ──────────────────────────────────

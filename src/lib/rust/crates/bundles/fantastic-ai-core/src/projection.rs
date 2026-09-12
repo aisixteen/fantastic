@@ -15,10 +15,17 @@ use crate::helpers::{agent_meta, now_secs};
 use crate::history::load_history;
 use crate::provider::Provider;
 use crate::state::BackendState;
-use crate::strategies::{compact, drop_orphan_tools, is_known_strategy, truncate};
+use crate::strategies::{
+    compact, drop_orphan_tools, fold::fold, is_known_strategy, strip::strip, truncate,
+    ProjectionCtx,
+};
+use crate::view::{res_of, save_view};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
+
+/// Fold rows between automatic recalls. Python `RECALL_EVERY`.
+pub const RECALL_EVERY: usize = 3;
 
 /// The ONE canonical inbound context-notice — composed at the SEAM from a
 /// strategy's projection artifact. A `role:user` turn (the role every backend
@@ -29,6 +36,8 @@ pub fn context_notice(
     summary: Option<&str>,
     omitted_marker: bool,
     dropped_n: usize,
+    stripped: usize,
+    stripped_bytes: usize,
 ) -> Value {
     let mut lines = vec![format!(
         "[context-notice] Your conversation exceeded the window and was compacted \
@@ -39,9 +48,19 @@ pub fn context_notice(
     } else if omitted_marker {
         lines.push("An earlier span was omitted in place.".to_string());
     }
+    if stripped > 0 {
+        lines.push(format!(
+            "{stripped} reply bod(ies) were STRIPPED to their tag+title line \
+             ({stripped_bytes} bytes left your view); every one is still in durable \
+             storage — recall it by the pid on its line."
+        ));
+    }
+    // PYTHON'S BYTES. This line teaches the model how to page turns back, and
+    // it taught the OLD JSON shape (`{type:'recall', query?, limit?}`) until
+    // 2026-09-12 — a call the harness refuses. Python `_context_notice`.
     lines.push(
         "The full transcript is intact in durable storage. To page dropped turns back, \
-         send {type:'recall', query?, limit?} to your OWN id. If the dropped span holds \
+         send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`). If the dropped span holds \
          durable facts (names, decisions, preferences), persist them to your memory agent \
          now via the send tool — the earlier turns are leaving your live view."
             .to_string(),
@@ -104,7 +123,19 @@ pub async fn project_context(
             json!({
                 "type": "context", "source": self_id.as_str(), "ts": now_secs(),
                 "phase": "too_small",
-                "detail": {"context_window": window, "system_tokens": sys_tokens, "hint": hint},
+                "detail": {
+                    "context_window": window, "system_tokens": sys_tokens,
+                    // WHAT IT COULD NOT FIT — python's detail. A probe reading
+                    // `too_small` off the wire needs the size and the head of
+                    // the turn that did not fit, not only the window.
+                    "last_turn_tokens": last_cost,
+                    "last_turn_head": body[body.len() - 1].get("content")
+                        .map(|c| match c.as_str() {
+                            Some(s) => s.chars().take(200).collect::<String>(),
+                            None => c.to_string().chars().take(200).collect::<String>(),
+                        }),
+                    "hint": hint,
+                },
             }),
         )
         .await;
@@ -117,14 +148,26 @@ pub async fn project_context(
         .to_string();
     if !is_known_strategy(&strat_name) {
         return Err(json!({
-            "error": format!("{name}: unknown context_strategy {strat_name:?} (valid: compact, truncate)"),
+            "error": format!(
+                "{name}: unknown context_strategy {strat_name:?} \
+                 (valid: compact, truncate, strip, fold)"
+            ),
         }));
     }
     let recent = cfg_recent_n(&meta);
-    let proj = if strat_name == "truncate" {
-        truncate(&body, body_budget)
-    } else {
-        compact(&body, recent, body_budget, provider).await
+    let pctx = ProjectionCtx {
+        budget: body_budget,
+        recent_n: recent,
+        provider,
+        self_id,
+        kernel,
+        client_id,
+    };
+    let proj = match strat_name.as_str() {
+        "truncate" => truncate(&body, body_budget),
+        "strip" => strip(&body, &pctx).await,
+        "fold" => fold(&body, &pctx).await,
+        _ => compact(&body, recent, body_budget, provider).await,
     };
     let dropped_pre = body.len().saturating_sub(proj.body.len());
     let notice = context_notice(
@@ -132,6 +175,8 @@ pub async fn project_context(
         proj.summary.as_deref(),
         proj.omitted_marker,
         dropped_pre,
+        proj.stripped,
+        proj.stripped_bytes,
     );
     // Single budget authority: the strategy reserved the envelope, but guard the
     // final fit anyway — trim oldest body turns (tool-pairing-safe). Never drop the
@@ -157,7 +202,32 @@ pub async fn project_context(
         "kept_turns": out_body.len(),
         "dropped_turns": dropped_n,
         "summarized": summarized,
+        "stripped": proj.stripped,
+        "stripped_bytes": proj.stripped_bytes,
+        "folded": proj.folded,
+        // What the model actually sees this turn — so "after reload it sees only
+        // the fold" is measured from the view, never self-reported.
+        "view_ids": out_body.iter().filter_map(|m| m.get("id").and_then(Value::as_i64))
+            .take(200).collect::<Vec<_>>(),
+        "view_ids_truncated":
+            out_body.iter().filter(|m| m.get("id").is_some()).count() > 200,
     }));
+    // THE VIEW ARRAY, written by every projection: what the model sees, at what
+    // resolution — so the next turn (and the next process) rebuilds the same bytes.
+    save_view(
+        self_id,
+        kernel,
+        &out_body
+            .iter()
+            .filter_map(|m| {
+                m.get("id")
+                    .and_then(Value::as_i64)
+                    .map(|id| json!({"id": id, "res": res_of(m)}))
+            })
+            .collect::<Vec<_>>(),
+        b,
+        &format!("projection: {strat_name}"),
+    );
     // `store_len`, NOT `body.len() - 1`. `body` is the DEDUPED/trimmed model view
     // and `derive_reaction` slices the FULL durable store by this index; whenever
     // the trimmers dropped whole turns the index came up short by that many, so the
@@ -165,6 +235,17 @@ pub async fn project_context(
     // reaction to a compaction the model had not yet seen.
     *state.compaction_mark.lock().expect("mark poisoned") =
         Some((store_len, client_id.to_string()));
+    if proj.folded > 0 {
+        // "When it feels it folded, it runs context_recall" — at the start of
+        // the next turn, over the new head. DEBOUNCED: every RECALL_EVERY-th
+        // batch (python: 11 folds, 5 recalls in 60 turns before the debounce).
+        let mut since = state.folds_since.lock().expect("folds_since poisoned");
+        *since += proj.folded;
+        if *since >= RECALL_EVERY {
+            *since = 0;
+            *state.recall_due.lock().expect("recall_due poisoned") = true;
+        }
+    }
     to_caller(
         kernel,
         self_id,
@@ -176,6 +257,13 @@ pub async fn project_context(
             "detail": {
                 "strategy": strat_name, "dropped_turns": dropped_n,
                 "kept_turns": out_body.len(), "summarized": summarized,
+                // WHAT THE STRATEGY DID, on the event a probe scores from —
+                // python's detail. Without these the fold arm read `folded=0`
+                // with four fold levels in its store (2026-09-12).
+                "pinned_facts": 0,
+                "stripped": proj.stripped,
+                "stripped_bytes": proj.stripped_bytes,
+                "folded": proj.folded,
             },
         }),
     )

@@ -9,7 +9,7 @@
 use crate::agent::AgentId;
 use crate::outcome::{Item, Status};
 use crate::send::with_sender;
-use crate::tasks::tests::{mk_agent, mk_kernel, Shared};
+use crate::tasks::tests::{mk_agent, mk_agent_grant, mk_kernel, Shared};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -389,7 +389,10 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
         .remove(0)
     })
     .await;
-    assert_eq!(a.status, Status::Completed, "{a:?}");
+    // `errored`: the vault HANDLER ran and answered "unknown verb". A semantic
+    // no, not a transport failure — and a settled outcome either way, which is
+    // what makes the join below the thing under test.
+    assert_eq!(a.status, Status::Errored, "{a:?}");
 
     let k = Arc::clone(&kernel);
     let b = with_sender(AgentId::from("bob"), async move {
@@ -428,5 +431,126 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
     assert_eq!(
         again.result, a.result,
         "the recorded outcome stopped returning"
+    );
+}
+
+/// AN ERRORED EXECUTION IS STILL AN EXECUTION. The `ledger` verb lists what
+/// named work BECAME, and a handler that RAN and said no is a row like any
+/// other — `e2e/coding/peer_review` proves a second mind was consulted by
+/// finding the `ai -> ai_rev` row, whatever the reviewer answered.
+#[tokio::test]
+async fn an_errored_execution_is_visible_in_the_ledger() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let a = mk_agent(&kernel, "l_err").await;
+    let out = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "nope_unknown"}))])
+        .await
+        .remove(0);
+    assert_eq!(out.status, Status::Errored, "{out:?}");
+
+    // BY PID — the agent also has a child-boot row under the same target.
+    let pid = out.pid.expect("a dispatched send has a pid").0;
+    let rows = ledger_rows(&kernel).await;
+    let hit = rows
+        .iter()
+        .find(|r| r["id"] == pid)
+        .unwrap_or_else(|| panic!("the errored execution vanished: {rows:?}"));
+    assert_eq!(hit["target"], a.0, "{hit:?}");
+    assert_eq!(hit["status"], "errored", "{hit:?}");
+}
+
+/// A SEND MADE FROM A FORK IS STILL A LEDGER ROW. `ai_core`'s reply routing runs
+/// in a `spawn_task`, so every tool call a model makes is issued from a fork —
+/// which is exactly what `e2e/coding/peer_review` looks for when it proves a
+/// second mind was consulted (`target == "ai_rev"`).
+#[tokio::test]
+async fn a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let b = mk_agent(&kernel, "l_peer").await;
+    // GRANT THE EDGE: a refused send never reaches the ledger at all.
+    let a = mk_agent_grant(&kernel, "l_forker", json!({"l_peer": "*"})).await;
+    // TWO-SIDED DENY-ALL: the callee must ACCEPT the caller, or the send is
+    // refused at ingress and never reaches the ledger at all.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "l_peer", "callable_by": {"l_forker": "*"}}),
+        )])
+        .await;
+
+    // The fork acts as `a`, the way route_reply acts as its agent.
+    let k = Arc::clone(&kernel);
+    let peer = b.clone();
+    let tid = with_sender(a.clone(), async {
+        kernel.spawn_task(&a, "route_reply", async move {
+            let _ = k.send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
+        })
+    })
+    .await;
+    // Let the fork run.
+    for _ in 0..100 {
+        if !kernel.tasks.contains(&tid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let rows = ledger_rows(&kernel).await;
+    assert!(
+        rows.iter()
+            .any(|r| r["target"] == b.0 && r["outcome"]["result"]["fast"] == true),
+        "a forked agent's send left no ledger row: {rows:?}"
+    );
+}
+
+/// READ AS AN AGENT, SEE ONLY YOUR OWN. The view is origin-scoped, so a reader
+/// that is not the operator cannot see another agent's executions — which is
+/// what makes `ledger` safe to grant. Pinned because `e2e/coding/peer_review`
+/// reads it over a REST leg, and what that leg counts as the ORIGIN decides
+/// whether the probe sees the model's work at all.
+#[tokio::test]
+async fn the_ledger_view_is_origin_scoped() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let b = mk_agent(&kernel, "l_theirs").await;
+    let a = mk_agent_grant(&kernel, "l_mine", json!({"l_theirs": "*"})).await;
+    // TWO-SIDED DENY-ALL: the callee must ACCEPT the caller, or the send is
+    // refused at ingress and never reaches the ledger at all.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "l_theirs", "callable_by": {"l_mine": "*"}}),
+        )])
+        .await;
+
+    let k = Arc::clone(&kernel);
+    let peer = b.clone();
+    with_sender(a.clone(), async move {
+        let _ = k.send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
+    })
+    .await;
+
+    // The OPERATOR sees it.
+    let mine = |rows: Vec<serde_json::Value>| {
+        rows.iter()
+            .any(|r| r["target"] == b.0 && r["outcome"]["result"]["fast"] == true)
+    };
+    assert!(
+        mine(kernel.ledger.rows_for(None)),
+        "the operator must see every execution: {:?}",
+        kernel.ledger.rows_for(None)
+    );
+    // A THIRD PARTY does not.
+    let other = AgentId::from("l_stranger");
+    assert!(
+        !mine(kernel.ledger.rows_for(Some(&other))),
+        "an agent saw an execution it did not originate"
+    );
+    // The ORIGINATOR does.
+    assert!(
+        mine(kernel.ledger.rows_for(Some(&a))),
+        "the originator lost its own row"
     );
 }

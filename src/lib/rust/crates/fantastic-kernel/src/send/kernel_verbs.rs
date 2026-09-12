@@ -38,8 +38,9 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             // never wires a provider of its own.
             | "persist_blob"
             | "load_blob"
-            // Root-only control verb — gated inside `handle_system_verb`
+            // Root-only control verbs — gated inside `handle_system_verb`
             // to the tree root; a non-root target answers with an error.
+            | "shutdown_agents"
             | "shutdown_kernel"
     )
 }
@@ -98,6 +99,9 @@ pub fn kernel_verb_docs() -> Value {
         "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its \
     own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's \
     batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}.",
+        "shutdown_agents": "No args. The AGENT half of a graceful stop — drains, sends \
+    every agent `shutdown`, waits for work to settle, cancels what is left. \
+    The kernel KEEPS SERVING; the persister catches up. Root only.",
         "shutdown_kernel": "No args. Stops the kernel PROCESS — under env:'container', the container.",
     })
 }
@@ -244,6 +248,18 @@ pub(super) async fn handle_kernel_verb(
             }
             _ => crate::refusal::missing("cancel", "task_id"),
         },
+        "shutdown_agents" => {
+            // Privileged: root control surface only, gated on rootness like
+            // `shutdown_kernel` so it holds whether the verb was addressed to
+            // the literal root id or via the `kernel` alias.
+            if target.parent_id.is_some() {
+                return json!({
+                    "error": "shutdown_agents: root control surface only; \
+                              address the kernel root (alias 'kernel')"
+                });
+            }
+            return kernel.shutdown_agents().await;
+        }
         "shutdown_kernel" => {
             // Privileged: root control surface only. Gate on rootness
             // (parent_id is None) so it holds whether the verb was

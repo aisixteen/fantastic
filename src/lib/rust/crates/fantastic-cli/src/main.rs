@@ -53,6 +53,7 @@ fn register_default_bundles() -> BundleRegistry {
         // one, so the task is a gated `user -> ai` send with a ledger row
         // instead of an operator injection from outside the kernel.
         reg.register(probes::USER_MODULE, probes::UserProbe::default());
+        reg.register(probes::ORACLE_MODULE, probes::OracleProbe::default());
     }
     reg.register(
         fantastic_text_file::HANDLER_MODULE,
