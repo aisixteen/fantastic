@@ -74,11 +74,9 @@ struct SendValidationTests {
         #expect(out.pid == nil)
         #expect(out.result["reason"].asString == "bad_arg", "\(out.result.serialize())")
         #expect(out.result["arg"].asString == "id")
-        // A colon id that names no execution is the minted namespace — refused too.
-        let minted = Item(AgentId("a"), .object(["type": .string("poke")]), id: "a:deadbeef")
-        let out2 = await kernel.send([minted])[0]
-        #expect(out2.result["reason"].asString == "bad_arg", "\(out2.result.serialize())")
-        #expect(out2.result["arg"].asString == "id")
+        // NO MINTED NAMESPACE. A caller's id is a NAME, any non-empty string;
+        // ids are ints the kernel mints. The old `<agent>:<hex>` refusal was
+        // swift's own and is gone (python parity, 2026-09-12).
     }
 
     @Test func createAgentWithEmptyIdIsRefused() async {

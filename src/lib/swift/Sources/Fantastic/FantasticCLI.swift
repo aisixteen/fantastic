@@ -155,6 +155,16 @@ struct FantasticCLI {
             exit(1)
         }
 
+        // A one-shot reads the same log the daemon writes, cold.
+        do {
+            try hydrateMessages(
+                kernel, rootDir: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                    .appendingPathComponent(".fantastic"))
+        } catch {
+            FileHandle.standardError.write("fantastic: \(error)\n".data(using: .utf8) ?? Data())
+            exit(1)
+        }
+
         var payload: [(String, JSON)] = [("type", .string(verb))]
         for kv in argTokens.dropFirst(2) {
             if let eq = kv.firstIndex(of: "=") {

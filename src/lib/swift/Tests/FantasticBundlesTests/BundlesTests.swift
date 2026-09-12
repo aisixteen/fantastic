@@ -349,7 +349,7 @@ struct BundleSmokeTests {
         #expect(err.contains("no store"), "\(r)")
         let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
         #expect((list["schedules"].asArray ?? []).isEmpty)
-        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
     }
 
     @Test func dueSchedulesFireAsOneConcurrentBatch() async throws {
@@ -383,7 +383,7 @@ struct BundleSmokeTests {
         let fastEarly = await waitFor({ probe.hit("p_fast") != nil }, seconds: 3.0)
         #expect(fastEarly, "not one batch: the fast fire waited for the slow one")
         let both = await waitFor({ probe.hit("p_slow") != nil && probe.hit("p_fast") != nil }, seconds: 6.0)
-        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
         #expect(both, "both probes must be hit")
         let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
         for s in list["schedules"].asArray ?? [] {
@@ -405,7 +405,7 @@ struct BundleSmokeTests {
         let sid = try #require(r["schedule_id"].asString)
         _ = await kernel.send([Item("sched", ["type": "boot"])])[0].result
         let hit = await waitFor({ probe.hit("p_cap") != nil }, seconds: 3.0)
-        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
         #expect(hit, "probe must be hit")
         let seen = try #require(probe.hit("p_cap"))
         let doc = try #require(seen.doc, "store had no schedules.json at fire time")
@@ -436,7 +436,7 @@ struct BundleSmokeTests {
             let bad = await schedule(kernel, "p_hang", timeout: badValue)
             #expect(bad["reason"].asString == "bad_arg" && bad["arg"].asString == "timeout", "\(bad)")
         }
-        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
     }
 
     @Test func nonIntArgsAreBadArgRefusals() async throws {
@@ -478,7 +478,7 @@ struct BundleSmokeTests {
         // ABSENT `limit` is the default page, not a refusal.
         let h = await kernel.send([Item("sched", ["type": "history"])])[0].result
         #expect(!h["history"].isNull && h["reason"].isNull, "\(h.serialize())")
-        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
     }
 
     @Test func scheduleRefusesANonObjectPayload() async throws {
@@ -496,7 +496,7 @@ struct BundleSmokeTests {
             #expect(r["reason"].asString == "bad_arg", "\(badValue.serialize()): \(r.serialize())")
             #expect(r["arg"].asString == "payload", "\(badValue.serialize()): \(r.serialize())")
         }
-        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
     }
 
     @Test func aNonNumericTickSecIsRefusedAtWriteTime() async {
@@ -598,7 +598,7 @@ struct BundleSmokeTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(wsId)]))])[0].result
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         // An OPEN file_bridge in a cwd-relative dir on the SAME kernel.

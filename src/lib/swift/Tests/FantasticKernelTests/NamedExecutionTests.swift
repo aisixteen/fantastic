@@ -59,8 +59,11 @@ struct NamedExecutionTests {
         let ps = await kernel.send([
             Item(AgentId("kernel"), .object(["type": .string("ps")]))
         ])[0].result
-        let ids = (ps["tasks"].asArray ?? []).compactMap { $0["id"].asString }
-        #expect(ids.contains("job-1"), "the caller's own id must be the ps handle: \(ids)")
+        let ids = (ps["tasks"].asArray ?? []).compactMap { $0["id"].asInt }
+        // The caller's NAME resolves to the int its execution runs under — that
+        // int is the ps handle (python: one id space, names beside it).
+        let jid = kernel.ledger.resolveName("job-1")
+        #expect(jid != nil && ids.contains(jid!), "the name's id must be the ps handle: \(ids)")
 
         let c = await kernel.send([
             Item(
@@ -68,18 +71,18 @@ struct NamedExecutionTests {
                 .object(["type": .string("cancel"), "task_id": .string("job-1")]))
         ])[0].result
         #expect(c["cancelled"].asBool == true, "\(c.serialize())")
-        #expect(c["killed"][0].asString == "job-1", "\(c.serialize())")
+        #expect(c["killed"][0].asInt == kernel.ledger.resolveName("job-1"), "\(c.serialize())")
 
         let out = await running.value
         #expect(out.status == .cancelled, "\(out.result.serialize())")
-        #expect(out.pid?.value == "job-1", "the outcome's pid is the caller's id")
+        #expect(out.pid?.value == kernel.ledger.resolveName("job-1"), "the outcome's pid is the id the caller's name opened")
     }
 
     @Test func anUnnamedExecutionStillMintsAPid() async {
         let kernel = freshKernel()
         await seed(kernel, "w")
         let out = await kernel.send([Item(AgentId("w"), .object(["type": .string("ping")]))])[0]
-        let pid = out.pid?.value ?? ""
-        #expect(pid.hasPrefix("w:"), "a minted pid is <agent>:<hex>, got \(pid)")
+        let pid = out.pid?.value ?? 0
+        #expect(pid > 0, "a minted pid is an int from the one counter, got \(pid)")
     }
 }

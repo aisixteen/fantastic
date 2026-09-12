@@ -5,17 +5,12 @@
 // UIs speak to Apple FM exactly the way they speak to any other LLM
 // backend in the kernel.
 //
-// Design: ATOMIC + STATELESS. Every `send` builds a fresh
-// `LanguageModelSession(instructions:tools:)`, feeds it ONE user
-// message, streams the reply, lets ARC drop the session. No
-// transcript carries between calls. The 3B on-device model has a
-// 4096-token window — treating each call as `(system + tools +
-// input) → reply` keeps the full budget available every time and
-// architecturally avoids the long-context drift small models hit
-// inside multi-turn chats. History (in-memory per `(agent_id,
-// client_id)`, owned by the shared `AIBackend`) is kept ONLY so the
-// `history` verb can return the UI bubble log — it is NEVER fed back
-// to the model (the shared core runs in `stateless` mode for FM).
+// Every `send` builds a fresh `LanguageModelSession(instructions:tools:)`
+// and streams the reply; the CONVERSATION is the shared core's, exactly as
+// for every other backend: the row store is the history, the view/fold/
+// recall path projects it into the model's window, and the session is
+// handed the projected messages. The 3B on-device model has a 4096-token
+// window, so the projection matters more here than anywhere.
 //
 // The model's DURABLE memory is the always-inject path: at `boot` the
 // bundle self-mounts a private memory FILE surface (a `file_bridge`
@@ -54,33 +49,11 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 provider: "apple_foundation_models",
                 sentence:
                     "Apple Foundation Models LLM agent (on-device; raw prompt-and-parse tool-calling).",
-                verbs: [
-                    "send":
-                        "args: text, client_id?. Atomic stateless call: (system + tools + text) → streaming reply.",
-                    "history":
-                        "args: client_id?. Returns UI bubble log (not fed back to the model).",
-                    "cancel": .string(CANCEL_DOC),
-                    "status":
-                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
-                    "backend_state": "Reports availability + in-flight count.",
-                ] as JSON,
-                // FM: stateless context (the on-device session owns it).
-                stateless: true,
                 compactPrompt: true,
                 reflectExtra: { _ in
                     [
                         "available": .bool(Self.isAvailable()),
                         "model": .string(Self.modelLabel()),
-                    ]
-                },
-                backendStateExtra: { [weak coreBox] _ in
-                    [
-                        "apple_intelligence_available": .bool(Self.isAvailable()),
-                        "model_available": .bool(Self.isAvailable()),
-                        "backend_registered": .bool(true),
-                        "model": .string(Self.modelLabel()),
-                        "in_flight": .integer(Int64(coreBox?.value?.readInFlight() ?? 0)),
-                        "reason": .string(Self.isAvailable() ? "ok" : Self.unavailableReason()),
                     ]
                 },
                 // Always-inject durable memory: the shared core appends
@@ -107,19 +80,13 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                         FoundationModelsProvider(temperature: temp, kernel: kernel))
                 }
             ))
-        coreBox.value = core
     }
-
-    /// Lets the `backendStateExtra` closure read the shared core's live
-    /// in-flight count without capturing `self` (which doesn't exist
-    /// yet when the closure is built inside `init`).
-    private let coreBox = WeakBox()
 
     public var readme: String? {
         """
         foundation_models_backend — Apple on-device Foundation Models LLM backend; thin over FantasticAICore.
-        Verbs: send/history/interrupt/backend_state. Same LLM backend contract as \
-        ollama_backend; runs stateless against the native on-device model.
+        Verbs: the shared ai_core set (reflect/send/inquiry/history/status/context_status/recall/pull/grep/context_recall). \
+        Same LLM backend contract as ollama_backend, against the native on-device model.
         Tool-calling is RAW: no Apple @Generable Tool — the model generates text and \
         FantasticAICore parses the <call name=…> envelope (tool_parse).
         Durable memory: on boot a private memory file surface + a text_file editor are \
@@ -334,10 +301,4 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             return "n/a"
         #endif
     }
-}
-
-/// Small box so the `backendStateExtra` closure can reach the shared
-/// core for its live in-flight count without a capture cycle.
-private final class WeakBox: @unchecked Sendable {
-    weak var value: AIBackend?
 }

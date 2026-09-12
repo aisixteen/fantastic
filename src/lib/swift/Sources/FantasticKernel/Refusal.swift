@@ -135,11 +135,11 @@ public enum Refusal {
         if agentId.hasPrefix(".") {
             return bad(verb, "id", "a name that is not hidden; got \"\(agentId)\"")
         }
-        if agentId.contains(":") {
-            // The minted-pid namespace `<agent>:<hex>`, one id space with the
-            // ledger and task table.
+        // Message ids are plain integers; in prompt text an all-digit agent id
+        // would be indistinguishable from a row id. Python `guard_agent_id`.
+        if agentId.allSatisfy({ $0.isASCII && $0.isNumber }) {
             return bad(
-                verb, "id", "a name without ':' (the minted-pid namespace); got \"\(agentId)\"")
+                verb, "id", "a name, not a number (message ids are ints); got '\(agentId)'")
         }
         return nil
     }

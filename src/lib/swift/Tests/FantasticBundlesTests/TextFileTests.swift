@@ -232,14 +232,15 @@ struct TextFileTests {
                 "type": .string("write"), "path": .string("c.txt"),
                 "checkpoint": .bool(true),
             ]), "mutated\n")
-        let ck = w["ckpt_id"].asString ?? ""
-        #expect(ck.contains(":"), "task pid shape: \(w)")
+        // A ckpt id IS the pid — an int from the one counter (python `_pid`).
+        let ck = w["ckpt_id"]
+        #expect(w["ckpt_id"].asInt != nil, "ckpt id is a pid (int): \(w)")
         #expect(read(dir, "c.txt") == "mutated\n")
         let r = await call(
             k,
             .object([
                 "type": .string("restore"), "path": .string("c.txt"),
-                "ckpt_id": .string(ck),
+                "ckpt_id": ck,
             ]))
         #expect(r["restored"].asBool == true)
         #expect(read(dir, "c.txt") == "original\n")
@@ -259,11 +260,11 @@ struct TextFileTests {
                 "type": .string("write"), "path": .string("c.txt"),
                 "checkpoint": .bool(true),
             ]), "after\n")
-        let ck = w["ckpt_id"].asString ?? ""
+        let ck = w["ckpt_id"]
         #expect(read(dir, "c.txt") == "after\n")
         // The model writes the id it was shown; the notation types it as an int
         // whenever it looks like one.
-        let typed: JSON = Int64(ck).map { JSON.integer($0) } ?? .string(ck)
+        let typed: JSON = ck
         let r = await call(
             k,
             .object([
@@ -282,13 +283,13 @@ struct TextFileTests {
                 "type": .string("write"), "path": .string("new.txt"),
                 "checkpoint": .bool(true),
             ]), "born\n")
-        let ck = w["ckpt_id"].asString ?? ""
+        let ck = w["ckpt_id"]
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("new.txt").path))
         let r = await call(
             k,
             .object([
                 "type": .string("restore"), "path": .string("new.txt"),
-                "ckpt_id": .string(ck),
+                "ckpt_id": ck,
             ]))
         #expect(r["restored"].asBool == true && r["deleted"].asBool == true)
         #expect(
@@ -301,25 +302,25 @@ struct TextFileTests {
         _ = await seed(k, "p.txt", "a = 1\n")
         let c = await call(
             k, .object(["type": .string("checkpoint"), "path": .string("p.txt")]))
-        let ck = c["ckpt_id"].asString ?? ""
+        let ck = c["ckpt_id"]
         _ = await callBin(
             k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("p.txt"), "hunks": .integer(1)])])]),
             block("a = 1", "a = 2"))
         var ls = await call(
             k, .object(["type": .string("checkpoints"), "path": .string("p.txt")]))
-        #expect((ls["ckpts"].asArray ?? []).compactMap { $0["id"].asString } == [ck])
+        #expect((ls["ckpts"].asArray ?? []).map { $0["id"] } == [ck])
         var r = await call(
             k,
             .object([
                 "type": .string("restore"), "path": .string("p.txt"),
-                "ckpt_id": .string(ck),
+                "ckpt_id": ck,
             ]))
         #expect(r["version"].asString == c["version"].asString)
         #expect(read(dir, "p.txt") == "a = 1\n")
         r = await call(
             k,
             .object([
-                "type": .string("drop"), "path": .string("p.txt"), "ckpt_id": .string(ck),
+                "type": .string("drop"), "path": .string("p.txt"), "ckpt_id": ck,
             ]))
         #expect(r["dropped"].asBool == true)
         ls = await call(
@@ -329,7 +330,7 @@ struct TextFileTests {
             k,
             .object([
                 "type": .string("restore"), "path": .string("p.txt"),
-                "ckpt_id": .string(ck),
+                "ckpt_id": ck,
             ]))
         #expect(r["reason"].asString == "not_found")
     }

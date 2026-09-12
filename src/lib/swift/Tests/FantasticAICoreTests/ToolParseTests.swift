@@ -259,6 +259,14 @@ struct ToolParseTests {
             ["text outside a tag"])
     }
 
+    /// Python `test_send_without_target`: the SAME input as the
+    /// neither-target-nor-to case, pinned on its own so the one needle python
+    /// asserts stays asserted when the other test's needles change.
+    @Test("a send without a target is refused")
+    func sendWithoutTarget() throws {
+        try refused(#"<call name="send"><type>reflect</type></call>"#, ["a send names its target"])
+    }
+
     @Test("a send with neither target nor to is refused naming both")
     func sendWithoutTargetNamesBothShapes() throws {
         try refused(

@@ -71,10 +71,10 @@ struct RoutingTests {
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"), "client_id": .string("c"),
             ]))])[0].result
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
+        try await waitForHistory(kernel: kernel, id: id, count: 2)
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(script.calls == 1, "done must end the turn, got \(script.calls) passes")
-        let msgs = await historyRows(kernel: kernel, id: id, client: "c")
+        let msgs = conversationRows(kernel: kernel, id: id)
         #expect(msgs.count == 2)
         #expect(msgs[1]["content"].asString?.hasPrefix("the answer") == true)
     }
@@ -132,8 +132,8 @@ struct RoutingTests {
         #expect(turn3.contains("PASS-ONE-SPEAKING"), "pass 3 read a stale history")
         #expect(turn3.contains("PASS-TWO-SPEAKING"))
         // 3 passes = 3 user turns + 3 assistant turns, two rows each.
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 6)
-        #expect((await historyRows(kernel: kernel, id: id, client: "c")).count == 6)
+        try await waitForHistory(kernel: kernel, id: id, count: 6)
+        #expect((conversationRows(kernel: kernel, id: id)).count == 6)
     }
 
     @Test func replyToOmittedDefaultsToSelf() async throws {
@@ -431,8 +431,8 @@ struct RoutingTests {
             await script.waitForCalls(2), "a call inside thinking must still dispatch")
         #expect(script.requestText(1).contains(" · core "))
         // And the deliberation is not in the durable record.
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
-        let msgs = await historyRows(kernel: kernel, id: id, client: "c")
+        try await waitForHistory(kernel: kernel, id: id, count: 2)
+        let msgs = conversationRows(kernel: kernel, id: id)
         #expect(msgs[1]["content"].asString?.contains("Let me work out") == false)
         #expect(msgs[1]["content"].asString?.contains("on it") == true)
     }
@@ -798,6 +798,61 @@ struct RoutingTests {
             "no trailing stamp line may survive: \(turn2.suffix(500))")
     }
 
+    /// EVERY REPLY NAMES THE TURN THAT MADE THE CALL. The tag carries `↑<turn>` —
+    /// the assistant row's id — and the batch token IS that same id, so `in batch
+    /// <b>` and `↑<turn>` name one row the model can see. The delivered turn's own
+    /// row then takes that id as its `parent`: a thread is the parent chain.
+    /// Python `test_row_ids.py` (`_reply_tag`, `_row_ids_for_incoming`).
+    @Test func aReplyTagNamesItsTurnAndTheDeliveredRowTakesItAsParent() async throws {
+        let call = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let script = ProviderScript([[call + "\n" + call], ["both back " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        let id = ids["mock"]!
+        let r = await kernel.send([Item(id, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        let turn = try #require(r["turn_id"].asInt, "send answers the assistant row's id: \(r.serialize())")
+        #expect(await script.waitForCalls(2), "the batch never came back")
+        let turn2 = script.requestText(1)
+        #expect(turn2.contains(" \u{b7} \u{2191}\(turn) \u{b7} 1 of 2 in batch \(turn)]"), "\(turn2.suffix(400))")
+        #expect(turn2.contains(" \u{b7} \u{2191}\(turn) \u{b7} 2 of 2 in batch \(turn)]"), "\(turn2.suffix(400))")
+        try await waitForHistory(kernel: kernel, id: id, count: 4)
+        let rows = conversationRows(kernel: kernel, id: id)
+        #expect(rows[1]["id"].asInt == turn, "the assistant row IS the turn the tags name")
+        #expect(rows[2]["parent"].asInt == turn, "the delivered reply turn names its parent from the tag")
+        #expect(rows[3]["parent"].asInt == rows[2]["id"].asInt)
+        #expect(rows[0]["parent"].isNull, "an external message is a root")
+        // The parser behind it, on python's own fixture.
+        #expect(incomingParent("[reply to 40 \u{b7} notes read \u{b7} \"read the spec\" \u{b7} \u{2191}17]\nok") == 17)
+        #expect(incomingParent("please survey the corpus") == nil)
+    }
+
+    /// THE MODEL'S `<title>` RIDES THE REPLY TAG — `[reply to <pid> · <target> <verb>
+    /// · "<title>" …]` — so a reply names what it answered forever, in the store
+    /// and in every digest. Swift built the dispatched call's route unit without
+    /// it (measured 2026-09-13: every swift reply tag read `[reply to N · notes
+    /// read · ↑T]` while python/rust carried `· "read filler_1.txt (2 of 8)"`).
+    @Test func theCallTitleRidesTheReplyTag() async throws {
+        let call = """
+            <call name="send"><target_id>core</target_id><title>list the roster (1 of 1)</title>\
+            <type>list_agents</type></call>
+            """
+        let script = ProviderScript([[call], ["seen " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(2), "the reply never came back")
+        try await waitForHistory(kernel: kernel, id: ids["mock"]!, count: 4)
+        // The delivered reply is the second user row — read RAW off the store,
+        // not through the serialized request text (where quotes are escaped).
+        let delivered = conversationRows(kernel: kernel, id: ids["mock"]!)
+            .filter { $0["role"].asString == "user" }.dropFirst().first?["content"].asString ?? ""
+        #expect(delivered.contains(" \u{b7} core list_agents \u{b7} \"list the roster (1 of 1)\" \u{b7} \u{2191}"), "\(delivered.prefix(200))")
+    }
+
     /// Read a batch token out of a delivered turn. Anchored on the STAMP, not on the
     /// words: the system block teaches the shape, so a bare `in batch ` search finds
     /// the prompt's own `<token>` placeholder first.
@@ -868,6 +923,47 @@ struct RoutingTests {
     /// record before it goes rides ON THE REPLY — measured 2026-08-20 (`live_plan`):
     /// stated once as system-block policy, the model wrote a `SEEN` line for 0 of 10
     /// reflects. Only reflect bodies are dropped later, so only they carry it.
+    /// FULL ASYNC: with `context_async` on the record, a reply over the inline
+    /// cap is stored under its pid and the model is handed python's stub — the
+    /// exact bytes, grep named first — with the size counted AFTER the reflect
+    /// nudge rode on. The body stays one `grep`/`pull` away.
+    @Test func anOverCapReplyIsStoredAndDeliveredAsTheStub() async throws {
+        // A window whose inline cap (an eighth of the budget) is smaller than the
+        // mock's own reflect + nudge, so that reply is the one that dehydrates.
+        let reflectSelf = callEnvelope(target: "mock", payload: .object(["type": .string("reflect")]))
+        let script = ProviderScript([[reflectSelf], ["SEEN mock " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"],
+            contextWindow: 8192, meta: ["context_async": .bool(true)])
+        let id = ids["mock"]!
+        _ = await kernel.send([Item(id, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(2), "the reflect never came back")
+        try await waitForHistory(kernel: kernel, id: id, count: 3)
+        let bodies = kernel.rows.forAgent(id).filter { $0["kind"]?.asString == "body" }
+        let bodyRow = try #require(bodies.first, "the over-cap reply must be STORED")
+        let pid = try #require(bodyRow["parent"]?.asInt)
+        let body = bodyRow["content"]?.asString ?? ""
+        #expect(body.hasSuffix(REFLECT_NUDGE), "the nudge is inside the stored body, so it is inside the size")
+        #expect(
+            AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)]))
+                > AIContext.inlineCap(kernel.agent(id)!))
+        let stub =
+            "(settled, \(body.unicodeScalars.count) bytes — NOT inlined. To find a line in it: "
+            + "send yourself <type>grep</type> <query>substring</query> <ids><item>\(pid)</item></ids>. "
+            + "To read it: <type>pull</type> <pid>\(pid)</pid> <offset>0</offset>)"
+        let delivered = conversationRows(kernel: kernel, id: id)[2]["content"].asString ?? ""
+        #expect(delivered.hasPrefix("[reply to \(pid) · mock reflect"), Comment(rawValue: delivered))
+        #expect(delivered.hasSuffix("]\n" + stub), Comment(rawValue: delivered))
+        #expect(!delivered.contains("this body is TRANSIENT"), "the body itself never rode the turn")
+        // and the body is one grep away, by the pid the stub names
+        let g = await kernel.send([Item(id, .object([
+                "type": .string("grep"), "query": .string("TRANSIENT"), "ids": .array([.integer(pid)]),
+            ]))])[0].result
+        #expect(g["total"].asInt == 1 && g["matches"][0]["id"].asInt == pid, Comment(rawValue: g.serialize()))
+    }
+
     @Test func reflectRepliesCarryTheDistillationNudge() async throws {
         let reflect = callEnvelope(target: "core", payload: cheapReflect)
         let list = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
@@ -888,5 +984,360 @@ struct RoutingTests {
         #expect(
             turn2.components(separatedBy: "this body is TRANSIENT").count == 2,
             "and ONLY the reflect block carries it")
+    }
+
+    // ─── every call in a turn gets its reply — delivered TOGETHER ──
+    // Mirrors python `test_reply_delivery.py`. Two defects pinned there, both
+    // measured live: 2026-08-24 (`live_build`) replies were delivered
+    // SEQUENTIALLY and each delivery blocked on a whole model turn — 26 of 36
+    // calls never answered; 2026-08-25 (`live_subai_langgraph`) one reply per
+    // turn — a turn that made 7 calls spent the next 7 turns collecting its own
+    // answers, asked `list_agents` at t3, received the t1 reflect instead, and
+    // re-asked until the repeat tripwire killed the run with nothing built.
+    //
+    // Python drives `_route_reply` against an ARRAY-SHAPED KERNEL STUB (one
+    // outcome per item, `sent` = the delivered `type:send` handoffs). Swift has
+    // no stub seam — `routeReply` takes a real `Kernel` — so the stub's two
+    // halves are two bundles on a bare in-memory kernel: `EchoBundle` answers
+    // `{ok:<id>}` and records what it answered (the stub's `batches`),
+    // `DeliveryRecorder` records `(agent, payload)` per destination (the stub's
+    // `sent`). Delivery is AWAITED inside `routeReply` here, so there is no
+    // `_settle` poll: when the call returns, every message has landed.
+
+    @Test func aTurnOfFourCallsIsAnsweredInOneMessage() async throws {
+        // Four calls out → ONE delivered message holding four tagged blocks, in
+        // the model's own emission order.
+        //
+        // "ONE kernel batch" is python's `k.batches == [[…]]`. The kernel
+        // launches every item of a batch before its first await
+        // (BatchSend.swift), so the honest twin is: all four rows are in `ps` AT
+        // ONCE — which a serial dispatch (the 2026-08-24 shape) can never show.
+        // The echo agents pause so the window is wide enough to read.
+        let (kernel, echo, sent) = await bootStubKernel(echoPauseNanos: 200_000_000)
+        await seedStub(kernel, "ai", "delivery.tools")
+        let targets = ["meter", "readings", "totals", "runner"]
+        for t in targets { await seedStub(kernel, t, "echo.tools") }
+        let text = targets.map { stubCall($0) }.joined()
+        let route = Task {
+            await routeReply(
+                selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
+                sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+        }
+        var inFlight: Set<String> = []
+        for _ in 0..<100 {
+            inFlight = Set(
+                await psRows(kernel).filter { $0["verb"].asString == "ping" }
+                    .compactMap { $0["agent"].asString })
+            if inFlight.count == targets.count { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(inFlight == Set(targets), "all four calls must dispatch in ONE kernel batch: \(inFlight)")
+        await route.value
+        #expect(Set(echo.answered().map(\.0)) == Set(targets))
+
+        #expect(sent.messages().count == 1, "one destination -> exactly one delivered message")
+        let (target, payload) = try #require(sent.messages().first)
+        #expect(target == "ai")
+        let blocks = (payload["text"].asString ?? "").components(separatedBy: "\n\n")
+        #expect(blocks.count == 4, Comment(rawValue: payload["text"].asString ?? ""))
+        for (n, (block, agent)) in zip(blocks, targets).enumerated() {
+            #expect(
+                block.hasReplyTag("\(agent) ping \u{b7} \(n + 1) of 4 in batch "),
+                "block \(n + 1) is not \(agent)'s: \(block.prefix(120))")
+        }
+    }
+
+    @Test func twoDestinationsGetTwoMessagesWithTheirOwnCounts() async throws {
+        // Per-call `reply_to` splits the batch: each destination's M counts only
+        // what IT receives; both messages share the turn's batch token.
+        let (kernel, _, sent) = await bootStubKernel()
+        for d in ["ai", "scribe"] { await seedStub(kernel, d, "delivery.tools") }
+        for t in ["meter", "totals", "readings"] { await seedStub(kernel, t, "echo.tools") }
+        let text = stubCall("meter") + stubCall("totals", replyTo: "scribe") + stubCall("readings")
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+
+        let byDest = Dictionary(
+            sent.messages().map { ($0.0, $0.1["text"].asString ?? "") }, uniquingKeysWith: { a, _ in a })
+        #expect(Set(byDest.keys) == ["ai", "scribe"])
+        let ai = byDest["ai"] ?? ""
+        #expect(ai.contains(" \u{b7} 1 of 2 in batch "), Comment(rawValue: ai))
+        #expect(ai.contains(" \u{b7} 2 of 2 in batch "), Comment(rawValue: ai))
+        #expect(!(byDest["scribe"] ?? "").contains("in batch"), "a lone block carries no suffix")
+        let token = ai.components(separatedBy: "in batch ").dropFirst().first?.prefix(4) ?? ""
+        // the same turn token names the round on the multi-block side
+        #expect(!token.isEmpty)
+    }
+
+    @Test func fireAndForgetStillDispatchesButIsNotCounted() async throws {
+        // `reply_to:null` runs the call and discards the answer — it appears in
+        // the kernel batch and in NO delivered message, and M ignores it.
+        let (kernel, echo, sent) = await bootStubKernel()
+        await seedStub(kernel, "ai", "delivery.tools")
+        for t in ["meter", "totals"] { await seedStub(kernel, t, "echo.tools") }
+        let text = stubCall("meter") + stubCall("totals", replyTo: .some(nil))
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+
+        #expect(Set(echo.answered().map(\.0)) == ["meter", "totals"], "the discarded call still ran")
+        #expect(sent.messages().count == 1)
+        let body = sent.messages().first?.1["text"].asString ?? ""
+        #expect(!body.contains("totals"), Comment(rawValue: body))
+        #expect(!body.contains("in batch"), "one awaited call -> no batch suffix")
+    }
+
+    @Test func aFailedOutcomeIsRenderedNotHidden() async throws {
+        // A call that failed or timed out occupies its slot in M with its error
+        // body — a partial batch is the one thing the model must never see.
+        //
+        // Python's stub ANSWERS `timed_out` for `hung`; here the kernel produces
+        // it for real: `hung` pauses 500ms and the layer's deadline is 100ms. The
+        // third call is the same agent under the model's OWN `<timeout>` — the
+        // override python pins in `test_the_layer_default_timeout_rides_every_item`
+        // — so one turn shows a slot that died on the layer deadline beside one
+        // the model rescued, and neither is hidden.
+        let (kernel, _, sent) = await bootStubKernel(hungPauseNanos: 500_000_000)
+        await seedStub(kernel, "ai", "delivery.tools")
+        await seedStub(kernel, "hung", "hung.tools")
+        await seedStub(kernel, "meter", "echo.tools")
+        var own: OrderedDictionary<String, JSON> = ["target_id": .string("hung")]
+        own["reply_to"] = .string("self")
+        own["timeout"] = .integer(2)
+        own["payload"] = stubPing
+        let text = stubCall("hung") + stubCall("meter") + renderCall("send", own)
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 0.1)
+
+        let body = sent.messages().first?.1["text"].asString ?? ""
+        let blocks = body.components(separatedBy: "\n\n")
+        #expect(blocks.count == 3, Comment(rawValue: body))
+        #expect(blocks[0].hasReplyTag("hung ping \u{b7} 1 of 3 in batch "), Comment(rawValue: blocks[0]))
+        #expect(blocks[0].contains("timed out after 0.1s"), Comment(rawValue: blocks[0]))
+        #expect(blocks[1].hasReplyTag("meter ping \u{b7} 2 of 3 in batch "), Comment(rawValue: blocks[1]))
+        #expect(blocks[2].hasReplyTag("hung ping \u{b7} 3 of 3 in batch "), Comment(rawValue: blocks[2]))
+        #expect(blocks[2].contains("<ok>hung</ok>"), "the model's own timeout must override the layer's: \(blocks[2])")
+    }
+
+    @Test func theModelsExecIdRidesTheItemAsItsId() async throws {
+        // `<exec_id>` is the call-level execution NAME; core hands it to the
+        // kernel as the batch item's `id` (a bare `<id>` would collide with
+        // payload ids).
+        //
+        // Python reads the item off its stub. Here the kernel is real, and a
+        // named item is exactly what the LEDGER records: the name resolves to
+        // the execution's int id, the row carries the retry budget, and the
+        // reply tag names that same id as its pid.
+        let (kernel, echo, sent) = await bootStubKernel()
+        await seedStub(kernel, "ai", "delivery.tools")
+        await seedStub(kernel, "vault", "echo.tools")
+        var args: OrderedDictionary<String, JSON> = ["target_id": .string("vault")]
+        args["reply_to"] = .string("self")
+        args["exec_id"] = .string("job-alpha")
+        args["retries"] = .integer(2)
+        args["payload"] = .object(["type": .string("withdraw")])
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", args), clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+
+        let jid = try #require(kernel.ledger.resolveName("job-alpha"), "the exec_id opened no named execution")
+        let row = try #require(kernel.ledger.rows(for: nil).first { $0["id"].asInt == jid })
+        #expect(row["retries"].asInt == 2, Comment(rawValue: row.serialize()))
+        #expect(row["named"].asBool == true && row["target"].asString == "vault", Comment(rawValue: row.serialize()))
+        #expect(echo.answered().first?.1 == .object(["type": .string("withdraw")]), "the payload must reach the target verbatim")
+        let body = sent.messages().first?.1["text"].asString ?? ""
+        #expect(body.hasPrefix("[reply to \(jid) \u{b7} vault withdraw]"), Comment(rawValue: body))
+    }
+
+    @Test func toFansOutOneCopyPerRecipientCarryingTheListAndMsg() async throws {
+        // `<to>` becomes N kernel items; every copy carries the whole list, the
+        // sending turn's id (`msg`) and the answered message (`re`).
+        let (kernel, _, sent) = await bootStubKernel()
+        await seedStub(kernel, "ai", "delivery.tools")
+        for s in ["solver_2", "solver_3"] { await seedStub(kernel, s, "delivery.tools") }
+        var args: OrderedDictionary<String, JSON> = [
+            "to": .array([.string("solver_2"), .string("solver_3")])
+        ]
+        args["re"] = .integer(398)
+        args["reply_to"] = .string("null")
+        args["payload"] = .object(["type": .string("send"), "text": .string("CANDIDATE 586")])
+        let call = renderCall("send", args)
+
+        // The ITEMS, in emission order — python reads them off its stub's batch;
+        // here `fanOut` is the step that makes them, read before dispatch.
+        let items = fanOut(extractToolCalls(call), turnId: 412)
+        #expect(items.map { $0.arguments["target_id"].asString } == ["solver_2", "solver_3"])
+        // …and each copy REALLY reaches its recipient, carrying the same fields.
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: call, clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, turnId: 412)
+        let peers = sent.messages().filter { ["solver_2", "solver_3"].contains($0.0) }
+        #expect(Set(peers.map(\.0)) == ["solver_2", "solver_3"], "\(peers.map(\.0))")
+        for p in items.map({ $0.arguments["payload"] }) + peers.map(\.1) {
+            #expect(p["to"] == .array([.string("solver_2"), .string("solver_3")]), Comment(rawValue: p.serialize()))
+            #expect(p["msg"].asInt == 412 && p["re"].asInt == 398, Comment(rawValue: p.serialize()))
+            #expect(p["text"].asString == "CANDIDATE 586")
+        }
+        #expect(sent.messages().count == 2, "reply_to:null — nothing is owed back to ai")
+    }
+
+    // ─── `await`: an honest wait or a refusal, never a silent stall ──
+    // Mirrors python `test_done_and_nudge.py` (the two `await` cases).
+
+    @Test func awaitWithNothingInFlightIsRefusedAndToldWhatToDo() async throws {
+        // Nothing dispatched, nothing queued, nothing running: waiting would be
+        // waiting forever on an empty inbox. The refusal is DELIVERED as a turn,
+        // so the model acts on it instead of sitting on a return value nobody reads.
+        //
+        // ITS OWN AGENT ID (python's `nd_aw`), not the suite's `mock`: `inFlightTurns`
+        // is keyed by the bare id across every kernel in the process, so a sibling
+        // case's live batch for "mock" would count as THIS agent's in-flight work
+        // and turn the refusal into an honoured wait (measured 2026-09-13: passes
+        // alone, fails under parallel execution).
+        let script = ProviderScript([["waiting <call name=\"await\"></call>"], [doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["nd_aw": script]), backendIds: ["nd_aw"])
+        _ = await kernel.send([Item(ids["nd_aw"]!, .object([
+                "type": .string("send"), "text": .string("hi"), "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(2), "the refusal never woke the model")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(script.calls == 2, "and `done` ends it: \(script.calls) passes")
+        let turn2 = script.requestText(1)
+        #expect(turn2.contains("[await refused]"), Comment(rawValue: turn2.suffix(400).description))
+        #expect(turn2.contains("nothing of yours is in flight"), Comment(rawValue: turn2.suffix(400).description))
+    }
+
+    @Test func awaitWithAMessageQueuedStopsQuietlyAndTheQueueWakesIt() async throws {
+        // The honest wait: something is queued for the agent, so `await` ends the
+        // turn with no nudge and no refusal; the queued message is the next turn.
+        //
+        // A slow first pass (300ms per chunk), so the second send queues behind
+        // it under the FIFO — python's `_Script(delay=0.3)`.
+        let script = ProviderScript([["waiting <call name=\"await\"></call>"], [doneEnvelope]])
+        var cfg = scriptedConfig(["nd_aw2": script])
+        cfg.makeProvider = { _, _, _ in
+            .provider(MockProvider(script: script, chunkDelayNanos: 300_000_000))
+        }
+        // Its own id (python's `nd_aw2`) for the same reason as the case above:
+        // `pending` must be THIS agent's queue, not a sibling "mock"'s batch.
+        let (kernel, ids, _) = await bootMockKernel(config: cfg, backendIds: ["nd_aw2"])
+        let id = ids["nd_aw2"]!
+        let first = Task {
+            await kernel.send([Item(id, .object([
+                    "type": .string("send"), "text": .string("one"), "client_id": .string("c"),
+                ]))])[0].result
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let second = Task {
+            await kernel.send([Item(id, .object([
+                    "type": .string("send"), "text": .string("two"), "client_id": .string("c"),
+                ]))])[0].result
+        }
+        _ = await first.value
+        _ = await second.value
+        try await Task.sleep(nanoseconds: 400_000_000)
+        #expect(script.calls == 2, "expected exactly the two sends, got \(script.calls) passes")
+        for i in 0..<script.calls {
+            #expect(!script.requestText(i).contains("[await refused]"), "pass \(i + 1) was refused")
+            #expect(!script.requestText(i).contains("[no call was dispatched]"), "pass \(i + 1) was nudged")
+        }
+        let last = script.request(1)?.last?["content"].asString ?? ""
+        #expect(last.hasSuffix("two"), "the queued message must be the next turn: \(last.suffix(200))")
+    }
+}
+
+// MARK: - python's `_Kernel` stub, as bundles on a bare kernel
+
+/// The `{type:"ping"}` payload every stub call carries — python's default
+/// `reflect`, swapped for a verb the kernel does not compose itself, so an echo
+/// reply is exactly what the bundle returned.
+private let stubPing: JSON = .object(["type": .string("ping")])
+
+/// python's `_call(target, reply_to)`.
+private func stubCall(_ target: String, replyTo: String?? = .some("self")) -> String {
+    callEnvelope(target: target, payload: stubPing, replyTo: replyTo)
+}
+
+/// The stub's "one outcome per item" half: answers any verb `{ok:<id>}` after
+/// `pauseNanos`, and records `(agent, payload)` for every verb it answered —
+/// python's `batches`, read as what actually ran.
+private final class EchoBundle: AgentBundle, @unchecked Sendable {
+    let name = "echo"
+    private let pauseNanos: UInt64
+    private let lock = NSLock()
+    private var seen: [(String, JSON)] = []
+
+    init(pauseNanos: UInt64 = 0) { self.pauseNanos = pauseNanos }
+
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString ?? "" {
+        case "boot", "shutdown": return nil
+        default:
+            lock.withLock { seen.append((agentId.value, payload)) }
+            if pauseNanos > 0 { try? await Task.sleep(nanoseconds: pauseNanos) }
+            return .object(["ok": .string(agentId.value)])
+        }
+    }
+
+    func answered() -> [(String, JSON)] { lock.withLock { seen } }
+}
+
+/// The stub's `sent` half: records every delivered `(agent, payload)`. Unlike
+/// `PayloadRecorder` it keeps the AGENT, so two destinations can be told apart.
+private final class DeliveryRecorder: AgentBundle, @unchecked Sendable {
+    let name = "delivery"
+    private let lock = NSLock()
+    private var seen: [(String, JSON)] = []
+
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString ?? "" {
+        case "boot", "shutdown": return nil
+        default:
+            lock.withLock { seen.append((agentId.value, payload)) }
+            return .object(["recorded": .bool(true)])
+        }
+    }
+
+    /// Every delivered message as `(destination, payload)`, in arrival order.
+    func messages() -> [(String, JSON)] { lock.withLock { seen } }
+}
+
+/// A bare in-memory kernel with the two stub bundles registered (`echo.tools`,
+/// `hung.tools` — an echo with its own pause — and `delivery.tools`). No
+/// backend: these cases drive `routeReply` directly, as python drives
+/// `_route_reply`.
+private func bootStubKernel(
+    echoPauseNanos: UInt64 = 0, hungPauseNanos: UInt64 = 0
+) async -> (Kernel, EchoBundle, DeliveryRecorder) {
+    let registry = BundleRegistry()
+    let echo = EchoBundle(pauseNanos: echoPauseNanos)
+    registry.register("echo.tools", echo)
+    registry.register("hung.tools", EchoBundle(pauseNanos: hungPauseNanos))
+    let sent = DeliveryRecorder()
+    registry.register("delivery.tools", sent)
+    let kernel = Kernel(storage: .inMemory, bundles: registry)
+    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    kernel.register(root)
+    kernel.setRoot(root)
+    return (kernel, echo, sent)
+}
+
+private func seedStub(_ kernel: Kernel, _ id: String, _ module: String) async {
+    _ = await kernel.send([Item(AgentId("kernel"), .object([
+            "type": .string("create_agent"), "parent_id": .string("core"),
+            "id": .string(id), "handler_module": .string(module),
+        ]))])[0].result
+}
+
+extension String {
+    /// `[reply to <pid> · <rest>` at the START of a block — python's
+    /// `startswith(f"[reply to {agent}:pid · …")`, with the pid an int here.
+    fileprivate func hasReplyTag(_ rest: String) -> Bool {
+        range(
+            of: "^\\[reply to [0-9]+ \u{b7} " + NSRegularExpression.escapedPattern(for: rest),
+            options: .regularExpression) != nil
     }
 }

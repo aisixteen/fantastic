@@ -68,7 +68,7 @@ struct BinaryBatchTests {
         #expect(out.status == .completed, "\(out.result.serialize())")
         #expect(out.result["written"].asInt == Int64(payload.count), "\(out.result.serialize())")
         #expect(sink.received == payload, "bytes must ride verbatim")
-        #expect(out.pid?.value.hasPrefix("sink:") == true, "\(out.pid?.value ?? "nil")")
+        #expect((out.pid?.value ?? 0) > 0, "a pid is an int from the one counter: \(String(describing: out.pid))")
     }
 
     @Test func aNamedBinaryItemDedupsLikeAnyOther() async {
@@ -81,7 +81,8 @@ struct BinaryBatchTests {
                 id: "job-b", binary: first)
         ])[0]
         #expect(out.result["written"].asInt == 3, "\(out.result.serialize())")
-        #expect(out.pid?.value == "job-b")
+        // A NAMED item is ledgered under the int its name opened — the pid IS that id.
+        #expect(out.pid?.value == kernel.ledger.resolveName("job-b"))
 
         // The SAME id re-sent returns the recorded outcome and runs nothing.
         let again = await kernel.send([

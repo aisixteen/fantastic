@@ -4,7 +4,7 @@ id: reboot_continuity
 group: coding
 title: "a live run rebooted half-way: same store, fresh process state, the work continues"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [python, rust, swift]
 costs: turns
 limits:
   idle_seconds: 60

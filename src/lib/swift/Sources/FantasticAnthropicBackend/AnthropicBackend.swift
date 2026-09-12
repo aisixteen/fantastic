@@ -72,27 +72,12 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
                 kind: "anthropic_backend",
                 provider: "anthropic",
                 sentence:
-                    "Anthropic-backed LLM agent (Messages API; raw prompt-and-parse tool-calling).",
-                verbs: [
-                    "send": "args: text, client_id?. Streams a response via SSE.",
-                    "history": "args: client_id?. Returns prior turns.",
-                    "cancel": .string(CANCEL_DOC),
-                    "status":
-                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
-                    "backend_state": "Reports availability + in-flight.",
-                ] as JSON,
+                    "Anthropic-backed LLM agent (raw prompt-and-parse tool-calling).",
                 includeAccumulatedOnError: true,
                 reflectExtra: { agent in
                     [
                         "endpoint": .string(Self.endpoint(agent: agent)),
                         "model": .string(Self.model(agent: agent)),
-                    ]
-                },
-                backendStateExtra: { agent in
-                    [
-                        "endpoint": .string(Self.endpoint(agent: agent)),
-                        "model": .string(Self.model(agent: agent)),
-                        "configured": .bool(readApiKey() != nil),
                     ]
                 },
                 makeProvider: { agent, _, _ in
@@ -122,7 +107,7 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? {
         """
         anthropic_backend — Anthropic Messages-API LLM agent; thin over FantasticAICore.
-        Verbs: send, history, cancel, status, backend_state; the api key comes from the ENVIRONMENT (ANTHROPIC_KEY, else ANTHROPIC_API_KEY) and is never stored; 429 + gateway retry.
+        Verbs: the shared ai_core set (reflect it); the api key comes from the ENVIRONMENT (ANTHROPIC_KEY, else ANTHROPIC_API_KEY) and is never stored; 429 + gateway retry.
         Tool-calling is RAW: the provider streams text and FantasticAICore parses the <call name=…> envelope (tool_parse); a native tool_use block that arrives anyway is a LOUD error.
         `endpoint` overrides the API host; set it for any proxy, or the default host is used with your key and answers 401.
         """

@@ -27,3 +27,10 @@ A consumer is therefore storage-agnostic — it pulls/pushes by id, blind to
 what's behind it (a file, a socket, a generator). `file_bridge` is the
 reference SOURCE+SINK; the served `GET /<rest>/file/<path>` octet route is
 read_stream-only.
+
+## The kernel's tail
+
+`Kernel.rows_stream(after)` is a SOURCE inside the process: every message with
+`id > after`, then every message as it lands. Yielding is not a message — no send, no
+task, no row. The loader's message pump is its first consumer; a UI or a relay can be
+the next, at no cost to the agents.

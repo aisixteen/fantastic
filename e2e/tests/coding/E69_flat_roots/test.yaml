@@ -4,7 +4,7 @@ id: flat_roots
 group: coding
 title: "24 tiny root tasks — folds of folds appear and the final answer needs all of them"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [python, rust, swift]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:

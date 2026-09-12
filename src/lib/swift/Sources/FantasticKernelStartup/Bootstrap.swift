@@ -7,7 +7,8 @@
 //   - `Bootstrap.oneShot(workdir:)` — no lock; for `fantastic <id>
 //     <verb>` style one-off RPC against an existing workdir
 //   - `runUntilSignal(_:)` — daemon-mode helper that boots all loaded
-//     agents, then blocks until SIGINT/SIGTERM, then shuts down
+//     agents, then blocks until SIGINT/SIGTERM/SIGHUP or a root-only
+//     `shutdown_kernel`, then runs the kernel's graceful `shutdown()`
 
 import FantasticJSON
 import FantasticKernel
@@ -41,6 +42,12 @@ public enum Bootstrap {
 
         let kernel = try await startKernel(workdir: workdir, portHint: portHint)
 
+        // THE MESSAGE STORE, hydrated COLD — before any agent exists, from
+        // above (python `hydrate_messages` in the bootstrap). A file of another
+        // version or a cut row refuses the boot rather than hydrating half a
+        // conversation.
+        try hydrateMessages(kernel, rootDir: url.appendingPathComponent(".fantastic"))
+
         // Hydrate state from disk if present.
         let stateFile = url.appendingPathComponent(".fantastic/state.json")
         if let data = try? Data(contentsOf: stateFile),
@@ -69,6 +76,7 @@ public enum Bootstrap {
     ) async throws -> Kernel {
         let url = URL(fileURLWithPath: workdir, isDirectory: true)
         let kernel = try await startKernel(workdir: workdir, portHint: 0)
+        try hydrateMessages(kernel, rootDir: url.appendingPathComponent(".fantastic"))
         let stateFile = url.appendingPathComponent(".fantastic/state.json")
         if let data = try? Data(contentsOf: stateFile),
             let json = String(data: data, encoding: .utf8)
@@ -84,8 +92,10 @@ public enum Bootstrap {
     }
 
     /// Run a kernel forever in daemon mode. Boots every loaded agent,
-    /// installs SIGINT/SIGTERM handlers, awaits a signal, then
-    /// shuts the kernel down gracefully + releases the lock.
+    /// installs SIGINT/SIGTERM/SIGHUP handlers, awaits a signal OR the
+    /// kernel's own stop request (`shutdown_kernel`), then runs the graceful
+    /// `Kernel.shutdown()` — drain, the last message window, the depth-first
+    /// hook walk — and releases the lock.
     public static func runUntilSignal(
         kernel: Kernel,
         lock: WorkdirLock
@@ -97,48 +107,91 @@ public enum Bootstrap {
         // AFTER the boot loop: the store agent must be live before the ledger
         // can rehydrate through it or install its flusher.
         await kernel.installLedgerPersistence()
+        // THE PUMP SUBSCRIBES HERE: after hydration (cold, above) and the
+        // ledger, at the highest id present. `subscribe(after:)` replays what
+        // the boot loop minted meanwhile, so nothing is lost.
+        kernel.installMessagePump(after: kernel.rows.nextId - 1)
 
         FileHandle.standardError.write(
             "fantastic: daemon up. \(kernel.allAgents().count) agent(s) loaded. Ctrl-C to stop.\n"
                 .data(using: .utf8) ?? Data())
 
-        // Wait for a signal.
-        await waitForSignal()
+        await awaitStop(kernel: kernel)
 
         FileHandle.standardError.write(
             "fantastic: shutting down...\n".data(using: .utf8) ?? Data())
-
-        // Reverse order so children stop before parents.
-        for agent in kernel.allAgents().reversed() {
-            _ = await kernel.send([Item(agent.id, .object(["type": .string("shutdown")]))])[0].result
-        }
-        kernel.shutdown()
+        // Drain, land the last message window (provider still alive), then the
+        // depth-first `onShutdown`/`onDelete` walk. Records and tree untouched.
+        await kernel.shutdown()
         lock.release()
     }
 
-    private static func waitForSignal() async {
-        let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-        signal(SIGINT, SIG_IGN)
-        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-        signal(SIGTERM, SIG_IGN)
-
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            let resumed = Atomic(false)
-            signalSource.setEventHandler {
-                if resumed.compareAndSwap(false, true) {
-                    cont.resume()
-                }
-            }
-            termSource.setEventHandler {
-                if resumed.compareAndSwap(false, true) {
-                    cont.resume()
-                }
-            }
-            signalSource.resume()
-            termSource.resume()
+    /// Block until an OS stop signal (SIGINT/SIGTERM/SIGHUP) arrives OR the
+    /// kernel's own `requestShutdown` fires (the root-only `shutdown_kernel`
+    /// verb, which deferred its trigger 100 ms so its ack flushed first). The
+    /// two are raced; whichever loses is cancelled. Python `longrun` installs
+    /// the same three handlers on one stop event that `shutdown_kernel` shares.
+    public static func awaitStop(kernel: Kernel) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await waitForSignal() }
+            group.addTask { await kernel.shutdownRequested() }
+            await group.next()
+            group.cancelAll()
         }
-        signalSource.cancel()
-        termSource.cancel()
+    }
+
+    /// Resolve on the first of SIGINT/SIGTERM/SIGHUP — or on cancellation, so
+    /// a serve loop that ends another way (`shutdown_kernel`) does not hang on
+    /// a continuation nobody will ever resume.
+    private static func waitForSignal() async {
+        let sources = [SIGINT, SIGTERM, SIGHUP].map { sig -> DispatchSourceSignal in
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
+            signal(sig, SIG_IGN)
+            return src
+        }
+        let resumed = Atomic(false)
+        let slot = ContinuationSlot()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                slot.store(cont)
+                for src in sources {
+                    src.setEventHandler {
+                        if resumed.compareAndSwap(false, true) {
+                            slot.take()?.resume()
+                        }
+                    }
+                    src.resume()
+                }
+                // Cancelled before the continuation was stored: honour it now.
+                if Task.isCancelled, resumed.compareAndSwap(false, true) {
+                    slot.take()?.resume()
+                }
+            }
+        } onCancel: {
+            if resumed.compareAndSwap(false, true) {
+                slot.take()?.resume()
+            }
+        }
+        for src in sources { src.cancel() }
+    }
+}
+
+/// One-slot holder so the signal handlers and the cancellation handler can
+/// hand the same continuation to exactly one resumer.
+private final class ContinuationSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<Void, Never>?
+
+    func store(_ c: CheckedContinuation<Void, Never>) {
+        lock.lock(); defer { lock.unlock() }
+        cont = c
+    }
+
+    func take() -> CheckedContinuation<Void, Never>? {
+        lock.lock(); defer { lock.unlock() }
+        let c = cont
+        cont = nil
+        return c
     }
 }
 

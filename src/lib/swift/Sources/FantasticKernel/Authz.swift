@@ -57,6 +57,9 @@ public struct Decision {
 /// while holding no grant that names it (production audit, 2026-08-27).
 public let privilegedVerbs: Set<String> = [
     "create_agent", "delete_agent", "update_agent", "state_subscribe",
+    // HYDRATION's pair — reading a conversation WHOLE and writing one into an
+    // agent. A wildcard never carries them; only a grant that NAMES them does.
+    "rows_read", "rows_write",
 ]
 
 /// The remedy shown on any denial: authority descends, it is never self-raised.

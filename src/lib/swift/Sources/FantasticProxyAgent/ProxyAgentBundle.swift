@@ -12,7 +12,7 @@
 //              host    → forward to host; overlay host_registered: true
 //   boot       no host → {ok: true}
 //              host    → host.onBoot() + forward
-//   shutdown   no host → {ok: true}
+//   shutdown   lifecycle no-op → null (hosts tear down in onDelete)
 //              host    → forward
 //   any other  no host → {error, reason: "no_host"}
 //              host    → forward
@@ -102,10 +102,8 @@ public struct ProxyAgentBundle: AgentBundle {
             h.onBoot()
             return forwardToHost(host: h, payload: payload)
 
-        case ("shutdown", nil):
-            return .object(["ok": .bool(true)])
-        case ("shutdown", let h?):
-            return forwardToHost(host: h, payload: payload)
+        case ("shutdown", _):
+            return .null
 
         case (_, nil):
             return .object([
@@ -131,7 +129,7 @@ public struct ProxyAgentBundle: AgentBundle {
         let sentence: String =
             hostRegistered
             ? "Host-implemented agent. See host_registered + verbs above for behaviour."
-            : "Host-implemented agent — no host registered yet. Verbs other than reflect/boot/shutdown will return {error, reason: \"no_host\"}."
+            : "Host-implemented agent — no host registered yet. Verbs other than reflect/boot will return {error, reason: \"no_host\"}."
         return .object([
             "id": .string(agentId.value),
             "sentence": .string(sentence),
@@ -140,7 +138,6 @@ public struct ProxyAgentBundle: AgentBundle {
             "verbs": [
                 "reflect": "Identity + host_registered probe.",
                 "boot": "Fire host.onBoot() if registered.",
-                "shutdown": "Forward to host if registered.",
                 "*": "Any other verb forwards to host.handle.",
             ] as JSON,
         ])

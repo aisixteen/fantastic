@@ -112,11 +112,10 @@ struct ReflectUniformTests {
     @Test func embeddedDocsLoad() {
         // The `docs/` resource tree must load (Bundle.module wired), each with a
         // `> ` descriptor line the index reads.
-        #expect(RootDocs.all.count == RootDocs.keys.count)
+        #expect(RootDocs.all.count == RootDocs.keys(RootDocs.tree).count)
         #expect(RootDocs.all.contains { $0.key == "self-extension" })
         for (key, body) in RootDocs.all {
             #expect(!body.isEmpty, "empty doc \(key)")
-            #expect(body.hasPrefix("> "), "doc \(key) must open with a `> ` descriptor")
         }
     }
 
@@ -179,6 +178,68 @@ struct ReflectUniformTests {
         // a `..` escape is refused.
         let esc = await kernel.send([Item("core", ["type": "reflect", "readme": "../root_readme"])])[0].result
         #expect(esc["readme"]["error"].asString != nil)
+    }
+
+    /// The manual is python's `kernel_state/docs/` tree, byte for byte, nested
+    /// dirs as tiers: the index lists `frontend` with `children`, a nested key
+    /// opens by `frontend/routing`, and the error texts are python's `{sel!r}`.
+    @Test func readmeTreeIsNestedLikePythons() async {
+        let kernel = makeKernel()
+        let idx = await kernel.send([Item("core", ["type": "reflect", "readme": "index"])])[0].result
+        let entries = idx["readme"]["index"].asArray ?? []
+        // Python walks `sorted(d.iterdir())`: alphabetical, every `*.md`.
+        #expect(
+            entries.map { $0["key"].asString ?? "" } == [
+                "agents", "daemon", "frontend", "memory", "orchestration", "persistence", "reflect",
+                "self-extension", "streams", "system-verbs", "terminal", "transports",
+            ], "\(entries.map { $0["key"] })")
+        let frontend = entries.first { $0["key"].asString == "frontend" }
+        #expect(
+            frontend?["children"].asArray?.map { $0["key"].asString ?? "" }
+                == ["frontend/panel-recipe", "frontend/routing"], "\(String(describing: frontend))")
+        for e in entries where e["key"].asString != "frontend" {
+            #expect(e["children"].isNull, "only a sibling dir adds children: \(e)")
+        }
+        // A nested key opens; the parent view carries its children's index.
+        let routing = await kernel.send([Item("core", ["type": "reflect", "readme": "frontend/routing"])])[0].result
+        #expect(routing["readme"]["key"].asString == "frontend/routing")
+        #expect(routing["readme"]["body"].asString?.isEmpty == false)
+        #expect(routing["readme"]["children"].isNull)
+        let parent = await kernel.send([Item("core", ["type": "reflect", "readme": "frontend"])])[0].result
+        #expect(parent["readme"]["children"].asArray?.count == 2)
+        // Python's texts: `no doc {sel!r}` inside the tree, `bad key {sel!r}` escaping it;
+        // `keys` is the flat pre-order list either way.
+        let miss = await kernel.send([Item("core", ["type": "reflect", "readme": "nope"])])[0].result
+        #expect(miss["readme"]["error"].asString == "no doc 'nope'")
+        #expect(miss["readme"]["keys"].asArray?.map { $0.asString ?? "" }.contains("frontend/routing") == true)
+        let esc = await kernel.send([Item("core", ["type": "reflect", "readme": "../root_readme"])])[0].result
+        #expect(esc["readme"]["error"].asString == "bad key '../root_readme'")
+        let inside = await kernel.send([Item("core", ["type": "reflect", "readme": "frontend/../reflect"])])[0].result
+        #expect(inside["readme"]["key"].asString == "frontend/../reflect" && inside["readme"]["body"].asString != nil)
+        // The bundled tree equals python's docs dir (the seed copies it as is).
+        let py = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("python/bundled_agents/loader/kernel_state/src/kernel_state/docs")
+        for (key, body) in RootDocs.all {
+            let want = try? String(contentsOf: py.appendingPathComponent("\(key).md"), encoding: .utf8)
+            #expect(want == body, "docs/\(key).md differs from python's")
+        }
+        #expect(RootDocs.all.count == 14)
+    }
+
+    /// The seed writes the nested tree under `.fantastic/docs/`, copy-if-missing.
+    @Test func rootDocsSeedWritesNestedFiles() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rootdocs_\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        RootDocs.seed(workdir: dir)
+        let routing = dir.appendingPathComponent(".fantastic/docs/frontend/routing.md")
+        #expect(FileManager.default.fileExists(atPath: routing.path))
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".fantastic/docs/system-verbs.md").path))
+        try "edited".write(to: routing, atomically: true, encoding: .utf8)
+        RootDocs.seed(workdir: dir)
+        #expect(try String(contentsOf: routing, encoding: .utf8) == "edited")
     }
 
     @Test func nonRootHasNoReadmesFrame() async {

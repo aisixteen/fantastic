@@ -42,22 +42,25 @@ public enum Opened {
     /// Carries the VERB that execution ran: a joiner is handed its outcome
     /// verbatim, so it must be authorized for THAT verb, not for whatever it
     /// happened to send.
-    case join(verb: String)
+    case join(verb: String, id: Int64)
     /// Already settled: this IS the answer; the handler must not run again.
-    case settled(Outcome, verb: String)
+    case settled(Outcome, verb: String, id: Int64)
     /// The id is unusable — the refusal to hand back verbatim.
     case refused(JSON)
 }
 
 /// One execution and what it became.
-private struct Row {
+private struct LedgerRow {
     var target: AgentId
     /// The verb this execution ran — the question the gate must be asked when
     /// somebody joins it.
     var verb: String
     var retries: UInt32
     var attempts: UInt32
-    var named: Bool
+    /// The caller's NAME for this execution, when it gave one — the dedup /
+    /// join / retry handle. Its id is the kernel's message id either way.
+    var name: String?
+    var named: Bool { name != nil }
     var origin: AgentId?
     /// `nil` while in flight. Set ONCE, at the FINAL outcome — a retrying
     /// execution does not settle its intermediate attempts, so a joiner never
@@ -69,9 +72,10 @@ private struct Row {
 /// through the discovered store, because the kernel never touches disk itself.
 public final class ExecutionLedger: @unchecked Sendable {
     private let lock = NSLock()
-    private var rows: [String: Row] = [:]
-    /// Insertion order, for the ring. Mirrors python's dict ordering.
-    private var order: [String] = []
+    private var rows: [Int64: LedgerRow] = [:]
+    /// Caller name → the id it opened. `resolveName` is the ONE bridge.
+    private var names: [String: Int64] = [:]
+    private var order: [Int64] = []
     private var cap: Int?
 
     public init(cap: Int? = defaultLedgerCap) { self.cap = cap }
@@ -80,13 +84,25 @@ public final class ExecutionLedger: @unchecked Sendable {
     ///
     /// `named` distinguishes a caller-chosen id from a minted pid: only the
     /// former is a dedup contract, and the ring evicts the latter first.
+    /// The id a caller's NAME resolves to, if that name has opened an execution.
+    public func resolveName(_ name: String) -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return names[name]
+    }
+
     public func open(
-        _ execId: String, target: AgentId, verb: String, retries: UInt32, named: Bool,
+        _ execId: Int64, target: AgentId, verb: String, retries: UInt32, name: String?,
         origin: AgentId?
     ) -> Opened {
         lock.lock()
         defer { lock.unlock() }
 
+        // A NAME THAT ALREADY OPENED AN EXECUTION joins it — resolved here, under
+        // the lock, so two callers racing on one name cannot both open. (The
+        // resolve in `launch` is the fast path; this is the one that holds.)
+        var execId = execId
+        if let n = name, let existing = names[n] { execId = existing }
         if let row = rows[execId] {
             // AN ID IS BOUND TO ITS FIRST TARGET. The same id aimed elsewhere is
             // a different intent wearing the same name — returning the other
@@ -95,29 +111,22 @@ public final class ExecutionLedger: @unchecked Sendable {
                 return .refused(
                     Refusal.make(
                         Refusal.badArg,
-                        "send: id \"\(execId)\" is bound to \(row.target.value) — a named "
+                        "send: id \(execId) is bound to \(row.target.value) — a named "
                             + "execution cannot be re-aimed",
                         extra: [
                             ("arg", .string("id")), ("bound_to", .string(row.target.value)),
                         ]))
             }
-            if let o = row.outcome { return .settled(o, verb: row.verb) }
-            return .join(verb: row.verb)
+            if let o = row.outcome { return .settled(o, verb: row.verb, id: execId) }
+            return .join(verb: row.verb, id: execId)
         }
 
         // A COLON ID REFERENCES an existing minted execution; it never creates
         // one. The caller cannot mint into the kernel's namespace, so an unknown
         // colon id is a dangling reference, not a new job.
-        if named && execId.contains(":") {
-            return .refused(
-                Refusal.make(
-                    Refusal.badArg,
-                    "send: no execution \"\(execId)\" — a pid REFERENCES, it never creates",
-                    extra: [("arg", .string("id"))]))
-        }
-
-        rows[execId] = Row(
-            target: target, verb: verb, retries: retries, attempts: 0, named: named,
+        if let n = name { names[n] = execId }
+        rows[execId] = LedgerRow(
+            target: target, verb: verb, retries: retries, attempts: 0, name: name,
             origin: origin,
             outcome: nil)
         order.append(execId)
@@ -128,11 +137,11 @@ public final class ExecutionLedger: @unchecked Sendable {
     /// Count one dispatch attempt; returns the new count.
     @discardableResult
     /// Whether a row exists under `execId` (named or minted, settled or not).
-    public func has(_ execId: String) -> Bool {
+    public func has(_ execId: Int64) -> Bool {
         lock.withLock { rows[execId] != nil }
     }
 
-    public func attempt(_ execId: String) -> UInt32 {
+    public func attempt(_ execId: Int64) -> UInt32 {
         lock.lock()
         defer { lock.unlock() }
         guard var r = rows[execId] else { return 1 }
@@ -144,7 +153,7 @@ public final class ExecutionLedger: @unchecked Sendable {
     /// May this execution be dispatched again? Only a terminal `failed`/
     /// `timed_out` with budget left. `cancelled` is ABSORBING; `completed` never
     /// retries.
-    public func shouldRetry(_ execId: String, _ status: Status) -> Bool {
+    public func shouldRetry(_ execId: Int64, _ status: Status) -> Bool {
         guard status.isRetryable else { return false }
         lock.lock()
         defer { lock.unlock() }
@@ -155,7 +164,7 @@ public final class ExecutionLedger: @unchecked Sendable {
     /// Record the FINAL outcome. Stamps `attempts`, so a caller sees what its
     /// work actually cost.
     @discardableResult
-    public func settle(_ execId: String, _ outcome: Outcome) -> Outcome {
+    public func settle(_ execId: Int64, _ outcome: Outcome) -> Outcome {
         lock.lock()
         defer { lock.unlock() }
         guard var r = rows[execId] else { return outcome }
@@ -168,7 +177,7 @@ public final class ExecutionLedger: @unchecked Sendable {
 
     /// The settled outcome for `execId`, if it has one — how a joiner reads the
     /// owner's answer.
-    public func settledOutcome(_ execId: String) -> Outcome? {
+    public func settledOutcome(_ execId: Int64) -> Outcome? {
         lock.lock()
         defer { lock.unlock() }
         return rows[execId]?.outcome
@@ -191,13 +200,14 @@ public final class ExecutionLedger: @unchecked Sendable {
             // (`settledSnapshot`), where it authorizes a joiner after a reboot;
             // the read verb never needed it.
             var o: OrderedDictionary<String, JSON> = [
-                "id": .string(id),
+                "id": .integer(id),
                 "target": .string(r.target.value),
                 "status": .string(r.outcome?.status.rawValue ?? "in_flight"),
                 "attempts": .integer(Int64(r.attempts)),
                 "retries": .integer(Int64(r.retries)),
                 "named": .bool(r.named),
             ]
+            if let n = r.name { o["name"] = .string(n) }
             if let out = r.outcome { o["outcome"] = out.asJSON }
             return .object(o)
         }
@@ -212,8 +222,9 @@ public final class ExecutionLedger: @unchecked Sendable {
         var out: OrderedDictionary<String, JSON> = [:]
         for id in order {
             guard let r = rows[id], let outcome = r.outcome else { continue }
-            out[id] = .object([
+            out[String(id)] = .object([
                 "target": .string(r.target.value),
+                "name": r.name.map { JSON.string($0) } ?? .null,
                 "retries": .integer(Int64(r.retries)),
                 "attempts": .integer(Int64(r.attempts)),
                 "named": .bool(r.named),
@@ -234,29 +245,38 @@ public final class ExecutionLedger: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var n = 0
-        for (id, r) in src {
-            guard let target = r["target"].asString,
+        for (key, r) in src {
+            guard let id = Int64(key), let target = r["target"].asString,
                 let statusText = r["outcome"]["status"].asString,
                 let status = Status(rawValue: statusText)
             else { continue }
             let outcome = Outcome(
-                pid: r["outcome"]["pid"].asString.map { TaskId($0) },
+                pid: r["outcome"]["pid"].asInt.map { TaskId(Int64($0)) },
                 status: status,
                 result: r["outcome"]["result"],
                 attempts: UInt32(r["outcome"]["attempts"].asInt ?? 1))
-            rows[id] = Row(
+            rows[id] = LedgerRow(
                 target: AgentId(target),
                 verb: r["verb"].asString ?? "",
                 retries: UInt32(r["retries"].asInt ?? 0),
                 attempts: UInt32(r["attempts"].asInt ?? 1),
-                named: r["named"].asBool ?? true,
+                name: r["name"].asString,
                 origin: r["origin"].asString.map { AgentId($0) },
                 outcome: outcome)
+            if let nm = r["name"].asString { names[nm] = id }
             order.append(id)
             n += 1
         }
         evict()
         return n
+    }
+
+    /// The highest execution id the ledger holds — what hydration raises the
+    /// row counter above, so a fresh mint never collides with a settled id.
+    public func highestId() -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return rows.keys.max()
     }
 
     /// The ring: evict oldest SETTLED rows, unnamed before named, never

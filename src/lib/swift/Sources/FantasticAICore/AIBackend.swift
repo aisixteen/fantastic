@@ -6,7 +6,7 @@
 // Extracted from the three (formerly duplicated) Swift backends. The
 // shared layer owns: per-(agent, client_id) chat history, the
 // epoch-bump cancellation state, the verb bodies (reflect / boot /
-// shutdown / send / history / interrupt / backend_state), the spawned
+// send / history / status / recall / …), the spawned
 // streaming task, the token / done event emission, and — since the
 // dispatch phase — READING THE MODEL'S TOOL CALLS OUT OF ITS OWN TEXT
 // AND DISPATCHING THEM (`ToolParse` + `Routing`). The providers own
@@ -32,7 +32,7 @@
 //                  accumulated, client_id}
 //   done  event → {type:done, stream_id, message_id, accumulated?,
 //                  client_id, error?}
-//   history → {messages, client_id}
+//   history → {rows, next, total}
 //   interrupt → {interrupted:true}
 //
 // `accumulated` on both the token and done events is the RAW completion — the
@@ -86,7 +86,7 @@ public final class AIBackend: @unchecked Sendable {
         return AIBackend.defaultSendTimeoutSeconds
     }()
 
-    /// In-flight stream count for `backend_state` reporting.
+    /// In-flight stream count (bumped around every pass).
     private let stateLock = NSLock()
     private var inFlight: Int = 0
 
@@ -102,6 +102,14 @@ public final class AIBackend: @unchecked Sendable {
     let projectionLock = NSLock()
     var projectionCache: [String: JSON] = [:]
     var compactionMark: [String: (Int, String)] = [:]
+    /// Agents whose next turn must open with `context_recall` (enough folds
+    /// landed) + the fold count since the last automatic recall. Python
+    /// `_recall_due` / `_folds_since`.
+    var recallDue: Set<String> = []
+    var foldsSince: [String: Int] = [:]
+    /// Where the last `assemble` took its view from — "array" or "store…".
+    /// Diagnostics only. Python `_view_source`.
+    var viewSource: [String: String] = [:]
 
 
     init(config: AIBackendConfig) {
@@ -109,8 +117,8 @@ public final class AIBackend: @unchecked Sendable {
     }
 
     /// Get (or lazily create) the coordination state for an agent. Internal, not
-    /// private: `recallVerb` (ContextProjection.swift, same type, different file)
-    /// reads the in-flight entry's client to resolve a bare `recall`.
+    /// private: the projection seam (ContextProjection.swift, same type,
+    /// different file) reads it.
     func runState(_ id: String) -> AIAgentRunState {
         runStatesLock.lock()
         defer { runStatesLock.unlock() }
@@ -142,9 +150,19 @@ public final class AIBackend: @unchecked Sendable {
         case "reflect":
             return reflectReply(agent: agent)
         case "boot":
-            return .object(["ok": .bool(true)])
+            // On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`.
+            // A fresh agent has nothing to recall and returns nothing. The
+            // incarnation is bumped FIRST: a reply dispatched under the previous
+            // one must not become a live turn of this one. Python `_make_boot`.
+            AIIncarnation.bump(agent.id.value)
+            if loadHistory(agent: agent, kernel: kernel).isEmpty { return nil }
+            let provider = await sideProvider(agent: agent, kernel: kernel)
+            return await contextRecall(
+                agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
         case "shutdown":
-            return .object(["ok": .bool(true)])
+            // A lifecycle no-op, never advertised: the AI is told by
+            // `shutdown_agents` only when its reflect map carries the verb.
+            return .null
         case "send":
             return await sendVerb(agent: agent, payload: payload, kernel: kernel)
         // ONE INQUIRY VERB, WHOEVER RECEIVES IT: a person answers `inquiry` from a
@@ -156,17 +174,31 @@ public final class AIBackend: @unchecked Sendable {
             let out = await sendVerb(agent: agent, payload: opened.send!, kernel: kernel)
             return inquiryClose(out, payload)
         case "history":
-            return await historyVerb(agent: agent, payload: payload, kernel: kernel)
+            return historyVerb(agent: agent, payload: payload, kernel: kernel)
         case "recall":
-            return await recallVerb(agent: agent, payload: payload, kernel: kernel)
+            return recallVerb(agent: agent, payload: payload, kernel: kernel)
+        // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
+        case "pull":
+            return pullVerb(agent: agent, payload: payload, kernel: kernel)
+        case "grep":
+            return grepVerb(agent: agent, payload: payload, kernel: kernel)
         case "context_status":
             return await contextStatusVerb(agent: agent, kernel: kernel)
+        // Rebuild the view from the store: on boot, after folds, on request.
+        case "context_recall":
+            let dry = payload["dry"].asBool ?? false
+            let provider = dry ? nil : await sideProvider(agent: agent, kernel: kernel)
+            return await contextRecall(
+                agent: agent, payload: payload, kernel: kernel, provider: provider)
         case "status":
             return statusVerb(agentId: agentId, payload: payload)
-        case "backend_state":
-            return backendStateReply(agent: agent)
         default:
-            return .object(["error": .string("unknown verb \(verb)")])
+            // Python's `f"{name}: unknown type {t!r}"` — the bundle name, the
+            // verb repr'd, `None` when the payload named no type.
+            return .object([
+                "error": .string(
+                    "\(config.kind): unknown type \(payload["type"] == .null ? "None" : pyRepr(verb))")
+            ])
         }
     }
 
@@ -186,7 +218,7 @@ public final class AIBackend: @unchecked Sendable {
     /// `history`, a `reflect`) — the entry is matched on its task id.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async {
         let st = runState(agentId.value)
-        guard let entry = st.takeCurrentForCancel(taskId: taskId.value) else { return }
+        guard let entry = st.takeCurrentForCancel(taskId: String(taskId.value)) else { return }
         await emitStatus(
             agentId: agentId, clientId: entry.clientId, phase: "done", st: st,
             extraDetail: [
@@ -201,7 +233,7 @@ public final class AIBackend: @unchecked Sendable {
             error: "cancelled")
     }
 
-    // MARK: - reflect / backend_state
+    // MARK: - reflect
 
     private func reflectReply(agent: Agent) -> JSON {
         var fields: OrderedDictionary<String, JSON> = [:]
@@ -216,27 +248,29 @@ public final class AIBackend: @unchecked Sendable {
         for (k, v) in contextReflectFields(agent: agent) {
             fields[k] = v
         }
-        // Merge the shared protocol verbs (recall, context_status) into the
-        // per-backend `verbs` map so the capability is discoverable.
-        var verbs = config.verbs.asObject ?? [:]
-        verbs["recall"] = .string(
-            "args: client_id?, query? (substring), limit? (max 100), before?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}."
-        )
-        verbs["context_status"] = .string(
-            "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}."
-        )
-        fields["verbs"] = .object(verbs)
+        fields["verbs"] = .object(Self.VERBS)
+        // A generation IS its kernel dispatch task; python names the way to kill
+        // it as a top-level field, not a verb.
+        fields["cancel"] = .string(CANCEL_DOC)
         return .object(fields)
     }
 
-    private func backendStateReply(agent: Agent) -> JSON {
-        var fields: OrderedDictionary<String, JSON> = [:]
-        fields["provider"] = .string(config.provider)
-        for (k, v) in config.backendStateExtra(agent) {
-            fields[k] = v
-        }
-        return .object(fields)
-    }
+    /// Python's `reflect.verbs` for every ai_core backend — the FIRST LINE of
+    /// each verb's docstring, in `_build`'s order, verbatim. One map, every
+    /// backend: the wording never differed per provider in python.
+    static let VERBS: OrderedDictionary<String, JSON> = [
+        "reflect": .string("Identity + model + endpoint + generating flag + context posture. No args."),
+        "send": .string("args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}."),
+        "inquiry": .string("args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?, client_id:str?. Sends THIS agent an inquiry and returns {answer, request_id} — the answer is the one it emits with the `answer` tool. The same verb a human answers; a sender writes one call for either."),
+        "history": .string("args: limit:int? (default: as many as fit inline), after:str? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. Bodies are behind `pull`; a row's text is behind `recall`. Returns {rows, next, total}."),
+        "status": .string("args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}."),
+        "context_status": .string("No args. The context-budget posture + the last overflow projection + the model's"),
+        "recall": .string("args: query?:str (case-insensitive substring over the serialized turn — matches tool args/replies too), limit?:int (default 20, max 100), before?:int (store index — page backward). Pages turns back from the DURABLE store (the FULL conversation, never trimmed — so anything compaction dropped is one call away). Read-only. A page always fits INLINE (the cap); trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."),
+        "pull": .string("args: pid:str (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with `offset: next_offset` until `eof`."),
+        "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something, wherever it is — a stored body you never pulled, a digest line, an old turn. Returns {matches:[{id, line, text}], total, truncated}."),
+        "context_recall": .string("args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."),
+        "boot": .string("On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`. A fresh"),
+    ]
 
 /// The outcome of ONE provider pass.
 ///
@@ -244,8 +278,9 @@ public final class AIBackend: @unchecked Sendable {
 /// did NOT finish has to travel back with it rather than being flattened to a
 /// missing value.
 enum AIPassOutcome {
-    /// The RAW completion — what routing parses.
-    case ok(String)
+    /// The RAW completion — what routing parses — and the assistant row's id,
+    /// the batch token every reply tag of this turn names (`↑<turn>`).
+    case ok(String, Int64)
     /// Terminal failure (timeout, provider error, context failsafe). The string
     /// is the message `send` reports as `{error: …}`.
     case failed(String)
@@ -424,7 +459,7 @@ enum AIPassOutcome {
             sendId: sendId, startedAt: nowSecs(), phase: "thinking",
             streamId: streamId, messageId: messageId,
             // The task we are running AS — how `onCancel` recognises its own turn.
-            taskId: KernelTaskLocals.currentTask?.value)
+            taskId: KernelTaskLocals.currentTask.map { String($0.value) })
         await emitStatus(
             agentId: agentId, clientId: clientId, phase: "thinking", st: st,
             kernel: kernel)
@@ -454,11 +489,12 @@ enum AIPassOutcome {
 
         let reply: JSON
         switch produced {
-        case .ok(let textOut):
+        case .ok(let textOut, let turnId):
             reply = .object([
                 "response": .string(textOut),
                 "final": .string(textOut),
                 "client_id": .string(clientId),
+                "turn_id": .integer(turnId),
             ])
         case .failed(let why):
             reply = .object(["error": .string(why), "client_id": .string(clientId)])
@@ -479,7 +515,7 @@ enum AIPassOutcome {
         // individually visible and killable. NEVER `Task.detached`: that loses
         // the task-locals and the row would land parentless, outside `cancel`'s
         // reach.
-        if case .ok(let textOut) = produced {
+        if case .ok(let textOut, let turnId) = produced {
             let deadline = sendTimeoutSeconds
             // THE COORDINATION STATE, threaded through so `await` can count what
             // is actually pending for this agent — its queue and its FIFO lock.
@@ -492,7 +528,8 @@ enum AIPassOutcome {
                     // THE LAYER'S PER-CALL DEADLINE, threaded to every model call
                     // the router dispatches. The kernel defaults nothing.
                     sendTimeout: deadline,
-                    runState: st)
+                    runState: st,
+                    turnId: turnId)
             }
         }
         return reply
@@ -523,8 +560,16 @@ enum AIPassOutcome {
 
         let deadline = Date().addingTimeInterval(sendTimeoutSeconds)
 
-        // Load the prior turns UNDER the FIFO lock (we hold it here), so
-        // serialized sends on one client can't race load→save.
+        // A RECALL OWED FROM THE LAST FOLD BATCH runs first, so this turn is
+        // assembled over the head the recall chose — python `_recall_due`.
+        if takeRecallDue(agentId.value) {
+            _ = await contextRecall(
+                agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
+        }
+        // The message list UNDER the FIFO lock (we hold it here), so serialized
+        // sends can't race load→save: the system block rebuilt from the live
+        // substrate (or the caller's override), the VIEW of the store, the live
+        // turn. `storeLen` is the durable store's length behind it.
         //
         // The user turn is NOT persisted here. It is persisted ONCE, with the
         // assistant turn, after the stream completes — matching python
@@ -533,43 +578,30 @@ enum AIPassOutcome {
         // errored turn leave a user row with no answer, which python and rust
         // never produce: there, an interrupted turn persists NOTHING, because
         // the exchange it was part of never happened.
-        //
-        // The user row carries `id` only for stateless backends (FM bubble
-        // identity); ollama/NIM don't. Stateless keeps history UI-only.
-        let prior = await loadHistory(agent: agent, client: clientId, kernel: kernel)
-        // A trimmed VIEW, not a rewrite of the store: stale whole-state reads
-        // deduped and answered reflects reduced to a stub — the model's own
-        // distillation carries the facts forward (see `HistoryView.swift`). The
-        // durable sidecar keeps every turn, so the trace stays complete and `recall`
-        // pages anything back.
-        let modelHistory = config.stateless ? [] : dropAnsweredReflects(dedupeStaleReads(prior))
+        let (assembled, storeLen) = await assemble(
+            agent: agent, userText: userText, systemPrompt: systemPrompt, kernel: kernel)
+        var messages = assembled
 
-        // Rebuild the system block every turn from the live substrate (a lean
-        // primer + self-reflect + the envelope how-to + the context how-to), OR
-        // use the caller's `system_prompt` override verbatim. NO agent menu — the
-        // primer's id-index plus `reflect` is how an agent is found. Not persisted.
-        let systemContent = await assembleSystemPrompt(
-            agent: agent, systemPrompt: systemPrompt, kernel: kernel)
-        var messages: [JSON] = [
-            .object(["role": .string("system"), "content": .string(systemContent)])
-        ]
-        messages.append(contentsOf: modelHistory)
-        messages.append(
-            .object(["role": .string("user"), "content": .string(userText)]))
+        // ROW IDS for this turn: the incoming row (a root, or a delivered reply
+        // turn that names its parent on its tag) and the assistant row that
+        // answers it. The batch token on this turn's reply tags is the assistant
+        // row's own id, so `↑` on every reply points at something the model can
+        // see. Python `core.py` (`_row_ids_for_incoming` + `_mint_row_id`).
+        let (inId, inParent) = rowIdsForIncoming(userText, kernel: kernel)
+        let turnId = kernel.rows.mintId()
 
         // Context-Protocol seam: shape what the MODEL sees this turn to fit the
         // window (prepending the canonical [context-notice]), ONCE at entry.
         // `messages` is the model view; persistence APPENDS this turn to the chat
         // store (the full conversation), so the durable store is never trimmed and
-        // the notice is never persisted. Skipped for stateless backends (FM owns its context;
-        // modelHistory is empty).
-        if !config.stateless {
+        // the notice is never persisted.
+        do {
             switch await projectContext(
                 provider: provider, agent: agent, clientId: clientId, messages: messages,
                 // THE DURABLE STORE'S LENGTH, not the view's: `messages` carries the
                 // deduped/trimmed history, so counting it puts the reaction cursor
                 // short by exactly the turns the trimmers dropped.
-                storeLen: prior.count,
+                storeLen: storeLen,
                 kernel: kernel)
             {
             case .projected(let projected):
@@ -675,11 +707,17 @@ enum AIPassOutcome {
         // compounds turn over turn. The RAW text (markers in) is what a reader
         // parses for tool calls — a call the model wrote mid-thought still counts —
         // and it is what the `token`/`done` events already carried.
-        let newTurns = [
-            userTurn(id: userMessageId, text: userText),
-            assistantTurn(id: messageId, content: withoutThinking(accumulated)),
+        let newTurns: [Row] = [
+            [
+                "role": .string("user"), "content": .string(userText),
+                "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
+            ],
+            [
+                "role": .string("assistant"), "content": .string(withoutThinking(accumulated)),
+                "id": .integer(turnId), "parent": .integer(inId),
+            ],
         ]
-        await saveHistory(agent: agent, client: clientId, kernel: kernel, newTurns: newTurns)
+        saveHistory(agent: agent, kernel: kernel, newTurns: newTurns)
 
         await emitStatus(
             agentId: agentId, clientId: clientId, phase: "done", st: st,
@@ -692,7 +730,7 @@ enum AIPassOutcome {
         // The RAW completion — markers in — is what routing parses: a call the
         // model wrote mid-thought still dispatches. Only the DURABLE turn above
         // is stripped.
-        return .ok(accumulated)
+        return .ok(accumulated, turnId)
     }
 
     // MARK: - status (verb + phase events)
@@ -821,8 +859,8 @@ enum AIPassOutcome {
                 "You are `\(selfId.value)`. " + renderReflect(me),
                 config.compactPrompt ? SEND_TO_HOWTO_COMPACT : SEND_TO_HOWTO,
             ]
-            // A stateless backend has no compaction and no `recall`, so naming
-            // them teaches it verbs it does not answer.
+            // The SMALL-window backend skips the context block: it costs more of
+            // the window than it saves (see `compactPrompt`).
             if !config.compactPrompt { blocks.append(CONTEXT_HOWTO) }
             // OPT-IN, on the record. Both verbs exist on every AI, but teaching
             // them costs every agent prompt tokens for a discipline most runs
@@ -838,6 +876,67 @@ enum AIPassOutcome {
         let extra = await config.systemPromptExtra(agent, kernel)
         if !extra.isEmpty { blocks.append(extra) }
         return blocks.joined(separator: "\n\n")
+    }
+
+    /// Build the message list: the system block, the MODEL VIEW of the store,
+    /// the live user turn. Returns `(messages, storeLen)` — `storeLen` is how
+    /// many turns the DURABLE store held when this view was built. The view is
+    /// deduped and trimmed, so its length is NOT a store index; `projectContext`
+    /// needs the store one to mark where this turn's reaction will land. Python
+    /// `_assemble`.
+    func assemble(agent: Agent, userText: String, systemPrompt: String?, kernel: Kernel) async
+        -> ([JSON], Int)
+    {
+        let sysContent = await assembleSystemPrompt(
+            agent: agent, systemPrompt: systemPrompt, kernel: kernel)
+        // The system block is rebuilt on EVERY user turn; the store holds only the
+        // user/assistant turns. The howto is not persisted — it always reflects
+        // the latest state at send-time.
+        var messages: [JSON] = [.object(["role": .string("system"), "content": .string(sysContent)])]
+        var storeLen = 0
+        do {
+            let hist = loadHistory(agent: agent, kernel: kernel)
+            storeLen = hist.count
+            // THE VIEW ARRAY IS THE STATE. When one exists and every id it names
+            // still resolves, the model sees exactly those rows at exactly those
+            // resolutions — the same bytes before and after a restart. Otherwise
+            // (no array yet, or an id that no longer resolves) the view is the
+            // trimmed store, as before: stale whole-state reads deduped and answered
+            // reflects reduced to a stub — the model's own distillation carries the
+            // facts (see `HistoryView.swift`).
+            let view = loadView(agent.id, kernel: kernel)
+            var byId: [Int64: JSON] = [:]
+            var idx: [Int64: Int] = [:]
+            for (i, r) in hist.enumerated() {
+                if let id = rowId(r), id != 0 {
+                    byId[id] = r
+                    idx[id] = i
+                }
+            }
+            let entries = view?["ids"]?.asArray ?? []
+            let resolves = !entries.isEmpty
+                && entries.allSatisfy { e in e["id"].asInt.map { byId[$0] != nil } ?? false }
+            if view != nil && resolves {
+                for e in entries {
+                    messages.append(applyRes(byId[e["id"].asInt!]!, e["res"].asString ?? "full"))
+                }
+                // THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every
+                // row appended since — the model's own turns, the replies that
+                // landed — rides behind it in full. Measured 2026-09-06 (python,
+                // recall_after_fold): served the array alone, the model never saw the
+                // read it had just made and restarted the survey from filler_0, sixty
+                // turns in a circle.
+                let newest = entries.map { idx[$0["id"].asInt!]! }.max()!
+                messages.append(
+                    contentsOf: dropAnsweredReflects(dedupeStaleReads(Array(hist[(newest + 1)...]))))
+                setViewSource(agent.id.value, "array")
+            } else {
+                messages.append(contentsOf: dropAnsweredReflects(dedupeStaleReads(hist)))
+                setViewSource(agent.id.value, view == nil ? "store" : "store (stale array)")
+            }
+        }
+        messages.append(.object(["role": .string("user"), "content": .string(userText)]))
+        return (messages, storeLen)
     }
 
     /// Project the internal message list to what the model reads — pure text,
@@ -880,127 +979,101 @@ enum AIPassOutcome {
 
     // MARK: - history
 
-    private func historyVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
-        // Sanitised at entry, like `send` — the sidecar is keyed by the SAFE id, so
-        // reading with the raw one answered from a thread that never existed.
-        let clientId = safeClient(payload["client_id"].asString ?? "cli")
-        let messages = await loadHistory(agent: agent, client: clientId, kernel: kernel)
+    /// The conversation at DIGEST resolution — {id, parent, kind, role, head,
+    /// bytes} per row, oldest first, paged; `{rows, next, total}`. Bodies are
+    /// behind `pull`; a row's text is behind `recall`. Python `_make_history`.
+    private func historyVerb(agent: Agent, payload: JSON, kernel: Kernel) -> JSON {
+        let rows = loadHistory(agent: agent, kernel: kernel)
+        var digest: [JSON] = rows.compactMap { r in
+            guard let id = r["id"].asInt else { return nil }
+            let content = r["content"].asString ?? ""
+            // `kind` FALLS BACK TO `role`: a plain turn carries no kind, and a
+            // reader that switches on it must still see what it is. 120
+            // CHARACTERS, newlines flattened — a head is for recognising a row,
+            // not for reading it.
+            return .object([
+                "id": .integer(id),
+                "parent": r["parent"],
+                "kind": r["kind"].asString.map(JSON.string) ?? r["role"],
+                "role": r["role"],
+                "head": .string(String(content.prefix(120)).replacingOccurrences(of: "\n", with: " ")),
+                "bytes": .integer(Int64(content.count)),
+            ])
+        }
+        // python `int(payload.get("limit") or 0)`, a bad value reading as 0.
+        let limit = pyIntOr(payload["limit"], 0) ?? 0
+        if let after = asMessageId(payload["after"]) {
+            // AN UNKNOWN CURSOR PAGES NOTHING, rather than starting over.
+            let at = digest.firstIndex { $0["id"].asInt == after }.map { $0 + 1 } ?? digest.count
+            digest.removeFirst(at)
+        }
+        // THE CAP INVARIANT: a digest page must answer UNDER the inline cap or it
+        // is stored and dehydrated and the model pulls its own history. `limit`
+        // bounds the count; the cap bounds the bytes.
+        let (kept, truncated) = AIContext.fitReply(
+            digest, capTokens: AIContext.inlineCap(agent), limit: limit > 0 ? limit : nil)
         return .object([
-            "messages": .array(messages),
-            "client_id": .string(clientId),
+            "rows": .array(kept),
+            "next": truncated ? (kept.last?["id"] ?? .null) : .null,
+            "total": .integer(Int64(rows.count)),
         ])
     }
 
-    // MARK: - history row shapes
+    // MARK: - the conversation: rows in the KERNEL's message store
 
-    private func userTurn(id: String, text: String) -> JSON {
-        var row: OrderedDictionary<String, JSON> = [:]
-        if config.stateless { row["id"] = .string(id) }
-        row["role"] = .string("user")
-        row["content"] = .string(text)
-        row["complete"] = .bool(true)
-        return .object(row)
-    }
+    /// The kernel's own bookkeeping kinds. In the same table, never the
+    /// conversation. WHAT IS NOT CONVERSATION: an allow-list of kinds to HIDE, so
+    /// a kind added to the kernel and forgotten here lands in the model's prompt
+    /// — which is how `settle` first arrived as a turn reading `null` (python,
+    /// 2026-09-11). Python `_BOOKKEEPING`, rust `history.rs`.
+    static let bookkeeping: Set<String> = ["call", "task", "body", "view", "settle"]
 
-    private func assistantTurn(id: String, content: String) -> JSON {
-        var row: OrderedDictionary<String, JSON> = [:]
-        if config.stateless { row["id"] = .string(id) }
-        row["role"] = .string("assistant")
-        row["content"] = .string(content)
-        row["complete"] = .bool(true)
-        return .object(row)
-    }
-
-    // MARK: - the chat sidecar (append-only JSONL on the AI's own leg)
-
-    /// Trim + sanitise a client id so it is safe as a filename suffix.
-    /// Mirrors Rust `safe_client` / Python `_safe_client`.
+    /// Trim + sanitise a client id — the status/queue axis, never a store key.
+    /// Python `_safe_client`: `(client_id or "cli").strip() or "cli"`, then every
+    /// char that is not alphanumeric or `._-` becomes `_`. No length cap.
     func safeClient(_ clientId: String) -> String {
-        let trimmed = clientId.trimmingCharacters(in: .whitespaces)
+        let trimmed = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
         let raw = trimmed.isEmpty ? "cli" : trimmed
-        let mapped = raw.map { c -> Character in
-            (c.isLetter || c.isNumber || c == "." || c == "_" || c == "-") ? c : "_"
-        }
-        let out = String(mapped.prefix(64))
-        return out.isEmpty ? "cli" : out
+        return String(
+            raw.map { c -> Character in
+                (c.isLetter || c.isNumber || c == "." || c == "_" || c == "-") ? c : "_"
+            })
     }
 
-    /// The chat sidecar's path on the agent's OWN file leg — one JSONL file per
-    /// client, one JSON line per turn. The encoding is the AI core's PRIVATE
-    /// choice as a consumer; the substrate imposes no format on anyone.
-    /// Mirrors python `_chat_path` (durable_memory is gone; memory is files).
-    private func chatPath(agentId: String, client: String) -> String {
-        "agents/\(agentId)/chat_\(safeClient(client)).jsonl"
+    /// The agent's conversation — every row, in order — from the KERNEL ROW
+    /// STORE. AGENT ID IS CONVERSATION ID: a second conversation is a second
+    /// agent, so there is no client dimension here. Nothing is read from disk:
+    /// persistence of the store is the kernel's concern (a loader hydrates it, a
+    /// persister tails it), never this bundle's. Python `_load_history`.
+    func loadHistory(agent: Agent, kernel: Kernel) -> [JSON] {
+        kernel.rows.forAgent(agent.id).filter { r in
+            guard let k = r["kind"]?.asString else { return true }
+            return !Self.bookkeeping.contains(k)
+        }.map { JSON.object($0) }
     }
 
-    private func chatLeg(_ agent: Agent) -> String? {
-        agent.metaValue(forKey: "file_bridge_id")?.asString.flatMap { $0.isEmpty ? nil : $0 }
-    }
-
-    /// The client's conversation, parsed line-by-line off the JSONL sidecar.
-    /// Empty on a missing leg, a missing file, or unreadable content; a torn
-    /// tail line (a crash mid-append) is skipped rather than poisoning the
-    /// whole history.
-    ///
-    /// BOOKKEEPING, PROCESSED FROM ABOVE — the agent does not choose to have a
-    /// conversation log. Confused-deputy-safe: the target is the record's OWN
-    /// `file_bridge_id`, the verb is literal, the path self-scoped
-    /// (`agents/<self>/…`, client sanitized). Mirrors python `_load_history`.
-    func loadHistory(agent: Agent, client: String, kernel: Kernel) async -> [JSON] {
-        guard let fb = chatLeg(agent) else { return [] }
-        let path = chatPath(agentId: agent.id.value, client: client)
-        let raw: Data = await kernel.asBookkeeping {
-            var acc = Data()
-            var offset = 0
-            while true {
-                let (r, body) = await kernel.sendWithBinary(
-                    AgentId(fb),
-                    .object([
-                        "type": .string("read_stream"), "path": .string(path),
-                        "offset": .integer(Int64(offset)),
-                    ]), Data())
-                guard case .object = r, r["error"].asString == nil else { break }
-                if !body.isEmpty { acc.append(body) }
-                if r["eof"].asBool ?? true { break }
-                if body.isEmpty { break }
-                offset = Int(r["next_offset"].asInt ?? Int64(offset + body.count))
-            }
-            return acc
-        }
-        guard !raw.isEmpty, let text = String(data: raw, encoding: .utf8) else { return [] }
-        var turns: [JSON] = []
-        for line in text.components(separatedBy: "\n") {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard !t.isEmpty, let parsed = try? JSON.parse(Data(t.utf8)),
-                case .object = parsed
-            else { continue }
-            turns.append(parsed)
-        }
-        return turns
-    }
-
-    /// APPEND this turn's new messages — one `write_stream` (absent offset =
-    /// append-at-end, creates the file) per turn, one JSON line each. The
-    /// durable record is never trimmed; the projection only shapes what the
-    /// model sees. PROCESSED FROM ABOVE — see `loadHistory`; and it clears the
-    /// caller's kill flag too: a cancel must never corrupt what was already
-    /// durable. Mirrors python `_save_history`.
-    private func saveHistory(
-        agent: Agent, client: String, kernel: Kernel, newTurns: [JSON]
-    ) async {
-        if newTurns.isEmpty { return }
-        guard let fb = chatLeg(agent) else { return }
-        let path = chatPath(agentId: agent.id.value, client: client)
+    /// APPEND this turn's rows to the kernel row store. Bookkeeping from above —
+    /// the same standing as the ledger's own put; no grant, no gate, no disk. A
+    /// pre-minted `id` is accepted, which is what lets a turn name itself in the
+    /// reply tags it sends before its own row exists. Python `_save_history`.
+    func saveHistory(agent: Agent, kernel: Kernel, newTurns: [Row]) {
         for turn in newTurns {
-            let line = turn.serialize() + "\n"
-            _ = await kernel.asBookkeeping {
-                await kernel.sendWithBinary(
-                    AgentId(fb),
-                    .object(["type": .string("write_stream"), "path": .string(path)]),
-                    Data(line.utf8)
-                ).0
+            do { try kernel.rows.put(agent.id, turn) } catch {
+                // A refused row is the hydrator's mistake, not the model's — say
+                // it and keep the rest of the turn, rather than dropping a
+                // conversation.
+                FileHandle.standardError.write(Data("  [history] \(agent.id.value): \(error)\n".utf8))
             }
         }
+    }
+
+    /// (id, parent) for an incoming turn. A delivered reply turn names the
+    /// assistant turn that made the calls (`↑`) on its first tag; anything else
+    /// is a ROOT — a fresh message from a person or a peer. Python
+    /// `_row_ids_for_incoming` + `_TAG_LINKS`.
+    func rowIdsForIncoming(_ text: String, kernel: Kernel) -> (Int64, Int64?) {
+        let rid = kernel.rows.mintId()
+        return (rid, incomingParent(text))
     }
 
     // MARK: - in-flight
@@ -1011,10 +1084,20 @@ enum AIPassOutcome {
         inFlight = max(0, inFlight + delta)
     }
 
-    /// Current in-flight stream count (for `backend_state` reporting).
-    public func readInFlight() -> Int {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return inFlight
-    }
+}
+
+// EVERY ROW HAS AN ADDRESS — an int from the kernel's one counter. `parent` is
+// CAUSALITY (the row this one responds to); a thread is the parent chain, derived
+// when needed. `reply_to` on a send is DELIVERY and is left alone. Python
+// `_TAG_LINKS`: `^\[reply to \S+ · [^\]]*?↑(\S+)[^\]]*\]`.
+private let tagLinks = try! NSRegularExpression(
+    pattern: "^\\[reply to \\S+ \u{b7} [^\\]]*?\u{2191}(\\S+)[^\\]]*\\]")
+
+/// The `↑<turn>` an incoming turn's FIRST tag names, if it is a delivered reply.
+func incomingParent(_ text: String) -> Int64? {
+    let ns = text as NSString
+    guard let m = tagLinks.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+        m.numberOfRanges > 1
+    else { return nil }
+    return asMessageId(.string(ns.substring(with: m.range(at: 1))))
 }

@@ -13,7 +13,8 @@
 // Keeping an unused one invites a future caller to wire it back.
 //
 // What remains is what callers actually use: `subscribe`, the HTTP port
-// accessors, and `save`/`load`/`shutdown`.
+// accessors, and `save`/`load`. The graceful `shutdown()` lives in
+// `Lifecycle.swift`.
 
 import FantasticJSON
 import Foundation
@@ -73,15 +74,5 @@ extension Kernel {
     /// (version, duplicates, dangling parents, no root).
     public func load(json: String) throws {
         try loadJSON(json)
-    }
-
-    /// Idempotent shutdown. Future: stop the HTTP listener, release
-    /// the workdir lock, fire bundle.onShutdown for every loaded
-    /// agent. Today: no-op for in-memory kernels.
-    public func shutdown() {
-        // The real teardown wires up alongside 8B (HTTP listener
-        // close) + 8H (lock release). For now this exists so app
-        // call sites compile and any caller that does
-        // `defer { kernel.shutdown() }` works.
     }
 }

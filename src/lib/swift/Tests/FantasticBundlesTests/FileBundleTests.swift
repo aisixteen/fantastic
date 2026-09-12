@@ -279,14 +279,28 @@ struct FileBundleTests {
         #expect(r2["root_error"].asString?.contains("escapes the running dir") == true, "\(r2)")
     }
 
-    @Test func textStreamVerbsAreRefusedWithBadArgOnTheTextChannel() async {
+    /// THE STREAM VERBS ON THE TEXT CHANNEL, as python serves them: a model
+    /// writes a document VERBATIM between `<bytes>` and `</bytes>` and the tag
+    /// grammar delivers it as utf-8 text to the same handler; a chunk read back
+    /// renders utf-8 in the reply. Swift refused both with "raw bytes on the
+    /// binary channel" until 2026-09-13 — the refusal the `subai_graph` routine
+    /// died on, the same gap rust closed the day before.
+    @Test func textChannelStreamVerbsServeUtf8LikePython() async {
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
-        for verb in ["read_stream", "write_stream"] {
-            let r = await call(k, ["type": .string(verb), "path": "a.txt"])
-            #expect(r["reason"].asString == "bad_arg" && r["arg"].asString == "bytes", "\(r)")
-            #expect(r["error"].asString?.contains("send_with_binary") == true)
-        }
+        let w = await call(k, ["type": "write_stream", "path": "a.txt", "bytes": "hello\nwörld"])
+        #expect(w["error"].isNull && w["path"].asString == "a.txt", "\(w)")
+        let r = await call(k, ["type": "read_stream", "path": "a.txt"])
+        #expect(r["bytes"].asString == "hello\nwörld" && r["eof"].asBool == true, "\(r)")
+        // A bare number is a document too (the tag grammar types it).
+        let n = await call(k, ["type": "write_stream", "path": "n.txt", "bytes": .integer(42), "truncate": .bool(true)])
+        #expect(n["error"].isNull, "\(n)")
+        #expect((await call(k, ["type": "read_stream", "path": "n.txt"]))["bytes"].asString == "42")
+        // No chunk at all is python's `missing` refusal, never a channel lecture.
+        let m = await call(k, ["type": "write_stream", "path": "a.txt"])
+        #expect(m["reason"].asString == "missing_arg" && m["error"].asString == "write_stream: bytes (one raw chunk) required", "\(m)")
+        let nf = await call(k, ["type": "read_stream", "path": "nope.txt"])
+        #expect(nf["reason"].asString == "not_found", "\(nf)")
     }
 
     @Test func passwordIngressIsRefusedOnFsAndProcessLegs() async {

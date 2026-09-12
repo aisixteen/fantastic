@@ -4,7 +4,7 @@ id: messages_gate
 group: coding
 title: "conversation rows are read by id through the kernel; a peer sees them only when the owner names it"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [python, rust, swift]
 costs: turns
 limits:
   idle_seconds: 60

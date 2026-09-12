@@ -19,7 +19,7 @@
 //   - watch_remote / unwatch_remote : subscribe to remote agent emits;
 //     `{type:"event"}` frames are re-emitted on this bridge's local inbox
 //   - detach   : drop the attached transport
-//   - shutdown : same as detach (substrate lifecycle hook)
+//   - shutdown : lifecycle no-op (the transport detaches in onShutdown/onDelete)
 //   - reflect  : identity + connectivity + verb docs
 
 @_exported import FantasticIoBridge
@@ -50,6 +50,42 @@ public enum BridgeFamily: Sendable {
     case relay
 
     var label: String { self == .ws ? "ws_bridge" : "relay_connector" }
+
+    /// Python's reflect `sentence` for this derivation.
+    var sentence: String {
+        switch self {
+        case .ws: return "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy."
+        case .relay: return "Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay; auto-reconnecting."
+        }
+    }
+
+    /// Python's reflect `verbs` for this derivation — `io_bridge.make_verbs`'s
+    /// six for `ws_bridge`, plus the relay directory four for
+    /// `relay_connector`; the first doc line of each, verbatim, in order.
+    var verbs: JSON {
+        switch self {
+        case .ws: return [
+            "reflect": .string("Identity + transport + connectivity. No args."),
+            "boot": .string("No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."),
+            "reconnect": .string("No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry)."),
+            "forward": .string("args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."),
+            "watch_remote": .string("args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set)."),
+            "unwatch_remote": .string("args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted."),
+        ] as JSON
+        case .relay: return [
+            "reflect": .string("Identity + transport + connectivity. No args."),
+            "boot": .string("No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."),
+            "reconnect": .string("No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry)."),
+            "forward": .string("args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."),
+            "watch_remote": .string("args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set)."),
+            "unwatch_remote": .string("args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted."),
+            "list_peers": .string("No args (optional timeout). One-shot snapshot of the relay directory:"),
+            "watch_directory": .string("No args. Subscribe to the relay directory; live `peer_joined`/`peer_left`/"),
+            "unwatch_directory": .string("No args. Stop the directory subscription started by `watch_directory`."),
+            "set_identity": .string("Advertise/update this peer's DIRECTORY identity — the typed attrs the relay"),
+        ] as JSON
+        }
+    }
     func admits(_ transportKind: String) -> Bool {
         switch self {
         case .ws: return transportKind == "ws" || transportKind == "memory"
@@ -166,9 +202,10 @@ public actor InMemoryBridge {
     /// `watch` subscription. Set by `KernelBridgeBundle.attachInMemory`.
     private var localBridgeId: AgentId?
     private weak var localKernel: Kernel?
-    /// One drain task per active watch_remote subscription. Cancelled
-    /// on unwatch_remote so the synthetic relay inbox stops draining.
-    private var watchTasks: [AgentId: Task<Void, Never>] = [:]
+    /// One drain task per active watch_remote subscription — a KERNEL task
+    /// (in `ps`, within reach of `cancel`), cancelled through the table on
+    /// unwatch_remote so the synthetic relay inbox stops draining.
+    private var watchTasks: [AgentId: TaskId] = [:]
     /// Synthetic watcher ids per target — needed for `unwatch` so we
     /// remove the same id we registered in `watch`.
     private var watcherIds: [AgentId: AgentId] = [:]
@@ -254,7 +291,7 @@ public actor InMemoryBridge {
             remote.watch(src: target, watcher: watcherId)
         }
 
-        let task = Task {
+        let task = local.spawnTask(agent: sink, verb: "watch_remote") {
             for await event in stream {
                 if Task.isCancelled { break }
                 await local.emit(sink, event)
@@ -274,7 +311,9 @@ public actor InMemoryBridge {
         if let watcherId = watcherIds.removeValue(forKey: target) {
             remote.unwatch(src: target, watcher: watcherId)
         }
-        watchTasks.removeValue(forKey: target)?.cancel()
+        if let task = watchTasks.removeValue(forKey: target), let local = localKernel {
+            _ = await local.cancelTask(task)
+        }
         return .object([
             "ok": .bool(true),
             "unwatched": .string(target.value),
@@ -333,6 +372,16 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             Task { await removed.close() }
         }
         return removed != nil
+    }
+
+    /// The process is stopping / the record is going: release the transport
+    /// (its receive loop, heartbeat, relay socket).
+    public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
+        _ = detach(agentId: agentId)
+    }
+
+    public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        _ = detach(agentId: agentId)
     }
 
     /// Sync lookup helper — keeps the NSLock outside any async scope.
@@ -491,9 +540,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             return [
                 "id": .string(agentId.value),
                 "kind": .string(family.label),
-                "sentence": .string(
-                    "Cross-kernel transport (WS-only, asymmetric; in-memory test backbone)."
-                ),
+                "sentence": .string(family.sentence),
                 // `connected` is the canonical field (python/rust); the transport
                 // attaches only after a successful boot/handshake, so it tracks
                 // attachment.
@@ -501,15 +548,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 "ingress_rule": .string(ingressName),
                 "egress_rule": .string(egressName),
                 "sealed": .bool(ingressName != "allow_all_ingress"),
-                "verbs": [
-                    "forward":
-                        "args: target, payload. Ships a raw `{type:'call', target, payload}` frame over the transport and returns the reply.",
-                    "watch_remote":
-                        "args: target. Subscribes to a remote agent's emits. Events are re-emitted on this bridge's local inbox.",
-                    "unwatch_remote":
-                        "args: target. Symmetric teardown of watch_remote.",
-                    "detach": "Drops the attached transport.",
-                ] as JSON,
+                "verbs": family.verbs,
             ] as JSON
         case "boot":
             // Idempotent: if already attached, no-op.
@@ -578,11 +617,15 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 ])
             }
         case "shutdown":
+            // A lifecycle no-op; the transport detaches in `onShutdown`/`onDelete`.
+            return .null
+        case "reconnect":
+            // Python `_reconnect`: teardown + boot. Explicit, because a dropped
+            // transport is never re-dialed on its own — a real network problem
+            // stays visible to the operator instead of flapping in the dark.
             _ = detach(agentId: agentId)
-            return .object(["ok": .bool(true)])
-        case "detach":
-            let removed = detach(agentId: agentId)
-            return .object(["ok": .bool(true), "removed": .bool(removed)])
+            return try await handle(
+                agentId: agentId, payload: .object(["type": .string("boot")]), kernel: kernel)
         case "forward":
             // Python is canonical: the arg name is `target`.
             let targetStr = payload["target"].asString

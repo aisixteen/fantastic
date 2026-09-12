@@ -319,3 +319,196 @@ public struct UserProbe: AgentBundle {
         }
     }
 }
+
+// ── the oracle ──────────────────────────────────────────────────────────────
+
+public let ORACLE_MODULE = "oracle_probe.tools"
+
+/// `oracle` — a fixed body of knowledge that answers QUESTIONS, deterministically.
+///
+/// One of the pieces of the multi-agent test: each solver has its own oracle, and
+/// the oracle knows only its own ledger. It is NOT a model (no lane, exact, cheap):
+/// `ask` is keyword search over the ledger lines on the record — every word of 3+
+/// letters in the question is matched case-insensitively, the lines that hit the
+/// MOST keywords come back, at most `limit` of them. So a precise question ("which
+/// room is Dana in") answers, and "tell me everything" returns noise, which is the
+/// point: the solver must work out what to ask.
+///
+/// Knowledge is POLICY ON THE RECORD (`lines`), written by the fixture; the bundle
+/// holds nothing. `asked` on reflect is the tally the scorer reads — a solver that
+/// only talks about its oracle leaves it at zero.
+///
+/// Mirrors `e2e/probes/oracle_probe/tools.py`.
+public struct OracleProbe: AgentBundle {
+    public let name = "oracle_probe"
+    /// Python's `_ASKED`: every question each oracle really answered, BY AGENT —
+    /// two oracles in one kernel keep two tallies.
+    private final class Asked: @unchecked Sendable {
+        private let lock = NSLock()
+        private var byAgent: [String: [String]] = [:]
+        func add(_ id: String, _ q: String) {
+            lock.lock(); defer { lock.unlock() }
+            byAgent[id, default: []].append(q)
+        }
+        func count(_ id: String) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return byAgent[id]?.count ?? 0
+        }
+    }
+    private let asked = Asked()
+    public init() {}
+
+    static let SENTENCE =
+        "An oracle: a ledger of facts I answer questions about. Send me `ask` with a "
+        + "precise `question`; I return the ledger lines that match its words. I know "
+        + "only my own ledger."
+    static let ASK_DOC =
+        "args: question:str (req), limit:int? (default 6). Keyword search over my "
+        + "ledger — the lines matching the most words of the question come back as "
+        + "{answers:[str], matched:int}. Ask precisely; a vague question returns noise."
+
+    /// Every `[A-Za-z0-9_]{3,}` run in `q`, lowercased and deduplicated — python's
+    /// `{w.lower() for w in re.findall(r"[A-Za-z0-9_]{3,}", q)}`. ASCII only, as
+    /// the pattern is.
+    static func keywords(_ q: String) -> [String] {
+        var out: [String] = []
+        var cur = ""
+        func flush() {
+            if cur.count >= 3 {
+                let w = cur.lowercased()
+                if !out.contains(w) { out.append(w) }
+            }
+            cur = ""
+        }
+        for c in q.unicodeScalars {
+            let ascii = c.value < 128 ? UInt8(c.value) : 0
+            let word =
+                (ascii >= 48 && ascii <= 57) || (ascii >= 65 && ascii <= 90)
+                || (ascii >= 97 && ascii <= 122) || ascii == 95
+            if word { cur.unicodeScalars.append(c) } else { flush() }
+        }
+        flush()
+        return out
+    }
+
+    /// Python's `str(x)` of a ledger entry: a string as itself, the rest spelled
+    /// the way python prints them.
+    private static func pyStr(_ v: JSON) -> String {
+        switch v {
+        case .string(let s): return s
+        case .null: return "None"
+        case .bool(let b): return b ? "True" : "False"
+        case .integer(let n): return String(n)
+        case .double(let d): return pyFloat(d)
+        default: return v.serialize()
+        }
+    }
+
+    /// Python's `str(float)`: `3.0`, not `3`.
+    private static func pyFloat(_ d: Double) -> String {
+        let s = "\(d)"
+        return (s.contains(".") || s.contains("e") || s.contains("n")) ? s : s + ".0"
+    }
+
+    /// Python's `repr` of the verb in the unknown-verb text: a str is quoted,
+    /// a missing `type` is `None`.
+    private static func pyRepr(_ v: JSON) -> String {
+        guard case .string(let s) = v else { return pyStr(v) }
+        let q: Character = (s.contains("'") && !s.contains("\"")) ? "\"" : "'"
+        var out = String(q)
+        for c in s {
+            if c == "\\" { out += "\\\\" } else if c == q { out += "\\" + String(q) }
+            else if c == "\n" { out += "\\n" } else { out.append(c) }
+        }
+        out.append(q)
+        return out
+    }
+
+    /// Python's `max(1, min(int(payload.get("limit") or 6), 20))` with the
+    /// `(TypeError, ValueError) → 6` net: a falsy or unparseable value is 6.
+    static func limit(_ v: JSON) -> Int {
+        let n: Int
+        switch v {
+        case .integer(let i): n = i == 0 ? 6 : Int(i)
+        case .double(let d): n = d == 0 ? 6 : Int(d)
+        case .bool(let b): n = b ? 1 : 6
+        case .string(let s):
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.isEmpty { n = 6 } else if let i = Int(t) { n = i } else { n = 6 }
+        default: n = 6
+        }
+        return max(1, min(n, 20))
+    }
+
+    /// Python's `str < str`: by code point, not by locale.
+    private static func lessByScalar(_ a: String, _ b: String) -> Bool {
+        a.unicodeScalars.lexicographicallyPrecedes(b.unicodeScalars) { $0.value < $1.value }
+    }
+
+    public func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        let verb = payload["type"]
+        switch verb.asString {
+        case "boot", "shutdown": return nil
+        case "reflect":
+            return .object([
+                "id": .string(agentId.value),
+                "sentence": .string(Self.SENTENCE),
+                "verbs": .object(["ask": .string(Self.ASK_DOC)]),
+                "asked": .integer(Int64(asked.count(agentId.value))),
+            ])
+        case "ask":
+            // The tag grammar types a bare number; a number is a question too.
+            let q: String
+            switch payload["question"] {
+            case .string(let s): q = s
+            case .integer(let n): q = String(n)
+            case .double(let d): q = Self.pyFloat(d)
+            default: q = ""
+            }
+            if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .object([
+                    "error": .string("oracle_probe: ask: `question` must be a non-empty string"),
+                    "reason": .string("bad_arg"),
+                    "arg": .string("question"),
+                ])
+            }
+            let lines = (kernel.agent(agentId)?.metaValue(forKey: "lines")?.asArray ?? [])
+                .map(Self.pyStr)
+            // NO DEFAULT. An unwired oracle says so rather than inventing
+            // knowledge it was never given.
+            if lines.isEmpty {
+                return .object([
+                    "error": .string(
+                        "oracle_probe: no `lines` on this agent's record — the operator wires what this oracle knows"
+                    ),
+                    "reason": .string("not_connected"),
+                ])
+            }
+            asked.add(agentId.value, q)
+            let limit = Self.limit(payload["limit"])
+            let words = Self.keywords(q)
+            var scored: [(hits: Int, line: String)] = []
+            for ln in lines {
+                let low = ln.lowercased()
+                let hits = words.filter { low.contains($0) }.count
+                if hits > 0 { scored.append((hits, ln)) }
+            }
+            // MOST HITS FIRST, then by the line itself — python's
+            // `key=lambda t: (-t[0], t[1])`, so the same ledger answers the same
+            // question the same way on every host.
+            scored.sort { a, b in
+                a.hits != b.hits ? a.hits > b.hits : Self.lessByScalar(a.line, b.line)
+            }
+            return .object([
+                "answers": .array(scored.prefix(limit).map { .string($0.line) }),
+                "matched": .integer(Int64(scored.count)),
+            ])
+        default:
+            return .object([
+                "error": .string(
+                    "oracle_probe: unknown verb \(Self.pyRepr(verb)); verbs: ['ask']"),
+                "reason": .string("unhandled"),
+            ])
+        }
+    }
+}

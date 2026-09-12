@@ -71,8 +71,12 @@ public protocol AgentBundle: Sendable {
     /// Use for cleanup (close connections, dispose sessions, etc.).
     func onDelete(agentId: AgentId, kernel: Kernel) async throws
 
-    /// Fired on kernel shutdown for every loaded agent that uses
-    /// this bundle. Use for graceful drain of in-flight work.
+    /// Fired by `Kernel.shutdown`'s depth-first walk for every loaded agent
+    /// that uses this bundle — the process is stopping, the record stays.
+    /// A bundle that wants to distinguish "shut down, will restart" from
+    /// "deleted forever" defines it; the DEFAULT IS `onDelete` (python's
+    /// resolution: `on_shutdown or on_delete`), because most bundles kill
+    /// the same subprocesses either way.
     func onShutdown(agentId: AgentId, kernel: Kernel) async throws
 
     /// The SIGTERM half of `cancel`: the kernel is killing `taskId` (one row of
@@ -121,6 +125,8 @@ extension AgentBundle {
     }
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {}
-    public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {}
+    public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
+        try await onDelete(agentId: agentId, kernel: kernel)
+    }
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {}
 }

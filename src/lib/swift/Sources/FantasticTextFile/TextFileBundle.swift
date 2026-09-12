@@ -121,8 +121,9 @@ public struct TextFileBundle: AgentBundle {
         return digest.map { String(format: "%02x", $0) }.joined().prefix(16).lowercased()
     }
 
-    private func pid() -> String {
-        KernelTaskLocals.currentTask?.value ?? "op:00000000"
+    private func pid() -> Int64 {
+        // Python `_pid`: `current_task() or 0` — a number, 0 outside any task.
+        KernelTaskLocals.currentTask?.value ?? 0
     }
 
     private func versionMismatch(want: String, have: String) -> JSON {
@@ -191,7 +192,7 @@ public struct TextFileBundle: AgentBundle {
     private func writeAtomic(_ kernel: Kernel, fb: String, path: String, data: Data) async
         -> JSON?
     {
-        let tmp = "\(path).tmp.\(pid().replacingOccurrences(of: ":", with: "_"))"
+        let tmp = "\(path).tmp.\(pid())"
         if let err = await writeChunks(kernel, fb: fb, path: tmp, data: data) { return err }
         let r = await legCall(
             kernel, fb: fb,
@@ -219,6 +220,12 @@ public struct TextFileBundle: AgentBundle {
         }
     }
 
+    /// A ckpt id on the wire: python emits the minted pid as an INT and a
+    /// `.ckpt` dir entry as `int(name) if name.isdigit() else name`.
+    private func ckptJSON(_ id: String) -> JSON {
+        Int64(id).map(JSON.integer) ?? .string(id)
+    }
+
     private func ckptPath(_ path: String, _ ckptId: String) -> String {
         "\(CKPT_DIR)/\(path.replacingOccurrences(of: "/", with: "__"))/\(ckptId)"
     }
@@ -243,7 +250,7 @@ public struct TextFileBundle: AgentBundle {
     private func takeCheckpoint(_ kernel: Kernel, fb: String, path: String) async
         -> Result<String, JSON>
     {
-        let ckptId = pid()
+        let ckptId = String(pid())
         var data: Data?
         switch await readAll(kernel, fb: fb, path: path) {
         case .success(let d): data = d
@@ -361,22 +368,14 @@ public struct TextFileBundle: AgentBundle {
             "verbs": .object([
                 "reflect": .string("no args — identity, verb guide, and the wired default surface."),
                 "boot": .string("no args — no-op; this agent holds no state to hydrate."),
-                "read": .string(
-                    "args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary."),
-                "write": .string(
-                    "args: path:str (req), bytes:bytes (req — the whole document, raw), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."),
-                "patch": .string(
-                    "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes:bytes (req — ALL hunks concatenated, raw utf-8), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."),
-                "append": .string(
-                    "args: path:str (req), bytes:bytes (req — one raw chunk), on:str? — appends (creates if absent); {path, size, version}."),
-                "checkpoint": .string(
-                    "args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}."),
-                "checkpoints": .string(
-                    "args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}."),
-                "restore": .string(
-                    "args: path:str (req), ckpt_id:str (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}."),
-                "drop": .string(
-                    "args: path:str (req), ckpt_id:str (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}."),
+                "read": .string("args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary."),
+                "write": .string("args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."),
+                "patch": .string("args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."),
+                "append": .string("args: path:str (req), bytes (req — one chunk; str is utf-8-encoded), on:str? — appends (creates if absent); {path, size, version}."),
+                "checkpoint": .string("args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}."),
+                "checkpoints": .string("args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}."),
+                "restore": .string("args: path:str (req), ckpt_id:str (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}."),
+                "drop": .string("args: path:str (req), ckpt_id:str (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}."),
             ]),
         ])
     }
@@ -466,7 +465,7 @@ public struct TextFileBundle: AgentBundle {
             "size": .integer(Int64(blob.count)),
             "version": .string(version(blob)),
         ]
-        if let ckptId { out["ckpt_id"] = .string(ckptId) }
+        if let ckptId { out["ckpt_id"] = ckptJSON(ckptId) }
         return .object(out)
     }
 
@@ -672,7 +671,7 @@ public struct TextFileBundle: AgentBundle {
         ]
         if payload["checkpoint"].asBool == true {
             out["ckpt_ids"] = .array(ckpts.map {
-                .object(["path": .string($0.0), "ckpt_id": .string($0.1)])
+                .object(["path": .string($0.0), "ckpt_id": ckptJSON($0.1)])
             })
         } else {
             for (path, id) in ckpts {
@@ -725,7 +724,7 @@ public struct TextFileBundle: AgentBundle {
         case .failure(let e): return e
         case .success(let id):
             return .object([
-                "ckpt_id": .string(id), "path": .string(path),
+                "ckpt_id": ckptJSON(id), "path": .string(path),
                 "version": .string(version(data)),
             ])
         }
@@ -749,7 +748,7 @@ public struct TextFileBundle: AgentBundle {
             guard f["type"].asString == "file",
                 let name = f["name"].asString, !name.hasSuffix(".absent")
             else { continue }
-            ckpts.append(.object(["id": .string(name), "size": f["size"]]))
+            ckpts.append(.object(["id": ckptJSON(name), "size": f["size"]]))
         }
         return .object(["path": .string(path), "ckpts": .array(ckpts)])
     }
@@ -828,7 +827,8 @@ public struct TextFileBundle: AgentBundle {
             kernel, fb: fb,
             .object(["type": .string("delete"), "path": .string(src + ".absent")]))
         return .object([
-            "dropped": .bool(true), "ckpt_id": .string(ckptId), "path": .string(path),
+            // python echoes the caller's `ckpt_id` AS GIVEN
+            "dropped": .bool(true), "ckpt_id": payload["ckpt_id"], "path": .string(path),
         ])
     }
 

@@ -3,8 +3,9 @@
 // `Projection`: a shortened body that fits the budget + a structured artifact
 // (a summary, or an omitted-span flag). It does NOT fabricate a notice turn —
 // the ONE canonical [context-notice] is composed at the seam. The durable
-// store is NEVER touched. Mirrors Python `ai_core/strategies` / Rust
-// `strategies.rs`.
+// store is NEVER touched by `compact`/`truncate`/`strip`; `fold` is the one
+// strategy that WRITES (a mark that does not persist is a prefix that rewrites
+// every turn). Mirrors Python `ai_core/strategies` / Rust `strategies/`.
 //
 // Tool-pairing is load-bearing: the OpenAI/NIM wire rejects a `role:tool` that
 // isn't preceded by its `assistant.tool_calls` turn. Every cut drops orphaned
@@ -15,26 +16,86 @@
 // nudge is now universal in the seam notice.
 
 import FantasticJSON
+import FantasticKernel
 import Foundation
 
 /// What a strategy returns: the projected body + the artifact the seam needs
 /// to compose the canonical context-notice. NEVER a fabricated user turn.
+/// Python `strategies/base.Projection`.
 public struct AIProjection: Sendable {
+    /// Projected conversation body — NO notice turn, NO system block.
     public var body: [JSON]
+    /// compact: the LLM summary text; truncate/none: nil.
     public var summary: String?
+    /// truncate: an earlier span was elided in place.
     public var omittedMarker: Bool
-    public init(body: [JSON], summary: String? = nil, omittedMarker: Bool = false) {
+    /// The agent's live FACT BLOCK, rendered. Carried as an ARTIFACT for the
+    /// same reason `summary` is — a strategy states what it retained, the seam
+    /// is the one place that turns it into a turn. Empty for every strategy
+    /// shipped today (python's `halve` was the one that set it).
+    public var pinned: [String]
+    /// `strip`: reply blocks reduced to their stub this projection, and the
+    /// bytes that left the view with them. Reported in the artifact so a probe
+    /// can prove the mechanism ran, separately from whether the run succeeded.
+    public var stripped: Int
+    public var strippedBytes: Int
+    /// `fold`: fold rows written this projection.
+    public var folded: Int
+    public init(
+        body: [JSON], summary: String? = nil, omittedMarker: Bool = false,
+        pinned: [String] = [], stripped: Int = 0, strippedBytes: Int = 0, folded: Int = 0
+    ) {
         self.body = body
         self.summary = summary
         self.omittedMarker = omittedMarker
+        self.pinned = pinned
+        self.stripped = stripped
+        self.strippedBytes = strippedBytes
+        self.folded = folded
     }
 }
+
+/// Everything a strategy needs, WITHOUT importing the seam. Python
+/// `context.ProjectionCtx`.
+///
+/// `budget` here is the budget for the conversation BODY (the window budget
+/// minus the already-measured system block) — strategies fit the body to it.
+/// `summarize` is a closure over the backend provider (nil for a caller that
+/// cannot summarize); `compact` and `fold` use it. `clientId` is the
+/// conversation this projection is for — `fold` is the one strategy that
+/// WRITES and it needs to know which store.
+public struct ProjectionCtx: Sendable {
+    public var budget: Int64
+    public var recentN: Int
+    public var summarize: (@Sendable ([JSON]) async throws -> String)?
+    public var selfId: AgentId
+    public var kernel: Kernel
+    public var clientId: String?
+    public init(
+        budget: Int64, recentN: Int, summarize: (@Sendable ([JSON]) async throws -> String)?,
+        selfId: AgentId, kernel: Kernel, clientId: String? = nil
+    ) {
+        self.budget = budget
+        self.recentN = recentN
+        self.summarize = summarize
+        self.selfId = selfId
+        self.kernel = kernel
+        self.clientId = clientId
+    }
+}
+
+/// `(body, system_block, rec, ctx) -> Projection` (body excludes the system
+/// block). Python `STRATEGY`.
+public typealias AIStrategy = @Sendable ([JSON], [JSON], JSON, ProjectionCtx) async -> AIProjection
 
 public enum AIStrategies {
     /// The stub used when a summarizer is unavailable / fails — a degraded
     /// artifact (the full transcript is whole in the durable store), NOT a
-    /// fallback chain.
+    /// fallback chain. Python `STUB_SUMMARY`.
     public static let stubSummary = "[Earlier conversation omitted — summary unavailable]"
+
+    /// Python `DEFAULT_STRATEGY`.
+    public static let defaultStrategy = "compact"
 
     static func isTool(_ turn: JSON) -> Bool {
         turn["role"].asString == "tool"
@@ -71,51 +132,70 @@ public enum AIStrategies {
         return (Array(body[..<start]), Array(body[start...]))
     }
 
-    /// Summarize a span of turns via the backend provider (tool-free
-    /// completion); degrade to a stub on ANY failure.
-    public static func safeSummary(provider: any AIProvider, overflow: [JSON]) async -> String {
-        let rendered = overflow.map { m -> String in
-            let role = m["role"].asString ?? "?"
-            let content = m["content"].asString ?? m["content"].serialize()
-            return "\(role): \(content)"
-        }.joined(separator: "\n")
-        let capped = String(rendered.prefix(20000))
-        let prompt: [JSON] = [
-            .object([
-                "role": .string("system"),
-                "content": .string(
-                    "Summarize the conversation excerpt below concisely, PRESERVING names, "
-                        + "decisions, facts, preferences, and unresolved tasks. Output ONLY "
-                        + "the summary."),
-            ]),
-            .object(["role": .string("user"), "content": .string(capped)]),
-        ]
-        var parts = ""
-        do {
-            let stream = provider.chat(messages: prompt)
-            for try await chunk in stream {
+    /// Closure over the backend provider: summarize a span of turns to a
+    /// string. A plain text completion (no tools — providers stream raw text).
+    /// Python `_make_summarizer`.
+    ///
+    /// The input is NOT char-capped: python hands the span over whole. A
+    /// REASONING MODEL THINKS OUT LOUD HERE TOO. Measured 2026-09-06 (python)
+    /// across two e2e runs: 172 of 172 model-written folds carried a title
+    /// beginning `<think>The user wants me to summarize…` — the summary was
+    /// buried under the reasoning and every fold read as noise. Side calls strip
+    /// like the main turn.
+    public static func makeSummarizer(_ provider: any AIProvider) -> @Sendable ([JSON]) async throws -> String {
+        { msgs in
+            let rendered = msgs.map { m -> String in
+                let role = m["role"].asString ?? "?"
+                let content = m["content"].asString ?? m["content"].serialize()
+                return "\(role): \(content)"
+            }.joined(separator: "\n")
+            let prompt: [JSON] = [
+                .object([
+                    "role": .string("system"),
+                    "content": .string(
+                        "Summarize the conversation excerpt below concisely, PRESERVING "
+                            + "names, decisions, facts, preferences, and unresolved tasks. "
+                            + "Output ONLY the summary."),
+                ]),
+                .object(["role": .string("user"), "content": .string(rendered)]),
+            ]
+            var parts = ""
+            for try await chunk in provider.chat(messages: prompt) {
                 if case .token(let t) = chunk { parts += t }
             }
-        } catch {
-            return stubSummary
+            return withoutThinking(parts)
         }
-        let s = parts.trimmingCharacters(in: .whitespacesAndNewlines)
-        return s.isEmpty ? stubSummary : s
     }
 
-    /// `compact` (DEFAULT): keep the recent turns verbatim + an LLM summary of
-    /// the overflow. The summary rides the artifact; the seam wraps it.
+    /// Summarize the overflow via the backend provider; degrade to a stub on
+    /// ANY failure (a degraded artifact — the full transcript is whole in the
+    /// chat store). Python `safe_summary`.
+    public static func safeSummary(_ ctx: ProjectionCtx, _ overflow: [JSON]) async -> String {
+        guard let summarize = ctx.summarize else { return stubSummary }
+        let s: String
+        do { s = try await summarize(overflow) } catch { return stubSummary }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? stubSummary : t
+    }
+
+    /// `compact` — the DEFAULT strategy. Keep the recent turns verbatim + an
+    /// LLM summary of the overflow. The summary rides the artifact (NOT a
+    /// fabricated turn); the seam wraps it into the one canonical
+    /// context-notice.
     public static func compact(
-        body: [JSON], recentN: Int, budget: Int64, provider: any AIProvider
+        _ body: [JSON], _ systemBlock: [JSON], _ rec: JSON, _ ctx: ProjectionCtx
     ) async -> AIProjection {
-        let (overflow, recent) = recentSplit(body, recentN)
+        let (overflow, recent) = recentSplit(body, ctx.recentN)
         if overflow.isEmpty {
-            return AIProjection(body: fitTail(body, budget))
+            return AIProjection(body: fitTail(body, ctx.budget))
         }
-        let summary = await safeSummary(provider: provider, overflow: overflow)
+        let summary = await safeSummary(ctx, overflow)
+        // Reserve room for the notice the seam will prepend: the wrapper envelope
+        // + the summary text itself (the seam embeds this exact summary). One
+        // budget authority.
         let summaryCost = AIContext.estimateOne(
             .object(["role": .string("user"), "content": .string(summary)]))
-        let avail = max(0, budget - AIContext.noticeEnvelopeReserve - summaryCost)
+        let avail = max(0, ctx.budget - AIContext.noticeEnvelopeReserve - summaryCost)
         // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it
         // is the first thing the overflow split takes. A summary is a lossy retelling;
         // the one turn that must survive verbatim is the instruction the whole run
@@ -123,30 +203,52 @@ public enum AIStrategies {
         // correct conclusion, then ended "healthy budget, no tasks" — it had not refused
         // to act, it no longer knew what it was doing. `truncate` already pins this
         // turn; `compact` did not. Cost is one turn of budget, charged before the tail.
-        guard let first = body.first else {
-            return AIProjection(body: fitTail(recent, avail), summary: summary)
-        }
+        let first = body[0]
         let headCost = AIContext.estimateOne(first)
         let kept = fitTail(recent, max(0, avail - headCost))
         // Only re-add it if the recent window does not already carry it (short bodies).
-        let pinned = kept.first == first ? kept : [first] + kept
-        return AIProjection(body: pinned, summary: summary)
+        if let k = kept.first, k == first {
+            return AIProjection(body: kept, summary: summary)
+        }
+        return AIProjection(body: [first] + kept, summary: summary)
     }
 
-    /// `truncate`: keep the first (task-framing) turn + the recent turns, drop
-    /// the middle. NO summarizer. The elision is reported via `omittedMarker`.
-    public static func truncate(body: [JSON], budget: Int64) -> AIProjection {
+    /// `truncate` — keep the first (task-framing) turn + the recent turns,
+    /// drop the middle. Cheap: NO summarizer call. The elision is reported via
+    /// `omittedMarker` (NOT a fabricated turn).
+    public static func truncate(
+        _ body: [JSON], _ systemBlock: [JSON], _ rec: JSON, _ ctx: ProjectionCtx
+    ) async -> AIProjection {
         if body.count <= 1 {
-            return AIProjection(body: fitTail(body, budget))
+            return AIProjection(body: fitTail(body, ctx.budget))
         }
         let first = body[0]
+        // Reserve room for the notice the seam prepends (no summary in truncate).
         let headCost = AIContext.estimateOne(first) + AIContext.noticeEnvelopeReserve
-        let tail = fitTail(Array(body[1...]), max(0, budget - headCost))
-        return AIProjection(body: [first] + tail, summary: nil, omittedMarker: true)
+        let tail = fitTail(Array(body[1...]), max(0, ctx.budget - headCost))
+        return AIProjection(body: [first] + tail, omittedMarker: true)
     }
 
-    /// The known strategy names (config validity check; unknown ⇒ caller errors).
-    public static func isKnown(_ name: String) -> Bool {
-        name == "compact" || name == "truncate"
+    /// The registry, in python's order. `strip` keeps every turn and drops
+    /// reply BODIES instead — the ledger at mixed resolution. `fold` leaves
+    /// MARKS: closed stretches collapse to an appended fold row (summary +
+    /// refs) the model can descend into; then strip, then cut.
+    public static let registry: [(String, AIStrategy)] = [
+        ("compact", compact),
+        ("truncate", truncate),
+        ("strip", AIStripStrategy.strip),
+        ("fold", AIFoldStrategy.fold),
+    ]
+
+    /// Return the strategy by name, or nil for an unknown name — the caller
+    /// surfaces a config error, NOT a silent fall-through to the default.
+    /// Python `get_strategy`.
+    public static func getStrategy(_ name: String) -> AIStrategy? {
+        registry.first { $0.0 == name }?.1
+    }
+
+    /// Python `strategy_names()`.
+    public static func strategyNames() -> [String] {
+        registry.map { $0.0 }
     }
 }

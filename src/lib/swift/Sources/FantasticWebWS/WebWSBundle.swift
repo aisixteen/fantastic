@@ -40,13 +40,13 @@ public final class WebWSBundle: AgentBundle, @unchecked Sendable {
                 "id": .string(agentId.value),
                 "kind": .string("web_ws"),
                 "sentence": .string(
-                    "WebSocket verb-invocation surface — contributes /<host_id>/ws to the parent web; handled by the host's shared proxy."
+                    "WS verb-invocation surface; mounts /<host_id>/ws on the parent web."
                 ),
+                // Python's VERBS table; `shutdown` is a lifecycle hook, not a verb.
                 "verbs": [
-                    "get_routes":
-                        "Returns {routes:[{kind:'websocket', method:'GET', path:'/{host_id}/ws'}]} — the parent web mounts it at boot.",
-                    "boot": "No-op (no own server state).",
-                    "shutdown": "No-op.",
+                    "reflect": "Identity + the URL pattern this surface mounts + this leg's auth posture",
+                    "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app.",
+                    "get_routes": "Declares this surface's HTTP/WS route mounts. Returns",
                 ] as JSON,
             ] as JSON
         case "get_routes":
@@ -62,8 +62,10 @@ public final class WebWSBundle: AgentBundle, @unchecked Sendable {
                     ])
                 ])
             ])
-        case "boot", "shutdown", "stop":
+        case "boot":
             return .object(["ok": .bool(true)])
+        case "shutdown":
+            return .null
         default:
             return .object(["error": .string("unknown verb \(verb)")])
         }

@@ -135,7 +135,7 @@ public struct Outcome: Sendable {
     /// The wire shape: `{pid, status, result, attempts}`.
     public var asJSON: JSON {
         .object([
-            "pid": pid.map { JSON.string($0.value) } ?? .null,
+            "pid": pid.map { JSON.integer($0.value) } ?? .null,
             "status": .string(status.rawValue),
             "result": result,
             "attempts": .integer(Int64(attempts)),

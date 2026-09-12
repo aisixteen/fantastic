@@ -4,7 +4,7 @@ id: fold_paging
 group: coding
 title: "many small tasks → many folds; find the one that matters, open only it"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [python, rust, swift]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:

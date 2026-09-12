@@ -55,12 +55,12 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
                 "sentence": .string(
                     "REST verb-invocation surface; POST /<self>/<target_id> body=payload."
                 ),
+                // Python's VERBS table. `handle_route` is the host's internal
+                // edge and `shutdown` a lifecycle hook — neither is advertised.
                 "verbs": [
-                    "get_routes":
-                        "Returns this surface's HTTP route descriptors (POST /<self>/<target>, GET /<self>/_reflect[/<target>]).",
-                    "handle_route":
-                        "Host calls this on a route match: dispatches kernel.send([Item(target, body)])[0].result and returns {status, content_type, body}.",
-                    "boot": "No-op.", "shutdown": "No-op.",
+                    "reflect": "Identity + URL patterns + curl examples + this leg's auth posture",
+                    "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app.",
+                    "get_routes": "Declares this surface's HTTP routes. Returns",
                 ] as JSON,
             ] as JSON
         case "get_routes":
@@ -86,8 +86,10 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
             ])
         case "handle_route":
             return await handleRoute(agentId: agentId, payload: payload, kernel: kernel)
-        case "boot", "shutdown", "stop":
+        case "boot":
             return .object(["ok": .bool(true)])
+        case "shutdown":
+            return .null
         default:
             return .object(["error": .string("unknown verb \(verb)")])
         }

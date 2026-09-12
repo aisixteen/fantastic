@@ -110,6 +110,39 @@ private func startsABlock(_ s: Substring) -> Bool {
     return rest.hasPrefix(" · ")
 }
 
+/// The pid off a block's first line — what `grep` and `strip` address a body by.
+/// Python `_PID_TAG` (`^\[reply to (\S+) · `), as a hand scan like the rest of
+/// this file. The token comes back AS THE TAG WRITES IT (`42`, `-`, a foreign
+/// `notes:a1`); the store keys an int pid by its decimal text, so the string is
+/// the one key both sides agree on.
+func pidOf(_ block: String) -> String? {
+    let full = Substring(block)
+    guard full.hasPrefix("[reply to ") else { return nil }
+    guard let (pid, rest) = takeRun(full.dropFirst("[reply to ".count)) else { return nil }
+    guard rest.hasPrefix(" · ") else { return nil }
+    return String(pid)
+}
+
+/// Python's `len()` of a string — code points, not grapheme clusters and not
+/// bytes. A stub says how much left the view in the units python counts.
+func pyLen(_ s: Substring) -> Int { s.unicodeScalars.count }
+func pyLen(_ s: String) -> Int { s.unicodeScalars.count }
+
+/// A reply block reduced to its stub: the tag line, then what it cost.
+/// Python `strategies/strip._stub` — ONE OWNER, shared by `strip` and
+/// `applyRes`, so a stub renders the same bytes wherever it is produced:
+///     [reply to pid · notes read · "survey chunk 2"] (stripped: 6800 bytes — recall by pid)
+func stub(_ block: String) -> String {
+    // `head, _, body = block.partition("\n")`: no newline ⇒ the whole block is the
+    // head and the body is empty.
+    if let nl = block.firstIndex(of: "\n") {
+        let head = block[block.startIndex..<nl]
+        let body = block[block.index(after: nl)...]
+        return "\(head) (stripped: \(pyLen(body)) bytes — recall by pid)"
+    }
+    return "\(block) (stripped: 0 bytes — recall by pid)"
+}
+
 /// Split a delivered turn into its reply BLOCKS. Python `_reply_blocks` /
 /// `_BLOCK_SPLIT` (`\n\n(?=\[reply to \S+ · )`).
 ///
@@ -202,11 +235,10 @@ func dropAnsweredReflects(_ history: [JSON]) -> [JSON] {
         if trimmed == blocks {
             out.append(turn)
         } else {
-            out.append(
-                .object([
-                    "role": .string("user"),
-                    "content": .string(trimmed.joined(separator: "\n\n")),
-                ]))
+            // `{**turn, "content": …}` — the row KEEPS its keys. Rebuilding the turn
+            // as a bare {role, content} silently unlinked every trimmed row from
+            // its `id`/`parent`, and a fold cannot place a row it cannot address.
+            out.append(withField(turn, "content", .string(trimmed.joined(separator: "\n\n"))))
         }
     }
     return out
@@ -249,10 +281,7 @@ func dedupeStaleReads(_ history: [JSON]) -> [JSON] {
             keepRev.append(turn)
         } else {
             keepRev.append(
-                .object([
-                    "role": .string("user"),
-                    "content": .string(keptRev.reversed().joined(separator: "\n\n")),
-                ]))
+                withField(turn, "content", .string(keptRev.reversed().joined(separator: "\n\n"))))
         }
     }
     return keepRev.reversed()

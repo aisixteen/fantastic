@@ -86,7 +86,7 @@ struct WebSocketTests {
         await mountWebWS(kernel)
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -141,7 +141,7 @@ struct WebSocketTests {
         await mountWebWS(kernel)
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -203,7 +203,7 @@ struct WebSocketTests {
         await mountWebWS(kernel, granted: false)
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -259,7 +259,7 @@ struct WebSocketTests {
             ]))])[0].result["id"].asString ?? "ws_slow_probe"
         defer {
             Task {
-                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
             }
         }
         let port = kernel.httpPort()

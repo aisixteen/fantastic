@@ -9,7 +9,7 @@
 //   let kernel = try await startKernelInMemory(portHint: 0)
 //   let port = kernel.httpPort()
 //   // ... use kernel
-//   kernel.shutdown()
+//   await kernel.shutdown()
 
 import FantasticCliBundle
 import FantasticFile
@@ -56,6 +56,9 @@ public func defaultBundleRegistry() -> BundleRegistry {
         // one, so the task is a gated `user -> ai` send with a ledger row
         // instead of an operator injection from outside the kernel.
         r.register(USER_MODULE, UserProbe())
+        // A fixed body of knowledge per solver: `ask` is keyword search over
+        // the `lines` on its record; `asked` is the tally the scorer reads.
+        r.register(ORACLE_MODULE, OracleProbe())
     #endif
     r.register("text_file.tools", TextFileBundle())
     r.register("proxy_agent.tools", ProxyAgentBundle())

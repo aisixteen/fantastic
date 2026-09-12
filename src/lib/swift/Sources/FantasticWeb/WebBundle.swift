@@ -88,15 +88,36 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     public let name = "web"
     public init() {}
 
-    /// Live `WebServer` instances keyed by agent id. Created in
-    /// `boot`, dropped in `shutdown`. NSLock-protected because
-    /// boot/shutdown can race with concurrent verb dispatch.
+    /// Live `WebServer` instances keyed by agent id. Created in `boot`,
+    /// dropped by `stop` and by the `onShutdown`/`onDelete` hooks.
+    /// NSLock-protected because boot/stop can race with concurrent verb
+    /// dispatch.
     private let serversLock = NSLock()
     private var servers: [AgentId: WebServer] = [:]
 
     private func serverFor(_ id: AgentId) -> WebServer? {
         serversLock.lock(); defer { serversLock.unlock() }
         return servers[id]
+    }
+
+    /// Stop + forget the listener for `id`. `false` when none was running.
+    /// Python `_stop_uvicorn`.
+    private func stopListener(_ id: AgentId) -> Bool {
+        guard let server = serverFor(id) else { return false }
+        server.stop()
+        setServer(nil, for: id)
+        return true
+    }
+
+    /// The process is stopping: the listener dies with it. Python `on_delete`
+    /// (its only hook, which the shutdown walk falls back to).
+    public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
+        _ = stopListener(agentId)
+    }
+
+    /// Cascade hook — the HTTP server does not outlive the agent record.
+    public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        _ = stopListener(agentId)
     }
 
     private func setServer(_ server: WebServer?, for id: AgentId) {
@@ -174,7 +195,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                 "id": .string(agent.id.value),
                 "kind": .string("web"),
                 "sentence": .string(
-                    "HTTP rendering host — serves /, /<id>/, /<id>/file/<path>, /_fantastic/transport.js, /_assets/*. WS + REST surfaces are composable children (web_ws / web_rest); at boot the host pulls each child's get_routes and mounts them."
+                    "HTTP host — rendering routes baked in; call surfaces mounted from sub-agents."
                 ),
                 "port": agent.metaValue(forKey: "port") ?? .null,
                 "running": agent.metaValue(forKey: "running") ?? .bool(false),
@@ -185,13 +206,16 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                             "content_type": .string($0.contentType),
                         ])
                     }),
+                // Python's VERBS table, first doc line each. `shutdown` is a
+                // lifecycle hook, never an advertised verb: an agent that
+                // advertises it is TOLD by `shutdown_agents`, and a listener
+                // must not be stopped by the drain it is carrying.
                 "verbs": [
-                    "boot": "Starts the HTTP listener + pulls each child's get_routes and mounts them.",
-                    "shutdown": "Stops the listener.",
-                    "mount": "args: child_id. Re-pull + remount one child's routes (hot-swap).",
-                    "unmount": "args: child_id. Drop a child's mounted routes.",
-                    "render": "args: agent_id. Returns the agent's render_html reply + transport.js injection.",
-                    "asset": "args: path. Returns the vendored asset for /_assets/* or /_fantastic/transport.js.",
+                    "reflect": "Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).",
+                    "boot": "Idempotent. Builds the host on rec.port (required, no default), mounts each",
+                    "stop": "No args. Asks uvicorn to shut down; cancels its task. Returns {stopped:bool}.",
+                    "mount": "args: child_id:str (req). Pulls `get_routes` from the named child and (re)mounts its routes onto the live app. Idempotent — unmounts any prior routes for the child first.",
+                    "unmount": "args: child_id:str (req). Removes every route belonging to the named child from the live app.",
                 ] as JSON,
                 "emits": [
                     "—": "rendering host emits nothing; surfaces emit on their own inboxes"
@@ -252,13 +276,13 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                 server.unmountRoutes(for: AgentId(childStr))
             }
             return .object(["unmounted": .bool(true), "child_id": .string(childStr)])
-        case "shutdown", "stop":
-            if let server = serverFor(agent.id) {
-                server.stop()
-                setServer(nil, for: agent.id)
-            }
+        case "shutdown":
+            // A lifecycle no-op; the listener stops in `onShutdown`/`onDelete`.
+            return .null
+        case "stop":
+            let stopped = stopListener(agent.id)
             agent.updateMeta(["running": .bool(false)])
-            return .object(["ok": .bool(true)])
+            return .object(["stopped": .bool(stopped)])
         case "asset":
             guard let path = payload["path"].asString else {
                 return .object(["error": .string("asset requires path")])

@@ -75,7 +75,7 @@ private struct SlowBundle: AgentBundle {
         // In flight until someone kills us (or the test times it out). Takes the
         // "resource" for the duration — released ONLY by `onCancel`.
         case "slow":
-            if let t = KernelTaskLocals.currentTask { sh.take(t.value) }
+            if let t = KernelTaskLocals.currentTask { sh.take(String(t.value)) }
             try? await Task.sleep(nanoseconds: 30_000_000_000)
             return .object(["finished": .bool(true)])  // never reached in these tests
         // A nested send — the callee's dispatch becomes a CHILD task of this one.
@@ -87,10 +87,10 @@ private struct SlowBundle: AgentBundle {
         case "fork":
             let sh = self.sh
             let tid = kernel.spawnTask(agent: agentId, verb: "job") {
-                if let t = KernelTaskLocals.currentTask { sh.take(t.value) }
+                if let t = KernelTaskLocals.currentTask { sh.take(String(t.value)) }
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
             }
-            return .object(["task_id": .string(tid.value)])
+            return .object(["task_id": .integer(tid.value)])
         // Fork long-lived work on a PEER, then stay in flight. The fork outlives
         // the `fork` dispatch and is re-parented to THIS task.
         case "chain_fork":
@@ -106,10 +106,10 @@ private struct SlowBundle: AgentBundle {
             let found = (table["tasks"].asArray ?? []).first {
                 $0["agent"].asString == victim && $0["verb"].asString == "slow"
             }
-            guard let taskId = found?["id"].asString else {
+            guard let taskId = found?["id"].asInt else {
                 return .object(["error": .string("no victim task")])
             }
-            return await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(taskId)]))])[0].result
+            return await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .integer(taskId)]))])[0].result
         case let other:
             return .object(["error": .string("unknown verb \(other)")])
         }
@@ -121,7 +121,7 @@ private struct SlowBundle: AgentBundle {
     /// exists.
     func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
         sh.recordHook(
-            agent: agentId.value, task: taskId.value,
+            agent: agentId.value, task: String(taskId.value),
             alive: kernel.tasks.contains(taskId))
     }
 }
@@ -168,8 +168,8 @@ private func rowFor(_ kernel: Kernel, _ agent: AgentId, _ verb: String) async ->
     }
 }
 
-private func cancel(_ kernel: Kernel, _ taskId: String) async -> JSON {
-    await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(taskId)]))])[0].result
+private func cancel(_ kernel: Kernel, _ taskId: Int64) async -> JSON {
+    await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .integer(taskId)]))])[0].result
 }
 
 /// Poll until `cond` holds, or fail the test.
@@ -182,10 +182,10 @@ private func waitUntil(_ what: String, _ cond: () async -> Bool) async throws {
 }
 
 /// Wait until `agent`'s `verb` dispatch shows up in the table, then return its id.
-private func waitForTask(_ kernel: Kernel, _ agent: AgentId, _ verb: String) async throws -> String
+private func waitForTask(_ kernel: Kernel, _ agent: AgentId, _ verb: String) async throws -> Int64
 {
     for _ in 0..<300 {
-        if let row = await rowFor(kernel, agent, verb), let id = row["id"].asString {
+        if let row = await rowFor(kernel, agent, verb), let id = row["id"].asInt {
             return id
         }
         try await Task.sleep(nanoseconds: 10_000_000)
@@ -244,19 +244,16 @@ struct TaskTablePsTests {
         let parent = try #require(await rowFor(kernel, a, "chain"))
         let child = try #require(await rowFor(kernel, b, "slow"))
 
-        // Task id IS a pid: "<agent_id>:<8 hex>". The token is OPAQUE on purpose — a
-        // visible counter reads as a SEQUENCE, and messaging is async (a send may return
-        // once, several times, or never). Measured 2026-08-20 on python: a model inferred
-        // ordering from the number and re-polled forever instead of matching on the id.
-        for (row, agent) in [(parent, a), (child, b)] {
-            let id = try #require(row["id"].asString)
-            let parts = id.split(separator: ":")
-            #expect(parts.count == 2)
-            #expect(String(parts[0]) == agent.value)
-            let token = String(parts[1])
-            #expect(token.count == 8)
-            #expect(token.allSatisfy { $0.isHexDigit && !$0.isUppercase })
+        // Task id IS a message id: one int from the kernel's one counter, so
+        // `ps`, `cancel`, the ledger, a reply tag and the message log name the
+        // same number (python; rust; swift since 2026-09-12). It was
+        // "<agent_id>:<8 hex>" here — an opaque per-agent token — until then.
+        for (row, _) in [(parent, a), (child, b)] {
+            let id = try #require(row["id"].asInt)
+            #expect(id > 0)
         }
+        #expect(try #require(child["id"].asInt) > (try #require(parent["id"].asInt)),
+            "the child was minted after its parent")
         // The tree: b's dispatch is a child of a's dispatch. a's caller is the
         // test task — not a dispatch — so a's task is a root (init-owned).
         #expect(child["parent"] == parent["id"])
@@ -295,10 +292,10 @@ struct TaskTableCancelTests {
         let r = await cancel(kernel, aTask)
         #expect(r["cancelled"].asBool == true)
         // Leaves-up: the child is killed before the parent that awaits it.
-        #expect(r["killed"] == .array([.string(bTask), .string(aTask)]))
+        #expect(r["killed"] == .array([.integer(bTask), .integer(aTask)]))
 
         // The subtree is GONE from the table.
-        let live = Set((await rows(kernel)).compactMap { $0["id"].asString })
+        let live = Set((await rows(kernel)).compactMap { $0["id"].asInt })
         #expect(!live.contains(aTask))
         #expect(!live.contains(bTask))
 
@@ -320,7 +317,7 @@ struct TaskTableCancelTests {
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
 
-        let unknown = await cancel(kernel, "no_such_agent:7")
+        let unknown = await cancel(kernel, 999_999)
         #expect(unknown == .object(["cancelled": .bool(false), "killed": .array([])]))
 
         // A task id that WAS live and is now finished (we just cancelled it).
@@ -365,9 +362,9 @@ struct TaskTableCancelTests {
 
         let r = await kernel.send([Item(killer, .object(["type": .string("kill"), "victim": .string(victim.value)]))])[0].result
         #expect(r["cancelled"].asBool == true)
-        #expect(r["killed"] == .array([.string(victimTask)]))
+        #expect(r["killed"] == .array([.integer(victimTask)]))
 
-        let live = Set((await rows(kernel)).compactMap { $0["id"].asString })
+        let live = Set((await rows(kernel)).compactMap { $0["id"].asInt })
         #expect(!live.contains(victimTask))
         let reply = await replyOf(caller)
         #expect(reply == .object(["cancelled": .bool(true)]))
@@ -387,7 +384,7 @@ struct TaskTableCancelTests {
         let caller = spawnCaller(kernel, a, .object(["type": .string("slow")]))
         defer { caller.cancel() }
         let taskId = try await waitForTask(kernel, a, "slow")
-        try await waitUntil("the resource to be held") { sh.heldIds().contains(taskId) }
+        try await waitUntil("the resource to be held") { sh.heldIds().contains(String(taskId)) }
 
         let r = await cancel(kernel, taskId)
         #expect(r["cancelled"].asBool == true)
@@ -396,7 +393,7 @@ struct TaskTableCancelTests {
         let log = sh.hookLog()
         #expect(log.count == 1)
         #expect(log.first?.0 == a.value)
-        #expect(log.first?.1 == taskId)
+        #expect(log.first?.1 == String(taskId))
         #expect(log.first?.2 == true, "the hook ran BEFORE the abort")
     }
 
@@ -425,12 +422,12 @@ struct TaskTableCancelTests {
             await rowFor(kernel, b, "fork") == nil
         }
         let jobRow = try #require(await rowFor(kernel, b, "job"))
-        #expect(jobRow["parent"].asString == aTask, "init-adoption")
+        #expect(jobRow["parent"].asInt == aTask, "init-adoption")
 
         // Killing the OUTER task reaches the forked job through the adopted link.
         let r = await cancel(kernel, aTask)
         #expect(r["cancelled"].asBool == true)
-        #expect(r["killed"] == .array([.string(job), .string(aTask)]))
+        #expect(r["killed"] == .array([.integer(job), .integer(aTask)]))
         #expect(sh.heldIds().isEmpty, "the job's onCancel must release it: \(sh.heldIds())")
         let reply = await replyOf(caller)
         #expect(reply == .object(["cancelled": .bool(true)]))

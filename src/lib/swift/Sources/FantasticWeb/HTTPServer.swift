@@ -297,15 +297,41 @@ public final class WebServer: @unchecked Sendable {
         // follow-on here and why an execution id had nowhere to ride.
         var headerObj: OrderedDictionary<String, JSON> = [:]
         for (k, v) in request.headers { headerObj[k.lowercased()] = .string(v) }
-        let reply = await kernel.send([Item(spec.ownerId, .object([
-                "type": .string("handle_route"),
-                "method": .string(request.method),
-                "path": .string(request.path),
-                "params": .object(paramsObj),
-                "query": .object(queryObj),
-                "headers": .object(headerObj),
-                "body": .string(bodyStr),
-            ]))])[0].result
+        // NO DISPATCH HOP. Python's REST handler calls `kernel.send` itself
+        // under the leg's identity (`sender_context(self_id)`), so the batch
+        // item's dispatch is the ONLY task row a request holds; rust does the
+        // same (`with_sender(owner)`). Swift dispatched a `handle_route` verb on
+        // the leg first, so every request held a second, PARENT row — the one
+        // `shutdown_agents` waited the whole quiet window for and then
+        // cancelled, killing the very request that asked, so `shutdown_kernel`'s
+        // ack was lost and the daemon never stopped (E78, measured 2026-09-13).
+        let routePayload: JSON = .object([
+            "type": .string("handle_route"),
+            "method": .string(request.method),
+            "path": .string(request.path),
+            "params": .object(paramsObj),
+            "query": .object(queryObj),
+            "headers": .object(headerObj),
+            "body": .string(bodyStr),
+        ])
+        let reply: JSON = await KernelTaskLocals.$currentSender.withValue(spec.ownerId) {
+            guard let owner = kernel.agent(spec.ownerId), let hm = owner.handlerModule,
+                let bundle = kernel.bundles.get(hm)
+            else {
+                return .object([
+                    "status": .integer(500), "content_type": .string("application/json"),
+                    "body": .string(JSON.object(["error": .string("no route owner \(spec.ownerId.value)")]).serialize()),
+                ])
+            }
+            do {
+                return try await bundle.handle(agentId: spec.ownerId, payload: routePayload, kernel: kernel) ?? .null
+            } catch {
+                return .object([
+                    "status": .integer(500), "content_type": .string("application/json"),
+                    "body": .string(JSON.object(["error": .string("\(error)")]).serialize()),
+                ])
+            }
+        }
         let status = Int(reply["status"].asInt ?? 200)
         let contentType = reply["content_type"].asString ?? "application/json"
         let bodyOut = reply["body"].asString ?? ""

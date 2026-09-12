@@ -1,44 +1,79 @@
 // The keyed manual — a doc TREE beside the short `root_readme.md` orientation.
 //
-// `Resources/docs/<key>.md` are the topic files (FLAT for this runtime). They
-// feed BOTH the on-disk `.fantastic/docs/` tree (seeded at boot) and
-// `reflect readme=index` / `reflect readme=<key>` on the root. Mirrors Python's
-// `kernel_state/docs/` + Rust's `fantastic_core::DOCS`.
+// `Resources/docs/` is a copy of python's `kernel_state/docs/`: `<key>.md` is a
+// topic, a sibling dir `<key>/` extends it with sub-docs (`<key>/<sub>`) —
+// nested dirs are tiers. The tree feeds BOTH the on-disk `.fantastic/docs/`
+// (seeded at boot, copy-if-missing) and `reflect readme=index` /
+// `readme=<key>` on the root. Mirrors Python's `Agent._readme_index` walk and
+// Rust's `fantastic_core::DOCS`.
 
 import Foundation
 
 public enum RootDocs {
-    /// Ordered topic keys (mirror the on-disk `docs/` tree). `self-extension`
-    /// first so a self-authoring model reaches it before the system manual.
-    public static let keys: [String] = [
-        "self-extension", "reflect", "agents", "memory",
-        "persistence", "transports", "streams", "daemon",
-    ]
+    /// One topic: its key (`frontend/routing` for a nested one), its body, and
+    /// the sub-docs of its sibling dir.
+    public struct Node: Sendable {
+        public let key: String
+        public let body: String
+        public let children: [Node]
+    }
 
-    /// `(key, body)` for each topic, loaded once from the bundled resources.
-    public static let all: [(key: String, body: String)] = {
-        keys.compactMap { key in
-            guard
-                let url = Bundle.module.url(
-                    forResource: key, withExtension: "md", subdirectory: "docs"),
-                let s = try? String(contentsOf: url, encoding: .utf8)
-            else { return nil }
-            return (key, s)
+    /// Walk a `docs/` directory the way python's `_readme_index` does: every
+    /// `*.md` in sorted name order, each extended by the children of a sibling
+    /// dir of the same stem. Absent or empty dir → `[]`.
+    public static func walk(_ dir: URL, prefix: String = "") -> [Node] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
+        var out: [Node] = []
+        for name in names.sorted() where name.hasSuffix(".md") {
+            let file = dir.appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: file.path, isDirectory: &isDir), !isDir.boolValue,
+                let body = try? String(contentsOf: file, encoding: .utf8)
+            else { continue }
+            let stem = String(name.dropLast(3))
+            let key = prefix + stem
+            let sub = dir.appendingPathComponent(stem)
+            let children =
+                fm.fileExists(atPath: sub.path, isDirectory: &isDir) && isDir.boolValue
+                ? walk(sub, prefix: key + "/") : []
+            out.append(Node(key: key, body: body, children: children))
         }
+        return out
+    }
+
+    /// The embedded tree, read once from the bundled resources.
+    public static let tree: [Node] = {
+        guard let dir = Bundle.module.resourceURL?.appendingPathComponent("docs") else { return [] }
+        return walk(dir)
     }()
 
-    /// Seed `<workdir>/.fantastic/docs/<key>.md` from [`all`], copy-if-missing
-    /// (preserves operator edits). Called at boot beside `RootReadme.seed`.
+    /// Every key, pre-order — python's `_readme_keys`.
+    public static func keys(_ nodes: [Node]) -> [String] {
+        nodes.flatMap { [$0.key] + keys($0.children) }
+    }
+
+    /// `(key, body)` for every topic, pre-order, nested keys included.
+    public static let all: [(key: String, body: String)] = flatten(tree)
+
+    private static func flatten(_ nodes: [Node]) -> [(key: String, body: String)] {
+        nodes.flatMap { [(key: $0.key, body: $0.body)] + flatten($0.children) }
+    }
+
+    /// Seed `<workdir>/.fantastic/docs/<key>.md` from [`all`] — nested keys land
+    /// in nested dirs — copy-if-missing (preserves operator edits). Called at
+    /// boot beside `RootReadme.seed`.
     public static func seed(workdir: URL) {
         let dir =
             workdir
             .appendingPathComponent(".fantastic")
             .appendingPathComponent("docs")
         let fm = FileManager.default
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         for (key, body) in all {
             let dest = dir.appendingPathComponent("\(key).md")
             if fm.fileExists(atPath: dest.path) { continue }
+            try? fm.createDirectory(
+                at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? body.write(to: dest, atomically: true, encoding: .utf8)
         }
     }

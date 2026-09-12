@@ -228,9 +228,8 @@ public struct StaticLoaderBundle: AgentBundle {
             "loader": .bool(true),
             "manifest": agent.metaValue(forKey: "manifest") ?? .null,
             "verbs": .object([
-                "reflect": .string("No args. The loader's posture: manifest + roster-hydration."),
-                "boot": .string(
-                    "No args. Read the manifest + hydrate the declared roster (operator)."),
+                "reflect": .string("The loader's posture: what manifest it hydrates, and that it IS a loader"),
+                "boot": .string("Hydrate the declared roster as OPERATOR."),
             ]),
         ])
     }

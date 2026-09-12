@@ -95,8 +95,30 @@ func deliverTurn(
     target: String,
     text: String,
     clientId: String,
-    systemPrompt: String?
+    systemPrompt: String?,
+    born: Int? = nil
 ) async {
+    if let born, AIIncarnation.of(target) != born {
+        // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real
+        // data, in the ledger and in the store — but it does not wake a turn: the
+        // agent that made the call is gone, and the one that replaced it is on
+        // other work. Python `_deliver`.
+        let rid = kernel.rows.mintId()
+        appendRows(
+            AgentId(target), kernel: kernel,
+            [
+                .object([
+                    "role": .string("user"),
+                    "id": .integer(rid),
+                    "parent": .null,
+                    "kind": .string("late"),
+                    "content": .string(
+                        "[late reply — answered a call made before this agent last "
+                            + "booted; recorded, not acted on]\n" + text),
+                ])
+            ])
+        return
+    }
     var payload: OrderedDictionary<String, JSON> = [:]
     payload["type"] = .string("send")
     payload["text"] = .string(text)
@@ -139,6 +161,18 @@ func deliverTurn(
                 "client_id": .string(clientId),
             ]))
     }
+}
+
+/// Hand `text` to `target` as a fresh turn, stamped with the incarnation the
+/// target has NOW — python's `_deliver_soon`, which reads `_incarnation[target]`
+/// as it schedules the delivery so `_deliver` can tell a reply that outlived
+/// its agent from one that belongs to it.
+func deliverSoon(
+    kernel: Kernel, target: String, text: String, clientId: String, systemPrompt: String?
+) async {
+    await deliverTurn(
+        kernel: kernel, target: target, text: text, clientId: clientId,
+        systemPrompt: systemPrompt, born: AIIncarnation.of(target))
 }
 
 // ─── the route ──────────────────────────────────────────────────
@@ -191,7 +225,7 @@ let inFlightTurns = InFlightTurns()
 /// the list buys is that each copy carries the WHOLE list, so a recipient can
 /// see who else heard it and reply to the same group instead of forking a
 /// private conversation the others never see.
-func fanOut(_ calls: [ToolCall]) -> [ToolCall] {
+func fanOut(_ calls: [ToolCall], turnId: Int64? = nil) -> [ToolCall] {
     var out: [ToolCall] = []
     for call in calls {
         guard case .object(let args) = call.arguments else {
@@ -203,6 +237,19 @@ func fanOut(_ calls: [ToolCall]) -> [ToolCall] {
             recipients = items.compactMap(\.asString).map(pyStrip).filter { !$0.isEmpty }
         }
         if call.name != "send" || recipients.isEmpty {
+            // A single `send` of a turn still carries `msg` — the row that sent
+            // it — unless the model named one itself. Python `_route_reply`.
+            if call.name == "send", let turnId, case .some(.object(var payload)) = args["payload"],
+                payload["type"]?.asString == "send"
+            {
+                if payload["msg"] == nil { payload["msg"] = .integer(turnId) }
+                if let re = args["re"] { payload["re"] = re }
+                var copy = args
+                copy["payload"] = .object(payload)
+                copy.removeValue(forKey: "re")
+                out.append(ToolCall(id: call.id, name: "send", arguments: .object(copy)))
+                continue
+            }
             out.append(call)
             continue
         }
@@ -213,6 +260,8 @@ func fanOut(_ calls: [ToolCall]) -> [ToolCall] {
             var payload = basePayload
             // The WHOLE list, in every copy — that is what makes it one message.
             payload["to"] = .array(recipients.map { JSON.string($0) })
+            // `msg` is the sending row's id: what a reply's `re` names.
+            if let turnId { payload["msg"] = .integer(turnId) }
             if let re { payload["re"] = re }
             var copy: OrderedDictionary<String, JSON> = [:]
             for (k, v) in args
@@ -309,9 +358,10 @@ func routeReply(
     systemPrompt: String?,
     incoming: String,
     sendTimeout: Double,
-    runState: AIAgentRunState? = nil
+    runState: AIAgentRunState? = nil,
+    turnId: Int64? = nil
 ) async {
-    let calls = fanOut(extractToolCalls(text))
+    let calls = fanOut(extractToolCalls(text), turnId: turnId)
     let doneCalled = calls.contains { $0.name == "done" }
     let awaitCalled = calls.contains { $0.name == "await" }
     let anyCalls = !calls.isEmpty
@@ -476,7 +526,13 @@ func routeReply(
         if let replyTo = replyTo {
             units.append(
                 RouteUnit(
-                    dest: replyTo, target: target, verb: verb, idx: items.count - 1, body: nil))
+                    dest: replyTo, target: target, verb: verb, idx: items.count - 1, body: nil,
+                    // The model's own `<title>` rides the reply's tag — python
+                    // `_clean_title(args.get("title"))`. Swift dropped it here, so
+                    // no delivered reply ever named what it answered: a probe
+                    // matching member rows by title found the call turn and not
+                    // its reply (E73 misleading_fold, 3/3 on swift, 2026-09-13).
+                    title: cleanTitle(args["title"])))
         }
     }
 
@@ -498,13 +554,18 @@ func routeReply(
     // about its own retries) and again 2026-08-20 (the model: "the reply queue is
     // running ahead of me", then re-polled forever). The PID is the same id
     // `ps`/`cancel` use, so a reply names a row the model can act on.
+    // A bare test kernel has no record: python reads `{}` there and `context_async`
+    // is simply off.
+    let me = kernel.agent(selfId)
+    let asyncOn = pythonTruthy(me?.metaValue(forKey: "context_async") ?? .null)
+    let cap = me.map(AIContext.inlineCap) ?? 0
     var blocks: [RouteBlock] = []
     for u in units {
         var pid = "-"
         var body = u.body ?? ""
         if let i = u.idx {
             let outcome = outcomes[i]
-            pid = outcome.pid?.value ?? "-"
+            pid = outcome.pid.map { String($0.value) } ?? "-"
             var result = outcome.result
             if result["raised"].asBool == true, var obj = result.asObject, obj["target"] == nil {
                 obj["target"] = .string(u.target)
@@ -514,6 +575,28 @@ func routeReply(
             // Only reflect bodies are dropped later, so only they carry the
             // distillation notice.
             if u.verb == "reflect" { body += REFLECT_NUDGE }
+            // FULL ASYNC. A reply is DATA, not a question — the model needs to be
+            // able to see it, not forced to swallow it whole as its next turn.
+            // Anything over the inline cap is stored under its pid and replaced
+            // by its digest; the model pulls pages when it wants them. This is
+            // what makes an unbounded reply (a 240KB ledger dump) non-fatal: it
+            // becomes a row to page, never a turn to fit. Measured AFTER the
+            // nudge rode on, exactly where python counts it.
+            if asyncOn, let p = outcome.pid,
+                AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)])) > cap
+            {
+                // `len(body)` — code points, as python counts a str.
+                let size = body.unicodeScalars.count
+                if (try? kernel.rows.bodyPut(selfId, pid: p.value, text: body)) != nil {
+                    // THE STUB NAMES GREP FIRST. It used to offer only `pull`, and a
+                    // model hunting one line paged 16 bodies (measured 2026-09-06,
+                    // python recall_after_fold: 24 pulls, 0 greps, marker not found).
+                    body =
+                        "(settled, \(size) bytes \u{2014} NOT inlined. To find a line in it: "
+                        + "send yourself <type>grep</type> <query>substring</query> <ids><item>\(p.value)</item></ids>. "
+                        + "To read it: <type>pull</type> <pid>\(p.value)</pid> <offset>0</offset>)"
+                }
+            }
         }
         blocks.append(
             RouteBlock(
@@ -560,7 +643,7 @@ func routeReply(
     if !nudging { await silentStreaks.reset(kernel, selfId.value, clientId) }
     if anyBlocks {
         await deliverGrouped(
-            kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt)
+            kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt, turnId: turnId)
     }
     if doneCalled {
         // Explicitly finished — nothing more runs, nothing reminds. A caller's
@@ -569,7 +652,7 @@ func routeReply(
         // which it can still apply, now that a call-less turn is nudged instead
         // of ending.
         if let sendTo = sendTo, !anyBlocks {
-            await deliverTurn(
+            await deliverSoon(
                 kernel: kernel, target: sendTo, text: text,
                 clientId: clientId, systemPrompt: systemPrompt)
         }
@@ -608,7 +691,7 @@ func routeReply(
         }
         // Nothing to wait for: say so, as a turn, so the model acts instead of
         // waiting forever on an empty inbox.
-        await deliverTurn(
+        await deliverSoon(
             kernel: kernel, target: selfId.value, text: awaitRefused,
             clientId: clientId, systemPrompt: systemPrompt)
         return
@@ -619,7 +702,7 @@ func routeReply(
             kernel.agent(selfId)?.metaValue(forKey: "nudge_limit")?.asInt.map { Int($0) }
             ?? nudgeLimit
         if streak <= limit {
-            await deliverTurn(
+            await deliverSoon(
                 kernel: kernel, target: selfId.value, text: noCallNudge,
                 clientId: clientId, systemPrompt: systemPrompt)
         } else {
@@ -632,7 +715,7 @@ func routeReply(
     // this pass's TEXT to `sendTo`, once. It must not propagate — a caller cannot
     // spend the model's turns for it.
     if let sendTo = sendTo {
-        await deliverTurn(
+        await deliverSoon(
             kernel: kernel, target: sendTo, text: text,
             clientId: clientId, systemPrompt: systemPrompt)
     }
@@ -651,7 +734,8 @@ func routeReply(
 /// flight" — the batch arrives whole. A model that made 2 calls and got 1 back
 /// could not tell "still running" from "answered the wrong one".
 private func deliverGrouped(
-    kernel: Kernel, blocks: [RouteBlock], clientId: String, systemPrompt: String?
+    kernel: Kernel, blocks: [RouteBlock], clientId: String, systemPrompt: String?,
+    turnId: Int64? = nil
 ) async {
     guard !blocks.isEmpty else { return }
     // Destination order = first appearance, so the model reads them in the order
@@ -662,12 +746,10 @@ private func deliverGrouped(
         if byDest[b.dest] == nil { order.append(b.dest) }
         byDest[b.dest, default: []].append(b)
     }
-    // A FRESH token per TURN, shared across destinations: it names the batch, and a
-    // model reading two destinations' messages can see they came from one turn.
-    // Derived from the batch's CONTENT until 2026-09-02, so two turns that made the
-    // same calls collided — the exact confusion the token exists to end (measured
-    // 2026-08-24: a model re-read one file forever on colliding stamps).
-    let token = String(format: "%04x", UInt16.random(in: .min ... .max))
+    // The batch token IS the assistant row's id, so `in batch <b>` and `↑<turn>`
+    // name the same thing and the model can see the row every reply points at.
+    // (A fresh random token only when no turn made these calls.)
+    let token = turnId.map { String($0) } ?? String(format: "%04x", UInt16.random(in: .min ... .max))
     for dest in order {
         let parts = byDest[dest] ?? []
         let m = parts.count
@@ -676,12 +758,14 @@ private func deliverGrouped(
             // in `recall` pages, and as the stub a stripped body leaves behind.
             // Optional segments append in THIS order:
             //     [reply to <pid> · <target> <verb> · "<title>" · N of M in batch <b>]
+            //     [reply to <pid> · <target> <verb> · "<title>" · ↑<turn> · N of M in batch <b>]
             var tag = "[reply to \(b.pid) \u{b7} \(b.target) \(b.verb)"
             if let t = b.title { tag += " \u{b7} \"\(t)\"" }
+            if let turnId { tag += " \u{b7} \u{2191}\(turnId)" }
             tag += m > 1 ? " \u{b7} \(i + 1) of \(m) in batch \(token)]" : "]"
             return tag + "\n" + b.body
         }.joined(separator: "\n\n")
-        await deliverTurn(
+        await deliverSoon(
             kernel: kernel, target: dest, text: body,
             clientId: clientId, systemPrompt: systemPrompt)
     }
@@ -690,7 +774,7 @@ private func deliverGrouped(
 /// A title lives INSIDE the reply tag, so it may not carry the one character
 /// that closes it, nor a newline that would end the tag line. Capped at 140
 /// characters: it is a sentence, not a body.
-private func cleanTitle(_ raw: JSON?) -> String? {
+func cleanTitle(_ raw: JSON?) -> String? {
     guard let text = raw?.asString else { return nil }
     var out = ""
     var gap = false
@@ -725,7 +809,7 @@ private func argsWithoutPayload(
 /// `target_id: ""` (or `0`, or `{}`) must still have its `target` read, and a
 /// model that wrote a non-empty non-string `target_id` must still land on the
 /// shape-naming error rather than silently dispatching to the other key.
-private func pythonTruthy(_ v: JSON) -> Bool {
+func pythonTruthy(_ v: JSON) -> Bool {
     switch v {
     case .null: return false
     case .bool(let b): return b

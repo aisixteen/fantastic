@@ -37,25 +37,13 @@ struct FoundationModelsBackendTests {
         #expect(r["provider"].asString == "apple_foundation_models")
         #expect(r["verbs"]["send"].asString != nil)
         #expect(r["verbs"]["history"].asString != nil)
-        #expect(r["verbs"]["backend_state"].asString != nil)
+        // The verb map is the shared ai_core one — python has no FM backend and
+        // no `backend_state` verb anywhere.
+        #expect(r["verbs"]["backend_state"].isNull)
         // No bundle-private `interrupt`: an in-flight `send` IS a kernel task,
-        // so the backend advertises the substrate's `ps` + `cancel` instead.
+        // so the backend names the substrate's `ps` + `cancel` — as a field.
         #expect(r["verbs"]["interrupt"].asString == nil)
-        #expect(r["verbs"]["cancel"].asString?.contains("task_id") == true)
-    }
-
-    @Test func backendStateReportsAvailability() async throws {
-        let kernel = try await freshKernelWithFm()
-        let r = await kernel.send([Item(AgentId("fm"), .object(["type": .string("backend_state")]))])[0].result
-        // Skeleton-level: we only require the keys exist + booleans
-        // are present. Their values depend on whether the test host
-        // actually has Apple Intelligence enabled.
-        #expect(r["provider"].asString == "apple_foundation_models")
-        #expect(r["apple_intelligence_available"].asBool != nil)
-        #expect(r["model_available"].asBool != nil)
-        #expect(r["backend_registered"].asBool == true)
-        #expect(r["in_flight"].asInt != nil)
-        #expect(r["reason"].asString != nil)
+        #expect(r["cancel"].asString?.contains("task_id") == true)
     }
 
     @Test func sendOnUnavailableHostReturnsError() async throws {
@@ -84,8 +72,7 @@ struct FoundationModelsBackendTests {
                 "type": .string("history"),
                 "client_id": .string("test"),
             ]))])[0].result
-        #expect(r["client_id"].asString == "test")
-        #expect((r["messages"].asArray ?? []).isEmpty)
+        #expect((r["rows"].asArray ?? []).isEmpty && r["total"].asInt == 0, "\(r.serialize())")
     }
 }
 
