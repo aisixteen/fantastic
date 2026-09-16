@@ -24,11 +24,19 @@
 
 use serde_json::Value;
 
+/// Encode ONE envelope for a TEXT frame — python `encode_frame`'s text half,
+/// `json.dumps(envelope, default=str)`: `, ` / `: ` separators and
+/// `ensure_ascii`, so `·` leaves as `·` exactly as python sends it. Every
+/// server→client text frame on every transport goes through here.
+pub fn encode_frame(envelope: &Value) -> String {
+    fantastic_bundle::py_json_dumps(envelope, true, None)
+}
+
 /// Encode a binary frame `[4B len | header | body]`. `header` should already carry the
 /// `_binary_path` marker (and `null` at that path) per the convention above so the
 /// receiver can place the body.
 pub fn encode_binary_frame(header: &Value, body: &[u8]) -> Vec<u8> {
-    let head = serde_json::to_vec(header).unwrap_or_else(|_| b"{}".to_vec());
+    let head = encode_frame(header).into_bytes();
     let mut out = Vec::with_capacity(4 + head.len() + body.len());
     out.extend_from_slice(&(head.len() as u32).to_be_bytes());
     out.extend_from_slice(&head);

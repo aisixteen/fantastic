@@ -69,10 +69,12 @@ let NO_TARGET_ERROR =
 /// shape it can recognise; what arrives here with no payload really has no verb
 /// in it, and saying so is the useful answer. Same shape as `NO_TARGET_ERROR`.
 ///
-/// The target is quoted the way python's `{target!r}` renders an ordinary string
-/// — single quotes — so the two runtimes' prompts stay the same sentence.
+/// The target is rendered by python's `{target!r}`, which is NOT "wrap it in
+/// single quotes": a target holding an apostrophe comes back double-quoted
+/// (`send to "it's"`) and a backslash or a tab is escaped (`'C:\\notes'`,
+/// `'tab\there'`).
 func noPayloadError(target: String) -> String {
-    "send to '\(target)' carried no payload, so nothing was dispatched. "
+    "send to \(pyRepr(target)) carried no payload, so nothing was dispatched. "
         + "A call names its verb in `<type>`, e.g. <type>reflect</type>."
 }
 
@@ -98,7 +100,7 @@ func deliverTurn(
     systemPrompt: String?,
     born: Int? = nil
 ) async {
-    if let born, AIIncarnation.of(target) != born {
+    if let born, AIIncarnation.of(kernel, target) != born {
         // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real
         // data, in the ledger and in the store — but it does not wake a turn: the
         // agent that made the call is gone, and the one that replaced it is on
@@ -144,22 +146,23 @@ func deliverTurn(
     // put `reason`/`error` at the TOP level until 2026-09-02, so every subscriber
     // reading `ev.detail.reason` saw nothing: the silent-death regression this
     // announcement exists to end, wearing the announcement's own clothes.
-    let failed = !out.isCompleted || out.result["error"].asString != nil
-    if failed {
-        let why = out.result["error"].asString ?? "delivery \(out.status.rawValue)"
-        await kernel.emit(
-            AgentId(target),
-            .object([
-                "type": .string("status"),
-                "source": .string(target),
-                "phase": .string("done"),
-                "detail": .object([
-                    "reason": .string("error"),
-                    "error": .string(why),
-                ]),
-                "ts": .double(Date().timeIntervalSince1970),
-                "client_id": .string(clientId),
-            ]))
+    // FAILED IS TWO THINGS AND NOT A THIRD. python: the outcome status is
+    // `failed`/`timed_out`, OR the reply carries a truthy `error`. A CANCELLED
+    // handoff is NOT announced — an operator kill is a decision, and announcing
+    // it woke the target with an error for work someone had deliberately
+    // stopped. Swift's `!isCompleted` announced cancels too.
+    let failedStatus = out.status == .failed || out.status == .timedOut
+    let errored = pyTruthy(out.result["error"])
+    if failedStatus || errored {
+        // `reply.get("error") or out["status"]` — the RAW status, with no
+        // `delivery ` prefix python never writes.
+        let why: JSON = errored ? out.result["error"] : .string(out.status.rawValue)
+        // THE SHARED EMITTER, so the announcement carries the target's own
+        // `send_id`/`started_at`/`queue_depth` like every other status event;
+        // this site built the envelope by hand and carried none of them.
+        await emitStatus(
+            kernel: kernel, agentId: AgentId(target), clientId: clientId, phase: "done",
+            detail: [("reason", .string("error")), ("error", why)])
     }
 }
 
@@ -169,10 +172,20 @@ func deliverTurn(
 /// its agent from one that belongs to it.
 func deliverSoon(
     kernel: Kernel, target: String, text: String, clientId: String, systemPrompt: String?
-) async {
-    await deliverTurn(
-        kernel: kernel, target: target, text: text, clientId: clientId,
-        systemPrompt: systemPrompt, born: AIIncarnation.of(target))
+) {
+    let born = AIIncarnation.of(kernel, target)
+    // NOT AWAITED, AND A `ps` ROW. A send to an AI agent takes its FIFO lock and
+    // does not return until that whole turn is done, so awaiting each delivery
+    // inside the router's loop made reply 2 of a 4-call turn wait for the entire
+    // conversation reply 1 started — and if the chain ended first it was never
+    // delivered at all (measured 2026-08-24, `live_build`: 26 of 36 calls never
+    // answered). Registered as a kernel task, so the work is a `ps` row and
+    // `cancel` reaches it — fire-and-forget without that is the orphan bug.
+    kernel.spawnTask(agent: AgentId(target), verb: "deliver_reply") {
+        await deliverTurn(
+            kernel: kernel, target: target, text: text, clientId: clientId,
+            systemPrompt: systemPrompt, born: born)
+    }
 }
 
 // ─── the route ──────────────────────────────────────────────────
@@ -192,11 +205,6 @@ let noCallNudge =
     + "NOTHING ran — a call decided in thinking does not execute unless the "
     + "element is written out. If the task is unfinished, emit that call now. "
     + "If it is finished, end the chain explicitly: <call name=\"done\"></call>"
-
-/// Consecutive silent chain turns the reminder tolerates before the chain is
-/// let go (record meta `nudge_limit` overrides). A safety bound on an
-/// unattended kernel, not a budget. Mirrors python `_NUDGE_LIMIT`.
-let nudgeLimit = 24
 
 /// What `await` is told when there is nothing to wait for. DELIVERED TO SELF, as
 /// a fresh turn: it must WAKE the model, not sit in a return value nobody reads.
@@ -277,27 +285,6 @@ func fanOut(_ calls: [ToolCall], turnId: Int64? = nil) -> [ToolCall] {
     }
     return out
 }
-
-/// (kernel instance, agent id, client id) → consecutive silent chain turns so
-/// far. Scoped to the KERNEL, not the process: two kernels in one process (the
-/// test suite, an app embedding several) may carry the same agent/client ids.
-actor SilentStreaks {
-    private var map: [String: Int] = [:]
-    private func key(_ kernel: Kernel, _ agent: String, _ client: String) -> String {
-        "\(ObjectIdentifier(kernel).hashValue)\u{1F}\(agent)\u{1F}\(client)"
-    }
-    func bump(_ kernel: Kernel, _ agent: String, _ client: String) -> Int {
-        let k = key(kernel, agent, client)
-        let n = (map[k] ?? 0) + 1
-        map[k] = n
-        return n
-    }
-    func reset(_ kernel: Kernel, _ agent: String, _ client: String) {
-        map[key(kernel, agent, client)] = nil
-    }
-}
-
-let silentStreaks = SilentStreaks()
 
 /// One EMITTED thing, in emission order — python's `units` tuple
 /// `(dest, target, verb, item_index, body)`. `idx` links a dispatched call to its
@@ -393,11 +380,11 @@ func routeReply(
         let args = call.arguments.asObject ?? [:]
         // `target_id` OR `target`. python's `or` skips a FALSY `target_id`, so a
         // model that wrote the key and left it empty still gets its `target`
-        // read; `pythonTruthy` keeps that fall-through honest for every JSON
+        // read; `pyTruthy` keeps that fall-through honest for every JSON
         // shape rather than only for strings.
         let targetValue: JSON = {
             let primary = args["target_id"] ?? .null
-            if pythonTruthy(primary) { return primary }
+            if pyTruthy(primary) { return primary }
             return args["target"] ?? .null
         }()
 
@@ -472,7 +459,10 @@ func routeReply(
             continue
         }
 
-        let verb = payload["type"]?.asString ?? "?"
+        // `payload.get("type", "?")`, rendered by `str()` at tag time: a
+        // non-string `<type>` still names the reply (`· a 42 ·`, `· a True ·`),
+        // and `?` means the key was ABSENT — not that it held something odd.
+        let verb = payload["type"].map { pyStr($0) } ?? "?"
 
         // A SELF-CALL INHERITS ITS CONVERSATION. The model's calls are dispatched
         // here, AFTER the turn closed and the in-flight entry was cleared — so a
@@ -557,7 +547,7 @@ func routeReply(
     // A bare test kernel has no record: python reads `{}` there and `context_async`
     // is simply off.
     let me = kernel.agent(selfId)
-    let asyncOn = pythonTruthy(me?.metaValue(forKey: "context_async") ?? .null)
+    let asyncOn = pyTruthy(me?.metaValue(forKey: "context_async") ?? .null)
     let cap = me.map(AIContext.inlineCap) ?? 0
     var blocks: [RouteBlock] = []
     for u in units {
@@ -566,12 +556,10 @@ func routeReply(
         if let i = u.idx {
             let outcome = outcomes[i]
             pid = outcome.pid.map { String($0.value) } ?? "-"
-            var result = outcome.result
-            if result["raised"].asBool == true, var obj = result.asObject, obj["target"] == nil {
-                obj["target"] = .string(u.target)
-                result = .object(obj)
-            }
-            body = renderReply(result)
+            // THE RESULT, UNCHANGED. Swift injected a `target` key into a raised
+            // handler's body; python renders what the kernel settled and nothing
+            // else, and the tag already names the target.
+            body = renderReply(outcome.result)
             // Only reflect bodies are dropped later, so only they carry the
             // distillation notice.
             if u.verb == "reflect" { body += REFLECT_NUDGE }
@@ -627,20 +615,12 @@ func routeReply(
     // reply or a nudge, so a FIRST turn of pure prose from a person ended the
     // work silently — the model had decided on a call, written it in thought,
     // and never emitted it.
-    let chained = true
-    let _wasChained =
-        incoming.hasPrefix("[reply to ") || incoming.hasPrefix("[no call was dispatched]")
+    //
     // AN INQUIRY IS A CALL NOW, so there is no silent-turn exemption: a turn that
     // consults someone DISPATCHES and is never silent. This used to scan the
     // model's own prose for the old `{"type":"question"}` line — a text convention
     // had to recognise, with the human living outside it entirely.
-    let nudging = !anyCalls && !anyBlocks && chained
-    // RESET BEFORE DELIVERING, which python gets for free and swift does not:
-    // `_deliver_soon` only SCHEDULES the delivered turn, so python's trailing reset
-    // still lands before that turn routes. Here `deliverTurn` awaits a `send` whose
-    // own routing is spawned, so a reset AFTER it races the delivered turn's streak
-    // bump — and wipes it, which buys the chain one extra nudge past its limit.
-    if !nudging { await silentStreaks.reset(kernel, selfId.value, clientId) }
+    let nudging = !anyCalls && !anyBlocks
     if anyBlocks {
         await deliverGrouped(
             kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt, turnId: turnId)
@@ -652,7 +632,7 @@ func routeReply(
         // which it can still apply, now that a call-less turn is nudged instead
         // of ending.
         if let sendTo = sendTo, !anyBlocks {
-            await deliverSoon(
+            deliverSoon(
                 kernel: kernel, target: sendTo, text: text,
                 clientId: clientId, systemPrompt: systemPrompt)
         }
@@ -669,45 +649,35 @@ func routeReply(
         // turn another message may ALREADY be running under the FIFO lock.
         // Routing happens AFTER the turn released that lock, so "queued" alone
         // would read empty at exactly the moment something is about to arrive.
-        await silentStreaks.reset(kernel, selfId.value, clientId)
         let queued = runState?.queueDepth() ?? 0
         let running = (await runState?.fifo.busy() ?? false) ? 1 : 0
         let pending = await inFlightTurns.count(selfId.value) + queued + running
         if pending > 0 || hadItems {
-            await kernel.emit(
-                selfId,
-                .object([
-                    "type": .string("status"),
-                    "source": .string(selfId.value),
-                    "phase": .string("done"),
-                    "detail": .object([
-                        "reason": .string("awaiting"),
-                        "pending": .integer(Int64(pending)),
-                    ]),
-                    "ts": .double(Date().timeIntervalSince1970),
-                    "client_id": .string(clientId),
-                ]))
+            await emitStatus(
+                kernel: kernel, agentId: selfId, clientId: clientId, phase: "done",
+                detail: [
+                    ("reason", .string("awaiting")), ("pending", .integer(Int64(pending))),
+                ])
             return
         }
         // Nothing to wait for: say so, as a turn, so the model acts instead of
         // waiting forever on an empty inbox.
-        await deliverSoon(
+        deliverSoon(
             kernel: kernel, target: selfId.value, text: awaitRefused,
             clientId: clientId, systemPrompt: systemPrompt)
         return
     }
     if nudging {
-        let streak = await silentStreaks.bump(kernel, selfId.value, clientId)
-        let limit =
-            kernel.agent(selfId)?.metaValue(forKey: "nudge_limit")?.asInt.map { Int($0) }
-            ?? nudgeLimit
-        if streak <= limit {
-            await deliverSoon(
-                kernel: kernel, target: selfId.value, text: noCallNudge,
-                clientId: clientId, systemPrompt: systemPrompt)
-        } else {
-            await silentStreaks.reset(kernel, selfId.value, clientId)
-        }
+        // NO STREAK AND NO CAP. A call-less turn is not a fact about how many
+        // times the model has been quiet; it means "you emitted no call, try
+        // again", and it means that every time. The chain ends where the MODEL
+        // says it ends — `done` or `await`, both handled above. A counter that
+        // gave up mid-task ended the work silently, which is the exact failure
+        // the nudge exists to prevent; spend is bounded outside, by whoever owns
+        // the budget.
+        deliverSoon(
+            kernel: kernel, target: selfId.value, text: noCallNudge,
+            clientId: clientId, systemPrompt: systemPrompt)
         return
     }
     if anyCalls { return }
@@ -715,7 +685,7 @@ func routeReply(
     // this pass's TEXT to `sendTo`, once. It must not propagate — a caller cannot
     // spend the model's turns for it.
     if let sendTo = sendTo {
-        await deliverSoon(
+        deliverSoon(
             kernel: kernel, target: sendTo, text: text,
             clientId: clientId, systemPrompt: systemPrompt)
     }
@@ -765,7 +735,7 @@ private func deliverGrouped(
             tag += m > 1 ? " \u{b7} \(i + 1) of \(m) in batch \(token)]" : "]"
             return tag + "\n" + b.body
         }.joined(separator: "\n\n")
-        await deliverSoon(
+        deliverSoon(
             kernel: kernel, target: dest, text: body,
             clientId: clientId, systemPrompt: systemPrompt)
     }
@@ -774,21 +744,31 @@ private func deliverGrouped(
 /// A title lives INSIDE the reply tag, so it may not carry the one character
 /// that closes it, nor a newline that would end the tag line. Capped at 140
 /// characters: it is a sentence, not a body.
+/// CODE POINTS, and python's strip: swift read `\r\n` as ONE Character (so a CRLF
+/// title kept its line break and ended the tag line), stripped with
+/// `.whitespacesAndNewlines` (which leaves U+001C..U+001F), and cut 140
+/// GRAPHEMES — a family-emoji title of 30 clusters is 150 scalars and python
+/// cuts it where swift did not.
 func cleanTitle(_ raw: JSON?) -> String? {
-    guard let text = raw?.asString else { return nil }
-    var out = ""
+    guard case .some(.string(let text)) = raw, !pyStrip(text).isEmpty else { return nil }
+    var out = String.UnicodeScalarView()
     var gap = false
-    for c in text {
+    for c in text.unicodeScalars {
         if c == "]" || c == "\r" || c == "\n" {
             gap = true
         } else {
-            if gap && !out.isEmpty { out.append(" ") }
+            // A RUN becomes ONE space, wherever it sits — python's
+            // `re.sub(r"[\]\r\n]+", " ", t)` writes it at the front and the end
+            // too, and the strip below is what removes those.
+            if gap { out.append(" ") }
             gap = false
             out.append(c)
         }
     }
-    let capped = String(out.trimmingCharacters(in: .whitespacesAndNewlines).prefix(140))
-    return capped.isEmpty ? nil : capped
+    if gap { out.append(" ") }
+    let capped = pyStrip(String(out)).unicodeScalars.prefix(140)
+    let title = String(String.UnicodeScalarView(capped))
+    return title.isEmpty ? nil : title
 }
 
 /// The call's args minus `payload`, for the `you_sent` echo — showing the model
@@ -800,23 +780,4 @@ private func argsWithoutPayload(
     var out: OrderedDictionary<String, JSON> = [:]
     for (k, v) in args where k != "payload" { out[k] = v }
     return out
-}
-
-/// Python's truthiness, so a ported `a or b` keeps meaning what it meant.
-///
-/// Only reachable from the `target_id` / `target` fall-through, where the source
-/// is `args.get("target_id") or args.get("target")`: a model that wrote
-/// `target_id: ""` (or `0`, or `{}`) must still have its `target` read, and a
-/// model that wrote a non-empty non-string `target_id` must still land on the
-/// shape-naming error rather than silently dispatching to the other key.
-func pythonTruthy(_ v: JSON) -> Bool {
-    switch v {
-    case .null: return false
-    case .bool(let b): return b
-    case .integer(let i): return i != 0
-    case .double(let d): return d != 0
-    case .string(let s): return !s.isEmpty
-    case .array(let a): return !a.isEmpty
-    case .object(let o): return !o.isEmpty
-    }
 }

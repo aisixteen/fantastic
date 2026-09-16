@@ -24,8 +24,8 @@ use crate::folds::{
     chain_text, is_fold, level, make_fold, quoted_title, render, row_id, row_parent, row_role,
 };
 use crate::history::append_history;
-use crate::provider::{Provider, ProviderEvent};
-use futures_util::StreamExt;
+use crate::provider::Provider;
+use fantastic_bundle::{py_splitlines, py_strip};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,6 +77,9 @@ fn cut_title(t: &str) -> String {
 }
 
 /// One summarizer call for one closed chain — `(title, body, degraded)`.
+///
+/// Through THE shared summarizer (python `ctx.summarize([ask])`), so the fold
+/// prompt rides the same system block as every other side call.
 async fn summarize(
     provider: &Arc<dyn Provider>,
     rows: &[Value],
@@ -86,7 +89,7 @@ async fn summarize(
         let t = titles_of(rows, chain);
         (cut_title(&t), t, true)
     };
-    let ask = vec![json!({
+    let ask = json!({
         "role": "user",
         "content": format!(
             "FOLD this finished piece of work. First line: a one-sentence title (what it \
@@ -94,20 +97,9 @@ async fn summarize(
              what was found or decided, anything that still binds. Output only that.\n\n{}",
             chain_text(rows, chain)
         ),
-    })];
-    let Ok(stream) = provider.chat(&ask).await else {
-        return degraded();
-    };
-    let mut parts: Vec<String> = Vec::new();
-    let mut stream = stream;
-    while let Some(ev) = stream.next().await {
-        match ev {
-            Ok(ProviderEvent::Token(t)) => parts.push(t),
-            Err(_) => return degraded(),
-        }
-    }
-    let text = parts.join("");
-    let text = text.trim();
+    });
+    let raw = crate::strategies::summarize(provider, std::slice::from_ref(&ask)).await;
+    let text = py_strip(&raw);
     if text.is_empty() {
         return degraded();
     }
@@ -115,29 +107,37 @@ async fn summarize(
     // quote must not become the title. Reasoning is already stripped by the
     // summarizer; a summary that still opens a think block is not a summary —
     // degrade to titles.
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
+    //
+    // PYTHON'S `splitlines()`, not rust's `lines()`: a `\x1c`/`\v`/`\f`-separated
+    // summary is many lines to python and ONE to rust — and that one line became
+    // the whole title.
+    let lines: Vec<&str> = py_splitlines(text)
+        .into_iter()
+        .map(py_strip)
         .filter(|l| !l.is_empty())
         .collect();
     if lines.is_empty() || lines[0].starts_with("<think") {
         return degraded();
     }
-    let title = lines[0].trim_matches('"').trim_matches(['*', '#']).trim();
-    let body = lines[1..].join("\n");
-    let body = body.trim();
-    let title = cut_title(title);
-    let title = if title.is_empty() {
-        "(untitled)".to_string()
-    } else {
-        title
-    };
-    let body = if body.is_empty() {
-        title.clone()
-    } else {
-        body.to_string()
-    };
-    (title, body, false)
+    let title = py_strip(lines[0].trim_matches('"').trim_matches(['*', '#']));
+    let joined = lines[1..].join("\n");
+    let body = py_strip(&joined);
+    let cut = cut_title(title);
+    (
+        if cut.is_empty() {
+            "(untitled)".to_string()
+        } else {
+            cut
+        },
+        // `body or title` — THE UNCUT TITLE. Falling back to the 140-char cut
+        // dropped the tail of a one-line summary from the fold's own body.
+        if body.is_empty() {
+            title.to_string()
+        } else {
+            body.to_string()
+        },
+        false,
+    )
 }
 
 /// Summarize `idxs` and append ONE fold row for them. A fold row in `idxs` is
@@ -265,5 +265,72 @@ pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Projection {
         stripped: out.stripped,
         stripped_bytes: out.stripped_bytes,
         folded,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ProviderError, ProviderEvent, ProviderStream};
+    use async_trait::async_trait;
+
+    /// A provider that answers every call with one fixed completion.
+    struct Fixed(String);
+
+    #[async_trait]
+    impl Provider for Fixed {
+        async fn chat(&self, _messages: &[Value]) -> Result<ProviderStream, ProviderError> {
+            let ev: Vec<Result<ProviderEvent, ProviderError>> =
+                vec![Ok(ProviderEvent::Token(self.0.clone()))];
+            Ok(Box::pin(futures_util::stream::iter(ev)))
+        }
+        fn model(&self) -> String {
+            "fixed".to_string()
+        }
+    }
+
+    fn rows(content: &str) -> Vec<Value> {
+        vec![json!({"role": "user", "id": 1, "content": content})]
+    }
+
+    #[tokio::test]
+    async fn summary_body_falls_back_to_the_uncut_title() {
+        // python `body or title` uses the UNCUT title. Rust fell back to the
+        // 140-char cut, so a one-line summary lost its tail from the fold's body.
+        let long = "t".repeat(200);
+        let p: Arc<dyn Provider> = Arc::new(Fixed(long.clone()));
+        let (title, body, degraded) = summarize(&p, &rows("x"), &[0]).await;
+        assert!(!degraded);
+        assert_eq!(title.chars().count(), MAX_TITLE, "the TITLE is cut");
+        assert_eq!(body, long, "the BODY is the uncut title");
+    }
+
+    #[tokio::test]
+    async fn summary_lines_split_like_python_splitlines() {
+        // `\x1c` / `\v` / `\f` are line boundaries to python and not to rust's
+        // `lines()` — the whole text used to become one title.
+        let p: Arc<dyn Provider> = Arc::new(Fixed("the title\u{1c}the body".to_string()));
+        let (title, body, _) = summarize(&p, &rows("x"), &[0]).await;
+        assert_eq!(title, "the title");
+        assert_eq!(body, "the body");
+        // A CRLF summary splits the same way, and a leading blank line never
+        // becomes the title.
+        let p: Arc<dyn Provider> =
+            Arc::new(Fixed("\r\n\"A title\"\r\n\r\nthe body\r\n".to_string()));
+        let (title, body, _) = summarize(&p, &rows("x"), &[0]).await;
+        assert_eq!(title, "A title");
+        assert_eq!(body, "the body");
+        // ORDER MATTERS: python strips `"` FIRST and `*#` second, so `**"t"**`
+        // keeps its quotes.
+        let p: Arc<dyn Provider> = Arc::new(Fixed("**\"t\"**".to_string()));
+        let (title, _, _) = summarize(&p, &rows("x"), &[0]).await;
+        assert_eq!(title, "\"t\"");
+    }
+
+    #[tokio::test]
+    async fn an_empty_summary_degrades_to_titles() {
+        let p: Arc<dyn Provider> = Arc::new(Fixed("   \u{1d} ".to_string()));
+        let (_, _, degraded) = summarize(&p, &rows("x"), &[0]).await;
+        assert!(degraded, "python strips the information separators too");
     }
 }

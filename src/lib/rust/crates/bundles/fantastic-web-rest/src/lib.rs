@@ -1,7 +1,7 @@
 //! REST verb channel — sub-agent of a `web` host.
 //!
 //! The actual REST routes (POST + `_reflect` GET helpers) are handled
-//! inside [`fantastic-web`]'s axum router; this bundle declares the
+//! inside [`fantastic-web`]'s router; this bundle declares the
 //! routes via the duck-typed `get_routes` verb that the parent `web`
 //! agent queries during boot. The `self_id` is baked into the path
 //! literal so several `web_rest` agents under the same `web` parent
@@ -14,16 +14,18 @@
 //! - `GET  /<self_id>/_reflect/{target_id}` → reflect on a specific agent
 //!
 //! Verbs:
-//! - `reflect` — `{id, sentence, mounted_on, path_pattern, ...}`
-//! - `boot` / `shutdown` — no-op
+//! - `reflect` — identity + URL patterns + curl examples + leg posture
+//! - `boot` — no-op
 //! - `get_routes` — declares the surface for mounting
 
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use fantastic_bundle::py_repr_value;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::refusal::{refusal, with, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 /// `handler_module` key under which this bundle registers.
@@ -52,57 +54,108 @@ impl Bundle for WebRestBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let id_str = agent_id.as_str();
         let reply = match verb {
-            "reflect" => {
-                let mounted_on = parent_id(agent_id, kernel);
-                json!({
-                    "id": id_str,
-                    "sentence": "REST verb-invocation surface; POST /<self>/<target_id> body=payload.",
-                    "mounted_on": mounted_on,
-                    "path_pattern": format!("/{id_str}/{{target_id}}"),
-                    "method": "POST",
-                    "reflect_url": format!("/{id_str}/_reflect"),
-                    "reflect_pattern": format!("/{id_str}/_reflect/{{target_id}}"),
-                    "verbs": {
-                        "reflect": "Identity + parent web agent id + URL patterns. No args.",
-                        "boot": "No-op (REST routes come up with the parent web agent).",
-                        "get_routes": "Returns {routes:[…]} for the POST + _reflect surface.",
-                    }
-                })
+            "reflect" => reflect_reply(agent_id, kernel),
+            // python's VERBS has no `shutdown`; an unknown type is refused.
+            "boot" => Value::Null,
+            "get_routes" => get_routes(agent_id),
+            _ => {
+                let raw = payload.get("type").cloned().unwrap_or(Value::Null);
+                let mut r = refusal(
+                    UNHANDLED,
+                    format!("web_rest: unknown type {}", py_repr_value(&raw)),
+                );
+                with(&mut r, "verb", raw);
+                r
             }
-            "boot" | "shutdown" => Value::Null,
-            "get_routes" => json!({
-                "routes": [
-                    {
-                        "kind": "post",
-                        "path": format!("/{id_str}/{{target_id}}"),
-                    },
-                    {
-                        "kind": "get",
-                        "path": format!("/{id_str}/_reflect"),
-                    },
-                    {
-                        "kind": "get",
-                        "path": format!("/{id_str}/_reflect/{{target_id}}"),
-                    },
-                ]
-            }),
-            other => json!({"error": format!("unknown verb {other:?}")}),
         };
         Ok(Some(reply))
     }
 }
 
-/// Resolve this surface's parent agent id (the `web` host). Empty
-/// string if not parented — see analogous helper in `fantastic-web-ws`.
-fn parent_id(agent_id: &AgentId, kernel: &Kernel) -> String {
-    kernel
+/// python `web_rest/tools.py::_reflect` — identity + URL patterns + curl
+/// examples + this leg's auth posture, in python's key order.
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let id = agent_id.as_str();
+    let mut out = Map::new();
+    out.insert("id".into(), json!(id));
+    out.insert(
+        "sentence".into(),
+        json!("REST verb-invocation surface; POST /<self>/<target_id> body=payload."),
+    );
+    out.insert("path_pattern".into(), json!(format!("/{id}/{{target_id}}")));
+    out.insert("method".into(), json!("POST"));
+    out.insert("reflect_url".into(), json!(format!("/{id}/_reflect")));
+    out.insert(
+        "reflect_pattern".into(),
+        json!(format!("/{id}/_reflect/{{target_id}}")),
+    );
+    out.insert("auth_header".into(), json!("X-Fantastic-Auth"));
+    out.insert(
+        "curl_post".into(),
+        json!(format!(
+            "curl -X POST -H \"content-type: application/json\" -d '{{\"type\":\"reflect\"}}' http://<host>/{id}/<target_id>"
+        )),
+    );
+    out.insert(
+        "curl_reflect".into(),
+        json!(format!(
+            "curl http://<host>/{id}/_reflect           # root reflect (tree)"
+        )),
+    );
+    out.insert(
+        "curl_reflect_target".into(),
+        json!(format!(
+            "curl http://<host>/{id}/_reflect/<target_id>  # any agent"
+        )),
+    );
+    // The REST face is a CHANNEL — surface its auth posture so a denied client
+    // can find the door (discovery-through-denial).
+    let meta = kernel
         .agents
         .get(agent_id)
-        .and_then(|e| e.parent_id.clone())
-        .map(|p| p.0)
-        .unwrap_or_default()
+        .map(|a| a.meta.read().expect("meta poisoned").clone())
+        .unwrap_or_default();
+    if let Some(posture) = fantastic_io_bridge::authorizer::describe(&meta).as_object() {
+        for (k, v) in posture {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out.insert(
+        "verbs".into(),
+        json!({
+            "reflect": "Identity + URL patterns + curl examples + this leg's auth posture",
+            "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app.",
+            "get_routes": "Declares this surface's HTTP routes. Returns",
+        }),
+    );
+    Value::Object(out)
+}
+
+/// python `web_rest/tools.py::_get_routes` — the duck-typed mount surface.
+/// Python's specs also carry an `endpoint` callable; rust mounts by
+/// `(kind, method, path)` so the callable has no wire spelling.
+fn get_routes(agent_id: &AgentId) -> Value {
+    let id = agent_id.as_str();
+    json!({
+        "routes": [
+            {
+                "kind": "http",
+                "method": "POST",
+                "path": format!("/{id}/{{target_id}}"),
+            },
+            {
+                "kind": "http",
+                "method": "GET",
+                "path": format!("/{id}/_reflect"),
+            },
+            {
+                "kind": "http",
+                "method": "GET",
+                "path": format!("/{id}/_reflect/{{target_id}}"),
+            },
+        ]
+    })
 }
 
 #[cfg(test)]

@@ -113,4 +113,59 @@ struct OracleProbeTests {
         #expect(OracleProbe.limit(.string(" 4 ")) == 4)
         #expect(OracleProbe.limit(.double(2.9)) == 2)
     }
+
+    @Test func oracleLimitCoercesLikePython() {
+        // `max(1, min(int(payload.get("limit") or 6), 20))` with python's
+        // `(TypeError, ValueError) → 6` net around it — falsy is the default,
+        // unparseable is the default, and the clamp is inclusive both ends.
+        #expect(OracleProbe.limit(.string("3")) == 3)
+        #expect(OracleProbe.limit(.integer(0)) == 6)
+        #expect(OracleProbe.limit(.string("x")) == 6)
+        #expect(OracleProbe.limit(.integer(99)) == 20)
+        #expect(OracleProbe.limit(.double(2.9)) == 2)
+        #expect(OracleProbe.limit(.bool(true)) == 1)
+        #expect(OracleProbe.limit(.integer(-5)) == 1)
+    }
+
+    @Test func oracleRendersNonStringLinesWithPythonStr() async {
+        // `str(ln)` on every ledger line, for the match AND for the answer: a
+        // JSON dump would spell `True` as `true` and a dict without its quotes.
+        let (kernel, id) = await oracleKernel(lines: [700, true, .null, ["abc": 1]])
+        let r = await kernel.send([
+            Item(id, ["type": "ask", "question": "700 true none abc"])
+        ])[0].result
+        #expect(r["matched"].asInt == 4, "\(r)")
+        // One hit each, so the tie breaks on the line itself, by code point.
+        #expect(
+            (r["answers"].asArray ?? []).compactMap { $0.asString }
+                == ["700", "None", "True", "{'abc': 1}"], "\(r)")
+    }
+
+    @Test func twoOraclesKeepTwoTallies() async {
+        // Python's `_ASKED` is a dict keyed by agent id: each solver's oracle
+        // counts only its own questions, which is what the scorer reads.
+        let r = BundleRegistry()
+        r.register(ORACLE_MODULE, OracleProbe())
+        let kernel = Kernel(storage: .inMemory, bundles: r)
+        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        for name in ["o1", "o2"] {
+            let rec: JSON = [
+                "type": "create_agent", "parent_id": "core",
+                "handler_module": .string(ORACLE_MODULE), "id": .string(name),
+                "lines": ["Dana is in room 4."],
+            ]
+            let out = await kernel.send([Item("core", rec)])[0].result
+            #expect(out["id"].asString == name, "\(out)")
+        }
+        for _ in 0..<3 {
+            _ = await kernel.send([Item("o1", ["type": "ask", "question": "which room"])])[0].result
+        }
+        _ = await kernel.send([Item("o2", ["type": "ask", "question": "which room"])])[0].result
+        let a = await kernel.send([Item("o1", ["type": "reflect"])])[0].result
+        let b = await kernel.send([Item("o2", ["type": "reflect"])])[0].result
+        #expect(a["asked"].asInt == 3, "\(a)")
+        #expect(b["asked"].asInt == 1, "\(b)")
+    }
 }

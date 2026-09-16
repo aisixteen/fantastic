@@ -157,7 +157,7 @@ fn mk_kernel() -> Arc<Kernel> {
         std::env::current_dir().unwrap().join(".fantastic"),
         false,
     );
-    let _ = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }

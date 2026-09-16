@@ -154,7 +154,7 @@ final class MockBundle: AgentBundle, @unchecked Sendable {
     }
 
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
-        await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+        try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
     /// The shared cancel hook — every real backend forwards exactly like this.
@@ -369,19 +369,24 @@ final class EventSink: @unchecked Sendable {
     func first(type: String) -> JSON? {
         snapshot().first { $0["type"].asString == type }
     }
+
+    /// The terminal event of a turn: `status` with `phase:'done'`. There is no
+    /// `done` event on any runtime (B2.15) — this is what a client waits on.
+    func statusDone() -> JSON? {
+        snapshot().first { $0["type"].asString == "status" && $0["phase"].asString == "done" }
+    }
 }
 
 // MARK: - config + kernel boot
 
 func baseConfig(
-    includeAccumulatedOnError: Bool = false,
     provider: @escaping @Sendable () -> ProviderResult
 ) -> AIBackendConfig {
     AIBackendConfig(
         kind: "mock_backend",
-        provider: "mock",
         sentence: "Mock LLM agent.",
-        includeAccumulatedOnError: includeAccumulatedOnError,
+        defaultModel: "(no default — set the `model` meta)",
+        defaultEndpoint: "http://mock.invalid",
         reflectExtra: { _ in ["extra": .string("yes")] },
         makeProvider: { _, _, _ in provider() }
     )

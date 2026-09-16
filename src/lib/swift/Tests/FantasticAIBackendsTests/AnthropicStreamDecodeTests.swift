@@ -76,8 +76,17 @@ struct AnthropicStreamDecodeTests {
         let (_, _, err) = decodeWithError([
             #"data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"send"}}"#
         ])
-        #expect(err?.contains("native tool_use block") == true)
-        #expect(err?.contains("<call name=") == true)
+        // B4.1: `{cb.get('name')!r}` — python's repr, single quotes.
+        #expect(
+            err
+                == "anthropic stream carried a native tool_use block ('send'): the model "
+                + "wrote a JSON tool call, which this kernel does not parse — calls are "
+                + "`<call name=…>` text")
+        // A block with no name reads `None`, not a placeholder of our own.
+        let (_, _, nameless) = decodeWithError([
+            #"data: {"type":"content_block_start","content_block":{"type":"tool_use"}}"#
+        ])
+        #expect(nameless?.contains("tool_use block (None):") == true)
     }
 
     @Test("message_stop ends the stream")
@@ -87,12 +96,20 @@ struct AnthropicStreamDecodeTests {
         #expect(d.done)
     }
 
-    @Test("an error event is surfaced, not swallowed")
+    // B4.1: `f"anthropic stream error: {err}"` over the WHOLE error object — the
+    // python dict repr, type and all. Reading `.message` alone dropped the type.
+    @Test("an error event is surfaced whole, python's way")
     func errorEvent() {
         var st = AnthropicStreamState()
         let d = decodeAnthropicSSELine(
-            #"data: {"type":"error","error":{"message":"overloaded"}}"#, state: &st)
-        #expect(d.error == "overloaded")
+            #"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            state: &st)
+        #expect(
+            d.error == "anthropic stream error: {'type': 'overloaded_error', 'message': 'Overloaded'}")
+        // `evt.get("error") or {}` — a missing object is the empty dict.
+        var bare = AnthropicStreamState()
+        let e = decodeAnthropicSSELine(#"data: {"type":"error"}"#, state: &bare)
+        #expect(e.error == "anthropic stream error: {}")
     }
 
     @Test("non-data lines and junk carry no model text")
@@ -112,38 +129,70 @@ struct AnthropicStreamDecodeTests {
         }
     }
 
-    @Test("stop_reason=tool_use reaching terminality is an anomaly and is loud")
+    // B4.1: `tool_use` is terminal ONLY when such a block was seen — python
+    // `test_tool_use_stop_reason_without_a_tool_use_block_is_an_anomaly`.
+    @Test("stop_reason=tool_use with no tool_use block is an anomaly and is loud")
     func toolUseIsAnAnomaly() {
-        // The block itself now raises in the decoder, so a stream that got this
-        // far carried a stop_reason with no block behind it.
         var st = AnthropicStreamState()
+        _ = decodeAnthropicSSELine(
+            #"data: {"type":"content_block_start","content_block":{"type":"text"}}"#, state: &st)
         st.stopReason = "tool_use"
-        #expect(anthropicTerminalityError(st)?.contains("tool_use") == true)
+        #expect(
+            anthropicTerminalityError(st)
+                == "anthropic stream ended without end_turn: stop_reason='tool_use' blocks=['text']")
     }
 
-    @Test("max_tokens is a TRUNCATED turn and must be loud")
+    @Test("max_tokens is a TRUNCATED turn and must be loud, with the blocks it held")
     func truncatedIsLoud() {
         var st = AnthropicStreamState()
-        st.stopReason = "max_tokens"
-        #expect(anthropicTerminalityError(st)?.contains("max_tokens") == true)
+        _ = decodeAnthropicSSELine(
+            #"data: {"type":"content_block_start","content_block":{"type":"thinking"}}"#, state: &st)
+        _ = decodeAnthropicSSELine(
+            #"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#, state: &st)
+        #expect(
+            anthropicTerminalityError(st)
+                == "anthropic stream ended without end_turn: stop_reason='max_tokens' "
+                + "blocks=['thinking']")
     }
 
     @Test("no stop_reason at all means the connection was cut")
     func noStopReason() {
-        #expect(anthropicTerminalityError(AnthropicStreamState())?.contains("cut") == true)
+        #expect(
+            anthropicTerminalityError(AnthropicStreamState())
+                == "anthropic stream ended without end_turn: stop_reason=None blocks=[] "
+                + "(none seen — connection cut mid-stream)")
     }
 
     // ── message translation ────────────────────────────────────────────────
 
-    @Test("system messages lift to the top level and concatenate")
-    func systemLifted() {
+    // B1.8: python `_to_anthropic`. The LAST system message wins (they do not
+    // concatenate), an empty user/assistant content is sent as `(no content)`,
+    // and every other role is DROPPED.
+    @Test("to_anthropic matches python")
+    func toAnthropicMatchesPython() {
         let (system, turns) = translateAnthropicMessages([
-            .object(["role": .string("system"), "content": .string("one")]),
-            .object(["role": .string("system"), "content": .string("two")]),
+            .object(["role": .string("system"), "content": .string("A")]),
+            .object(["role": .string("user"), "content": .string("")]),
+            .object(["role": .string("assistant"), "content": .null]),
+            .object(["role": .string("tool"), "content": .string("x")]),
             .object(["role": .string("user"), "content": .string("hi")]),
         ])
-        #expect(system == "one\n\ntwo")
-        #expect(turns.count == 1)
-        #expect(turns[0]["role"].asString == "user")
+        #expect(system == "A")
+        #expect(turns.count == 3)
+        #expect(turns[0] == .object(["role": .string("user"), "content": .string("(no content)")]))
+        #expect(
+            turns[1] == .object(["role": .string("assistant"), "content": .string("(no content)")])
+        )
+        #expect(turns[2] == .object(["role": .string("user"), "content": .string("hi")]))
+    }
+
+    @Test("a later system message overrides the earlier one")
+    func lastSystemWins() {
+        let (system, _) = translateAnthropicMessages([
+            .object(["role": .string("system"), "content": .string("A")]),
+            .object(["role": .string("system"), "content": .string("")]),
+            .object(["role": .string("user"), "content": .string("hi")]),
+        ])
+        #expect(system == "")
     }
 }

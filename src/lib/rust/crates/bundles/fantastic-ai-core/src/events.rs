@@ -1,9 +1,11 @@
 //! Event routing + the status phase machine.
 //!
-//! Per the LLM contract, stream events go to the originating caller
-//! ONLY. The two shipped backends differ on HOW the `cli` caller is
-//! reached — that difference is captured by [`CallerRoute`] so a single
-//! shared path serves both byte-identically to each backend's contract.
+//! Per the LLM contract, stream events go to the originating caller ONLY. There
+//! is ONE rule for how (python `_to_caller`): the `cli` caller round-trips
+//! through the `cli` agent so its handler prints to stdout, and every other
+//! caller gets the event on the BACKEND's inbox tagged with its `client_id` —
+//! the browser's WS subscription mirrors that inbox and filters to its own id.
+//! No fan-out: cli does not see browser tokens, and vice versa.
 
 use crate::helpers::now_secs;
 use crate::state::BackendState;
@@ -11,56 +13,33 @@ use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-/// How streaming events reach the originating caller.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CallerRoute {
-    /// `client_id == "cli"` round-trips through the `cli` agent
-    /// (`kernel.send(vec![Item::new("cli", ev)])`); everyone else gets
-    /// `kernel.emit(self_id, ev)` tagged with `client_id`. Matches the
-    /// Python reference + the ollama backend.
-    CliRoundTrip,
-    /// Every event is emitted on `client_id`'s own inbox
-    /// (`kernel.emit(client_id, ev)`). Used by the NIM backend, whose
-    /// tests drain a per-`client_id` inbox.
-    PerClientInbox,
-}
-
-/// Route a streaming event to the originating caller's inbox.
-pub async fn to_caller(
-    kernel: &Arc<Kernel>,
-    self_id: &AgentId,
-    client_id: &str,
-    route: CallerRoute,
-    mut ev: Value,
-) {
+/// Route a streaming event to the originating caller's inbox — python
+/// `_to_caller`, the ONE rule.
+///
+/// This used to be selected per backend by a `CallerRoute` knob: ollama
+/// round-tripped `cli` and the other three always emitted on the agent's inbox.
+/// Python has no such knob, so a `cli` caller on three of the four backends
+/// never reached the `cli` handler and printed nothing.
+pub async fn to_caller(kernel: &Arc<Kernel>, self_id: &AgentId, client_id: &str, mut ev: Value) {
     if let Value::Object(ref mut obj) = ev {
         obj.insert("client_id".to_string(), json!(client_id));
         obj.entry("source")
             .or_insert_with(|| Value::String(self_id.as_str().to_string()));
     }
-    match route {
-        CallerRoute::CliRoundTrip => {
-            if client_id == crate::helpers::DEFAULT_CLIENT_ID {
-                let _ = kernel
-                    .send(vec![Item::new(AgentId::from("cli"), ev)])
-                    .await
-                    .remove(0)
-                    .result;
-            } else {
-                kernel.emit(self_id, ev).await;
-            }
-        }
-        CallerRoute::PerClientInbox => {
-            // ON THE AGENT'S INBOX, tagged with `client_id` — not on an inbox
-            // named after the client. A synthetic client id has no Agent, so it
-            // has no watcher set, and a watcher that subscribed to the AGENT
-            // (which is what a `watch` frame names) never saw these events at
-            // all: measured 2026-09-10, `compaction:rust` fired its projection
-            // and pushed nothing the harness could observe. The browser's WS
-            // subscription mirrors the agent's inbox and filters to its own id,
-            // which is what the tag is for.
-            kernel.emit(self_id, ev).await;
-        }
+    if client_id == crate::helpers::DEFAULT_CLIENT_ID {
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("cli"), ev)])
+            .await
+            .remove(0)
+            .result;
+    } else {
+        // ON THE AGENT'S INBOX, tagged with `client_id` — not on an inbox named
+        // after the client. A synthetic client id has no Agent, so it has no
+        // watcher set, and a watcher that subscribed to the AGENT (which is what
+        // a `watch` frame names) never saw these events at all: measured
+        // 2026-09-10, `compaction:rust` fired its projection and pushed nothing
+        // the harness could observe.
+        kernel.emit(self_id, ev).await;
     }
 }
 
@@ -71,7 +50,6 @@ pub async fn emit_status(
     state: &Arc<BackendState>,
     self_id: &AgentId,
     client_id: &str,
-    route: CallerRoute,
     phase: &str,
     extra_detail: Map<String, Value>,
 ) {
@@ -102,5 +80,5 @@ pub async fn emit_status(
         "detail": Value::Object(detail),
         "ts": now_secs(),
     });
-    to_caller(kernel, self_id, client_id, route, ev).await;
+    to_caller(kernel, self_id, client_id, ev).await;
 }

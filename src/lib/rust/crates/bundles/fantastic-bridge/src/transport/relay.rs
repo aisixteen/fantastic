@@ -23,6 +23,7 @@
 use super::{BridgeTransport, Frame, TransportError};
 use async_trait::async_trait;
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
+use fantastic_kernel::{AgentId, Kernel};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -57,7 +58,6 @@ type RelayPending = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>
 /// The WS subprotocol the relay pairs + authenticates on.
 pub const SUBPROTOCOL: &str = "fantastic.relay.v1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const HEARTBEAT_SECS: u64 = 30;
 
 /// The write DEADLINE on the relay sink.
 ///
@@ -124,6 +124,32 @@ impl From<SendFail> for TransportError {
     }
 }
 
+/// python's `spawn=lambda name, coro: kernel.ctx.spawn_task(rec["id"], name, coro)`
+/// — the heartbeat is the connector's OWN registered work, so it has a `ps` row
+/// and a `cancel` that reaches it.
+pub struct RelaySpawn {
+    kernel: Arc<Kernel>,
+    agent_id: AgentId,
+}
+
+impl RelaySpawn {
+    /// Bind the seam to one connector agent.
+    #[must_use]
+    pub fn new(kernel: &Arc<Kernel>, agent_id: &AgentId) -> Self {
+        Self {
+            kernel: Arc::clone(kernel),
+            agent_id: agent_id.clone(),
+        }
+    }
+
+    fn spawn<F>(&self, verb: &str, work: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.kernel.spawn_task(&self.agent_id, verb, work);
+    }
+}
+
 /// Relay router transport with a self-healing connection. `send` writes to the
 /// current sink (errors while mid-reconnect); `recv` pulls frames the supervisor
 /// pumps across reconnects.
@@ -134,7 +160,9 @@ pub struct RelayTransport {
     closed: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
-    heartbeat: Mutex<Option<JoinHandle<()>>>,
+    /// Fired by `close` so the registered heartbeat task ends at once (python
+    /// cancels its `_hb_task`).
+    stop_heartbeat: Arc<tokio::sync::Notify>,
     relay_pending: RelayPending,
     relay_next_id: AtomicU64,
     identity: SharedIdentity,
@@ -170,13 +198,16 @@ impl RelayTransport {
     /// Dial the relay as `guid` and tunnel to `partner_guid`. `reconnect_secs` is
     /// the backoff before each re-dial (0 = one-shot: the initial dial must
     /// succeed, and a later drop is terminal). The initial dial is eager.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         relay_url: &str,
         guid: &str,
         token: &str,
         partner_guid: &str,
         reconnect_secs: f64,
+        heartbeat_secs: f64,
         identity: Value,
+        spawn: RelaySpawn,
     ) -> Result<Arc<Self>, TransportError> {
         let url = format!("{}/{}", relay_url.trim_end_matches('/'), guid);
         let token = token.to_string();
@@ -221,11 +252,20 @@ impl RelayTransport {
             reconnect_secs,
             initial,
         ));
-        let heartbeat = tokio::spawn(heartbeat_loop(
-            Arc::clone(&sink),
-            Arc::clone(&closed),
-            Arc::clone(&connected),
-        ));
+        // python `_start_heartbeat`: `heartbeat <= 0` means OFF.
+        let stop = Arc::new(tokio::sync::Notify::new());
+        if heartbeat_secs > 0.0 {
+            spawn.spawn(
+                "relay_heartbeat",
+                heartbeat_loop(
+                    Arc::clone(&sink),
+                    Arc::clone(&closed),
+                    Arc::clone(&connected),
+                    Arc::clone(&stop),
+                    heartbeat_secs,
+                ),
+            );
+        }
 
         Ok(Arc::new(Self {
             partner,
@@ -234,7 +274,7 @@ impl RelayTransport {
             closed,
             connected,
             supervisor: Mutex::new(Some(supervisor)),
-            heartbeat: Mutex::new(Some(heartbeat)),
+            stop_heartbeat: Arc::clone(&stop),
             relay_pending,
             relay_next_id: AtomicU64::new(0),
             identity,
@@ -257,7 +297,7 @@ impl RelayTransport {
             &self.sink,
             &self.connected,
             "relay directory send",
-            Message::Text(frame.to_string()),
+            Message::Text(fantastic_io_bridge::codec::encode_frame(&frame)),
         )
         .await
         {
@@ -276,7 +316,13 @@ impl RelayTransport {
             Ok(Ok(v)) => v,
             _ => {
                 self.relay_pending.lock().unwrap().remove(&id);
-                json!({"error":"relay_connector: directory timeout","reason":"timeout"})
+                json!({
+                    "error": format!(
+                        "relay_connector: directory timeout after {}s",
+                        fantastic_bundle::py_float_repr(timeout_s)
+                    ),
+                    "reason": "timeout"
+                })
             }
         }
     }
@@ -331,12 +377,20 @@ fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Opt
                     .expect("relay_pending poisoned")
                     .remove(id)
                 {
-                    let _ = tx.send(env.get("data").cloned().unwrap_or(Value::Null));
+                    // python `msg.get("data") or {}`.
+                    let data = match env.get("data") {
+                        Some(v) if fantastic_bundle::py_truthy(v) => v.clone(),
+                        _ => json!({}),
+                    };
+                    let _ = tx.send(data);
                 }
             }
             None
         }
         Some("event") => match env.get("source").and_then(Value::as_str) {
+            // python skips ANY event whose payload is not a dict, directory
+            // included, before it ever looks at the source.
+            _ if !env.get("payload").is_some_and(Value::is_object) => None,
             // Directory event → re-emit on the connector inbox via the engine.
             Some("relay") => Some(Frame::Text(json!({
                 "type": "event",
@@ -424,16 +478,29 @@ async fn send_announce(sink: &SharedSink, connected: &AtomicBool, identity: &Sha
     if empty {
         return;
     }
-    let text = json!({"type": "announce", "attrs": attrs, "target": "relay"}).to_string();
+    let text = fantastic_io_bridge::codec::encode_frame(
+        &json!({"type": "announce", "attrs": attrs, "target": "relay"}),
+    );
     let _ = send_bounded(sink, connected, "relay announce", Message::Text(text)).await;
 }
 
 /// Send the relay's no-reply `keepalive` verb every `HEARTBEAT_SECS` while
 /// connected, refreshing the peer's `last_seen` so it stays `green`.
-async fn heartbeat_loop(sink: SharedSink, closed: Arc<AtomicBool>, connected: Arc<AtomicBool>) {
-    let beat = serde_json::to_string(&json!({"type": "keepalive"})).unwrap();
+async fn heartbeat_loop(
+    sink: SharedSink,
+    closed: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
+    stop: Arc<tokio::sync::Notify>,
+    every_secs: f64,
+) {
+    // python sends `json.dumps({"type": "keepalive"})` — WITH the space.
+    let beat = fantastic_io_bridge::codec::encode_frame(&json!({"type": "keepalive"}));
+    let period = Duration::from_secs_f64(every_secs);
     loop {
-        tokio::time::sleep(Duration::from_secs(HEARTBEAT_SECS)).await;
+        tokio::select! {
+            () = tokio::time::sleep(period) => {}
+            () = stop.notified() => return,
+        }
         if closed.load(Ordering::SeqCst) {
             return;
         }
@@ -479,8 +546,8 @@ fn unwrap_binary(mut env: Value, body: Vec<u8>, partner: &str) -> Option<Frame> 
 impl BridgeTransport for RelayTransport {
     async fn send_frame(&self, frame: Value) -> Result<(), TransportError> {
         let env = json!({"type":"send","target":self.partner,"payload":frame});
-        let text = serde_json::to_string(&env)
-            .map_err(|e| TransportError::Other(format!("relay encode: {e}")))?;
+        // python's `encode_frame` text half (A13.14).
+        let text = fantastic_io_bridge::codec::encode_frame(&env);
         send_bounded(
             &self.sink,
             &self.connected,
@@ -526,6 +593,17 @@ impl BridgeTransport for RelayTransport {
         }
     }
 
+    /// python `RelayTransport.closed` — EXPLICIT close only; a transient drop is
+    /// healed by `recv` (reconnect), so the leg stays alive across blips.
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// python `RelayTransport.is_live`.
+    fn is_live(&self) -> bool {
+        RelayTransport::is_live(self)
+    }
+
     async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         // ABORT FIRST, then reach for the sink. The supervisor and the heartbeat
@@ -536,9 +614,9 @@ impl BridgeTransport for RelayTransport {
         if let Some(h) = self.supervisor.lock().await.take() {
             h.abort();
         }
-        if let Some(h) = self.heartbeat.lock().await.take() {
-            h.abort();
-        }
+        // `notify_one` (not `notify_waiters`): it STORES a permit, so a heartbeat
+        // that has not parked yet still ends at its first await.
+        self.stop_heartbeat.notify_one();
         {
             let mut guard = self.sink.lock().await;
             if let Some(mut s) = guard.take() {
@@ -569,7 +647,9 @@ impl BridgeTransport for RelayTransport {
             &self.sink,
             &self.connected,
             "relay unwatch",
-            Message::Text(json!({"type":"unwatch","target":"relay"}).to_string()),
+            Message::Text(fantastic_io_bridge::codec::encode_frame(
+                &json!({"type":"unwatch","target":"relay"}),
+            )),
         )
         .await;
         json!({"ok": true, "unwatched": "relay"})
@@ -714,7 +794,9 @@ mod tests {
         // stalled, `close()` could never return, so the bridge agent could not be
         // deleted. It now aborts first and settles the directory waiters.
         let supervisor = tokio::spawn(async { std::future::pending::<()>().await });
-        let heartbeat = tokio::spawn(async { std::future::pending::<()>().await });
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let beat_stop = Arc::clone(&stop);
+        let heartbeat = tokio::spawn(async move { beat_stop.notified().await });
         let (_tx, rx) = mpsc::channel::<Result<Frame, TransportError>>(1);
         let relay_pending: RelayPending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (dir_tx, dir_rx) = oneshot::channel::<Value>();
@@ -729,7 +811,7 @@ mod tests {
             closed: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(true)),
             supervisor: Mutex::new(Some(supervisor)),
-            heartbeat: Mutex::new(Some(heartbeat)),
+            stop_heartbeat: Arc::clone(&stop),
             relay_pending,
             relay_next_id: AtomicU64::new(0),
             identity: Arc::new(std::sync::Mutex::new(json!({}))),
@@ -742,7 +824,12 @@ mod tests {
             t.supervisor.lock().await.is_none(),
             "supervisor not aborted"
         );
-        assert!(t.heartbeat.lock().await.is_none(), "heartbeat not aborted");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), heartbeat)
+                .await
+                .is_ok(),
+            "the heartbeat task must end on close"
+        );
         let settled = dir_rx
             .await
             .expect("a pending directory request must settle");

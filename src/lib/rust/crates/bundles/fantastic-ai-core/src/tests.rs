@@ -5,8 +5,7 @@
 
 use super::*;
 use crate::agent_loop::BackendConfig;
-use crate::events::CallerRoute;
-use crate::provider::{Provider, ProviderEvent, ProviderStream};
+use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
@@ -64,6 +63,14 @@ impl MockScript {
         });
         Value::Array(msgs.clone()).to_string()
     }
+
+    /// The model-view messages handed to pass `n`, as values.
+    fn request_messages(&self, n: usize) -> Vec<Value> {
+        let reqs = self.requests.lock().unwrap();
+        reqs.get(n)
+            .unwrap_or_else(|| panic!("pass {n} never happened"))
+            .clone()
+    }
 }
 
 /// A provider that replays its agent's shared [`MockScript`], optionally after a
@@ -74,7 +81,7 @@ struct MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
         self.script.requests.lock().unwrap().push(messages.to_vec());
         if !self.script.delay.is_zero() {
             tokio::time::sleep(self.script.delay).await;
@@ -86,11 +93,11 @@ impl Provider for MockProvider {
             .unwrap()
             .pop_front()
             .unwrap_or_default();
-        let evs: Vec<Result<ProviderEvent, String>> = pass
+        let evs: Vec<Result<ProviderEvent, ProviderError>> = pass
             .into_iter()
             .map(|e| match e {
                 ScriptEvent::Token(t) => Ok(ProviderEvent::Token(t)),
-                ScriptEvent::Fail(e) => Err(e),
+                ScriptEvent::Fail(e) => Err(ProviderError::raised(e)),
             })
             .collect();
         Ok(Box::pin(futures_util::stream::iter(evs)))
@@ -174,8 +181,8 @@ fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
 }
 
 const CFG: BackendConfig = BackendConfig {
-    route: CallerRoute::CliRoundTrip,
     name: "mock_backend",
+    provider_missing_error: None,
 };
 
 #[async_trait]
@@ -202,12 +209,16 @@ impl Bundle for MockBundle {
                     "emits": {"token": "t"},
                 })
             }
-            "boot" => Value::Null,
+            // A BOOT IS A NEW INCARNATION, exactly as in every real backend.
+            "boot" => {
+                crate::state::bump_incarnation(agent_id);
+                Value::Null
+            }
             "send" => {
                 let provider: Arc<dyn Provider> = Arc::new(MockProvider {
                     script: script_for(agent_id),
                 });
-                verbs::send(provider, agent_id, payload, kernel, CFG).await
+                verbs::send(Some(provider), agent_id, payload, kernel, CFG).await?
             }
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
@@ -237,7 +248,7 @@ impl Bundle for MockBundle {
         task_id: &fantastic_kernel::TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
         Ok(())
     }
 }
@@ -269,7 +280,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     let backend_id = id_for(tmp, tag);
@@ -400,16 +411,14 @@ fn rebind_backend_inbox(
     kernel: &Arc<Kernel>,
     backend: &AgentId,
 ) -> fantastic_kernel::inbox::InboxReceiver {
-    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
-    kernel.inboxes.insert(backend.clone(), tx);
-    rx
+    kernel.ensure_inbox(backend)
 }
 
 async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
     let mut out = Vec::new();
     for _ in 0..40 {
         while let Some(v) = rx.try_recv() {
-            out.push(v);
+            out.push(v.payload);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
         if out.iter().any(|v| {
@@ -417,7 +426,7 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
                 && v.get("phase").and_then(Value::as_str) == Some("done")
         }) {
             while let Some(v) = rx.try_recv() {
-                out.push(v);
+                out.push(v.payload);
             }
             break;
         }
@@ -599,15 +608,16 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
 
     // The DURABLE turn is stripped — no marker, no deliberation, no mid-thought
     // call text; just the answer.
-    let h = kernel
+    // Through `recall`, which pages the DURABLE turns: `history` is the digest.
+    let r = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "history", "client_id": client_id}),
+            json!({"type": "recall", "client_id": client_id}),
         )])
         .await
         .remove(0)
         .result;
-    let messages = h["messages"].as_array().expect("messages array");
+    let messages = r["messages"].as_array().expect("recall messages");
     let last = messages.last().unwrap();
     assert_eq!(last["role"], "assistant");
     let content = last["content"].as_str().unwrap();
@@ -664,8 +674,12 @@ async fn a_thinking_only_turn_is_not_an_empty_completion() {
         .await
         .remove(0)
         .result;
-    let messages = h["messages"].as_array().expect("messages array");
-    assert_eq!(messages.last().unwrap()["content"], "");
+    // `history` is the DIGEST (python's `{rows, next, total}`) — the assistant
+    // turn's body stripped of its thinking is an EMPTY head, 0 bytes.
+    let rows = h["rows"].as_array().expect("rows array");
+    assert_eq!(rows.last().unwrap()["head"], "");
+    assert_eq!(rows.last().unwrap()["bytes"], 0);
+    assert!(h.get("messages").is_none(), "python sends no `messages`");
 }
 
 // ── Context Protocol: budget primitives + strategies (no kernel) ─────
@@ -687,13 +701,261 @@ fn body(n: usize, size: usize) -> Vec<Value> {
 struct SummaryProvider(&'static str);
 #[async_trait]
 impl Provider for SummaryProvider {
-    async fn chat(&self, _m: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, _m: &[Value]) -> Result<ProviderStream, ProviderError> {
         let ev = Ok(ProviderEvent::Token(self.0.to_string()));
         Ok(Box::pin(futures_util::stream::iter(vec![ev])))
     }
     fn model(&self) -> String {
         "sum".into()
     }
+}
+
+/// B3.3 — `status.current` has TWO python shapes, not one dict with a flag.
+/// With a client: `{phase, send_id, started_at, elapsed, is_mine}` (+ this
+/// caller's own text). Without: the in-flight ENTRY minus its text-bearing keys,
+/// so `client_id` and `queued_at` are there and the order is the entry's. And an
+/// EMPTY `client_id` is falsy — it takes the redacted branch and is echoed back
+/// as `''`, where rust turned it into `'cli'`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_current_shape_matches_python() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_status").await;
+    let _s = script(&backend, vec![pass("ack")], Duration::from_millis(400));
+    let send_kernel = Arc::clone(&kernel);
+    let backend_for_task = backend.clone();
+    let join = tokio::spawn(async move {
+        send_kernel
+            .send(vec![Item::new(
+                backend_for_task,
+                json!({"type": "send", "text": "go", "client_id": "probe"}),
+            )])
+            .await
+            .remove(0)
+            .result
+    });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let mine = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "status", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        mine["current"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec![
+            "phase",
+            "send_id",
+            "started_at",
+            "elapsed",
+            "is_mine",
+            "text",
+            "text_so_far"
+        ],
+        "{mine:#?}"
+    );
+    assert_eq!(mine["current"]["is_mine"], json!(true));
+
+    let other = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "status", "client_id": "someone_else"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        other["current"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["phase", "send_id", "started_at", "elapsed", "is_mine"],
+        "no client_id leaks into a per-caller block: {other:#?}"
+    );
+    assert_eq!(other["current"]["is_mine"], json!(false));
+
+    // NO client: the redacted ENTRY, `queued_at` included, `''` echoed.
+    for payload in [
+        json!({"type": "status"}),
+        json!({"type": "status", "client_id": ""}),
+    ] {
+        let want_echo = payload.get("client_id").cloned().unwrap_or(Value::Null);
+        let bare = kernel
+            .send(vec![Item::new(backend.clone(), payload)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(bare["client_id"], want_echo, "{bare:#?}");
+        assert_eq!(
+            bare["current"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![
+                "client_id",
+                "send_id",
+                "queued_at",
+                "started_at",
+                "phase",
+                "elapsed",
+                "is_mine"
+            ],
+            "{bare:#?}"
+        );
+        assert_eq!(bare["current"]["is_mine"], json!(false));
+        assert!(bare["current"]["queued_at"].as_f64().unwrap_or(0.0) > 0.0);
+        assert_eq!(bare["mine_pending"], json!([]));
+    }
+    let _ = join.await.unwrap();
+}
+
+/// B3.4 — the `send` reply names the row this turn produced. python `_run`
+/// returns `{response, final, client_id, turn_id}`; rust minted the id (routing
+/// needs it to parent the next turn) and then dropped it from the reply, so a
+/// caller could not name the row its own send wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_reply_carries_turn_id() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_tid").await;
+    let _s = script(&backend, vec![pass("ack")], Duration::ZERO);
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "ping", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["response", "final", "client_id", "turn_id"],
+        "{r:#?}"
+    );
+    let turn_id = r["turn_id"].as_i64().expect("turn_id is a row id");
+    // It NAMES the assistant row this turn appended.
+    let rows = kernel.rows.for_agent(&backend);
+    let assistant = rows
+        .iter()
+        .find(|row| row["id"].as_i64() == Some(turn_id))
+        .expect("the row the reply names");
+    assert_eq!(assistant["role"], json!("assistant"));
+    assert_eq!(assistant["content"], json!("ack"));
+}
+
+/// The env is process-global, so the test that overrides the send ceiling must
+/// not overlap any other. It takes this lock and restores what it found.
+static SEND_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// B2.8 — the ceiling is a python FLOAT: `FANTASTIC_AI_SEND_TIMEOUT=0.05` is a
+/// 50ms ceiling (rust parsed `u64`, failed, and silently used 180), the refusal
+/// spells the value with python's `repr`, and the `status(done)` detail carries
+/// `reason` plus the auto-fills and nothing else (rust added
+/// `partial_chars`/`partial_head`/`partial_tail`, a shape python never emits).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_provider_times_out_at_the_python_float_ceiling() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let prev = std::env::var("FANTASTIC_AI_SEND_TIMEOUT").ok();
+    std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", "0.05");
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_to").await;
+    let _s = script(
+        &backend,
+        vec![pass("never arrives")],
+        Duration::from_millis(600),
+    );
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let started = std::time::Instant::now();
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let elapsed = started.elapsed();
+    match prev {
+        Some(v) => std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", v),
+        None => std::env::remove_var("FANTASTIC_AI_SEND_TIMEOUT"),
+    }
+    assert_eq!(
+        r,
+        json!({"error": "send: timeout after 0.05s", "client_id": "probe"})
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "the float ceiling must bind: {elapsed:?}"
+    );
+    let evs = drain(&mut rx).await;
+    let done = evs
+        .iter()
+        .find(|v| {
+            v.get("type").and_then(Value::as_str) == Some("status")
+                && v.get("phase").and_then(Value::as_str) == Some("done")
+        })
+        .expect("status(done)");
+    let keys: Vec<&String> = done["detail"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        vec!["reason", "send_id", "started_at", "queue_depth"],
+        "{done:#?}"
+    );
+    assert_eq!(done["detail"]["reason"], json!("timeout"));
+}
+
+/// The default is python's `180.0`, and it is a float on the wire of the
+/// refusal — not `180`.
+#[test]
+fn the_default_send_ceiling_is_a_python_float() {
+    assert_eq!(crate::verbs::SEND_TIMEOUT_SECS, 180.0);
+    assert_eq!(
+        fantastic_bundle::py_float_repr(crate::verbs::SEND_TIMEOUT_SECS),
+        "180.0"
+    );
+}
+
+/// B2.6 — python `secrets.token_urlsafe(8)`: 11 base64url characters, no
+/// prefix. Rust minted `snd_<8 hex>`.
+#[test]
+fn send_id_is_pythons_token_urlsafe_shape() {
+    for _ in 0..200 {
+        let id = crate::helpers::mint_send_id();
+        assert_eq!(id.chars().count(), 11, "{id}");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "{id}"
+        );
+        assert!(!id.starts_with("snd_"), "{id}");
+    }
+}
+
+/// B2.10 — python `_safe_client`, per CODE POINT: `str.isalnum` is Unicode-aware
+/// and there is no length cap, and the strip is python's whitespace set.
+#[test]
+fn safe_client_strips_python_whitespace() {
+    use crate::helpers::safe_client;
+    // `\x1c`–`\x1f` are python whitespace; `str::trim` keeps them.
+    assert_eq!(safe_client("\u{1f} p \u{1f}"), "p");
+    assert_eq!(safe_client("  "), "cli");
+    assert_eq!(safe_client(""), "cli");
+    // UNICODE ALPHANUMERICS SURVIVE, and 70 of them are still 70.
+    let long: String = "é".repeat(70);
+    assert_eq!(safe_client(&long), long);
+    // Decomposed `e` + U+0301 — the combining mark is not alphanumeric.
+    assert_eq!(safe_client("e\u{301}x"), "e_x");
+    // A zero-width joiner is not alphanumeric either.
+    assert_eq!(safe_client("a\u{200d}b"), "a_b");
+    assert_eq!(safe_client("a/b c"), "a_b_c");
+    assert_eq!(safe_client("keep._-"), "keep._-");
 }
 
 #[test]
@@ -816,7 +1078,9 @@ async fn recall_pages_durable_store_and_context_status_shape() {
             .contains("halcyon")),
         "recall did not page the planted fact back: {r:#?}"
     );
-    assert_eq!(r["client_id"], "chat");
+    // python's recall reply is `{messages, total, truncated[, note]}` — no
+    // `client_id`, which rust used to add.
+    assert!(r.get("client_id").is_none(), "{r:#?}");
 
     // context_status shape — default strategy, projection recorded.
     let st = kernel
@@ -874,15 +1138,12 @@ async fn history_persists_and_round_trips() {
         .await
         .remove(0)
         .result;
-    let messages = h["messages"].as_array().expect("messages array");
-    assert!(
-        messages.len() >= 2,
-        "expected >=2 messages, got {messages:#?}"
-    );
-    assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[0]["content"], "ping");
-    assert_eq!(messages[1]["role"], "assistant");
-    assert_eq!(messages[1]["content"], "ack");
+    let rows = h["rows"].as_array().expect("rows array");
+    assert!(rows.len() >= 2, "expected >=2 rows, got {rows:#?}");
+    assert_eq!(rows[0]["role"], "user");
+    assert_eq!(rows[0]["head"], "ping");
+    assert_eq!(rows[1]["role"], "assistant");
+    assert_eq!(rows[1]["head"], "ack");
 
     // WHERE IT LIVES: the KERNEL's row store, one table for every agent, keyed
     // by the one counter. It used to be an append-only JSONL sidecar on the AI's
@@ -890,7 +1151,7 @@ async fn history_persists_and_round_trips() {
     // bundle chose, and a per-CLIENT split that gave two clients on one agent
     // two threads that could not see each other. Agent id is conversation id
     // now, so one list is what every reader gets.
-    let rows = kernel.rows.for_agent(&backend);
+    let rows = conversation(&kernel, &backend);
     // ONE ROW PER TURN — list index == store index (recall/reaction paging).
     // Four turns: the ping, the call-less answer, the nudge it earned, and the
     // `done` that ended the chain.
@@ -952,7 +1213,7 @@ async fn chat_persists_with_no_loader_provider_wired() {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     let backend_id = id_for(&tmp, "noprov");
@@ -989,19 +1250,19 @@ async fn chat_persists_with_no_loader_provider_wired() {
         .await
         .remove(0)
         .result;
-    let messages = h["messages"].as_array().expect("messages array");
+    let rows = h["rows"].as_array().expect("rows array");
     assert_eq!(
-        messages.len(),
+        rows.len(),
         4,
         "history came back empty with no loader provider: {h:#?}"
     );
-    assert_eq!(messages[0]["content"], "ping");
-    assert_eq!(messages[1]["content"], "ack");
+    assert_eq!(rows[0]["head"], "ping");
+    assert_eq!(rows[1]["head"], "ack");
     // …and it is REALLY in the KERNEL's row store, not on the AI's file leg.
     // The conversation stopped being this bundle's private JSONL sidecar on
     // 2026-09-10: rows are the kernel's, one table, and putting them on disk is
     // a loader's job that no agent asks for.
-    let rows = kernel.rows.for_agent(&backend);
+    let rows = conversation(&kernel, &backend);
     assert_eq!(
         rows.len(),
         4,
@@ -1141,42 +1402,6 @@ async fn status_during_in_flight_shows_phase() {
 // `add_backend`) — the default is smaller than the system block once
 // `SEND_TO_HOWTO` is in it, and a second turn dying on `context_insufficient`
 // looks exactly like a routing bug.
-
-/// THE point of model-owned routing: a one-pass task costs ONE pass. No
-/// `<call name="done">` means the model is finished — nothing schedules another turn.
-///
-/// The second scripted pass is the trap: it must never be served. Before the
-/// shared script box existed the mock replayed pass 1 on every send, so an
-/// over-eager chain looked identical to a correct stop.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_call_less_chain_is_bounded_by_the_nudge_limit() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "rt_stop").await;
-    let s = script(
-        &backend,
-        vec![pass("the answer"), pass("still no call")],
-        Duration::ZERO,
-    );
-    let r = kernel
-        .send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "hi"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["final"], "the answer");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    // EVERY call-less turn is nudged (user, 2026-09-09: "all is tool calls"), so
-    // a model that never calls is bounded by `nudge_limit` and not by the shape
-    // of its first turn: NUDGE_LIMIT reminders plus the turn that started it.
-    assert_eq!(
-        s.passes_served(),
-        (crate::route::NUDGE_LIMIT + 1) as usize,
-        "the limit bounds it, got {} passes",
-        s.passes_served()
-    );
-}
 
 /// The model emits a send; it really runs; its REPLY comes back as the next turn,
 /// tagged so the model can tell it from a human's message.
@@ -1688,6 +1913,105 @@ async fn an_error_reply_does_not_route() {
     assert_eq!(s.passes_served(), 1, "an errored pass must not route");
 }
 
+/// PROVIDER FAILURE, KIND 2 (B2.1): unmapped — python re-raises it out of the
+/// handler, and the kernel settles a raise as `{error:"<Type>: <msg>",
+/// raised:true}` on a FAILED execution. `status(done, reason='error')` still
+/// announces it first, carrying `str(e)` WITHOUT the exception-type prefix.
+/// Rust used to answer every provider failure with a COMPLETED
+/// `{error, client_id}`, so no AI failure was ever retryable or dead-letterable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmapped_provider_error_settles_raised() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_raise").await;
+    let _s = script(
+        &backend,
+        vec![vec![ScriptEvent::Fail("provider exploded".into())]],
+        Duration::ZERO,
+    );
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], json!("RuntimeError: provider exploded"));
+    assert_eq!(r["raised"], json!(true));
+    // The RAISE carries the type; the EVENT carries `str(e)` alone.
+    assert!(r.get("client_id").is_none(), "{r:#?}");
+    let evs = drain(&mut rx).await;
+    let done: Vec<&Value> = evs
+        .iter()
+        .filter(|v| {
+            v.get("type").and_then(Value::as_str) == Some("status")
+                && v.get("phase").and_then(Value::as_str) == Some("done")
+        })
+        .collect();
+    assert_eq!(done.len(), 1, "{evs:#?}");
+    assert_eq!(done[0]["detail"]["reason"], json!("error"));
+    assert_eq!(done[0]["detail"]["error"], json!("provider exploded"));
+}
+
+/// B2.2: a CONTEXT-PROJECTION refusal is not a provider failure. python returns
+/// the seam's dict out of `_run` VERBATIM — no `status(done)` closes a turn that
+/// never opened a provider pass, no `client_id` is stapled on, and the handler
+/// does not fail. The seam's own `context(too_small)` event is the only one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_projection_refusal_is_returned_verbatim_and_does_not_raise() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_toosmall").await;
+    // A window the kernel's own system block cannot fit — the `too_small`
+    // failsafe, which refuses BEFORE the model is called.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": backend.as_str(), "context_window": 300}),
+        )])
+        .await;
+    let _s = script(&backend, vec![pass("never reached")], Duration::ZERO);
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("mock_backend: context_insufficient — "),
+        "{r:#?}"
+    );
+    assert!(
+        r.get("raised").is_none(),
+        "a refusal is not a raise: {r:#?}"
+    );
+    assert!(
+        r.get("client_id").is_none(),
+        "python returns the seam dict bare: {r:#?}"
+    );
+    let evs = drain(&mut rx).await;
+    assert!(
+        !evs.iter().any(|v| {
+            v.get("type").and_then(Value::as_str) == Some("status")
+                && v.get("phase").and_then(Value::as_str) == Some("done")
+        }),
+        "no turn opened, so nothing closes one: {evs:#?}"
+    );
+    assert!(
+        evs.iter().any(|v| {
+            v.get("type").and_then(Value::as_str) == Some("context")
+                && v.get("phase").and_then(Value::as_str) == Some("too_small")
+        }),
+        "{evs:#?}"
+    );
+}
+
 /// A handler that DIES must reach the model as `{"error": …}`.
 ///
 /// Two shapes, one contract. A bundle returning `Err` is already mapped to an
@@ -1736,7 +2060,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let backend_id = id_for(&tmp, "rt_raise");
     let file_id = format!("ff_{backend_id}");
@@ -1835,7 +2159,8 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_prompt").await;
     let state = crate::state::state_for(&backend);
     let (messages, _store_len) =
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None).await;
+        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None, None)
+            .await;
     let sys_block = messages[0]["content"]
         .as_str()
         .expect("system content")
@@ -1938,6 +2263,11 @@ async fn routing_is_its_own_ps_row() {
 async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
     // The model is QUERIED UNTIL IT CALLS (python-canonical, 2026-09-01): a
     // second silent turn used to end the chain silently.
+    //
+    // NO STREAK AND NO CAP. Rust bounded this at `NUDGE_LIMIT` (24, or the
+    // record's `nudge_limit`) and dropped the chain in SILENCE past it — the
+    // exact failure the reminder exists to prevent, one layer up. python's two
+    // honest ends (`done`, `await`) both return above this branch.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "ndg").await;
     let s = script(
@@ -1974,46 +2304,6 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(s.passes_served(), 5, "done ended it; nothing reminds after");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nudge_limit_bounds_a_never_calling_chain() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "ndl").await;
-    // record meta `nudge_limit` = 2 consecutive silent turns
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({"type": "update_agent", "id": backend.as_str(), "nudge_limit": 2}),
-        )])
-        .await;
-    let s = script(
-        &backend,
-        vec![
-            pass(call_envelope(
-                "kernel",
-                json!({"type": "reflect", "tree": "none"}),
-                None,
-            )),
-            pass("prose 1"),
-            pass("prose 2"),
-            pass("prose 3"),
-            pass("prose 4 — would be nudged without the limit"),
-        ],
-        Duration::ZERO,
-    );
-    let _ = kernel
-        .send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "go"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(until_passes(&s, 4).await, "two nudges must arrive");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    // call, silent→nudge 1, silent→nudge 2, silent→over the limit: 4, never 5
-    assert_eq!(s.passes_served(), 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2109,7 +2399,6 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         None,
         String::new(),
         0.2,
-        CallerRoute::CliRoundTrip,
         None,
     )
     .await;
@@ -2353,14 +2642,128 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
         .unwrap_or_else(|| panic!("the dead handoff was silent: {events:#?}"));
     assert_eq!(status["phase"], "done", "{status:#?}");
     assert_eq!(status["detail"]["reason"], "error", "{status:#?}");
-    assert!(
-        status["detail"]["error"].is_string(),
-        "the announcement must say WHY: {status:#?}"
-    );
+    // B2.4 — the error is the REPLY's own error, verbatim. python passes
+    // `reply.get("error")` straight through; the raw status is the fallback and
+    // carries NO `delivery ` prefix, which rust added to a string no python
+    // subscriber matches.
+    let why = status["detail"]["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the announcement must say WHY: {status:#?}"));
+    assert!(!why.starts_with("delivery "), "{status:#?}");
+    assert!(why.contains("unknown type"), "{status:#?}");
     assert_eq!(status["source"], leg.as_str(), "{status:#?}");
     assert!(status.get("ts").is_some(), "{status:#?}");
     assert_eq!(status["client_id"], "probe", "{status:#?}");
     assert_eq!(s.passes_served(), 1);
+}
+
+/// B2.5 — EACH DELIVERY IS ITS OWN `deliver_reply` KERNEL TASK, and the router
+/// does not wait for it. A `send` to an AI agent holds that agent's FIFO lock
+/// for the whole turn, so awaiting deliveries inline made reply 2 of a 4-call
+/// turn wait for the conversation reply 1 started — measured on python
+/// 2026-08-24, 26 of 36 calls never answered.
+///
+/// Since C36 each of those tasks is also a `task` ROW on the target (python's
+/// `ai_rows_read.json` rows 427/435/445/462), under the very id `ps` reports.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delivery_is_a_deliver_reply_task_not_awaited() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_dsoon").await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    // The peer's own turn is SLOW. If the router awaited the delivery, this
+    // agent's `send` could not return before the peer finished.
+    script(&peer, vec![pass("peer ack")], Duration::from_millis(800));
+    let _s = script(
+        &backend,
+        vec![pass(call_envelope(
+            "core",
+            json!({"type": "list_agents"}),
+            Some(peer.as_str()),
+        ))],
+        Duration::ZERO,
+    );
+    let started = std::time::Instant::now();
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // The routing pass itself is detached, so give it a moment to spawn.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "the router awaited the delivery: {:?}",
+        started.elapsed()
+    );
+    let table = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ps"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let row = table["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["verb"] == json!("deliver_reply"))
+        .unwrap_or_else(|| panic!("no deliver_reply task row: {table:#?}"));
+    assert_eq!(
+        row["agent"],
+        json!(peer.as_str()),
+        "the task belongs to the TARGET: {row:#?}"
+    );
+    // C36 — A FORK IS A MESSAGE: the delivery's pid is the id of a `task` row
+    // on the target, so a finished delivery is still explainable from the store.
+    let store: Vec<_> = kernel
+        .rows
+        .for_agent(&peer)
+        .into_iter()
+        .filter(|r| {
+            r.get("kind") == Some(&json!("task")) && r.get("verb") == Some(&json!("deliver_reply"))
+        })
+        .collect();
+    assert_eq!(
+        store.len(),
+        1,
+        "one `deliver_reply` row per delivery: {store:?}"
+    );
+    assert_eq!(store[0]["id"], row["id"], "the task id is the row id");
+    // …and it is BOOKKEEPING: the conversation reader never sees it.
+    assert!(
+        crate::history::load_history(&peer, &kernel, "cli")
+            .await
+            .iter()
+            .all(|r| r.get("verb") != Some(&json!("deliver_reply"))),
+        "a delivery task reached the peer's conversation"
+    );
+}
+
+/// B2.4 — a CANCELLED handoff is not announced. python's `failed` is
+/// `status in ("failed", "timed_out")`; rust used `!is_completed()`, which also
+/// caught `cancelled` and turned every operator kill into a spurious error
+/// event on the target's inbox.
+#[test]
+fn only_failed_and_timed_out_count_as_a_failed_handoff() {
+    use fantastic_kernel::outcome::Status;
+    for (status, announced) in [
+        (Status::Failed, true),
+        (Status::TimedOut, true),
+        (Status::Cancelled, false),
+        (Status::Completed, false),
+    ] {
+        assert_eq!(
+            matches!(status, Status::Failed | Status::TimedOut),
+            announced,
+            "{status}"
+        );
+    }
+    // The raw status is what python puts in `error` — no prefix, python's spelling.
+    assert_eq!(Status::TimedOut.as_str(), "timed_out");
 }
 
 /// ONE event on contention, and it is the `status` one. Rust/swift emitted a bare
@@ -2408,7 +2811,7 @@ async fn contended_sends_emit_one_queued_status_and_no_bare_queued_event() {
     let _ = first.await.expect("first send");
     let mut events = drain(&mut rx).await;
     while let Some(v) = rx.try_recv() {
-        events.push(v);
+        events.push(v.payload);
     }
     assert!(
         !events
@@ -2492,7 +2895,8 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     ];
     crate::history::append_history(&backend, &kernel, "probe", &turns).await;
     let (messages, store_len) =
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None).await;
+        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None, None)
+            .await;
     assert_eq!(store_len, 4, "the STORE keeps every turn");
     assert!(
         messages.len() < 1 + store_len + 1,
@@ -2515,7 +2919,6 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
         &state,
         &kernel,
         "probe",
-        CallerRoute::CliRoundTrip,
         "mock_backend",
         fat,
         store_len,
@@ -2565,7 +2968,6 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         None,
         "[reply to x · y z]".to_string(),
         30.0,
-        CallerRoute::CliRoundTrip,
         None,
     )
     .await;
@@ -2813,9 +3215,52 @@ async fn history_answers_the_digest_and_the_full_turns() {
     assert!(rows[0]["id"].as_i64().unwrap() > 0);
     assert_eq!(h["total"], rows.len());
 
-    // The full text is still there, whole, for the wire harness.
-    let messages = h["messages"].as_array().expect("messages");
-    assert_eq!(messages[1]["content"], long);
+    // And the reply is python's, EXACTLY: no `messages`, no `client_id`.
+    assert_eq!(
+        h.as_object().unwrap().keys().cloned().collect::<Vec<_>>(),
+        vec!["rows".to_string(), "next".to_string(), "total".to_string()],
+        "{h:#?}"
+    );
+    // The whole text is still one call away — `recall` pages the durable turn.
+    let r = kernel
+        .send(vec![Item::new(backend, json!({"type": "recall"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["messages"].as_array().unwrap()[1]["content"], long);
+}
+
+/// A NEGATIVE `limit` is already satisfied by the empty page — python
+/// `_fit_reply(digest, cap, limit or None)` returns `([], True)`.
+#[tokio::test]
+async fn history_negative_limit_is_an_empty_page() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "hneg").await;
+    script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "ping"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "history", "limit": -1}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["rows"], json!([]), "{r:#?}");
+    assert_eq!(r["next"], Value::Null);
+    assert!(r["total"].as_u64().unwrap() >= 2, "{r:#?}");
 }
 
 /// Paging: `limit` cuts the page, `next` names where to resume, and an `after`
@@ -2884,25 +3329,21 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
 
     let client = "browser_tok";
     let client_id = AgentId::from(client);
-    let (ctx, mut client_rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
-    kernel.inboxes.insert(client_id.clone(), ctx);
+    let mut client_rx = kernel.ensure_inbox(&client_id);
 
-    for route in [CallerRoute::CliRoundTrip, CallerRoute::PerClientInbox] {
-        crate::events::to_caller(
-            &kernel,
-            &backend,
-            client,
-            route,
-            json!({"type": "token", "delta": "x"}),
-        )
-        .await;
-    }
+    crate::events::to_caller(
+        &kernel,
+        &backend,
+        client,
+        json!({"type": "token", "delta": "x"}),
+    )
+    .await;
 
     let mut seen = Vec::new();
     while let Some(v) = agent_rx.try_recv() {
-        seen.push(v);
+        seen.push(v.payload);
     }
-    assert_eq!(seen.len(), 2, "both routes must reach the agent: {seen:?}");
+    assert_eq!(seen.len(), 1, "the event must reach the agent: {seen:?}");
     for ev in &seen {
         assert_eq!(ev["client_id"], client, "the event must be TAGGED: {ev}");
         assert_eq!(ev["source"], backend.as_str());
@@ -2911,6 +3352,95 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
         client_rx.try_recv().is_none(),
         "nothing may be emitted on an inbox named after the client"
     );
+}
+
+/// B2.7 — ONE caller route, python's `_to_caller`: `client_id == 'cli'` is
+/// DISPATCHED to the `cli` agent (so its handler prints to stdout), everyone
+/// else is emitted on the backend's own inbox. Rust selected between the two
+/// with a per-backend `CallerRoute` knob python does not have, so three of the
+/// four backends never reached the `cli` handler at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cli_caller_round_trips_through_the_cli_agent() {
+    /// Stands in for the real `cli` bundle: records what it was handed.
+    struct CliSink(Arc<std::sync::Mutex<Vec<Value>>>);
+    #[async_trait]
+    impl Bundle for CliSink {
+        fn name(&self) -> &str {
+            "cli"
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            self.0.lock().expect("sink poisoned").push(payload.clone());
+            Ok(None)
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, MockBundle);
+    kernel
+        .bundles
+        .register("file_bridge.tools", fantastic_file::FileBundle);
+    kernel
+        .bundles
+        .register("cli.sink", CliSink(Arc::clone(&seen)));
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let backend_id = id_for(&tmp, "evt_cli");
+    let file_id = format!("ff_{backend_id}");
+    add_file_bridge(
+        &kernel,
+        &file_id,
+        &tmp.path().join(".fantastic"),
+        &backend_id,
+    )
+    .await;
+    let backend = add_backend(&kernel, &backend_id, &file_id).await;
+    let mut agent_rx = rebind_backend_inbox(&kernel, &backend);
+
+    // Two-sided deny-all: the backend already holds `can_call:{cli:*}`, so the
+    // `cli` agent has to accept it.
+    let mut cli_meta = Map::new();
+    cli_meta.insert("callable_by".to_string(), json!({ backend.as_str(): "*" }));
+    let cli = Agent::new(
+        AgentId::from("cli"),
+        Some("cli.sink".to_string()),
+        None,
+        cli_meta,
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&cli));
+
+    crate::events::to_caller(&kernel, &backend, "cli", json!({"type": "token"})).await;
+    let handed = seen.lock().expect("sink poisoned").clone();
+    assert_eq!(handed.len(), 1, "the cli handler must run: {handed:?}");
+    assert_eq!(handed[0]["client_id"], json!("cli"));
+    assert_eq!(handed[0]["source"], json!(backend.as_str()));
+    assert!(
+        agent_rx.try_recv().is_none(),
+        "a cli event is dispatched, not emitted on the agent"
+    );
+
+    // …and a NON-cli caller still lands on the agent's own inbox.
+    crate::events::to_caller(&kernel, &backend, "browser_tok", json!({"type": "token"})).await;
+    let ev = agent_rx.try_recv().expect("the browser event").payload;
+    assert_eq!(ev["client_id"], json!("browser_tok"));
+    assert_eq!(seen.lock().expect("sink poisoned").len(), 1);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -2923,6 +3453,23 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
 
 /// Put a row on the agent's conversation directly — the store is the kernel's,
 /// and a test that wants a history writes one rather than acting out ten turns.
+/// The agent's CONVERSATION — its rows without the kernel's own bookkeeping.
+/// Since C36 a dispatch writes a `call` row and a fork a `task` row onto the
+/// same list, so a raw `for_agent` count is no longer a count of turns.
+fn conversation(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<fantastic_kernel::Row> {
+    kernel
+        .rows
+        .for_agent(agent)
+        .into_iter()
+        .filter(|r| {
+            !matches!(
+                r.get("kind").and_then(Value::as_str),
+                Some("call" | "task" | "body" | "view" | "settle")
+            )
+        })
+        .collect()
+}
+
 fn put_row(kernel: &Arc<Kernel>, agent: &AgentId, row: Value) -> i64 {
     let Value::Object(m) = row else {
         panic!("a row is an object")
@@ -3268,9 +3815,16 @@ async fn a_fold_projection_over_budget_writes_folds() {
         script: script_for(&backend),
     });
     let state = crate::state::state_for(&backend);
-    let (messages, store_len) =
-        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys"))
-            .await;
+    let (messages, store_len) = crate::assembly::assemble_messages(
+        &backend,
+        &state,
+        "next",
+        &kernel,
+        "cli",
+        Some("sys"),
+        None,
+    )
+    .await;
     let ids_in_body = messages.iter().filter(|m| m.get("id").is_some()).count();
     let out = crate::projection::project_context(
         &provider,
@@ -3278,7 +3832,6 @@ async fn a_fold_projection_over_budget_writes_folds() {
         &state,
         &kernel,
         "cli",
-        CallerRoute::CliRoundTrip,
         "mock",
         messages.clone(),
         store_len,
@@ -3355,18 +3908,11 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             &kernel,
             "cli",
             Some("sys"),
+            None,
         )
         .await;
         let _ = crate::projection::project_context(
-            &provider,
-            &backend,
-            &state,
-            &kernel,
-            "cli",
-            CallerRoute::CliRoundTrip,
-            "mock",
-            messages,
-            store_len,
+            &provider, &backend, &state, &kernel, "cli", "mock", messages, store_len,
         )
         .await;
         let rows: Vec<Value> = crate::history::load_history(&backend, &kernel, "cli").await;
@@ -3395,4 +3941,1049 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             rows.iter().filter(|r| crate::folds::is_fold(r)).count()
         );
     }
+}
+// ─── B1 / B3 / B5 python-parity twins ───────────────────────────────────────
+
+#[test]
+fn cancel_doc_is_python_verbatim() {
+    // Every AI reflect carries this, so a model reads it on every turn. Rust
+    // taught `{type:'ps'}` / `{type:'cancel', task_id:'<agent>:<n>'}` — JSON, and
+    // a task_id shape the kernel no longer mints.
+    assert_eq!(
+        crate::CANCEL_DOC,
+        "No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with \
+         the substrate's universal system verbs: send 'kernel' <type>ps</type> for \
+         the live task table, find the row {agent:'<this agent>', verb:'send'}, then \
+         send 'kernel' <type>cancel</type> <task_id>n</task_id>. The turn closes \
+         with status(phase='done', reason='cancelled') + done, its HTTP stream and \
+         FIFO lock are released, and the blocked caller's `send` resolves to \
+         {cancelled:true}. Cancel kills the task's whole SUBTREE, so any work the \
+         turn spawned dies with it."
+    );
+}
+
+#[test]
+fn reflect_verbs_match_python_first_doc_lines() {
+    // python's `_build` order, and the FIRST LINE of each verb's docstring.
+    let v = crate::verbs::reflect_verbs();
+    let o = v.as_object().expect("an object");
+    assert_eq!(
+        o.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "reflect",
+            "send",
+            "inquiry",
+            "history",
+            "status",
+            "context_status",
+            "recall",
+            "pull",
+            "grep",
+            "context_recall",
+            "boot",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        o["reflect"],
+        "Identity + model + endpoint + generating flag + context posture. No args."
+    );
+    assert_eq!(
+        o["context_status"],
+        "No args. The context-budget posture + the last overflow projection + the model's"
+    );
+    assert_eq!(
+        o["boot"],
+        "On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`. A fresh"
+    );
+    assert!(o["history"]
+        .as_str()
+        .unwrap()
+        .ends_with("Returns {rows, next, total}."));
+}
+
+#[test]
+fn reflect_emits_and_concurrency_are_python_verbatim() {
+    let e = crate::verbs::reflect_emits();
+    let o = e.as_object().expect("an object");
+    // THREE, in this order — `done` and `say` and `queued` are not python's.
+    assert_eq!(
+        o.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "token".to_string(),
+            "status".to_string(),
+            "context".to_string()
+        ]
+    );
+    assert!(o["token"]
+        .as_str()
+        .unwrap()
+        .starts_with("{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY"));
+    assert!(o["status"]
+        .as_str()
+        .unwrap()
+        .contains("detail.reason='ok'|'cancelled'|'timeout'|'error' for done."));
+    assert!(o["context"]
+        .as_str()
+        .unwrap()
+        .ends_with("Pull counterpart: the `context_status` verb."));
+    assert_eq!(
+        crate::verbs::CONCURRENCY_DOC,
+        "Per-backend FIFO lock around `send`: one generation at a time. Other \
+         callers wait (and receive a `queued` event so their UI can show it). \
+         `reflect`/`history`/`status` skip the lock and stay snappy."
+    );
+}
+
+#[test]
+fn render_reflect_matches_python_one() {
+    // A string as-is; a list of SCALARS comma-joined through `str()`; anything
+    // nested through `render_reply` with whitespace collapsed; `null` empty.
+    assert_eq!(
+        crate::assembly::render_reflect(&json!({
+            "sentence": "S",
+            "a": null,
+            "b": ["x", "y"],
+            "c": {"$self": "*"},
+        })),
+        "S  a=  b=x,y  c=<$self>*</$self>"
+    );
+    // `shift_remove`, not swap: the remaining keys keep their order.
+    assert_eq!(
+        crate::assembly::render_reflect(&json!({
+            "sentence": "S", "one": 1, "two": 2, "three": 3,
+        })),
+        "S  one=1  two=2  three=3"
+    );
+    // A list of scalars uses python `str()`, so a bool is `True`.
+    assert_eq!(
+        crate::assembly::render_reflect(&json!({"sentence": "", "t": [true, 2]})),
+        "t=True,2"
+    );
+}
+
+#[test]
+fn estimate_one_counts_python_json_dumps_code_points() {
+    // `json.dumps(m)` with `, `/`: ` separators and ensure_ascii, measured in
+    // CODE POINTS: `{"role": "user", "content": "a \u2014 b"}` is 41 chars → 11.
+    assert_eq!(
+        crate::context::estimate_one(&json!({"role": "user", "content": "a — b"})),
+        11
+    );
+}
+
+#[test]
+fn budget_meta_parses_like_python() {
+    let meta = |v: Value| v.as_object().unwrap().clone();
+    // `context_window` 0.5 is a POSITIVE float, so `_as_pos_int` truncates it to
+    // 0 and that 0 is the window; `output_reserve` "-5" is not a digit string, so
+    // 1024; the budget then floors at 256. Measured python: {0, 1024, 256}.
+    let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": 1000.0}));
+    assert_eq!(crate::context::resolve_context_window(&m), 0);
+    assert_eq!(crate::context::output_reserve(&m), 1024);
+    assert_eq!(crate::context::budget(&m), 256);
+    assert_eq!(crate::context::recent_n(&m), 50);
+    // `+12` is not `isdigit()`, `1000.0` is not an int, `true` is `int(True)` = 1.
+    let m = meta(json!({"context_window": "+12", "output_reserve": 1000.0, "recent_n": true}));
+    assert_eq!(crate::context::resolve_context_window(&m), 131_072);
+    assert_eq!(crate::context::output_reserve(&m), 1024);
+    assert_eq!(crate::context::recent_n(&m), 1);
+    // A positive float window truncates; the budget then floors.
+    let m = meta(json!({"context_window": 12.9}));
+    assert_eq!(crate::context::resolve_context_window(&m), 12);
+    assert_eq!(crate::context::budget(&m), 256);
+    // A bool is never a window; `" 7 "` is `int()`-able.
+    let m = meta(json!({"context_window": true, "recent_n": " 7 "}));
+    assert_eq!(crate::context::resolve_context_window(&m), 131_072);
+    assert_eq!(crate::context::recent_n(&m), 7);
+}
+
+#[test]
+fn recent_n_bool_is_one() {
+    let m = json!({"recent_n": 7.9}).as_object().unwrap().clone();
+    assert_eq!(crate::context::recent_n(&m), 7);
+    let m = json!({"recent_n": "nope"}).as_object().unwrap().clone();
+    assert_eq!(crate::context::recent_n(&m), 6, "int() raises → python's 6");
+}
+
+#[test]
+fn inquiry_turn_text_uses_python_str_and_json_dumps() {
+    let out = crate::verbs::inquiry_open(&json!({
+        "text": "pick",
+        "options": [true, "b"],
+        "action": {"a": 1, "b": "—"},
+    }))
+    .expect("a valid inquiry");
+    let text = out["text"].as_str().unwrap();
+    assert!(text.contains("\n\nOptions: True, b"), "{text:?}");
+    assert!(
+        text.contains("\n\nProposed action: {\"a\": 1, \"b\": \"\\u2014\"}"),
+        "{text:?}"
+    );
+}
+
+/// B3.2 — the placeholder refusal renders the RAW value with python's `repr`,
+/// and a non-string `answer` is refused on its own. Rust coerced any non-string
+/// to `""` and printed rust's `Debug`, so a model that answered `42` was told
+/// its answer had come back as `""`. The strip is python's: whitespace first,
+/// then dots off both ends, so `'. x'` is a real answer.
+#[test]
+fn inquiry_placeholder_refusal_renders_python_repr() {
+    let closed = |answer: &str| {
+        crate::verbs::inquiry_close(
+            json!({
+                "response": format!(
+                    "<call name=\"inquiry_answer\"><answer>{answer}</answer></call>"
+                ),
+            }),
+            &json!({"request_id": "r1"}),
+        )
+    };
+    let placeholder = closed("...");
+    assert_eq!(
+        placeholder["error"],
+        json!(
+            "that is the PLACEHOLDER, not an answer — `answer` came back as \
+             '...'. Say what you actually concluded."
+        )
+    );
+    assert_eq!(placeholder["reason"], json!("bad_arg"));
+    assert_eq!(placeholder["arg"], json!("answer"));
+    assert_eq!(placeholder["request_id"], json!("r1"));
+    // python whitespace, THEN dots — a dot with prose after it is an answer.
+    assert_eq!(closed(". x")["answer"], json!(". x"));
+    // A NON-STRING is refused, rendered as python writes it.
+    let numeric = crate::verbs::inquiry_close(
+        json!({"response": "<call name=\"inquiry_answer\"><answer>42</answer></call>"}),
+        &json!({"request_id": "r1"}),
+    );
+    assert!(
+        numeric["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("came back as 42."),
+        "{numeric:#?}"
+    );
+    // A MISSING `answer` is python's `None`.
+    let missing = crate::verbs::inquiry_close(
+        json!({"response": "<call name=\"inquiry_answer\"></call>"}),
+        &json!({"request_id": "r1"}),
+    );
+    assert!(
+        missing["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("came back as None."),
+        "{missing:#?}"
+    );
+}
+
+#[test]
+fn a_null_context_strategy_is_refused_with_pythons_text() {
+    // python `get_strategy(None)` is None → the refusal renders the VALUE's repr
+    // and `str(strategy_names())`.
+    let want = "(valid: ['compact', 'truncate', 'strip', 'fold'])";
+    assert_eq!(
+        fantastic_bundle::py_repr_value(&json!(crate::strategies::STRATEGY_NAMES)),
+        "['compact', 'truncate', 'strip', 'fold']"
+    );
+    assert!(format!("x {want}").contains(want));
+    assert_eq!(fantastic_bundle::py_repr_value(&json!(null)), "None");
+    assert_eq!(fantastic_bundle::py_repr_value(&json!("bogus")), "'bogus'");
+}
+// ─── the self-verb replies a MODEL reads (python-canonical bytes) ───────────
+
+#[tokio::test]
+async fn history_digest_of_caller_rows_follows_python() {
+    // `kind or role`, `str(content)[:120]` and `len(str(content))` — rust's
+    // `as_str` gave head '' / bytes 0 for a dict content and kept an EMPTY kind.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "hdigpy").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "kind": "", "content": {"a": 1}}),
+    );
+    put_row(&kernel, &backend, json!({"role": "user", "content": null}));
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "kind": 5, "content": "x"}),
+    );
+    let h = kernel
+        .send(vec![Item::new(backend, json!({"type": "history"}))])
+        .await
+        .remove(0)
+        .result;
+    let rows = h["rows"].as_array().expect("rows");
+    assert_eq!(rows[0]["kind"], "user", "a falsy kind falls back to role");
+    assert_eq!(rows[0]["head"], "{'a': 1}");
+    assert_eq!(rows[0]["bytes"], 8);
+    assert_eq!(rows[1]["head"], "None", "str(None) is the head");
+    assert_eq!(rows[1]["bytes"], 4);
+    assert_eq!(rows[2]["kind"], 5, "a non-string kind is kept RAW");
+}
+
+#[tokio::test]
+async fn recall_renders_non_string_content_like_python_json_dumps() {
+    // `json.dumps(content, default=str)` with ensure_ascii — `{"k":"é"}` renders
+    // `{"k": "\u00e9"}`, and an EMPTY string content renders as itself, never as
+    // the whole row.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rcpy").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": {"k": "é"}}),
+    );
+    put_row(&kernel, &backend, json!({"role": "user", "content": ""}));
+    let r = kernel
+        .send(vec![Item::new(backend, json!({"type": "recall"}))])
+        .await
+        .remove(0)
+        .result;
+    let msgs = r["messages"].as_array().expect("messages");
+    assert_eq!(msgs[0]["content"], "{\"k\": \"\\u00e9\"}");
+    assert_eq!(msgs[1]["content"], "", "an empty content is itself");
+    assert!(r.get("client_id").is_none(), "python sends no client_id");
+}
+
+#[tokio::test]
+async fn recall_empty_page_says_why() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rcnote").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "hello"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "recall", "query": "zzz"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["messages"], json!([]));
+    assert_eq!(
+        r["note"], "query 'zzz' matched none of the 1 stored turns.",
+        "python's note names no client: {r:#?}"
+    );
+}
+
+#[tokio::test]
+async fn pull_refuses_a_non_integer_offset() {
+    // python does BOTH conversions under one try/except, and the refusal carries
+    // no `arg`.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "pullbad").await;
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "pull", "pid": 7, "offset": "x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], "pull: offset/length must be integers");
+    assert_eq!(r["reason"], "bad_arg");
+    assert!(r.get("arg").is_none(), "{r:#?}");
+    // `length: 0` is FALSY, so python's `or cap` gives the cap — not a refusal.
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "pull", "pid": 7, "length": 0}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "not_found", "{r:#?}");
+}
+
+#[tokio::test]
+async fn pull_pid_zero_string_is_not_found_like_python() {
+    // `_as_id('0')` is 0 — the STRING branch has no `> 0` filter — so this is a
+    // readable not_found, not a `bad_arg`. Rust filtered it out as bad_arg.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "pid0").await;
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "pull", "pid": "0"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "not_found", "{r:#?}");
+    assert!(r["error"].as_str().unwrap().contains("pid 0"), "{r:#?}");
+    // `' 12 '` strips; `'+5'` is not a digit string at all.
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "pull", "pid": "+5"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg", "{r:#?}");
+}
+
+#[tokio::test]
+async fn pull_fold_negative_length_slices_like_python() {
+    // `text[:length]` with python slice semantics: -3 counts from the END, and
+    // `next_offset`/`eof` stay signed. Rust clamped to 0 and returned '' / 0.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "foldneg").await;
+    let fid = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "kind": "fold", "body": "abcdefghij", "content": "[fold]"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "pull", "pid": fid, "length": -3}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["text"], "abcdefg", "{r:#?}");
+    assert_eq!(r["next_offset"], -3);
+    assert_eq!(r["eof"], false);
+    assert_eq!(r["refs"], json!([]), "`r.get('refs') or []`");
+}
+
+#[tokio::test]
+async fn grep_numeric_query_and_empty_ids_follow_python() {
+    // `str(query or "")` — a NUMERIC query is its digits; an EMPTY `ids` list is
+    // falsy, so it means NO SCOPE (rust scoped every row out).
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "grepnum").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "order 586 shipped"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "grep", "query": 586, "ids": []}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["total"], 1, "{r:#?}");
+    // python's key order, and the rendered reply opens with `<matches>`.
+    assert_eq!(
+        r.as_object()
+            .unwrap()
+            .keys()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            "matches".to_string(),
+            "total".to_string(),
+            "truncated".to_string()
+        ]
+    );
+    assert!(crate::tool_parse::render_reply(&r).starts_with("<matches>"));
+}
+
+#[tokio::test]
+async fn grep_splits_lines_like_python_splitlines() {
+    // `\r`, `\f` and the information separators are LINE BOUNDARIES to python;
+    // rust's `lines()` saw one line and returned the whole text.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "grepsl").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "a\rneedle here\nb"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "grep", "query": "needle"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let m = r["matches"].as_array().unwrap();
+    assert_eq!(m.len(), 1, "{r:#?}");
+    assert_eq!(m[0]["line"], 2);
+    assert_eq!(m[0]["text"], "needle here");
+    // `\x1c` splits too.
+    let (kernel, backend) = mk_kernel(&tmp, "grepsl2").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "x\u{1c}needle"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "grep", "query": "needle"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["matches"].as_array().unwrap()[0]["line"], 2, "{r:#?}");
+}
+
+#[tokio::test]
+async fn grep_scans_non_string_content_as_python_json_dumps() {
+    // ensure_ascii: `{"k":"é"}` is scanned as `{"k": "\u00e9"}`, so `é` matches
+    // NOTHING and `u00e9` matches. Rust's compact UTF-8 matched `é`.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "grepesc").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": {"k": "é"}}),
+    );
+    let ask = |q: &str| {
+        let kernel = Arc::clone(&kernel);
+        let backend = backend.clone();
+        let q = q.to_string();
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    backend,
+                    json!({"type": "grep", "query": q}),
+                )])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    assert_eq!(ask("u00e9").await["total"], 1);
+    assert_eq!(ask("é").await["total"], 0);
+}
+
+#[tokio::test]
+async fn a_null_context_strategy_is_reported_raw_and_refused() {
+    // Only an ABSENT key means `compact`. `context_status` echoes the raw value
+    // and the projection refuses it with python's text.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ctxnull").await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": backend.as_str(), "context_strategy": null}),
+        )])
+        .await;
+    let st = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "context_status"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(st["strategy"], Value::Null, "{st:#?}");
+    // And `last_projection` carries `pinned_facts` right after `summarized`
+    // once a projection has fired (an absent key is a different reply from 0).
+    assert!(st.get("last_projection").is_some());
+}
+
+#[tokio::test]
+async fn context_titles_flag_is_python_truthy() {
+    // `if rec.get("context_titles")` — `1` turns the block on; `as_bool` did not.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ctxtitles").await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": backend.as_str(), "context_titles": 1}),
+        )])
+        .await;
+    let sys = crate::assembly::default_system_content(&backend, &kernel).await;
+    assert!(
+        sys.contains("## Titling your calls"),
+        "the titles block is on"
+    );
+}
+#[tokio::test]
+async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
+    // Measured 2026-09-06 (python): the rebooted agent was woken by answers to
+    // calls its PREVIOUS incarnation made, and finished THAT work instead of the
+    // new instruction. The reply is kept as a row — real data — but runs no turn.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "late").await;
+    let s = script(&backend, vec![pass("ack")], Duration::ZERO);
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "GOAL"}),
+    );
+    // A boot bumps the incarnation, so a delivery decided BEFORE it is late.
+    let born = crate::state::incarnation(&backend);
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
+        .await;
+    assert_eq!(crate::state::incarnation(&backend), born + 1);
+    crate::route::deliver(
+        &kernel,
+        backend.as_str(),
+        "[reply to 1 · n r]\nlate",
+        "cli",
+        None,
+        born,
+    )
+    .await;
+    assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
+    let rows = crate::history::load_history(&backend, &kernel, "cli").await;
+    let last = rows.last().expect("a row");
+    assert_eq!(last["kind"], "late");
+    assert_eq!(
+        last["content"],
+        "[late reply — answered a call made before this agent last booted; \
+         recorded, not acted on]\n[reply to 1 · n r]\nlate"
+    );
+    // A reply from THIS incarnation runs a turn.
+    crate::route::deliver(&kernel, backend.as_str(), "fresh", "cli", None, born + 1).await;
+    assert!(s.passes_served() >= 1, "a live reply is a turn");
+}
+
+#[tokio::test]
+async fn send_to_is_kept_raw_and_dropped_only_when_blank() {
+    // python keeps `send_to` VERBATIM and drops it only when it is not a string
+    // or is blank after a full strip. Rust trimmed it, so `' peer '` silently
+    // became `peer` — a different agent from the one the caller named.
+    //
+    // `send_to` fires on the `done` branch (a call-less turn is NUDGED first and
+    // returns — python's order, and rust's).
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "sendto").await;
+    let peer = format!("ff_{}", backend.as_str());
+    script(
+        &backend,
+        vec![pass("the answer <call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "hi", "send_to": format!(" {peer} ")}),
+        )])
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let handed = |kernel: &Arc<Kernel>, peer: &str| -> bool {
+        let log = kernel.ledger.settled_snapshot();
+        log["rows"]
+            .as_object()
+            .map(|rows| {
+                rows.values()
+                    .any(|r| r["target"] == json!(peer) && r["verb"] == json!("send"))
+            })
+            .unwrap_or(false)
+    };
+    assert!(
+        !handed(&kernel, &peer),
+        "the raw ` peer ` is NOT the agent `peer` — nothing may be handed to it"
+    );
+
+    // A blank-after-strip / non-string `send_to` makes no hand-off either, and a
+    // NAMED one still does.
+    for (bad, expect) in [
+        (json!("\n\t"), false),
+        (json!(7), false),
+        (json!(peer.clone()), true),
+    ] {
+        let tag = format!("st_{}", expect);
+        let (kernel, backend) = mk_kernel(&tmp, &tag).await;
+        let peer = format!("ff_{}", backend.as_str());
+        let arg = if bad.is_string() && bad.as_str() == Some(peer.as_str()) {
+            json!(peer)
+        } else {
+            bad.clone()
+        };
+        let arg = if expect { json!(peer) } else { arg };
+        script(
+            &backend,
+            vec![pass("done here <call name=\"done\"></call>")],
+            Duration::ZERO,
+        );
+        let _rx = rebind_backend_inbox(&kernel, &backend);
+        let _ = kernel
+            .send(vec![Item::new(
+                backend.clone(),
+                json!({"type": "send", "text": "hi", "send_to": arg}),
+            )])
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            handed(&kernel, &peer),
+            expect,
+            "send_to {bad} must {} hand off",
+            if expect { "" } else { "NOT" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stateless_messages_override_persists_nothing() {
+    // python `_run`'s `stateless`: `[system] + messages + live turn`, no recall
+    // due, no projection, NOTHING written to the store.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "stateless").await;
+    let s = script(
+        &backend,
+        vec![pass("ok <call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let before = conversation(&kernel, &backend).len();
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({
+                "type": "send",
+                "text": "live",
+                "messages": [{"role": "user", "content": "caller turn"}],
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r["final"].as_str().unwrap().starts_with("ok"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        conversation(&kernel, &backend).len(),
+        before,
+        "a stateless send writes no conversation rows"
+    );
+    let req = s.request_messages(0);
+    assert_eq!(req[0]["role"], "system");
+    assert_eq!(req[1]["content"], "caller turn");
+    assert_eq!(req[2]["content"], "live");
+    assert_eq!(
+        req.len(),
+        3,
+        "[system] + messages + the live turn: {req:#?}"
+    );
+}
+
+#[tokio::test]
+async fn grep_scope_scans_bodies_in_python_set_order() {
+    // `list(set(ids))` is the hash table's SLOT order, not sorted — and which of
+    // two bodies owns a line they SHARE is decided by it.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "setord").await;
+    let line = "the audit marker";
+    let a = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "row a"}),
+    );
+    // Advance the counter until the NEXT row lands in a LOWER set slot than `a`.
+    loop {
+        let m = kernel.rows.mint_id();
+        if (m + 1) & 7 < a & 7 {
+            break;
+        }
+    }
+    let b = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "row b"}),
+    );
+    assert_eq!(
+        fantastic_bundle::py_set_order(&[a, b]),
+        vec![b, a],
+        "the fixture must exercise a set order that is NOT sorted"
+    );
+    kernel.rows.body_put(&backend, a, line).expect("body a");
+    kernel.rows.body_put(&backend, b, line).expect("body b");
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "grep", "query": "audit marker", "ids": [a, b]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let m = r["matches"].as_array().unwrap();
+    assert_eq!(m.len(), 1, "identical lines are deduped: {r:#?}");
+    assert_eq!(
+        m[0]["id"], b,
+        "the body python scans FIRST owns the shared line: {r:#?}"
+    );
+}
+#[tokio::test]
+async fn context_recall_dry_is_python_truthy() {
+    // `if payload.get("dry")` — `1` is dry, and a dry recall makes NO model call.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "dry1").await;
+    let s = script(
+        &backend,
+        vec![pass("{\"expand\": [], \"why\": \"x\"}")],
+        Duration::ZERO,
+    );
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "THE GOAL"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend,
+            json!({"type": "context_recall", "dry": 1}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        s.passes_served(),
+        0,
+        "dry:1 must make no model call: {r:#?}"
+    );
+    assert_eq!(r["why"], "mechanical fit");
+    assert_eq!(r["degraded"], true);
+}
+
+#[tokio::test]
+async fn an_empty_json_recall_answer_stays_degraded() {
+    // python `if ans:` — an empty `{}` is NO answer: `degraded` stays true and
+    // `why` stays `mechanical fit`.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ansempty").await;
+    script(&backend, vec![pass("{}")], Duration::ZERO);
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "THE GOAL"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(backend, json!({"type": "context_recall"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["degraded"], true, "{r:#?}");
+    assert_eq!(r["why"], "mechanical fit");
+}
+
+#[tokio::test]
+async fn a_numeric_why_is_its_python_str() {
+    // `str(ans.get("why") or "")[:300] or "chosen"`: 42 reads `42`, `["a"]` reads
+    // `['a']`, and only a FALSY why is `chosen`.
+    for (answer, want) in [
+        ("{\"why\": 42}", "42"),
+        ("{\"why\": [\"a\"]}", "['a']"),
+        ("{\"why\": 0}", "chosen"),
+        ("{\"why\": \"\"}", "chosen"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (kernel, backend) = mk_kernel(&tmp, &format!("why_{want}")).await;
+        script(&backend, vec![pass(answer)], Duration::ZERO);
+        put_row(
+            &kernel,
+            &backend,
+            json!({"role": "user", "content": "THE GOAL"}),
+        );
+        let r = kernel
+            .send(vec![Item::new(backend, json!({"type": "context_recall"}))])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["why"], want, "answer {answer}: {r:#?}");
+        assert_eq!(r["degraded"], false);
+    }
+}
+
+#[tokio::test]
+async fn a_scalar_expand_raises_like_python() {
+    // A truthy int/float/bool `expand` is NOT iterable: python raises BEFORE the
+    // view and the recall row are written. Rust used to write both.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "expscalar").await;
+    script(
+        &backend,
+        vec![pass("{\"expand\": 5, \"why\": \"w\"}")],
+        Duration::ZERO,
+    );
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "THE GOAL"}),
+    );
+    let before = conversation(&kernel, &backend).len();
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "context_recall"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"], "TypeError: 'int' object is not iterable",
+        "{r:#?}"
+    );
+    assert_eq!(r["raised"], true);
+    assert_eq!(
+        conversation(&kernel, &backend).len(),
+        before,
+        "nothing is written when python would have raised"
+    );
+    // A STRING expand iterates its CHARACTERS (each one an `_as_id` candidate).
+    let (kernel, backend) = mk_kernel(&tmp, "expstr").await;
+    script(
+        &backend,
+        vec![pass("{\"expand\": \"7\", \"why\": \"w\"}")],
+        Duration::ZERO,
+    );
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "THE GOAL"}),
+    );
+    let r = kernel
+        .send(vec![Item::new(backend, json!({"type": "context_recall"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "a string IS iterable: {r:#?}");
+}
+
+#[tokio::test]
+async fn a_non_string_type_tags_the_reply_with_python_str() {
+    // `payload.get("type", "?")` then `str()` into the reply tag: `?` means the
+    // key was ABSENT, never "the type was not a string".
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "verbstr").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(call_envelope("kernel", json!({"type": 42}), Some("self"))),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await;
+    assert!(
+        until_passes(&s, 2).await,
+        "the reply must come back as a turn"
+    );
+    let seen = s.request(1);
+    assert!(
+        seen.contains("· kernel 42 ·") || seen.contains("· kernel 42]"),
+        "the tag must print python's str(42): {seen}"
+    );
+}
+
+#[tokio::test]
+async fn the_seam_keeps_the_goal_the_strategies_pinned() {
+    // `project_context` appends the real notice and then trims to fit. It trimmed
+    // from the FRONT — exactly where `compact`/`truncate` had just pinned the goal
+    // turn — so a snug window silently dropped the one turn the whole run serves
+    // (python, measured 2026-08-28: absent across a wide band of windows, in BOTH
+    // strategies). python trims from the MIDDLE first and only takes the goal as
+    // a last resort, loudly.
+    let goal = "GOAL-SENTINEL: build the widget and report when done";
+    for strategy in ["compact", "truncate"] {
+        for window in [1200i64, 2000, 4000] {
+            let tmp = TempDir::new().unwrap();
+            let (kernel, backend) = mk_kernel(&tmp, &format!("seam_{strategy}_{window}")).await;
+            let _ = kernel
+                .send(vec![Item::new(
+                    AgentId::from("core"),
+                    json!({"type": "update_agent", "id": backend.as_str(),
+                           "context_window": window, "output_reserve": 0,
+                           "context_strategy": strategy}),
+                )])
+                .await;
+            script(
+                &backend,
+                vec![pass("A title\n\nSummary."), pass("A title\n\nSummary.")],
+                Duration::ZERO,
+            );
+            let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+                script: script_for(&backend),
+            });
+            let state = crate::state::state_for(&backend);
+            let mut messages = vec![
+                json!({"role": "system", "content": "sys"}),
+                json!({"role": "user", "content": goal}),
+            ];
+            for i in 0..40 {
+                let role = if i % 2 == 0 { "assistant" } else { "user" };
+                messages.push(json!({"role": role, "content": "z".repeat(400)}));
+            }
+            let len = messages.len() - 1;
+            let out = crate::projection::project_context(
+                &provider, &backend, &state, &kernel, "cli", "mock", messages, len,
+            )
+            .await
+            .expect("the projection must fit, not failfast");
+            assert!(
+                crate::context::estimate_tokens(&out) <= window,
+                "{strategy}@{window}: the projection must still fit"
+            );
+            assert!(
+                out.iter()
+                    .any(|m| m["content"].as_str().unwrap_or("").contains(goal)),
+                "{strategy}@{window}: the pinned goal turn was dropped by the seam"
+            );
+        }
+    }
+}
+
+/// C36 — the kernel's own bookkeeping is in the SAME table and never becomes a
+/// turn. Once a dispatch writes a `call` row and a fork writes a `task` row,
+/// the AI's conversation reader is the only thing keeping them out of a prompt.
+#[tokio::test]
+async fn history_hides_call_and_task_rows() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "hidebk").await;
+    // A real dispatch AT the backend — that writes a `call` row on it.
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
+        .await;
+    // …and one turn of actual conversation.
+    kernel
+        .rows
+        .put(
+            &backend,
+            json!({"kind": "turn", "role": "user", "content": "hello"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+
+    let raw = kernel.rows.for_agent(&backend);
+    let raw_kinds: Vec<&str> = raw
+        .iter()
+        .filter_map(|r| r.get("kind").and_then(Value::as_str))
+        .collect();
+    assert!(
+        raw_kinds.contains(&"call"),
+        "the store must actually hold call rows: {raw_kinds:?}"
+    );
+
+    let rows = crate::history::load_history(&backend, &kernel, "cli").await;
+    assert!(
+        rows.iter().all(|r| !matches!(
+            r.get("kind").and_then(Value::as_str),
+            Some("call" | "task" | "body" | "view" | "settle")
+        )),
+        "bookkeeping reached the conversation: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.get("content").and_then(Value::as_str) == Some("hello")),
+        "the real turn is still there"
+    );
 }

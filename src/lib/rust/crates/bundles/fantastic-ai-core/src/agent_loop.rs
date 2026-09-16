@@ -11,9 +11,9 @@
 //! iterates on the model's behalf.
 
 use crate::assembly::assemble_messages;
-use crate::events::{emit_status, to_caller, CallerRoute};
+use crate::events::{emit_status, to_caller};
 use crate::history::append_history;
-use crate::provider::{Provider, ProviderEvent};
+use crate::provider::{Provider, ProviderError, ProviderEvent};
 use crate::state::BackendState;
 use crate::think::without_thinking;
 use fantastic_kernel::{AgentId, Kernel};
@@ -25,11 +25,27 @@ use std::sync::Arc;
 /// serves every backend. The provider is the streaming seam.
 #[derive(Clone, Copy, Debug)]
 pub struct BackendConfig {
-    /// How streaming events reach the caller.
-    pub route: CallerRoute,
     /// Backend error-message prefix (e.g. `"ollama_backend"`), used by the
     /// context-projection seam's `too_small` / config-error messages.
     pub name: &'static str,
+    /// python `Backend.provider_missing_error`, set only by a backend whose
+    /// `require_provider` is true (nvidia, whose key is the precondition).
+    /// `None` = this backend can always build a provider, so `send` has nothing
+    /// to failfast on and never reads this.
+    pub provider_missing_error: Option<&'static str>,
+}
+
+/// Why a generation produced no completion. The two kinds settle differently,
+/// so they are not one string: python returns a projection refusal VERBATIM out
+/// of `_run` (no status event, no `client_id`, no raise), while a provider
+/// failure either maps to a caller-facing sentence or propagates.
+pub enum GenFailure {
+    /// The context-projection seam refused (`too_small` failsafe, unknown
+    /// strategy). The dict is the reply — python `_run`'s
+    /// `if isinstance(projected, dict): return projected`.
+    Projection(Value),
+    /// The provider pass failed. See [`ProviderError`].
+    Provider(ProviderError),
 }
 
 /// Project the message list to what the model actually reads — pure text, every
@@ -65,7 +81,12 @@ pub async fn run_generation(
     client_id: &str,
     cfg: BackendConfig,
     system_prompt: Option<String>,
-) -> Result<(String, i64), String> {
+    messages_override: Option<Vec<Value>>,
+) -> Result<(String, i64), GenFailure> {
+    // STATELESS: a caller-supplied non-empty `messages` list means the caller owns
+    // this turn's context. No owed recall runs, no projection shapes it, and
+    // NOTHING is persisted — python `_run`'s `stateless`.
+    let stateless = messages_override.as_ref().is_some_and(|m| !m.is_empty());
     // `messages` is the FULL conversation (persistence source). Projection shapes
     // the MODEL view to fit the window ONCE at entry, prepending the canonical
     // [context-notice]; the durable store is never trimmed by it. A caller-supplied
@@ -73,7 +94,7 @@ pub async fn run_generation(
     // A RECALL OWED FROM THE LAST FOLD BATCH runs first, so this turn is
     // assembled over the head the recall chose — python `_recall_due`.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
-    if due {
+    if due && !stateless {
         let _ = crate::retrieval::context_recall(self_id, &json!({}), kernel, Some(provider)).await;
     }
     // ROW IDS FOR THIS TURN — python `_row_ids_for_incoming` + `_mint_row_id`:
@@ -92,46 +113,41 @@ pub async fn run_generation(
         kernel,
         client_id,
         system_prompt.as_deref(),
+        messages_override.as_deref(),
     )
     .await;
-    let model_messages = match crate::projection::project_context(
-        provider, self_id, state, kernel, client_id, cfg.route, cfg.name, messages, store_len,
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            // too_small failsafe / unknown-strategy config error — the model is NOT
-            // called. Surface it as the send error (the seam already pushed the event).
-            return Err(e
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("context projection error")
-                .to_string());
+    let model_messages = if stateless {
+        messages
+    } else {
+        match crate::projection::project_context(
+            provider, self_id, state, kernel, client_id, cfg.name, messages, store_len,
+        )
+        .await
+        {
+            Ok(m) => m,
+            // too_small failsafe / unknown-strategy config error — the model is
+            // NOT called and the seam's dict IS the reply, python-verbatim: no
+            // `status(done)` closes a turn that never opened a provider pass,
+            // and no `client_id` is stapled onto a refusal python returns bare.
+            Err(e) => return Err(GenFailure::Projection(e)),
         }
     };
 
     // ONE provider pass. Every chunk is a content token — the provider knows
     // nothing of the tool protocol; the envelope is text this crate parses after.
     let model_view = render_for_model(&model_messages);
-    let mut stream = provider.chat(&model_view).await?;
+    let mut stream = provider
+        .chat(&model_view)
+        .await
+        .map_err(GenFailure::Provider)?;
     let mut content_parts: Vec<String> = Vec::new();
     let mut first_text_chunk = true;
     while let Some(ev) = stream.next().await {
-        match ev? {
+        match ev.map_err(GenFailure::Provider)? {
             ProviderEvent::Token(t) => {
                 if first_text_chunk {
                     first_text_chunk = false;
-                    emit_status(
-                        kernel,
-                        state,
-                        self_id,
-                        client_id,
-                        cfg.route,
-                        "streaming",
-                        Map::new(),
-                    )
-                    .await;
+                    emit_status(kernel, state, self_id, client_id, "streaming", Map::new()).await;
                 }
                 {
                     let mut cur = state.current_meta.lock().expect("current poisoned");
@@ -143,7 +159,6 @@ pub async fn run_generation(
                     kernel,
                     self_id,
                     client_id,
-                    cfg.route,
                     json!({"type": "token", "text": t, "source": self_id.as_str()}),
                 )
                 .await;
@@ -153,7 +168,7 @@ pub async fn run_generation(
     }
     let last_text = content_parts.join("");
 
-    emit_status(kernel, state, self_id, client_id, cfg.route, "done", {
+    emit_status(kernel, state, self_id, client_id, "done", {
         let mut m = Map::new();
         m.insert("reason".to_string(), json!("ok"));
         m
@@ -162,6 +177,9 @@ pub async fn run_generation(
 
     // APPEND this send's user + assistant turns to the durable chat store so
     // context management (compaction/recall) has the FULL conversation next turn.
+    if stateless {
+        return Ok((last_text, turn_id));
+    }
     let new_turns = vec![
         json!({"role": "user", "content": user_text, "id": in_id, "parent": in_parent}),
         // STRIPPED — the deliberation is not part of the conversation. The RAW

@@ -18,36 +18,47 @@ import NIOCore
 
 public let HANDLER_MODULE = "ollama_backend.tools"
 
+/// NO guessy default: this connector never names a model that reaches the
+/// network. The sentinel exists ONLY so `reflect` can say what is true.
+/// (py-canonical `ollama_backend.provider.DEFAULT_MODEL`.)
+public let DEFAULT_MODEL = "(no default — set the `model` meta)"
+
+/// Where a local ollama listens by default (py `ollama_backend.provider`).
+public let DEFAULT_ENDPOINT = "http://localhost:11434"
+
 public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     public let name = "ollama_backend"
 
-    private let core: AIBackend
+    let core: AIBackend
 
     public init() {
         self.core = buildAIBackend(
             AIBackendConfig(
                 kind: "ollama_backend",
-                provider: "ollama",
                 sentence: "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
+                defaultModel: DEFAULT_MODEL,
+                defaultEndpoint: DEFAULT_ENDPOINT,
+                // The SAMPLING KNOBS, in python's order — `model` and `endpoint`
+                // are base fields now. `temperature` falls back to the provider's
+                // 0.3; the rest are null unless the record sets them.
                 reflectExtra: { agent in
                     [
-                        "host": .string(Self.host(agent: agent)),
-                        "model": Self.model(agent: agent).map(JSON.string) ?? .null,
+                        "temperature": .double(Self.temperature(agent: agent)),
+                        "num_ctx": Self.numCtx(agent: agent).map(JSON.integer) ?? .null,
+                        "num_predict": Self.numPredict(agent: agent).map(JSON.integer) ?? .null,
+                        "think": Self.think(agent: agent).map(JSON.bool) ?? .null,
                     ]
                 },
                 makeProvider: { agent, _, _ in
-                    guard let model = Self.model(agent: agent) else {
-                        return .refused(
-                            .object([
-                                "error": .string(
-                                    "ollama_backend: `model` required — set it on the record "
-                                        + "(e.g. model=gemma4:12b). No model default is guessed.")
-                            ]))
-                    }
-                    return .provider(
+                    // AN UNSET MODEL IS NOT A REFUSAL BEFORE THE TURN. python
+                    // builds the provider with the SENTINEL and raises inside
+                    // `chat()`, so the turn reaches `status(thinking)` and the
+                    // failure is the provider's, with python's own wording —
+                    // swift refused early with a sentence of its own invention.
+                    .provider(
                         OllamaProvider(
-                            host: Self.host(agent: agent),
-                            model: model,
+                            endpoint: Self.endpoint(agent: agent),
+                            model: Self.model(agent: agent),
                             temperature: Self.temperature(agent: agent),
                             numCtx: Self.numCtx(agent: agent),
                             numPredict: Self.numPredict(agent: agent),
@@ -56,21 +67,73 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
             ))
     }
 
-    public var readme: String? {
-        """
-        ollama_backend — local LLM agent; thin over FantasticAICore.
-        Per-client chat threads, FIFO lock; verbs: the shared ai_core set (reflect it). \
-        No `interrupt`: an in-flight `send` IS a kernel task — kill it with `ps` + `cancel`.
-        Tool-calling is RAW: no native ollama tools — provider streams text, FantasticAICore parses the <call name=…> envelope (tool_parse).
-        """
-    }
+    public var readme: String? { Self.readmeText }
+
+    /// THE PYTHON FILE, BYTE FOR BYTE (`ollama_backend/readme.md`). Persisted as
+    /// `agents/<id>/readme.md` and served by `reflect readme=true`, so a swift
+    /// kernel and a python one hand a reader the same document. A swift-written
+    /// summary of it was a second, shorter truth about the same bundle.
+    static let readmeText = #"""
+        # ollama_backend â local LLM, a context-managed completion agent
+        Talks to a local ollama. Per-client chat threads, FIFO lock, and automatic
+        context management (compaction / recall / context_status). Persistence via
+        `file_bridge_id`. **No agentic loop** â one provider pass per `send`.
+
+        ## Implementation
+        A thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt
+        assembly, the ONE-PASS `_run`, and all the context machinery live in
+        `ai_core.core`; this module supplies the `OllamaProvider` builder (endpoint /
+        model from the agent record) and `ai_core.build()` wires the rest into
+        `(VERBS, handler)`.
+
+        ## Bare completion â the tool loop is the CALLER's
+        This backend does NOT parse tool calls and does NOT loop. `send` performs exactly
+        ONE provider pass: it streams the model's pure text and returns it. Any tool
+        convention is the caller's: an authored agent teaches its convention in the
+        prompt (via `system_prompt`), reads the completion, dispatches, and feeds the
+        result back as the next `{send, text}` turn. The `OllamaProvider` never receives a
+        `tools` array and no `message.tool_calls` are read â model-agnostic.
+
+        ## Context management â owned HERE (the conversation's owner owns its context)
+        Because this backend owns the per-client conversation, it owns the context:
+        - **history** â every `send` loads + appends the per-client `chat.json` thread;
+        - **auto-compaction** â when the assembled prompt overflows the model's window,
+          the configured `context_strategy` (default `compact`) summarizes / elides older
+          turns ONCE at turn entry and inserts a `[context-notice]`; the durable
+          transcript is never trimmed;
+        - **`recall {query?, limit?}`** â page dropped turns back from the durable store;
+        - **`context_status`** â inspect budget + last compaction + the model's reaction.
+
+        ## Calling this agent
+        `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
+        and returns `{response, final}`. A first-class peer of `exec_bridge`: a
+        scheduler, a host job, a peer kernel, or a routine can call it by id. Optional
+        `system_prompt:str` REPLACES the default system block (the caller supplies its own
+        role / tool convention / whatever menu it built). Optional `messages:list`
+        REPLACES persisted history (fully stateless â no `file_bridge_id` needed, and no
+        compaction â the caller owns the context in that mode).
+
+        ## Recursion guard
+        A `send` carrying a reserved `_call_stack` that already contains this agent (a
+        cycle) or exceeds depth 8 is refused BEFORE the FIFO lock â so an authored agent's AI→AI
+        chain can neither deadlock nor run away. Don't set `_call_stack` yourself.
+
+        ## Meta-possibility â any routine orchestrates the whole substrate
+        Every routine (an authored agent, a host job, a peer kernel, any out-of-process caller)
+        reaches every agent by id. From any of them you can read memory anywhere
+        (`send(<state>, {read})`), run an inference turn (`send(<ai>, {send, ...})`),
+        and/or spawn compute (`send(<py>, {start, code})`) â regardless of which kernel
+        owns the target. Code steps and LLM-call steps are interchangeable, both
+        directions.
+
+        """#
 
     public func handle(
         agentId: AgentId,
         payload: JSON,
         kernel: Kernel
     ) async throws -> JSON? {
-        await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+        try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
     /// The kernel is killing a task of this agent. If it is the in-flight
@@ -83,15 +146,19 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
 
     // MARK: - meta helpers
 
-    fileprivate static func host(agent: Agent) -> String {
-        agent.metaValue(forKey: "host")?.asString ?? "http://127.0.0.1:11434"
+    /// The record's `endpoint` — where ollama listens, with `/api/chat` appended
+    /// by the provider (python `rec.get("endpoint", DEFAULT_ENDPOINT)`). It used
+    /// to read a `host` meta and ignore `endpoint` entirely, so a record that
+    /// pointed python at another box left swift talking to 127.0.0.1.
+    fileprivate static func endpoint(agent: Agent) -> String {
+        agent.metaValue(forKey: "endpoint")?.asString ?? DEFAULT_ENDPOINT
     }
 
-    /// The model id — REQUIRED (from the record's `model` meta). No default is
-    /// guessed: a bad guess reaches the network (a wrong model 404s). `nil` when
-    /// unset → the backend refuses loudly (see `makeProvider`).
-    fileprivate static func model(agent: Agent) -> String? {
-        agent.metaValue(forKey: "model")?.asString
+    /// The model id from the record's `model` meta, or the SENTINEL. No default
+    /// is guessed: a bad guess reaches the network (a wrong model 404s), and the
+    /// sentinel is what `chat()` fails loud on.
+    fileprivate static func model(agent: Agent) -> String {
+        agent.metaValue(forKey: "model")?.asString ?? DEFAULT_MODEL
     }
 
     // Sampling knobs (parity with the rust/python ollama backends). ollama's own
@@ -117,7 +184,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
 /// native `tools` array is sent and NO `tool_calls` are read; ai-core parses the
 /// `<call name=…>` envelope from the text. Mirrors Rust/Python ollama providers.
 struct OllamaProvider: AIProvider {
-    let host: String
+    let endpoint: String
     let model: String
     let temperature: Double
     let numCtx: Int64?
@@ -125,7 +192,7 @@ struct OllamaProvider: AIProvider {
     let think: Bool?
 
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
-        let host = host
+        let endpoint = endpoint
         let model = model
         let temperature = temperature
         let numCtx = numCtx
@@ -133,6 +200,15 @@ struct OllamaProvider: AIProvider {
         let think = think
         return AsyncThrowingStream { continuation in
             let task = Task {
+                // FAILS LOUD, INSIDE THE TURN — python's wording, verbatim.
+                if model.isEmpty || model == DEFAULT_MODEL {
+                    continuation.finish(
+                        throwing: PyError(
+                            "RuntimeError",
+                            "ollama_backend: no `model` set — this connector does not guess one. "
+                                + "Name a model on the agent record (model=...)."))
+                    return
+                }
                 // RAW: no native `tools` array — ai-core parses the `<call name=…>`
                 // envelope out of the streamed content text.
                 var options: OrderedDictionary<String, JSON> = ["temperature": .double(temperature)]
@@ -148,7 +224,7 @@ struct OllamaProvider: AIProvider {
                 // models reject it).
                 if let t = think { fields["think"] = .bool(t) }
                 let body: JSON = .object(fields)
-                var req = HTTPClientRequest(url: "\(host)/api/chat")
+                var req = HTTPClientRequest(url: "\(endpoint)/api/chat")
                 req.method = .POST
                 req.headers.add(name: "Content-Type", value: "application/json")
                 req.body = .bytes(ByteBuffer(string: body.serialize()))

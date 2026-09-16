@@ -1,45 +1,47 @@
-//! axum HTTP host bundle.
+//! HTTP host bundle — the rust port of python's `web` (`PB/web/host/src/web/`).
 //!
-//! Each `web` agent owns a `port` field on its record (REQUIRED — no
-//! default). On `boot`, spawns an axum listener on `0.0.0.0:<port>`
-//! serving the standard rendering routes:
+//! A `web` agent owns a `port` field on its record (REQUIRED — no default). On
+//! `boot` it builds the route table, mounts every child surface through the
+//! duck-typed `get_routes` verb, and only then starts listening, so the port
+//! never serves a request before its full route table is in place.
 //!
-//! | route                          | what                                          |
-//! |--------------------------------|-----------------------------------------------|
-//! | `GET  /`                       | root index (link tree of served agents)       |
-//! | `GET  /<id>/`                  | dispatch `render_html` on agent + inject transport.js |
-//! | `GET  /<id>/file/<path>`       | pipe the agent's `read_stream` SOURCE (gated; chunked) |
-//! | `GET  /transport.js`           | the JS client embedded at compile-time        |
-//! | `GET  /favicon.ico`            | embedded favicon                              |
+//! The baked routes are RENDERING ONLY, and they are exactly python's four:
 //!
-//! Verb-invocation surfaces (WS, REST) are NOT served here — they
-//! live in sibling `fantastic-web-ws` / `fantastic-web-rest` agents
-//! that mount onto the same router via their own listen ports
-//! (Phase 1 keeps each surface on its own port; multi-port mounting
-//! is a future hardening).
+//! | route                           | what                                   |
+//! |---------------------------------|----------------------------------------|
+//! | `GET /`                         | the agent-tree index (HTML)            |
+//! | `GET /_assets/favicon.png`      | the bundled favicon                    |
+//! | `GET /favicon.png`              | the same favicon                       |
+//! | `GET /{agent_id}/file/{path}`   | pipe the agent's `read_stream` SOURCE  |
+//!
+//! Verb-invocation surfaces (WS, REST) are NOT baked in: they live in
+//! `fantastic-web-ws` / `fantastic-web-rest` child agents and mount through
+//! `mount` / `unmount` / boot.
 //!
 //! ### Verbs
 //!
-//! - `reflect` → `{id, sentence, port, running}`
-//! - `boot`    → spawn the server task, store its handle. Idempotent.
-//! - `stop`    → cancel the task. Idempotent.
-//! - `shutdown`→ alias of `stop`.
+//! - `reflect` → identity, port, running, served_agent_count, surfaces, routes,
+//!   browser_reachable
+//! - `boot`    → `{running, surfaces}`. Idempotent; a missing `port` RAISES.
+//! - `stop`    → `{stopped}`
+//! - `mount` / `unmount` → (re)mount one child's declared routes
 
 #![deny(missing_docs)]
 
+mod handlers;
+pub(crate) mod mimetypes;
+mod mimetypes_table;
+pub(crate) mod routes;
+pub(crate) mod ws;
+
 use async_trait::async_trait;
-use axum::{
-    body::{Body, Bytes},
-    extract::{ws::Message, ws::WebSocket, Path as AxPath, Query, State, WebSocketUpgrade},
-    http::{header, HeaderMap, Request, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::{get, post},
-    Router,
-};
+use axum::body::Body;
+use axum::http::Request;
+use axum::response::Response;
+use fantastic_bundle::{py_int, py_repr_value, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Item, Kernel, SubscriberToken};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -48,69 +50,35 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::sync::RwLock as AsyncRwLock;
 use tokio::task::JoinHandle;
-use tower::ServiceExt;
-// axum's ServiceExt provides `.into_make_service()` on any tower Service.
-use axum::ServiceExt as _;
+
+use routes::RouteTable;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "web.tools";
 
-/// readme.md auto-seeded into the agent's dir on creation.
+/// readme.md auto-seeded into the agent's dir on creation. Python's file, byte
+/// for byte (`PB/web/host/src/web/readme.md`).
 pub const README: &str = include_str!("readme.md");
 
-/// `transport.js` body — the client transport script served at
-/// `/transport.js` AND injected into every `<id>/` render. Plain
-/// JavaScript; no Rust code expects it to round-trip.
-pub const TRANSPORT_JS: &str = include_str!("transport.js");
-
-/// Static `/` index — link tree placeholder.
+/// The `/` index scaffold — python's `web/templates/index.html`, byte for byte.
 pub const ROOT_INDEX_HTML: &str = include_str!("index.html");
 
-// ── Bundled third-party web assets ────────────────────────────────
-//
-// Vendored under `assets/`. Served at top-level `/_assets/<name>`
-// URLs so any WebView surface (canvas, terminal, future ones in this
-// kernel or embedding apps) can reference them without CDN deps.
-// Version-pinned; license attribution in `rust/THIRD_PARTY_LICENSES.md`.
+/// Bundled favicon — python's `web/favicon.png`, byte for byte.
+pub const FAVICON_PNG: &[u8] = include_bytes!("favicon.png");
 
-/// Three.js v0.160.0 (minified). Consumed by `fantastic-canvas-webapp`.
-pub const THREE_JS: &str = include_str!("assets/three.module.js");
-
-/// xterm.js v6.0.0 (minified). Consumed by `fantastic-terminal-webapp`.
-pub const XTERM_JS: &str = include_str!("assets/xterm.min.js");
-
-/// xterm.js v6.0.0 default stylesheet. Consumed by `fantastic-terminal-webapp`.
-pub const XTERM_CSS: &str = include_str!("assets/xterm.min.css");
-
-/// xterm.js fit addon v0.11.0 (minified). Consumed by `fantastic-terminal-webapp`.
-pub const XTERM_ADDON_FIT_JS: &str = include_str!("assets/xterm-addon-fit.min.js");
-
-/// `Cache-Control` value for `/_assets/*` — pinned files never change
-/// for a given kernel version, so the browser can hold them indefinitely.
-const ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
-
-/// Live web servers, keyed by web-agent id. Holds the JoinHandle +
-/// the Arc-RwLock'd Router (for hot re-mounting) + the
-/// `routes_changed` state subscriber token (so `stop` / `on_delete`
-/// can detach cleanly).
+/// Live web servers, keyed by web-agent id.
 pub(crate) static SERVERS: once_cell_lock::OnceLockMap = once_cell_lock::OnceLockMap::new();
 
 /// Per-agent live server bookkeeping. Tracked outside `Agent` so the
 /// substrate's plain record stays disk-shape only.
 pub(crate) struct ServerHandle {
-    /// The serve loop's task handle.
-    pub task: JoinHandle<()>,
-    /// The shared router; writers swap the inner Router in place to
-    /// hot-mount/unmount child surfaces without restarting axum.
-    /// Held here so the boot path and the `routes_changed`
-    /// subscriber closure share the same Arc; never read back from
-    /// this map (the closure has its own clone), but keeps the
-    /// lifetime tied to the running server.
-    #[allow(dead_code)]
-    pub router: Arc<AsyncRwLock<Router>>,
-    /// State-subscriber token for the `routes_changed` watcher; detach
-    /// on stop so the closure's captured Arcs drop.
-    pub sub_token: SubscriberToken,
+    /// The serve loop's task handle; `None` until `_start_serving`'s twin runs.
+    pub task: Option<JoinHandle<()>>,
+    /// The live ordered route table; mount/unmount swap entries in place.
+    pub table: Arc<AsyncRwLock<RouteTable>>,
+    /// The port the record asked for (python reports `handle.port`, the
+    /// CONFIGURED port, never the bound one).
+    pub port: u16,
 }
 
 mod once_cell_lock {
@@ -131,14 +99,29 @@ mod once_cell_lock {
     }
 }
 
-/// Shared state available to every axum handler.
+/// Shared state available to every request handler.
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     /// Reference to the live kernel so handlers can `kernel.send(...)`.
-    kernel: Arc<Kernel>,
-    /// This web agent's id (used to look up port + render parent context).
-    #[allow(dead_code)]
-    web_agent_id: AgentId,
+    pub kernel: Arc<Kernel>,
+    /// This web agent's id — the sender the file proxy dispatches as.
+    pub web_agent_id: AgentId,
+    /// The kernel task the `boot` dispatch ran as. python creates the uvicorn
+    /// serve task INSIDE the boot dispatch, so every request handler inherits
+    /// its `CURRENT_TASK` contextvar and a REST-ingress dispatch is parented to
+    /// the boot pid (`web/tools.py:162`; measured python parent 7 vs rust null).
+    pub boot_task: Option<TaskId>,
+}
+
+impl AppState {
+    /// Run `work` under the boot dispatch's task scope — the parent every
+    /// request-originated dispatch reports.
+    pub(crate) async fn scoped<F: Future>(&self, work: F) -> F::Output {
+        match self.boot_task {
+            Some(t) => fantastic_kernel::CURRENT_TASK.scope(t, work).await,
+            None => work.await,
+        }
+    }
 }
 
 /// The HTTP host bundle.
@@ -163,410 +146,419 @@ impl Bundle for WebBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel).await,
-            "boot" => boot_reply(agent_id, kernel).await,
-            // NO `shutdown` VERB HERE. It was an alias of `stop`, and
-            // `shutdown_agents` sends `shutdown` to every agent that advertises
-            // it — so the graceful stop tore down the listener the operator was
-            // watching the stop THROUGH (measured 2026-09-12, kernel_restart:rust:
-            // `Connection refused` on the very next request). Python's web face
-            // advertises no such verb and survives; the listener dies with the
-            // process, through `on_shutdown`, exactly as python's does.
-            "stop" => stop_reply(agent_id),
-            other => json!({"error": format!("unknown verb {other:?}")}),
+            "boot" => boot_reply(agent_id, kernel).await?,
+            "stop" => stop_reply(agent_id).await,
+            "mount" => mount_reply(agent_id, payload, kernel).await,
+            "unmount" => unmount_reply(agent_id, payload).await,
+            _ => {
+                let raw = payload.get("type").cloned().unwrap_or(Value::Null);
+                json!({"error": format!("web: unknown type {}", py_repr_value(&raw))})
+            }
         };
         Ok(Some(reply))
     }
 
-    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let _ = stop_with_kernel(agent_id, kernel);
+    async fn on_delete(
+        &self,
+        agent_id: &AgentId,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        stop_reply(agent_id).await;
         Ok(())
     }
 }
 
+// ─── verbs ──────────────────────────────────────────────────────────
+
+/// python `_reflect` — identity + port + running flag + the live surfaces, the
+/// browser-facing route CONTRACT and the computed `browser_reachable` property.
 async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let port = read_port(agent_id, kernel);
-    let running = SERVERS.lock().contains_key(agent_id);
-    json!({
-        "id": agent_id.as_str(),
-        "sentence": "axum HTTP host.",
-        "port": port,
-        "running": running,
-        "verbs": {
-            "reflect": "Identity + bound port + running flag. No args.",
-            "boot": "Spawn the listener on `port`. Idempotent.",
-            "stop": "Cancel the listener task. Idempotent.",
+    let (running, surfaces) = {
+        let handle = SERVERS.lock();
+        match handle.get(agent_id) {
+            Some(h) => (true, Some(Arc::clone(&h.table))),
+            None => (false, None),
         }
-    })
+    };
+    let mut surface_map = Map::new();
+    if let Some(table) = surfaces {
+        let table = table.read().await;
+        for cid in table.child_ids() {
+            let key = AgentId::from(cid.as_str());
+            surface_map.insert(cid, json!(table.paths_for(&key)));
+        }
+    }
+    let mut out = Map::new();
+    out.insert("id".into(), json!(agent_id.as_str()));
+    out.insert(
+        "sentence".into(),
+        json!("HTTP host — rendering routes baked in; call surfaces mounted from sub-agents."),
+    );
+    out.insert("port".into(), port.map_or(Value::Null, |p| json!(p)));
+    out.insert("running".into(), json!(running));
+    out.insert("served_agent_count".into(), json!(kernel.agents.len()));
+    out.insert("surfaces".into(), Value::Object(surface_map));
+    // THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser hits,
+    // and it was described NOWHERE — so a model reflected this agent, found no
+    // route contract, and HALLUCINATED one (measured 2026-08-21). The field
+    // they invented is the field that was missing.
+    out.insert(
+        "routes".into(),
+        json!({
+            "GET /<agent_id>/file/<path>":
+                "Streams a file by read_stream-ing through the named agent. The \
+        read is dispatched AS THIS WEB AGENT, so it needs BOTH sides of \
+        the call gate — this host's can_call[<agent_id>] (egress) AND that \
+        agent's callable_by[<this web id>] (ingress) — plus that agent's \
+        own io leg open (ingress_rule). Any one missing → 404. See \
+        browser_reachable for who actually passes all three."
+        }),
+    );
+    // The PROPERTY, computed — not a description of it. `ingress_rule=allow_all_ingress`
+    // reads like "open" while the call gate still refuses, so config never
+    // carried the answer to "what can a browser actually get?".
+    out.insert(
+        "browser_reachable".into(),
+        json!(browser_reachable(agent_id, kernel)),
+    );
+    out.insert(
+        "verbs".into(),
+        json!({
+            "reflect": "Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).",
+            "boot": "Idempotent. Builds the host on rec.port (required, no default), mounts each",
+            "stop": "No args. Asks uvicorn to shut down; cancels its task. Returns {stopped:bool}.",
+            "mount": "args: child_id:str (req). Pulls `get_routes` from the named child and (re)mounts its routes onto the live app. Idempotent — unmounts any prior routes for the child first.",
+            "unmount": "args: child_id:str (req). Removes every route belonging to the named child from the live app.",
+        }),
+    );
+    Value::Object(out)
 }
 
-async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    if SERVERS.lock().contains_key(agent_id) {
-        return json!({"id": agent_id.as_str(), "running": true, "already_booted": true});
-    }
-    let port = match read_port(agent_id, kernel) {
-        Some(p) => p,
-        None => {
-            return json!({"error": format!(
-                "web {}: port is required (no default). Set via update_agent.",
-                agent_id
-            )})
+/// python `_browser_reachable` — which agents a browser could actually fetch
+/// through this host, RIGHT NOW. Asks the REAL gates (the same `authorize_call`
+/// `Agent.send` uses, plus the io leg's own resolved ingress rule) rather than
+/// re-deriving them: a reimplementation here would be a second truth that
+/// silently drifts, which is the exact bug this field exists to expose.
+fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
+    use fantastic_kernel::authz::authorize_call;
+    let Some(web) = kernel.agents.get(web_id).map(|e| Arc::clone(&e)) else {
+        return Vec::new();
+    };
+    let web_meta = web.meta.read().expect("meta poisoned").clone();
+    let web_children: std::collections::HashSet<String> =
+        web.child_ids().into_iter().map(|c| c.0).collect();
+    let mut out: Vec<String> = Vec::new();
+    for entry in kernel.agents.iter() {
+        let agent = entry.value();
+        if agent.id == *web_id {
+            continue;
         }
+        let meta = agent.meta.read().expect("meta poisoned").clone();
+        // An agent that cannot answer the SOURCE verb is not a file server at all.
+        let declares = meta
+            .get("verbs")
+            .and_then(Value::as_object)
+            .is_some_and(|v| v.contains_key("read_stream"));
+        let servable = declares
+            || agent
+                .handler_module
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("file_bridge");
+        if !servable {
+            continue;
+        }
+        let egress = authorize_call(
+            web_meta.get("can_call").unwrap_or(&Value::Null),
+            "read_stream",
+            agent.id.as_str(),
+            web_id.as_str(),
+            web.parent_id.as_ref().map(|p| p.0.as_str()),
+            &web_children,
+            None,
+            true,
+        );
+        if !egress.allowed {
+            continue;
+        }
+        let children: std::collections::HashSet<String> =
+            agent.child_ids().into_iter().map(|c| c.0).collect();
+        let ingress = authorize_call(
+            meta.get("callable_by").unwrap_or(&Value::Null),
+            "read_stream",
+            web_id.as_str(),
+            agent.id.as_str(),
+            agent.parent_id.as_ref().map(|p| p.0.as_str()),
+            &children,
+            None,
+            true,
+        );
+        if !ingress.allowed {
+            continue;
+        }
+        if leg_admits(&meta, agent.id.as_str(), "read_stream") {
+            out.push(agent.id.0.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The io leg's own resolved ingress rule (python `gate_inbound(resolve_ingress(rec), …)`).
+fn leg_admits(meta: &Map<String, Value>, target: &str, verb: &str) -> bool {
+    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
+    let spec = manifold_spec(meta.get("ingress_rule"), meta.get("auth"), "_ingress");
+    match ingress::resolve(spec.as_ref()) {
+        Ok(rule) => matches!(
+            rule.authorize(&Action {
+                kind: "call",
+                target,
+                verb,
+                token: None,
+            }),
+            Decision::Allow
+        ),
+        Err(_) => false,
+    }
+}
+
+/// python `_boot` — build the host on `rec.port`, mount every child's surface,
+/// THEN start serving, then announce the URL to `cli`.
+async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
+    let already = SERVERS.lock().contains_key(agent_id);
+    let boot_task = fantastic_kernel::current_task();
+    if !already {
+        // python `_spawn`: a falsy `port` RAISES — no default, no fallback.
+        let Some(port) = read_port(agent_id, kernel) else {
+            return Err(format!(
+                "RuntimeError: webapp {agent_id}: rec.port is required (no default). \
+Set port on create_agent or via update_agent."
+            )
+            .into());
+        };
+        SERVERS.lock().insert(
+            agent_id.clone(),
+            ServerHandle {
+                task: None,
+                table: Arc::new(AsyncRwLock::new(RouteTable::base())),
+                port,
+            },
+        );
+    }
+    let Some((table, port)) = SERVERS
+        .lock()
+        .get(agent_id)
+        .map(|h| (Arc::clone(&h.table), h.port))
+    else {
+        return Ok(json!({"running": false}));
     };
     let state = AppState {
         kernel: Arc::clone(kernel),
         web_agent_id: agent_id.clone(),
+        boot_task,
     };
-    // Build the base router synchronously (always-present routes) + walk
-    // siblings to mount their `get_routes`. The result lives inside an
-    // Arc<RwLock<Router>> so the `routes_changed` subscription can swap
-    // it in place without restarting axum.
-    let initial = build_router_from_siblings(&state, agent_id, kernel).await;
-    let router_lock = Arc::new(AsyncRwLock::new(initial));
+    // Mount all child surfaces BEFORE the listener starts accepting.
+    let children: Vec<AgentId> = kernel
+        .agents
+        .get(agent_id)
+        .map(|e| e.child_ids())
+        .unwrap_or_default();
+    for cid in children {
+        mount_surface(&table, kernel, &cid).await;
+    }
+    start_serving(agent_id, &state, &table, port).await;
+    // Announce OURSELVES to the cli renderer (the boot-event convention): the
+    // web host owns its port, so it tells the terminal where to attach — the
+    // renderer never reaches in for it. Best-effort: cli's `say` returns None;
+    // when there is no cli the send answers a refusal, and the stderr line is
+    // the fallback so container logs still record the bind.
+    let line = format!(
+        "listening on http://127.0.0.1:{port}/ · rest/ws are children (reflect kernel for ids)"
+    );
+    let reply = kernel
+        .send(vec![Item::new(
+            AgentId::from("cli"),
+            json!({"type": "say", "source": "web", "text": line}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    if !reply.is_null() {
+        eprintln!("  [web] {agent_id} listening on http://localhost:{port}/");
+    }
+    let surfaces = table.read().await.child_ids();
+    Ok(json!({"running": true, "surfaces": surfaces}))
+}
 
-    // Bind all interfaces (0.0.0.0) to match the python web host + the
-    // module doc above + to be reachable via container `-p` port mapping
-    // (a loopback-only bind is unreachable from the host through the
-    // container's network namespace).
+/// python `_start_serving` — schedule the serve loop for an already-built,
+/// already-route-mounted handle. Idempotent. A bind failure is LOGGED, never
+/// raised: uvicorn's `sys.exit(1)` out of the serve task would otherwise take
+/// the whole kernel down with one bad webapp.
+async fn start_serving(
+    agent_id: &AgentId,
+    state: &AppState,
+    table: &Arc<AsyncRwLock<RouteTable>>,
+    port: u16,
+) {
+    if SERVERS
+        .lock()
+        .get(agent_id)
+        .is_some_and(|h| h.task.is_some())
+    {
+        return;
+    }
+    // Bind all interfaces (0.0.0.0) to match python's uvicorn host and to stay
+    // reachable through a container's published port.
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
-        Err(e) => return json!({"error": format!("bind {addr}: {e}")}),
-    };
-    let actual_port = match listener.local_addr() {
-        Ok(a) => a.port(),
-        Err(_) => port,
-    };
-
-    // Subscribe to kernel state events BEFORE handing the listener to
-    // axum::serve. If a child emits `routes_changed` while boot is
-    // still resolving siblings, the closure rebuilds against the
-    // current sibling set — boot is idempotent so we can't race past
-    // it. (See module-level note on boot sequencing.)
-    let sub_state = state.clone();
-    let sub_self_id = agent_id.clone();
-    let sub_router = Arc::clone(&router_lock);
-    let sub_kernel = Arc::clone(kernel);
-    let sub_token = kernel.add_state_subscriber(Arc::new(move |event: &Value| {
-        let ty = event.get("type").and_then(Value::as_str).unwrap_or("");
-        let verb = event.get("verb").and_then(Value::as_str).unwrap_or("");
-        // Match either an explicit `routes_changed` emit OR a
-        // `created`/`removed` system event on a sibling (so adding /
-        // dropping a web_ws child re-mounts even if the child doesn't
-        // emit). Conservative re-mount: cheap (the build only walks
-        // direct siblings) + idempotent.
-        let is_routes_changed = ty == "emit" && verb == "routes_changed";
-        let is_created = ty == "created"
-            && event.get("parent_id").and_then(Value::as_str) == Some(sub_self_id.as_str());
-        let is_removed = ty == "removed";
-        if !is_routes_changed && !is_created && !is_removed {
+        Err(e) => {
+            // python `logger.error("webapp %s :%d serve failed: %s", …)`
+            // (`web/tools.py:158`), through `logging.lastResort` → bare stderr.
+            // python's OTHER spelling here (uvicorn raising SystemExit on a bind
+            // clash → `serve exited (code=…) — port likely in use`) is a uvicorn
+            // artefact, residual per D16.
+            eprintln!("webapp {agent_id} :{port} serve failed: {e}");
+            SERVERS.lock().remove(agent_id);
             return;
         }
-        let state = sub_state.clone();
-        let self_id = sub_self_id.clone();
-        let router = Arc::clone(&sub_router);
-        let kernel = Arc::clone(&sub_kernel);
-        tokio::spawn(async move {
-            let new_router = build_router_from_siblings(&state, &self_id, &kernel).await;
-            *router.write().await = new_router;
-        });
-    }));
-
+    };
     let dynamic = DynamicRouter {
-        inner: Arc::clone(&router_lock),
+        state: state.clone(),
+        table: Arc::clone(table),
     };
     let serve = axum::serve(listener, dynamic.into_make_service());
+    let failed_id = agent_id.clone();
     let task = tokio::spawn(async move {
         if let Err(e) = serve.await {
-            tracing::warn!(error = %e, "web: axum serve exited with error");
+            // Same python line — `_safe_serve`'s `except Exception` wraps the
+            // whole `server.serve()`, not just the bind.
+            eprintln!("webapp {failed_id} :{port} serve failed: {e}");
         }
     });
-    SERVERS.lock().insert(
-        agent_id.clone(),
-        ServerHandle {
-            task,
-            router: router_lock,
-            sub_token,
-        },
-    );
-    // Announce OURSELVES to the cli renderer (the boot-event convention): the web
-    // host owns its port, so it tells the terminal where to attach — the renderer
-    // never reaches in for it. The rust cli renderer is a state subscriber, so we
-    // publish a `say` event (parity of Python's send(cli, say)). Best-effort: no
-    // renderer => nobody renders it.
-    kernel.publish_state(&json!({
-        "type": "say",
-        "source": "web",
-        "text": format!(
-            "listening on http://127.0.0.1:{actual_port}/ · rest/ws are children (reflect kernel for ids)"
-        ),
-    }));
-    json!({
-        "id": agent_id.as_str(),
-        "running": true,
-        "port": actual_port,
-    })
-}
-
-fn stop_reply(agent_id: &AgentId) -> Value {
-    // Snapshot the handle WITHOUT dropping it while holding the lock
-    // (the kernel state-subscriber detach below takes its own lock,
-    // and we want to be lock-free during that).
-    let removed = SERVERS.lock().remove(agent_id);
-    if let Some(handle) = removed {
-        handle.task.abort();
-        // No kernel reference here — `on_delete` / `stop` could be
-        // called from many paths and we don't always have an Arc<Kernel>
-        // in scope. The subscriber holds Arcs that drop with this
-        // handle, so detaching is best-effort cleanup. We rely on the
-        // closure becoming a no-op when its captured `router` Arc is
-        // the only one (router_lock dropped along with handle).
-        // For a clean detach pattern from places that DO own a kernel
-        // ref, see `WebBundle::on_delete`.
-        json!({
-            "id": agent_id.as_str(),
-            "stopped": true,
-            "sub_token": handle.sub_token.0,
-        })
-    } else {
-        json!({"id": agent_id.as_str(), "stopped": false, "reason": "not running"})
+    if let Some(h) = SERVERS.lock().get_mut(agent_id) {
+        h.task = Some(task);
     }
 }
 
-/// Stop variant that also detaches the kernel state subscriber. Called
-/// from `on_delete` (where we always have a `kernel` ref).
-fn stop_with_kernel(agent_id: &AgentId, kernel: &Kernel) -> Value {
+/// python `_stop_uvicorn` + `_stop` — `{stopped:bool}`.
+async fn stop_reply(agent_id: &AgentId) -> Value {
     let removed = SERVERS.lock().remove(agent_id);
-    if let Some(handle) = removed {
-        handle.task.abort();
-        kernel.remove_state_subscriber(handle.sub_token);
-        json!({"id": agent_id.as_str(), "stopped": true})
-    } else {
-        json!({"id": agent_id.as_str(), "stopped": false, "reason": "not running"})
+    match removed {
+        Some(handle) => {
+            if let Some(task) = handle.task {
+                task.abort();
+            }
+            json!({"stopped": true})
+        }
+        None => json!({"stopped": false}),
     }
 }
 
+/// python `_mount` — pull `get_routes` from the named child and (re)mount it.
+async fn mount_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let Some(child) = child_arg(payload) else {
+        return json!({"error": "web.mount: child_id required"});
+    };
+    let Some(table) = SERVERS.lock().get(agent_id).map(|h| Arc::clone(&h.table)) else {
+        return json!({"error": "web.mount: not running"});
+    };
+    table.write().await.unmount(&child);
+    mount_surface(&table, kernel, &child).await;
+    json!({"mounted": table.read().await.paths_for(&child)})
+}
+
+/// python `_unmount` — remove every route belonging to the named child.
+async fn unmount_reply(agent_id: &AgentId, payload: &Value) -> Value {
+    let Some(child) = child_arg(payload) else {
+        return json!({"error": "web.unmount: child_id required"});
+    };
+    let Some(table) = SERVERS.lock().get(agent_id).map(|h| Arc::clone(&h.table)) else {
+        return json!({"error": "web.unmount: not running"});
+    };
+    table.write().await.unmount(&child);
+    json!({"unmounted": child.0})
+}
+
+/// python `payload.get("child_id")` guarded by its own truthiness.
+fn child_arg(payload: &Value) -> Option<AgentId> {
+    let v = payload.get("child_id")?;
+    if !py_truthy(v) {
+        return None;
+    }
+    v.as_str().map(AgentId::from)
+}
+
+/// python `_mount_surface` — ask one child for its routes and mount them. A
+/// child that does not answer with a route list mounts nothing.
+async fn mount_surface(
+    table: &Arc<AsyncRwLock<RouteTable>>,
+    kernel: &Arc<Kernel>,
+    child: &AgentId,
+) {
+    let reply = kernel
+        .send(vec![Item::new(
+            child.clone(),
+            json!({"type": "get_routes"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let mounted = routes::routes_from_spec(child, &reply);
+    if mounted.is_empty() {
+        return;
+    }
+    table.write().await.mount(child.clone(), mounted);
+}
+
+/// python `int(rec.get("port"))` with its falsy check — `None`, `0` and `""`
+/// all mean "not set".
 fn read_port(agent_id: &AgentId, kernel: &Kernel) -> Option<u16> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned").clone();
-    meta.get("port").and_then(|v| v.as_u64()).map(|p| p as u16)
-}
-
-/// Build the base router: always-present rendering routes only.
-///
-/// Call surfaces (WS, REST) are NOT in the base — they mount via
-/// [`build_router_from_siblings`] only when a `web_ws` / `web_rest`
-/// child agent declares them through its `get_routes` verb. This
-/// matches Python's `_mount_surface` semantics: a `web` instance
-/// with no children serves rendering and 404s on `/<id>/ws`.
-fn build_router(state: AppState) -> Router {
-    // Order matters for axum's matchit: place literal-segment routes
-    // (transport.js, favicon) before parametric ones so the trie
-    // disambiguates correctly. The file proxy uses
-    // `:agent_id/file/*path` syntax so the wildcard sits at the
-    // trailing position cleanly.
-    Router::new()
-        .route("/", get(serve_root_index_dynamic))
-        .route("/transport.js", get(serve_transport_js))
-        .route("/favicon.ico", get(serve_favicon))
-        .route("/favicon.png", get(serve_favicon))
-        .route("/_assets/favicon.png", get(serve_favicon))
-        .route("/_assets/three.module.js", get(serve_three_js))
-        .route("/_assets/xterm.min.js", get(serve_xterm_js))
-        .route("/_assets/xterm.min.css", get(serve_xterm_css))
-        .route(
-            "/_assets/xterm-addon-fit.min.js",
-            get(serve_xterm_addon_fit_js),
-        )
-        .route("/:agent_id/file/*path", get(serve_file_proxy))
-        .route("/:agent_id/", get(serve_agent_render))
-        .with_state(state)
-}
-
-/// Walk this web agent's direct child agents. For each one, ask
-/// `get_routes` and mount the returned route specs onto a fresh
-/// router built atop the always-present base.
-///
-/// Bundles return `{routes: [{kind, path, ...}]}` where `kind` is one
-/// of `"websocket"`, `"get"`, `"post"`, `"http"` (with `method`). The
-/// `endpoint` field that Python sends is NOT used — Rust dispatch
-/// goes through static handlers that know the kind + path pattern
-/// (e.g. `/<id>/ws` always uses `serve_ws_dynamic`, `POST
-/// /<rest>/<target>` always uses `serve_rest_post`).
-async fn build_router_from_siblings(
-    state: &AppState,
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-) -> Router {
-    let base = build_router(state.clone());
-
-    // Find children of this web agent.
-    let child_ids: Vec<AgentId> = match kernel.agents.get(self_id) {
-        Some(entry) => entry.child_ids(),
-        None => Vec::new(),
-    };
-
-    // Build child surfaces as a separate `Router<()>` (state baked in
-    // per route), then merge into base. We must apply `.with_state`
-    // per route group because axum's chained `route()` calls require
-    // matching state types.
-    let mut surface = Router::<()>::new();
-    let mut surface_has_routes = false;
-
-    for cid in child_ids {
-        let reply = kernel
-            .send(vec![Item::new(cid.clone(), json!({"type": "get_routes"}))])
-            .await
-            .remove(0)
-            .result;
-        let Some(routes) = reply.get("routes").and_then(Value::as_array) else {
-            continue;
-        };
-        for spec in routes {
-            let kind = spec.get("kind").and_then(Value::as_str).unwrap_or("");
-            let path = match spec.get("path").and_then(Value::as_str) {
-                Some(p) => p,
-                None => continue,
-            };
-            // Python uses `{name}` path-param syntax; axum 0.7 uses
-            // `:name`. Translate so a Python-style spec mounts cleanly.
-            let axum_path = translate_path(path);
-            let next = match kind {
-                "websocket" => Some(
-                    Router::<AppState>::new()
-                        .route(&axum_path, get(serve_ws_dynamic))
-                        .with_state(state.clone()),
-                ),
-                "get" | "http" => {
-                    let method = if kind == "get" {
-                        "GET".to_string()
-                    } else {
-                        spec.get("method")
-                            .and_then(Value::as_str)
-                            .unwrap_or("GET")
-                            .to_uppercase()
-                    };
-                    if method == "GET" {
-                        if axum_path.ends_with("/_reflect") {
-                            Some(
-                                Router::<AppState>::new()
-                                    .route(&axum_path, get(serve_rest_reflect_root_dynamic))
-                                    .layer(axum::Extension(RestOwner(cid.clone())))
-                                    .with_state(state.clone()),
-                            )
-                        } else if axum_path.contains("/_reflect/") {
-                            Some(
-                                Router::<AppState>::new()
-                                    .route(&axum_path, get(serve_rest_reflect_dynamic))
-                                    .layer(axum::Extension(RestOwner(cid.clone())))
-                                    .with_state(state.clone()),
-                            )
-                        } else {
-                            tracing::warn!(path = %axum_path, "web: unknown GET surface path");
-                            None
-                        }
-                    } else if method == "POST" {
-                        Some(
-                            Router::<AppState>::new()
-                                .route(&axum_path, post(serve_rest_post_dynamic))
-                                .layer(axum::Extension(RestOwner(cid.clone())))
-                                .with_state(state.clone()),
-                        )
-                    } else {
-                        tracing::warn!(method = %method, path = %axum_path, "web: unsupported HTTP method");
-                        None
-                    }
-                }
-                "post" => Some(
-                    Router::<AppState>::new()
-                        .route(&axum_path, post(serve_rest_post_dynamic))
-                        .layer(axum::Extension(RestOwner(cid.clone())))
-                        .with_state(state.clone()),
-                ),
-                other => {
-                    tracing::warn!(kind = %other, "web: unknown route kind");
-                    None
-                }
-            };
-            if let Some(r) = next {
-                surface = surface.merge(r);
-                surface_has_routes = true;
-            }
-        }
+    let raw = meta.get("port")?;
+    if !py_truthy(raw) {
+        return None;
     }
-
-    if surface_has_routes {
-        base.merge(surface)
-    } else {
-        base
-    }
+    py_int(raw).ok().and_then(|n| u16::try_from(n).ok())
 }
 
-/// Header carrying a caller-chosen execution id on a REST POST. Mirrors
-/// `X-Fantastic-Auth`: dispatch metadata rides the carrier, never the body.
-const EXEC_ID_HEADER: &str = "x-fantastic-execution-id";
+// ─── the serving edge ───────────────────────────────────────────────
 
-/// The binary leg — JSON has no bytes type, so a verb whose payload OR reply
-/// carries RAW bytes (`patch_text_file`, `write_stream`, `read_stream`) rides an
-/// octet-stream body instead of JSON: the raw body IS the blob, the rest of the
-/// envelope is JSON on `X-Fantastic-Payload`, and the one bytes-valued field is
-/// named by `X-Fantastic-Bytes-Field` (default `bytes`). Symmetric in BOTH
-/// directions, never base64 — the HTTP mirror of the WS binary frame. Mirrors
-/// Python `web_rest/tools.py`.
-const OCTET_CT: &str = "application/octet-stream";
-/// Header carrying the JSON envelope on an octet-stream request/reply.
-/// The INGRESS credential on the http modality. The http envelope is the request
-/// HEADER, not the body — so the dispatched payload never carries the token.
-const AUTH_HEADER: &str = "x-fantastic-auth";
-const PAYLOAD_HEADER: &str = "x-fantastic-payload";
-/// Header naming the one bytes-valued field on an octet-stream request/reply.
-const BYTES_FIELD_HEADER: &str = "x-fantastic-bytes-field";
-
-/// Translate a Python/FastAPI-style path with `{name}` placeholders
-/// into axum 0.7's `:name` syntax. Wildcards (`{name:path}`) become
-/// `*name` (axum's catch-all). Idempotent — already-axum paths pass
-/// through.
-fn translate_path(p: &str) -> String {
-    let mut out = String::with_capacity(p.len());
-    let mut i = 0;
-    let bytes = p.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            // Find matching '}'.
-            if let Some(end_rel) = p[i + 1..].find('}') {
-                let name = &p[i + 1..i + 1 + end_rel];
-                if let Some((n, kind)) = name.split_once(':') {
-                    if kind == "path" {
-                        out.push('*');
-                        out.push_str(n);
-                    } else {
-                        out.push(':');
-                        out.push_str(n);
-                    }
-                } else {
-                    out.push(':');
-                    out.push_str(name);
-                }
-                i = i + 1 + end_rel + 1;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-/// `DynamicRouter` wraps an `Arc<RwLock<Router>>` and forwards each
-/// request through the current router (clone-cheap because axum's
-/// Router is internally `Arc`-shared). Mounting / unmounting child
-/// surfaces is a write-lock swap; per-request reads take the read-lock
-/// briefly, clone the router, drop the lock, and `oneshot` the
-/// request. `tokio::sync::RwLock` is the async-aware lock — required
-/// because the call site is `Service::call` returning a Future, and
-/// holding a `parking_lot` guard across an `.await` is unsound.
+/// `DynamicRouter` walks the live route table for each request. Mounting and
+/// unmounting a child surface is a write-lock swap; per-request reads take the
+/// read-lock for the length of the match only.
 #[derive(Clone)]
 struct DynamicRouter {
-    inner: Arc<AsyncRwLock<Router>>,
+    state: AppState,
+    table: Arc<AsyncRwLock<RouteTable>>,
+}
+
+impl DynamicRouter {
+    fn into_make_service(self) -> IntoMakeService {
+        IntoMakeService(self)
+    }
+}
+
+/// `tower::MakeService` shim: one router instance per accepted connection.
+#[derive(Clone)]
+struct IntoMakeService(DynamicRouter);
+
+impl<T> tower::Service<T> for IntoMakeService {
+    type Response = DynamicRouter;
+    type Error = std::convert::Infallible;
+    #[allow(clippy::type_complexity)]
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: T) -> Self::Future {
+        let router = self.0.clone();
+        Box::pin(async move { Ok(router) })
+    }
 }
 
 impl tower::Service<Request<Body>> for DynamicRouter {
@@ -580,1574 +572,11 @@ impl tower::Service<Request<Body>> for DynamicRouter {
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            let guard = inner.read().await;
-            // Router::clone is Arc-cheap. We clone to avoid holding the
-            // read lock across the (async) oneshot.
-            let svc = guard.clone();
-            drop(guard);
-            svc.oneshot(req).await
-        })
+        let state = self.state.clone();
+        let table = Arc::clone(&self.table);
+        Box::pin(async move { Ok(handlers::dispatch(state, table, req).await) })
     }
 }
-
-/// Dynamic-mount WS endpoint. The mounted path is a literal
-/// `/<parent_id>/ws` — no path params. Axum's extractor framework
-/// rejects requests against handlers whose path-param arity doesn't
-/// match the mounted path, so this handler takes no `AxPath`.
-async fn serve_ws_dynamic(
-    State(state): State<AppState>,
-    AxPath(host_id): AxPath<String>,
-    upgrade: WebSocketUpgrade,
-) -> Response {
-    let host = AgentId::from(host_id.as_str());
-    upgrade.on_upgrade(move |socket| ws_loop(state, socket, host))
-}
-
-/// Dynamic-mount POST endpoint. Mounted path is `/<self_id>/:target_id`
-/// — one path param (`target_id`). The `self_id` (`rest_id` in
-/// telemetry) isn't available from the path; we substitute the synthetic
-/// `_ws_dyn_post` sender so the telemetry pane still gets a non-empty
-/// sender for the dispatched verb. To attribute back to the surface
-/// agent's id we'd need to bake it into the handler via a per-route
-/// state — wired into the closure-style mount as a future improvement.
-/// Carries the route-owner agent id (the `web_rest` instance whose
-/// `get_routes` reply mounted this path). Stamped at mount time via
-/// `Extension<RestOwner>` so the handler can attribute the dispatched
-/// verb's `_current_sender` back to the real surface agent — Python
-/// parity (`web_rest/tools.py:61` uses `self_id` the same way).
-#[derive(Clone)]
-struct RestOwner(AgentId);
-
-/// Track one in-flight `call` dispatch, PRUNING the finished ones first.
-///
-/// Nothing removed a finished handle until the socket closed, so the vector only
-/// ever grew: a dashboard tab polling `status` once a second accumulated ~86k
-/// JoinHandles over a day, none of them reachable or useful. Python discards its
-/// task in an `add_done_callback`; this is the same bound, applied at the ONE
-/// place the vector grows. The handles that remain are exactly the ones a
-/// disconnect still has to abort.
-fn track_call(
-    kernel: &std::sync::Arc<Kernel>,
-    pending: &std::sync::Mutex<Vec<fantastic_kernel::TaskId>>,
-    id: fantastic_kernel::TaskId,
-) {
-    let mut p = pending.lock().expect("pending poisoned");
-    // LIVENESS COMES FROM THE TABLE, which holds only running work.
-    p.retain(|t| kernel.tasks.contains(t));
-    p.push(id);
-}
-
-/// The INGRESS gate on a REST leg — python parity (`web_rest/tools.py::_gate`).
-///
-/// The rust REST routes used to dispatch straight into `with_sender(owner)` with
-/// no ingress check at all, so a leg carrying NO `ingress_rule` — sealed by
-/// default everywhere else in the io family — served every request. And when a
-/// call did fail it failed on the EGRESS side, naming a false cause
-/// ("web_rest_x may not call \"reflect\" on sibling") while the true one — this
-/// leg is sealed — was never stated.
-///
-/// Returns `Some(403)` to answer with, or `None` when the leg admits the call.
-fn rest_gate(
-    kernel: &Kernel,
-    owner: &AgentId,
-    target: &str,
-    verb: &str,
-    token: Option<&str>,
-) -> Option<Response> {
-    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision, Denial};
-
-    let (primary, auth) = match kernel.agents.get(owner).map(|e| Arc::clone(&e)) {
-        Some(a) => {
-            let meta = a.meta.read().expect("meta poisoned");
-            (meta.get("ingress_rule").cloned(), meta.get("auth").cloned())
-        }
-        // No record for the mounting leg ⇒ nothing granted it anything. Sealed.
-        None => (None, None),
-    };
-    let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
-    let decision = match ingress::resolve(spec.as_ref()) {
-        Ok(rule) => rule.authorize(&Action {
-            kind: "call",
-            target,
-            verb,
-            token,
-        }),
-        // A spec that will not parse is not an authorization.
-        Err(e) => Decision::Deny(Denial::new(format!("web_rest: bad ingress rule: {e}"))),
-    };
-    match decision {
-        Decision::Allow => None,
-        Decision::Deny(denial) => Some(deny_403(&denial)),
-    }
-}
-
-/// The 403 a sealed/gated REST leg answers with — the rule's own
-/// `reason`/`hint`/`see`, forwarded verbatim so discovery-through-denial works
-/// over http exactly as it does over the WS leg.
-fn deny_403(denial: &fantastic_io_bridge::authorizer::Denial) -> Response {
-    let mut body = json!({"error": denial.reason, "reason": "unauthorized"});
-    if !denial.hint.is_empty() {
-        body["hint"] = json!(denial.hint);
-    }
-    if !denial.see.is_empty() {
-        body["see"] = json!(denial.see);
-    }
-    (
-        StatusCode::FORBIDDEN,
-        [(header::CONTENT_TYPE, "application/json")],
-        body.to_string(),
-    )
-        .into_response()
-}
-
-async fn serve_rest_post_dynamic(
-    State(state): State<AppState>,
-    axum::Extension(owner): axum::Extension<RestOwner>,
-    AxPath(target_id): AxPath<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let target = AgentId::from(target_id.as_str());
-    // NAMING an execution — python parity (`web_rest/tools.py`). The
-    // credential rides `X-Fantastic-Auth`; an execution id rides its own
-    // header for the same reason: it is dispatch metadata about the call, not
-    // part of the verb payload the target reads. With it, ensure-semantics
-    // reach the wire — an unknown id dispatches, an in-flight id JOINS, and a
-    // settled id returns the recorded outcome instead of running twice.
-    let exec_id = headers
-        .get(EXEC_ID_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned);
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let auth_token = headers.get(AUTH_HEADER).and_then(|v| v.to_str().ok());
-
-    // ── binary leg ──────────────────────────────────────────────────────
-    // Content-Type: application/octet-stream ⇒ the raw body IS the blob; the
-    // rest of the envelope rides `X-Fantastic-Payload` (JSON). Rust's JSON
-    // `Value` can't hold bytes, so the blob travels the dedicated binary
-    // channel (`send_with_binary`) — the SAME one `read_stream` /
-    // `write_stream` / `patch_text_file` already use over the WS binary frame.
-    // The gate + sender/self-id tagging live INSIDE `send_with_binary` exactly
-    // as they do for the JSON `send` path.
-    if content_type.starts_with(OCTET_CT) {
-        let payload: Value = match headers.get(PAYLOAD_HEADER).and_then(|v| v.to_str().ok()) {
-            Some(s) => match serde_json::from_str(s) {
-                Ok(v) => v,
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        [(header::CONTENT_TYPE, "application/json")],
-                        json!({"error": "web_rest: X-Fantastic-Payload is not valid JSON"})
-                            .to_string(),
-                    )
-                        .into_response();
-                }
-            },
-            None => json!({}),
-        };
-        if !payload.is_object() {
-            return (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "application/json")],
-                json!({"error": "web_rest: X-Fantastic-Payload must be a JSON object"}).to_string(),
-            )
-                .into_response();
-        }
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if let Some(denial) = rest_gate(&state.kernel, &owner.0, &target_id, verb, auth_token) {
-            return denial;
-        }
-        let blob = body.to_vec();
-        let (reply, out_body) = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-            state.kernel.send_with_binary(&target, payload, blob).await
-        })
-        .await;
-        // A reply that carries raw bytes (e.g. `read_stream`) goes back the
-        // same way it came in — octet body + JSON header — never base64.
-        if !out_body.is_empty() {
-            let mut resp_headers = header::HeaderMap::new();
-            resp_headers.insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static(OCTET_CT),
-            );
-            if let Ok(v) = header::HeaderValue::from_str(&reply.to_string()) {
-                if let Ok(name) = header::HeaderName::from_bytes(PAYLOAD_HEADER.as_bytes()) {
-                    resp_headers.insert(name, v);
-                }
-            }
-            if let Ok(name) = header::HeaderName::from_bytes(BYTES_FIELD_HEADER.as_bytes()) {
-                resp_headers.insert(name, header::HeaderValue::from_static("bytes"));
-            }
-            return (StatusCode::OK, resp_headers, out_body).into_response();
-        }
-        // No bytes in the reply (e.g. `write_stream` / `patch_text_file`
-        // status) — fall back to the JSON envelope, same shape as below.
-        if reply.is_null() {
-            return (StatusCode::NO_CONTENT, ()).into_response();
-        }
-        let status = StatusCode::OK; // a dispatched reply is 200 even when it carries {error} (py parity); only the INGRESS gate + malformed request are 4xx
-        return (
-            status,
-            [(header::CONTENT_TYPE, "application/json")],
-            reply.to_string(),
-        )
-            .into_response();
-    }
-
-    // ── JSON leg (unchanged) ────────────────────────────────────────────
-    let payload: Value = if body.is_empty() {
-        json!({})
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(v) => v,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    json!({"error": "web_rest: request body is not valid JSON"}).to_string(),
-                )
-                    .into_response();
-            }
-        }
-    };
-    if !payload.is_object() {
-        return (
-            StatusCode::BAD_REQUEST,
-            [(header::CONTENT_TYPE, "application/json")],
-            json!({"error": "web_rest: body must be a JSON object"}).to_string(),
-        )
-            .into_response();
-    }
-    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-    if let Some(denial) = rest_gate(&state.kernel, &owner.0, &target_id, verb, auth_token) {
-        return denial;
-    }
-    let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-        let mut item = Item::new(target.clone(), payload);
-        if let Some(id) = exec_id {
-            item = item.with_id(id);
-        }
-        state.kernel.send(vec![item]).await.remove(0).result
-    })
-    .await;
-    // Python parity: return 204 No Content if the verb's reply was
-    // null (some bundles signal "fire-and-forget" that way).
-    if reply.is_null() {
-        return (StatusCode::NO_CONTENT, ()).into_response();
-    }
-    let status = StatusCode::OK; // a dispatched reply is 200 even when it carries {error} (py parity); only the INGRESS gate + malformed request are 4xx
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        reply.to_string(),
-    )
-        .into_response()
-}
-
-/// Dynamic-mount GET `_reflect` endpoint (no target). Mounted path is
-/// `/<self_id>/_reflect` — no path params; the `self_id` again isn't
-/// extracted (see note on `serve_rest_post_dynamic`).
-async fn serve_rest_reflect_root_dynamic(
-    State(state): State<AppState>,
-    axum::Extension(owner): axum::Extension<RestOwner>,
-    Query(q): Query<ReflectQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let target = AgentId::from("kernel");
-    if let Some(denial) = rest_gate(
-        &state.kernel,
-        &owner.0,
-        "kernel",
-        "reflect",
-        headers.get(AUTH_HEADER).and_then(|v| v.to_str().ok()),
-    ) {
-        return denial;
-    }
-    let payload = serde_json::json!({
-        "type": "reflect",
-        "readme": q.readme.unwrap_or(0) != 0,
-    });
-    let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-        state
-            .kernel
-            .send(vec![Item::new(target.clone(), payload)])
-            .await
-            .remove(0)
-            .result
-    })
-    .await;
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        reply.to_string(),
-    )
-        .into_response()
-}
-
-/// Dynamic-mount GET `_reflect/:target_id` endpoint. Mounted path is
-/// `/<self_id>/_reflect/:target_id` — one path param.
-async fn serve_rest_reflect_dynamic(
-    State(state): State<AppState>,
-    axum::Extension(owner): axum::Extension<RestOwner>,
-    AxPath(target_id): AxPath<String>,
-    Query(q): Query<ReflectQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let target = AgentId::from(target_id.as_str());
-    if let Some(denial) = rest_gate(
-        &state.kernel,
-        &owner.0,
-        &target_id,
-        "reflect",
-        headers.get(AUTH_HEADER).and_then(|v| v.to_str().ok()),
-    ) {
-        return denial;
-    }
-    let payload = serde_json::json!({
-        "type": "reflect",
-        "readme": q.readme.unwrap_or(0) != 0,
-    });
-    let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-        state
-            .kernel
-            .send(vec![Item::new(target.clone(), payload)])
-            .await
-            .remove(0)
-            .result
-    })
-    .await;
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        reply.to_string(),
-    )
-        .into_response()
-}
-
-/// Dynamic root index: walks the substrate tree, probes each agent
-/// for `render_html` / `get_webapp` in parallel, renders the same
-/// nested-tree HTML Python's `_index_page` does. Template body is
-/// the `{{tree_body}}` placeholder in `index.html`.
-async fn serve_root_index_dynamic(State(state): State<AppState>) -> impl IntoResponse {
-    let kernel = Arc::clone(&state.kernel);
-
-    // `/` is ALWAYS the dynamic agent-tree index — no env-pointed disk read.
-    // The kernel's own web owns no `fs` surface (parity with Python's web,
-    // which dropped `FANTASTIC_WEB_INDEX`): a custom landing is served through
-    // the gated `/<file_bridge>/file/<path>` route, not a back-channel
-    // `std::fs::read`. Same on every runtime — what Python deleted, we delete.
-
-    // Pull the root's reflect to get the tree (default tree=all).
-    let primer = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            serde_json::json!({"type":"reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let tree = primer.get("tree").cloned().unwrap_or(Value::Null);
-
-    // Collect every agent id from the tree (depth-first).
-    fn collect_ids(node: &Value, out: &mut Vec<String>) {
-        let Some(obj) = node.as_object() else { return };
-        if let Some(id) = obj.get("id").and_then(Value::as_str) {
-            out.push(id.to_string());
-        }
-        if let Some(children) = obj.get("children").and_then(Value::as_array) {
-            for c in children {
-                collect_ids(c, out);
-            }
-        }
-    }
-    let mut ids = Vec::new();
-    collect_ids(&tree, &mut ids);
-
-    // Probe each agent for render_html or get_webapp IN PARALLEL.
-    let probes = ids.iter().map(|id| {
-        let kernel = Arc::clone(&kernel);
-        let id = id.clone();
-        async move {
-            // Try render_html first.
-            let r = kernel
-                .send(vec![Item::new(
-                    AgentId::from(id.as_str()),
-                    serde_json::json!({"type":"render_html"}),
-                )])
-                .await
-                .remove(0)
-                .result;
-            if r.get("html").and_then(Value::as_str).is_some() {
-                return (id, true);
-            }
-            // Then get_webapp.
-            let r = kernel
-                .send(vec![Item::new(
-                    AgentId::from(id.as_str()),
-                    serde_json::json!({"type":"get_webapp"}),
-                )])
-                .await
-                .remove(0)
-                .result;
-            if r.get("url").is_some() && r.get("error").is_none() {
-                return (id, true);
-            }
-            (id, false)
-        }
-    });
-    let probe_results = futures_util::future::join_all(probes).await;
-    let mut has_html = std::collections::HashMap::<String, bool>::new();
-    for (id, ok) in probe_results {
-        has_html.insert(id, ok);
-    }
-
-    fn html_escape(s: &str) -> String {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    }
-
-    fn render_node(node: &Value, has_html: &std::collections::HashMap<String, bool>) -> String {
-        let Some(obj) = node.as_object() else {
-            return String::new();
-        };
-        let aid = obj
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let name = obj
-            .get("display_name")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&aid)
-            .to_string();
-        let hm = obj
-            .get("handler_module")
-            .and_then(Value::as_str)
-            .unwrap_or("(root)")
-            .to_string();
-        let visit = if *has_html.get(&aid).unwrap_or(&false) {
-            format!(
-                r#"<a class="visit" href="/{}/" title="open agent UI">↗</a>"#,
-                aid
-            )
-        } else {
-            String::new()
-        };
-        let kids_html = if let Some(children) = obj.get("children").and_then(Value::as_array) {
-            if children.is_empty() {
-                String::new()
-            } else {
-                let inner: String = children.iter().map(|c| render_node(c, has_html)).collect();
-                format!("<ul>{inner}</ul>")
-            }
-        } else {
-            String::new()
-        };
-        format!(
-            r#"<li><span class="id">{}</span> {} <code>{}</code> <span class="hm">{}</span>{}</li>"#,
-            html_escape(&name),
-            visit,
-            html_escape(&aid),
-            html_escape(&hm),
-            kids_html,
-        )
-    }
-
-    let body = if tree.is_object() {
-        render_node(&tree, &has_html)
-    } else {
-        "<li><em>empty tree</em></li>".to_string()
-    };
-
-    let page = ROOT_INDEX_HTML.replace("{{tree_body}}", &body);
-    Html(page).into_response()
-}
-
-async fn serve_transport_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "application/javascript")],
-        TRANSPORT_JS,
-    )
-}
-
-/// Bundled favicon — copied verbatim from Python's web bundle
-/// (`python/bundled_agents/web/host/src/web/favicon.png`) so the
-/// browser tab icon matches across runtimes.
-pub const FAVICON_PNG: &[u8] = include_bytes!("favicon.png");
-
-async fn serve_favicon() -> Response {
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "image/png")],
-        FAVICON_PNG,
-    )
-        .into_response()
-}
-
-// ── /_assets/* handlers ────────────────────────────────────────────
-
-async fn serve_three_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
-        ],
-        THREE_JS,
-    )
-        .into_response()
-}
-
-async fn serve_xterm_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
-        ],
-        XTERM_JS,
-    )
-        .into_response()
-}
-
-async fn serve_xterm_css() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/css"),
-            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
-        ],
-        XTERM_CSS,
-    )
-        .into_response()
-}
-
-async fn serve_xterm_addon_fit_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
-        ],
-        XTERM_ADDON_FIT_JS,
-    )
-        .into_response()
-}
-
-async fn serve_agent_render(
-    State(state): State<AppState>,
-    AxPath(agent_id): AxPath<String>,
-) -> Response {
-    let target = AgentId::from(agent_id.as_str());
-    let reply = state
-        .kernel
-        .send(vec![Item::new(
-            target.clone(),
-            json!({"type": "render_html"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    // Successful response: {html: "..."}.
-    if let Some(html) = reply.get("html").and_then(Value::as_str) {
-        let injected = inject_transport(html);
-        return Html(injected).into_response();
-    }
-    if let Some(err) = reply.get("error").and_then(Value::as_str) {
-        return (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain")],
-            format!("agent {agent_id}: {err}"),
-        )
-            .into_response();
-    }
-    (
-        StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, "text/plain")],
-        format!("agent {agent_id}: no render_html reply"),
-    )
-        .into_response()
-}
-
-/// Octet proxy `GET /<id>/file/<path>` — serves any agent answering the
-/// `read_stream` SOURCE verb as an HTTP file server, piping the file out
-/// **chunk by chunk** so a large file never lands whole in RAM. The
-/// allowance is the served agent's OWN gate: a sealed `file_bridge`
-/// denies `read_stream` → `404` (the denial never leaks file existence),
-/// path clamped to its root. Mirrors Python's `read_stream`-only octet
-/// route (whole-file image `read`→`image_base64` is NOT used here).
-async fn serve_file_proxy(
-    State(state): State<AppState>,
-    AxPath((agent_id, path)): AxPath<(String, String)>,
-) -> Response {
-    let target = AgentId::from(agent_id.as_str());
-    const CHUNK: u64 = 262144;
-    // Eager first chunk: decides status + mime BEFORE we commit headers
-    // (a stream can't change the status once the body starts flowing).
-    let (meta, first) = state
-        .kernel
-        .send_with_binary(
-            &target,
-            json!({"type": "read_stream", "path": path, "offset": 0, "length": CHUNK}),
-            Vec::new(),
-        )
-        .await;
-    if let Some(err) = meta.get("error").and_then(Value::as_str) {
-        // Sealed bridge, missing file, escape attempt — all 404 (uniform,
-        // leaks nothing about which it was beyond the error string).
-        return (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain")],
-            err.to_string(),
-        )
-            .into_response();
-    }
-    let mime = guess_mime(&path);
-    let eof = meta.get("eof").and_then(Value::as_bool).unwrap_or(true);
-    let size = meta.get("size").and_then(Value::as_u64);
-    let next = meta
-        .get("next_offset")
-        .and_then(Value::as_u64)
-        .unwrap_or(first.len() as u64);
-
-    // Stream state: (kernel, target, path, next_offset, done?). `done`
-    // starts true when the first chunk already hit EOF.
-    let kernel = Arc::clone(&state.kernel);
-    let stream = futures_util::stream::unfold(
-        (Some(first), kernel, target, path, next, eof),
-        move |(pending, kernel, target, path, offset, done)| async move {
-            // Emit the eagerly-read first chunk on the first poll.
-            if let Some(buf) = pending {
-                return Some((
-                    Ok::<Vec<u8>, std::io::Error>(buf),
-                    (None, kernel, target, path, offset, done),
-                ));
-            }
-            if done {
-                return None;
-            }
-            let (m, body) = kernel
-                .send_with_binary(
-                    &target,
-                    json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
-                    Vec::new(),
-                )
-                .await;
-            // Mid-stream error (file shrank/vanished): end the body. The
-            // 200 status already went out; truncation is the honest signal.
-            if m.get("error").is_some() {
-                return None;
-            }
-            let eof = m.get("eof").and_then(Value::as_bool).unwrap_or(true);
-            let next = m
-                .get("next_offset")
-                .and_then(Value::as_u64)
-                .unwrap_or(offset + body.len() as u64);
-            Some((Ok(body), (None, kernel, target, path, next, eof)))
-        },
-    );
-
-    // Content-Length when the size is known (parity with Python's header);
-    // omit it otherwise rather than guess.
-    let mut headers = header::HeaderMap::new();
-    if let Ok(v) = header::HeaderValue::from_str(mime) {
-        headers.insert(header::CONTENT_TYPE, v);
-    }
-    if let Some(sz) = size {
-        if let Ok(v) = header::HeaderValue::from_str(&sz.to_string()) {
-            headers.insert(header::CONTENT_LENGTH, v);
-        }
-    }
-    (StatusCode::OK, headers, Body::from_stream(stream)).into_response()
-}
-
-/// Inject `<script src="/transport.js"></script>` + the favicon
-/// `<link>` before `</head>` if present, else at the top of the body.
-/// Mirrors Python's transport injection + `_FAVICON_TAG` so browser
-/// tabs show the bundled icon and pages get the JS runtime without
-/// each agent declaring it.
-fn inject_transport(html: &str) -> String {
-    const TRANSPORT_TAG: &str = "<script src=\"/transport.js\"></script>";
-    const FAVICON_TAG: &str =
-        "<link rel=\"icon\" type=\"image/png\" href=\"/_assets/favicon.png\">";
-    let needs_transport = !html.contains(TRANSPORT_TAG);
-    // Skip favicon if the page already declares any `<link rel="icon"`
-    // (per-agent custom icons win).
-    let needs_favicon = !html.contains("rel=\"icon\"") && !html.contains("rel='icon'");
-    if !needs_transport && !needs_favicon {
-        return html.to_string();
-    }
-    let mut inject = String::new();
-    if needs_favicon {
-        inject.push_str(FAVICON_TAG);
-        inject.push('\n');
-    }
-    if needs_transport {
-        inject.push_str(TRANSPORT_TAG);
-        inject.push('\n');
-    }
-    if let Some(idx) = html.find("</head>") {
-        let (head, tail) = html.split_at(idx);
-        format!("{head}{inject}{tail}")
-    } else {
-        format!("{inject}{html}")
-    }
-}
-
-fn guess_mime(path: &str) -> &'static str {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".html") || lower.ends_with(".htm") {
-        "text/html; charset=utf-8"
-    } else if lower.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if lower.ends_with(".js") {
-        "application/javascript"
-    } else if lower.ends_with(".json") {
-        "application/json"
-    } else if lower.ends_with(".png") {
-        "image/png"
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "text/plain; charset=utf-8"
-    }
-}
-
-// ─── WebSocket surface ──────────────────────────────────────────────
-//
-// `ws://host/<agent_id>/ws` — frame protocol per docs/_proxy.py:
-//   C→S {type:"call",  target, payload, id}     → kernel.send → reply
-//   C→S {type:"emit",  target, payload}         → kernel.emit (no reply)
-//   C→S {type:"watch", src}                     → register synthetic watcher
-//   C→S {type:"unwatch", src}                   → unregister
-//   S→C {type:"reply", id, data} | {type:"error", id, error}
-//   S→C {type:"event", payload}                 → drained from watcher inbox
-//
-// Binary frames are deferred to a later milestone.
-
-/// WebSocket proxy loop. 1:1 port of Python's `web/_proxy.py::run`.
-///
-/// - `host_agent_id` — the URL the browser connected to
-///   (`ws://host/<host_id>/ws`). Auto-watched on connect so events
-///   emitted on its inbox reach the page without an explicit `watch`
-///   frame. Also used as `_current_sender` for browser-driven calls
-///   so telemetry rays attribute to the visible page agent (Python
-///   uses the web_ws sub-agent's id here; Rust mounts WS routes
-///   directly from the web bundle so the host is the closest match).
-///
-/// Mirrors Python's structure: `watching` set + pending task set,
-/// inline emit/watch/unwatch handlers, `call` dispatched as a task
-/// so long-lived sends (LLM streaming, slow tools) don't block the
-/// receive loop. Disconnect cancels every pending task + unwatches
-/// every src + drops the synthetic inbox.
-async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
-    use std::collections::HashSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_CLIENT_HEX: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT_CLIENT_HEX.fetch_add(1, Ordering::SeqCst);
-    let client_id = AgentId::from(format!("_ws_{n:06x}").as_str());
-
-    // Per-WS chunked-upload reassembly state. Lives in the ws_loop scope
-    // so it drops on disconnect — no GC task needed for the "dead client"
-    // case. Memory is bounded by MAX_CONCURRENT_UPLOADS × MAX_UPLOAD_SIZE.
-    let pending_uploads: Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
-    let (mut sink, mut stream) = socket.split();
-
-    // Spawn a watcher-drain task: pulls events from the client's
-    // auto-vivified inbox and serializes them as {type:"event"} frames.
-    // We need a separate channel because axum's split sink is single-
-    // consumer; the inbox receiver lives in the kernel.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(state.kernel.inbox_bound);
-    // Parallel BINARY out-channel — a `read_stream` reply carries raw bytes that
-    // can't ride the text channel; the sink writer drains both (text →
-    // Message::Text, binary → Message::Binary, the `[4B len|header|body]` codec
-    // frame). Mirrors py web_ws, which sends binary reply frames the same way.
-    let (bin_tx, mut bin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(state.kernel.inbox_bound);
-    // Hook the synthetic client inbox into the kernel.
-    // THE READER REGISTERS FIRST, and the queue drops the OLDEST at the bound —
-    // a browser that stalls catches up on the freshest frames rather than
-    // freezing on stale ones.
-    let (inbox_tx, mut inbox_rx) = fantastic_kernel::inbox::inbox(state.kernel.inbox_bound);
-    state.kernel.inboxes.insert(client_id.clone(), inbox_tx);
-
-    // Auto-watch the host agent (Python parity — see web/_proxy.py:135).
-    // Track every watch so the cleanup block can unwatch them all on
-    // disconnect.
-    let watching: Arc<tokio::sync::Mutex<HashSet<AgentId>>> =
-        Arc::new(tokio::sync::Mutex::new(HashSet::from_iter([
-            host_agent_id.clone()
-        ])));
-    state.kernel.watch(&host_agent_id, client_id.clone()).await;
-
-    // Pending `call` tasks — cancelled on disconnect so long-lived
-    // sends (ollama / nvidia streaming, slow tools) release their
-    // locks immediately. Python: `pending: set[asyncio.Task]`.
-    let pending_calls: Arc<std::sync::Mutex<Vec<fantastic_kernel::TaskId>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    // State-stream subscription tokens — remove on disconnect to
-    // unregister the kernel's telemetry callback for this WS.
-    // (Python: `state_unsubs: list` of opaque unsubscribe callables.
-    // Rust uses opaque tokens that we hand back to remove_state_subscriber.)
-    let state_unsubs: Arc<std::sync::Mutex<Vec<fantastic_kernel::SubscriberToken>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    let drain_task = tokio::spawn({
-        let out_tx = out_tx.clone();
-        async move {
-            while let Some(payload) = inbox_rx.recv().await {
-                let frame = serde_json::json!({"type": "event", "payload": payload});
-                let line = match serde_json::to_string(&frame) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                if out_tx.send(line).await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-
-    // Outbound forwarder: text frames (out_tx) AND binary frames (bin_tx) hit
-    // the one single-consumer sink. Select across both so neither starves.
-    let send_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                line = out_rx.recv() => match line {
-                    Some(line) => {
-                        if sink.send(Message::Text(line)).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break,
-                },
-                blob = bin_rx.recv() => match blob {
-                    Some(blob) => {
-                        if sink.send(Message::Binary(blob)).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break,
-                },
-            }
-        }
-    });
-
-    // Inbound loop: parse text + binary frames, dispatch.
-    // Browser-driven traffic uses host_agent_id as `_current_sender`
-    // so telemetry rays visually originate from the page agent —
-    // Python parity (web/_proxy.py uses web_agent_id; closest Rust
-    // equivalent is the host since we don't have a separate web_ws
-    // sub-agent on the route).
-    while let Some(msg) = stream.next().await {
-        let text = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Binary(bytes)) => {
-                handle_binary_frame(
-                    &state,
-                    &client_id,
-                    &out_tx,
-                    &bin_tx,
-                    &pending_uploads,
-                    bytes,
-                )
-                .await;
-                continue;
-            }
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => continue,
-        };
-        let Ok(env): Result<Value, _> = serde_json::from_str(&text) else {
-            continue;
-        };
-        let ty = env.get("type").and_then(Value::as_str).unwrap_or("");
-        let target = env.get("target").and_then(Value::as_str).map(AgentId::from);
-        let payload = env.get("payload").cloned().unwrap_or(Value::Null);
-        let id = env.get("id").and_then(Value::as_str).map(str::to_string);
-        let kernel = Arc::clone(&state.kernel);
-        let sender_for_scope = host_agent_id.clone();
-        let out = out_tx.clone();
-        match ty {
-            "call" => {
-                let Some(target) = target else {
-                    if let Some(id) = id {
-                        let _ = out
-                            .send(
-                                serde_json::json!({"type":"error","id":id,"error":"call requires target"})
-                                    .to_string(),
-                            )
-                            .await;
-                    }
-                    continue;
-                };
-                // Spawn the call so a long-lived send (LLM streaming,
-                // slow tools) doesn't block the receive loop. Stash
-                // the JoinHandle so disconnect can abort it, releasing
-                // any kernel-side locks the dispatch holds.
-                let frame_id = id.clone();
-                // REGISTERED: a frame handler DISPATCHES, so it is real work —
-                // a `ps` row, reachable by `cancel`, and its send is parented to
-                // it instead of becoming a root. `spawn_task` carries this
-                // scope's identity into the fork, so the hand-rolled
-                // `with_sender` that used to do it here is gone.
-                let spawner = Arc::clone(&state.kernel);
-                let handle = spawner.spawn_task(&sender_for_scope, "ws_call", async move {
-                    let reply = {
-                        // THE FRAME ID IS THE EXECUTION ID. One id space: the
-                        // correlation id a client already sends NAMES the
-                        // execution, so the same id arriving twice — a
-                        // double-click, a second tab, a reconnect replaying its
-                        // queue — is ONE intent, deduped and joined by the
-                        // ledger instead of running the side effect twice.
-                        // There is deliberately no second `exec_id` field.
-                        kernel
-                            .send(vec![Item::from_frame(
-                                target.clone(),
-                                payload,
-                                frame_id.as_deref(),
-                            )])
-                            .await
-                            .remove(0)
-                            .result
-                    };
-                    if let Some(id) = id {
-                        // Always wrap as `type:"reply"` with the verb's
-                        // reply inside `data`. Verb-level errors travel
-                        // inside `data.error` (Python's wire shape); the
-                        // separate `type:"error"` frame is reserved for
-                        // out-of-band failures the caller's promise
-                        // can't resolve from data alone.
-                        let frame = serde_json::json!({
-                            "type": "reply",
-                            "id": id,
-                            "data": reply,
-                        });
-                        let _ = out.send(frame.to_string()).await;
-                    }
-                });
-                track_call(&state.kernel, &pending_calls, handle);
-            }
-            "emit" => {
-                let Some(target) = target else { continue };
-                // Inline-await — emit is a state mutation, not a long
-                // round-trip; no need to spawn.
-                fantastic_kernel::send::with_sender(sender_for_scope, async {
-                    kernel.emit(&target, payload).await
-                })
-                .await;
-            }
-            "watch" => {
-                let Some(src) = env.get("src").and_then(Value::as_str).map(AgentId::from) else {
-                    continue;
-                };
-                let mut w = watching.lock().await;
-                if !w.contains(&src) {
-                    // UNDER THE LEG'S OWN IDENTITY, so the kernel's gate sees a
-                    // real caller. Without this `current_sender()` is None, the
-                    // kernel reads the frame as an OPERATOR watch, and the
-                    // two-sided gate never runs — which is exactly how a leg
-                    // granted only `assistant:[send]` could mirror any agent's
-                    // inbox and read the model's prompt out of it.
-                    let denial = fantastic_kernel::send::with_sender(
-                        host_agent_id.clone(),
-                        kernel.watch(&src, client_id.clone()),
-                    )
-                    .await;
-                    if let Some(d) = denial {
-                        let id = env.get("id").cloned().unwrap_or(Value::Null);
-                        let _ = out
-                            .send(json!({"type": "error", "id": id, "data": d}).to_string())
-                            .await;
-                        continue;
-                    }
-                    w.insert(src);
-                }
-            }
-            "unwatch" => {
-                let Some(src) = env.get("src").and_then(Value::as_str).map(AgentId::from) else {
-                    continue;
-                };
-                let mut w = watching.lock().await;
-                if w.remove(&src) {
-                    kernel.unwatch(&src, &client_id).await;
-                }
-            }
-            "state_subscribe" => {
-                // The state stream is a KERNEL-WIDE read: every send's sender,
-                // target, verb and payload summary, for every agent in the tree.
-                // So it is gated on the ROOT, and `state_subscribe` is a
-                // privileged verb so a wildcard never covers it. An ingress rule
-                // answers "may this client reach this leg"; it says nothing
-                // about what the client may then READ.
-                let denial = fantastic_kernel::send::with_sender(host_agent_id.clone(), async {
-                    kernel.authorize_state_subscribe(&host_agent_id)
-                })
-                .await;
-                if let Some(d) = denial {
-                    let id = env.get("id").cloned().unwrap_or(Value::Null);
-                    let _ = out
-                        .send(json!({"type": "error", "id": id, "data": d}).to_string())
-                        .await;
-                    continue;
-                }
-                // Python parity (web/_proxy.py:231-256): first emit a
-                // `state_snapshot` frame carrying every agent's identity
-                // so the consumer (a state-watching view) can bootstrap before
-                // the first event arrives, THEN register a callback
-                // pumping subsequent `state_event` frames.
-                let snapshot_frame = serde_json::json!({
-                    "type": "state_snapshot",
-                    "agents": kernel.state_snapshot(),
-                });
-                if let Ok(line) = serde_json::to_string(&snapshot_frame) {
-                    let _ = out_tx.send(line).await;
-                }
-                let out_for_cb = out_tx.clone();
-                let kernel_for_cb = Arc::clone(&kernel);
-                let token = kernel.add_state_subscriber(Arc::new(move |event: &Value| {
-                    let mut frame = match event.clone() {
-                        Value::Object(m) => m,
-                        _ => return,
-                    };
-                    // Lazy `name` fill — Python derives it from the
-                    // agent record if the state event lacks one, so the
-                    // browser always renders with a single shape. The
-                    // lookup is cheap (DashMap by id) and only fires for
-                    // events missing the field.
-                    if !frame.contains_key("name") {
-                        if let Some(aid) = frame.get("agent_id").and_then(Value::as_str) {
-                            let aid_key = AgentId::from(aid);
-                            if let Some(a) = kernel_for_cb.agents.get(&aid_key) {
-                                let name = a.display_name().unwrap_or_else(|| a.id.0.clone());
-                                frame.insert("name".into(), Value::String(name));
-                            }
-                        }
-                    }
-                    frame.insert("type".to_string(), Value::String("state_event".into()));
-                    let line = match serde_json::to_string(&Value::Object(frame)) {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    // Best-effort: drop if the WS drain channel is gone
-                    // (disconnected mid-fanout) — the unsubscribe will
-                    // remove this callback shortly anyway.
-                    let _ = out_for_cb.try_send(line);
-                }));
-                state_unsubs
-                    .lock()
-                    .expect("state_unsubs poisoned")
-                    .push(token);
-            }
-            "state_unsubscribe" => {
-                let tokens: Vec<_> = state_unsubs
-                    .lock()
-                    .expect("state_unsubs poisoned")
-                    .drain(..)
-                    .collect();
-                for t in tokens {
-                    kernel.remove_state_subscriber(t);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // ─── Cleanup on disconnect (Python: `finally` block) ──────────
-    // 1. Cancel any in-flight `call` handlers so kernel.send tasks
-    //    unwind (ollama_backend honors CancelledError, releases its
-    //    FIFO lock, emits done).
-    {
-        let ids: Vec<_> = {
-            let mut p = pending_calls.lock().expect("pending poisoned");
-            p.drain(..).collect()
-        };
-        for t in ids {
-            // Through the TABLE — `on_cancel` runs, as for any cancel.
-            state.kernel.cancel_task(&t).await;
-        }
-    }
-    // 2. Unwatch every src this WS subscribed to.
-    {
-        let srcs: Vec<AgentId> = watching.lock().await.drain().collect();
-        for src in srcs {
-            state.kernel.unwatch(&src, &client_id).await;
-        }
-    }
-    // 3. Unregister any state-stream callbacks tied to this WS.
-    {
-        let tokens: Vec<_> = state_unsubs
-            .lock()
-            .expect("state_unsubs poisoned")
-            .drain(..)
-            .collect();
-        for t in tokens {
-            state.kernel.remove_state_subscriber(t);
-        }
-    }
-    // 4. Drop the synthetic inbox + abort the drain/send tasks.
-    state.kernel.inboxes.remove(&client_id);
-    drain_task.abort();
-    send_task.abort();
-}
-
-/// Maximum size of a single binary WS frame's blob payload. Frames
-/// larger than this are rejected with an error reply.
-#[cfg(not(test))]
-const MAX_CHUNK_SIZE: usize = 1_048_576; // 1 MB
-
-/// Maximum total size of a reassembled chunked upload. Sum of all
-/// chunks; chunks that would push past this cap are rejected.
-#[cfg(not(test))]
-const MAX_UPLOAD_SIZE: usize = 100 * 1_048_576; // 100 MB
-
-// UNDER TEST THE CAPS ARE TINY. The cap check counts REAL bytes, so proving
-// the total cap fires meant actually pushing 101 MB across a websocket — and in
-// an unoptimised build, with every client byte masked, that ONE test cost 83
-// seconds of the rust suite's 123. What is under test is the ENFORCEMENT (does
-// the projected sum trip, does the frame get refused, is the entry dropped) —
-// never the constant's value, which no assertion reads. Shrinking it exercises
-// the identical branches for a few kilobytes.
-#[cfg(test)]
-const MAX_CHUNK_SIZE: usize = 4 * 1024; // 4 KB
-#[cfg(test)]
-const MAX_UPLOAD_SIZE: usize = 16 * 1024; // 16 KB
-
-/// Maximum concurrent in-flight chunked uploads per WS connection.
-const MAX_CONCURRENT_UPLOADS: usize = 16;
-
-/// Per-upload reassembly buffer. Lives in a per-WS map keyed by
-/// `upload_id`; drops on WS disconnect or on successful final dispatch.
-struct ChunkBuffer {
-    /// Chunks indexed by `chunk_index`. BTreeMap keeps them sorted
-    /// so concatenation is in-order regardless of arrival order.
-    chunks: std::collections::BTreeMap<u32, Vec<u8>>,
-    /// Declared total chunk count (must match across every chunk).
-    total: u32,
-    /// Cumulative byte count across all chunks received so far.
-    cumulative_bytes: usize,
-    /// First chunk's header (with chunking fields stripped) — used as
-    /// the dispatched header when the upload finalizes.
-    base_header: Value,
-}
-
-/// Decode a binary WS frame and dispatch it through
-/// [`Kernel::send_with_binary`]. Frame shape (matches Python's wire):
-///
-/// ```text
-/// [4-byte BE u32 header_len][header_len bytes JSON header][rest = blob]
-/// ```
-///
-/// `header` must carry at least `target` (agent id); `id` (if present)
-/// rides through to the reply frame so callers can correlate.
-///
-/// ## Chunked uploads (opt-in)
-///
-/// For payloads larger than `MAX_CHUNK_SIZE`, callers can chunk by
-/// adding these optional fields to the header:
-///
-/// - `upload_id`: stable string tying all chunks of one upload
-/// - `chunk_index`: 0-based index of this chunk
-/// - `total_chunks`: declared chunk count (must match across chunks)
-/// - `final`: `true` on the last chunk; triggers reassembly + dispatch
-///
-/// Server-side: chunks accumulate in a per-WS `pending_uploads` map.
-/// On the final chunk, the full blob is concatenated in chunk-index
-/// order, the chunking fields are stripped from the header, and the
-/// dispatch happens via `kernel.send_with_binary` exactly as if a
-/// single-frame upload had been sent.
-///
-/// Frames without `upload_id` take the single-frame fast path
-/// (current behaviour, byte-compatible with Python's wire).
-///
-/// On any decode error the frame is dropped silently (we log a debug
-/// trace) — the WS stays open. The shape is documented + a single
-/// malformed frame from a JS client shouldn't kill the channel.
-/// Send a binary-dispatch reply on the correct WS channel. An empty `body` is a
-/// plain `{type:reply, id, data}` TEXT frame; a non-empty body (e.g.
-/// `file_bridge.read_stream` bytes) is a BINARY frame `[4B len|header|body]` (the
-/// codec) sent on `bin_tx` — raw bytes, never base64. Mirrors py web_ws.
-async fn send_binary_reply(
-    out_tx: &tokio::sync::mpsc::Sender<String>,
-    bin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
-    id: Option<Value>,
-    reply: Value,
-    body: Vec<u8>,
-) {
-    if body.is_empty() {
-        let frame = json!({ "type": "reply", "id": id, "data": reply }).to_string();
-        let _ = out_tx.send(frame).await;
-        return;
-    }
-    // Binary reply: the body rides raw at `data.bytes`.
-    let mut header = json!({ "type": "reply", "id": id, "data": reply });
-    header["_binary_path"] = json!("data.bytes");
-    let wire = fantastic_io_bridge::codec::encode_binary_frame(&header, &body);
-    let _ = bin_tx.send(wire).await;
-}
-
-async fn handle_binary_frame(
-    state: &AppState,
-    client_id: &AgentId,
-    out_tx: &tokio::sync::mpsc::Sender<String>,
-    bin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
-    pending_uploads: &Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>>,
-    bytes: Vec<u8>,
-) {
-    if bytes.len() < 4 {
-        tracing::debug!(
-            len = bytes.len(),
-            "ws binary frame too short for header_len"
-        );
-        return;
-    }
-    let hdr_len = u32::from_be_bytes(match bytes[0..4].try_into() {
-        Ok(arr) => arr,
-        Err(_) => {
-            tracing::debug!("ws binary frame: failed to read header_len");
-            return;
-        }
-    }) as usize;
-    if 4usize.saturating_add(hdr_len) > bytes.len() {
-        tracing::debug!(
-            hdr_len,
-            frame_len = bytes.len(),
-            "ws binary frame: header_len exceeds frame"
-        );
-        return;
-    }
-    let header: Value = match serde_json::from_slice(&bytes[4..4 + hdr_len]) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(error = %e, "ws binary frame: header decode failed");
-            return;
-        }
-    };
-    let blob = bytes[4 + hdr_len..].to_vec();
-    let id = header.get("id").cloned();
-
-    // Per-frame chunk size cap (applies to both single-frame uploads and
-    // individual chunks of a chunked upload).
-    if blob.len() > MAX_CHUNK_SIZE {
-        let _ = out_tx
-            .send(
-                json!({
-                    "type": "error",
-                    "id": id,
-                    "error": format!(
-                        "binary frame: blob {} bytes exceeds chunk cap {}",
-                        blob.len(),
-                        MAX_CHUNK_SIZE,
-                    ),
-                })
-                .to_string(),
-            )
-            .await;
-        return;
-    }
-
-    // Chunked upload? Check for upload_id; otherwise fall through to
-    // the single-frame fast path.
-    let upload_id = header
-        .get("upload_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-
-    if let Some(upload_id) = upload_id {
-        handle_chunked_frame(
-            state,
-            client_id,
-            out_tx,
-            bin_tx,
-            pending_uploads,
-            upload_id,
-            header,
-            id.unwrap_or(Value::Null),
-            blob,
-        )
-        .await;
-        return;
-    }
-
-    // Single-frame upload — existing dispatch path.
-    let Some(target_str) = header.get("target").and_then(Value::as_str) else {
-        tracing::debug!("ws binary frame: header missing target");
-        return;
-    };
-    let target = AgentId::from(target_str);
-
-    let kernel = Arc::clone(&state.kernel);
-    let sender_for_scope = client_id.clone();
-    let out = out_tx.clone();
-    let bin = bin_tx.clone();
-    let header_for_dispatch = header.clone();
-    tokio::spawn(async move {
-        let (reply, body) = fantastic_kernel::send::with_sender(sender_for_scope, async {
-            kernel
-                .send_with_binary(&target, header_for_dispatch, blob)
-                .await
-        })
-        .await;
-        send_binary_reply(&out, &bin, id, reply, body).await;
-    });
-}
-
-/// Pure (no-I/O) chunk-ingest step — inserts one chunk into the
-/// per-connection upload map and, once **all** `total_chunks` are
-/// present, removes the entry and returns the assembled
-/// `(base_header, full_blob)`. Assembly is **order-independent**: the
-/// `final` flag is informational, `total_chunks` is the contract, so an
-/// early `final` chunk is simply held until the rest arrive (chunks live
-/// in a `BTreeMap`, so concatenation is always index-ordered).
-///
-/// Returns `Ok(None)` to ack-and-wait, `Ok(Some(..))` when the upload is
-/// complete, or `Err` on a concurrent-cap / total-mismatch / size-cap
-/// violation (the map entry is dropped on Err). Extracted from
-/// `handle_chunked_frame` so it's unit-testable.
-fn ingest_chunk(
-    map: &mut std::collections::HashMap<String, ChunkBuffer>,
-    upload_id: &str,
-    chunk_index: u32,
-    total_chunks: u32,
-    blob: Vec<u8>,
-    base_header: &Value,
-) -> Result<Option<(Value, Vec<u8>)>, String> {
-    // Cap concurrent uploads BEFORE inserting a new id.
-    if !map.contains_key(upload_id) && map.len() >= MAX_CONCURRENT_UPLOADS {
-        return Err(format!(
-            "chunked upload: concurrent upload cap {MAX_CONCURRENT_UPLOADS} reached",
-        ));
-    }
-    let entry_existed = map.contains_key(upload_id);
-    let buf = map
-        .entry(upload_id.to_string())
-        .or_insert_with(|| ChunkBuffer {
-            chunks: std::collections::BTreeMap::new(),
-            total: total_chunks,
-            cumulative_bytes: 0,
-            base_header: base_header.clone(),
-        });
-
-    // total_chunks must agree across every chunk.
-    if entry_existed && buf.total != total_chunks {
-        let prior = buf.total;
-        map.remove(upload_id);
-        return Err(format!(
-            "chunked upload: total_chunks mismatch (saw {prior}, now {total_chunks})",
-        ));
-    }
-    let projected = buf.cumulative_bytes.saturating_add(blob.len());
-    if projected > MAX_UPLOAD_SIZE {
-        map.remove(upload_id);
-        return Err(format!(
-            "chunked upload: projected {projected} bytes exceeds total cap {MAX_UPLOAD_SIZE}",
-        ));
-    }
-    buf.cumulative_bytes = projected;
-    buf.chunks.insert(chunk_index, blob);
-
-    // Assemble once every chunk is present — regardless of arrival order
-    // or which frame carried `final`.
-    if buf.chunks.len() as u32 == buf.total {
-        let removed = map.remove(upload_id).expect("entry just inserted");
-        let mut full = Vec::with_capacity(removed.cumulative_bytes);
-        for (_, chunk) in removed.chunks {
-            full.extend_from_slice(&chunk);
-        }
-        Ok(Some((removed.base_header, full)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Handle one chunk of a chunked upload: validate, delegate assembly to
-/// `ingest_chunk`, ack non-final chunks, and dispatch once the upload is
-/// complete. Per-WS state, no global locks.
-#[allow(clippy::too_many_arguments)]
-async fn handle_chunked_frame(
-    state: &AppState,
-    client_id: &AgentId,
-    out_tx: &tokio::sync::mpsc::Sender<String>,
-    bin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
-    pending_uploads: &Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>>,
-    upload_id: String,
-    mut header: Value,
-    id: Value,
-    blob: Vec<u8>,
-) {
-    let chunk_index = match header.get("chunk_index").and_then(Value::as_u64) {
-        Some(n) if n <= u32::MAX as u64 => n as u32,
-        _ => {
-            let _ = out_tx
-                .send(
-                    json!({
-                        "type": "error",
-                        "id": id,
-                        "error": "chunked upload: chunk_index required (u32)",
-                    })
-                    .to_string(),
-                )
-                .await;
-            return;
-        }
-    };
-    let total_chunks = match header.get("total_chunks").and_then(Value::as_u64) {
-        Some(n) if n >= 1 && n <= u32::MAX as u64 => n as u32,
-        _ => {
-            let _ = out_tx
-                .send(
-                    json!({
-                        "type": "error",
-                        "id": id,
-                        "error": "chunked upload: total_chunks required (u32 ≥ 1)",
-                    })
-                    .to_string(),
-                )
-                .await;
-            return;
-        }
-    };
-    // The header `final` flag is informational — assembly is triggered
-    // by chunk count vs `total_chunks` (the contract), so an early
-    // `final` is held until the remaining chunks arrive (order-agnostic).
-
-    if chunk_index >= total_chunks {
-        let _ = out_tx
-            .send(
-                json!({
-                    "type": "error",
-                    "id": id,
-                    "error": format!(
-                        "chunked upload: chunk_index {chunk_index} >= total_chunks {total_chunks}",
-                    ),
-                })
-                .to_string(),
-            )
-            .await;
-        return;
-    }
-
-    // Build base_header (header with chunking fields stripped) before we
-    // borrow it for the assembled dispatch later.
-    if let Some(obj) = header.as_object_mut() {
-        obj.remove("upload_id");
-        obj.remove("chunk_index");
-        obj.remove("total_chunks");
-        obj.remove("final");
-    }
-
-    // Ingest under the per-connection lock. `ingest_chunk` returns the
-    // assembled (base_header, blob) once every chunk is present, `None`
-    // to ack-and-wait, or `Err` on a cap/mismatch violation.
-    let outcome: Result<Option<(Value, Vec<u8>)>, String> = {
-        let mut map = pending_uploads.lock().expect("pending_uploads poisoned");
-        ingest_chunk(
-            &mut map,
-            &upload_id,
-            chunk_index,
-            total_chunks,
-            blob,
-            &header,
-        )
-    };
-
-    let assembled: Option<(Value, Vec<u8>)> = match outcome {
-        Ok(v) => v,
-        Err(msg) => {
-            let _ = out_tx
-                .send(
-                    json!({
-                        "type": "error",
-                        "id": id,
-                        "error": msg,
-                    })
-                    .to_string(),
-                )
-                .await;
-            return;
-        }
-    };
-
-    match assembled {
-        Some((base_header, full_blob)) => {
-            // Dispatch the reassembled upload exactly like a single-frame.
-            let Some(target_str) = base_header.get("target").and_then(Value::as_str) else {
-                let _ = out_tx
-                    .send(
-                        json!({
-                            "type": "error",
-                            "id": id,
-                            "error": "chunked upload: assembled header missing target",
-                        })
-                        .to_string(),
-                    )
-                    .await;
-                return;
-            };
-            let target = AgentId::from(target_str);
-            let kernel = Arc::clone(&state.kernel);
-            let sender_for_scope = client_id.clone();
-            let out = out_tx.clone();
-            let bin = bin_tx.clone();
-            tokio::spawn(async move {
-                let (reply, body) = fantastic_kernel::send::with_sender(sender_for_scope, async {
-                    kernel
-                        .send_with_binary(&target, base_header, full_blob)
-                        .await
-                })
-                .await;
-                send_binary_reply(&out, &bin, Some(id), reply, body).await;
-            });
-        }
-        None => {
-            // Non-final chunk — emit a chunk_ack so the client can
-            // flow-control its upload pipeline.
-            let _ = out_tx
-                .send(
-                    json!({
-                        "type": "chunk_ack",
-                        "upload_id": upload_id,
-                        "chunk_index": chunk_index,
-                    })
-                    .to_string(),
-                )
-                .await;
-        }
-    }
-}
-
-// ─── REST surface ───────────────────────────────────────────────────
-//
-// POST /<rest_id>/<target_id> body=<payload-json> → kernel.send → JSON.
-// GET  /<rest_id>/_reflect[/<target_id>][?readme=1]               → reflect helper.
-
-#[derive(serde::Deserialize)]
-struct ReflectQuery {
-    readme: Option<u8>,
-}
-
-// (REST handler implementations live above in the dynamic-mount block:
-// `serve_rest_post_dynamic`, `serve_rest_reflect_root_dynamic`,
-// `serve_rest_reflect_dynamic`. The previous static-route versions
-// expected the `:rest_id` segment in the path; that segment is now
-// baked into the mount-time path literal, so no static handlers are
-// needed.)
-
-// base64 is a transitive dep — re-declare via fantastic-kernel's
-// indirect graph. Pull it in via Cargo.toml if not already there.
-#[allow(unused_imports)]
-use base64 as _;
 
 #[cfg(test)]
 mod tests;

@@ -22,17 +22,18 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::events::{emit_status, to_caller, CallerRoute};
-use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::events::emit_status;
+use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use fantastic_ai_core::retrieval;
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
-use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
+use fantastic_bundle::py_repr_value;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -50,11 +51,16 @@ pub const DEFAULT_ENDPOINT: &str = "https://integrate.api.nvidia.com/v1";
 /// path fails loud when the model is unset/sentinel.
 pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
 
+/// What `reflect` says this agent IS — python `nvidia_nim_backend/tools.py`'s
+/// `sentence`, verbatim.
+pub const SENTENCE: &str =
+    "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).";
+
 /// Headless / REPL caller default.
 pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
 
 /// Hard per-generation ceiling (seconds). Releases the FIFO lock.
-pub const SEND_TIMEOUT_SECS: u64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
+pub const SEND_TIMEOUT_SECS: f64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
 
 /// Max wait honored from a `Retry-After` header on 429.
 pub const RATE_LIMIT_MAX_WAIT_SECS: u64 = 60;
@@ -67,8 +73,10 @@ pub const RATE_LIMIT_MAX_RETRIES: u32 = 1;
 
 /// Per-backend config: per-client-inbox routing, serial tool dispatch.
 const CFG: BackendConfig = BackendConfig {
-    route: CallerRoute::PerClientInbox,
     name: "nvidia_nim_backend",
+    // python `require_provider=True` + `provider_missing_error`: the key is
+    // the precondition, and `send` refuses with this text after the guard.
+    provider_missing_error: Some(NO_KEY_ERROR),
 };
 
 // ── NIM-local: Bearer HTTP client cache ─────────────────────────────
@@ -141,7 +149,7 @@ fn get_or_build_client(self_id: &AgentId) -> Result<Arc<reqwest::Client>, String
         return Ok(c);
     }
     let Some(key) = read_api_key() else {
-        return Err(no_key_error());
+        return Err(NO_KEY_ERROR.to_string());
     };
     let client = Arc::new(build_client(&key)?);
     HTTP_CLIENTS
@@ -169,10 +177,11 @@ fn read_api_key() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// The refusal for an unwired connector — names the variable to set.
-fn no_key_error() -> String {
-    format!("nvidia_nim_backend: no api key — set {KEY_VAR}")
-}
+/// The refusal for an unwired connector — names the variable to set. python
+/// `_no_key_error()`, handed to `send` as the config's `provider_missing_error`
+/// so the refusal is minted where python mints it: inside the shared verb,
+/// after the recursion guard, with the caller's `client_id`.
+const NO_KEY_ERROR: &str = "nvidia_nim_backend: no api key — set NVIDIA_API_KEY";
 
 // ── NIM provider (Bearer + SSE + 429 retry) ─────────────────────────
 
@@ -204,12 +213,13 @@ impl Provider for NimProvider {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
         // NO guessy default: fail loud before the wire if no model is named.
         if self.model.is_empty() || self.model == DEFAULT_MODEL {
-            return Err("nvidia_nim_backend: no `model` set — this connector does \
-                not guess one. Name a model on the agent record (model=...)."
-                .to_string());
+            return Err(ProviderError::raised(
+                "nvidia_nim_backend: no `model` set — this connector does \
+                 not guess one. Name a model on the agent record (model=...).",
+            ));
         }
         // RAW: no native `tools`/`tool_choice` — ai-core parses the `<tool_call>`
         // envelope out of the streamed text.
@@ -222,32 +232,25 @@ impl Provider for NimProvider {
         // rate-limit say + status during the backoff.
         let mut attempt: u32 = 0;
         let resp = loop {
-            let client = get_or_build_client(&self.self_id)?;
+            let client = get_or_build_client(&self.self_id).map_err(ProviderError::raised)?;
             let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
             let resp = client
                 .post(&url)
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("http: {}", error_chain(&e)))?;
+                .map_err(|e| ProviderError::raised(format!("http: {}", error_chain(&e))))?;
             let status = resp.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 if attempt < RATE_LIMIT_MAX_RETRIES {
                     let wait = parse_retry_after(resp.headers());
                     attempt += 1;
                     drop(resp);
-                    to_caller(
-                        &self.kernel,
-                        &self.self_id,
-                        &self.client_id,
-                        CFG.route,
-                        json!({
-                            "type": "say",
-                            "text": format!("[provider rate limited (429); waiting {wait}s]"),
-                            "source": self.self_id.as_str(),
-                        }),
-                    )
-                    .await;
+                    // STATUS ONLY. python `_stream_with_rate_limit_retry` emits
+                    // one `status(thinking, waiting_on='rate_limit', wait_s)` and
+                    // nothing else; the `say` rust pushed alongside it put a
+                    // model-visible line in the caller's stream that the
+                    // canonical runtime never writes.
                     let mut extras = Map::new();
                     extras.insert("waiting_on".into(), json!("rate_limit"));
                     extras.insert("wait_s".into(), json!(wait));
@@ -256,7 +259,6 @@ impl Provider for NimProvider {
                         &state::state_for(&self.self_id),
                         &self.self_id,
                         &self.client_id,
-                        CFG.route,
                         "thinking",
                         extras,
                     )
@@ -264,83 +266,139 @@ impl Provider for NimProvider {
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                     continue;
                 } else {
+                    // MAPPED — python's `_map_error` turns the provider's
+                    // `httpx.HTTPStatusError` into this sentence and `send`
+                    // RETURNS it; only this backend has a mapper.
                     let wait = parse_retry_after(resp.headers());
-                    return Err(format!("send: rate limited (429); retry in {wait}s"));
+                    return Err(ProviderError::mapped(format!(
+                        "send: rate limited (429); retry in {wait}s"
+                    )));
                 }
             }
             if !status.is_success() {
-                return Err(format!("send: provider HTTP {}", status.as_u16()));
+                // MAPPED, as above — `_map_error`'s non-429 branch.
+                return Err(ProviderError::mapped(format!(
+                    "send: provider HTTP {}",
+                    status.as_u16()
+                )));
             }
             break resp;
         };
 
-        // Drain the SSE body fully, parse, finalize tool-calls.
-        let events = consume_sse(resp).await?;
-        Ok(Box::pin(futures_util::stream::iter(events)))
+        Ok(consume_sse(resp))
     }
 }
 
-/// Drain the SSE body, split into `data:` lines, parse JSON, emit content
-/// tokens in order. PURE RAW TEXT — no native `tool_calls` are read; ai-core
-/// parses the `<call name=…>` envelope out of the token text.
-async fn consume_sse(
-    resp: reqwest::Response,
-) -> Result<Vec<Result<ProviderEvent, String>>, String> {
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
-    let mut done_marker_seen = false;
-    // ONE wrapper for the whole pass — the reasoning span is per TURN.
-    let mut wrap = ThinkWrap::new();
+/// The SSE body as a LIVE stream of content tokens.
+///
+/// PER LINE, NOT PER BODY. This used to drain the whole response into a `Vec`
+/// and hand it over only once the stream had ENDED — so nothing reached
+/// `text_so_far`, the `token` events or the `streaming` phase until the
+/// completion was already finished, and a long turn was indistinguishable from
+/// a stalled request. Python's provider is an async generator over
+/// `resp.aiter_lines()`; this yields on the same boundary.
+///
+/// PURE RAW TEXT — no native `tool_calls` are read; ai-core parses the
+/// `<call name=…>` envelope out of the token text.
+fn consume_sse(resp: reqwest::Response) -> ProviderStream {
+    let inner = resp.bytes_stream();
+    // `pending` holds the events decoded from ONE chunk: a chunk can carry
+    // several lines, and each line several tokens.
+    let init = (inner, SseState::new(), VecDeque::new(), false);
+    Box::pin(futures_util::stream::unfold(
+        init,
+        |(mut inner, mut st, mut pending, mut finished)| async move {
+            loop {
+                if let Some(ev) = pending.pop_front() {
+                    return Some((ev, (inner, st, pending, finished)));
+                }
+                if finished {
+                    return None;
+                }
+                let Some(chunk_res) = inner.next().await else {
+                    finished = true;
+                    st.close_span(&mut pending);
+                    continue;
+                };
+                match chunk_res {
+                    Ok(bytes) => st.buf.extend_from_slice(&bytes),
+                    Err(e) => {
+                        finished = true;
+                        pending.push_back(Err(ProviderError::raised(format!(
+                            "stream: {}",
+                            error_chain(&e)
+                        ))));
+                        continue;
+                    }
+                }
+                while let Some(nl) = st.buf.iter().position(|b| *b == b'\n') {
+                    let line_bytes: Vec<u8> = st.buf.drain(..=nl).collect();
+                    let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                        .trim_end_matches('\r')
+                        .to_string();
+                    if st.decode_line(&line, &mut pending) {
+                        finished = true;
+                        st.close_span(&mut pending);
+                        break;
+                    }
+                }
+            }
+        },
+    ))
+}
 
-    while let Some(chunk_res) = stream.next().await {
-        let bytes = match chunk_res {
-            Ok(b) => b,
-            Err(e) => return Err(format!("stream: {}", error_chain(&e))),
+/// Per-line SSE decode state — the buffer plus the per-TURN reasoning span.
+struct SseState {
+    buf: Vec<u8>,
+    wrap: ThinkWrap,
+}
+
+impl SseState {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            wrap: ThinkWrap::new(),
+        }
+    }
+
+    /// Decode ONE line into the tokens it produces. `true` = the `[DONE]`
+    /// marker: the turn is over.
+    fn decode_line(
+        &mut self,
+        line: &str,
+        out: &mut VecDeque<Result<ProviderEvent, ProviderError>>,
+    ) -> bool {
+        if line.is_empty() || !line.starts_with("data:") {
+            return false;
+        }
+        let data = line[5..].trim();
+        if data.is_empty() {
+            return false;
+        }
+        if data == "[DONE]" {
+            return true;
+        }
+        let Ok(obj) = serde_json::from_str::<Value>(data) else {
+            return false;
         };
-        buf.extend_from_slice(&bytes);
-        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
-            let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
-            let line_owned = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
-                .trim_end_matches('\r')
-                .to_string();
-            let line = line_owned.as_str();
-            if line.is_empty() || !line.starts_with("data:") {
-                continue;
-            }
-            let data = line[5..].trim();
-            if data.is_empty() {
-                continue;
-            }
-            if data == "[DONE]" {
-                done_marker_seen = true;
-                break;
-            }
-            let obj: Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let Some(choices) = obj.get("choices").and_then(Value::as_array) else {
-                continue;
-            };
-            let Some(first) = choices.first() else {
-                continue;
-            };
-            let delta = first.get("delta").cloned().unwrap_or(Value::Null);
-            decode_delta_into(&delta, &mut wrap, &mut out);
-        }
-        if done_marker_seen {
-            break;
-        }
+        let Some(choices) = obj.get("choices").and_then(Value::as_array) else {
+            return false;
+        };
+        let Some(first) = choices.first() else {
+            return false;
+        };
+        let delta = first.get("delta").cloned().unwrap_or(Value::Null);
+        decode_delta_into(&delta, &mut self.wrap, out);
+        false
     }
 
-    // The turn ended while still reasoning (content never started) — close the
-    // span exactly once so the deliberation is strippable.
-    if let Some(m) = wrap.close_marker() {
-        out.push(Ok(ProviderEvent::Token(m.to_string())));
+    /// The turn ended while still reasoning (content never started) — close the
+    /// span exactly once so the deliberation is strippable.
+    fn close_span(&mut self, out: &mut VecDeque<Result<ProviderEvent, ProviderError>>) {
+        if let Some(m) = self.wrap.close_marker() {
+            out.push_back(Ok(ProviderEvent::Token(m.to_string())));
+        }
     }
-
-    Ok(out)
 }
 
 /// Decode ONE OpenAI-style streaming `delta` into content tokens, reading BOTH
@@ -359,13 +417,13 @@ async fn consume_sse(
 fn decode_delta_into(
     delta: &Value,
     wrap: &mut ThinkWrap,
-    out: &mut Vec<Result<ProviderEvent, String>>,
+    out: &mut VecDeque<Result<ProviderEvent, ProviderError>>,
 ) {
     // DELEGATES to the shared decode: NIM and `llama-server` speak the same
     // wire, and two copies would drift on the one thing this gets right —
     // reading BOTH channels, not just `content`.
     for piece in fantastic_ai_core::think::decode_openai_delta(delta, wrap) {
-        out.push(Ok(ProviderEvent::Token(piece)));
+        out.push_back(Ok(ProviderEvent::Token(piece)));
     }
 }
 
@@ -392,10 +450,13 @@ impl Bundle for NvidiaNimBundle {
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel).await,
-            "shutdown" => Value::Null,
+            "reflect" => reflect_reply(agent_id, kernel),
             // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`.
             "boot" => {
+                // A BOOT IS A NEW INCARNATION (python `_make_boot`): a reply
+                // answering a call the PREVIOUS one made is recorded as a row
+                // and wakes no turn.
+                state::bump_incarnation(agent_id);
                 if fantastic_ai_core::history::load_history(
                     agent_id,
                     kernel,
@@ -410,13 +471,13 @@ impl Bundle for NvidiaNimBundle {
                     retrieval::context_recall(agent_id, &json!({}), kernel, p.as_ref()).await
                 }
             }
-            "send" => send_reply(agent_id, payload, kernel).await,
+            "send" => send_reply(agent_id, payload, kernel).await?,
             // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
             // record, this agent answers it by THINKING, and the asker writes
             // the same call either way.
             "inquiry" => match verbs::inquiry_open(payload) {
                 Err(refusal) => refusal,
-                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await, payload),
+                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await?, payload),
             },
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
@@ -430,7 +491,14 @@ impl Bundle for NvidiaNimBundle {
             }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
-            other => json!({"error": format!("nvidia_nim_backend: unknown type {other:?}")}),
+            // python's VERBS map has no `shutdown` — it is an unknown type like
+            // any other, and the value is rendered with python's `repr`.
+            _ => json!({
+                "error": format!(
+                    "nvidia_nim_backend: unknown type {}",
+                    py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
+                )
+            }),
         };
         Ok(Some(reply))
     }
@@ -454,7 +522,7 @@ impl Bundle for NvidiaNimBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
         Ok(())
     }
 }
@@ -479,65 +547,31 @@ fn build_provider(
     }))
 }
 
-async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+async fn send_reply(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Result<Value, BundleError> {
     let client_id = helpers::safe_client(
         payload
             .get("client_id")
             .and_then(Value::as_str)
             .unwrap_or(""),
     );
-    let Some(provider) = build_provider(agent_id, kernel, &client_id) else {
-        return json!({ "error": no_key_error() });
-    };
+    // NO KEY = NO PROVIDER, and the refusal is `send`'s to write (python
+    // `require_provider`): it belongs after the recursion guard and carries the
+    // `client_id`, neither of which a backend-local early return can do.
+    let provider = build_provider(agent_id, kernel, &client_id);
     verbs::send(provider, agent_id, payload, kernel, CFG).await
 }
 
-async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
-    let model = helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL);
-    let file_bridge_id_v = helpers::meta_string(agent_id, kernel, "file_bridge_id");
-    let has_key = read_api_key().is_some();
-    let generating = state::is_generating(agent_id);
-    let meta = helpers::agent_meta(agent_id, kernel);
-    let context_window = fantastic_ai_core::context::resolve_context_window(&meta);
-    let context_strategy = meta
-        .get("context_strategy")
-        .and_then(Value::as_str)
-        .unwrap_or("compact")
-        .to_string();
-    json!({
-        "id": agent_id.as_str(),
-        "sentence": "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
-        "model": model,
-        "endpoint": endpoint,
-        "file_bridge_id": file_bridge_id_v,
-        "has_api_key": has_key,
-        "generating": generating,
-        "context_window": context_window,
-        "context_strategy": context_strategy,
-        "verbs": {
-            "reflect": "Identity + model + endpoint + has_api_key + generating + file_bridge_id binding. No args. `has_api_key` reports whether the ENV key is set; the value is NEVER returned.",
-            "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Failfast if file_bridge_id unset OR no api key in the environment.",
-            "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
-            "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
-            "pull": "args: pid:int (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with offset: next_offset until eof.",
-            "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int?, width:int? (chars of each matched line, default 200). Finds the LINE that mentions something, wherever it is. Returns {matches:[{id, line, text}], total, truncated}.",
-            "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuilds this agent's VIEW from its store: fits the head to the budget at digest resolution, asks the model which rows it wants in full, persists the id list, logs the decision as a row. Returns {kept, expanded, dropped, budget, why, degraded}.",
-            "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
-            "status": "args: client_id:str?. Privacy-filtered queue/in-flight snapshot.",
-        },
-        "cancel": fantastic_ai_core::CANCEL_DOC,
-        "emits": {
-            "queued": "{type:'queued', source, client_id, send_id} — back-compat queue notice.",
-            "token": "{type:'token', text, source, client_id} — streaming chunk.",
-            "say": "{type:'say', text, source, client_id} — per call summary plus rate-limit notices.",
-            "status": "{type:'status', source, client_id, ts, phase, detail} — phase machine: queued|thinking|streaming|tool_calling|done. detail.waiting_on='rate_limit' + wait_s during 429 backoff.",
-            "done": "{type:'done', source, client_id} — back-compat end marker.",
-            "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called). Pull counterpart: the context_status verb.",
-        },
-        "concurrency": "Per-backend FIFO lock around `send`. reflect/history skip the lock.",
-    })
+/// `reflect` — python `_make_reflect` + `nvidia_nim_backend/tools.py`'s
+/// `_reflect_extra`: the shared base body, then `has_api_key`. The KEY itself is
+/// never returned, and `file_bridge_id` (a rust-only key) is gone.
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, DEFAULT_MODEL, DEFAULT_ENDPOINT);
+    out.insert("has_api_key".to_string(), json!(read_api_key().is_some()));
+    Value::Object(out)
 }
 
 #[cfg(test)]

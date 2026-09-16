@@ -19,8 +19,46 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+/// ONE queued payload — the whole payload, bytes included.
+///
+/// Python queues the payload DICT, so a `write_stream`'s `bytes` value rides on
+/// the inbox like any other field and a drainer encodes the queued dict straight
+/// through `encode_frame`. A `serde_json::Value` cannot hold bytes, so the rust
+/// carrier splits: `payload` is the head (null at the bytes field) and `body` is
+/// `(path, bytes)` — the dotted path WITHIN the payload where the value lived,
+/// which is exactly what `_binary_path` names once a drainer nests the payload in
+/// its own envelope. Without this half a watcher could never receive the binary
+/// frame python sends it.
+#[derive(Clone, Debug)]
+pub struct InboxItem {
+    /// The payload dict. For a binary payload the bytes field is `null` here.
+    pub payload: Value,
+    /// `(dotted path within `payload`, raw bytes)` for a payload carrying bytes.
+    pub body: Option<(String, Vec<u8>)>,
+}
+
+impl InboxItem {
+    /// A text payload — no bytes anywhere in it.
+    #[must_use]
+    pub fn text(payload: Value) -> Self {
+        Self {
+            payload,
+            body: None,
+        }
+    }
+
+    /// A payload whose `path` field held `bytes`; `payload` carries `null` there.
+    #[must_use]
+    pub fn binary(payload: Value, path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            payload,
+            body: Some((path.into(), bytes)),
+        }
+    }
+}
+
 struct Shared {
-    queue: Mutex<VecDeque<Value>>,
+    queue: Mutex<VecDeque<InboxItem>>,
     ready: Notify,
     bound: usize,
 }
@@ -35,21 +73,27 @@ pub struct InboxReceiver(Arc<Shared>);
 impl InboxSender {
     /// Append. At the bound the OLDEST payload is evicted to make room, so the
     /// newest always lands.
-    pub fn send(&self, v: Value) {
+    pub fn send(&self, item: InboxItem) {
         {
             let mut q = self.0.queue.lock().expect("inbox poisoned");
             if q.len() >= self.0.bound {
                 q.pop_front();
             }
-            q.push_back(v);
+            q.push_back(item);
         }
         self.0.ready.notify_one();
+    }
+
+    /// Another read half on the SAME queue — how `Kernel::ensure_inbox` stays
+    /// idempotent: a reader calling it twice reads one queue, not two.
+    pub(crate) fn receiver(&self) -> InboxReceiver {
+        InboxReceiver(Arc::clone(&self.0))
     }
 }
 
 impl InboxReceiver {
     /// The next payload, waiting if the queue is empty.
-    pub async fn recv(&mut self) -> Option<Value> {
+    pub async fn recv(&mut self) -> Option<InboxItem> {
         loop {
             if let Some(v) = self.0.queue.lock().expect("inbox poisoned").pop_front() {
                 return Some(v);
@@ -59,7 +103,7 @@ impl InboxReceiver {
     }
 
     /// The next payload if one is already queued.
-    pub fn try_recv(&mut self) -> Option<Value> {
+    pub fn try_recv(&mut self) -> Option<InboxItem> {
         self.0.queue.lock().expect("inbox poisoned").pop_front()
     }
 }
@@ -84,11 +128,15 @@ mod tests {
     async fn the_oldest_is_evicted_so_the_newest_always_lands() {
         let (tx, mut rx) = inbox(3);
         for i in 0..5 {
-            tx.send(json!({ "n": i }));
+            tx.send(InboxItem::text(json!({ "n": i })));
         }
         // 0 and 1 were pushed out; the tip survives.
         let got: Vec<i64> = (0..3)
-            .map(|_| rx.try_recv().expect("three held")["n"].as_i64().unwrap())
+            .map(|_| {
+                rx.try_recv().expect("three held").payload["n"]
+                    .as_i64()
+                    .unwrap()
+            })
             .collect();
         assert_eq!(got, vec![2, 3, 4], "a full inbox must drop the OLDEST");
         assert!(rx.try_recv().is_none());
@@ -99,7 +147,26 @@ mod tests {
         let (tx, mut rx) = inbox(8);
         let h = tokio::spawn(async move { rx.recv().await });
         tokio::task::yield_now().await;
-        tx.send(json!({"n": 1}));
-        assert_eq!(h.await.unwrap().unwrap()["n"], 1);
+        tx.send(InboxItem::text(json!({"n": 1})));
+        assert_eq!(h.await.unwrap().unwrap().payload["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_queued_item_keeps_its_raw_body() {
+        // C86: a payload carrying bytes rides the inbox WHOLE — the head with
+        // `null` at the bytes field, the raw body alongside — so a drainer can
+        // rebuild the binary frame python sends.
+        let (tx, mut rx) = inbox(4);
+        tx.send(InboxItem::binary(
+            json!({"type": "write_stream", "bytes": null}),
+            "bytes",
+            vec![0xde, 0xad, 0xbe, 0xef],
+        ));
+        let got = rx.try_recv().expect("one held");
+        assert_eq!(got.payload["type"], "write_stream");
+        assert_eq!(
+            got.body,
+            Some(("bytes".to_string(), vec![0xde, 0xad, 0xbe, 0xef]))
+        );
     }
 }

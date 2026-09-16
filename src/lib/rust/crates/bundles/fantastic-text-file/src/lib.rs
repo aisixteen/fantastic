@@ -19,16 +19,18 @@
 //! to `<path>.tmp.<pid>` then `rename` (the leg's one atomic op); a
 //! checkpointed mutate commits the pre-image BEFORE touching the target; a
 //! patch verifies every hunk before writing anything. Checkpoint ids ARE the
-//! dispatch's kernel task pid (`<agent>:<hex8>`). Mirrors the canonical Python
+//! dispatch's kernel task pid (an int — one id space with `ps`, the trace and
+//! the chat turn that caused the mutation). Mirrors the canonical Python
 //! `text_file` bundle (python is the immutable reference).
 
 use async_trait::async_trait;
-use fantastic_bundle as _; // keep the bundle ↔ kernel link explicit
+use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::refusal::{bad, missing, refusal, with, UNHANDLED};
+use fantastic_kernel::refusal::{bad, missing, refusal, with, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{current_task, Agent, AgentId, Item, Kernel};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -41,6 +43,15 @@ pub const HANDLER_MODULE: &str = "text_file.tools";
 const CKPT_DIR: &str = ".ckpt";
 /// read/write chunk size on the stream verbs.
 const CHUNK: usize = 65536;
+
+/// python's `dict.get(key)` default — absent reads as `None`, never as a
+/// different shape.
+static NULL: Value = Value::Null;
+
+/// `payload.get(key)` with python's `None` default.
+fn arg<'a>(payload: &'a Value, key: &str) -> &'a Value {
+    payload.get(key).unwrap_or(&NULL)
+}
 
 /// ABSENT ⇒ `default`. Present, an integer, ≥ `minimum` ⇒ that value. ANYTHING
 /// ELSE (a bool, a string, a float, an explicit null, a value under the bound)
@@ -111,12 +122,11 @@ fn version_of(data: &[u8]) -> String {
     hex[..16].to_string()
 }
 
-/// This dispatch's kernel task pid — the checkpoint id space. A pid is a NUMBER
-/// now (the one counter's), rendered here because a checkpoint id is text.
-/// Outside any dispatch — an operator write — there is no task, and `op` says so
-/// rather than borrowing a number that names nothing.
-fn pid() -> String {
-    current_task().map_or_else(|| "op".to_string(), |t| t.0.to_string())
+/// This dispatch's kernel task pid (a message id) — the checkpoint id space, an
+/// INT like python's. `0` outside any dispatch (an operator call): never
+/// minted, so never a clash.
+fn pid() -> i64 {
+    current_task().map_or(0, |t| t.0)
 }
 
 // ─── per-document serialization ─────────────────────────────────
@@ -175,7 +185,10 @@ impl Drop for Held {
     }
 }
 
-fn version_mismatch(want: &str, have: &str) -> Value {
+/// `_if_match_guard`'s refusal — `expected` echoes the caller's RAW value (a
+/// non-string never matches a hex digest, and saying what was passed is the
+/// point of the guard).
+fn version_mismatch(want: &Value, have: &str) -> Value {
     json!({
         "error": "version mismatch — the document changed since you read it",
         "reason": "version_mismatch",
@@ -184,33 +197,103 @@ fn version_mismatch(want: &str, have: &str) -> Value {
     })
 }
 
+/// The per-edit form inside a patch transaction: `path` sits between `reason`
+/// and `expected` (python writes the dict in that order).
+fn version_mismatch_at(path: &str, want: &Value, have: &str) -> Value {
+    json!({
+        "error": "version mismatch — the document changed since you read it",
+        "reason": "version_mismatch",
+        "path": path,
+        "expected": want,
+        "actual": have,
+    })
+}
+
+// ─── the leg-IO seam ────────────────────────────────────────────
+// EVERY byte this agent moves crosses one of these three functions and nothing
+// else in the bundle speaks to the leg's stream verbs. The two IO bodies are
+// the only place that knows HOW a chunk rides (one binary-framed send today);
+// `leg_failure` is channel-agnostic. Moving text_file's leg IO onto the batch
+// swaps the two bodies and nothing else.
+
+/// One `read_stream` chunk: the leg's reply and the raw chunk it carried.
+/// `path` rides VERBATIM — a truthy non-string is the leg's to refuse.
+async fn leg_read_chunk(
+    kernel: &Arc<Kernel>,
+    fb: &str,
+    path: &Value,
+    offset: u64,
+    length: u64,
+) -> (Value, Vec<u8>) {
+    kernel
+        .send_with_binary(
+            &AgentId::from(fb),
+            json!({"type": "read_stream", "path": path, "offset": offset, "length": length}),
+            Vec::new(),
+        )
+        .await
+}
+
+/// One `write_stream` chunk. An absent `offset`/`truncate` is python's append
+/// at end (which creates the file).
+async fn leg_write_chunk(
+    kernel: &Arc<Kernel>,
+    fb: &str,
+    path: &Value,
+    offset: Option<u64>,
+    truncate: Option<bool>,
+    bytes: Vec<u8>,
+) -> Value {
+    let mut header = Map::new();
+    header.insert("type".to_string(), json!("write_stream"));
+    header.insert("path".to_string(), path.clone());
+    if let Some(o) = offset {
+        header.insert("offset".to_string(), json!(o));
+    }
+    if let Some(t) = truncate {
+        header.insert("truncate".to_string(), json!(t));
+    }
+    kernel
+        .send_with_binary(&AgentId::from(fb), Value::Object(header), bytes)
+        .await
+        .0
+}
+
+/// python's `if not isinstance(r, dict) or r.get("error"):` — the ONE
+/// leg-reply failure test, shared by every call site (the `.absent` probes and
+/// the checkpoints listing included). A non-object reply becomes
+/// `{"error": str(r)}` (`None` → `"None"`); an object fails only on a TRUTHY
+/// `error`, so `{"error": ""}` is a success.
+fn leg_failure(r: &Value) -> Option<Value> {
+    match r {
+        Value::Object(_) => py_truthy(arg(r, "error")).then(|| r.clone()),
+        other => Some(json!({"error": py_str(other)})),
+    }
+}
+
+/// One plain (non-binary) verb to the leg, gated as this agent.
+async fn leg_call(kernel: &Arc<Kernel>, fb: &str, payload: Value) -> Value {
+    kernel
+        .send(vec![Item::new(AgentId::from(fb), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
 // ─── stream I/O (every byte through the gated leg) ──────────────
 
 /// Whole file via the leg's `read_stream` chunk loop. `Ok(bytes)` or the leg's
 /// own refusal passed through verbatim (not_found, unauthorized).
-async fn read_all(kernel: &Arc<Kernel>, fb: &str, path: &str) -> Result<Vec<u8>, Value> {
-    let leg = AgentId::from(fb);
+async fn read_all(kernel: &Arc<Kernel>, fb: &str, path: &Value) -> Result<Vec<u8>, Value> {
     let mut raw: Vec<u8> = Vec::new();
     let mut offset: u64 = 0;
     loop {
-        let (r, body) = kernel
-            .send_with_binary(
-                &leg,
-                json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
-                Vec::new(),
-            )
-            .await;
-        if !r.is_object() {
-            return Err(json!({"error": format!("{fb}: no reply")}));
+        let (r, body) = leg_read_chunk(kernel, fb, path, offset, CHUNK as u64).await;
+        if let Some(err) = leg_failure(&r) {
+            return Err(err);
         }
-        if r.get("error").is_some() {
-            return Err(r);
-        }
-        if !body.is_empty() {
-            raw.extend_from_slice(&body);
-        }
-        let eof = r.get("eof").and_then(Value::as_bool).unwrap_or(true);
-        if eof || body.is_empty() {
+        raw.extend_from_slice(&body);
+        if py_truthy(arg(&r, "eof")) || body.is_empty() {
             break;
         }
         offset = r
@@ -223,26 +306,16 @@ async fn read_all(kernel: &Arc<Kernel>, fb: &str, path: &str) -> Result<Vec<u8>,
 
 /// Write `data` to `path` on the leg — truncate-first, then append chunks.
 /// NOT atomic on its own; `write_atomic` adds the tmp+rename commit.
-async fn write_chunks(kernel: &Arc<Kernel>, fb: &str, path: &str, data: &[u8]) -> Option<Value> {
-    let leg = AgentId::from(fb);
+async fn write_chunks(kernel: &Arc<Kernel>, fb: &str, path: &Value, data: &[u8]) -> Option<Value> {
     let mut off: usize = 0;
     let mut first = true;
     while first || off < data.len() {
         let end = (off + CHUNK).min(data.len());
         let chunk = data[off..end].to_vec();
         let clen = chunk.len();
-        let (r, _) = kernel
-            .send_with_binary(
-                &leg,
-                json!({"type": "write_stream", "path": path, "offset": off, "truncate": first}),
-                chunk,
-            )
-            .await;
-        if !r.is_object() {
-            return Some(json!({"error": format!("{fb}: no reply")}));
-        }
-        if r.get("error").is_some() {
-            return Some(r);
+        let r = leg_write_chunk(kernel, fb, path, Some(off as u64), Some(first), chunk).await;
+        if let Some(err) = leg_failure(&r) {
+            return Some(err);
         }
         off += clen;
         first = false;
@@ -250,19 +323,10 @@ async fn write_chunks(kernel: &Arc<Kernel>, fb: &str, path: &str, data: &[u8]) -
     None
 }
 
-/// One plain (non-binary) verb to the leg, gated as this agent.
-async fn leg_call(kernel: &Arc<Kernel>, fb: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(fb), payload)])
-        .await
-        .remove(0)
-        .result
-}
-
 /// The COMMIT: write to a tmp sibling, then the leg's one atomic `rename`.
 /// A crash before the rename leaves only tmp debris.
-async fn write_atomic(kernel: &Arc<Kernel>, fb: &str, path: &str, data: &[u8]) -> Option<Value> {
-    let tmp = format!("{path}.tmp.{}", pid().replace(':', "_"));
+async fn write_atomic(kernel: &Arc<Kernel>, fb: &str, path: &Value, data: &[u8]) -> Option<Value> {
+    let tmp = Value::String(format!("{}.tmp.{}", py_str(path), pid()));
     if let Some(err) = write_chunks(kernel, fb, &tmp, data).await {
         return Some(err);
     }
@@ -272,53 +336,41 @@ async fn write_atomic(kernel: &Arc<Kernel>, fb: &str, path: &str, data: &[u8]) -
         json!({"type": "rename", "old_path": tmp, "new_path": path}),
     )
     .await;
-    if !r.is_object() {
-        return Some(json!({"error": format!("{fb}: no reply")}));
-    }
-    if r.get("error").is_some() {
-        return Some(r);
-    }
-    None
+    leg_failure(&r)
 }
 
 /// `/` in the document path would nest under `.ckpt`; flatten it so every
-/// pre-image of one document lives in ONE listable dir.
-/// A checkpoint id from the payload, whatever the notation typed it as.
-///
-/// A ckpt id IS a pid, and a pid is a NUMBER now — so a model writing
-/// `<ckpt_id>29</ckpt_id>` hands over an integer, and reading it as a string
-/// only refused the model its own checkpoint back ("restore: ckpt_id required",
-/// measured 2026-09-10 on `undo:rust`). Python accepts anything truthy here for
-/// the same reason.
-fn ckpt_arg(payload: &Value) -> Option<String> {
-    match payload.get("ckpt_id") {
-        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-        Some(Value::Number(n)) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-fn ckpt_path(path: &str, ckpt_id: &str) -> String {
-    format!("{CKPT_DIR}/{}/{ckpt_id}", path.replace('/', "__"))
+/// pre-image of one document lives in ONE listable dir. Both halves are
+/// python's f-string, i.e. `str(x)`: a ckpt id is an int.
+fn ckpt_path(path: &Value, ckpt_id: &Value) -> String {
+    format!(
+        "{CKPT_DIR}/{}/{}",
+        py_str(path).replace('/', "__"),
+        py_str(ckpt_id)
+    )
 }
 
 /// The on-demand optimistic guard: only fires when the caller passed
-/// `if_match`. `Some(refusal)` on mismatch, else `None`.
+/// `if_match` as anything other than null. `Some(refusal)` on mismatch, else
+/// `None`.
 async fn if_match_guard(
     kernel: &Arc<Kernel>,
     fb: &str,
-    path: &str,
+    path: &Value,
     payload: &Value,
 ) -> Option<Value> {
-    let want = payload.get("if_match").and_then(Value::as_str)?;
+    let want = payload.get("if_match")?;
+    if want.is_null() {
+        return None;
+    }
     match read_all(kernel, fb, path).await {
         Err(e) => Some(e),
         Ok(data) => {
             let have = version_of(&data);
-            if have != want {
-                Some(version_mismatch(want, &have))
-            } else {
+            if Value::String(have.clone()) == *want {
                 None
+            } else {
+                Some(version_mismatch(want, &have))
             }
         }
     }
@@ -326,26 +378,34 @@ async fn if_match_guard(
 
 /// Commit the pre-image BEFORE any mutate touches the target. A file that does
 /// not exist yet checkpoints as ABSENT (restore = delete).
-async fn take_checkpoint(kernel: &Arc<Kernel>, fb: &str, path: &str) -> Result<String, Value> {
+async fn take_checkpoint(kernel: &Arc<Kernel>, fb: &str, path: &Value) -> Result<i64, Value> {
     let ckpt_id = pid();
     let data = match read_all(kernel, fb, path).await {
         Ok(d) => Some(d),
         Err(e) if e.get("reason").and_then(Value::as_str) == Some("not_found") => None,
         Err(e) => return Err(e),
     };
-    let dest = ckpt_path(path, &ckpt_id);
+    let dest = ckpt_path(path, &json!(ckpt_id));
     let marker: &[u8] = data.as_deref().unwrap_or(b"");
-    if let Some(err) = write_chunks(kernel, fb, &dest, marker).await {
+    if let Some(err) = write_chunks(kernel, fb, &Value::String(dest.clone()), marker).await {
         return Err(err);
     }
     // An absent pre-image is recorded as an empty file with an `.absent` twin —
     // restore then deletes the document instead of emptying it.
     if data.is_none() {
-        if let Some(err) = write_chunks(kernel, fb, &format!("{dest}.absent"), b"").await {
+        let twin = Value::String(format!("{dest}.absent"));
+        if let Some(err) = write_chunks(kernel, fb, &twin, b"").await {
             return Err(err);
         }
     }
     Ok(ckpt_id)
+}
+
+/// The `.absent` twin probe: one 1-byte read that only has to succeed.
+async fn absent_twin(kernel: &Arc<Kernel>, fb: &str, src: &str) -> bool {
+    let probe = Value::String(format!("{src}.absent"));
+    let (absent, _) = leg_read_chunk(kernel, fb, &probe, 0, 1).await;
+    leg_failure(&absent).is_none()
 }
 
 // ─── patch grammar (moved from file_bridge — same guarantees) ───
@@ -401,11 +461,37 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
 
 // ─── verbs ──────────────────────────────────────────────────────
 
-fn path_of(payload: &Value, verb: &str) -> Result<String, Value> {
-    match payload.get("path").and_then(Value::as_str) {
-        Some(p) if !p.is_empty() => Ok(p.to_string()),
-        _ => Err(missing(verb, "path")),
+/// python's `path = payload.get("path", ""); if not path: missing(...)`. Only a
+/// FALSY path is this agent's to refuse; a truthy non-string rides to the leg
+/// verbatim and gets the leg's own `bad_arg` (the tag grammar types
+/// `<path>2024</path>` as an int).
+fn path_of<'a>(payload: &'a Value, verb: &str) -> Result<&'a Value, Value> {
+    let p = arg(payload, "path");
+    if py_truthy(p) {
+        Ok(p)
+    } else {
+        Err(missing(verb, "path"))
     }
+}
+
+/// The document/patch this call carries. A str `bytes` in the payload IS the
+/// document, utf-8-encoded (py text courtesy, 2026-09-01: ai_core encodes for
+/// the MODEL, but a spawned program's ctrl-fd wire is JSON and has no bytes
+/// type, so this is its one write path); otherwise the binary channel's blob.
+/// Neither ⇒ python's per-verb `missing`.
+fn blob_of<'a>(
+    payload: &'a Value,
+    blob: &'a [u8],
+    verb: &str,
+    arg_text: &str,
+) -> Result<Cow<'a, [u8]>, Value> {
+    if let Some(s) = payload.get("bytes").and_then(Value::as_str) {
+        return Ok(Cow::Borrowed(s.as_bytes()));
+    }
+    if blob.is_empty() {
+        return Err(missing(verb, arg_text));
+    }
+    Ok(Cow::Borrowed(blob))
 }
 
 async fn reflect_reply(agent: &Agent) -> Value {
@@ -449,17 +535,19 @@ async fn reflect_reply(agent: &Agent) -> Value {
             the call. The document ends at the first `</bytes>`. A patch names \
             its edits as tags: \
             <edits><item><path>a.py</path><hunks>2</hunks></item></edits>",
+        // Every line here is the first line of the python verb's docstring,
+        // verbatim (`tools.py` VERBS, rendered by `_reflect`).
         "verbs": {
             "reflect": "no args — identity, verb guide, and the wired default surface.",
             "boot": "no args — no-op; this agent holds no state to hydrate.",
             "read": "args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary.",
-            "write": "args: path:str (req), bytes:bytes (req — the whole document, raw), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}.",
-            "patch": "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes:bytes (req — ALL hunks concatenated, raw utf-8), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}.",
-            "append": "args: path:str (req), bytes:bytes (req — one raw chunk), on:str? — appends (creates if absent); {path, size, version}.",
+            "write": "args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}.",
+            "patch": "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}.",
+            "append": "args: path:str (req), bytes (req — one chunk; str is utf-8-encoded), on:str? — appends (creates if absent); {path, size, version}.",
             "checkpoint": "args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}.",
             "checkpoints": "args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}.",
-            "restore": "args: path:str (req), ckpt_id (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}.",
-            "drop": "args: path:str (req), ckpt_id (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}.",
+            "restore": "args: path:str (req), ckpt_id:str (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}.",
+            "drop": "args: path:str (req), ckpt_id:str (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}.",
         },
     })
 }
@@ -478,7 +566,7 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
         Ok(v) => v as usize,
         Err(refusal) => return refusal,
     };
-    let data = match read_all(kernel, fb, &path).await {
+    let data = match read_all(kernel, fb, path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -512,82 +600,77 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
     })
 }
 
-/// Text courtesy (py-canonical, 2026-09-01): ai_core encodes for the MODEL, but
-/// a spawned program's ctrl-fd wire is JSON (no bytes type) — a str `bytes` in
-/// the payload IS the document, utf-8. Without this an empty binary blob plus a
-/// JSON-string `bytes` wrote an EMPTY file silently.
-fn effective_blob<'a>(payload: &'a Value, blob: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
-    if blob.is_empty() {
-        if let Some(s) = payload.get("bytes").and_then(Value::as_str) {
-            return std::borrow::Cow::Owned(s.as_bytes().to_vec());
-        }
-    }
-    std::borrow::Cow::Borrowed(blob)
-}
-
 async fn write_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
-    let blob = &*effective_blob(payload, blob);
     let path = match path_of(payload, "write") {
         Ok(p) => p,
         Err(e) => return e,
     };
-    if blob.is_empty() && payload.get("bytes").is_none() {
-        return missing("write", "bytes (the document — str is utf-8-encoded)");
-    }
-    let _held = hold(fb, &[&path]).await;
-    if let Some(err) = if_match_guard(kernel, fb, &path, payload).await {
+    let data = match blob_of(
+        payload,
+        blob,
+        "write",
+        "bytes (the document — str is utf-8-encoded)",
+    ) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let key = py_str(path);
+    let _held = hold(fb, &[key.as_str()]).await;
+    if let Some(err) = if_match_guard(kernel, fb, path, payload).await {
         return err;
     }
-    let mut ckpt_id: Option<String> = None;
-    if payload.get("checkpoint").and_then(Value::as_bool) == Some(true) {
-        match take_checkpoint(kernel, fb, &path).await {
-            Ok(id) => ckpt_id = Some(id),
+    let mut ckpt_id: i64 = 0;
+    if py_truthy(arg(payload, "checkpoint")) {
+        match take_checkpoint(kernel, fb, path).await {
+            Ok(id) => ckpt_id = id,
             Err(e) => return e,
         }
     }
-    if let Some(err) = write_atomic(kernel, fb, &path, blob).await {
+    if let Some(err) = write_atomic(kernel, fb, path, &data).await {
         return err;
     }
-    let mut out = json!({"path": path, "size": blob.len(), "version": version_of(blob)});
-    if let Some(id) = ckpt_id {
-        out["ckpt_id"] = json!(id);
+    let mut out = json!({"path": path, "size": data.len(), "version": version_of(&data)});
+    // python `if ckpt_id:` — an operator write outside any dispatch mints 0,
+    // and 0 is not a checkpoint anyone can name.
+    if ckpt_id != 0 {
+        out["ckpt_id"] = json!(ckpt_id);
     }
     out
 }
 
 async fn append_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
-    let blob = &*effective_blob(payload, blob);
     let path = match path_of(payload, "append") {
         Ok(p) => p,
         Err(e) => return e,
     };
-    if blob.is_empty() && payload.get("bytes").is_none() {
-        return missing("append", "bytes (one chunk — str is utf-8-encoded)");
-    }
-    let _held = hold(fb, &[&path]).await;
-    // absent offset = append at end (creates the file)
-    let (r, _) = kernel
-        .send_with_binary(
-            &AgentId::from(fb),
-            json!({"type": "write_stream", "path": path}),
-            blob.to_vec(),
-        )
-        .await;
-    if !r.is_object() {
-        return json!({"error": format!("{fb}: no reply")});
-    }
-    if r.get("error").is_some() {
-        return r;
-    }
-    let whole = match read_all(kernel, fb, &path).await {
+    let data = match blob_of(
+        payload,
+        blob,
+        "append",
+        "bytes (one chunk — str is utf-8-encoded)",
+    ) {
         Ok(d) => d,
         Err(e) => return e,
     };
-    json!({"path": path, "size": r.get("size").cloned().unwrap_or(Value::Null), "version": version_of(&whole)})
+    let key = py_str(path);
+    let _held = hold(fb, &[key.as_str()]).await;
+    // absent offset = append at end (creates the file)
+    let r = leg_write_chunk(kernel, fb, path, None, None, data.to_vec()).await;
+    if let Some(err) = leg_failure(&r) {
+        return err;
+    }
+    let whole = match read_all(kernel, fb, path).await {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    json!({
+        "path": path,
+        "size": arg(&r, "size"),
+        "version": version_of(&whole),
+    })
 }
 
 async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
-    let blob = &*effective_blob(payload, blob);
     // A TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file
     // rides the array (one shape, no single/multi drift; user decision
     // 2026-09-01). ONE raw hunk blob, split by the per-edit counts; verify
@@ -601,13 +684,17 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
     else {
         return missing("patch", "edits (a list of {path, hunks, if_match?})");
     };
-    if blob.is_empty() {
-        return missing(
-            "patch",
-            "bytes (the utf-8 patch — all hunks, in edits order)",
-        );
+    let arg_text = "bytes (the utf-8 patch — all hunks, in edits order)";
+    let data = match blob_of(payload, blob, "patch", arg_text) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    // python: `not isinstance(data, (bytes, bytearray)) or not data` — an EMPTY
+    // patch is a missing document, not a malformed one.
+    if data.is_empty() {
+        return missing("patch", arg_text);
     }
-    let patch = match std::str::from_utf8(blob) {
+    let patch = match std::str::from_utf8(&data) {
         Ok(s) => s,
         Err(_) => return bad("patch", "bytes", "valid utf-8 (the patch is text)"),
     };
@@ -626,7 +713,7 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
     struct Edit {
         path: String,
         hunks: Vec<(String, String)>,
-        if_match: Option<String>,
+        if_match: Value,
         new: Vec<u8>,
     }
     let mut plan: Vec<Edit> = Vec::new();
@@ -647,7 +734,7 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
             return bad(
                 "patch",
                 "edits",
-                &format!("edit {i} ({path:?}): `hunks` (int >= 1)"),
+                &format!("edit {i} ({}): `hunks` (int >= 1)", py_repr(path)),
             );
         };
         let n = n as usize;
@@ -658,22 +745,20 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
                 "each path at most once — put all of a file's hunks in one edit",
             );
         }
-        if cursor + n > hunks.len() {
-            cursor += n;
-            break;
-        }
+        // python slices `hunks[cursor:cursor + n]` — it CLAMPS and keeps going,
+        // so every edit is validated and `cursor` holds the full claim for the
+        // sum check below.
+        let lo = cursor.min(hunks.len());
+        let hi = cursor.saturating_add(n).min(hunks.len());
         plan.push(Edit {
             path: path.to_string(),
-            hunks: hunks[cursor..cursor + n].to_vec(),
-            if_match: e
-                .get("if_match")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            hunks: hunks[lo..hi].to_vec(),
+            if_match: arg(e, "if_match").clone(),
             new: Vec::new(),
         });
-        cursor += n;
+        cursor = cursor.saturating_add(n);
     }
-    if cursor != hunks.len() || plan.len() != edits.len() {
+    if cursor != hunks.len() {
         return bad(
             "patch",
             "edits",
@@ -689,16 +774,15 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
     let _held = hold(fb, &paths).await;
     // ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
     for e in plan.iter_mut() {
-        let raw = match read_all(kernel, fb, &e.path).await {
+        let path = Value::String(e.path.clone());
+        let raw = match read_all(kernel, fb, &path).await {
             Ok(d) => d,
             Err(err) => return err,
         };
-        if let Some(want) = &e.if_match {
+        if !e.if_match.is_null() {
             let have = version_of(&raw);
-            if have != *want {
-                let mut out = version_mismatch(want, &have);
-                out["path"] = json!(e.path);
-                return out;
+            if Value::String(have.clone()) != e.if_match {
+                return version_mismatch_at(&e.path, &e.if_match, &have);
             }
         }
         let mut working = match String::from_utf8(raw) {
@@ -707,7 +791,7 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
                 return bad(
                     "patch",
                     "edits",
-                    &format!("{:?}: a utf-8 text file", e.path),
+                    &format!("{}: a utf-8 text file", py_repr(&e.path)),
                 )
             }
         };
@@ -729,7 +813,7 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
         }
         e.new = working.into_bytes();
     }
-    if payload.get("dry_run").and_then(Value::as_bool) == Some(true) {
+    if py_truthy(arg(payload, "dry_run")) {
         return json!({
             "dry_run": true,
             "edits": plan.iter().map(|e| json!({"path": e.path, "hunks": e.hunks.len()})).collect::<Vec<_>>(),
@@ -738,29 +822,25 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
     // ── CHECKPOINT ALL, then APPLY ALL; a mid-apply failure restores ──
     // everything already written. Pre-images are ALWAYS taken (they ARE the
     // rollback); `checkpoint:true` only KEEPS them.
-    let mut ckpts: Vec<(String, String)> = Vec::new();
+    let mut ckpts: Vec<(String, i64)> = Vec::new();
     for e in &plan {
-        match take_checkpoint(kernel, fb, &e.path).await {
+        match take_checkpoint(kernel, fb, &Value::String(e.path.clone())).await {
             Ok(id) => ckpts.push((e.path.clone(), id)),
             Err(err) => return err,
         }
     }
-    let mut written: Vec<(String, String)> = Vec::new();
+    let mut written: Vec<(String, i64)> = Vec::new();
     for (e, (_, ckpt_id)) in plan.iter().zip(&ckpts) {
-        if let Some(err) = write_atomic(kernel, fb, &e.path, &e.new).await {
+        if let Some(err) = write_atomic(kernel, fb, &Value::String(e.path.clone()), &e.new).await {
             for (path, ck) in &written {
-                restore_from(kernel, fb, path, ck).await;
+                restore_from(kernel, fb, path, *ck).await;
             }
-            let mut out = if err.is_object() {
-                err
-            } else {
-                json!({"error": err.to_string()})
-            };
+            let mut out = err;
             out["restored"] = json!(written.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
             out["failed_path"] = json!(e.path);
             return out;
         }
-        written.push((e.path.clone(), ckpt_id.clone()));
+        written.push((e.path.clone(), *ckpt_id));
     }
     let mut out = json!({
         "patched": true,
@@ -774,14 +854,14 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
             }))
             .collect::<Vec<_>>(),
     });
-    if payload.get("checkpoint").and_then(Value::as_bool) == Some(true) {
+    if py_truthy(arg(payload, "checkpoint")) {
         out["ckpt_ids"] = json!(ckpts
             .iter()
             .map(|(p, c)| json!({"path": p, "ckpt_id": c}))
             .collect::<Vec<_>>());
     } else {
         for (path, ck) in &ckpts {
-            drop_quiet(kernel, fb, path, ck).await;
+            drop_quiet(kernel, fb, path, *ck).await;
         }
     }
     out
@@ -790,27 +870,21 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
 /// Rollback arm of the patch transaction: put the pre-image back (or delete a
 /// file that did not exist). Best-effort — it runs INSIDE a failure path that
 /// is already being reported.
-async fn restore_from(kernel: &Arc<Kernel>, fb: &str, path: &str, ckpt_id: &str) {
-    let src = ckpt_path(path, ckpt_id);
-    let (absent, _) = kernel
-        .send_with_binary(
-            &AgentId::from(fb),
-            json!({"type": "read_stream", "path": format!("{src}.absent"), "offset": 0, "length": 1}),
-            Vec::new(),
-        )
-        .await;
-    if absent.is_object() && absent.get("error").is_none() {
+async fn restore_from(kernel: &Arc<Kernel>, fb: &str, path: &str, ckpt_id: i64) {
+    let path = Value::String(path.to_string());
+    let src = ckpt_path(&path, &json!(ckpt_id));
+    if absent_twin(kernel, fb, &src).await {
         let _ = leg_call(kernel, fb, json!({"type": "delete", "path": path})).await;
         return;
     }
-    if let Ok(data) = read_all(kernel, fb, &src).await {
-        let _ = write_atomic(kernel, fb, path, &data).await;
+    if let Ok(data) = read_all(kernel, fb, &Value::String(src)).await {
+        let _ = write_atomic(kernel, fb, &path, &data).await;
     }
 }
 
 /// Self-cleaning arm: a COMMITTED transaction discards its pre-images.
-async fn drop_quiet(kernel: &Arc<Kernel>, fb: &str, path: &str, ckpt_id: &str) {
-    let src = ckpt_path(path, ckpt_id);
+async fn drop_quiet(kernel: &Arc<Kernel>, fb: &str, path: &str, ckpt_id: i64) {
+    let src = ckpt_path(&Value::String(path.to_string()), &json!(ckpt_id));
     let _ = leg_call(kernel, fb, json!({"type": "delete", "path": src.clone()})).await;
     let _ = leg_call(
         kernel,
@@ -825,11 +899,11 @@ async fn checkpoint_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Va
         Ok(p) => p,
         Err(e) => return e,
     };
-    let data = match read_all(kernel, fb, &path).await {
+    let data = match read_all(kernel, fb, path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
-    match take_checkpoint(kernel, fb, &path).await {
+    match take_checkpoint(kernel, fb, path).await {
         Ok(id) => json!({"ckpt_id": id, "path": path, "version": version_of(&data)}),
         Err(e) => e,
     }
@@ -840,13 +914,9 @@ async fn checkpoints_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> V
         Ok(p) => p,
         Err(e) => return e,
     };
-    let r = leg_call(
-        kernel,
-        fb,
-        json!({"type": "list", "path": format!("{CKPT_DIR}/{}", path.replace('/', "__"))}),
-    )
-    .await;
-    if !r.is_object() || r.get("error").is_some() {
+    let dir = format!("{CKPT_DIR}/{}", py_str(path).replace('/', "__"));
+    let r = leg_call(kernel, fb, json!({"type": "list", "path": dir})).await;
+    if leg_failure(&r).is_some() {
         // no dir yet = no checkpoints, honestly empty
         return json!({"path": path, "ckpts": []});
     }
@@ -865,10 +935,16 @@ async fn checkpoints_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> V
                             .ends_with(".absent")
                 })
                 .map(|f| {
-                    json!({
-                        "id": f.get("name").cloned().unwrap_or(Value::Null),
-                        "size": f.get("size").cloned().unwrap_or(Value::Null),
-                    })
+                    let name = f.get("name").and_then(Value::as_str).unwrap_or("");
+                    // python `int(name) if name.isdigit() else name` — a ckpt id
+                    // IS a pid, and a pid is a number.
+                    let id = match name.parse::<i64>() {
+                        Ok(n) if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) => {
+                            json!(n)
+                        }
+                        _ => json!(name),
+                    };
+                    json!({"id": id, "size": arg(f, "size")})
                 })
                 .collect()
         })
@@ -881,43 +957,43 @@ async fn restore_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value
         Ok(p) => p,
         Err(e) => return e,
     };
-    let Some(ckpt_id) = ckpt_arg(payload) else {
+    // A ckpt id is whatever the notation typed it as — the model writes back
+    // the int it was shown. Only a FALSY value is missing.
+    let ckpt_id = arg(payload, "ckpt_id");
+    if !py_truthy(ckpt_id) {
         return missing("restore", "ckpt_id");
-    };
-    let ckpt_id = ckpt_id.as_str();
-    let _held = hold(fb, &[&path]).await;
-    if let Some(err) = if_match_guard(kernel, fb, &path, payload).await {
+    }
+    let key = py_str(path);
+    let _held = hold(fb, &[key.as_str()]).await;
+    if let Some(err) = if_match_guard(kernel, fb, path, payload).await {
         return err;
     }
-    let src = ckpt_path(&path, ckpt_id);
+    let src = ckpt_path(path, ckpt_id);
     // An `.absent` twin means the pre-image was NO FILE — restore deletes.
-    let (absent, _) = kernel
-        .send_with_binary(
-            &AgentId::from(fb),
-            json!({"type": "read_stream", "path": format!("{src}.absent"), "offset": 0, "length": 1}),
-            Vec::new(),
-        )
-        .await;
-    if absent.is_object() && absent.get("error").is_none() {
+    if absent_twin(kernel, fb, &src).await {
         let r = leg_call(kernel, fb, json!({"type": "delete", "path": path})).await;
-        if !r.is_object() || r.get("error").is_some() {
-            return r;
+        if let Some(err) = leg_failure(&r) {
+            return err;
         }
         return json!({"restored": true, "path": path, "deleted": true});
     }
-    let data = match read_all(kernel, fb, &src).await {
+    let data = match read_all(kernel, fb, &Value::String(src)).await {
         Ok(d) => d,
         Err(e) => {
             if e.get("reason").and_then(Value::as_str) == Some("not_found") {
-                return json!({
-                    "error": format!("restore: no checkpoint {ckpt_id:?} for {path:?}"),
-                    "reason": "not_found",
-                });
+                return refusal(
+                    NOT_FOUND,
+                    format!(
+                        "restore: no checkpoint {} for {}",
+                        py_repr_value(ckpt_id),
+                        py_repr_value(path)
+                    ),
+                );
             }
             return e;
         }
     };
-    if let Some(err) = write_atomic(kernel, fb, &path, &data).await {
+    if let Some(err) = write_atomic(kernel, fb, path, &data).await {
         return err;
     }
     json!({"restored": true, "path": path, "version": version_of(&data)})
@@ -928,13 +1004,14 @@ async fn drop_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let Some(ckpt_id) = ckpt_arg(payload) else {
+    let ckpt_id = arg(payload, "ckpt_id");
+    if !py_truthy(ckpt_id) {
         return missing("drop", "ckpt_id");
-    };
-    let src = ckpt_path(&path, &ckpt_id);
+    }
+    let src = ckpt_path(path, ckpt_id);
     let r = leg_call(kernel, fb, json!({"type": "delete", "path": src.clone()})).await;
-    if !r.is_object() || r.get("error").is_some() {
-        return r;
+    if let Some(err) = leg_failure(&r) {
+        return err;
     }
     // best-effort: the `.absent` twin, if any (its absence is not an error)
     let _ = leg_call(
@@ -946,28 +1023,32 @@ async fn drop_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
     json!({"dropped": true, "ckpt_id": ckpt_id, "path": path})
 }
 
-fn unknown_type(verb: &str) -> Value {
-    let mut r = refusal(UNHANDLED, format!("text_file: unknown type {verb:?}"));
-    with(&mut r, "verb", json!(verb));
+/// python `refusal(UNHANDLED, f"text_file: unknown type {t!r}", verb=t)` — the
+/// RAW type value, repr'd (an int bare, a str quoted).
+fn unknown_type(verb: &Value) -> Value {
+    let mut r = refusal(
+        UNHANDLED,
+        format!("text_file: unknown type {}", py_repr_value(verb)),
+    );
+    with(&mut r, "verb", verb.clone());
     r
 }
 
 /// One dispatch used by BOTH channels — the byte verbs take the blob, the rest
 /// ignore it.
 async fn dispatch(agent: &Agent, payload: &Value, blob: &[u8], kernel: &Arc<Kernel>) -> Value {
-    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-    if matches!(verb, "reflect") {
-        return reflect_reply(agent).await;
-    }
-    if matches!(verb, "boot" | "shutdown") {
-        return Value::Null;
+    let raw_verb = arg(payload, "type");
+    let verb = raw_verb.as_str().unwrap_or("");
+    match verb {
+        "reflect" => return reflect_reply(agent).await,
+        "boot" => return Value::Null,
+        // python's VERBS map has no `shutdown`, so it is an unknown type.
+        "read" | "write" | "patch" | "append" | "checkpoint" | "checkpoints" | "restore"
+        | "drop" => {}
+        _ => return unknown_type(raw_verb),
     }
     let Some(fb) = target_of(agent, payload) else {
-        return match verb {
-            "read" | "write" | "patch" | "append" | "checkpoint" | "checkpoints" | "restore"
-            | "drop" => unwired(verb),
-            other => unknown_type(other),
-        };
+        return unwired(verb);
     };
     match verb {
         "read" => read_reply(kernel, &fb, payload).await,
@@ -977,8 +1058,7 @@ async fn dispatch(agent: &Agent, payload: &Value, blob: &[u8], kernel: &Arc<Kern
         "checkpoint" => checkpoint_reply(kernel, &fb, payload).await,
         "checkpoints" => checkpoints_reply(kernel, &fb, payload).await,
         "restore" => restore_reply(kernel, &fb, payload).await,
-        "drop" => drop_reply(kernel, &fb, payload).await,
-        other => unknown_type(other),
+        _ => drop_reply(kernel, &fb, payload).await,
     }
 }
 
@@ -992,6 +1072,20 @@ impl Bundle for TextFileBundle {
         Some(README)
     }
 
+    /// python `validate_meta`: `target_id`, when present, must be a non-empty
+    /// agent-id string (the default surface this agent operates on).
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        _record: &Map<String, Value>,
+    ) -> Option<String> {
+        match meta.get("target_id") {
+            Some(t) if t.as_str().is_some_and(|s| !s.is_empty()) => None,
+            Some(_) => Some("target_id must be a non-empty file_bridge agent id".to_string()),
+            None => None,
+        }
+    }
+
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -1001,21 +1095,9 @@ impl Bundle for TextFileBundle {
         let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
             return Ok(Some(json!({"error": format!("no agent {agent_id}")})));
         };
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        // The byte verbs carry RAW BYTES — binary channel, OR the text courtesy
-        // (py-canonical, 2026-09-01): a str `bytes` in the payload IS the
-        // document, utf-8. ai_core encodes for the MODEL; a spawned program's
-        // ctrl-fd wire is JSON (no bytes type), so the str form is its one path
-        // (measured live: E20's program was refused here and stored nothing).
-        // effective_blob in the reply fns lifts the str out of the payload.
-        if matches!(verb, "write" | "patch" | "append")
-            && payload.get("bytes").and_then(Value::as_str).is_none()
-        {
-            return Ok(Some(missing(
-                verb,
-                "bytes (the document — str is utf-8-encoded)",
-            )));
-        }
+        // NO early bytes refusal here: python types the args IN the verb, so an
+        // unwired agent, or a missing `path`, is reported before anyone looks
+        // for a document. `blob_of` raises the per-verb `missing` in its place.
         Ok(Some(dispatch(&agent, payload, &[], kernel).await))
     }
 

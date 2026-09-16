@@ -39,7 +39,7 @@ func renderCall(_ name: String, _ arguments: OrderedDictionary<String, JSON>) ->
 }
 
 private func renderField(_ name: String, _ value: JSON) -> String {
-    if name == "bytes" { return "<bytes>\(flatText(value))</bytes>\n" }
+    if name == "bytes" { return "<bytes>\(callText(value))</bytes>\n" }
     switch value {
     case .object(let map):
         let inner = map.map { renderField($0.key, $0.value) }.joined()
@@ -48,7 +48,7 @@ private func renderField(_ name: String, _ value: JSON) -> String {
         let inner = items.map { renderField("item", $0) }.joined()
         return "<\(name)>\(inner)</\(name)>\n"
     default:
-        return "<\(name)>\(flatText(value))</\(name)>\n"
+        return "<\(name)>\(callText(value))</\(name)>\n"
     }
 }
 
@@ -63,7 +63,7 @@ func renderReply(_ value: JSON) -> String {
     case .array:
         return trimTrailingNewlines(renderReplyField("items", value))
     default:
-        return flatText(value)
+        return replyText(value)
     }
 }
 
@@ -84,11 +84,14 @@ private func renderReplyField(_ name: String, _ value: JSON) -> String {
         let inner =
             structural
             ? items.map { renderReplyField("item", $0) }.joined()
-            : items.map { "<item>\(flatText($0))</item>\n" }.joined()
+            : items.map { "<item>\(replyText($0))</item>\n" }.joined()
         return "<\(name)>\n\(inner)</\(name)>\n"
     default:
-        let text = flatText(value)
-        return text.contains("\n")
+        let text = replyText(value)
+        // A LF SCALAR, not a Character: swift reads CRLF as ONE Character, so a
+        // `contains("\n")` over characters says no and a CRLF-only terminal reply
+        // came back on one line where python spans it.
+        return text.unicodeScalars.contains("\n")
             ? "<\(name)>\n\(text)\n</\(name)>\n" : "<\(name)>\(text)</\(name)>\n"
     }
 }
@@ -99,20 +102,26 @@ private func trimTrailingNewlines(_ s: String) -> String {
     return String(out)
 }
 
-/// One value as the text the model reads: a string is itself (never quoted), a
-/// bool is `true`/`false`, null is empty, a number is its digits.
+/// One REPLY value as the text the model reads — python `_reply_text`: a string
+/// is itself (never quoted), a bool is `true`/`false`, null is EMPTY, and
+/// everything else is python's `str(x)`.
 ///
-/// A STRUCTURE reaching here is the one shape the notation cannot say — python
-/// falls back to `str(dict)`, its own repr; compact JSON is this runtime's
-/// equivalent, and both are a last resort for a list that mixes scalars with
-/// objects.
-private func flatText(_ v: JSON) -> String {
+/// `str(x)` is what carries the shapes the notation cannot say: a float is
+/// python's repr (`1e-05`, `1e+16`, `inf`, `nan`, never `0.00001`), and a
+/// structure inside a mixed list is python's container repr (`{'a': 1}`), not
+/// JSON.
+private func replyText(_ v: JSON) -> String {
     switch v {
     case .null: return ""
     case .bool(let b): return b ? "true" : "false"
-    case .string(let s): return s
-    case .integer(let i): return String(i)
-    case .double(let d): return JSON.double(d).serialize()
-    default: return v.serialize()
+    default: return pyStr(v)
     }
+}
+
+/// One CALL field's scalar as python's `_render_field` writes it: a bool is
+/// `true`/`false`, everything else is `str(x)` — so `None` renders as the word
+/// `None`, which is where this differs from a reply's empty tag.
+private func callText(_ v: JSON) -> String {
+    if case .bool(let b) = v { return b ? "true" : "false" }
+    return pyStr(v)
 }

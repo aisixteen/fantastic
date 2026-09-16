@@ -30,6 +30,13 @@ struct AnthropicDecoded: Equatable {
 struct AnthropicStreamState {
     var wrap = ThinkingWrap()
     var stopReason: String? = nil
+    /// WHAT THE STREAM ACTUALLY CONTAINED — every `content_block_start`'s own
+    /// `type`, in order, RAW (a block with no type is `None`, exactly as
+    /// python's `blocks.append(cb.get("type"))` records it). A bare
+    /// `stop_reason` names the symptom and nothing else; the block types are the
+    /// one fact that separates "the model wrote a native tool block" from "the
+    /// connection died before any content".
+    var blocks: [JSON] = []
 }
 
 /// Decode one SSE line, folding it through `state`.
@@ -58,10 +65,12 @@ func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)
         // call lost. A `/cc`-style route emits these for a request carrying no
         // `tools` key at all — that is exactly the case worth failing on.
         let cb = obj["content_block"]
+        state.blocks.append(cb["type"])
         if cb["type"].asString == "tool_use" {
-            let name = cb["name"].asString ?? "?"
+            // `{cb.get('name')!r}` — python's repr, so an absent name reads
+            // `None` and a quoted one keeps its quotes.
             out.error =
-                "anthropic stream carried a native tool_use block (\"\(name)\"): "
+                "anthropic stream carried a native tool_use block (\(pyRepr(cb["name"]))): "
                 + "the model wrote a JSON tool call, which this kernel does not "
                 + "parse — calls are `<call name=…>` text"
         }
@@ -84,7 +93,13 @@ func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)
         }
 
     case "error":
-        out.error = obj["error"]["message"].asString ?? "anthropic stream error"
+        // THE WHOLE ERROR OBJECT, python's way: `f"anthropic stream error: {err}"`
+        // over `evt.get("error") or {}`. Reading `.message` alone threw away the
+        // type and every other field the endpoint sent, and answered a bare
+        // sentence of our own when the object carried no message at all.
+        out.error =
+            "anthropic stream error: "
+            + pyStr(pyTruthy(obj["error"]) ? obj["error"] : .object([:]))
 
     case "message_stop":
         out.done = true
@@ -106,32 +121,46 @@ func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)
 /// the decoder, so a `stop_reason` of `tool_use` reaching here is an anomaly
 /// and says so.
 func anthropicTerminalityError(_ state: AnthropicStreamState) -> String? {
-    switch state.stopReason {
-    case "end_turn", "stop_sequence":
-        return nil
-    case .some(let other):
-        return "anthropic stream ended without end_turn: stop_reason=\(other)"
-    case .none:
-        return "anthropic stream ended without end_turn: no stop_reason seen "
-            + "(connection cut mid-stream)"
-    }
+    // TERMINAL ON WHAT THE STREAM CONTAINED. A turn that ended BECAUSE the model
+    // called tools is a complete turn — but only when such a block was actually
+    // seen; `tool_use` with no such block means the stream did not carry what
+    // its stop_reason claims. (Python builds the same tuple.)
+    var terminal = ["end_turn", "stop_sequence"]
+    if state.blocks.contains(where: { $0.asString == "tool_use" }) { terminal.append("tool_use") }
+    if let reason = state.stopReason, terminal.contains(reason) { return nil }
+    let blocks = JSON.array(state.blocks)
+    return "anthropic stream ended without end_turn: "
+        + "stop_reason=\(pyRepr(state.stopReason.map(JSON.string) ?? .null)) "
+        + "blocks=\(pyRepr(blocks))"
+        + (state.stopReason == nil ? " (none seen — connection cut mid-stream)" : "")
 }
 
 /// Split ai-core's plain messages into Anthropic's top-level `system` string
-/// plus the user/assistant turns.
+/// plus the user/assistant turns — python `_to_anthropic`.
 ///
 /// Tool-calling is RAW prompt-and-parse, so there is NO tool_use / tool_result
 /// translation in EITHER direction — the envelope is already text in the turn.
-/// System blocks concatenate, matching rust's `translate_messages`.
+///
+/// THREE RULES, all of them python's and none of them what this did before: the
+/// LAST system message wins (they do not concatenate), a user or assistant turn
+/// whose content is empty or null is sent as `(no content)` rather than as an
+/// empty string the API rejects, and every OTHER role is DROPPED instead of
+/// riding through untranslated.
 func translateAnthropicMessages(_ messages: [JSON]) -> (system: String?, messages: [JSON]) {
     var system: String? = nil
     var out: [JSON] = []
     for m in messages {
-        if m["role"].asString == "system" {
-            let text = m["content"].asString ?? ""
-            system = system.map { $0 + "\n\n" + text } ?? text
-        } else {
-            out.append(m)
+        let role = m["role"].asString
+        // `m.get("content", "") or ""` — null, missing and false all read empty.
+        let content = pyTruthy(m["content"]) ? (m["content"].asString ?? "") : ""
+        if role == "system" {
+            system = content
+        } else if role == "user" || role == "assistant" {
+            out.append(
+                .object([
+                    "role": .string(role!),
+                    "content": .string(content.isEmpty ? "(no content)" : content),
+                ]))
         }
     }
     return (system, out)

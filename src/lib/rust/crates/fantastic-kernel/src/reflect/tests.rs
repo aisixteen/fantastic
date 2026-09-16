@@ -60,7 +60,7 @@ fn tree_node_includes_id_and_empty_children() {
 async fn root_reflect_is_uniform_no_primer_keys() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let v = bare_reflect(&kernel, &root, &json!({"type": "reflect"}));
     assert_eq!(v["id"], "core");
@@ -92,7 +92,7 @@ async fn root_reflect_carries_a_32hex_guid() {
         json!("0123456789abcdef0123456789abcdef"),
     );
     let root = mk_agent_meta("core", None, meta);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let v = bare_reflect(&kernel, &root, &json!({"type": "reflect"}));
     let guid = v["guid"].as_str().expect("root reflect has a guid");
@@ -109,10 +109,10 @@ async fn child_reflect_has_no_guid() {
     // not surface one — `apply_reflect_flags` only injects it on the root.
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let child = mk_agent("kid_1", Some(AgentId::from("core")));
-    let _rx2 = kernel.register(Arc::clone(&child));
+    kernel.register(Arc::clone(&child));
     let v = bare_reflect(&kernel, &child, &json!({"type": "reflect"}));
     assert!(v.get("guid").is_none(), "guid must be root-only");
 }
@@ -121,10 +121,10 @@ async fn child_reflect_has_no_guid() {
 async fn child_reflect_is_uniform() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let child = mk_agent("kid_1", Some(AgentId::from("core")));
-    let _rx2 = kernel.register(Arc::clone(&child));
+    kernel.register(Arc::clone(&child));
     let v = bare_reflect(&kernel, &child, &json!({"type": "reflect"}));
     assert_eq!(v["id"], "kid_1");
     assert_eq!(v["parent_id"], "core");
@@ -142,11 +142,11 @@ async fn child_reflect_is_uniform() {
 async fn tree_tiers() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let child = mk_agent("kid_1", Some(AgentId::from("core")));
-    let _rx2 = kernel.register(Arc::clone(&child));
-    root.children.insert(child.id.clone(), Arc::clone(&child));
+    kernel.register(Arc::clone(&child));
+    root.add_child(Arc::clone(&child));
     // tree=ids → flat list, self first.
     let ids = bare_reflect(&kernel, &root, &json!({"type": "reflect", "tree": "ids"}));
     assert_eq!(ids["tree"], json!(["core", "kid_1"]));
@@ -159,7 +159,7 @@ async fn tree_tiers() {
 async fn bundles_tiers() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     // No bundles registered in this bare kernel → empty list (not absent).
     let all = bare_reflect(
@@ -180,13 +180,13 @@ async fn bundles_tiers() {
 async fn description_surfaces_top_and_tree() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut meta = Map::new();
     meta.insert("description".to_string(), json!("holds my notes"));
     let child = mk_agent_meta("kid_1", Some(AgentId::from("core")), meta);
-    let _rx2 = kernel.register(Arc::clone(&child));
-    root.children.insert(child.id.clone(), Arc::clone(&child));
+    kernel.register(Arc::clone(&child));
+    root.add_child(Arc::clone(&child));
     // top-level on the child's own reflect.
     let own = bare_reflect(&kernel, &child, &json!({"type": "reflect"}));
     assert_eq!(own["description"], "holds my notes");
@@ -205,7 +205,7 @@ async fn description_surfaces_top_and_tree() {
 async fn readme_flag_tiers() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     // default → no readme key.
     let plain = bare_reflect(&kernel, &root, &json!({"type": "reflect"}));
@@ -233,7 +233,7 @@ async fn readme_flag_tiers() {
 async fn root_self_extension() -> String {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let v = bare_reflect(&kernel, &root, &json!({"type": "reflect"}));
     v["self_extension"]
@@ -365,7 +365,7 @@ async fn readme_doctree_frame_index_view_and_errors() {
     seed_docs(&base);
     let kernel = Arc::new(Kernel::new());
     let root = Agent::new(AgentId::from("core"), None, None, Map::new(), base, true);
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     // Always-on frame: `readmes` index + `docs` note on the root reflect.
@@ -433,11 +433,35 @@ async fn readme_doctree_frame_index_view_and_errors() {
     assert!(esc["readme"]["error"].is_string());
 }
 
+/// A12.2 — `minds` was a rust-only topic python never shipped. With it gone the
+/// key is an ORDINARY unknown key: the reply stays well-formed and names the keys
+/// that do exist, rather than serving a doc no other runtime has.
+#[tokio::test]
+async fn readme_minds_is_no_doc() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join(".fantastic");
+    seed_docs(&base);
+    let kernel = Arc::new(Kernel::new());
+    let root = Agent::new(AgentId::from("core"), None, None, Map::new(), base, true);
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    let r = bare_reflect(
+        &kernel,
+        &root,
+        &json!({"type":"reflect","tree":"none","readme":"minds"}),
+    );
+    assert_eq!(r["readme"]["error"], "no doc 'minds'");
+    let keys = r["readme"]["keys"].as_array().unwrap();
+    assert!(keys.iter().any(|k| k == "self-extension"));
+    assert!(!keys.iter().any(|k| k == "minds"));
+}
+
 #[tokio::test]
 async fn non_root_has_no_readmes_frame() {
     let kernel = Arc::new(Kernel::new());
     let child = mk_agent("kid", Some(AgentId::from("core")));
-    let _rx = kernel.register(Arc::clone(&child));
+    kernel.register(Arc::clone(&child));
     let r = bare_reflect(&kernel, &child, &json!({"type":"reflect","tree":"none"}));
     assert!(r.get("readmes").is_none());
     assert!(r.get("docs").is_none());
@@ -449,12 +473,12 @@ async fn non_root_has_no_readmes_frame() {
 async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _r = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     for i in 0..5 {
         let c = mk_agent(&format!("kid_{i}"), Some(root.id.clone()));
-        let _ = kernel.register(Arc::clone(&c));
-        root.children.insert(c.id.clone(), Arc::clone(&c));
+        kernel.register(Arc::clone(&c));
+        root.add_child(Arc::clone(&c));
     }
 
     // Default is UNCHANGED — everything, no cursor.
@@ -522,15 +546,15 @@ async fn an_agent_can_read_its_own_authority() {
     // send the map whole, so you must be able to read it.
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
-    let _r = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     let mut meta = Map::new();
     meta.insert("can_call".into(), json!({"store": ["read"]}));
     meta.insert("callable_by".into(), json!({"cli": "*"}));
     let a = mk_agent_meta("worker", Some(root.id.clone()), meta);
-    let _ra = kernel.register(Arc::clone(&a));
-    root.children.insert(a.id.clone(), Arc::clone(&a));
+    kernel.register(Arc::clone(&a));
+    root.add_child(Arc::clone(&a));
 
     let own = kernel
         .send(vec![Item::new(a.id.clone(), json!({"type": "reflect"}))])
@@ -556,4 +580,65 @@ async fn an_agent_can_read_its_own_authority() {
         .expect("the worker node");
     assert_eq!(node["can_call"]["store"][0], "read");
     assert_eq!(node["callable_by"]["cli"], "*");
+}
+
+// ─── C5 — children walk CREATION order ─────────────────────────
+
+#[tokio::test]
+async fn tree_children_keep_creation_order() {
+    // Python's `_children` is a plain dict, so the tree frame, `tree=ids` and
+    // the descendant walk all read insertion order. Rust's `DashMap` had none,
+    // so every reader sorted by id and printed a tree python never prints —
+    // measured in `root_reflect_full.json` children and `prompt_req_01.json`.
+    let kernel = Arc::new(Kernel::new());
+    let root = mk_agent("core", None);
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    // Deliberately reverse-alphabetical: a sort would invert this.
+    for id in ["zulu", "mike", "alpha"] {
+        let c = mk_agent(id, Some(root.id.clone()));
+        kernel.register(Arc::clone(&c));
+        root.add_child(Arc::clone(&c));
+    }
+    // A grandchild under the LAST child, to pin the DFS order too.
+    let g = mk_agent("gamma", Some(AgentId::from("alpha")));
+    kernel.register(Arc::clone(&g));
+    kernel
+        .agents
+        .get(&AgentId::from("alpha"))
+        .unwrap()
+        .add_child(Arc::clone(&g));
+
+    // `tree` frame.
+    let node = tree_node(&root);
+    let kids: Vec<&str> = node["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(kids, vec!["zulu", "mike", "alpha"], "{node}");
+
+    // `tree=ids` / descendant walk — DFS, self first, children in creation order.
+    assert_eq!(
+        descendant_ids(&root),
+        vec!["core", "zulu", "mike", "alpha", "gamma"]
+    );
+
+    // `child_ids()` is the one ordered accessor both read through.
+    assert_eq!(
+        root.child_ids(),
+        vec![
+            AgentId::from("zulu"),
+            AgentId::from("mike"),
+            AgentId::from("alpha")
+        ]
+    );
+
+    // A detach leaves the survivors in place — it does not re-sort.
+    root.remove_child(&AgentId::from("mike"));
+    assert_eq!(
+        root.child_ids(),
+        vec![AgentId::from("zulu"), AgentId::from("alpha")]
+    );
 }

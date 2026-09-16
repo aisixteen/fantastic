@@ -14,6 +14,7 @@
 //! python-canonical, and independent of whether the loader discovered a
 //! persistence provider.
 
+use fantastic_bundle::{is_alnum, py_strip};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::Value;
 use std::sync::Arc;
@@ -49,31 +50,31 @@ pub fn agent_meta(agent_id: &AgentId, kernel: &Kernel) -> serde_json::Map<String
     }
 }
 
-/// Trim + sanitise a client id so it's safe as a filename suffix.
-/// Spaces / slashes / weirdness collapse to underscores; capped at 64.
+/// Trim + sanitise a client id so it's safe as a filename suffix — python
+/// `_safe_client`, per CODE POINT.
+///
+/// UNICODE ALPHANUMERICS SURVIVE (`str.isalnum` is Unicode-aware), and there is
+/// NO LENGTH CAP. Rust used to keep only ASCII alphanumerics and truncate at 64,
+/// so `éx` became `_x` and a long browser client id was silently a DIFFERENT id
+/// from python's — two runtimes writing two different chat sidecars for one
+/// caller. The strip is python's whitespace set (`\x1c`–`\x1f` included), which
+/// `str::trim` does not cover.
 pub fn safe_client(client_id: &str) -> String {
-    let trimmed = client_id.trim();
-    let raw = if trimmed.is_empty() {
+    let stripped = py_strip(client_id);
+    let raw = if stripped.is_empty() {
         DEFAULT_CLIENT_ID
     } else {
-        trimmed
+        stripped
     };
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.len() > 64 {
-        out.truncate(64);
-    }
-    if out.is_empty() {
-        DEFAULT_CLIENT_ID.to_string()
-    } else {
-        out
-    }
+    raw.chars()
+        .map(|c| {
+            if is_alnum(c) || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Current unix time in fractional seconds.
@@ -100,9 +101,26 @@ fn mix() -> u64 {
     nanos ^ stack_ptr ^ std::process::id() as u64 ^ seq
 }
 
-/// Opaque id for a single user submission.
+/// The base64url alphabet, python's `secrets.token_urlsafe` spelling.
+const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Opaque id for a single user submission — python `secrets.token_urlsafe(8)`:
+/// 8 bytes as UNPADDED base64url, so 11 characters and NO prefix. Rust minted
+/// `snd_<8 hex>`, a shape no python-facing consumer (or capture diff) expects.
 pub fn mint_send_id() -> String {
-    format!("snd_{:08x}", mix() as u32)
+    let bytes = mix().to_be_bytes();
+    let mut out = String::with_capacity(11);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        // 3 bytes → 4 characters, 2 → 3, 1 → 2 (the padding is stripped).
+        for i in 0..chunk.len() + 1 {
+            let six = (n >> (18 - 6 * i)) & 63;
+            out.push(B64URL[six as usize] as char);
+        }
+    }
+    out
 }
 
 /// A FRESH 4-hex token for ONE delivered turn's batch — python's

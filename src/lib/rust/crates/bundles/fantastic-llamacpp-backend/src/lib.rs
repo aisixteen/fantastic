@@ -22,15 +22,16 @@
 //!   per-request equivalent, so this bundle does not pretend to own one.
 
 use async_trait::async_trait;
-use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use fantastic_ai_core::retrieval;
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
-use fantastic_ai_core::{agent_loop::BackendConfig, events::CallerRoute, helpers, state, verbs};
-use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
+use fantastic_bundle::{py_float, py_int, py_repr_value, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// The handler module id a record names to select this bundle.
@@ -41,12 +42,28 @@ pub const README: &str = include_str!("readme.md");
 /// Where a local llama-server listens by default.
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8080/v1";
 
+/// A SENTINEL, never sent on the wire — python `llamacpp_backend/provider.py`.
+/// `llama-server` serves exactly ONE model (whichever `-hf`/`-m` loaded it) and
+/// IGNORES the request's `model` field, so there is no model to guess and none
+/// to get wrong; this string exists only so `reflect` can say what is true.
+pub const DEFAULT_MODEL: &str = "(server-loaded)";
+
+/// What `reflect` says this agent IS — python `llamacpp_backend/tools.py`'s
+/// `sentence`, verbatim.
+pub const SENTENCE: &str = "llama.cpp-backed local LLM agent (raw prompt-and-parse tool-calling).";
+
+/// Sampling temperature when the record names none. An agentic backend must
+/// emit EXACT tool calls, not improvise, so the default is LOW — python
+/// `provider.py:51`, which folds the default in at CONSTRUCTION, so the key is
+/// on the wire of every request.
+pub const DEFAULT_TEMPERATURE: f64 = 0.3;
+
 pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
-pub const SEND_TIMEOUT_SECS: u64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
+pub const SEND_TIMEOUT_SECS: f64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
 
 const CFG: BackendConfig = BackendConfig {
-    route: CallerRoute::PerClientInbox,
     name: "llamacpp_backend",
+    provider_missing_error: None,
 };
 
 // ── provider ────────────────────────────────────────────────────────
@@ -58,7 +75,11 @@ struct LlamaCppProvider {
     requested_model: Option<String>,
     api_key: Option<String>,
     max_tokens: Option<u64>,
-    temperature: Option<f64>,
+    /// ALWAYS SENT. python resolves the default in `__init__`, so `temperature`
+    /// is never absent from the body; rust omitted the field entirely when the
+    /// record named none, which let the SERVER's default (often 0.8) decide how
+    /// literal a tool-calling model was.
+    temperature: f64,
     /// `None` means DO NOT SEND the kwarg: a model without a thinking gate
     /// rejects an unknown one, so this is three-valued on purpose.
     think: Option<bool>,
@@ -67,13 +88,14 @@ struct LlamaCppProvider {
 #[async_trait]
 impl Provider for LlamaCppProvider {
     fn model(&self) -> String {
-        // Reporting a guess here would be a lie that `reflect` then repeats.
+        // Reporting a guess here would be a lie that `reflect` then repeats;
+        // python names the same sentinel (`provider.model`).
         self.requested_model
             .clone()
-            .unwrap_or_else(|| "(llama-server default)".to_string())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string())
     }
 
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
         // RAW: no native `tools`/`tool_choice` — ai-core parses the `<tool_call>`
         // envelope out of the streamed text.
         let mut body = serde_json::Map::new();
@@ -82,9 +104,7 @@ impl Provider for LlamaCppProvider {
         if let Some(m) = &self.requested_model {
             body.insert("model".into(), json!(m));
         }
-        if let Some(t) = self.temperature {
-            body.insert("temperature".into(), json!(t));
-        }
+        body.insert("temperature".into(), json!(self.temperature));
         if let Some(n) = self.max_tokens {
             body.insert("max_tokens".into(), json!(n));
         }
@@ -105,77 +125,129 @@ impl Provider for LlamaCppProvider {
         if let Some(key) = self.api_key.as_deref().filter(|k| !k.is_empty()) {
             req = req.bearer_auth(key);
         }
-        let resp = req.send().await.map_err(|e| format!("http: {e}"))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::raised(format!("http: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("send: provider HTTP {}", status.as_u16()));
+            return Err(ProviderError::raised(format!(
+                "send: provider HTTP {}",
+                status.as_u16()
+            )));
         }
-        let events = consume_sse(resp).await?;
-        Ok(Box::pin(futures_util::stream::iter(events)))
+        Ok(consume_sse(resp))
     }
 }
 
-/// Drain the SSE body, split into `data:` lines, emit content tokens in order.
+/// The SSE body as a LIVE stream of content tokens.
+///
+/// PER LINE, NOT PER BODY. This used to drain the whole response into a `Vec`
+/// and hand it over only once the stream had ENDED — so nothing reached
+/// `text_so_far`, the `token` events or the `streaming` phase until the
+/// completion was already finished, and a long turn was indistinguishable from
+/// a stalled request. Python's provider is an async generator over
+/// `resp.aiter_lines()`; this yields on the same boundary.
+///
 /// PURE RAW TEXT — no native `tool_calls` are read.
-async fn consume_sse(
-    resp: reqwest::Response,
-) -> Result<Vec<Result<ProviderEvent, String>>, String> {
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
-    let mut done_marker_seen = false;
-    // ONE wrapper for the whole pass — the reasoning span is per TURN.
-    let mut wrap = ThinkWrap::new();
+fn consume_sse(resp: reqwest::Response) -> ProviderStream {
+    let inner = resp.bytes_stream();
+    // `pending` holds the events decoded from ONE chunk: a chunk can carry
+    // several lines, and each line several tokens.
+    let init = (inner, SseState::new(), VecDeque::new(), false);
+    Box::pin(futures_util::stream::unfold(
+        init,
+        |(mut inner, mut st, mut pending, mut finished)| async move {
+            loop {
+                if let Some(ev) = pending.pop_front() {
+                    return Some((ev, (inner, st, pending, finished)));
+                }
+                if finished {
+                    return None;
+                }
+                let Some(chunk_res) = inner.next().await else {
+                    finished = true;
+                    st.close_span(&mut pending);
+                    continue;
+                };
+                match chunk_res {
+                    Ok(bytes) => st.buf.extend_from_slice(&bytes),
+                    Err(e) => {
+                        finished = true;
+                        pending.push_back(Err(ProviderError::raised(format!("stream: {e}"))));
+                        continue;
+                    }
+                }
+                while let Some(nl) = st.buf.iter().position(|b| *b == b'\n') {
+                    let line_bytes: Vec<u8> = st.buf.drain(..=nl).collect();
+                    let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                        .trim_end_matches('\r')
+                        .to_string();
+                    if st.decode_line(&line, &mut pending) {
+                        finished = true;
+                        st.close_span(&mut pending);
+                        break;
+                    }
+                }
+            }
+        },
+    ))
+}
 
-    while let Some(chunk_res) = stream.next().await {
-        let bytes = match chunk_res {
-            Ok(b) => b,
-            Err(e) => return Err(format!("stream: {e}")),
+/// Per-line SSE decode state — the buffer plus the per-TURN reasoning span.
+struct SseState {
+    buf: Vec<u8>,
+    wrap: ThinkWrap,
+}
+
+impl SseState {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            wrap: ThinkWrap::new(),
+        }
+    }
+
+    /// Decode ONE line into the tokens it produces. `true` = the `[DONE]`
+    /// marker: the turn is over.
+    fn decode_line(
+        &mut self,
+        line: &str,
+        out: &mut VecDeque<Result<ProviderEvent, ProviderError>>,
+    ) -> bool {
+        if line.is_empty() || !line.starts_with("data:") {
+            return false;
+        }
+        let data = line[5..].trim();
+        if data.is_empty() {
+            return false;
+        }
+        if data == "[DONE]" {
+            return true;
+        }
+        let Ok(obj) = serde_json::from_str::<Value>(data) else {
+            return false;
         };
-        buf.extend_from_slice(&bytes);
-        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
-            let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
-            let line_owned = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
-                .trim_end_matches('\r')
-                .to_string();
-            let line = line_owned.as_str();
-            if line.is_empty() || !line.starts_with("data:") {
-                continue;
-            }
-            let data = line[5..].trim();
-            if data.is_empty() {
-                continue;
-            }
-            if data == "[DONE]" {
-                done_marker_seen = true;
-                break;
-            }
-            let obj: Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let Some(choices) = obj.get("choices").and_then(Value::as_array) else {
-                continue;
-            };
-            let Some(first) = choices.first() else {
-                continue;
-            };
-            let delta = first.get("delta").cloned().unwrap_or(Value::Null);
-            for piece in decode_openai_delta(&delta, &mut wrap) {
-                out.push(Ok(ProviderEvent::Token(piece)));
-            }
+        let Some(choices) = obj.get("choices").and_then(Value::as_array) else {
+            return false;
+        };
+        let Some(first) = choices.first() else {
+            return false;
+        };
+        let delta = first.get("delta").cloned().unwrap_or(Value::Null);
+        for piece in decode_openai_delta(&delta, &mut self.wrap) {
+            out.push_back(Ok(ProviderEvent::Token(piece)));
         }
-        if done_marker_seen {
-            break;
-        }
+        false
     }
 
-    // The turn ended while still reasoning (content never started) — close the
-    // span exactly once so the deliberation is strippable.
-    if let Some(m) = wrap.close_marker() {
-        out.push(Ok(ProviderEvent::Token(m.to_string())));
+    /// The turn ended while still reasoning (content never started) — close the
+    /// span exactly once so the deliberation is strippable.
+    fn close_span(&mut self, out: &mut VecDeque<Result<ProviderEvent, ProviderError>>) {
+        if let Some(m) = self.wrap.close_marker() {
+            out.push_back(Ok(ProviderEvent::Token(m.to_string())));
+        }
     }
-    Ok(out)
 }
 
 // ── verbs ───────────────────────────────────────────────────────────
@@ -209,12 +281,18 @@ fn build_provider(
         max_tokens: meta_u64(agent_id, kernel, "num_predict"),
         temperature: helpers::agent_meta(agent_id, kernel)
             .get("temperature")
-            .and_then(Value::as_f64),
+            .filter(|v| !v.is_null())
+            .and_then(|v| py_float(v).ok())
+            .unwrap_or(DEFAULT_TEMPERATURE),
         think: meta_bool(agent_id, kernel, "think"),
     }))
 }
 
-async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+async fn send_reply(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Result<Value, BundleError> {
     let client_id = helpers::safe_client(
         payload
             .get("client_id")
@@ -223,42 +301,42 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     );
     let provider = build_provider(agent_id, kernel, &client_id)
         .expect("llamacpp: the provider is record-driven and always buildable");
-    verbs::send(provider, agent_id, payload, kernel, CFG).await
+    verbs::send(Some(provider), agent_id, payload, kernel, CFG).await
 }
 
-async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
+/// `reflect` — python `_make_reflect` + `llamacpp_backend/tools.py`'s
+/// `_reflect_extra`: the shared base body, then the sampling knobs. `num_ctx` is
+/// deliberately ABSENT (llama-server fixes the window at start), and so are the
+/// rust-only `note`/`file_bridge_id` keys python never answered with.
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, DEFAULT_MODEL, DEFAULT_ENDPOINT);
     let meta = helpers::agent_meta(agent_id, kernel);
-    let context_window = fantastic_ai_core::context::resolve_context_window(&meta);
-    let context_strategy = meta
-        .get("context_strategy")
-        .and_then(Value::as_str)
-        .unwrap_or("compact")
-        .to_string();
-    json!({
-        "id": agent_id.as_str(),
-        "sentence": "llama.cpp-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
-        "endpoint": endpoint,
-        "model": helpers::meta_string(agent_id, kernel, "model"),
-        "file_bridge_id": helpers::meta_string(agent_id, kernel, "file_bridge_id"),
-        "think": meta.get("think").cloned().unwrap_or(Value::Null),
-        "generating": state::is_generating(agent_id),
-        "context_window": context_window,
-        "context_strategy": context_strategy,
-        "verbs": {
-            "reflect": "Identity + endpoint + think + generating + file_bridge_id binding. No args.",
-            "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?. Streams tokens to ONLY the caller. Failfast if file_bridge_id unset.",
-            "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
-            "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store.",
-            "pull": "args: pid:int (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with offset: next_offset until eof.",
-            "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int?, width:int? (chars of each matched line, default 200). Finds the LINE that mentions something, wherever it is. Returns {matches:[{id, line, text}], total, truncated}.",
-            "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuilds this agent's VIEW from its store: fits the head to the budget at digest resolution, asks the model which rows it wants in full, persists the id list, logs the decision as a row. Returns {kept, expanded, dropped, budget, why, degraded}.",
-            "context_status": "No args. Context-budget posture + last compaction + derived reaction.",
-            "status": "args: client_id?. In-flight phase + this client's pending queue.",
+    out.insert(
+        "temperature".to_string(),
+        match meta.get("temperature").filter(|v| !v.is_null()) {
+            Some(v) => json!(py_float(v)?),
+            None => json!(DEFAULT_TEMPERATURE),
         },
-        "note": "The model and the context window belong to the server (-hf/-m, -c N), not to this record: llama-server serves ONE model and ignores the request's `model` field.",
-    })
+    );
+    out.insert(
+        "num_predict".to_string(),
+        match meta.get("num_predict").filter(|v| py_truthy(v)) {
+            Some(v) => json!(py_int(v)?),
+            None => Value::Null,
+        },
+    );
+    out.insert(
+        "think".to_string(),
+        match meta.get("think").filter(|v| !v.is_null()) {
+            Some(v) => json!(py_truthy(v)),
+            None => Value::Null,
+        },
+    );
+    out.insert(
+        "has_api_key".to_string(),
+        json!(meta.get("api_key").is_some_and(py_truthy)),
+    );
+    Ok(Value::Object(out))
 }
 
 // ── bundle impl ─────────────────────────────────────────────────────
@@ -284,10 +362,13 @@ impl Bundle for LlamaCppBundle {
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel).await,
-            "shutdown" => Value::Null,
+            "reflect" => reflect_reply(agent_id, kernel)?,
             // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`.
             "boot" => {
+                // A BOOT IS A NEW INCARNATION (python `_make_boot`): a reply
+                // answering a call the PREVIOUS one made is recorded as a row
+                // and wakes no turn.
+                state::bump_incarnation(agent_id);
                 if fantastic_ai_core::history::load_history(
                     agent_id,
                     kernel,
@@ -302,13 +383,13 @@ impl Bundle for LlamaCppBundle {
                     retrieval::context_recall(agent_id, &json!({}), kernel, p.as_ref()).await
                 }
             }
-            "send" => send_reply(agent_id, payload, kernel).await,
+            "send" => send_reply(agent_id, payload, kernel).await?,
             // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
             // record, this agent answers it by THINKING, and the asker writes
             // the same call either way.
             "inquiry" => match verbs::inquiry_open(payload) {
                 Err(refusal) => refusal,
-                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await, payload),
+                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await?, payload),
             },
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
@@ -322,7 +403,14 @@ impl Bundle for LlamaCppBundle {
             }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
-            other => json!({"error": format!("llamacpp_backend: unknown type {other:?}")}),
+            // python's VERBS map has no `shutdown` — it is an unknown type like
+            // any other, and the value is rendered with python's `repr`.
+            _ => json!({
+                "error": format!(
+                    "llamacpp_backend: unknown type {}",
+                    py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
+                )
+            }),
         };
         Ok(Some(reply))
     }
@@ -342,7 +430,10 @@ impl Bundle for LlamaCppBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

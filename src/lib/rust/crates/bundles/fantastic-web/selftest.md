@@ -4,9 +4,10 @@
 > requires: free port (suggest 18181), `cargo build --release --bin fantastic_kernel`
 > out-of-scope: WS frames (web_ws selftest), REST verb dispatch (web_rest selftest)
 
-axum HTTP host. Serves `/`, `/<id>/`, `/<id>/file/<path>`,
-`/transport.js`, `/favicon.ico`. Verb-invocation surfaces (web_ws,
-web_rest) mount sibling routes via `get_routes`.
+HTTP host. Serves python's four rendering routes — `/`,
+`/_assets/favicon.png`, `/favicon.png`, `/<id>/file/<path>`.
+Verb-invocation surfaces (web_ws, web_rest) mount sibling routes via
+`get_routes`.
 
 ## Pre-flight
 
@@ -32,26 +33,21 @@ curl -sf -o /tmp/fw_test/root.html http://localhost:$PORT/
 grep -q "fantastic" /tmp/fw_test/root.html
 ```
 
-### Test 2: transport.js served + injectable
+### Test 2: the favicon is the only static asset
 
 ```bash
-curl -sf http://localhost:$PORT/transport.js | grep -q "fantastic_transport"
-# Page render also injects transport.js automatically — at the root
-# index (`/`) and at every renderable agent's path (`/<id>/`). The
-# `web` agent itself does NOT answer `render_html` (it's the host,
-# not a renderable), so `/w/` 404s by design. Test the root index:
-curl -sf http://localhost:$PORT/ | grep -q "transport.js"
+curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/favicon.png | grep -q "200"
+curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/_assets/favicon.png | grep -q "200"
 ```
 
-### Test 3: per-agent render_html
+### Test 3: no server-side render route
 
-Add an html_agent (Phase 2 deliverable). Until then: any agent
-returning `{html: str}` from `render_html` gets that body served at
-`/<id>/`.
+Rendering routes are python's four; frontend panels live in the TS
+kernel, so `/<id>/` and `/transport.js` are NOT served.
 
 ```bash
-# Phase 2 — needs fantastic-html-agent.
-echo "SKIP: requires fantastic-html-agent (Phase 2)"
+curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/transport.js | grep -q "404"
+curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/w/ | grep -q "404"
 ```
 
 ### Test 4: file proxy at /<file_id>/file/<path>
@@ -71,10 +67,10 @@ sleep 2
 curl -sf http://localhost:$PORT/fw_f/file/test.txt | grep -q "file content"
 ```
 
-### Test 5: 404 on unknown agent
+### Test 5: 404 on an unmatched path
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/no_such_agent/ | grep -q "404"
+curl -s http://localhost:$PORT/no_such_agent/ | grep -q '{"detail":"Not Found"}'
 ```
 
 ## Summary table
@@ -82,7 +78,7 @@ curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/no_such_agent/ | g
 | Test | Pass / Fail | Notes |
 |---|---|---|
 | 1. root index 200 |  |  |
-| 2. transport.js |  |  |
-| 3. render_html | skip | needs Phase 2 |
+| 2. favicon |  |  |
+| 3. no render route |  |  |
 | 4. file proxy |  |  |
-| 5. 404 on unknown |  |  |
+| 5. 404 JSON on a miss |  |  |

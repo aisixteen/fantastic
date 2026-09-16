@@ -48,9 +48,11 @@ enum DaemonMode {
         let lock = WorkdirLock(workdir: workdirURL)
         do {
             try lock.acquire()
-        } catch WorkdirLock.LockError.alreadyRunning(let pid, let dir) {
+        } catch WorkdirLock.LockError.alreadyRunning(let pid, _) {
+            // Python raises out of `acquire_lock` and `main_dispatch` prints
+            // `[kernel] <e>` — three lines naming the pid and both ways out.
             FileHandle.standardError.write(
-                "fantastic: another fantastic owns this dir (pid=\(pid), workdir=\(dir))\n"
+                (FantasticCLI.daemonLockRefusal(pid: Int(pid)) + "\n")
                     .data(using: .utf8) ?? Data())
             exit(1)
         } catch {

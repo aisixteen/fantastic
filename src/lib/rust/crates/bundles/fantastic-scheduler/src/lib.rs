@@ -10,8 +10,7 @@
 //! Verbs (mirror Python verb-for-verb):
 //!
 //! - `reflect` → `{id, sentence, tick_sec, paused, running, verbs, emits}`
-//! - `boot`    → idempotent. Starts the tick task.
-//! - `shutdown`→ idempotent. Cancels the tick task.
+//! - `boot`    → idempotent. Starts the tick task; answers `{running:true}`.
 //! - `schedule`     args `{target, payload, interval_seconds, timeout?}` → mint + persist
 //! - `unschedule`   args `{schedule_id}`                       → remove + persist
 //! - `list`                                                    → `{schedules}`
@@ -26,14 +25,21 @@
 //! seconds; absent = wait forever (the kernel never defaults it). One
 //! `{type:"schedule_fired", ...}` per outcome goes to the scheduler's OWN inbox
 //! only — the target gets the payload, which is the tick.
+//!
+//! There is no `shutdown` VERB: the tick loop is a kernel task, stopped by deleting
+//! the agent (`on_delete`) or by cancelling that task — the same two doors every
+//! other bundle's background work has.
 
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use fantastic_bundle::{py_json_dumps, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{bad, AgentId, Item, Kernel, Status};
+use futures_util::FutureExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -47,12 +53,17 @@ pub const README: &str = include_str!("readme.md");
 /// Matches Python's `HISTORY_MAX`.
 pub const HISTORY_MAX: usize = 500;
 
-/// Live tick tasks keyed by scheduler agent id. `boot` populates;
-/// `shutdown` / `on_delete` abort.
+/// Seconds between tick-loop sweeps when the record does not name one
+/// (python `DEFAULT_TICK_SEC`).
+pub const DEFAULT_TICK_SEC: f64 = 1.0;
+
+/// Live tick tasks keyed by scheduler agent id. `boot` populates; `on_delete`
+/// (and an operator's `cancel` on the row) aborts.
 static SCHEDULER_TASKS: OnceLockTaskMap = OnceLockTaskMap::new();
 
-/// In-process schedule cache to avoid re-reading schedules.json on every
-/// tick. The on-disk file is the truth; this is a warm copy.
+/// In-process schedule cache, python's `_cache`. Every verb mutates it BEFORE it
+/// persists, so the cache is what a failed write leaves behind (A5.9), and nothing
+/// ever evicts it — not even `delete_agent` (A5.14).
 static SCHEDULE_CACHE: OnceLockScheduleCache = OnceLockScheduleCache::new();
 
 // ── once-lock map helpers ───────────────────────────────────────────
@@ -67,6 +78,34 @@ impl OnceLockTaskMap {
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .expect("SCHEDULER_TASKS poisoned")
+    }
+}
+
+/// python configures NO logging handler, so `logger.warning` / `logger.exception`
+/// reach `logging.lastResort` and print the BARE formatted message to stderr
+/// (`scheduler/tools.py:43`). This is that writer, with a sink tests can swap in
+/// to read the exact line back (A15.2).
+static LOG_SINK: OnceLockLogSink = OnceLockLogSink::new();
+
+/// Emit one python `logging.lastResort` line.
+fn log_line(msg: String) {
+    if let Some(buf) = LOG_SINK.lock().as_mut() {
+        buf.push(msg);
+        return;
+    }
+    eprintln!("{msg}");
+}
+
+struct OnceLockLogSink(OnceLock<Mutex<Option<Vec<String>>>>);
+impl OnceLockLogSink {
+    const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Vec<String>>> {
+        self.0
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("LOG_SINK poisoned")
     }
 }
 
@@ -120,13 +159,11 @@ impl Bundle for SchedulerBundle {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let raw_type = payload.get("type").unwrap_or(&Value::Null);
+        let verb = raw_type.as_str().unwrap_or("");
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel),
             "boot" => boot_reply(agent_id, kernel).await,
-            // A LIFECYCLE NO-OP, as in python: the tick loop dies in `on_delete`
-            // (which `on_shutdown` defaults to), never behind a verb.
-            "shutdown" => Value::Null,
             "schedule" => schedule_reply(agent_id, payload, kernel).await,
             "unschedule" => unschedule_reply(agent_id, payload, kernel).await,
             "list" => list_reply(agent_id, kernel).await,
@@ -134,14 +171,20 @@ impl Bundle for SchedulerBundle {
             "resume" => resume_reply(agent_id, payload, kernel).await,
             "tick_now" => tick_now_reply(agent_id, payload, kernel).await,
             "history" => history_reply(agent_id, payload, kernel).await,
-            other => json!({"error": format!("scheduler: unknown type '{other}'")}),
+            // `shutdown` is NOT a verb (A5.3): python's `VERBS` has no such key, so
+            // it lands here like any other unknown type. The tick loop dies in
+            // `on_delete`, never behind a verb.
+            _ => json!({"error": format!("scheduler: unknown type {}", py_repr_value(raw_type))}),
         };
         Ok(Some(reply))
     }
 
+    /// The tick loop dies with the agent. The SCHEDULE CACHE deliberately does NOT
+    /// (A5.14 / D6): python's `_cache` is a module global keyed by agent id and
+    /// nothing evicts it, so an agent recreated under the same id in the same
+    /// process sees its predecessor's schedules.
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let _ = shutdown_reply(agent_id, kernel).await;
-        SCHEDULE_CACHE.lock().remove(agent_id);
+        shutdown_tick(agent_id, kernel).await;
         Ok(())
     }
 }
@@ -180,20 +223,28 @@ fn int_arg(
 
 // ── meta helpers ────────────────────────────────────────────────────
 
-fn meta_f64(agent_id: &AgentId, kernel: &Kernel, key: &str, default: f64) -> f64 {
-    let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
-        return default;
-    };
+fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
+    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
-    meta.get(key).and_then(Value::as_f64).unwrap_or(default)
+    meta.get(key).cloned()
 }
 
-fn meta_bool(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
-    let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
-        return false;
-    };
-    let meta = agent.meta.read().expect("meta poisoned");
-    meta.get(key).and_then(Value::as_bool).unwrap_or(false)
+/// The record's sweep interval, python's `_tick_sec`.
+///
+/// A bool, a non-number or a non-positive value is the DOCUMENTED DEFAULT (the write
+/// gate already refused those), and there is NO floor: a tick faster than a tenth of
+/// a second is what the operator asked for (A5.12).
+fn tick_sec(agent_id: &AgentId, kernel: &Kernel) -> f64 {
+    match meta_value(agent_id, kernel, "tick_sec") {
+        Some(Value::Number(n)) => n.as_f64().filter(|v| *v > 0.0).unwrap_or(DEFAULT_TICK_SEC),
+        _ => DEFAULT_TICK_SEC,
+    }
+}
+
+/// A meta flag under PYTHON TRUTHINESS (A5.11) — `paused: "no"` is a paused
+/// scheduler there, because a non-empty string is true.
+fn meta_truthy(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
+    meta_value(agent_id, kernel, key).is_some_and(|v| py_truthy(&v))
 }
 
 async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
@@ -288,18 +339,26 @@ async fn load_schedules(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<Value> 
     parsed
 }
 
+/// Write the schedules out — RAM CACHE FIRST (A5.9).
+///
+/// python's `_load` hands back the cached LIST ITSELF and every verb mutates it in
+/// place, so by the time `_save` runs the cache already holds the change: a failed
+/// persist leaves it there (tick, unschedule, pause, resume keep the change), and
+/// only `schedule`/`tick_now` — which roll back explicitly — do not. Warming the
+/// cache on success alone made rust the opposite of python on every one of them.
+///
+/// The bytes are `json.dumps(…, indent=2)`: indent 2, `ensure_ascii`, and python's
+/// separators (A5.10).
 async fn save_schedules(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
     schedules: &[Value],
 ) -> Result<(), PersistError> {
-    let body = serde_json::to_string_pretty(schedules)
-        .map_err(|e| json!({"error": format!("serialize: {e}")}))?;
-    file_write(agent_id, kernel, SCHEDULES_BLOB, &body).await?;
     SCHEDULE_CACHE
         .lock()
         .insert(agent_id.clone(), schedules.to_vec());
-    Ok(())
+    let body = py_json_dumps(&Value::Array(schedules.to_vec()), true, Some(2));
+    file_write(agent_id, kernel, SCHEDULES_BLOB, &body).await
 }
 
 async fn append_history(
@@ -310,8 +369,9 @@ async fn append_history(
     let prev = file_read(agent_id, kernel, HISTORY_BLOB)
         .await
         .unwrap_or_default();
-    let line =
-        serde_json::to_string(event).map_err(|e| json!({"error": format!("serialize: {e}")}))?;
+    // py `json.dumps(event, default=str)` — defaults, so `, ` / `: ` separators and
+    // `ensure_ascii` (A5.10).
+    let line = py_json_dumps(event, true, None);
     let mut combined = prev;
     combined.push_str(&line);
     combined.push('\n');
@@ -358,19 +418,20 @@ async fn read_history(agent_id: &AgentId, kernel: &Arc<Kernel>, limit: usize) ->
 
 async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
     loop {
-        let tick_sec = meta_f64(&agent_id, &kernel, "tick_sec", 1.0).max(0.1);
-        tokio::time::sleep(Duration::from_secs_f64(tick_sec)).await;
-        if meta_bool(&agent_id, &kernel, "paused") {
-            continue;
-        }
+        // py reads the record FIRST and returns when it is gone, then sleeps, then
+        // checks `paused`.
         if kernel.agents.get(&agent_id).is_none() {
             return; // agent was deleted; exit cleanly
+        }
+        tokio::time::sleep(Duration::from_secs_f64(tick_sec(&agent_id, &kernel))).await;
+        if meta_truthy(&agent_id, &kernel, "paused") {
+            continue;
         }
         let now = now_secs();
         let mut schedules = load_schedules(&agent_id, &kernel).await;
         let mut due: Vec<Value> = Vec::new();
         for sch in schedules.iter_mut() {
-            if sch.get("paused").and_then(Value::as_bool).unwrap_or(false) {
+            if sch.get("paused").is_some_and(py_truthy) {
                 continue;
             }
             let next_run = sch.get("next_run").and_then(Value::as_f64).unwrap_or(0.0);
@@ -393,20 +454,63 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
             continue;
         }
         if let Err(e) = save_schedules(&agent_id, &kernel, &schedules).await {
-            tracing::warn!(error = %e, "scheduler: persist failed");
+            // python `logger.warning("scheduler %s: persist failed: %s", sid,
+            // err.get("error"))` — an ABSENT `error` key reads `None`.
+            log_line(format!(
+                "scheduler {agent_id}: persist failed: {}",
+                py_str(e.get("error").unwrap_or(&Value::Null))
+            ));
         }
         fire_many(&agent_id, &kernel, &due).await;
     }
 }
 
+/// A schedule's `target`, python's way: whatever was stored, as text. `schedule`
+/// only checks the field for TRUTHINESS, so a non-string target is stored verbatim
+/// and fired verbatim (A5.5).
+fn sched_target(sch: &Value) -> String {
+    match sch.get("target") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => py_str(other),
+        None => String::new(),
+    }
+}
+
+/// A schedule's `payload` under py `sch.get("payload") or {}`.
+fn sched_payload(sch: &Value) -> Value {
+    match sch.get("payload").filter(|v| py_truthy(v)) {
+        Some(p) => p.clone(),
+        None => json!({}),
+    }
+}
+
 fn fire_item(sch: &Value) -> Item {
-    let target = sch.get("target").and_then(Value::as_str).unwrap_or("");
-    let payload = sch.get("payload").cloned().unwrap_or_else(|| json!({}));
-    let mut item = Item::new(AgentId::from(target), payload);
+    let mut item = Item::new(
+        AgentId::from(sched_target(sch).as_str()),
+        sched_payload(sch),
+    );
     if let Some(t) = sch.get("timeout").and_then(Value::as_f64) {
         item = item.with_timeout(t);
     }
     item
+}
+
+/// One fire's `(result, error)` pair for the `schedule_fired` event (A5.8).
+///
+/// `completed` ⇒ result is the reply and error stays NULL — even when that reply
+/// carries an `error` key, because the status is the verdict. Anything else ⇒
+/// `f"{status}: {detail}"`, where `detail` is `res["error"]` for a dict (ABSENT
+/// reads `None`) and the whole result otherwise, both through python's `str()`. A
+/// cancelled fire therefore reads `cancelled: None`.
+fn fire_outcome(status: Status, result: Value) -> (Value, Value) {
+    if status == Status::Completed {
+        return (result, Value::Null);
+    }
+    let detail = match &result {
+        Value::Object(m) => m.get("error").cloned().unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    (Value::Null, json!(format!("{status}: {}", py_str(&detail))))
 }
 
 /// Fire every due schedule as ONE batch send — concurrent, no head-of-line
@@ -416,24 +520,10 @@ async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) {
     let outcomes = kernel.send(due.iter().map(fire_item).collect()).await;
     let duration_ms = ((now_secs() - ts) * 1000.0) as i64;
     for (sch, out) in due.iter().zip(outcomes) {
-        let target = sch.get("target").and_then(Value::as_str).unwrap_or("");
-        let payload = sch.get("payload").cloned().unwrap_or_else(|| json!({}));
-        let sched_id = sch.get("id").and_then(Value::as_str).unwrap_or("");
-        let mut error: Option<String> = None;
-        let mut result = Value::Null;
-        if out.status != Status::Completed {
-            let detail = out
-                .result
-                .get("error")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| out.result.to_string());
-            error = Some(format!("{}: {detail}", out.status));
-        } else if let Some(err) = out.result.get("error").and_then(Value::as_str) {
-            error = Some(err.to_string());
-        } else {
-            result = out.result;
-        }
+        let target = sched_target(sch);
+        let payload = sched_payload(sch);
+        let sched_id = sch.get("id").cloned().unwrap_or(Value::Null);
+        let (result, error) = fire_outcome(out.status, out.result);
         let event = json!({
             "type": "schedule_fired",
             "schedule_id": sched_id,
@@ -446,7 +536,12 @@ async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) {
             "duration_ms": duration_ms,
         });
         if let Err(e) = append_history(agent_id, kernel, &event).await {
-            tracing::warn!(error = %e, "scheduler: history append failed");
+            // python `logger.warning("scheduler %s: history persist failed: %s",
+            // sid, err.get("error"))`.
+            log_line(format!(
+                "scheduler {agent_id}: history persist failed: {}",
+                py_str(e.get("error").unwrap_or(&Value::Null))
+            ));
         }
         // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
         // `schedule_fired` doubled every delivery to a live program's on_message —
@@ -488,22 +583,25 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     json!({
         "id": agent_id.as_str(),
         "sentence": "Recurring-task scheduler.",
-        "tick_sec": meta_f64(agent_id, kernel, "tick_sec", 1.0),
-        "paused": meta_bool(agent_id, kernel, "paused"),
+        "tick_sec": tick_sec(agent_id, kernel),
+        "paused": meta_truthy(agent_id, kernel, "paused"),
         "running": running,
+        // py `{n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()}`
+        // — the FIRST LINE of each verb's docstring, in `VERBS` order. `boot`'s is
+        // truncated mid-sentence; that is the python text.
         "verbs": {
             "reflect": "Identity + tick state. No args.",
-            "boot": "Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write failfasts only when no store is wired.",
-            "schedule": "args: target:str, payload:dict, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever).",
-            "unschedule": "args: schedule_id:str.",
-            "list": "No args. Returns {schedules:[...]}.",
-            "pause": "args: schedule_id:str?. Pauses one or all.",
-            "resume": "args: schedule_id:str?. Resumes one or all.",
-            "tick_now": "args: schedule_id:str. Bumps run_count, persists, then fires immediately.",
-            "history": "args: limit:int?, schedule_id:str?.",
+            "boot": "Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write",
+            "schedule": "args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
+            "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
+            "list": "No args. Returns {schedules: [<schedule record>, ...]}.",
+            "pause": "args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler.",
+            "resume": "args: schedule_id:str?. With id resumes one; without, resumes the whole scheduler.",
+            "tick_now": "args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately. Returns {fired:true, schedule_id}.",
+            "history": "args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count}.",
         },
         "emits": {
-            "schedule_fired": "{type, schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} emitted on the scheduler's OWN inbox on every fire (never the target's)",
+            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
         }
     })
 }
@@ -513,7 +611,10 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     if let Some(existing) = tasks.get(agent_id) {
         // LIVENESS COMES FROM THE TABLE, which holds only running work.
         if kernel.tasks.contains(existing) {
-            return json!({"running": true, "already_booted": true});
+            // py `return {"running": True}` on BOTH branches (A5.4): boot is
+            // idempotent and says nothing else, so a caller cannot branch on
+            // whether it was first.
+            return json!({"running": true});
         }
     }
     let id = agent_id.clone();
@@ -523,32 +624,37 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     // invisible to `ps`, beyond `cancel`, and sending under no identity — so
     // every fire reached the gate as the OPERATOR.
     let task = kernel.spawn_task(agent_id, "tick_loop", async move {
-        tick_loop(id, k).await;
+        // python wraps the whole loop in `except Exception: logger.exception(
+        // "scheduler tick crashed for %s", sid)` (`scheduler/tools.py:243-244`)
+        // — a crash names the scheduler on stderr instead of vanishing. Rust's
+        // equivalent of an escaped exception is a panic, so the loop runs inside
+        // `catch_unwind`. The traceback body is residual R-D4-8.
+        let sid = id.clone();
+        if AssertUnwindSafe(tick_loop(id, k))
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            log_line(format!("scheduler tick crashed for {sid}"));
+        }
     });
     tasks.insert(agent_id.clone(), task);
     json!({"running": true})
 }
 
-async fn shutdown_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+/// Stop this scheduler's tick loop. A LIFECYCLE step (`on_delete`), not a verb.
+async fn shutdown_tick(agent_id: &AgentId, kernel: &Arc<Kernel>) {
     let removed = SCHEDULER_TASKS.lock().remove(agent_id);
     if let Some(tid) = removed {
         // Through the TABLE — the same path an operator's `cancel` takes.
         kernel.cancel_task(&tid).await;
-        json!({"stopped": true, "id": agent_id.as_str()})
-    } else {
-        json!({"stopped": false, "id": agent_id.as_str(), "reason": "not running"})
     }
 }
 
+/// `schedule` — VALIDATION ORDER IS PART OF THE CONTRACT (A5.5): the payload's
+/// shape, then `interval_seconds`, then the target, then `payload.type`, then
+/// `timeout`. A call with two faults is told about the FIRST one python names.
 async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let target = payload
-        .get("target")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if target.is_empty() {
-        return json!({"error": "schedule: target required"});
-    }
     let sched_payload = match payload.get("payload") {
         None | Some(Value::Null) => json!({}),
         Some(v) if v.is_object() => v.clone(),
@@ -556,25 +662,25 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         // rather than as the downstream "payload.type required".
         Some(_) => return bad("schedule", "payload", "an object with type"),
     };
-    if sched_payload
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .is_empty()
-    {
-        return json!({"error": "schedule: payload.type required"});
-    }
     let interval = match int_arg(payload, "interval_seconds", 60, "schedule", 1) {
         Ok(v) => v,
         Err(refusal) => return refusal,
     };
+    // TRUTHINESS, and a truthy non-string target is stored verbatim.
+    let Some(target) = payload.get("target").filter(|v| py_truthy(v)).cloned() else {
+        return json!({"error": "schedule: target required"});
+    };
+    if !sched_payload.get("type").is_some_and(py_truthy) {
+        return json!({"error": "schedule: payload.type required"});
+    }
     // Per-fire bound, seconds. Optional: absent = wait forever (never defaulted).
+    // It is STORED AS SENT (A5.6) — an int `5` stays `5`, it does not become `5.0`.
     let timeout = match payload.get("timeout") {
         None | Some(Value::Null) => None,
-        Some(v) => match v.as_f64() {
-            Some(t) if t > 0.0 => Some(t),
-            _ => return bad("schedule", "timeout", "a positive number of seconds"),
-        },
+        Some(Value::Number(n)) if n.as_f64().is_some_and(|t| t > 0.0) => {
+            Some(Value::Number(n.clone()))
+        }
+        Some(_) => return bad("schedule", "timeout", "a positive number of seconds"),
     };
     let now = now_secs();
     let mut sch = json!({
@@ -588,26 +694,49 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         "paused": false,
     });
     if let Some(t) = timeout {
-        sch["timeout"] = json!(t);
+        sch["timeout"] = t;
     }
     let mut schedules = load_schedules(agent_id, kernel).await;
     schedules.push(sch.clone());
     if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
-        // The cache was not touched (save_schedules only warms it on success),
-        // so a failed persist leaves no phantom schedule.
+        // ROLL THE CACHE BACK, as python does: `save_schedules` has already put the
+        // new schedule there, and a failed persist must leave no phantom.
+        let mut cache = SCHEDULE_CACHE.lock();
+        let kept: Vec<Value> = cache
+            .get(agent_id)
+            .map(|v| {
+                v.iter()
+                    .filter(|s| s.get("id") != sch.get("id"))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        cache.insert(agent_id.clone(), kept);
+        drop(cache);
         return persist_err("schedule", &e);
     }
     json!({"schedule_id": sch["id"], "schedule": sch})
 }
 
+/// `payload["schedule_id"]` under PYTHON TRUTHINESS (A5.7) — every verb that takes
+/// one writes `if not sid:`, and the raw value is echoed back in the reply.
+fn schedule_id(payload: &Value) -> Option<&Value> {
+    payload.get("schedule_id").filter(|v| py_truthy(v))
+}
+
+/// Does this stored schedule carry `sid`? python compares with `==` against the RAW
+/// value, so only a string can ever match a stored string id.
+fn is_sched(s: &Value, sid: &Value) -> bool {
+    s.get("id") == Some(sid)
+}
+
 async fn unschedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let sid = match payload.get("schedule_id").and_then(Value::as_str) {
-        Some(s) => s.to_string(),
-        None => return json!({"error": "unschedule: schedule_id required"}),
+    let Some(sid) = schedule_id(payload).cloned() else {
+        return json!({"error": "unschedule: schedule_id required"});
     };
     let mut schedules = load_schedules(agent_id, kernel).await;
     let before = schedules.len();
-    schedules.retain(|s| s.get("id").and_then(Value::as_str) != Some(sid.as_str()));
+    schedules.retain(|s| !is_sched(s, &sid));
     let removed = schedules.len() < before;
     if removed {
         if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
@@ -622,59 +751,52 @@ async fn list_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     json!({"schedules": schedules})
 }
 
-async fn pause_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if let Some(sid) = payload.get("schedule_id").and_then(Value::as_str) {
+/// `pause`/`resume` — one schedule, or the whole scheduler.
+///
+/// The per-schedule reply leads with the FLAG, then the id (python's key order).
+async fn set_paused(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+    verb: &str,
+    flag_key: &str,
+    paused: bool,
+) -> Value {
+    if let Some(sid) = schedule_id(payload).cloned() {
         let mut schedules = load_schedules(agent_id, kernel).await;
         let mut touched = 0;
         for s in schedules.iter_mut() {
-            if s.get("id").and_then(Value::as_str) == Some(sid) {
-                s["paused"] = json!(true);
+            if is_sched(s, &sid) {
+                s["paused"] = json!(paused);
                 touched += 1;
             }
         }
         if touched > 0 {
             if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
-                return persist_err("pause", &e);
+                return persist_err(verb, &e);
             }
         }
-        return json!({"paused": touched > 0, "schedule_id": sid});
+        return json!({flag_key: touched > 0, "schedule_id": sid});
     }
-    update_meta(agent_id, kernel, "paused", json!(true)).await;
-    json!({"paused": true, "scheduler_id": agent_id.as_str()})
+    update_meta(agent_id, kernel, "paused", json!(paused)).await;
+    json!({flag_key: true, "scheduler_id": agent_id.as_str()})
+}
+
+async fn pause_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    set_paused(agent_id, payload, kernel, "pause", "paused", true).await
 }
 
 async fn resume_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if let Some(sid) = payload.get("schedule_id").and_then(Value::as_str) {
-        let mut schedules = load_schedules(agent_id, kernel).await;
-        let mut touched = 0;
-        for s in schedules.iter_mut() {
-            if s.get("id").and_then(Value::as_str) == Some(sid) {
-                s["paused"] = json!(false);
-                touched += 1;
-            }
-        }
-        if touched > 0 {
-            if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
-                return persist_err("resume", &e);
-            }
-        }
-        return json!({"resumed": touched > 0, "schedule_id": sid});
-    }
-    update_meta(agent_id, kernel, "paused", json!(false)).await;
-    json!({"resumed": true, "scheduler_id": agent_id.as_str()})
+    set_paused(agent_id, payload, kernel, "resume", "resumed", false).await
 }
 
 async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let sid = match payload.get("schedule_id").and_then(Value::as_str) {
-        Some(s) => s.to_string(),
-        None => return json!({"error": "tick_now: schedule_id required"}),
+    let Some(sid) = schedule_id(payload).cloned() else {
+        return json!({"error": "tick_now: schedule_id required"});
     };
     let mut schedules = load_schedules(agent_id, kernel).await;
-    let Some(idx) = schedules
-        .iter()
-        .position(|s| s.get("id").and_then(Value::as_str) == Some(sid.as_str()))
-    else {
-        return json!({"error": format!("schedule '{sid}' not found")});
+    let Some(idx) = schedules.iter().position(|s| is_sched(s, &sid)) else {
+        return json!({"error": format!("schedule {} not found", py_repr_value(&sid))});
     };
     // Same order as the tick: bump → persist → fire.
     let count = schedules[idx]
@@ -683,6 +805,10 @@ async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         .unwrap_or(0);
     schedules[idx]["run_count"] = json!(count + 1);
     if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
+        // ROLL THE BUMP BACK (py `s["run_count"] -= 1`): `save_schedules` already
+        // wrote the incremented list into the cache.
+        schedules[idx]["run_count"] = json!(count);
+        SCHEDULE_CACHE.lock().insert(agent_id.clone(), schedules);
         return persist_err("tick_now", &e);
     }
     let due = vec![schedules[idx].clone()];
@@ -696,8 +822,8 @@ async fn history_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
         Err(refusal) => return refusal,
     };
     let mut entries = read_history(agent_id, kernel, limit).await;
-    if let Some(sid) = payload.get("schedule_id").and_then(Value::as_str) {
-        entries.retain(|e| e.get("schedule_id").and_then(Value::as_str) == Some(sid));
+    if let Some(sid) = schedule_id(payload) {
+        entries.retain(|e| e.get("schedule_id") == Some(sid));
     }
     let n = entries.len();
     json!({"history": entries, "count": n})

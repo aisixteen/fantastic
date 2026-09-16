@@ -7,6 +7,9 @@ license.workspace = true
 description = "Shared reflect-driven LLM-agent machinery (state, verbs, agentic loop, prompt assembly, events, history) behind a Provider seam. Backends supply only their Provider + a thin Bundle."
 
 [dependencies]
+# python-format helpers: `py_truthy` decides the `target_id or target`
+# fall-through exactly as python does.
+fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

@@ -50,7 +50,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
+use fantastic_bundle::{io_error_str, py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{
     bad, missing, refusal, refusal_hint, with, NOT_FOUND, TRANSPORT_ERROR, UNAUTHORIZED,
@@ -96,12 +96,19 @@ pub fn allowed_patterns(meta: &Map<String, Value>) -> Vec<String> {
 }
 
 /// Mirror python's `str(x)` over each `allowed` element: a string as-is, anything
-/// else via its text form.
+/// else via CPython's `str()` (so `True`, not `true`).
 fn value_to_pattern(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
+    py_str(v)
+}
+
+/// Compile one `allowed` pattern in PYTHON's `re` dialect (A4.7 / D5).
+///
+/// `fancy-regex`, not `regex`: python's engine is a backtracker, so an operator's
+/// allowlist may legitimately use `(?P<name>…)`, `(?P=name)`, a backreference or
+/// lookaround — every one of which `regex` rejects at compile time, turning a
+/// working python policy into a leg that permits nothing.
+fn compile_pattern(pat: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> {
+    fancy_regex::Regex::new(pat)
 }
 
 /// `None` when `line` fullmatches an allowed pattern; else the refusal text.
@@ -122,14 +129,18 @@ pub fn command_permitted(meta: &Map<String, Value>, line: &str) -> Option<String
     }
     for pat in &pats {
         // A broken pattern permits nothing; validate_meta refuses new ones.
-        if let Ok(re) = regex::Regex::new(&format!(r"\A(?s:{pat})\z")) {
-            if re.is_match(line) {
+        if let Ok(re) = compile_pattern(&format!(r"\A(?s:{pat})\z")) {
+            if re.is_match(line).unwrap_or(false) {
                 return None;
             }
         }
     }
+    // py `f"…: {line!r} — this leg permits: {pats}"`: the line is repr'd, the list
+    // printed as python prints a `list[str]`.
     Some(format!(
-        "exec_bridge: command not allowed: {line:?} — this leg permits: {pats:?}"
+        "exec_bridge: command not allowed: {} — this leg permits: {}",
+        py_repr(line),
+        py_repr_value(&json!(pats))
     ))
 }
 
@@ -187,16 +198,16 @@ impl Bundle for ExecBridgeBundle {
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
+        // ONLY an UNKNOWN RULE NAME is refused (py `resolve_ingress(...).unknown`):
+        // a falsy spec and a type-less object both seal silently, and
+        // `password_ingress` resolves fine here — it is the stem check below that
+        // refuses it on this edge.
         if let Some(spec) = meta.get("ingress_rule") {
-            let resolved = fantastic_io_bridge::authorizer::ingress::resolve(Some(spec));
-            let known = matches!(
-                spec.as_str(),
-                Some("allow_all_ingress") | Some("deny_ingress") | Some("password_ingress")
-            ) || resolved.is_ok() && spec.is_object();
-            if !known {
+            if fantastic_io_bridge::authorizer::ingress::unknown(Some(spec)).is_some() {
                 return Some(format!(
-                    "ingress_rule={spec} is not a rule this bundle implements — \
-                     legal values: allow_all_ingress, deny_ingress"
+                    "ingress_rule={} is not a rule this bundle implements — \
+                     legal values: allow_all_ingress, deny_ingress",
+                    py_repr_value(spec)
                 ));
             }
         }
@@ -211,9 +222,10 @@ impl Bundle for ExecBridgeBundle {
             };
             if fantastic_io_bridge::authorizer::rule_name(Some(spec), "") == stem {
                 return Some(format!(
-                    "{field}={spec} is not applicable to the process edge: a leg with \
+                    "{field}={} is not applicable to the process edge: a leg with \
                      no wire envelope can never present a token — legal values: \
-                     allow_all_ingress, deny_ingress"
+                     allow_all_ingress, deny_ingress",
+                    py_repr_value(spec)
                 ));
             }
         }
@@ -242,13 +254,23 @@ impl Bundle for ExecBridgeBundle {
             };
             if pats.is_empty() {
                 return Some(
-                    "allowed must be a non-empty list of regexes, e.g. allowed=['ls( .*)?']"
+                    "allowed must be a non-empty list of regexes, e.g. \
+                     <allowed><item>ls( .*)?</item></allowed>"
                         .to_string(),
                 );
             }
-            for pat in &pats {
-                if let Err(e) = regex::Regex::new(pat) {
-                    return Some(format!("allowed contains a broken regex {pat:?}: {e}"));
+            // py reprs the RAW element and compiles `str(pat)`; the engine's own
+            // message after `': '` is the D4/D5 residual.
+            let raw_items: Vec<Value> = match raw {
+                Value::Array(a) => a.clone(),
+                other => vec![other.clone()],
+            };
+            for (item, pat) in raw_items.iter().zip(&pats) {
+                if let Err(e) = compile_pattern(pat) {
+                    return Some(format!(
+                        "allowed contains a broken regex {}: {e}",
+                        py_repr_value(item)
+                    ));
                 }
             }
         }
@@ -261,14 +283,19 @@ impl Bundle for ExecBridgeBundle {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let raw_type = payload.get("type").unwrap_or(&Value::Null);
+        let verb = raw_type.as_str().unwrap_or("");
         // AUTH GATE — the process edge, gated like any io_bridge leg (SEALED by
-        // default). `reflect` is UNGATED: discovery must work on a sealed bridge.
-        // Mail (the unknown-verb branch below) is deliberately not gated, matching
-        // py: the substrate's fanout already delivered the payload; this only ACKs.
+        // default). `reflect` and `connector` are UNGATED: discovery must work on a
+        // sealed bridge. Mail (the unknown-verb branch below) is deliberately not
+        // gated, matching py: the substrate's fanout already delivered the payload;
+        // this only ACKs.
+        //
+        // `shutdown` is NOT in this set and NOT a verb (A4.3): python's VERBS has no
+        // such key, so it is MAIL like any other unowned type.
         let owned = matches!(
             verb,
-            "start" | "boot" | "shutdown" | "status" | "clear" | "interrupt" | "stop"
+            "start" | "boot" | "status" | "clear" | "interrupt" | "stop"
         );
         if owned {
             let meta = snapshot_meta(agent_id, kernel);
@@ -280,7 +307,6 @@ impl Bundle for ExecBridgeBundle {
             "reflect" => reflect_reply(agent_id, kernel),
             "start" => start_reply(agent_id, payload, kernel).await,
             "boot" => boot_reply(agent_id, kernel).await,
-            "shutdown" => Value::Null,
             "status" => status_reply(agent_id, payload),
             "clear" => clear_reply(agent_id, payload),
             "interrupt" => interrupt_reply(agent_id, payload),
@@ -308,12 +334,14 @@ impl Bundle for ExecBridgeBundle {
             // ADDRESSABLE INBOX. Any verb this bundle does not own is mail for the
             // running program — the substrate's fanout has ALREADY delivered it to the
             // job's `_xbself_` proxy, so this only ACKs. Re-emitting would double it.
-            other => {
-                if jobs::has_running_job(agent_id, kernel) {
+            _ => {
+                if jobs::has_running_job(agent_id) {
                     json!({"queued": true})
                 } else {
+                    // py `{t!r}` over the RAW value — an absent `type` is `None`.
                     json!({"error": format!(
-                        "exec_bridge: unknown type {other:?} (no running job to receive it)"
+                        "exec_bridge: unknown type {} (no running job to receive it)",
+                        py_repr_value(raw_type)
                     )})
                 }
             }
@@ -390,7 +418,11 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
         kind: "spawn",
         target: agent_id.0.as_str(),
         verb,
-        token: meta.get("auth_token").and_then(Value::as_str),
+        // NO CREDENTIAL (A4.16). A token is a WIRE-ENVELOPE fact and the process
+        // edge has no envelope; reading one off the RECORD would let a leg satisfy
+        // its own password rule with a secret it stores itself. python's
+        // `gate_inbound` here is handed an Action with `token=None`.
+        token: None,
     };
     if let fantastic_io_bridge::authorizer::Decision::Deny(d) =
         fantastic_io_bridge::gate_inbound(&rule, &action)
@@ -418,45 +450,22 @@ fn snapshot_meta(agent_id: &AgentId, kernel: &Kernel) -> Map<String, Value> {
     }
 }
 
-/// Read a string field, treating empty strings as absent. Callers
-/// (`update_agent id=py python=""`) pass `""` to unset — without this
-/// filter the resolver picks up the empty path and spawn fails with
-/// ENOENT. Discovered by the resolution selftests (Tests 4/5/6/8).
-fn meta_str<'a>(meta: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
-    meta.get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-}
-
-fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-}
-
 // ── verb implementations ────────────────────────────────────────────
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
-    let cwd_val = meta_str(&meta, "cwd")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "<process default>".to_string());
-    // Liveness comes off the JOB TABLE — one registry, no second truth to drift.
+    // py `rec.get("cwd") or "<process default>"`: TRUTHINESS over the raw value, so
+    // a non-string cwd is reported as written rather than silently dropped.
+    let cwd_val = match meta.get("cwd").filter(|v| py_truthy(v)) {
+        Some(v) => v.clone(),
+        None => json!("<process default>"),
+    };
+    // Liveness = the OS process has not exited — ONE definition (`jobs::alive`).
     let running = jobs::jobs()
         .values()
-        .filter(|j| &j.owner == agent_id && j.exit_code.is_none())
+        .filter(|j| &j.owner == agent_id && jobs::alive(j))
         .count();
-    let ingress = fantastic_io_bridge::authorizer::rule_name(
-        fantastic_io_bridge::authorizer::manifold_spec(
-            meta.get("ingress_rule"),
-            meta.get("auth"),
-            "_ingress",
-        )
-        .as_ref(),
-        "deny_ingress",
-    );
-    json!({
+    let mut out = json!({
         "id": agent_id.as_str(),
         // Py-canonical sentence — the ALLOWLIST is advertised so an authoring
         // model can see what it may run without guessing.
@@ -465,15 +474,18 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // THE GATE, advertised: a caller must see what it may run.
         "allowed": allowed_patterns(&meta),
         "running": running,
+        // py `{n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()}`
+        // — the FIRST LINE of each verb's docstring, in `VERBS` order. Several are
+        // truncated mid-sentence; that is the python text, not an abbreviation.
         "verbs": {
-            "reflect": "Identity + running job count + auth posture. No args.",
-            "start": "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes or the start is refused naming the patterns. Spawns in the BACKGROUND; returns {job_id, status:'running'} at once and streams progress/job_done.",
-            "status": "args: job_id:str?. One job (with full output) or all of this agent's jobs.",
-            "clear": "args: job_id:str?. Drop finished rows of this agent.",
+            "start": "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra",
+            "status": "args: job_id:str? — one job (with full stdout/stderr), or all of this agent's",
+            "stop": "args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs.",
+            "interrupt": "args: job_id:str? — SIGINT one job or ALL of this agent's running jobs.",
+            "clear": "args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM",
             "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
-            "interrupt": "args: job_id:str?. SIGINT in-flight subprocesses. Returns {interrupted:int}.",
-            "stop": "args: job_id:str?. SIGKILL in-flight subprocesses. Returns {killed:int}.",
-            "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not the record.",
+            "reflect": "Identity + running job count + auth posture. No args.",
+            "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the",
         },
         "emits": {
             "job_started": "{type:'job_started', job_id}",
@@ -483,10 +495,19 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
         "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first turn arrives.",
         "tasks": "Every running job holds a row in the kernel TASK TABLE (`task_id` in each `status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
-        "authoring": "A general-purpose command runner: `start {command, args}`, gated by the `allowed` regexes on the full command line.",
-        "ingress_rule": ingress,
-        "sealed": ingress != "allow_all_ingress",
-    })
+        "authoring": "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",
+    });
+    // The auth POSTURE, python's `describe(rec)` — `**_describe(rec)` is the last
+    // thing python's reflect spreads, so these keys land last and in its order.
+    if let (Some(o), Some(posture)) = (
+        out.as_object_mut(),
+        fantastic_io_bridge::authorizer::describe(&meta).as_object(),
+    ) {
+        for (k, v) in posture {
+            o.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 pub mod jobs;
@@ -501,14 +522,14 @@ mod tests;
 /// Both now address the JOB TABLE. There is exactly one registry: a private pid set
 /// alongside it would be a second truth, and `start`'s jobs would be invisible to it.
 fn signal_jobs(agent_id: &AgentId, payload: &Value, sig: nix::sys::signal::Signal) -> u64 {
-    let want = payload.get("job_id").and_then(Value::as_str);
+    let want = job_id(payload).and_then(Value::as_str);
     let mut g = jobs::jobs();
     let mut n = 0u64;
     for (id, j) in g.iter_mut() {
         if &j.owner != agent_id || want.is_some_and(|w| w != id.as_str()) {
             continue;
         }
-        if j.exit_code.is_some() {
+        if !jobs::alive(j) {
             continue; // already gone — never pretend
         }
         if sig == nix::sys::signal::Signal::SIGKILL {
@@ -529,13 +550,30 @@ fn signal_jobs(agent_id: &AgentId, payload: &Value, sig: nix::sys::signal::Signa
 /// `reason == "not_found"` (what the corpus and the e2e scenarios pin) never
 /// matched on this runtime.
 fn no_job(agent_id: &AgentId, payload: &Value) -> Option<Value> {
-    let jid = payload.get("job_id").and_then(Value::as_str)?;
-    if jobs::jobs().get(jid).is_some_and(|j| &j.owner == agent_id) {
+    let jid = job_id(payload)?;
+    // python indexes `_jobs` with the RAW value: only a string can ever name a row,
+    // so a truthy non-string is simply not found — and the refusal echoes it as sent.
+    let known = jid
+        .as_str()
+        .is_some_and(|s| jobs::jobs().get(s).is_some_and(|j| &j.owner == agent_id));
+    if known {
         return None;
     }
-    let mut v = refusal(NOT_FOUND, format!("exec_bridge: no job {jid:?}"));
-    with(&mut v, "job_id", json!(jid));
+    let mut v = refusal(
+        NOT_FOUND,
+        format!("exec_bridge: no job {}", py_repr_value(jid)),
+    );
+    with(&mut v, "job_id", jid.clone());
     Some(v)
+}
+
+/// `payload["job_id"]` under PYTHON TRUTHINESS (A4.8).
+///
+/// `None` = every job of this agent — python writes `if jid:`, so an absent key,
+/// `null`, `""`, `0`, `[]` and `{}` all mean ALL, and only a truthy value names one
+/// job. The raw `Value` is returned because every refusal echoes it verbatim.
+fn job_id(payload: &Value) -> Option<&Value> {
+    payload.get("job_id").filter(|v| py_truthy(v))
 }
 
 fn interrupt_reply(agent_id: &AgentId, payload: &Value) -> Value {
@@ -565,19 +603,23 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     if payload.get("code").is_some_and(|v| !v.is_null()) {
         return bad("start", "code", "absent — run a command instead");
     }
+    // py `not isinstance(command, str) or not command.strip()`: a string of nothing
+    // but WHITESPACE is missing, and `str.strip()` strips every python space
+    // character, not just ASCII.
     let command = match payload.get("command").and_then(Value::as_str) {
-        Some(c) if !c.trim().is_empty() => c.to_string(),
+        Some(c) if c.chars().any(|ch| !fantastic_bundle::is_space(ch)) => c.to_string(),
         _ => return missing("start", "command"),
     };
-    // `args` — a list of scalars (str/int/float), each stringified into argv.
+    // `args` — a list of scalars, each stringified into argv. python's
+    // `isinstance(a, (str, int, float))` ACCEPTS a bool (a bool IS an int there), and
+    // `str(True)` is `True`; an explicit `null` is not a list and refuses.
     let raw_args = payload.get("args").cloned().unwrap_or_else(|| json!([]));
     let args: Vec<String> = match &raw_args {
         Value::Array(a) => {
             let mut out = Vec::with_capacity(a.len());
             for v in a {
                 match v {
-                    Value::String(s) => out.push(s.clone()),
-                    Value::Number(n) => out.push(n.to_string()),
+                    Value::String(_) | Value::Number(_) | Value::Bool(_) => out.push(py_str(v)),
                     _ => return bad("start", "args", "a list of strings"),
                 }
             }
@@ -600,24 +642,46 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             "the leg's `allowed` policy decides; an operator may widen it",
         );
     }
-    // The per-call `env` block — a dict of str -> scalar.
-    let env_extra: Map<String, Value> = match payload.get("env") {
-        None | Some(Value::Null) => Map::new(),
+    // The per-call `env` block — py `payload.get("env") or {}`, so ANY falsy value
+    // (absent, null, `{}`, `0`, `""`, `[]`) is an empty block and only a truthy
+    // non-dict refuses. Values are str/int/float/bool, stringified by `str()`.
+    let env_extra: Map<String, Value> = match payload.get("env").filter(|v| py_truthy(v)) {
+        None => Map::new(),
         Some(Value::Object(m)) => {
             for v in m.values() {
-                if !matches!(v, Value::String(_) | Value::Number(_)) {
+                if !matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_)) {
                     return bad("start", "env", "a dict of str -> str");
                 }
             }
             m.clone()
         }
-        _ => return bad("start", "env", "a dict of str -> str"),
+        Some(_) => return bad("start", "env", "a dict of str -> str"),
     };
-    let cwd = payload_str(payload, "cwd").or_else(|| meta_str(&meta, "cwd"));
+    // py `payload.get("cwd") or rec.get("cwd") or None` — truthiness, and the raw
+    // value is what the job row reports; `proc.spawn_argv` then uses it only when it
+    // is a non-empty STRING.
+    let cwd = payload
+        .get("cwd")
+        .filter(|v| py_truthy(v))
+        .or_else(|| meta.get("cwd").filter(|v| py_truthy(v)))
+        .cloned()
+        .unwrap_or(Value::Null);
 
-    let spawned = match crate::spawn::spawn_job(&argv, agent_id.as_str(), &env_extra, cwd) {
+    let spawned = match crate::spawn::spawn_job(&argv, agent_id.as_str(), &env_extra, cwd.as_str())
+    {
         Ok(s) => s,
-        Err(e) => return refusal(TRANSPORT_ERROR, format!("exec_bridge: spawn failed: {e}")),
+        Err(e) => {
+            // py `f"exec_bridge: spawn failed: {e}"` over the OSError
+            // `create_subprocess_exec` raises — `[Errno 2] No such file or
+            // directory: 'nope'`, the COMMAND as the filename.
+            return refusal(
+                TRANSPORT_ERROR,
+                format!(
+                    "exec_bridge: spawn failed: {}",
+                    io_error_str(&e, std::path::Path::new(&command))
+                ),
+            );
+        }
     };
     let crate::spawn::Spawned { child, ctrl } = spawned;
     let Some(pid) = child.id() else {
@@ -675,7 +739,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             // WHAT ran — so a caller can re-issue this job verbatim.
             command,
             args,
-            cwd: cwd.map(str::to_string),
+            cwd,
             status: "running".to_string(),
             started_at: now_secs(),
             exit_code: None,
@@ -703,7 +767,7 @@ fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
         return gone;
     }
     let g = jobs::jobs();
-    match payload.get("job_id").and_then(Value::as_str) {
+    match job_id(payload).and_then(Value::as_str) {
         // `no_job` above has already established that the row exists and is ours.
         Some(jid) => match g.get(jid).filter(|j| &j.owner == agent_id) {
             Some(j) => json!({"jobs": [jobs::snap(jid, j, true)]}),
@@ -716,23 +780,31 @@ fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
     }
 }
 
-/// `clear` — drop finished rows of this agent. Running ones stay.
+/// `clear` — forget rows of this agent.
+///
+/// NAMED, it drops that job whatever its status (A4.22): python's filter is
+/// `k == jid if jid else v["status"] not in ("running", "stopping")`, so the status
+/// label only decides which jobs a BARE `clear` sweeps. `clear` is also the one
+/// caller that wants the label rather than process liveness — it is deciding what is
+/// finished enough to forget.
 fn clear_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    let want = payload.get("job_id").and_then(Value::as_str);
+    let want = job_id(payload);
     let mut g = jobs::jobs();
     let doomed: Vec<String> = g
         .iter()
         .filter(|(id, j)| {
             &j.owner == agent_id
-                && want.is_none_or(|w| w == id.as_str())
-                && j.status != "running"
-                && j.status != "stopping"
+                && match want {
+                    Some(w) => w.as_str() == Some(id.as_str()),
+                    None => j.status != "running" && j.status != "stopping",
+                }
         })
         .map(|(id, _)| id.clone())
         .collect();
     let n = doomed.len();
     for id in doomed {
-        g.remove(&id);
+        // ORDER-PRESERVING: python's dict keeps the surviving rows in start order.
+        g.shift_remove(&id);
     }
     json!({ "cleared": n })
 }

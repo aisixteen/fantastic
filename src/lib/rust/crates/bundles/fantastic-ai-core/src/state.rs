@@ -4,6 +4,7 @@
 //! (built per agent) is the only per-backend seam.
 
 use crate::helpers::{now_secs, safe_client};
+use fantastic_bundle::py_truthy;
 use fantastic_kernel::AgentId;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -32,6 +33,10 @@ pub struct CurrentEntry {
     pub text: String,
     /// Correlation id for status events.
     pub send_id: String,
+    /// Enqueue timestamp, carried over from the queue row — python promotes the
+    /// WHOLE queued entry (`{**entry, started_at, phase, …}`), so `queued_at`
+    /// survives into `status.current` and says how long the caller waited.
+    pub queued_at: f64,
     /// Lock-acquisition timestamp.
     pub started_at: f64,
     /// Current phase: thinking|streaming|tool_calling|done.
@@ -116,6 +121,31 @@ pub fn state_for(agent_id: &AgentId) -> Arc<BackendState> {
     )
 }
 
+/// How many times this agent has BOOTED in this process — python
+/// `_incarnation`. A delivery captures it when it is decided; a reply that
+/// crosses the next boot answered a call the previous incarnation made.
+fn incarnations() -> &'static Mutex<HashMap<AgentId, u64>> {
+    static INCARNATIONS: OnceLock<Mutex<HashMap<AgentId, u64>>> = OnceLock::new();
+    INCARNATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// This agent's current incarnation (0 before its first boot).
+#[must_use]
+pub fn incarnation(agent_id: &AgentId) -> u64 {
+    *incarnations()
+        .lock()
+        .expect("incarnations poisoned")
+        .get(agent_id)
+        .unwrap_or(&0)
+}
+
+/// A boot: the agent is a NEW incarnation from here on. Every backend's `boot`
+/// verb calls this first, exactly as python's `_make_boot` does.
+pub fn bump_incarnation(agent_id: &AgentId) {
+    let mut m = incarnations().lock().expect("incarnations poisoned");
+    *m.entry(agent_id.clone()).or_insert(0) += 1;
+}
+
 /// `true` iff a `send` holds the FIFO lock right now (a generation is in
 /// flight). Read off `current_meta` — the backend keeps no task handle of its
 /// own: a generation IS its kernel dispatch task (see the `ps`/`cancel` system
@@ -151,21 +181,38 @@ pub fn take_current_for_cancel(agent_id: &AgentId, task_id: &str) -> Option<Curr
 
 // ── status snapshot ─────────────────────────────────────────────────
 
-fn redact_entry(c: &CurrentEntry, requesting: Option<&str>) -> Value {
-    let is_mine = requesting
-        .map(|r| r == c.client_id.as_str())
-        .unwrap_or(false);
-    let elapsed = (now_secs() - c.started_at).max(0.0);
+/// The `current` block of a status snapshot — python `_status_snapshot`'s two
+/// shapes, which are NOT the same dict with a flag.
+///
+/// WITH a requesting client the block is BUILT: `{phase, send_id, started_at,
+/// elapsed, is_mine}`, plus this caller's own text when the turn is theirs.
+/// WITHOUT one it is the in-flight ENTRY with its text-bearing keys removed
+/// (`_redact_text`), so it keeps `client_id` and `queued_at` and carries the
+/// entry's own key order. Rust answered one shape for both, with `client_id`
+/// leaked into the per-caller block and `queued_at` missing from the other.
+fn current_out(c: &CurrentEntry, requesting: Option<&str>) -> Value {
+    let elapsed = now_secs() - c.started_at;
+    let Some(req) = requesting else {
+        return json!({
+            "client_id": c.client_id,
+            "send_id": c.send_id,
+            "queued_at": c.queued_at,
+            "started_at": c.started_at,
+            "phase": c.phase,
+            "elapsed": elapsed,
+            "is_mine": false,
+        });
+    };
+    let is_mine = req == c.client_id;
     let mut out = json!({
-        "client_id": c.client_id,
+        "phase": c.phase,
         "send_id": c.send_id,
         "started_at": c.started_at,
-        "phase": c.phase,
         "elapsed": elapsed,
         "is_mine": is_mine,
     });
     if is_mine {
-        let obj = out.as_object_mut().unwrap();
+        let obj = out.as_object_mut().expect("object literal");
         obj.insert("text".to_string(), json!(c.text));
         obj.insert("text_so_far".to_string(), json!(c.text_so_far));
         if let Some(t) = &c.last_tool {
@@ -177,10 +224,21 @@ fn redact_entry(c: &CurrentEntry, requesting: Option<&str>) -> Value {
 
 /// Build the `status` verb reply (privacy-filtered).
 pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
-    let requesting = payload
-        .get("client_id")
-        .and_then(Value::as_str)
-        .map(safe_client);
+    // PYTHON TRUTHINESS DECIDES, and the reply ECHOES what it decided on:
+    // `cid = payload.get("client_id"); if cid: cid = _safe_client(cid)`. An
+    // EMPTY string is falsy — it takes the redacted branch and comes back as
+    // `''`. Rust ran `safe_client` unconditionally, so `''` became `'cli'` and a
+    // caller asking for the redacted view was answered as if it were `cli`.
+    let raw_client = payload.get("client_id").cloned().unwrap_or(Value::Null);
+    let requesting = if py_truthy(&raw_client) {
+        Some(safe_client(raw_client.as_str().unwrap_or_default()))
+    } else {
+        None
+    };
+    let echoed_client = match &requesting {
+        Some(c) => json!(c),
+        None => raw_client,
+    };
     let state = state_for(agent_id);
     let cur = state.current_meta.lock().expect("current poisoned").clone();
     let queue = state
@@ -191,9 +249,9 @@ pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
         .cloned()
         .collect::<Vec<_>>();
 
-    let current_out = cur
+    let current = cur
         .as_ref()
-        .map(|c| redact_entry(c, requesting.as_deref()))
+        .map(|c| current_out(c, requesting.as_deref()))
         .unwrap_or(Value::Null);
 
     let (mine_pending, others_pending) = match &requesting {
@@ -218,9 +276,9 @@ pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
 
     json!({
         "source": agent_id.as_str(),
-        "client_id": requesting,
+        "client_id": echoed_client,
         "generating": cur.is_some(),
-        "current": current_out,
+        "current": current,
         "mine_pending": mine_pending,
         "others_pending": others_pending,
     })

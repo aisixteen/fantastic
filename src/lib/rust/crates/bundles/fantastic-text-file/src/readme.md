@@ -11,8 +11,10 @@ Name the surface per call with `on: <file_bridge id>`, or set a default
 `can_call` names the leg, the leg's `callable_by` accepts this agent.
 
 Verbs: `read` (line-numbered, paged, rejects binary) · `write` (atomic:
-tmp + rename on the target) · `patch` (SEARCH/REPLACE blocks, all-or-nothing,
-fails loud on `no_match`/`ambiguous`) · `append` · and ON DEMAND:
+tmp + rename on the target) · `patch` (a TRANSACTION over
+`edits:[{path, hunks, if_match?}]` — even one file rides the array; verify
+every hunk of every edit, checkpoint all, apply all, self-clean; any failure
+writes nothing or restores what landed; fails loud on `no_match`/`ambiguous`) · `append` · and ON DEMAND:
 `checkpoint` / `checkpoints` / `restore` / `drop` (pre-images as plain files
 under `.ckpt/` on the same surface — visible, caller-retained) plus a
 `version` content-hash on every reply and an `if_match` guard on every mutate.

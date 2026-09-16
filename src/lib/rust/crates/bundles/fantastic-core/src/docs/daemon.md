@@ -25,9 +25,13 @@ spawns a fresh kernel, reads disk, dispatches, exits:
 and one-shots are locked out. Tell the user to add one (don't guess a port
 yourself):
 
-    fantastic core create_agent handler_module=web.tools port=<N>
-    fantastic <web_id> create_agent handler_module=web_ws.tools
-    fantastic <web_id> create_agent handler_module=web_rest.tools
+    fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=<N>
+    fantastic kernel create_agent parent_id=<web_id> handler_module=web_ws.tools
+    fantastic kernel create_agent parent_id=<web_id> handler_module=web_rest.tools
+    fantastic kernel create_agent parent_id=<web_id> handler_module=kernel_state.tools \
+        root=.fantastic/web watch=false alias=web_loader   # frontend store (readme=frontend)
+    fantastic web_loader persist_record \
+        record='{"id":"<root_id>","handler_module":"<frontend-root>.ts"}'  # seed the frontend
 
 ...then they restart the daemon.
 

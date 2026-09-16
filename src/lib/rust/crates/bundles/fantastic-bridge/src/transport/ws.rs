@@ -25,6 +25,20 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// python `logger.warning("ws_bridge: skipping malformed frame: %s", e)`
+/// (`ws_bridge/_ws.py:78`). python configures no logging handler, so the record
+/// reaches `logging.lastResort` and the BARE message lands on stderr. The `<e>`
+/// tail is the codec's own text (residual R-D4-8 for the library half).
+fn skip_malformed(err: &str) {
+    eprintln!("ws_bridge: skipping malformed frame: {err}");
+}
+
+/// python `logger.warning("ws_bridge: skipping non-object frame")`
+/// (`ws_bridge/_ws.py:81`) — a frame that decoded, but not to a dict.
+fn skip_non_object() {
+    eprintln!("ws_bridge: skipping non-object frame");
+}
+
 /// WebSocket client transport.
 ///
 /// On construction we split the socket and spawn a reader task that
@@ -67,15 +81,38 @@ impl WsTransport {
         let reader = tokio::spawn(async move {
             while let Some(msg) = source.next().await {
                 let frame_result = match msg {
-                    // Text WS message → a plain JSON envelope.
-                    Ok(Message::Text(t)) => serde_json::from_str::<Value>(&t)
-                        .map(Frame::Text)
-                        .map_err(|e| TransportError::Other(format!("ws decode: {e}"))),
+                    // Text WS message → a plain JSON envelope. A frame that does
+                    // not decode, or decodes to a non-object, is SKIPPED with
+                    // python's line and the reader keeps going (A15.1) — the peer
+                    // is remote, so bad bytes are an input, not a bug. Raising
+                    // here killed the engine read loop while `closed` stayed
+                    // false, leaving a bridge that reflects `connected:true` and
+                    // answers every forward with a timeout that never names the
+                    // dead reader.
+                    Ok(Message::Text(t)) => match serde_json::from_str::<Value>(&t) {
+                        Ok(v) if v.is_object() => Ok(Frame::Text(v)),
+                        Ok(_) => {
+                            skip_non_object();
+                            continue;
+                        }
+                        Err(e) => {
+                            skip_malformed(&format!("bad text frame: {e}"));
+                            continue;
+                        }
+                    },
                     // Binary WS message → the `[4B len|header|body]` codec frame
                     // (a read_stream/write_stream chunk — raw bytes, no base64).
-                    Ok(Message::Binary(b)) => decode_binary_frame(&b)
-                        .map(|(h, body)| Frame::Binary(h, body))
-                        .map_err(|e| TransportError::Other(format!("ws binary decode: {e}"))),
+                    Ok(Message::Binary(b)) => match decode_binary_frame(&b) {
+                        Ok((h, body)) if h.is_object() => Ok(Frame::Binary(h, body)),
+                        Ok(_) => {
+                            skip_non_object();
+                            continue;
+                        }
+                        Err(e) => {
+                            skip_malformed(&e);
+                            continue;
+                        }
+                    },
                     Ok(Message::Close(_)) => {
                         let _ = tx
                             .send(Err(TransportError::ConnectionClosed(
@@ -107,8 +144,8 @@ impl WsTransport {
 #[async_trait]
 impl BridgeTransport for WsTransport {
     async fn send_frame(&self, frame: Value) -> Result<(), TransportError> {
-        let text = serde_json::to_string(&frame)
-            .map_err(|e| TransportError::Other(format!("ws encode: {e}")))?;
+        // python's `encode_frame` text half (A13.14).
+        let text = fantastic_io_bridge::codec::encode_frame(&frame);
         let mut sink = self.sink.lock().await;
         sink.send(Message::Text(text))
             .await

@@ -228,7 +228,7 @@ pub(crate) fn mk_kernel(sh: Arc<Shared>) -> Arc<Kernel> {
         PathBuf::new(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(root);
     kernel
 }
@@ -859,4 +859,42 @@ async fn a_keepalive_loop_is_neither_waited_for_nor_cancelled() {
         "the keepalive loop must survive the stop: {out}"
     );
     assert!(kernel.tasks.contains(&live), "and still be running");
+}
+
+// ── C36: a fork is a message ───────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_task_writes_a_task_row() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let a = mk_agent(&kernel, "forker").await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "fork"}))])
+        .await
+        .remove(0);
+    let forked = r.result["task_id"].as_i64().expect("a forked task id");
+    // THE TASK ID IS THE ROW ID: the fork took its number from the store by
+    // writing the row, not from the counter behind the store's back.
+    let row = kernel.rows.get_one(forked).expect("the task row");
+    assert_eq!(row["kind"], json!("task"));
+    assert_eq!(row["verb"], json!("job"));
+    assert_eq!(row["agent"], json!("forker"));
+    assert_eq!(
+        row["parent"].as_i64(),
+        r.pid.map(TaskId::get),
+        "parent = the dispatch that forked it"
+    );
+    assert_eq!(
+        row.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["kind", "verb", "parent", "id", "agent", "ts"],
+        "python's key order: the row as written, then what the store adds"
+    );
+    // …and it sits on the forking agent's list, beside its `call` rows.
+    let mine = kernel.rows.for_agent(&a);
+    let kinds: Vec<&str> = mine
+        .iter()
+        .filter_map(|r| r.get("kind").and_then(Value::as_str))
+        .collect();
+    // `boot` (the child's own first dispatch), the `fork` call, then the fork.
+    assert_eq!(kinds, vec!["call", "call", "task"]);
 }

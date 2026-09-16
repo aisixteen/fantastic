@@ -17,30 +17,53 @@
 use crate::history::load_history;
 use crate::history_view::{dedupe_stale_reads, drop_answered_reflects};
 use crate::state::BackendState;
+use fantastic_bundle::{py_split_whitespace, py_str, py_strip, py_truthy};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// ONE reflect field as the model reads it — python `_render_reflect._one`.
+///
+/// NO JSON ON THE MODEL PATH: a string goes through as-is, a list of scalars is
+/// comma-joined through `str()`, and anything nested is the REPLY NOTATION
+/// collapsed onto the line. Rust used to serialize every non-string as JSON, so
+/// a model read `parent_id=null`, `can_call={"$self":"*"}` and
+/// `tree=["core",…]` where python's says `parent_id=`, `can_call=<$self>*</$self>`
+/// and `tree=kernel_state,web`.
+fn reflect_field(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(items)
+            if items
+                .iter()
+                .all(|x| !matches!(x, Value::Object(_) | Value::Array(_))) =>
+        {
+            items.iter().map(py_str).collect::<Vec<_>>().join(",")
+        }
+        other => py_split_whitespace(&crate::tool_parse::render_reply(other)).join(" "),
+    }
+}
+
 /// Render a reflect reply into a one-line `sentence  k=v  k=v` blurb.
+///
+/// `shift_remove`, not `remove`: with `preserve_order` on, `serde_json`'s
+/// `remove` is a SWAP-remove, which would move the last key into `sentence`'s
+/// slot and reorder every field the model reads.
 pub fn render_reflect(v: &Value) -> String {
     let mut obj = match v.as_object() {
         Some(o) => o.clone(),
         None => return String::new(),
     };
     let sentence = obj
-        .remove("sentence")
-        .and_then(|s| s.as_str().map(str::to_string))
+        .shift_remove("sentence")
+        .map(|s| py_str(&s))
         .unwrap_or_default();
-    let mut parts: Vec<String> = Vec::new();
-    for (k, val) in obj.iter() {
-        let rendered = match val.as_str() {
-            Some(s) => s.to_string(),
-            None => serde_json::to_string(val).unwrap_or_default(),
-        };
-        parts.push(format!("{k}={rendered}"));
-    }
-    let fields = parts.join("  ");
-    format!("{sentence}  {fields}").trim().to_string()
+    let fields = obj
+        .iter()
+        .map(|(k, val)| format!("{k}={}", reflect_field(val)))
+        .collect::<Vec<_>>()
+        .join("  ");
+    py_strip(&format!("{sentence}  {fields}")).to_string()
 }
 
 /// How to reach another agent — the ENVELOPE this crate actually dispatches (see
@@ -276,7 +299,10 @@ pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> 
     // as rows. Teaching either unconditionally spends window on an
     // affordance the agent does not have.
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    let flag = |k: &str| meta.get(k).and_then(Value::as_bool).unwrap_or(false);
+    // PYTHON TRUTHINESS (`if rec_.get(...)`): `1`/`"on"` turn the block on, and
+    // `as_bool` read them as off — the prompt the model got depended on whether
+    // the record's flag happened to be a JSON bool.
+    let flag = |k: &str| meta.get(k).is_some_and(py_truthy);
     let mut blocks = vec![
         render_reflect(&primer),
         format!("You are `{}`. {}", self_id, render_reflect(&me)),
@@ -315,12 +341,22 @@ pub async fn assemble_messages(
     kernel: &Arc<Kernel>,
     client_id: &str,
     system_prompt: Option<&str>,
+    messages_override: Option<&[Value]>,
 ) -> (Vec<Value>, usize) {
     let system_content = match system_prompt {
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => default_system_content(self_id, kernel).await,
     };
     let mut messages = vec![json!({"role": "system", "content": system_content})];
+    // STATELESS: a caller-supplied non-empty `messages` REPLACES the persisted
+    // history whole, and there is no store behind it (`store_len` 0). The view,
+    // the trimmers and the projection are all skipped — the caller owns the
+    // context, which is the entire point of the override.
+    if let Some(over) = messages_override.filter(|m| !m.is_empty()) {
+        messages.extend(over.iter().cloned());
+        messages.push(json!({"role": "user", "content": user_text}));
+        return (messages, 0);
+    }
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped
     // and answered reflects reduced to a stub — the model's own distillation
     // carries the facts forward. Durable history keeps every turn, so the trace

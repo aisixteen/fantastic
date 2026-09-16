@@ -4,6 +4,7 @@
 //! WRONG tokenizer for gemma/nemotron). Plus window/budget resolution off
 //! the agent record meta. Mirrors the Python `ai_core/context.py`.
 
+use fantastic_bundle::{decimal_value, py_int, py_json_dumps, py_strip};
 use serde_json::{json, Map, Value};
 
 /// ~chars per token for the estimate.
@@ -36,7 +37,11 @@ pub const NOTICE_ENVELOPE_RESERVE: i64 = 160;
 /// because role + content + tool_calls + role:tool replies + the JSON
 /// envelope all consume real context.
 pub fn estimate_one(message: &Value) -> i64 {
-    let n = serde_json::to_string(message).map(|s| s.len()).unwrap_or(0);
+    // PYTHON'S `json.dumps`, PYTHON'S LENGTH: `, `/`: ` separators, `\uXXXX`
+    // escapes (ensure_ascii), and CODE POINTS. `serde_json`'s compact separators
+    // and byte length made every estimate smaller than python's — by 2 chars per
+    // key, and by 5 per non-ASCII character.
+    let n = py_json_dumps(message, true, None).chars().count();
     n.div_ceil(CHARS_PER_TOKEN) as i64
 }
 
@@ -45,16 +50,31 @@ pub fn estimate_tokens(messages: &[Value]) -> i64 {
     messages.iter().map(estimate_one).sum()
 }
 
-/// Read a positive integer meta value (number or numeric string); `None`
-/// otherwise (bools and non-positive values are rejected).
+/// Python `_as_pos_int`: a bool is never one; an int must be > 0; a float must
+/// be > 0 and then TRUNCATES (`0.5` → 0, which is why the budget can floor); a
+/// string counts only when `strip().isdigit()` (so `+12` and `-3` are not).
 fn as_pos_int(v: Option<&Value>) -> Option<i64> {
     match v {
         Some(Value::Bool(_)) => None,
         Some(Value::Number(n)) => {
-            let i = n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))?;
-            (i > 0).then_some(i)
+            if let Some(i) = n.as_i64() {
+                (i > 0).then_some(i)
+            } else if let Some(f) = n.as_f64() {
+                (f > 0.0).then_some(f as i64)
+            } else {
+                None
+            }
         }
-        Some(Value::String(s)) => s.trim().parse::<i64>().ok().filter(|&i| i > 0),
+        Some(Value::String(s)) => {
+            let t = py_strip(s);
+            if !t.is_empty() && t.chars().all(|c| decimal_value(c).is_some()) {
+                py_int(&Value::String(t.to_string()))
+                    .ok()
+                    .filter(|&i| i > 0)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -72,7 +92,9 @@ pub fn resolve_context_window(meta: &Map<String, Value>) -> i64 {
     DEFAULT_CONTEXT_WINDOW
 }
 
-/// Output headroom reserved out of the window (default 1024).
+/// Output headroom reserved out of the window — python `output_reserve`: a
+/// NON-BOOL int ≥ 0, or a `strip().isdigit()` string, else 1024. A float (even
+/// `1000.0`), a negative, and `+5` all take the default.
 pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
     match meta.get("output_reserve") {
         Some(Value::Bool(_)) => DEFAULT_OUTPUT_RESERVE,
@@ -80,11 +102,14 @@ pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
             .as_i64()
             .filter(|&i| i >= 0)
             .unwrap_or(DEFAULT_OUTPUT_RESERVE),
-        Some(Value::String(s)) => s
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .unwrap_or(DEFAULT_OUTPUT_RESERVE),
+        Some(Value::String(s)) => {
+            let t = py_strip(s);
+            if !t.is_empty() && t.chars().all(|c| decimal_value(c).is_some()) {
+                py_int(&Value::String(t.to_string())).unwrap_or(DEFAULT_OUTPUT_RESERVE)
+            } else {
+                DEFAULT_OUTPUT_RESERVE
+            }
+        }
         _ => DEFAULT_OUTPUT_RESERVE,
     }
 }
@@ -95,12 +120,12 @@ pub fn budget(meta: &Map<String, Value>) -> i64 {
 }
 
 /// The agent's configured `recent_n` (verbatim recent turns kept by
-/// compact/truncate), clamped to [1, 50]; default 6.
+/// compact/truncate) — python `int(v)` clamped to [1, 50], and 6 on the
+/// TypeError/ValueError `int()` raises. `True` is 1, `7.9` is 7, `" 7 "` is 7.
 pub fn recent_n(meta: &Map<String, Value>) -> usize {
     let n = match meta.get("recent_n") {
-        Some(Value::Number(num)) => num.as_i64().unwrap_or(6),
-        Some(Value::String(s)) => s.trim().parse::<i64>().unwrap_or(6),
-        _ => 6,
+        Some(v) => py_int(v).unwrap_or(6),
+        None => 6,
     };
     n.clamp(1, 50) as usize
 }
@@ -137,16 +162,19 @@ pub fn pull_cap_chars(meta: &Map<String, Value>) -> usize {
 /// text by up to ~30% on newline-heavy bodies; the margin is what keeps "fits"
 /// true at the seam. Python `_fit_reply`.
 #[must_use]
-pub fn fit_reply(items: &[Value], cap_tokens: i64, limit: Option<usize>) -> (Vec<Value>, bool) {
+pub fn fit_reply(items: &[Value], cap_tokens: i64, limit: Option<i64>) -> (Vec<Value>, bool) {
     let cap = (cap_tokens as f64 * 0.8) as i64;
     let mut kept: Vec<Value> = Vec::new();
     for it in items {
-        if limit.is_some_and(|l| kept.len() >= l) {
+        // SIGNED, as python's `len(kept) >= limit`: a NEGATIVE limit is already
+        // satisfied by the empty page, so it returns one — `as u64`/`as usize`
+        // turned `-1` into "no limit" and served every row that fit.
+        if limit.is_some_and(|l| kept.len() as i64 >= l) {
             return (kept, true);
         }
         let mut trial = kept.clone();
         trial.push(it.clone());
-        let rendered = serde_json::to_string(&trial).unwrap_or_default();
+        let rendered = py_json_dumps(&Value::Array(trial.clone()), true, None);
         if estimate_one(&json!({"role": "user", "content": rendered})) > cap {
             return (kept, true);
         }

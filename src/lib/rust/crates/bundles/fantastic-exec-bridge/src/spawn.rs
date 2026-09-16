@@ -63,16 +63,21 @@ pub fn spawn_job(
 
     let mut cmd = Command::new(exe);
     cmd.args(rest)
-        .env("FANTASTIC_CTRL_FD", child_raw.to_string())
-        .env("FANTASTIC_SELF_ID", self_id)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
     // The per-call `env` block — each value stringified, exactly like python's
     // `{str(k): str(v) for k, v in env_extra_user.items()}`.
+    //
+    // IT GOES FIRST, and the two control vars are written OVER it (A4.23): python
+    // builds one dict literal with the caller's items spread before the two keys, so
+    // `env={"FANTASTIC_SELF_ID": "root"}` cannot make a job claim another agent's
+    // identity, nor point `FANTASTIC_CTRL_FD` at a descriptor it chose.
     for (k, v) in env_extra {
         cmd.env(k, value_to_env(v));
     }
+    cmd.env("FANTASTIC_CTRL_FD", child_raw.to_string())
+        .env("FANTASTIC_SELF_ID", self_id);
     if let Some(c) = cwd.filter(|c| !c.is_empty()) {
         cmd.current_dir(c);
     }
@@ -106,14 +111,10 @@ pub fn spawn_job(
     Ok(Spawned { child, ctrl })
 }
 
-/// Stringify an env value the way python's `str(v)` would for the common scalar
-/// cases (string as-is, others via their JSON text). Objects/arrays are unusual in
-/// an env block but must not panic.
+/// Stringify an env value exactly as python's `str(v)` does — a string as itself,
+/// everything else through CPython's repr (`True`, not `true`).
 fn value_to_env(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
+    fantastic_bundle::py_str(v)
 }
 
 /// The fd number the child was told to use. Exposed for tests.

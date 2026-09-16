@@ -59,9 +59,9 @@ struct ConnectorParityTests {
 /// THE decisive test for the durable design. Everything else — relay, inbox,
 /// self-reap — is built on the child actually receiving the socket.
 ///
-/// It also pins the empirical finding that Foundation's `Process` passes an inherited
-/// fd at all. If a toolchain ever turns on POSIX_SPAWN_CLOEXEC_DEFAULT, this fails
-/// here rather than as a mysterious hang inside the relay.
+/// It also pins that the `posix_spawnp` file actions really do land the socket on fd
+/// 3. If that ever stops holding, this fails here rather than as a mysterious hang
+/// inside the relay.
 @Suite("python spawn")
 struct SpawnTests {
 
@@ -71,7 +71,7 @@ struct SpawnTests {
         return nil
     }
 
-    @Test func childSeesTheControlSocketAndItsEnvelope() throws {
+    @Test func childSeesTheControlSocketAndItsEnvelope() async throws {
         guard let py = python3() else { print("skipping: no python3"); return }
         let code = """
             import os, stat
@@ -81,8 +81,8 @@ struct SpawnTests {
         let s = try Spawn.job(
             argv: [py, "-u", "-c", code], selfId: "owner_agent",
             envExtra: ["MYVAR": "hello"], cwd: nil)
-        let data = s.stdout.fileHandleForReading.readDataToEndOfFile()
-        s.process.waitUntilExit()
+        let data = s.stdout.readDataToEndOfFile()
+        _ = await s.child.wait()
         close(s.ctrlFd)
         let text = String(data: data, encoding: .utf8) ?? ""
         #expect(text.contains("sock True"))
@@ -105,12 +105,12 @@ struct SpawnTests {
             ],
             selfId: "owner_agent", envExtra: [:], cwd: nil)
         Thread.sleep(forTimeInterval: 0.5)
-        #expect(s.process.isRunning, "child exited early")
+        #expect(s.child.isAlive, "child exited early")
 
         close(s.ctrlFd)  // the only thing holding it open
         let deadline = Date().addingTimeInterval(10)
-        while s.process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-        #expect(!s.process.isRunning, "child did not self-reap within 10s")
-        #expect(s.process.terminationStatus == 0, "self-reap should exit 0")
+        while s.child.isAlive && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        #expect(!s.child.isAlive, "child did not self-reap within 10s")
+        #expect(s.child.exitCode == 0, "self-reap should exit 0")
     }
 }

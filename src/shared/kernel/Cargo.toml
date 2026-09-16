@@ -37,8 +37,6 @@ fantastic-ollama-backend = { path = "../../lib/rust/crates/bundles/fantastic-oll
 fantastic-nvidia-nim-backend = { path = "../../lib/rust/crates/bundles/fantastic-nvidia-nim-backend" }
 fantastic-anthropic-backend = { path = "../../lib/rust/crates/bundles/fantastic-anthropic-backend" }
 fantastic-bridge = { path = "../../lib/rust/crates/bundles/fantastic-bridge" }
-fantastic-proxy-agent = { path = "../../lib/rust/crates/bundles/fantastic-proxy-agent" }
-fantastic-tools = { path = "../../lib/rust/crates/bundles/fantastic-tools" }
 fantastic-terminal-backend = { path = "../../lib/rust/crates/bundles/fantastic-terminal-backend" }
 
 [dev-dependencies]

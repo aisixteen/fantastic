@@ -286,6 +286,31 @@
             #expect(refl["allowed"].asArray != nil, "discovery must work sealed")
         }
 
+        /// A1.2 — a rule object with no `type` is a plain SEAL, python's
+        /// `parse_spec` returning `(None, cfg)`: it used to throw out of `handle`
+        /// (and the write was refused), so a leg configured `{env: "X"}` took the
+        /// whole dispatch down instead of denying.
+        @Test func aTypelessRuleObjectSealsLikePython() async {
+            let kernel = freshKernel()
+            let create: JSON = .object([
+                "type": .string("create_agent"), "parent_id": .string("core"),
+                "handler_module": .string("exec_bridge.tools"), "id": .string("typeless"),
+                "ingress_rule": .object(["env": .string("X")]),
+            ])
+            let made = await kernel.send([Item(AgentId("core"), create)])[0].result
+            #expect(made["id"].asString == "typeless", "the write is accepted: \(made.serialize())")
+            let a = AgentId("typeless")
+            let start: JSON = .object(["type": .string("start"), "command": .string("ls")])
+            let d = await kernel.send([Item(a, start)])[0].result
+            #expect(d["reason"].asString == "unauthorized", "\(d.serialize())")
+            #expect(d["error"].asString == "edge sealed by policy", "\(d.serialize())")
+            // reflect still answers, and reports the seal + the egress default.
+            let refl = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
+            #expect(refl["ingress_rule"].asString == "deny_ingress", "\(refl.serialize())")
+            #expect(refl["egress_rule"].asString == "silent_egress", "\(refl.serialize())")
+            #expect(refl["sealed"].asBool == true, "\(refl.serialize())")
+        }
+
         // MARK: - the task table + the orphan gate
 
         /// A running job IS a process, and the kernel sees it: the job's row carries
@@ -402,7 +427,10 @@
         var fds: [Int32] = [0, 0]
         precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0, "socketpair")
         let relay = Relay(fd: fds[0], owner: owner, jobId: jobId, kernel: kernel)
-        relay.start()
+        // A4.34 — the relay IS a kernel task; drive it the way `start` does.
+        _ = kernel.spawnTask(agent: owner, verb: "relay") { [relay] in
+            await relay.run(taskId: KernelTaskLocals.currentTask)
+        }
         _ = fcntl(fds[1], F_SETFL, O_NONBLOCK)  // so a test can never block on read
         return (fds[1], relay)
     }
@@ -797,8 +825,8 @@
             let sp = try Spawn.job(
                 argv: [py, "-u", "-c", code], selfId: "owner_agent",
                 envExtra: ["MYVAR": "hello"], cwd: nil)
-            let outData = sp.stdout.fileHandleForReading.readDataToEndOfFile()
-            sp.process.waitUntilExit()
+            let outData = sp.stdout.readDataToEndOfFile()
+            _ = await sp.child.wait()
             close(sp.ctrlFd)
             let text = String(data: outData, encoding: .utf8) ?? ""
             #expect(text.contains("sock True"), "control fd is not a socket: \(text)")
@@ -869,6 +897,628 @@
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
             #expect(out.contains("WROTE 768 READ 768 True bytes"), "bytes did not round-trip raw: \(out)")
+        }
+    }
+
+    // ─── A4 python-parity twins ─────────────────────────────────────
+    //
+    // One test per plan item, each pinning the PYTHON text or behaviour named
+    // there (`PB/io/exec_bridge/src/exec_bridge/`). Python is canonical; where a
+    // line here disagrees with it, this file is wrong.
+
+    /// python's `readme.md`, for the byte-for-byte pin.
+    private func pythonExecReadme() throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // FantasticExecBridgeTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // swift
+            .deletingLastPathComponent()  // lib
+            .appendingPathComponent(
+                "python/bundled_agents/io/exec_bridge/src/exec_bridge/readme.md")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// Echoes back whatever payload it was dispatched — the only way to see what
+    /// the relay actually forwarded.
+    private final class EchoBundle: AgentBundle, @unchecked Sendable {
+        let name = "echo"
+        func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+            .object(["got": payload])
+        }
+    }
+
+    private func echoKernel() -> Kernel {
+        let registry = BundleRegistry()
+        registry.register("exec_bridge.tools", ExecBridgeBundle())
+        registry.register("echo.tools", EchoBundle())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        return kernel
+    }
+
+    @Suite("exec_bridge python parity")
+    struct ExecBridgeParityTests {
+
+        // MARK: A4.1 / A4.2 / A4.26 / A4.27 — reflect
+
+        /// A4.1 — reflect carries the full auth posture: `ingress_rule`,
+        /// `egress_rule` (default `silent_egress`) and `sealed`, in python's order.
+        @Test func reflectReportsEgressPosture() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "egr")
+            let r = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
+            let keys = try #require(r.asObject).keys
+            #expect(r["ingress_rule"].asString == "allow_all_ingress", "\(r.serialize())")
+            #expect(r["egress_rule"].asString == "silent_egress", "\(r.serialize())")
+            #expect(r["sealed"].asBool == false, "\(r.serialize())")
+            let i = try #require(keys.firstIndex(of: "ingress_rule"))
+            let e = try #require(keys.firstIndex(of: "egress_rule"))
+            let s = try #require(keys.firstIndex(of: "sealed"))
+            #expect(i < e && e < s, "python order is ingress_rule, egress_rule, sealed")
+        }
+
+        /// A4.2 + A4.26 + A4.27 — the prose blocks are python's, verbatim: the
+        /// `authoring` tag example, the `wire` passage about the fd not being
+        /// one-way, and `inbox`'s closing clause about a script that only defines
+        /// something.
+        @Test func reflectTextsMatchPythonVerbatim() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "texts")
+            let r = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
+            #expect(
+                r["authoring"].asString
+                    == "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",
+                "\(r["authoring"].serialize())")
+            let wire = r["wire"].asString ?? ""
+            #expect(
+                wire.contains(
+                    "{op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply."
+                ), "\(wire)")
+            #expect(
+                r["inbox"].asString
+                    == "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first turn arrives.",
+                "\(r["inbox"].serialize())")
+        }
+
+        /// A4.28 — the vendored readme IS python's `readme.md`, byte for byte.
+        @Test func vendoredReadmeMatchesPythonByteForByte() throws {
+            #expect(ExecBridgeBundle().readme == (try pythonExecReadme()))
+        }
+
+        /// A4.10 — reflect coerces the way python does: a FALSY `cwd` is
+        /// `<process default>` (truthiness, not presence), and `allowed` items go
+        /// through `str(x)`, so `5` reads `5` and `true` reads `True`.
+        @Test func reflectCoercesLikePython() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(
+                kernel, id: "coer",
+                meta: ["cwd": .string(""), "allowed": .array([.integer(5), .bool(true)])])
+            let r = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
+            #expect(r["cwd"].asString == "<process default>", "\(r.serialize())")
+            #expect(
+                r["allowed"].asArray?.compactMap { $0.asString } == ["5", "True"],
+                "\(r.serialize())")
+        }
+
+        // MARK: A4.3 — `shutdown` is mail
+
+        /// A4.3 — python's VERBS table has no `shutdown`, so it is MAIL: ungated,
+        /// `{queued:true}` with a live job and the unknown-type error without one.
+        /// It is not advertised as a verb either.
+        @Test func shutdownIsMailNotAVerb() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "sd_open")
+            let refl = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
+            #expect(refl["verbs"].asObject?["shutdown"] == nil, "\(refl["verbs"].serialize())")
+
+            let r = await kernel.send([Item(a, .object(["type": .string("shutdown")]))])[0].result
+            #expect(
+                r["error"].asString
+                    == "exec_bridge: unknown type 'shutdown' (no running job to receive it)",
+                "\(r.serialize())")
+            #expect(r["reason"].isNull, "mail is not a refusal: \(r.serialize())")
+
+            // …and it is UNGATED: a sealed leg answers the same, not `unauthorized`.
+            let sealedId = await kernel.send([
+                Item(
+                    AgentId("core"),
+                    .object([
+                        "type": .string("create_agent"), "parent_id": .string("core"),
+                        "handler_module": .string("exec_bridge.tools"),
+                        "id": .string("sd_sealed"),
+                    ]))
+            ])[0].result
+            #expect(sealedId["id"].asString == "sd_sealed", "\(sealedId.serialize())")
+            let s = await kernel.send([
+                Item(AgentId("sd_sealed"), .object(["type": .string("shutdown")]))
+            ])[0].result
+            #expect(s["reason"].isNull, "shutdown must not be gated: \(s.serialize())")
+            #expect(s["error"].asString?.contains("no running job") == true, "\(s.serialize())")
+        }
+
+        // MARK: A4.4 / A4.5 — python repr in every refusal
+
+        /// A4.4 — `{x!r}` everywhere: the refused command line, the job id, and the
+        /// unknown mail type (absent ⇒ `None`). The allowlist is python's LIST repr.
+        @Test func refusalTextsUsePythonRepr() async throws {
+            let kernel = freshKernel()
+            let rec = kernel.agent(
+                await createPy(
+                    kernel, id: "repr_leg",
+                    meta: ["allowed": .array([.string("ls( .*)?")])]))
+            #expect(
+                commandPermitted(rec, "rm -rf /")
+                    == "exec_bridge: command not allowed: 'rm -rf /' — this leg permits: ['ls( .*)?']",
+                "\(commandPermitted(rec, "rm -rf /") ?? "nil")")
+
+            let a = await createPy(kernel, id: "repr_job")
+            let gone = await kernel.send([
+                Item(a, .object(["type": .string("stop"), "job_id": .string("nope")]))
+            ])[0].result
+            #expect(gone["error"].asString == "exec_bridge: no job 'nope'", "\(gone.serialize())")
+            #expect(gone["reason"].asString == "not_found", "\(gone.serialize())")
+
+            // An absent `type` is python's `None`, not an empty string. The kernel
+            // refuses a typeless payload at the batch (`send: payload.type
+            // required`), so this branch is reached at the bundle.
+            let bare = try await ExecBridgeBundle().handle(
+                agentId: a, payload: .object(["note": .string("hi")]), kernel: kernel)
+            #expect(
+                bare?["error"].asString
+                    == "exec_bridge: unknown type None (no running job to receive it)",
+                "\(bare?.serialize() ?? "nil")")
+        }
+
+        /// A4.5 — `validate_meta` texts are python's: the tag-shaped `allowed`
+        /// example, and the spec/pattern spelled with `{x!r}`. The engine's own
+        /// wording past `': '` is the residual ICU cannot reproduce.
+        @Test func validateMetaTextsMatchPython() {
+            let b = ExecBridgeBundle()
+            #expect(
+                b.validateMeta(["allowed": .array([])], record: [:])
+                    == "allowed must be a non-empty list of regexes, "
+                    + "e.g. <allowed><item>ls( .*)?</item></allowed>")
+            let broken = b.validateMeta(["allowed": .array([.string("(")])], record: [:]) ?? ""
+            #expect(
+                broken.hasPrefix("allowed contains a broken regex '(': "), "\(broken)")
+            #expect(
+                b.validateMeta(["ingress_rule": .string("nonsense")], record: [:])
+                    == "ingress_rule='nonsense' is not a rule this bundle implements — "
+                    + "legal values: allow_all_ingress, deny_ingress")
+            #expect(
+                b.validateMeta(["auth": .string("password")], record: [:])
+                    == "auth='password' is not applicable to the process edge: "
+                    + "a leg with no wire envelope can never present a token — "
+                    + "legal values: allow_all_ingress, deny_ingress")
+        }
+
+        // MARK: A4.7 / A4.33 — the regex dialect
+
+        /// A4.7 (D5) — `allowed` is python's `re`: named groups spelled `(?P<n>…)`,
+        /// a `(?P=n)` backreference and lookaround all compile and match.
+        @Test func allowedAcceptsPythonRegexSyntax() async throws {
+            let kernel = freshKernel()
+            let named = kernel.agent(
+                await createPy(
+                    kernel, id: "rx_named",
+                    meta: ["allowed": .array([.string("(?P<w>\\w+) (?P=w)")])]))
+            #expect(commandPermitted(named, "ls ls") == nil, "python named group + backref")
+            #expect(commandPermitted(named, "ls cat") != nil, "the backref must bind")
+
+            let look = kernel.agent(
+                await createPy(
+                    kernel, id: "rx_look",
+                    meta: ["allowed": .array([.string("(?!rm).*")])]))
+            #expect(commandPermitted(look, "ls -la") == nil)
+            #expect(commandPermitted(look, "rm -rf /") != nil, "the lookahead must refuse")
+
+            // …and the same source compiles at WRITE time.
+            #expect(
+                ExecBridgeBundle().validateMeta(
+                    ["allowed": .array([.string("(?P<w>\\w+) (?P=w)")])], record: [:]) == nil)
+        }
+
+        /// A4.33 — a python `fullmatch` BACKTRACKS across alternation. ICU's
+        /// leftmost `firstMatch` stops at `ls` and the old range check then refused
+        /// `ls -la`; `\A(?:…)\z` makes the whole string the goal.
+        @Test func fullmatchBacktracksAcrossAlternation() async throws {
+            let kernel = freshKernel()
+            let rec = kernel.agent(
+                await createPy(
+                    kernel, id: "rx_alt",
+                    meta: ["allowed": .array([.string("ls|ls -la")])]))
+            #expect(commandPermitted(rec, "ls -la") == nil, "python fullmatch accepts this")
+            #expect(commandPermitted(rec, "ls") == nil)
+            #expect(commandPermitted(rec, "ls -l") != nil)
+        }
+
+        // MARK: A4.8 — job_id truthiness
+
+        /// A4.8 — python reads `job_id` under TRUTHINESS: a falsy one means every
+        /// job of this agent; a truthy NON-string can never be a key, so it is
+        /// `not_found` echoing the raw value.
+        @Test func emptyJobIdMeansAllJobs() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "jid")
+            for jid in [JSON.string(""), .null, .integer(0), .array([])] {
+                let st = await kernel.send([
+                    Item(a, .object(["type": .string("status"), "job_id": jid]))
+                ])[0].result
+                #expect(
+                    st["jobs"].asArray?.count == 0,
+                    "falsy \(jid.serialize()): \(st.serialize())")
+            }
+            let bad = await kernel.send([
+                Item(a, .object(["type": .string("status"), "job_id": .integer(5)]))
+            ])[0].result
+            #expect(bad["error"].asString == "exec_bridge: no job 5", "\(bad.serialize())")
+            #expect(bad["job_id"] == .integer(5), "the RAW value is echoed: \(bad.serialize())")
+            // `clear` has no not_found guard in python — an unknown id clears nothing.
+            let cleared = await kernel.send([
+                Item(a, .object(["type": .string("clear"), "job_id": .integer(5)]))
+            ])[0].result
+            #expect(cleared["cleared"].asInt == 0, "\(cleared.serialize())")
+        }
+
+        // MARK: A4.9 / A4.31 / A4.32 — start
+
+        /// A4.9 — python's coercions: an explicit null `args` is not a list (the
+        /// KEY being absent is `[]`), scalars go through `str()` so a bool reads
+        /// `True`, a falsy `env` is the empty block, and a command that is all
+        /// whitespace is MISSING.
+        @Test func startCoercesArgumentsLikePython() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "coerce")
+            func start(_ extra: OrderedDictionary<String, JSON>) async -> JSON {
+                var p: OrderedDictionary<String, JSON> = [
+                    "type": .string("start"), "command": .string("/bin/echo"),
+                ]
+                for (k, v) in extra { p[k] = v }
+                return await kernel.send([Item(a, .object(p))])[0].result
+            }
+            let nullArgs = await start(["args": .null])
+            #expect(nullArgs["reason"].asString == "bad_arg", "\(nullArgs.serialize())")
+            #expect(nullArgs["arg"].asString == "args", "\(nullArgs.serialize())")
+
+            let objArgs = await start(["args": .object([:])])
+            #expect(objArgs["reason"].asString == "bad_arg", "\(objArgs.serialize())")
+
+            // A falsy `env` is `{}` — `payload.get("env") or {}`, not a type error.
+            for falsy in [JSON.null, .array([]), .object([:]), .string(""), .integer(0)] {
+                let r = await start(["env": falsy, "args": .array([.string("x")])])
+                #expect(r["job_id"].asString != nil, "falsy env must spawn: \(r.serialize())")
+                _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
+            }
+            let badEnv = await start(["env": .array([.integer(1)])])
+            #expect(badEnv["arg"].asString == "env", "\(badEnv.serialize())")
+
+            // `command.strip()` spans newlines and tabs.
+            let blank = await kernel.send([
+                Item(a, .object(["type": .string("start"), "command": .string(" \n\t ")]))
+            ])[0].result
+            #expect(blank["reason"].asString == "missing_arg", "\(blank.serialize())")
+            #expect(blank["error"].asString == "start: command required", "\(blank.serialize())")
+        }
+
+        /// A4.9 (the argv half) — scalars reach the child as python's `str(x)`:
+        /// `1`, `2.5`, `True`.
+        @Test func startStringifiesScalarArgsLikePython() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "argv_str")
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([
+                Item(
+                    a,
+                    .object([
+                        "type": .string("start"), "command": .string(py),
+                        "args": .array([
+                            .string("-u"), .string("-c"),
+                            .string("import sys; print(sys.argv[1:])"),
+                            .integer(1), .double(2.5), .bool(true),
+                        ]),
+                    ]))
+            ])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            #expect(out.contains("['1', '2.5', 'True']"), "argv was not python-stringified: \(out)")
+        }
+
+        /// A4.31 — a command that never reaches `exec` is a TRANSPORT refusal whose
+        /// text is python's `str(OSError)`.
+        @Test func aMissingCommandIsASpawnFailedRefusal() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "nospawn")
+            let r = await kernel.send([
+                Item(
+                    a,
+                    .object([
+                        "type": .string("start"),
+                        "command": .string("/nonexistent/fantastic_nope"),
+                    ]))
+            ])[0].result
+            #expect(r["reason"].asString == "transport_error", "\(r.serialize())")
+            #expect(
+                r["error"].asString
+                    == "exec_bridge: spawn failed: [Errno 2] No such file or directory: "
+                    + "'/nonexistent/fantastic_nope'", "\(r.serialize())")
+        }
+
+        /// A4.32 — `secrets.token_hex(4)` is ALWAYS 8 hex digits; a `radix: 16`
+        /// conversion dropped the leading zeros of one job in sixteen.
+        @Test func jobIdIsEightHexChars() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "jobid_hex")
+            for _ in 0..<8 {
+                let r = await kernel.send([Item(a, pyStart(py, "pass"))])[0].result
+                let jid = try #require(r["job_id"].asString)
+                #expect(jid.count == 8, "job_id `\(jid)` is not 8 chars")
+                #expect(
+                    jid.allSatisfy { $0.isHexDigit && !$0.isUppercase },
+                    "job_id `\(jid)` is not hex")
+            }
+        }
+
+        // MARK: A4.6 / A4.14 / A4.15 / A4.29 / A4.30 — the pump
+
+        /// A4.6 — a signal death is python's `returncode`: `-signal`, `ok:false`.
+        @Test func aKilledJobReportsNegativeSignalExitCode() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "sigkill")
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([Item(a, pyStart(py, "import time; time.sleep(60)"))])[0].result
+            try await Task.sleep(nanoseconds: 300_000_000)
+            _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let done = events.first { $0["type"].asString == "job_done" }
+            #expect(done?["exit_code"].asInt == -9, "\(done?.serialize() ?? "no job_done")")
+            #expect(done?["ok"].asBool == false, "\(done?.serialize() ?? "none")")
+        }
+
+        /// A4.14 — a line past the 64 KiB reader limit is a PUMP fault, python's
+        /// `ValueError` text and its shape: stdout `''`, the message on stderr.
+        @Test func anOverlongLineIsAPumpError() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "overlong")
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([
+                Item(a, pyStart(py, "import sys; sys.stdout.write('x' * 150000 + '\\n')"))
+            ])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let done = events.first { $0["type"].asString == "job_done" }
+            #expect(done?["stdout"].asString == "", "\(done?.serialize().prefix(200) ?? "none")")
+            #expect(
+                done?["stderr"].asString
+                    == "[pump error] Separator is not found, and chunk exceed the limit",
+                "\(done?["stderr"].serialize() ?? "none")")
+        }
+
+        /// A4.15 — the counter lives on the PUMP: python's `_read_stream` closes
+        /// over the job dict, so `clear {job_id}` dropping a RUNNING row does not
+        /// reset `progress.n`.
+        @Test func progressCountSurvivesClear() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "clr_count")
+            let stream = kernel.ensureInbox(a)
+            let r = await kernel.send([
+                Item(
+                    a,
+                    pyStart(
+                        py,
+                        "import sys, time\n"
+                            + "for i in range(6):\n    print(i)\n    sys.stdout.flush()\n    time.sleep(0.3)\n"
+                    ))
+            ])[0].result
+            let jid = try #require(r["job_id"].asString)
+            // FORGET the row while it still runs — a NAMED clear drops a running one.
+            try await Task.sleep(nanoseconds: 500_000_000)
+            let cleared = await kernel.send([
+                Item(a, .object(["type": .string("clear"), "job_id": .string(jid)]))
+            ])[0].result
+            #expect(
+                cleared["cleared"].asInt == 1,
+                "a named clear drops a running row: \(cleared.serialize())")
+            // ONE consumer per stream: the inbox buffers, so this sees the whole run.
+            let events = await drainUntil(stream, timeout: 20) { $0["n"].asInt == 6 }
+            let ns = events.compactMap { $0["type"].asString == "progress" ? $0["n"].asInt : nil }
+            #expect(ns.contains(6), "the count restarted or stopped after clear: \(ns)")
+        }
+
+        /// A4.29 — invalid UTF-8 is REPLACED, not dropped: python decodes with
+        /// `errors="replace"`, so the rest of the output survives.
+        @Test func invalidUtf8OutputIsReplacedNotDropped() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "bad_utf8")
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([
+                Item(
+                    a,
+                    pyStart(py, "import sys; sys.stdout.buffer.write(b'\\xff' + b'ok\\n')"))
+            ])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            #expect(out.contains("ok"), "the valid tail was dropped: \(out.debugDescription)")
+            #expect(
+                out.contains("\u{FFFD}"),
+                "the invalid byte was not replaced: \(out.debugDescription)")
+        }
+
+        /// A4.30 — a cancelled job emits NO `job_done`: python's pump re-raises
+        /// `CancelledError` after labelling the row, so nothing announces a normal
+        /// finish for a job the kernel killed.
+        @Test func aCancelledJobEmitsNoJobDone() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "no_done")
+            let file = pidFile()
+            defer { try? FileManager.default.removeItem(at: file) }
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([Item(a, pyStart(py, sleepForeverCode(file)))])[0].result
+            let pid = try await waitForPid(file)
+            let row = try await waitForRow(kernel, agent: a.value, verb: "start")
+            _ = await cancelTask(kernel, try #require(row["id"].asInt))
+            #expect(await waitProcessGone(pid), "pid \(pid) survived cancel")
+            let events = await drainUntil(stream, timeout: 3) { _ in false }
+            #expect(
+                !events.contains { $0["type"].asString == "job_done" },
+                "a cancelled job announced job_done: \(events.map { $0.serialize() })")
+        }
+
+        // MARK: A4.12 — start order
+
+        /// A4.12 — `status` lists jobs in START order, the way python's dict does.
+        @Test func statusListsJobsInStartOrder() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "order")
+            var started: [String] = []
+            for i in 0..<5 {
+                let r = await kernel.send([
+                    Item(
+                        a,
+                        .object([
+                            "type": .string("start"), "command": .string(py),
+                            "args": .array([
+                                .string("-u"), .string("-c"),
+                                .string("import time; time.sleep(30)"),
+                                .string("tag\(i)"),
+                            ]),
+                        ]))
+                ])[0].result
+                started.append(try #require(r["job_id"].asString))
+            }
+            let st = await kernel.send([Item(a, .object(["type": .string("status")]))])[0].result
+            let listed = st["jobs"].asArray?.compactMap { $0["job_id"].asString } ?? []
+            #expect(listed == started, "listed \(listed), started \(started)")
+            _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
+        }
+
+        // MARK: A4.11 / A4.13 / A4.34 — the relay
+
+        /// A4.11 — python coerces both relay frames: `m.get("payload") or {}` and
+        /// `m.get("target") or owner_id`, so a program that omits either is not
+        /// forwarding a null.
+        @Test func relayCoercesFalsyPayloadAndTarget() async throws {
+            let kernel = echoKernel()
+            let a = await createPy(
+                kernel, id: "relay_coer",
+                meta: ["can_call": .object(["echo1": .string("*")])])
+            _ = await kernel.send([
+                Item(
+                    AgentId("core"),
+                    .object([
+                        "type": .string("create_agent"), "parent_id": .string("core"),
+                        "id": .string("echo1"), "handler_module": .string("echo.tools"),
+                        "callable_by": .object([a.value: .string("*")]),
+                    ]))
+            ])[0].result
+            let (fd, relay) = wire(kernel, owner: a, jobId: "jc")
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            // No `payload` key at all — python forwards `{}`, not None.
+            wireWrite(
+                fd,
+                .object([
+                    "op": .string("send"), "rid": .integer(1), "target": .string("echo1"),
+                ]))
+            let reply = try #require(await wireRead(fd), "no reply frame")
+            #expect(reply["op"].asString == "reply", "\(reply.serialize())")
+            // The batch tells the two apart: a `null` payload is `send: payload
+            // required`, an EMPTY OBJECT is `send: payload.type required`. Seeing the
+            // second is seeing the `or {}`.
+            #expect(
+                reply["data"]["arg"].asString == "payload.type",
+                "the falsy payload was not coerced to {}: \(reply.serialize())")
+
+            // …and a payload that carries a type reaches the target intact.
+            wireWrite(
+                fd,
+                .object([
+                    "op": .string("send"), "rid": .integer(2), "target": .string("echo1"),
+                    "payload": .object(["type": .string("ping")]),
+                ]))
+            let echoed = try #require(await wireRead(fd), "no second reply frame")
+            #expect(
+                echoed["data"]["got"]["type"].asString == "ping", "\(echoed.serialize())")
+
+            // An emit with no target lands on the OWNER agent.
+            let owner = kernel.ensureInbox(a)
+            wireWrite(
+                fd,
+                .object([
+                    "op": .string("emit"), "payload": .object(["type": .string("ping")]),
+                ]))
+            let seen = await drainUntil(owner, timeout: 5) { $0["type"].asString == "ping" }
+            #expect(
+                seen.contains { $0["type"].asString == "ping" },
+                "\(seen.map { $0.serialize() })")
+        }
+
+        /// A4.13 — a watching program's drains are kernel TASKS (`watch_drain` /
+        /// `inbox_drain`), parented to the relay, so `ps` shows what it holds.
+        /// A4.34 — and the relay itself is one, verb `relay`.
+        @Test func aWatchingProgramHoldsDrainTaskRows() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "drains")
+            let (fd, relay) = wire(kernel, owner: a, jobId: "jd")
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            wireWrite(fd, .object(["op": .string("watch"), "src": .string(a.value)]))
+            wireWrite(fd, .object(["op": .string("onmessage")]))
+            let relayRow = try await waitForRow(kernel, agent: a.value, verb: "relay")
+            let watchRow = try await waitForRow(kernel, agent: a.value, verb: "watch_drain")
+            let inboxRow = try await waitForRow(kernel, agent: a.value, verb: "inbox_drain")
+            #expect(watchRow["parent"].asInt == relayRow["id"].asInt, "\(watchRow.serialize())")
+            #expect(inboxRow["parent"].asInt == relayRow["id"].asInt, "\(inboxRow.serialize())")
+        }
+
+        /// A4.34 — a real job holds a `relay` row for as long as its control socket
+        /// lives, so a program's sends are rowed under work that is still alive.
+        @Test func aJobHoldsARelayTaskRow() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "relay_row")
+            _ = await kernel.send([Item(a, pyStart(py, "import time; time.sleep(30)"))])[0].result
+            let row = try await waitForRow(kernel, agent: a.value, verb: "relay")
+            #expect(row["agent"].asString == a.value, "\(row.serialize())")
+            _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
+        }
+
+        // MARK: A4.16 — the gate takes no credential from the record
+
+        /// A4.16 — python builds the ingress action from the target and the payload
+        /// ALONE. A record that stores the group token used to satisfy its own
+        /// `password_ingress` — the leg letting itself in.
+        @Test func theRecordAuthTokenIsNeverACredential() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "self_cred")
+            let envName = "FANTASTIC_TEST_TOKEN_A416"
+            setenv(envName, "s3cret", 1)
+            defer { unsetenv(envName) }
+            // Written straight onto the record: `validate_meta` refuses this spelling
+            // at the WRITE, and the point here is the GATE, not the write.
+            let agent = try #require(kernel.agent(a))
+            _ = agent.updateMeta([
+                "ingress_rule": .object([
+                    "type": .string("password_ingress"), "env": .string(envName),
+                ]),
+                "auth_token": .string("s3cret"),
+            ])
+            let r = await kernel.send([Item(a, .object(["type": .string("status")]))])[0].result
+            #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
+            #expect(
+                r["error"].asString?.contains("group token") == true, "\(r.serialize())")
         }
     }
 

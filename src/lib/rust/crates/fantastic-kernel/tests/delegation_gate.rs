@@ -53,7 +53,7 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     let peer = create(

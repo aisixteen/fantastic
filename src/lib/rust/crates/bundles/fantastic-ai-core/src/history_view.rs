@@ -222,10 +222,26 @@ pub fn drop_answered_reflects(history: &[Value]) -> Vec<Value> {
         {
             out.push(turn.clone());
         } else {
-            out.push(json!({"role": "user", "content": trimmed.join("\n\n")}));
+            // KEEP THE ROW'S KEYS — python `{**turn, "content": …}`. Rebuilding a
+            // bare `{role, content}` dropped `id`/`parent`/`agent`/`ts`, so
+            // `next_span` skipped the row, `save_view` left it out of the array
+            // and the estimate lost its bytes (measured: rust fold 1054 carried 7
+            // refs where python/swift carried 8).
+            out.push(with_content(turn, trimmed.join("\n\n")));
         }
     }
     out
+}
+
+/// The row with a NEW `content` and every other key intact — python's
+/// `{**turn, "content": …}`.
+fn with_content(turn: &Value, content: String) -> Value {
+    let mut row = match turn {
+        Value::Object(m) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    row.insert("content".to_string(), json!(content));
+    Value::Object(row)
 }
 
 /// Drop whole-state read replies that a later reply to the same `(agent, verb)`
@@ -271,7 +287,7 @@ pub fn dedupe_stale_reads(history: &[Value]) -> Vec<Value> {
             keep_rev.push(turn.clone());
         } else {
             kept_rev.reverse();
-            keep_rev.push(json!({"role": "user", "content": kept_rev.join("\n\n")}));
+            keep_rev.push(with_content(turn, kept_rev.join("\n\n")));
         }
     }
     keep_rev.reverse();
@@ -281,6 +297,58 @@ pub fn dedupe_stale_reads(history: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// python `{**turn, "content": …}`: a trimmed row keeps `id`, `parent`,
+    /// `agent` and `ts`. Rebuilding a bare `{role, content}` made `next_span`
+    /// skip the row, `save_view` drop it from the array, and the estimate lose
+    /// its bytes (rust folds carried 7 refs where python carried 8).
+    #[test]
+    fn the_view_trimmers_keep_row_keys() {
+        let row = |id: i64, content: String| {
+            json!({"role": "user", "id": id, "parent": id - 1, "agent": "ai",
+                   "ts": 1.0, "content": content})
+        };
+        let keys = |out: &[Value]| {
+            for r in out {
+                if r["role"] == json!("assistant") {
+                    continue;
+                }
+                assert!(r.get("id").is_some(), "the row lost its id: {r:#?}");
+                assert!(r.get("parent").is_some(), "the row lost its parent: {r:#?}");
+                assert!(r.get("agent").is_some(), "the row lost its agent: {r:#?}");
+                assert!(r.get("ts").is_some(), "the row lost its ts: {r:#?}");
+            }
+        };
+        // `drop_answered_reflects`: an ANSWERED reflect body becomes a stub.
+        let reflect = "[reply to 11 \u{b7} notes reflect]\nverbs: read, write".to_string();
+        let answered = vec![
+            row(11, reflect.clone()),
+            json!({"role": "assistant", "content": "seen: notes reads and writes"}),
+        ];
+        let out = drop_answered_reflects(&answered);
+        assert_ne!(
+            out[0]["content"],
+            json!(reflect),
+            "the body must be stubbed"
+        );
+        keys(&out);
+
+        // `dedupe_stale_reads`: a SUPERSEDED whole-state block drops from a turn
+        // whose sibling block stays.
+        let batch = "[reply to 11 \u{b7} notes reflect]\nold state\n\n\
+                     [reply to 12 \u{b7} notes read]\nfile body"
+            .to_string();
+        let stale = vec![
+            row(11, batch.clone()),
+            row(
+                12,
+                "[reply to 13 \u{b7} notes reflect]\nnew state".to_string(),
+            ),
+        ];
+        let out = dedupe_stale_reads(&stale);
+        assert_ne!(out[0]["content"], json!(batch), "the stale block must drop");
+        keys(&out);
+    }
 
     fn turn(role: &str, content: &str) -> Value {
         json!({"role": role, "content": content})

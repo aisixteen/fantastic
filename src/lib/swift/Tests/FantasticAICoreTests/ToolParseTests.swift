@@ -375,4 +375,103 @@ struct ToolParseTests {
             payload(c)["action"]["payload"]
                 == .object(["type": .string("buy"), "item": .string("rocket")]))
     }
+
+    // ── code points, not graphemes (B5.14) ───────────────────────
+
+    // Python indexes a str by CODE POINT. Swift's `[Character]` scan was a
+    // second index space: a CRLF is one Character, an NFD `é` is one Character,
+    // and two Characters compare EQUAL when canonically equivalent.
+    @Test("the scanner indexes code points like python")
+    func scannerIndexesCodePointsLikePython() throws {
+        // 1. head40 counts CODE POINTS: `ab\r\n` × 10 is 40 scalars but only 30
+        // Characters, so a grapheme-indexed excerpt quoted a third more text.
+        let tail = String(repeating: "ab\r\n", count: 20)
+        let faults = malformedCalls("<call name=\"send\"><target_id>a</target_id>" + tail)
+        #expect(faults.count == 1)
+        #expect(
+            faults[0].error.contains(
+                "text after the last tag (`" + String(repeating: "ab\r\n", count: 10) + "`)"),
+            "\(faults[0].error)")
+
+        // 2. An NFC opener is NOT closed by an NFD closer — python compares code
+        // points, and swift's Character `==` folded them together.
+        let nfc = "<call name=\"send\"><target_id>a</target_id><t\u{e9}>x</t\u{65}\u{301}></call>"
+        #expect(extractToolCalls(nfc).isEmpty, "an NFD closer must not close an NFC tag")
+
+        // 3. `s\u{e9}nd` is not a tool: the head class is ASCII, so the name stops
+        // at `s` and the block is refused.
+        #expect(
+            extractToolCalls("<call name=\"s\u{e9}nd\"><target_id>a</target_id></call>").isEmpty)
+
+        // 4. A tag name may not continue with Other_Alphabetic or a circled
+        // letter — python's `\w` is L*/numeric/underscore.
+        for bad in [
+            "<k_\u{928}\u{93e}\u{92e}>v</k_\u{928}\u{93e}\u{92e}>", "<x\u{24b6}>v</x\u{24b6}>",
+        ] {
+            let text =
+                "<call name=\"send\"><target_id>a</target_id><type>t</type>" + bad + "</call>"
+            #expect(
+                extractToolCalls(text).isEmpty,
+                "`\(bad)` must read as text outside a tag, not dispatch")
+        }
+
+        // 5. `<call` + an INFORMATION SEPARATOR is an envelope: python's
+        // `str.isspace()` includes U+001C..U+001F.
+        let sep = "<call\u{1c}name=\"send\"><target_id>a</target_id><type>reflect</type></call>"
+        #expect(extractToolCalls(sep).count == 1)
+    }
+
+    // ── `to` (B5.12 / B5.13) ─────────────────────────────────────
+
+    // Python keeps a truthy non-list `to` EXACTLY as written and dispatches the
+    // call; routing answers the no-target reply. Only a FALSY `to` with no
+    // string target is refused at parse.
+    @Test("a truthy non-list `to` is kept raw")
+    func aTruthyNonListToIsKeptRaw() throws {
+        let c = try one("<call name=\"send\"><to>42</to><type>reflect</type></call>")
+        #expect(c.arguments["to"] == .integer(42))
+        #expect(c.arguments.asObject?["target_id"] == nil)
+        // `<to>0</to>` is falsy, so there is no target at all.
+        let zero = "<call name=\"send\"><to>0</to><type>reflect</type></call>"
+        #expect(extractToolCalls(zero).isEmpty)
+        #expect(malformedCalls(zero).first?.error.contains("a send names its target") == true)
+    }
+
+    // Each recipient is `str(t).strip()` — python's `str`, not JSON.
+    @Test("to items are python str")
+    func toItemsArePythonStr() throws {
+        let c = try one(
+            "<call name=\"send\"><to><item>true</item><item>1e20</item>"
+                + "<item><a>x</a></item><item><item>y</item></item></to>"
+                + "<type>reflect</type></call>")
+        #expect(
+            c.arguments["to"]
+                == .array([
+                    .string("True"), .string("1e+20"), .string("{'a': 'x'}"), .string("['y']"),
+                ]))
+    }
+
+    // ── reply rendering (B5.16 / B5.17) ──────────────────────────
+
+    // `_reply_text` is `str(x)`: python float reprs, python container reprs, and
+    // an EMPTY tag for null.
+    @Test("reply scalars are python str")
+    func replyScalarsArePythonStr() {
+        #expect(renderReply(.object(["c": .double(0.00001)])) == "<c>1e-05</c>")
+        #expect(renderReply(.object(["c": .double(1e16)])) == "<c>1e+16</c>")
+        #expect(renderReply(.object(["c": .double(.infinity)])) == "<c>inf</c>")
+        #expect(renderReply(.object(["c": .double(.nan)])) == "<c>nan</c>")
+        #expect(renderReply(.object(["c": .null])) == "<c></c>")
+        #expect(renderReply(.object(["c": .bool(true)])) == "<c>true</c>")
+        // A STRUCTURE inside a MIXED list is python's container repr.
+        #expect(
+            renderReply(.object(["c": .array([.integer(1), .object(["a": .integer(1)])])]))
+                == "<c>\n<item>1</item>\n<item>{'a': 1}</item>\n</c>")
+    }
+
+    // A CRLF body holds a LF code point, so python spans the tag across lines.
+    @Test("render_reply spans CRLF text like python")
+    func renderReplySpansCrlfTextLikePython() {
+        #expect(renderReply(.object(["c": .string("a\r\nb")])) == "<c>\na\r\nb\n</c>")
+    }
 }

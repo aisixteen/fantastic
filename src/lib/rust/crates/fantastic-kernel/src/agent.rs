@@ -10,7 +10,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use tokio::sync::RwLock;
 
 /// Stable identifier for an agent (newtype around `String`).
@@ -56,12 +55,18 @@ pub struct AgentRecord {
     /// Bundle handler key. `None` for the root and other bare agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handler_module: Option<String>,
-    /// Parent id, omitted for the root.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
     /// All other key/value pairs.
     #[serde(flatten)]
     pub meta: Map<String, Value>,
+    /// Parent id, omitted for the root.
+    ///
+    /// DECLARED LAST, so it SERIALIZES last — python writes `id`,
+    /// `handler_module`, the meta, then `parent_id`, because structure wins: a
+    /// `parent_id` that leaked into meta must not shadow where the agent
+    /// actually sits (`P/kernel/_agent.py:510-527`). The port declared it third
+    /// and every record on the wire and on disk disagreed with python's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// The recursive substrate node.
@@ -79,8 +84,15 @@ pub struct Agent {
     pub parent_id: Option<AgentId>,
     /// Arbitrary metadata persisted to agent.json (display_name, port, root, …).
     pub meta: std::sync::RwLock<Map<String, Value>>,
-    /// Direct children by id.
-    pub(crate) children: DashMap<AgentId, Arc<Agent>>,
+    /// Direct children, in CREATION ORDER.
+    ///
+    /// Python's `_children` is a plain dict, so the tree, `tree=ids` and every
+    /// descendant walk read insertion order. A `DashMap` has no order at all,
+    /// which is why the port sorted by id at every reader — and printed a tree
+    /// python never prints. Reach it through [`Agent::add_child`],
+    /// [`Agent::remove_child`] and [`Agent::child_ids`]; children counts are
+    /// small and no site looks one up by key.
+    pub(crate) children: std::sync::RwLock<Vec<Arc<Agent>>>,
     /// Synthetic ids (browser clients) + agent ids currently watching
     /// this agent's inbox. Updated by `watch` / `unwatch` in sub-phase B.
     #[allow(dead_code)]
@@ -89,6 +101,11 @@ pub struct Agent {
     pub root_path: PathBuf,
     /// Skip disk writes when true (cli, repl, in-test fixtures).
     pub ephemeral: bool,
+    /// Handler dispatches currently RUNNING on this agent — python's
+    /// `_in_flight`. Bumped at dispatch start, dropped in the `finally`; it is
+    /// the `backlog` every state event and the state snapshot report. Queue
+    /// depth is a different number and was never what python answered.
+    in_flight: std::sync::atomic::AtomicI64,
 }
 
 /// Keys a RECORD may never carry: they name substrate wiring, not agent meta.
@@ -136,11 +153,34 @@ impl Agent {
             handler_module,
             parent_id,
             meta: std::sync::RwLock::new(meta),
-            children: DashMap::new(),
+            children: std::sync::RwLock::new(Vec::new()),
             watcher_ids: RwLock::new(HashSet::new()),
             root_path,
             ephemeral,
+            in_flight: std::sync::atomic::AtomicI64::new(0),
         })
+    }
+
+    /// Dispatches currently running on this agent — the `backlog` of every state
+    /// event and of `Kernel::state_snapshot`.
+    pub fn in_flight(&self) -> i64 {
+        self.in_flight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Enter a dispatch (python's `self._in_flight += 1`).
+    pub(crate) fn in_flight_enter(&self) {
+        self.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Leave a dispatch — python's `max(0, self._in_flight - 1)`, clamped so a
+    /// stray drain can never take the counter negative.
+    pub(crate) fn in_flight_leave(&self) {
+        let _ = self.in_flight.fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| Some((n - 1).max(0)),
+        );
     }
 
     /// The persistable record snapshot — `id` + `handler_module` +
@@ -216,23 +256,52 @@ impl Agent {
 
     /// Does this agent own a child with the given id?
     pub fn has_child(&self, id: &AgentId) -> bool {
-        self.children.contains_key(id)
+        self.children
+            .read()
+            .expect("children lock poisoned")
+            .iter()
+            .any(|c| c.id == *id)
     }
 
     /// Direct child count.
     pub fn child_count(&self) -> usize {
-        self.children.len()
+        self.children.read().expect("children lock poisoned").len()
     }
 
-    /// Snapshot of direct child ids (sorted for deterministic iteration).
+    /// Snapshot of direct child ids, in CREATION ORDER — python's dict order.
     pub fn child_ids(&self) -> Vec<AgentId> {
-        let mut ids: Vec<AgentId> = self
-            .children
+        self.children
+            .read()
+            .expect("children lock poisoned")
             .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-        ids.sort_by(|a, b| a.0.cmp(&b.0));
-        ids
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// Snapshot of the direct children themselves, in creation order.
+    pub(crate) fn children_snapshot(&self) -> Vec<Arc<Agent>> {
+        self.children
+            .read()
+            .expect("children lock poisoned")
+            .clone()
+    }
+
+    /// Wire a child in. Re-wiring an id that is already there REPLACES it in
+    /// place, keeping its position — python's `dict[k] = v`.
+    pub(crate) fn add_child(&self, child: Arc<Agent>) {
+        let mut kids = self.children.write().expect("children lock poisoned");
+        match kids.iter().position(|c| c.id == child.id) {
+            Some(i) => kids[i] = child,
+            None => kids.push(child),
+        }
+    }
+
+    /// Detach a child by id. Absent id → no-op.
+    pub(crate) fn remove_child(&self, id: &AgentId) {
+        self.children
+            .write()
+            .expect("children lock poisoned")
+            .retain(|c| c.id != *id);
     }
 }
 

@@ -46,6 +46,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// In-flight inbound `call` dispatches, keyed so each removes itself when it
     /// finishes. Mutated ONLY on the event loop (channelRead + the completion hop).
     private var callTasks: [UUID: Task<Void, Never>] = [:]
+    /// uvicorn's keepalive: ping every `ping_interval`, close 1011 when no pong
+    /// arrives within `ping_timeout` (both 20 s, `uvicorn/config.py:191-192`).
+    static let pingIntervalSeconds: Int64 = 20
+    static let pongTimeoutSeconds: Int64 = 20
+    private var keepalive: RepeatedTask?
+    private var awaitingPong = false
 
     init(hostId: String, legId: AgentId, kernel: Kernel) {
         self.hostId = hostId
@@ -68,8 +74,30 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         drainTask = Task {
             for await event in inbox {
                 let frame: JSON = .object(["type": .string("event"), "payload": event])
-                Self.writeText(channel: channel, text: frame.serialize())
+                Self.writeText(channel: channel, text: Codec.encodeText(frame))
             }
+        }
+        // SERVER keepalive — uvicorn pings every 20 s and closes 1011
+        // `keepalive ping timeout` when the pong does not come back in time.
+        // Swift answered client pings and ignored pongs, but never pinged, so a
+        // half-open socket was never detected.
+        keepalive = context.eventLoop.scheduleRepeatedTask(
+            initialDelay: .seconds(Self.pingIntervalSeconds),
+            delay: .seconds(Self.pongTimeoutSeconds)
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            if self.awaitingPong {
+                var reason = channel.allocator.buffer(capacity: 24)
+                reason.writeInteger(UInt16(1011))
+                reason.writeString("keepalive ping timeout")
+                let close = WebSocketFrame(fin: true, opcode: .connectionClose, data: reason)
+                channel.writeAndFlush(close).whenComplete { _ in channel.close(promise: nil) }
+                return
+            }
+            self.awaitingPong = true
+            let ping = WebSocketFrame(
+                fin: true, opcode: .ping, data: channel.allocator.buffer(capacity: 0))
+            channel.writeAndFlush(ping, promise: nil)
         }
     }
 
@@ -83,6 +111,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func teardown() {
+        keepalive?.cancel()
+        keepalive = nil
         drainTask?.cancel()
         drainTask = nil
         // Cancel every in-flight dispatch. A `call` can run for minutes (an LLM
@@ -113,14 +143,17 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             let pong = WebSocketFrame(fin: true, opcode: .pong, data: frame.unmaskedData)
             context.writeAndFlush(wrapOutboundOut(pong), promise: nil)
         case .connectionClose:
+            // ECHO the client's close payload — python answers 1000 with the
+            // code it received; an empty buffer read as 1005 on the client.
             let close = WebSocketFrame(
-                fin: true, opcode: .connectionClose,
-                data: context.channel.allocator.buffer(capacity: 0))
+                fin: true, opcode: .connectionClose, data: frame.unmaskedData)
             context.writeAndFlush(wrapOutboundOut(close)).whenComplete { _ in
                 context.close(promise: nil)
             }
-        case .pong, .continuation:
-            break  // pong ignored; fragmentation not used by the JS client
+        case .pong:
+            awaitingPong = false
+        case .continuation:
+            break  // fragmentation not used by the JS client
         default:
             break
         }
@@ -240,7 +273,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // The binary WS message is the `[4B len|header|body]` codec frame —
         // the STANDARD call envelope `{type:"call", id, target, payload:{…}}`
         // with raw body trailing. Dispatch the INNER payload (py/rust parity).
-        guard let (header, blob) = Codec.decodeBinaryFrame(payload) else { return }
+        guard let (header, blob) = try? Codec.decodeBinaryFrame(payload) else { return }
         let target = header["target"].asString ?? hostId
         let id = header["id"].asString ?? ""
         let inner = header["payload"]
@@ -274,7 +307,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private static func writeReply(channel: Channel, id: String, data: JSON) {
         let frame: JSON = .object(["type": .string("reply"), "id": .string(id), "data": data])
-        writeText(channel: channel, text: frame.serialize())
+        writeText(channel: channel, text: Codec.encodeText(frame))
     }
 
     static func writeText(channel: Channel, text: String) {

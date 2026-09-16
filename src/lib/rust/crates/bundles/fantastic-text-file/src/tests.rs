@@ -33,7 +33,7 @@ async fn mk_with(tmp: &TempDir, store_extra: &[(&str, Value)]) -> (Arc<Kernel>, 
         tmp.path().join(".fantastic"),
         false,
     );
-    let _ = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut store_meta = Map::new();
     store_meta.insert("root".to_string(), json!(store_root.to_string_lossy()));
@@ -50,7 +50,7 @@ async fn mk_with(tmp: &TempDir, store_extra: &[(&str, Value)]) -> (Arc<Kernel>, 
         store_root.clone(),
         false,
     );
-    let _ = kernel.register(Arc::clone(&store));
+    kernel.register(Arc::clone(&store));
     let mut meta = Map::new();
     meta.insert("target_id".to_string(), json!("store"));
     meta.insert("can_call".to_string(), json!({"store": "*"}));
@@ -62,7 +62,7 @@ async fn mk_with(tmp: &TempDir, store_extra: &[(&str, Value)]) -> (Arc<Kernel>, 
         tmp.path().join("ed"),
         false,
     );
-    let _ = kernel.register(Arc::clone(&ed));
+    kernel.register(Arc::clone(&ed));
     (kernel, AgentId::from("ed"))
 }
 
@@ -75,8 +75,19 @@ async fn call(kernel: &Arc<Kernel>, ed: &AgentId, payload: Value) -> Value {
 }
 
 /// A byte verb over the BINARY channel (the blob is the document/patch).
+///
+/// Through the BATCH (`Item::with_binary`), which is the production path and
+/// the one python mirrors: one send, one task row, so `current_task()` names
+/// this dispatch and a checkpoint id is that pid. `send_with_binary` bypasses
+/// the batch and registers no task (documented at `Item::with_binary`).
 async fn call_bin(kernel: &Arc<Kernel>, ed: &AgentId, header: Value, blob: &[u8]) -> Value {
-    kernel.send_with_binary(ed, header, blob.to_vec()).await.0
+    kernel
+        .send(vec![
+            Item::new(ed.clone(), header).with_binary(blob.to_vec())
+        ])
+        .await
+        .remove(0)
+        .result
 }
 
 fn block(old: &str, new: &str) -> String {
@@ -373,13 +384,10 @@ async fn checkpointed_write_restores_byte_identical() {
         b"mutated\n",
     )
     .await;
-    let ck = w["ckpt_id"].as_str().expect("ckpt_id").to_string();
-    // A checkpoint id is the dispatch's pid rendered — a number now, or `op`
-    // when the write came from an operator with no task of its own.
-    assert!(
-        ck == "op" || ck.parse::<i64>().is_ok(),
-        "task pid shape: {ck}"
-    );
+    // A checkpoint id IS the dispatch's kernel task pid — an INT, python's
+    // one id space with `ps`, the trace and the chat turn (A3.10).
+    let ck = w["ckpt_id"].as_i64().expect("ckpt_id is an int");
+    assert!(ck > 0, "minted pid: {w}");
     assert_eq!(on_disk(&tmp, "c.txt"), "mutated\n");
     let r = call(
         &k,
@@ -402,7 +410,7 @@ async fn checkpoint_of_absent_file_restores_to_absence() {
         b"born\n",
     )
     .await;
-    let ck = w["ckpt_id"].as_str().expect("ckpt_id").to_string();
+    let ck = w["ckpt_id"].as_i64().expect("ckpt_id is an int");
     assert!(tmp.path().join("sd/new.txt").exists());
     let r = call(
         &k,
@@ -421,7 +429,7 @@ async fn checkpoint_list_drop_restore_lifecycle() {
     let (k, ed) = mk(&tmp).await;
     seed(&k, &ed, "p.txt", "a = 1\n").await;
     let c = call(&k, &ed, json!({"type": "checkpoint", "path": "p.txt"})).await;
-    let ck = c["ckpt_id"].as_str().expect("ckpt_id").to_string();
+    let ck = c["ckpt_id"].as_i64().expect("ckpt_id is an int");
     call_bin(
         &k,
         &ed,
@@ -430,13 +438,15 @@ async fn checkpoint_list_drop_restore_lifecycle() {
     )
     .await;
     let ls = call(&k, &ed, json!({"type": "checkpoints", "path": "p.txt"})).await;
-    let ids: Vec<&str> = ls["ckpts"]
+    // `checkpoints` reports an all-digit name as an int, python's
+    // `int(name) if name.isdigit() else name`.
+    let ids: Vec<i64> = ls["ckpts"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|x| x["id"].as_str().unwrap())
+        .map(|x| x["id"].as_i64().expect("int ckpt id"))
         .collect();
-    assert_eq!(ids, [ck.as_str()], "{ls}");
+    assert_eq!(ids, [ck], "{ls}");
     let r = call(
         &k,
         &ed,
@@ -479,7 +489,7 @@ async fn unwired_editor_fails_loud_on_every_verb() {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _ = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let ed = Agent::new(
         AgentId::from("bare"),
@@ -489,7 +499,7 @@ async fn unwired_editor_fails_loud_on_every_verb() {
         tmp.path().join("bare"),
         false,
     );
-    let _ = kernel.register(Arc::clone(&ed));
+    kernel.register(Arc::clone(&ed));
     let ed = AgentId::from("bare");
     for verb in ["read", "checkpoint", "checkpoints", "restore", "drop"] {
         let r = call(&kernel, &ed, json!({"type": verb, "path": "x"})).await;
@@ -759,10 +769,39 @@ async fn concurrent_patches_on_one_file_both_land() {
 async fn text_channel_bytes_guard_is_missing_arg() {
     let tmp = TempDir::new().unwrap();
     let (k, ed) = mk(&tmp).await;
-    for verb in ["write", "patch", "append"] {
+    // A3.1: the order is unwired -> path/edits -> bytes, and each verb names
+    // its OWN document arg (py ::test_text_channel_bytes_guard_is_missing_arg).
+    for (verb, arg) in [
+        ("write", "bytes (the document — str is utf-8-encoded)"),
+        ("append", "bytes (one chunk — str is utf-8-encoded)"),
+    ] {
         let r = call(&k, &ed, json!({"type": verb, "path": "x"})).await;
         assert_eq!(r["reason"], "missing_arg", "{verb}: {r}");
-        assert!(r["arg"].as_str().unwrap().starts_with("bytes"), "{r}");
+        assert_eq!(r["arg"], arg, "{verb}: {r}");
+        assert_eq!(r["error"], format!("{verb}: {arg} required"), "{r}");
+    }
+    let r = call(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [{"path": "x", "hunks": 1}]}),
+    )
+    .await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(
+        r["arg"], "bytes (the utf-8 patch — all hunks, in edits order)",
+        "{r}"
+    );
+    // …and `edits` is reported BEFORE `bytes` (py ::test_missing_path).
+    let r = call(&k, &ed, json!({"type": "patch"})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(
+        r["arg"], "edits (a list of {path, hunks, if_match?})",
+        "{r}"
+    );
+    // A missing `path` beats a missing document on the byte verbs too.
+    for verb in ["write", "append"] {
+        let r = call(&k, &ed, json!({"type": verb})).await;
+        assert_eq!(r["arg"], "path", "{verb}: {r}");
     }
 }
 
@@ -773,6 +812,8 @@ async fn unknown_type_carries_verb() {
     let r = call(&k, &ed, json!({"type": "frobnicate"})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "frobnicate", "{r}");
+    // A3.3: python reprs the RAW type value.
+    assert_eq!(r["error"], "text_file: unknown type 'frobnicate'", "{r}");
 }
 
 #[tokio::test]
@@ -889,18 +930,394 @@ async fn restore_takes_the_ckpt_id_as_the_notation_typed_it() {
         b"after\n",
     )
     .await;
-    let ck = w["ckpt_id"].as_str().expect("ckpt_id").to_string();
+    let ck = w["ckpt_id"].as_i64().expect("ckpt_id is an int");
     assert_eq!(on_disk(&tmp, "c.txt"), "after\n");
 
-    // The model writes the id it was shown; the notation makes it an int when
-    // it looks like one.
-    let numeric: Value = ck.parse::<i64>().map(Value::from).unwrap_or(json!(ck));
+    // The model writes back the int it was shown.
     let r = call(
         &k,
         &ed,
-        json!({"type": "restore", "path": "c.txt", "ckpt_id": numeric}),
+        json!({"type": "restore", "path": "c.txt", "ckpt_id": ck}),
     )
     .await;
     assert!(r.get("error").is_none(), "{r}");
     assert_eq!(on_disk(&tmp, "c.txt"), "before\n");
 }
+
+// ─── python parity (A3) ─────────────────────────────────────────
+
+/// A3.2 — `shutdown` is not in python's VERBS map, so it is an unknown type,
+/// not a silent no-op (py `tools.py:787-798,811-816`).
+#[tokio::test]
+async fn shutdown_is_unhandled() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    let r = call(&k, &ed, json!({"type": "shutdown"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], "shutdown", "{r}");
+    assert_eq!(r["error"], "text_file: unknown type 'shutdown'", "{r}");
+    // `boot` stays the no-op python declares.
+    assert_eq!(call(&k, &ed, json!({"type": "boot"})).await, Value::Null);
+}
+
+/// A3.3 — every refusal that embeds a value uses python's `repr`: an int bare,
+/// a str single-quoted (py `tools.py:505,554,755,815`).
+#[tokio::test]
+async fn refusal_texts_use_python_repr() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "c.txt", "keep\n").await;
+    // restore, no such checkpoint — a RAW int id stays bare, the path is quoted
+    let r = call(
+        &k,
+        &ed,
+        json!({"type": "restore", "path": "c.txt", "ckpt_id": 999999}),
+    )
+    .await;
+    assert_eq!(r["reason"], "not_found", "{r}");
+    assert_eq!(
+        r["error"], "restore: no checkpoint 999999 for 'c.txt'",
+        "{r}"
+    );
+    // …and a string id is quoted like python's `{ckpt_id!r}`.
+    let r = call(
+        &k,
+        &ed,
+        json!({"type": "restore", "path": "c.txt", "ckpt_id": "tf:deadbeef"}),
+    )
+    .await;
+    assert_eq!(
+        r["error"], "restore: no checkpoint 'tf:deadbeef' for 'c.txt'",
+        "{r}"
+    );
+    // a per-edit `hunks` count that is not an int >= 1
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [{"path": "a.py", "hunks": "2"}]}),
+        block("x", "y").as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        r["error"], "patch: edits must be edit 0 ('a.py'): `hunks` (int >= 1)",
+        "{r}"
+    );
+    // a non-utf8 document inside a transaction
+    seed(&k, &ed, "raw.bin", "").await;
+    std::fs::write(tmp.path().join("sd/raw.bin"), [0xffu8, 0xfe]).unwrap();
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [{"path": "raw.bin", "hunks": 1}]}),
+        block("x", "y").as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        r["error"], "patch: edits must be 'raw.bin': a utf-8 text file",
+        "{r}"
+    );
+}
+
+/// A3.4 — every edit is validated (python does not `break` on a short hunk
+/// stream) and the sum names the FULL claim (py `tools.py:495-527`).
+#[tokio::test]
+async fn patch_reports_the_full_hunk_claim() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.py", "x = 1\n").await;
+    seed(&k, &ed, "b.py", "y = 2\n").await;
+    let blob = format!("{}\n{}", block("x = 1", "x = 10"), block("y = 2", "y = 20"));
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [
+            {"path": "a.py", "hunks": 3}, {"path": "b.py", "hunks": 1}]}),
+        blob.as_bytes(),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(
+        r["error"],
+        "patch: edits must be hunk counts that sum to the blob's blocks — \
+         edits claim 4, the patch holds 2",
+        "{r}"
+    );
+    // a LATER edit's own typing still wins over the sum — no early break.
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [
+            {"path": "a.py", "hunks": 3}, {"path": "b.py", "hunks": 0}]}),
+        blob.as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        r["error"], "patch: edits must be edit 1 ('b.py'): `hunks` (int >= 1)",
+        "{r}"
+    );
+    assert_eq!(on_disk(&tmp, "a.py"), "x = 1\n");
+}
+
+/// A3.5 — the per-edit version-mismatch dict is written `error, reason, path,
+/// expected, actual` (py `tools.py:544-550`).
+#[tokio::test]
+async fn per_edit_version_mismatch_key_order() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.py", "one\n").await;
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [
+            {"path": "a.py", "hunks": 1, "if_match": "0000000000000000"}]}),
+        block("one", "ONE").as_bytes(),
+    )
+    .await;
+    let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        ["error", "reason", "path", "expected", "actual"],
+        "{r}"
+    );
+    // the bare `if_match` guard has no `path` (py `_if_match_guard`).
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "write", "path": "a.py", "if_match": "0000000000000000"}),
+        b"two\n",
+    )
+    .await;
+    let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["error", "reason", "expected", "actual"], "{r}");
+}
+
+/// A3.6 — `validate_meta` refuses an unusable `target_id` (py
+/// `tools.py:801-808`).
+#[tokio::test]
+async fn validate_meta_refuses_an_empty_target_id() {
+    assert_eq!(
+        TextFileBundle.validate_meta(
+            &[("target_id".to_string(), json!(""))].into_iter().collect(),
+            &Map::new()
+        ),
+        Some("target_id must be a non-empty file_bridge agent id".to_string())
+    );
+    assert_eq!(
+        TextFileBundle.validate_meta(
+            &[("target_id".to_string(), json!(7))].into_iter().collect(),
+            &Map::new()
+        ),
+        Some("target_id must be a non-empty file_bridge agent id".to_string())
+    );
+    assert_eq!(TextFileBundle.validate_meta(&Map::new(), &Map::new()), None);
+    // …and the substrate refuses the create.
+    let tmp = TempDir::new().unwrap();
+    let (k, _ed) = mk(&tmp).await;
+    let r = call(
+        &k,
+        &AgentId::from("core"),
+        json!({"type": "create_agent", "parent_id": "core", "id": "ed2",
+               "handler_module": HANDLER_MODULE, "target_id": ""}),
+    )
+    .await;
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("target_id must be a non-empty file_bridge agent id"),
+        "{r}"
+    );
+    assert!(!k.agents.contains_key(&AgentId::from("ed2")));
+}
+
+/// A3.7 — `checkpoint`/`dry_run` go by python truthiness, `if_match` guards
+/// whenever it is present and non-null (a non-string never matches, and the
+/// RAW value is echoed as `expected`), and a falsy `ckpt_id` is missing.
+#[tokio::test]
+async fn arg_typing_follows_python_truthiness() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "t.txt", "one\n").await;
+    // a truthy non-bool `checkpoint` still takes a pre-image
+    let w = call_bin(
+        &k,
+        &ed,
+        json!({"type": "write", "path": "t.txt", "checkpoint": 1}),
+        b"two\n",
+    )
+    .await;
+    assert!(w["ckpt_id"].is_i64(), "{w}");
+    // a non-string `if_match` can never equal a hex digest
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "write", "path": "t.txt", "if_match": 12345}),
+        b"three\n",
+    )
+    .await;
+    assert_eq!(r["reason"], "version_mismatch", "{r}");
+    assert_eq!(r["expected"], 12345, "{r}");
+    assert_eq!(on_disk(&tmp, "t.txt"), "two\n");
+    // an explicit null `if_match` does NOT guard (python: `want is None`)
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "write", "path": "t.txt", "if_match": null}),
+        b"four\n",
+    )
+    .await;
+    assert_eq!(on_disk(&tmp, "t.txt"), "four\n", "{r}");
+    // 0 is a falsy ckpt id
+    for verb in ["restore", "drop"] {
+        let r = call(
+            &k,
+            &ed,
+            json!({"type": verb, "path": "t.txt", "ckpt_id": 0}),
+        )
+        .await;
+        assert_eq!(r["reason"], "missing_arg", "{verb}: {r}");
+        assert_eq!(r["arg"], "ckpt_id", "{verb}: {r}");
+    }
+    // a truthy non-bool `dry_run` writes nothing
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "dry_run": "yes",
+               "edits": [{"path": "t.txt", "hunks": 1}]}),
+        block("four", "five").as_bytes(),
+    )
+    .await;
+    assert_eq!(r["dry_run"], true, "{r}");
+    assert_eq!(on_disk(&tmp, "t.txt"), "four\n");
+}
+
+/// A3.8 — the ONE leg-reply failure test: a non-object reply becomes
+/// `{"error": str(r)}`, an object fails only on a TRUTHY `error`
+/// (py `tools.py:169-170,202-203,225-226,…`).
+#[test]
+fn leg_failure_mirrors_python() {
+    assert_eq!(leg_failure(&Value::Null), Some(json!({"error": "None"})));
+    assert_eq!(leg_failure(&json!(7)), Some(json!({"error": "7"})));
+    assert_eq!(leg_failure(&json!("boom")), Some(json!({"error": "boom"})));
+    assert_eq!(
+        leg_failure(&json!([1, 2])),
+        Some(json!({"error": "[1, 2]"}))
+    );
+    assert_eq!(leg_failure(&json!({})), None);
+    assert_eq!(leg_failure(&json!({"error": ""})), None);
+    assert_eq!(leg_failure(&json!({"error": null})), None);
+    assert_eq!(
+        leg_failure(&json!({"error": "no", "reason": "not_found"})),
+        Some(json!({"error": "no", "reason": "not_found"}))
+    );
+}
+
+/// A3.9 — the tag grammar types `<path>2024</path>` as an int; a TRUTHY
+/// non-string path rides to the leg verbatim and gets the leg's own refusal.
+/// Only a falsy path is this agent's to refuse (py `tools.py:322-324,…`).
+#[tokio::test]
+async fn a_truthy_non_string_path_goes_to_the_leg() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    let r = call(&k, &ed, json!({"type": "read", "path": 2024})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["error"], "read_stream: path must be a string", "{r}");
+    let r = call(&k, &ed, json!({"type": "checkpoint", "path": 2024})).await;
+    assert_eq!(r["error"], "read_stream: path must be a string", "{r}");
+    let r = call_bin(&k, &ed, json!({"type": "append", "path": 2024}), b"x").await;
+    assert_eq!(r["error"], "write_stream: path must be a string", "{r}");
+    // falsy stays ours
+    for p in [json!(""), json!(0), json!(null), json!([])] {
+        let r = call(&k, &ed, json!({"type": "read", "path": p})).await;
+        assert_eq!(r["reason"], "missing_arg", "{p}: {r}");
+        assert_eq!(r["arg"], "path", "{p}: {r}");
+    }
+}
+
+/// A3.10 — ckpt ids are ints end to end: `checkpoint` mints one, `write` adds
+/// the key only when it is non-zero, `checkpoints` reports an all-digit name as
+/// an int, and `drop` echoes the RAW payload value (py `tools.py:100-103,…`).
+#[tokio::test]
+async fn ckpt_ids_are_ints() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "i.txt", "one\n").await;
+    let c = call(&k, &ed, json!({"type": "checkpoint", "path": "i.txt"})).await;
+    let id = c["ckpt_id"].as_i64().expect("int ckpt_id");
+    let ls = call(&k, &ed, json!({"type": "checkpoints", "path": "i.txt"})).await;
+    assert_eq!(ls["ckpts"][0]["id"], json!(id), "{ls}");
+    assert!(ls["ckpts"][0]["id"].is_i64(), "{ls}");
+    // a plain write mints nothing
+    let w = seed(&k, &ed, "i.txt", "two\n").await;
+    assert!(w.get("ckpt_id").is_none(), "{w}");
+    // `drop` echoes what the caller passed, verbatim
+    let r = call(
+        &k,
+        &ed,
+        json!({"type": "drop", "path": "i.txt", "ckpt_id": id}),
+    )
+    .await;
+    assert_eq!(
+        r,
+        json!({"dropped": true, "ckpt_id": id, "path": "i.txt"}),
+        "{r}"
+    );
+}
+
+/// A3.11 — every reflect verb line is the first line of the python verb's
+/// docstring, read from the immutable python source.
+#[tokio::test]
+async fn reflect_verbs_are_python_docstrings_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    let r = call(&k, &ed, json!({"type": "reflect"})).await;
+    let py = std::fs::read_to_string(PY_TOOLS).expect("python tools.py");
+    let verbs = [
+        "reflect",
+        "boot",
+        "read",
+        "write",
+        "patch",
+        "append",
+        "checkpoint",
+        "checkpoints",
+        "restore",
+        "drop",
+    ];
+    // key order is python's VERBS order too
+    let got: Vec<&str> = r["verbs"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(got, verbs, "{r}");
+    for v in verbs {
+        let head = format!("async def _{v}(id, payload, kernel):\n    \"\"\"");
+        let at = py
+            .find(&head)
+            .unwrap_or_else(|| panic!("python def for {v}"))
+            + head.len();
+        let rest = &py[at..];
+        let end = rest.find("\"\"\"").expect("docstring close");
+        let want = rest[..end.min(rest.find('\n').unwrap_or(end))].trim_end();
+        assert_eq!(r["verbs"][v], want, "{v}");
+    }
+}
+
+/// A3.12 — the readme is a byte copy of python's.
+#[test]
+fn readme_is_the_python_readme() {
+    let py = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../python/bundled_agents/text_file/src/text_file/readme.md"
+    ))
+    .expect("python readme.md");
+    assert_eq!(README, py);
+}
+
+const PY_TOOLS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../../python/bundled_agents/text_file/src/text_file/tools.py"
+);

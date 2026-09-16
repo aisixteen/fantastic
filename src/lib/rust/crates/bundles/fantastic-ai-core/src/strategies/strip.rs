@@ -72,10 +72,13 @@ pub fn pid_of(block: &str) -> Option<&str> {
 /// A reply block reduced to its stub: the tag line, then what it cost.
 #[must_use]
 pub fn stub(block: &str) -> String {
+    // CODE POINTS: python prints `len(body)`, and a byte count reported a
+    // non-ASCII body as bigger than the model's own `pull` of it.
     match block.split_once('\n') {
-        Some((head, body)) => {
-            format!("{head} (stripped: {} bytes — recall by pid)", body.len())
-        }
+        Some((head, body)) => format!(
+            "{head} (stripped: {} bytes — recall by pid)",
+            body.chars().count()
+        ),
         None => format!("{block} (stripped: 0 bytes — recall by pid)"),
     }
 }
@@ -92,9 +95,12 @@ pub fn is_reply(m: &Value) -> bool {
 /// Project `body` with every stripped block reduced to its stub. Deterministic
 /// in (body, stripped) — the same inputs render the same bytes, which is what
 /// keeps the prefix stable between strip events.
-fn render(body: &[Value], done: &HashSet<String>) -> (Vec<Value>, usize, usize) {
+fn render(body: &[Value], done: &HashSet<String>) -> (Vec<Value>, usize, i64) {
     let mut out = Vec::with_capacity(body.len());
-    let (mut n, mut saved) = (0usize, 0usize);
+    // `saved` is SIGNED in python (`len(b) - len(stub)`): a tiny block's stub is
+    // LONGER than the block, and saturating at 0 reported a strip that cost
+    // bytes as one that saved none.
+    let (mut n, mut saved) = (0usize, 0i64);
     for m in body {
         if !is_reply(m) {
             out.push(m.clone());
@@ -107,7 +113,7 @@ fn render(body: &[Value], done: &HashSet<String>) -> (Vec<Value>, usize, usize) 
                 Some(p) if done.contains(p) => {
                     let s = stub(b);
                     n += 1;
-                    saved += b.len().saturating_sub(s.len());
+                    saved += b.chars().count() as i64 - s.chars().count() as i64;
                     parts.push(s);
                 }
                 _ => parts.push(b.to_string()),

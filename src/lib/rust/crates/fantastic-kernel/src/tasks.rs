@@ -38,7 +38,7 @@
 
 use crate::agent::AgentId;
 use crate::kernel::Kernel;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -463,18 +463,22 @@ impl Kernel {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        // THE COUNTER, not a table-local sequence: a fork is a message, and its
-        // id comes from the one allocator like every other id in the kernel.
-        let task_id = TaskId(self.rows.mint_id());
-        let handle = TaskHandle::new();
-        self.tasks.register_marked(
-            &task_id,
-            agent_id,
-            verb,
-            current_task(),
-            handle.clone(),
-            keepalive,
+        // A FORK IS A MESSAGE: the task's id is the id of a `task` row written
+        // here, so every id in the kernel names a row — the counter is reached
+        // through the store, never around it. Python `Kernel.spawn_task`.
+        let parent = current_task();
+        let mut row = Map::new();
+        row.insert("kind".to_string(), Value::from("task"));
+        row.insert("verb".to_string(), Value::from(verb));
+        row.insert("parent".to_string(), Value::from(parent.map(TaskId::get)));
+        let task_id = TaskId(
+            self.rows
+                .put(agent_id, row)
+                .expect("a minted task row id is unused"),
         );
+        let handle = TaskHandle::new();
+        self.tasks
+            .register_marked(&task_id, agent_id, verb, parent, handle.clone(), keepalive);
 
         let cancel = handle.cancel_signal();
         let killed = handle.killed_flag();

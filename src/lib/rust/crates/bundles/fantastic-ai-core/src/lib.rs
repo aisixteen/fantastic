@@ -99,7 +99,6 @@ pub mod verbs;
 pub mod view;
 
 pub use agent_loop::{run_generation, BackendConfig};
-pub use events::CallerRoute;
 pub use helpers::DEFAULT_CLIENT_ID;
 pub use provider::{Provider, ProviderEvent, ProviderStream};
 pub use route::route_reply;

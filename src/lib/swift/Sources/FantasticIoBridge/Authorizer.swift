@@ -20,6 +20,7 @@
 
 import FantasticJSON
 import Foundation
+import OrderedCollections
 
 /// Default env var for the `password` rule when the record names none.
 public let DefaultGroupTokenEnv = "FANTASTIC_GROUP_TOKEN"
@@ -110,23 +111,22 @@ public struct AuthPolicyError: Error, CustomStringConvertible {
     public var description: String { message }
 }
 
-/// Normalize a rule spec to `(type name, env var)`. Absent/null/empty ⇒ `(nil, nil)`.
-/// String ⇒ `(name, nil)`. Object ⇒ `(type, env)`.
+/// Normalize a rule spec to `(type name, env var)` — python `parse_spec`.
+///
+/// Python-falsy (absent, null, `""`, `false`, `0`, `[]`, `{}`) ⇒ `(nil, nil)`. A
+/// string ⇒ `(name, nil)`. An object ⇒ `(type, env)`; an object with no `type`
+/// has no name, which every resolver reads as a plain seal — python seals it
+/// (`edge sealed by policy`), where this used to throw out of `handle`.
 func parseSpec(_ spec: JSON?) throws -> (name: String?, tokenEnv: String?) {
-    guard let spec else { return (nil, nil) }
+    guard let spec, pyTruthy(spec) else { return (nil, nil) }
     switch spec {
-    case .null:
-        return (nil, nil)
     case .string(let s):
-        return s.isEmpty ? (nil, nil) : (s, nil)
+        return (s, nil)
     case .object(let o):
         // `type` and `env` are the only spellings. The `policy` / `token_env` aliases
         // were swift+rust only — python's parse_spec never accepted them — so they gave
         // one wire key two names and are deleted.
-        guard let name = o["type"]?.asString else {
-            throw AuthPolicyError("rule object missing 'type'")
-        }
-        return (name, o["env"]?.asString)
+        return (o["type"]?.asString, o["env"]?.asString)
     default:
         throw AuthPolicyError("unsupported rule spec")
     }
@@ -148,7 +148,9 @@ func parseSpec(_ spec: JSON?) throws -> (name: String?, tokenEnv: String?) {
 /// nothing outbound, a MEANING spelled out per stem rather than a lookup miss. Scoping
 /// HERE keeps `resolve` and `ruleName` unchanged: they only ever see a scoped spec.
 public func manifoldSpec(_ primary: JSON?, _ auth: JSON?, _ suffix: String) -> JSON? {
-    if let primary, primary != .null { return primary }
+    // KEY PRESENCE decides, as python's `"ingress_rule" in record`: a present
+    // `null` is a seal, never a fall-through to `auth`.
+    if let primary { return primary }
     guard let auth, let (name, env) = try? parseSpec(auth), let stem = name else { return nil }
     if suffix == "_egress" && (stem == "allow_all" || stem == "deny") {
         return .string("silent_egress")
@@ -158,16 +160,46 @@ public func manifoldSpec(_ primary: JSON?, _ auth: JSON?, _ suffix: String) -> J
     return .string(scoped)
 }
 
-/// The rule TYPE name for reflect — never surfaces the rule's config. Absent ⇒ `def`,
-/// which the CALLER supplies: `deny_ingress` for ingress (IO legs seal by default) and
-/// `silent_egress` for egress. This doc used to say `allow_all` for ingress, the opposite of
-/// what callers pass and of sealed-by-default.
+/// The rule TYPE name for reflect — python `rule_name`: the spec's name, or `def`
+/// when it has none (never the rule's config). The CALLER supplies `def`:
+/// `deny_ingress` for ingress (IO legs seal by default) and `silent_egress` for
+/// egress.
 public func ruleName(_ spec: JSON?, default def: String) -> String {
-    switch spec {
-    case .some(.string(let s)) where !s.isEmpty: return s
-    case .some(.object(let o)): return o["type"]?.asString ?? def
-    default: return def
-    }
+    guard let name = (try? parseSpec(spec))?.name, !name.isEmpty else { return def }
+    return name
+}
+
+/// A leg's auth posture for `reflect` — python `describe(record)`:
+/// `{ingress_rule, egress_rule, sealed}`, rule NAMES only.
+///
+/// Keyed by the field a caller WRITES (read-key == write-key). The per-direction
+/// field wins by key presence; `auth` carries a bare stem, reported as the scoped
+/// rule it resolves to — but a name that already carries its suffix
+/// (`auth: allow_all_ingress`) is kept, where scoping it again reported
+/// `allow_all_ingress_ingress`. `manifoldSpec` stays as it is: the gate uses it.
+public func describe(_ meta: OrderedDictionary<String, JSON>) -> OrderedDictionary<String, JSON> {
+    let auth = meta["auth"]
+    let hasIngress = meta.keys.contains("ingress_rule")
+    let hasEgress = meta.keys.contains("egress_rule")
+    let ingress = scopedName(
+        ruleName(hasIngress ? meta["ingress_rule"] : auth, default: "deny_ingress"),
+        "_ingress", wasScoped: hasIngress)
+    let egress = scopedName(
+        ruleName(hasEgress ? meta["egress_rule"] : auth, default: "silent_egress"),
+        "_egress", wasScoped: hasEgress)
+    return [
+        "ingress_rule": .string(ingress),
+        "egress_rule": .string(egress),
+        "sealed": .bool(ingress != "allow_all_ingress"),
+    ]
+}
+
+/// Python `_scoped`: the name as written when it came from the per-direction field
+/// or already ends with the suffix; an inbound-only stem presents nothing outbound.
+private func scopedName(_ name: String, _ suffix: String, wasScoped: Bool) -> String {
+    if wasScoped || name.hasSuffix(suffix) { return name }
+    if suffix == "_egress" && (name == "allow_all" || name == "deny") { return "silent_egress" }
+    return name + suffix
 }
 
 /// Content-blind constant-time compare given equal length (length is not secret —

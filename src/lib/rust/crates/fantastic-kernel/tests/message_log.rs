@@ -95,7 +95,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
         store_root.to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -256,4 +256,235 @@ async fn no_store_wired_keeps_the_log_in_ram_and_says_so_once() {
         "a log was written with no store wired"
     );
     assert_eq!(k.rows.for_agent(&ai).len(), 1, "the row is still in RAM");
+}
+
+// ── C36: what the pump writes, and what it never writes ────────────────
+
+/// A bundle that answers `work` and, on `nope`, says no like a real one.
+struct Worker;
+
+#[async_trait]
+impl Bundle for Worker {
+    fn name(&self) -> &str {
+        "worker"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+            "nope" => Ok(Some(
+                json!({"error": "no such path 'x'", "reason": "not_found"}),
+            )),
+            _ => Ok(Some(json!({"ok": true}))),
+        }
+    }
+}
+
+/// `kernel_at` plus a `worker.tools` bundle, so a dispatch can be made that is
+/// not the pump's own traffic.
+fn kernel_with_worker(store_root: &Path) -> Arc<Kernel> {
+    let mut kernel = Kernel::with_storage(StorageMode::Disk(store_root.to_path_buf()));
+    let mut reg = BundleRegistry::new();
+    reg.register(
+        "file_bridge.tools",
+        AppendStore {
+            root: store_root.to_path_buf(),
+        },
+    );
+    reg.register("worker.tools", Worker);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        store_root.to_path_buf(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    kernel
+}
+
+async fn mk_worker(kernel: &Arc<Kernel>, id: &str) {
+    let r = kernel
+        .send(vec![fantastic_kernel::Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": "worker.tools", "id": id,
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
+}
+
+/// Every row in the log, parsed back.
+fn logged(log: &Path) -> Vec<fantastic_kernel::Row> {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    fantastic_kernel::messages_xml::parse_messages(&text).unwrap_or_default()
+}
+
+/// Wait until the log holds a row satisfying `pred` (or give up).
+async fn until_row(
+    log: &Path,
+    pred: impl Fn(&fantastic_kernel::Row) -> bool,
+) -> Vec<fantastic_kernel::Row> {
+    for _ in 0..200 {
+        let rows = logged(log);
+        if rows.iter().any(&pred) {
+            return rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    logged(log)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pump_appends_every_row_but_its_own_calls() {
+    // Twin of python `test_the_pump_appends_every_row_but_its_own_calls`.
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let log = store.join("messages.xml");
+    let k = kernel_with_worker(&store);
+    wire_store(&k, &store).await;
+    fantastic_kernel::messages_log::install_message_pump(&k, 0);
+    mk_worker(&k, "sp_p").await;
+
+    for _ in 0..3 {
+        k.send(vec![fantastic_kernel::Item::new(
+            AgentId::from("sp_p"),
+            json!({"type": "work"}),
+        )])
+        .await;
+    }
+    let ai = AgentId::from("ai");
+    let rid = k.rows.put(&ai, turn("user", "planted")).unwrap();
+    k.rows.body_put(&ai, rid, &"a body ".repeat(100)).unwrap();
+
+    let rows = until_row(&log, |r| {
+        r.get("kind") == Some(&json!("body")) && r.get("parent") == Some(&json!(rid))
+    })
+    .await;
+    let ids: Vec<i64> = rows
+        .iter()
+        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+        .collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(ids, sorted, "in id order, once each");
+    assert!(ids.contains(&rid));
+
+    // A dispatch writes TWO rows now: the `call` at launch and its `settle`.
+    for r in &rows {
+        if r.get("agent") == Some(&json!("sp_p")) && r.contains_key("kind") {
+            assert!(
+                matches!(r["kind"].as_str(), Some("call")),
+                "unexpected row on the worker: {r:?}"
+            );
+        }
+    }
+    // THE PUMP'S OWN WRITES never enter the log — neither the calls it makes on
+    // the store nor the task row it runs under.
+    assert!(
+        rows.iter()
+            .all(|r| !(r.get("kind") == Some(&json!("call"))
+                && r.get("agent") == Some(&json!("store")))),
+        "the pump's own writes to the store reached the log"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pump_skips_its_own_calls_tasks_and_their_settles() {
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let log = store.join("messages.xml");
+    let k = kernel_with_worker(&store);
+    wire_store(&k, &store).await;
+    fantastic_kernel::messages_log::install_message_pump(&k, 0);
+    mk_worker(&k, "sp_s").await;
+    k.send(vec![fantastic_kernel::Item::new(
+        AgentId::from("sp_s"),
+        json!({"type": "work"}),
+    )])
+    .await;
+
+    let rows = until_row(&log, |r| {
+        r.get("agent") == Some(&json!("sp_s")) && r.get("kind") == Some(&json!("call"))
+    })
+    .await;
+    // The pump's own kernel task never reaches the log…
+    assert!(
+        rows.iter().all(|r| r.get("kind") != Some(&json!("task"))
+            || r.get("verb") != Some(&json!("message_pump"))),
+        "the pump's own task row reached the log"
+    );
+    // …and neither do the SETTLES of the calls it skipped: a settle follows its
+    // call, or persisting a row produces a row to persist, forever.
+    let skipped_parents: Vec<i64> = k
+        .rows
+        .for_agent(&AgentId::from("store"))
+        .iter()
+        .filter(|r| r.get("kind") == Some(&json!("call")))
+        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+        .collect();
+    assert!(
+        !skipped_parents.is_empty(),
+        "the pump did write to the store"
+    );
+    for r in &rows {
+        if r.get("kind") == Some(&json!("settle")) {
+            let parent = r.get("parent").and_then(Value::as_i64).unwrap_or(-1);
+            assert!(
+                !skipped_parents.contains(&parent),
+                "a settle of a skipped call reached the log: {r:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settle_row_outcome_is_the_python_stamp() {
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let log = store.join("messages.xml");
+    let k = kernel_with_worker(&store);
+    wire_store(&k, &store).await;
+    fantastic_kernel::messages_log::install_message_pump(&k, 0);
+    mk_worker(&k, "sp_o").await;
+    let out = k
+        .send(vec![fantastic_kernel::Item::new(
+            AgentId::from("sp_o"),
+            json!({"type": "nope"}),
+        )])
+        .await
+        .remove(0);
+    let pid = json!(out.pid.map(fantastic_kernel::TaskId::get));
+
+    let is_ours = |r: &fantastic_kernel::Row| {
+        r.get("kind") == Some(&json!("settle")) && r.get("parent") == Some(&pid)
+    };
+    let rows = until_row(&log, is_ours).await;
+    let settle = rows
+        .iter()
+        .find(|r| is_ours(r))
+        .expect("the settle reached disk");
+    assert_eq!(
+        settle["outcome"],
+        json!({"status": "errored", "error": "no such path 'x'", "reason": "not_found"}),
+        "the log carries python's stamp, not the ledger Outcome"
+    );
+    // The call row it ended carries the SAME stamp, nested.
+    let call = rows
+        .iter()
+        .find(|r| r.get("kind") == Some(&json!("call")) && r.get("id") == Some(&pid))
+        .expect("the call row");
+    assert_eq!(call["outcome"], settle["outcome"]);
 }

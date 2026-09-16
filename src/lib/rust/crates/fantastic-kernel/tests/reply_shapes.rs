@@ -47,7 +47,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     (tmp, kernel)
 }
@@ -227,4 +227,123 @@ async fn get_is_unhandled_not_a_kernel_verb() {
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "get", "the refusal names the verb");
     assert!(r["id"].is_null(), "it must not answer with a record: {r}");
+}
+
+/// C6 — `list_agents` answers the registry in REGISTRATION ORDER.
+///
+/// Python iterates `self.ctx.agents`, a plain dict, so the root leads and every
+/// agent follows in the order it was registered. Rust's registry is a `DashMap`
+/// with no order, and the port sorted by id — which put `alpha` ahead of the
+/// root and made the walk in `PT/kernel/test_pagination.py` reassemble a
+/// different registry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_agents_is_registry_order() {
+    let (_t, kernel) = mk();
+    // Deliberately NOT alphabetical: sorting would put `alpha` first.
+    for id in ["zulu", "mike", "alpha"] {
+        mk_child(&kernel, id).await;
+    }
+    let r = call(&kernel, "kernel", json!({"type": "list_agents"})).await;
+    let ids: Vec<&str> = r["agents"]
+        .as_array()
+        .expect("agents array")
+        .iter()
+        .map(|a| a["id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(ids, vec!["core", "zulu", "mike", "alpha"], "{r}");
+
+    // A delete removes it from the order and leaves the rest as they were.
+    let d = call(
+        &kernel,
+        "kernel",
+        json!({"type": "delete_agent", "id": "mike"}),
+    )
+    .await;
+    assert_eq!(d["deleted"], true, "{d}");
+    let r = call(&kernel, "kernel", json!({"type": "list_agents"})).await;
+    let ids: Vec<&str> = r["agents"]
+        .as_array()
+        .expect("agents array")
+        .iter()
+        .map(|a| a["id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(ids, vec!["core", "zulu", "alpha"], "{r}");
+
+    // …and the cursor pages through THAT order, not a sorted one.
+    let p = call(
+        &kernel,
+        "kernel",
+        json!({"type": "list_agents", "limit": 2}),
+    )
+    .await;
+    let ids: Vec<&str> = p["agents"]
+        .as_array()
+        .expect("agents array")
+        .iter()
+        .map(|a| a["id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(ids, vec!["core", "zulu"], "{p}");
+}
+
+/// C15 — a record serializes `id, handler_module?, <meta in order>, parent_id`.
+///
+/// Python writes `parent_id` LAST because structure wins: a `parent_id` that
+/// leaked into meta must not shadow where the agent actually sits. Rust
+/// declared it third, so every record on the wire and in `agent.json` carried a
+/// key order python never produces.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_parent_id_is_last() {
+    let (_t, kernel) = mk();
+    let created = call(
+        &kernel,
+        "kernel",
+        json!({
+            "type": "create_agent",
+            "parent_id": "kernel",
+            "handler_module": "noop.tools",
+            "id": "kid",
+            "display_name": "Kid",
+            "note": "second",
+        }),
+    )
+    .await;
+    // `can_call`/`callable_by` are the stamped structural baseline; they land in
+    // meta ahead of the authored keys.
+    let keys: Vec<&str> = created
+        .as_object()
+        .expect("object record")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys.first(), Some(&"id"), "{created}");
+    assert_eq!(keys.get(1), Some(&"handler_module"), "{created}");
+    assert_eq!(keys.last(), Some(&"parent_id"), "{created}");
+    // Meta keeps its own order between the two.
+    let dn = keys.iter().position(|k| *k == "display_name").unwrap();
+    let note = keys.iter().position(|k| *k == "note").unwrap();
+    assert!(dn < note, "meta order was not preserved: {keys:?}");
+
+    // Same order off `list_agents` — one record shape, one spelling.
+    let r = call(&kernel, "kernel", json!({"type": "list_agents"})).await;
+    let kid = r["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "kid")
+        .expect("kid is registered");
+    let keys: Vec<&str> = kid
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys.last(), Some(&"parent_id"), "{kid}");
+    // The ROOT carries no `parent_id` at all.
+    let root = r["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "core")
+        .expect("root is registered");
+    assert!(root.get("parent_id").is_none(), "{root}");
 }

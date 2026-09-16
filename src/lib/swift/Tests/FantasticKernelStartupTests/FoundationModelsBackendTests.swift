@@ -33,8 +33,12 @@ struct FoundationModelsBackendTests {
     @Test func reflectReturnsExpectedShape() async throws {
         let kernel = try await freshKernelWithFm()
         let r = await kernel.send([Item(AgentId("fm"), .object(["type": .string("reflect")]))])[0].result
-        #expect(r["kind"].asString == "foundation_models_backend")
-        #expect(r["provider"].asString == "apple_foundation_models")
+        // B1.23: python's reflect has NO `kind` and NO `provider`; the identity
+        // is `id`/`sentence`, and `model` names the on-device model.
+        #expect(r["kind"].isNull && r["provider"].isNull)
+        #expect(r["sentence"].asString?.hasPrefix("Apple Foundation Models") == true)
+        #expect(r["model"].asString != nil)
+        #expect(r["available"].asBool != nil, "the FM extra still rides after concurrency")
         #expect(r["verbs"]["send"].asString != nil)
         #expect(r["verbs"]["history"].asString != nil)
         // The verb map is the shared ai_core one — python has no FM backend and

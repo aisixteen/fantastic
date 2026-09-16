@@ -29,7 +29,14 @@ pub const DEFAULT_INBOX_BOUND: usize = 256;
 /// A subscriber callback fired on every state event (`send` / `emit`
 /// / `removed` / etc.). Synchronous, called inline — keep it cheap;
 /// off-thread the work if it might block.
-pub type StateSubscriber = Arc<dyn Fn(&Value) + Send + Sync>;
+///
+/// The second argument is the event payload's RAW BODY — `(dotted path within
+/// `payload`, bytes)` — for a traffic event whose payload carried bytes. Python
+/// queues the bytes inside the payload dict and its WS tap re-encodes the whole
+/// event as a binary frame; a `serde_json::Value` cannot hold bytes, so the body
+/// rides beside the event exactly as it rides beside an
+/// [`crate::inbox::InboxItem`]. `None` for every event with no bytes.
+pub type StateSubscriber = Arc<dyn Fn(&Value, Option<&(String, Vec<u8>)>) + Send + Sync>;
 
 /// Opaque token returned by [`Kernel::add_state_subscriber`]; pass to
 /// [`Kernel::remove_state_subscriber`] to detach.
@@ -44,8 +51,18 @@ pub struct SubscriberToken(pub u64);
 
 /// Shared kernel context.
 pub struct Kernel {
-    /// Flat global id → Agent. The only routing table.
+    /// Flat global id → Agent. The only routing table — a LOOKUP table, with
+    /// no order of its own.
     pub agents: DashMap<AgentId, Arc<Agent>>,
+    /// Registration order of [`Self::agents`], maintained by
+    /// [`Self::register`] / [`Self::unregister`] and read through
+    /// [`Self::agent_ids`].
+    ///
+    /// Python's registry is a plain dict, so `list_agents`, the shutdown sweep
+    /// and the snapshot walk it in the order agents were registered. A
+    /// `DashMap` has none, so the port sorted by id at each reader and answered
+    /// a registry python never answers.
+    agent_order: RwLock<Vec<AgentId>>,
     /// Per-id inbox (agents + synthetic browser client ids).
     pub inboxes: DashMap<AgentId, crate::inbox::InboxSender>,
     /// Active state-event taps (telemetry, debugging). Keyed by token
@@ -140,6 +157,7 @@ impl Kernel {
     pub fn with_storage_and_inbox(storage: StorageMode, bound: usize) -> Self {
         Self {
             agents: DashMap::new(),
+            agent_order: RwLock::new(Vec::new()),
             inboxes: DashMap::new(),
             state_subscribers: RwLock::new(Vec::new()),
             next_subscriber: AtomicU64::new(1),
@@ -209,7 +227,7 @@ impl Kernel {
         // face that treats it as a teardown must never be told by the stop it
         // is carrying (the web listener, 2026-09-12). Reflect is read under the
         // shutdown scope so the drain gate lets the kernel's own reads through.
-        let all: Vec<AgentId> = self.agents.iter().map(|e| e.key().clone()).collect();
+        let all: Vec<AgentId> = self.agent_ids();
         let mut targets: Vec<AgentId> = Vec::new();
         if !all.is_empty() {
             let asks: Vec<crate::Item> = all
@@ -286,14 +304,60 @@ impl Kernel {
         }
     }
 
-    /// Register an agent in the flat index + auto-vivify its inbox.
-    /// Returns the bound channel receiver so the caller can drain it
-    /// (typically a fanout loop or a per-bundle handler task).
-    pub fn register(&self, agent: Arc<Agent>) -> crate::inbox::InboxReceiver {
-        let (tx, rx) = crate::inbox::inbox(self.inbox_bound);
-        self.inboxes.insert(agent.id.clone(), tx);
+    /// Register an agent in the flat index. NO INBOX.
+    ///
+    /// An agent does not get a queue merely by existing. `register` used to mint
+    /// one and hand back the receiver, which almost every caller dropped on the
+    /// same line — so the queue was live, nobody read it, and `watch` happily
+    /// mirrored into it forever. [`Self::ensure_inbox`] IS the reader
+    /// registration, and every caller of it drains what it gets.
+    pub fn register(&self, agent: Arc<Agent>) {
+        // Re-registering an id keeps its place, as python's `dict[k] = v` does.
+        {
+            let mut order = self.agent_order.write().expect("agent order poisoned");
+            if !order.contains(&agent.id) {
+                order.push(agent.id.clone());
+            }
+        }
         self.agents.insert(agent.id.clone(), agent);
-        rx
+    }
+
+    /// Register `id` as a READER and hand back its queue — python's
+    /// `Kernel.ensure_inbox`.
+    ///
+    /// This call IS the registration: a queue exists iff someone called this to
+    /// get one, and every caller that does drains it (the WS proxy for a
+    /// synthetic browser client, exec_bridge for a relay proxy, a test asserting
+    /// on traffic). Idempotent, so a reader may call it defensively before every
+    /// read — a second call reads the SAME queue, never a fresh one.
+    pub fn ensure_inbox(&self, id: &AgentId) -> crate::inbox::InboxReceiver {
+        use dashmap::mapref::entry::Entry;
+        match self.inboxes.entry(id.clone()) {
+            Entry::Occupied(e) => e.get().receiver(),
+            Entry::Vacant(e) => {
+                let (tx, rx) = crate::inbox::inbox(self.inbox_bound);
+                e.insert(tx);
+                rx
+            }
+        }
+    }
+
+    /// Drop `id`'s inbox — the reader is gone (a browser disconnected, a relay
+    /// proxy was released). Idempotent.
+    pub fn remove_inbox(&self, id: &AgentId) {
+        self.inboxes.remove(id);
+    }
+
+    /// Every registered id, in REGISTRATION ORDER — python's registry walk.
+    ///
+    /// The one ordered view of [`Self::agents`]. Readers that answer a caller
+    /// (`list_agents`, the shutdown sweep, the snapshot) go through here; a
+    /// reader that only needs membership or a lookup uses `agents` directly.
+    pub fn agent_ids(&self) -> Vec<AgentId> {
+        self.agent_order
+            .read()
+            .expect("agent order poisoned")
+            .clone()
     }
 
     /// Unregister an agent + drop its inbox. Caller has already run
@@ -301,6 +365,10 @@ impl Kernel {
     pub fn unregister(&self, id: &AgentId) {
         self.inboxes.remove(id);
         self.agents.remove(id);
+        self.agent_order
+            .write()
+            .expect("agent order poisoned")
+            .retain(|a| a != id);
     }
 
     /// Cheap clone of the current root pointer (`None` until
@@ -316,10 +384,38 @@ impl Kernel {
 
     /// Push a state event to every subscriber. Keep callbacks short —
     /// they run on the dispatching task.
+    ///
+    /// `ts` is stamped HERE and LAST (python `{**event, "ts": time.time()}`), so
+    /// every event carries the moment it was published and no caller has to
+    /// remember to add one. No subscribers = no work at all, as in python.
     pub fn publish_state(&self, event: &Value) {
+        self.publish_state_with_body(event, None);
+    }
+
+    /// [`Self::publish_state`] for a traffic event whose payload carried bytes:
+    /// the raw body travels beside the event so a tap can rebuild the binary
+    /// frame python sends.
+    pub fn publish_state_with_body(&self, event: &Value, body: Option<&(String, Vec<u8>)>) {
         let subs = self.state_subscribers.read().expect("state subs poisoned");
+        if subs.is_empty() {
+            return;
+        }
+        let mut stamped = match event {
+            Value::Object(m) => m.clone(),
+            other => {
+                for (_token, cb) in subs.iter() {
+                    cb(other, body);
+                }
+                return;
+            }
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        stamped.insert("ts".to_string(), json!(ts));
+        let stamped = Value::Object(stamped);
         for (_token, cb) in subs.iter() {
-            cb(event);
+            cb(&stamped, body);
         }
     }
 
@@ -350,9 +446,9 @@ impl Kernel {
     /// kernels produce equal output for equal in-memory state — the
     /// medium difference is irrelevant here.
     ///
-    /// Pure read; iterates `self.agents`, builds the snapshot in
-    /// id-sorted order so [`Self::save_json`] is byte-deterministic.
-    /// Ephemeral agents are skipped (they're per-process composition,
+    /// Pure read; walks the registry in REGISTRATION ORDER (python's dict
+    /// order), so [`Self::save_json`] is byte-deterministic for equal kernel
+    /// state. Ephemeral agents are skipped (they're per-process composition,
     /// never round-trip through a snapshot).
     pub fn save(&self) -> KernelState {
         // TRANSITIVELY. Dropping only the ephemeral agent ITSELF left its
@@ -387,13 +483,12 @@ impl Kernel {
                 }
             }
         };
-        let mut agents: Vec<_> = self
-            .agents
-            .iter()
-            .filter(|e| !dropped.contains(e.key()))
-            .map(|e| e.value().record())
+        let agents: Vec<_> = self
+            .agent_ids()
+            .into_iter()
+            .filter(|id| !dropped.contains(id))
+            .filter_map(|id| self.agents.get(&id).map(|e| e.value().record()))
             .collect();
-        agents.sort_by(|a, b| a.id.cmp(&b.id));
         KernelState {
             version: CURRENT_VERSION,
             agents,
@@ -532,6 +627,10 @@ impl Kernel {
         // dropped from the DashMap (subscribers see the channel
         // closing and clean up).
         self.agents.clear();
+        self.agent_order
+            .write()
+            .expect("agent order poisoned")
+            .clear();
         self.inboxes.clear();
         self.root.store(None);
 
@@ -567,12 +666,9 @@ impl Kernel {
                 if let Some(pid) = parent_id.as_ref() {
                     if skip_ids.contains(pid) {
                         // Cascade skip — parent was dropped (weak-load).
+                        // SILENT, as python is: `_kernel.py:1019-1031` returns
+                        // without a line for the skipped subtree (A15.3).
                         skip_ids.insert(rec.id.clone());
-                        tracing::warn!(
-                            agent = %rec.id,
-                            ancestor = %pid,
-                            "skipping agent during load (ancestor dropped)",
-                        );
                         made_progress = true;
                         continue;
                     }
@@ -623,15 +719,13 @@ impl Kernel {
                     root_path,
                     false, // not ephemeral — ephemeral agents are never in a snapshot
                 );
-                let _rx = self.register(Arc::clone(&agent));
+                self.register(Arc::clone(&agent));
                 by_id.insert(rec.id.clone(), Arc::clone(&agent));
 
                 // Wire parent → child Arc.
                 if let Some(pid) = &rec.parent_id {
                     if let Some(parent_arc) = by_id.get(pid) {
-                        parent_arc
-                            .children
-                            .insert(agent.id.clone(), Arc::clone(&agent));
+                        parent_arc.add_child(Arc::clone(&agent));
                     }
                 } else {
                     self.set_root(Arc::clone(&agent));
@@ -662,37 +756,27 @@ impl Kernel {
         self.load(state)
     }
 
-    /// Synchronous read of every loaded agent's identity + display
-    /// name. Mirrors Python's `Kernel.state_snapshot` — used by new
-    /// `state_subscribe` subscribers to bootstrap their agent view
-    /// before the first event arrives. No queue puts, no fanout.
+    /// Synchronous read of every loaded agent's identity + in-flight handler
+    /// count. Mirrors python's `Kernel.state_snapshot` — used by new
+    /// `state_subscribe` subscribers to bootstrap their agent view before the
+    /// first event arrives. No queue puts, no fanout.
     ///
-    /// Each entry: `{agent_id, name, backlog: 0}`. `backlog` is the
-    /// number of in-flight handler dispatches; Rust doesn't track
-    /// this counter today, so we report 0 (consumers that rely on
-    /// it for ordering can recompute from observed traffic). Matches
-    /// Python's wire shape so existing telemetry pane consumers work.
+    /// Each entry: `{agent_id, name, backlog}`. REGISTRATION ORDER (python walks
+    /// `self.agents.values()`); it used to sort by id and report `backlog: 0` for
+    /// everyone, which answered a registry and a workload python never answers.
     pub fn state_snapshot(&self) -> Vec<Value> {
-        let mut out: Vec<Value> = self
-            .agents
-            .iter()
-            .map(|entry| {
-                let a = entry.value();
+        self.agent_ids()
+            .into_iter()
+            .filter_map(|id| self.agents.get(&id).map(|e| Arc::clone(&e)))
+            .map(|a| {
                 let name = a.display_name().unwrap_or_else(|| a.id.0.clone());
-                serde_json::json!({
+                json!({
                     "agent_id": a.id.0,
                     "name": name,
-                    "backlog": 0,
+                    "backlog": a.in_flight(),
                 })
             })
-            .collect();
-        out.sort_by(|a, b| {
-            a.get("agent_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .cmp(b.get("agent_id").and_then(Value::as_str).unwrap_or(""))
-        });
-        out
+            .collect()
     }
 }
 

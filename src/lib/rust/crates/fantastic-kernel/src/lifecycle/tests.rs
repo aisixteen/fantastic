@@ -80,7 +80,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
         tmp.path().to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     // Wire the persistence provider (rooted at the workdir) so records land on
     // disk — persistence is provider-routed now, RAM without one.
@@ -121,7 +121,7 @@ async fn delete_refuses_locked() {
         tmp.path().to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
         .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "locked_1", "delete_lock": true}))])
@@ -152,7 +152,7 @@ async fn cascade_delete_fires_hooks_depth_first() {
         tmp.path().to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
         .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "p_1"}))])
@@ -199,7 +199,7 @@ fn mk_rooted(tmp: &tempfile::TempDir) -> Arc<Kernel> {
         tmp.path().to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }

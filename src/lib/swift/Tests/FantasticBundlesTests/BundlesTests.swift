@@ -11,9 +11,7 @@ import FantasticJSON
 import FantasticKernel
 import FantasticKernelBridge
 import FantasticKernelStartup
-import FantasticProxyAgent
 import FantasticScheduler
-import FantasticTools
 import FantasticWeb
 import FantasticWebRest
 import FantasticWebWS
@@ -23,8 +21,7 @@ import Testing
 func makeKernelWithAll(rootPath: URL = URL(fileURLWithPath: "")) -> Kernel {
     let registry = BundleRegistry()
     registry.register("file_bridge.tools", FileBundle())
-    registry.register("proxy_agent.tools", ProxyAgentBundle())
-    registry.register("tools.tools", ToolsBundle())
+    registry.register(CliBundle.handlerModule, CliBundle())
     registry.register("scheduler.tools", SchedulerBundle())
     registry.register("ws_bridge.tools", KernelBridgeBundle())
     registry.register("web_ws.tools", WebWSBundle())
@@ -44,7 +41,7 @@ func makeKernelWithAll(rootPath: URL = URL(fileURLWithPath: "")) -> Kernel {
 func makeDiskKernel(workdir: URL) -> Kernel {
     let registry = BundleRegistry()
     registry.register("file_bridge.tools", FileBundle())
-    registry.register("tools.tools", ToolsBundle())
+    registry.register(CliBundle.handlerModule, CliBundle())
     let kernel = Kernel(storage: .disk(workdir), bundles: registry)
     let root = Agent(
         id: "core", handlerModule: nil, parentId: nil,
@@ -72,7 +69,7 @@ struct BundleSmokeTests {
         }
 
         // No store wired ⇒ the create stays in RAM (NO direct-fs fallback).
-        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "ram_only"])])[0].result
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "cli.tools", "id": "ram_only"])])[0].result
         #expect(!fm.fileExists(atPath: file("agents/ram_only/agent.json")))
         #expect(kernel.agent("ram_only") != nil)  // live in RAM
 
@@ -87,7 +84,7 @@ struct BundleSmokeTests {
 
         // Now a created agent persists THROUGH the provider.
         _ = await kernel.send([Item("core", [
-                "type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "foo",
+                "type": "create_agent", "parent_id": "core", "handler_module": "cli.tools", "id": "foo",
                 "display_name": "Foo",
             ])])[0].result
         #expect(fm.fileExists(atPath: file("agents/foo/agent.json")))
@@ -146,47 +143,6 @@ struct BundleSmokeTests {
             ])])[0].result
         let r = await kernel.send([Item("fs1", ["type": "reflect"])])[0].result
         #expect(r["kind"].asString == nil || r["sentence"].asString?.contains("Filesystem") == true)
-    }
-
-    @Test func proxyAgentNoHostReturnsStructuredError() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "proxy_agent.tools", "id": "p1"])])[0].result
-        let r = await kernel.send([Item("p1", ["type": "render", "x": 1])])[0].result
-        #expect(r["reason"].asString == "no_host")
-    }
-
-    @Test func proxyAgentReflectShowsHostRegisteredFalse() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "proxy_agent.tools", "id": "p2"])])[0].result
-        let r = await kernel.send([Item("p2", ["type": "reflect"])])[0].result
-        #expect(r["host_registered"].asBool == false)
-        #expect(r["kind"].asString == "proxy_agent")
-    }
-
-    @Test func toolsRegisterAndDispatch() async {
-        _ = FantasticTools.clear()
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "tools"])])[0].result
-        let r = await kernel.send([Item("tools", [
-                "type": "register",
-                "name": "ping",
-                "agent_id": "health",
-                "description": "Returns pong.",
-                "parameters_schema": ["type": "object"] as JSON,
-            ])])[0].result
-        #expect(r["ok"].asBool == true)
-        let list = await kernel.send([Item("tools", ["type": "list_for_llm"])])[0].result
-        let arr = list["tools"].asArray ?? []
-        #expect(arr.count == 1)
-        #expect(arr[0]["name"].asString == "ping")
-    }
-
-    @Test func toolsDispatchUnknownReturnsToolNotFound() async {
-        _ = FantasticTools.clear()
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "tools"])])[0].result
-        let r = await kernel.send([Item("tools", ["type": "dispatch", "name": "nope", "arguments": [:] as JSON])])[0].result
-        #expect(r["reason"].asString == "tool_not_found")
     }
 
     @Test func schedulerScheduleListUnschedule() async throws {
@@ -518,8 +474,11 @@ struct BundleSmokeTests {
         // Wire bridge from kernel1 → kernel2.
         let bridge = KernelBridgeBundle()
         kernel1.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernel1.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br"])])[0].result
-        bridge.attachInMemory(agentId: "br", remote: kernel2, localKernel: kernel1)
+        _ = await kernel1.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br", "transport": "memory"])])[0].result
+        // python's `memory` seam: inject the transport, then BOOT — the engine
+        // pops it and runs its read loop over it.
+        bridge.injectMemoryTransport(agentId: "br", remote: kernel2)
+        _ = await kernel1.send([Item("br", ["type": "boot"])])[0].result
         let reply = await kernel1.send([Item("br", [
                 "type": "forward",
                 "target": "core",
@@ -537,8 +496,9 @@ struct BundleSmokeTests {
         let kernel2 = makeKernelWithAll()
         let bridge = KernelBridgeBundle()
         kernel1.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernel1.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br"])])[0].result
-        bridge.attachInMemory(agentId: "br", remote: kernel2, localKernel: kernel1)
+        _ = await kernel1.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br", "transport": "memory"])])[0].result
+        bridge.injectMemoryTransport(agentId: "br", remote: kernel2)
+        _ = await kernel1.send([Item("br", ["type": "boot"])])[0].result
         // kernel2: an OPEN file_bridge in a cwd-relative dir.
         let fm = FileManager.default
         let rel = "fantastic-brstream-\(UUID().uuidString)"
@@ -580,7 +540,7 @@ struct BundleSmokeTests {
         // dispatches `sendWithBinary` to a `file_bridge`. Raw bytes both ways,
         // never base64. (The in-memory variant is
         // `kernelBridgeBinaryForwardStreamsRawBytes`.)
-        let kernel = try await startKernelInMemory(portHint: 0)
+        let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         // web_ws SEALS by default — open it for the inbound binary call.
         let rec = await kernel.send([Item(AgentId("kernel"), .object([
@@ -621,28 +581,42 @@ struct BundleSmokeTests {
                 ]),
             ]))])[0].result
 
+        // A ws_bridge leg dialing this kernel's own web_ws over the loopback.
         let port = kernel.httpPort()
-        let url = URL(string: "ws://127.0.0.1:\(port)/core/ws")!
-        let transport = WebSocketTransport(endpoint: url)
-        await transport.connect()
+        let brBundle = KernelBridgeBundle(family: .ws)
+        kernel.bundles.register("ws_bridge.tools", brBundle)
+        _ = await kernel.send([Item(AgentId("core"), .object([
+                "type": .string("create_agent"), "parent_id": .string("core"),
+                "handler_module": .string("ws_bridge.tools"), "id": .string("wbr"),
+                "transport": .string("ws"), "host": .string("127.0.0.1"),
+                "local_port": .integer(Int64(port)), "peer_id": .string("core"),
+            ]))])[0].result
+        // `create_agent` already booted it through the kernel's fanout, so this
+        // second boot is python's idempotent `{already:true, transport}`.
+        let booted = await kernel.send([Item(AgentId("wbr"), .object(["type": .string("boot")]))])[0].result
+        #expect(booted == .object(["already": .bool(true), "transport": .string("ws")]), "\(booted.serialize())")
 
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // write_stream (binary) over the wire → kernel.fs
-        let (w, _) = await transport.binaryForward(
-            target: AgentId("fs"),
-            header: .object([
-                "type": .string("write_stream"), "path": .string("blob.bin"),
-                "truncate": .bool(true),
-            ]),
-            blob: payload)
-        #expect(w["written"].asInt == Int64(payload.count), "\(w)")
+        let (w, _) = await kernel.sendWithBinary(
+            AgentId("wbr"),
+            .object([
+                "type": .string("forward"), "target": .string("fs"),
+                "payload": .object([
+                    "type": .string("write_stream"), "path": .string("blob.bin"),
+                    "truncate": .bool(true),
+                ]),
+            ]), payload)
+        #expect(w["written"].asInt == Int64(payload.count), "\(w.serialize())")
         // read_stream (binary) over the wire → raw bytes back
-        let (_, body) = await transport.binaryForward(
-            target: AgentId("fs"),
-            header: .object([
-                "type": .string("read_stream"), "path": .string("blob.bin"),
-            ]),
-            blob: Data())
+        let (_, body) = await kernel.sendWithBinary(
+            AgentId("wbr"),
+            .object([
+                "type": .string("forward"), "target": .string("fs"),
+                "payload": .object([
+                    "type": .string("read_stream"), "path": .string("blob.bin"),
+                ]),
+            ]), Data())
         #expect(body == payload, "raw bytes must round-trip over the WS wire")
     }
 
@@ -655,11 +629,9 @@ struct BundleSmokeTests {
         let kernelB = makeKernelWithAll()
         let bridge = KernelBridgeBundle()
         kernelA.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernelA.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br"])])[0].result
-        bridge.attachInMemory(agentId: "br", remote: kernelB, localKernel: kernelA)
-
-        // Give attachInMemory's async setLocalSink Task a tick to land.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        _ = await kernelA.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br", "transport": "memory"])])[0].result
+        bridge.injectMemoryTransport(agentId: "br", remote: kernelB)
+        _ = await kernelA.send([Item("br", ["type": "boot"])])[0].result
 
         // Subscribe via the bridge: A.br.watch_remote(target=core)
         let w = await kernelA.send([Item("br", ["type": "watch_remote", "target": "core"])])[0].result
@@ -703,14 +675,8 @@ struct BundleSmokeTests {
         _ = await kernelA.send([Item("br", ["type": "unwatch_remote", "target": "core"])])[0].result
     }
 
-    @Test func cliRendererAttaches() async {
-        let kernel = makeKernelWithAll()
-        let token = attach(kernel)
-        // Just verify the token works for unsubscribe — full CLI
-        // output testing is overkill for a smoke test.
-        kernel.unsubscribe(token)
-    }
-
+    /// A11.5 — python's ws descriptor is `{kind:"websocket", path}` with NO
+    /// method (the host defaults it); swift declared `method: "GET"`.
     @Test func webWSGetRoutesShape() async {
         let kernel = makeKernelWithAll()
         _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "web_ws.tools", "id": "ws"])])[0].result
@@ -719,51 +685,38 @@ struct BundleSmokeTests {
         #expect(routes.count == 1)
         #expect(routes.first?["kind"].asString == "websocket")
         #expect(routes.first?["path"].asString == "/{host_id}/ws")
+        #expect(routes.first?["method"].isNull == true, "\(r)")
     }
 
+    /// A11.5 — the REST paths capture `{target_id}`, python's parameter name.
     @Test func webRestGetRoutesNamespacedBySelf() async {
         let kernel = makeKernelWithAll()
         _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "web_rest.tools", "id": "rest"])])[0].result
         let r = await kernel.send([Item("rest", ["type": "get_routes"])])[0].result
         let paths = (r["routes"].asArray ?? []).compactMap { $0["path"].asString }
-        #expect(paths.contains("/rest/{target}"))
-        #expect(paths.contains("/rest/_reflect"))
-        #expect(paths.contains("/rest/_reflect/{target}"))
+        #expect(paths == ["/rest/{target_id}", "/rest/_reflect", "/rest/_reflect/{target_id}"])
+        let methods = (r["routes"].asArray ?? []).compactMap { $0["method"].asString }
+        #expect(methods == ["POST", "GET", "GET"])
     }
 
-    @Test func webRestHandleRoutePostDispatchesBodyVerb() async {
+    /// A11.28 — `handle_route` is NOT an agent verb: python mounts a callable,
+    /// so a served request is never a send on the leg (swift's extra hop held a
+    /// second, parent task row that `shutdown_agents` then cancelled).
+    @Test func webRestHandleRouteIsNotAVerb() async {
         let kernel = makeKernelWithAll()
-        // The web_rest leg SEALS by default — open it for the inbound POST.
         _ = await kernel.send([Item("core", [
                 "type": "create_agent", "parent_id": "core", "handler_module": "web_rest.tools", "id": "rest",
                 "ingress_rule": "allow_all_ingress",
             ])])[0].result
-        // Simulate the host calling handle_route for
-        // POST /rest/core  body={type:list_agents}.
         let reply = await kernel.send([Item("rest", [
                 "type": "handle_route",
                 "method": "POST",
-                "params": ["target": "core"] as JSON,
-                "query": [:] as JSON,
+                "params": ["target_id": "core"] as JSON,
                 "body": "{\"type\":\"list_agents\"}",
             ])])[0].result
-        #expect(reply["status"].asInt == 200)
-        #expect(reply["content_type"].asString == "application/json")
-        let body = reply["body"].asString ?? ""
-        #expect(body.contains("\"core\""))
-    }
-
-    @Test func webRestHandleRouteBadJsonIs400() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "web_rest.tools", "id": "rest"])])[0].result
-        let reply = await kernel.send([Item("rest", [
-                "type": "handle_route",
-                "method": "POST",
-                "params": ["target": "core"] as JSON,
-                "query": [:] as JSON,
-                "body": "not json",
-            ])])[0].result
-        #expect(reply["status"].asInt == 400)
+        #expect(reply["reason"].asString == "unhandled", "\(reply)")
+        #expect(reply["error"].asString == "web_rest: unknown type 'handle_route'", "\(reply)")
+        #expect(reply["verb"].asString == "handle_route", "\(reply)")
     }
 }
 
@@ -814,6 +767,445 @@ final class SchedProbe: AgentBundle, @unchecked Sendable {
             return .object(["hit": .string(agentId.value)])
         default:
             return .object(["error": .string("unknown verb")])
+        }
+    }
+}
+
+// ─── A5 python-parity twins ─────────────────────────────────────────
+//
+// One test per plan item, each pinning the PYTHON text or behaviour named there
+// (`PB/scheduler/src/scheduler/tools.py`). Python is canonical; where a line here
+// disagrees with it, this file is wrong.
+
+/// One dispatch, spelled once.
+private func ask(_ kernel: Kernel, _ target: String, _ payload: JSON) async -> JSON {
+    await kernel.send([Item(AgentId(target), payload)])[0].result
+}
+
+/// `create_agent` for a scheduler on the root, with optional extra meta.
+@discardableResult
+private func newScheduler(
+    _ kernel: Kernel, _ id: String, _ meta: [String: JSON] = [:]
+) async -> JSON {
+    var p: JSON = [
+        "type": "create_agent", "parent_id": "core",
+        "handler_module": "scheduler.tools", "id": .string(id),
+    ]
+    for (k, v) in meta { p[k] = v }
+    return await ask(kernel, "core", p)
+}
+
+/// A store-backed kernel with a `sched` that may persist through it. Returns the
+/// kernel and the store's on-disk directory.
+private func schedulerOnAStore(_ tag: String) async throws -> (Kernel, URL) {
+    let fm = FileManager.default
+    let rel = "fantastic-\(tag)-\(UUID().uuidString)"
+    let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let kernel = makeKernelWithAll(rootPath: dir)
+    var store: JSON = [
+        "type": "create_agent", "parent_id": "core",
+        "handler_module": "file_bridge.tools", "id": "store",
+        "root": .string(rel), "ingress_rule": "allow_all_ingress",
+    ]
+    store["callable_by"] = ["sched": "*"]
+    _ = await ask(kernel, "core", store)
+    await newScheduler(kernel, "sched", ["can_call": ["store": "*"] as JSON])
+    return (kernel, dir)
+}
+
+/// Schedule `payload` on `target` and return the whole reply.
+private func addSchedule(
+    _ kernel: Kernel, target: JSON, payload: JSON, interval: Int64 = 3600,
+    timeout: JSON? = nil
+) async -> JSON {
+    var p: JSON = [
+        "type": "schedule", "target": target, "interval_seconds": .integer(interval),
+        "payload": payload,
+    ]
+    if let timeout { p["timeout"] = timeout }
+    return await ask(kernel, "sched", p)
+}
+
+/// python's `readme.md`, for the byte-for-byte pin.
+private func pythonSchedulerReadme() throws -> String {
+    let url = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()  // FantasticBundlesTests
+        .deletingLastPathComponent()  // Tests
+        .deletingLastPathComponent()  // swift
+        .deletingLastPathComponent()  // lib
+        .appendingPathComponent("python/bundled_agents/scheduler/src/scheduler/readme.md")
+    return try String(contentsOf: url, encoding: .utf8)
+}
+
+@Suite("scheduler python parity")
+struct SchedulerParityTests {
+
+    /// A5.1 — the `schedule_fired` blurb is python's, verbatim: two em-dashes and
+    /// the clause that says the payload send IS the tick.
+    @Test func schedulerReflectEmitsIsPythonVerbatim() async throws {
+        let kernel = makeKernelWithAll()
+        await newScheduler(kernel, "s_emits")
+        let r = await ask(kernel, "s_emits", ["type": "reflect"])
+        #expect(
+            r["emits"]["schedule_fired"].asString
+                == "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
+            "\(r["emits"].serialize())")
+    }
+
+    /// A5.2 — the readme IS python's `readme.md`: two lines and the trailing
+    /// newline, not a swift paraphrase.
+    @Test func schedulerReadmeIsPythonVerbatim() throws {
+        #expect(SchedulerBundle().readme == (try pythonSchedulerReadme()))
+    }
+
+    /// A5.3 + A5.13 — `shutdown` is not a verb here: python's VERBS table has no
+    /// such key, so it is the unknown-type error, spelled with `{t!r}`.
+    @Test func schedulerShutdownIsAnUnknownType() async throws {
+        let kernel = makeKernelWithAll()
+        await newScheduler(kernel, "s_sd")
+        let r = await ask(kernel, "s_sd", ["type": "shutdown"])
+        #expect(r["error"].asString == "scheduler: unknown type 'shutdown'", "\(r.serialize())")
+        let refl = await ask(kernel, "s_sd", ["type": "reflect"])
+        #expect(refl["verbs"].asObject?["shutdown"] == nil, "\(refl["verbs"].serialize())")
+        let n = await ask(kernel, "s_sd", ["type": "wat"])
+        #expect(n["error"].asString == "scheduler: unknown type 'wat'", "\(n.serialize())")
+    }
+
+    /// A5.4 — `boot` ALWAYS replies `{running:true}` and nothing else, and it
+    /// RESTARTS a loop whose task is gone (a cancelled tick loop left its id in
+    /// the table, so the scheduler claimed to run and never ticked again).
+    @Test func schedulerBootAfterCancelRestartsTheTickLoop() async throws {
+        let kernel = makeKernelWithAll()
+        await newScheduler(kernel, "s_boot")
+        let first = await ask(kernel, "s_boot", ["type": "boot"])
+        #expect(first == .object(["running": .bool(true)]), "\(first.serialize())")
+        let second = await ask(kernel, "s_boot", ["type": "boot"])
+        #expect(second == .object(["running": .bool(true)]), "\(second.serialize())")
+
+        // Cancel the loop through the task table, then boot again.
+        let ps = await ask(kernel, "kernel", ["type": "ps"])
+        let rows = ps["tasks"].asArray ?? []
+        let row = rows.first {
+            $0["agent"].asString == "s_boot" && $0["verb"].asString == "tick_loop"
+        }
+        let tid = try #require(row?["id"].asInt, "no tick_loop row: \(ps.serialize())")
+        _ = await ask(kernel, "kernel", ["type": "cancel", "task_id": .integer(tid)])
+        let dead = await ask(kernel, "s_boot", ["type": "reflect"])
+        #expect(dead["running"].asBool == false, "the loop must be gone: \(dead.serialize())")
+
+        let again = await ask(kernel, "s_boot", ["type": "boot"])
+        #expect(again == .object(["running": .bool(true)]), "\(again.serialize())")
+        let back = await ask(kernel, "s_boot", ["type": "reflect"])
+        #expect(
+            back["running"].asBool == true,
+            "boot must restart a dead loop: \(back.serialize())")
+    }
+
+    /// A5.5 — the VALIDATION ORDER is observable. python checks the payload's
+    /// shape, then `interval_seconds`, then `target`, then `payload.type`, then
+    /// `timeout`; a call with two faults must name the first of those.
+    @Test func schedulerValidationOrderMatchesPython() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedorder")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // interval BEFORE target: both wrong ⇒ the interval is named.
+        let a = await ask(
+            kernel, "sched",
+            [
+                "type": "schedule", "target": "", "interval_seconds": "60",
+                "payload": ["type": "hit"] as JSON,
+            ])
+        #expect(a["reason"].asString == "bad_arg", "\(a.serialize())")
+        #expect(a["arg"].asString == "interval_seconds", "\(a.serialize())")
+        // payload SHAPE before the interval.
+        let b = await ask(
+            kernel, "sched",
+            [
+                "type": "schedule", "target": "core", "interval_seconds": "60",
+                "payload": .array([.integer(1)]),
+            ])
+        #expect(b["arg"].asString == "payload", "\(b.serialize())")
+        // target BEFORE payload.type.
+        let c = await addSchedule(kernel, target: "", payload: ["note": "no type"])
+        #expect(c["error"].asString == "schedule: target required", "\(c.serialize())")
+        // …and payload.type BEFORE timeout.
+        let d = await addSchedule(
+            kernel, target: "core", payload: ["note": "no type"], timeout: .integer(0))
+        #expect(d["error"].asString == "schedule: payload.type required", "\(d.serialize())")
+        // A truthy non-string target is STORED VERBATIM, python-style.
+        let e = await addSchedule(kernel, target: .integer(7), payload: ["type": "hit"])
+        #expect(e["schedule"]["target"] == .integer(7), "\(e.serialize())")
+    }
+
+    /// A5.6 — `timeout` is stored AS SENT: an int `5` stays an int, in the reply
+    /// and in the persisted bytes.
+    @Test func anIntTimeoutStaysAnInt() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedto")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await addSchedule(
+            kernel, target: "core", payload: ["type": "list_agents"], timeout: .integer(5))
+        #expect(r["schedule"]["timeout"] == .integer(5), "\(r.serialize())")
+        let raw = try String(
+            contentsOf: dir.appendingPathComponent("agents/sched/schedules.json"),
+            encoding: .utf8)
+        #expect(raw.contains("\"timeout\": 5"), "widened on disk: \(raw)")
+    }
+
+    /// A5.7 — every `schedule_id` read is python TRUTHINESS, and the value is
+    /// echoed RAW.
+    @Test func emptyScheduleIdIsAbsentLikePython() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedsid")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for falsy in [JSON.string(""), .null, .integer(0)] {
+            let u = await ask(kernel, "sched", ["type": "unschedule", "schedule_id": falsy])
+            #expect(u["error"].asString == "unschedule: schedule_id required", "\(u.serialize())")
+            let t = await ask(kernel, "sched", ["type": "tick_now", "schedule_id": falsy])
+            #expect(t["error"].asString == "tick_now: schedule_id required", "\(t.serialize())")
+            // pause with a FALSY id pauses the WHOLE scheduler.
+            let p = await ask(kernel, "sched", ["type": "pause", "schedule_id": falsy])
+            #expect(p["scheduler_id"].asString == "sched", "\(p.serialize())")
+        }
+        // A truthy id nobody holds is echoed raw, in python's repr.
+        let miss = await ask(kernel, "sched", ["type": "tick_now", "schedule_id": .integer(9)])
+        #expect(miss["error"].asString == "schedule 9 not found", "\(miss.serialize())")
+        let un = await ask(kernel, "sched", ["type": "unschedule", "schedule_id": .integer(9)])
+        #expect(un["schedule_id"] == .integer(9), "\(un.serialize())")
+        #expect(un["removed"].asBool == false, "\(un.serialize())")
+    }
+
+    /// A5.13 — `schedule {sid!r} not found` quotes a string id.
+    @Test func schedulerRefusalTextUsesPythonRepr() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedrepr")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await ask(kernel, "sched", ["type": "tick_now", "schedule_id": "sch_zzz"])
+        #expect(r["error"].asString == "schedule 'sch_zzz' not found", "\(r.serialize())")
+    }
+
+    /// A5.8 — the fire outcome: COMPLETED puts the target's reply in `result` and
+    /// leaves `error` null; anything else makes `'<status>: ' + str(detail)`, where
+    /// the detail is `res["error"]` for a dict body and the body itself otherwise
+    /// (so a cancelled fire with no detail reads `cancelled: None`).
+    ///
+    /// The scheduler used to hoist an `error` key out of a COMPLETED reply, which
+    /// reported a failed fire for a verb that had answered.
+    @Test func cancelledFireErrorReadsNone() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedout")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func fire(_ target: String, _ payload: JSON) async -> JSON {
+            let r = await addSchedule(kernel, target: .string(target), payload: payload)
+            let sid = r["schedule_id"].asString ?? ""
+            _ = await ask(kernel, "sched", ["type": "tick_now", "schedule_id": .string(sid)])
+            let h = await ask(
+                kernel, "sched", ["type": "history", "schedule_id": .string(sid)])
+            return h["history"][0]
+        }
+        // COMPLETED: the reply is the result, and there is NO error.
+        let ok = await fire("core", ["type": "list_agents"])
+        #expect(ok["error"].isNull, "a completed fire has no error: \(ok.serialize())")
+        #expect(!ok["result"]["agents"].isNull, "\(ok.serialize())")
+
+        // NOT COMPLETED: `<status>: <str(detail)>`, and `result` stays null. The
+        // detail here is the body's `error`; a body that is not a dict (a cancelled
+        // fire's `None`) renders through the same `str()`.
+        let bad = await fire("store", ["type": "list", "path": "nope_dir"])
+        #expect(
+            bad["error"].asString == "errored: path 'nope_dir' does not exist",
+            "\(bad.serialize())")
+        #expect(bad["result"].isNull, "\(bad.serialize())")
+    }
+
+    /// A5.10 — the sidecars are python's `json.dumps`: the history line is
+    /// COMPACT with `', '`/`': '` separators, `schedules.json` is `indent=2`, and
+    /// both are `ensure_ascii` so a non-ASCII value is escaped.
+    @Test func historyLineUsesPythonJsonLayout() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedjson")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await addSchedule(
+            kernel, target: "core", payload: ["type": "list_agents", "note": "héllo"])
+        let sid = try #require(r["schedule_id"].asString)
+        let sched = try String(
+            contentsOf: dir.appendingPathComponent("agents/sched/schedules.json"),
+            encoding: .utf8)
+        #expect(sched.hasPrefix("[\n  {\n    \"id\": \""), "indent=2: \(sched.prefix(40))")
+        #expect(sched.contains("h\\u00e9llo"), "ensure_ascii: \(sched)")
+
+        _ = await ask(kernel, "sched", ["type": "tick_now", "schedule_id": .string(sid)])
+        let hist = try String(
+            contentsOf: dir.appendingPathComponent("agents/sched/history.jsonl"),
+            encoding: .utf8)
+        let line = String(try #require(hist.split(separator: "\n").first))
+        #expect(
+            line.hasPrefix("{\"type\": \"schedule_fired\", \"schedule_id\": \"\(sid)\", "),
+            "compact python separators: \(line.prefix(120))")
+        #expect(line.contains("h\\u00e9llo"), "ensure_ascii on the history line: \(line)")
+        #expect(hist.hasSuffix("\n"), "one line per fire, newline-terminated")
+    }
+
+    /// A5.11 — `paused` is read with python TRUTHINESS, on the record and on each
+    /// schedule; reflect still reports a BOOL.
+    @Test func pausedMetaUsesPythonTruthiness() async throws {
+        let kernel = makeKernelWithAll()
+        await newScheduler(kernel, "s_paused", ["paused": "yes"])
+        let r = await ask(kernel, "s_paused", ["type": "reflect"])
+        #expect(
+            r["paused"] == .bool(true),
+            "a truthy string is paused, as a BOOL: \(r.serialize())")
+
+        _ = await ask(
+            kernel, "core", ["type": "update_agent", "id": "s_paused", "paused": .integer(0)])
+        let z = await ask(kernel, "s_paused", ["type": "reflect"])
+        #expect(z["paused"] == .bool(false), "0 is not paused: \(z.serialize())")
+    }
+
+    /// A5.12 — NO 0.1 s floor. `validateMeta` already refuses everything the read
+    /// cannot use, so a clamp could only contradict a legal record.
+    @Test func tickSecBelowATenthIsNotClamped() async throws {
+        let kernel = makeKernelWithAll()
+        await newScheduler(kernel, "s_fast", ["tick_sec": .double(0.02)])
+        let r = await ask(kernel, "s_fast", ["type": "reflect"])
+        #expect(r["tick_sec"].asDouble == 0.02, "\(r.serialize())")
+        // An absent one is the documented default, not a clamp.
+        await newScheduler(kernel, "s_dflt")
+        let d = await ask(kernel, "s_dflt", ["type": "reflect"])
+        #expect(d["tick_sec"].asDouble == 1.0, "\(d.serialize())")
+    }
+
+    /// A5.16 — pause/resume put the FLAG FIRST, python's dict order.
+    @Test func schedulerPauseReplyKeyOrderMatchesPython() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedkeys")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await addSchedule(kernel, target: "core", payload: ["type": "list_agents"])
+        let sid = try #require(r["schedule_id"].asString)
+        let p = await ask(kernel, "sched", ["type": "pause", "schedule_id": .string(sid)])
+        #expect(
+            Array(try #require(p.asObject).keys) == ["paused", "schedule_id"],
+            "\(p.serialize())")
+        let rs = await ask(kernel, "sched", ["type": "resume", "schedule_id": .string(sid)])
+        #expect(
+            Array(try #require(rs.asObject).keys) == ["resumed", "schedule_id"],
+            "\(rs.serialize())")
+        let whole = await ask(kernel, "sched", ["type": "pause"])
+        #expect(
+            Array(try #require(whole.asObject).keys) == ["paused", "scheduler_id"],
+            "\(whole.serialize())")
+    }
+
+    /// A5.9 — the RAM cache is updated BEFORE the persist, and the two directions
+    /// differ: `pause` KEEPS its flip when the write fails (the next tick must
+    /// already honour it), while `tick_now` ROLLS its bump back (a run nothing
+    /// recorded must not show up in `list`).
+    ///
+    /// Acceptance-deferred until C13: the persist-failure TEXT wraps the loader's
+    /// own refusal, which C13 rewrites. What is pinned here is the RAM half.
+    @Test func failedTickPersistDoesNotRefireNextTick() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedcache")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await addSchedule(kernel, target: "core", payload: ["type": "list_agents"])
+        let sid = try #require(r["schedule_id"].asString)
+        // BREAK PERSISTENCE: with the store gone the loader has nothing to write to.
+        _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "store"])
+
+        let paused = await ask(kernel, "sched", ["type": "pause", "schedule_id": .string(sid)])
+        #expect(
+            (paused["error"].asString ?? "").hasPrefix("scheduler.pause:"),
+            "the failed write must be surfaced: \(paused.serialize())")
+        let afterPause = await ask(kernel, "sched", ["type": "list"])
+        #expect(
+            afterPause["schedules"][0]["paused"].asBool == true,
+            "a failed write KEEPS the flip: \(afterPause.serialize())")
+
+        let ticked = await ask(kernel, "sched", ["type": "tick_now", "schedule_id": .string(sid)])
+        #expect(
+            (ticked["error"].asString ?? "").hasPrefix("scheduler.tick_now:"),
+            "\(ticked.serialize())")
+        let afterTick = await ask(kernel, "sched", ["type": "list"])
+        #expect(
+            afterTick["schedules"][0]["run_count"].asInt == 0,
+            "a failed tick_now ROLLS the bump back: \(afterTick.serialize())")
+    }
+
+    /// A5.14 — nothing evicts the schedule cache: python's `_cache` is a module
+    /// global, so a scheduler deleted and recreated under the same id still sees
+    /// what the process knew.
+    @Test func recreatedSchedulerKeepsTheProcessCache() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedrecreate")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await addSchedule(kernel, target: "core", payload: ["type": "list_agents"])
+        _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "sched"])
+        // No `can_call` this time, so the recreated agent cannot read the store —
+        // everything it lists comes from the PROCESS cache.
+        await newScheduler(kernel, "sched")
+        let list = await ask(kernel, "sched", ["type": "list"])
+        #expect((list["schedules"].asArray ?? []).count == 1, "\(list.serialize())")
+    }
+}
+
+// ── A15.2 — the scheduler names its persistence failures on stderr ──
+
+@Suite("scheduler stderr lines")
+struct SchedulerStderrTests {
+
+    /// Python `scheduler/tools.py:236-239,286-289`: a tick that cannot persist
+    /// prints `scheduler <sid>: persist failed: <error>` and a fire that cannot
+    /// append prints `scheduler <sid>: history persist failed: <error>`. Swift
+    /// discarded both results, so a scheduler whose store went away ticked on in
+    /// silence and lost every schedule on the next boot with nothing anywhere
+    /// saying why.
+    @Test func schedulerPersistFailurePrintsPythonLine() async throws {
+        let fm = FileManager.default
+        let rel = "fantastic-a152-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let kernel = makeKernelWithAll(rootPath: dir)
+
+        _ = await ask(
+            kernel, "core",
+            [
+                "type": "create_agent", "parent_id": "core",
+                "handler_module": "file_bridge.tools", "id": "store",
+                "root": .string(rel), "ingress_rule": "allow_all_ingress",
+                "callable_by": ["sched": "*"] as JSON,
+            ])
+        _ = await ask(
+            kernel, "core",
+            [
+                "type": "create_agent", "parent_id": "core",
+                "handler_module": "scheduler.tools", "id": "sched",
+                "tick_sec": .double(0.25),
+                "can_call": ["store": "*", "core": "*"] as JSON,
+            ])
+        _ = await ask(kernel, "sched", ["type": "boot"])
+        let added = await ask(
+            kernel, "sched",
+            [
+                "type": "schedule", "target": "core", "interval_seconds": .integer(1),
+                "payload": ["type": "list_agents"] as JSON,
+            ])
+        #expect(added["error"].asString == nil, "\(added.serialize())")
+
+        // Pull the store out from under the running tick loop — every write the
+        // next sweep attempts now fails at the loader.
+        _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "store"])
+
+        // One sweep window: tick_sec 0.25, the schedule due at +1s. Kept as
+        // short as the 1 s minimum interval allows — a live tick loop is load on
+        // every test running beside it.
+        let lines = await RuntimeLog.capture {
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+        }
+        _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "sched"])
+        let persist = lines.filter { $0.hasPrefix("scheduler sched: persist failed: ") }
+        let history = lines.filter { $0.hasPrefix("scheduler sched: history persist failed: ") }
+
+        #expect(!persist.isEmpty, "no persist-failed line")
+        #expect(!history.isEmpty, "no history-persist-failed line")
+        // The tail is the loader's own error text, and it is NEVER empty — an
+        // empty tail would mean the error dict lost its `error` key.
+        for line in persist + history {
+            #expect(line.hasSuffix("\n"))
+            #expect(line.split(separator: ": ").count >= 3, "\(line)")
+            #expect(!line.hasSuffix("failed: \n"), "\(line)")
         }
     }
 }

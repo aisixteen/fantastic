@@ -56,7 +56,7 @@ public enum AIFoldStrategy {
     }
 
     private static func cutTitle(_ t: String) -> String {
-        String(t.unicodeScalars.prefix(MAX_TITLE))
+        String(String.UnicodeScalarView(t.unicodeScalars.prefix(MAX_TITLE)))
     }
 
     /// (title, body, degraded). One summarizer call for one closed chain. Python
@@ -77,24 +77,23 @@ public enum AIFoldStrategy {
         ])
         var text = ""
         do { text = try await summarize([ask]) } catch { text = "" }
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        text = pyStrip(text)
         if text.isEmpty { return degraded() }
         // The title is the first NON-EMPTY line; a leading blank line or a stray
         // quote must not become the title. Reasoning is already stripped by the
         // summarizer; a summary that still opens a think block is not a summary —
         // degrade to titles.
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        // `text.splitlines()` — python's boundary set, so a CRLF summary is
+        // several lines and not one. Splitting on `"\n"` as a Character read the
+        // WHOLE CRLF text as a single line, which became the title.
+        let lines = pySplitlines(text).map(pyStrip).filter { !$0.isEmpty }
         guard let firstLine = lines.first, !firstLine.hasPrefix("<think") else { return degraded() }
-        let title = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            .trimmingCharacters(in: CharacterSet(charactersIn: "*#"))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let body = lines.dropFirst().joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = pyStrip(pyTrim(pyTrim(firstLine, "\""), "*#"))
+        let body = pyStrip(lines.dropFirst().joined(separator: "\n"))
+        // `title[:MAX_TITLE] or "(untitled)"`, and the body falls back to the
+        // UNCUT title — python's `body or title`, not `body or title[:140]`.
         let cut = cutTitle(title)
-        let finalTitle = cut.isEmpty ? "(untitled)" : cut
-        return (finalTitle, body.isEmpty ? finalTitle : body, false)
+        return (cut.isEmpty ? "(untitled)" : cut, body.isEmpty ? title : body, false)
     }
 
     /// Summarize `idxs` and append ONE fold row for them. A fold row in `idxs` is
@@ -195,4 +194,18 @@ public enum AIFoldStrategy {
             body: out.body, omittedMarker: out.omittedMarker,
             stripped: out.stripped, strippedBytes: out.strippedBytes, folded: folded)
     }
+}
+
+/// Python's `str.strip(chars)`: every LEADING and TRAILING scalar that is one of
+/// `chars` is removed. `CharacterSet` trimming compares Characters, which is a
+/// different set the moment a combining mark is involved.
+private func pyTrim(_ s: String, _ chars: String) -> String {
+    let set = Set(chars.unicodeScalars)
+    var view = Array(s.unicodeScalars)
+    var lo = 0
+    var hi = view.count
+    while lo < hi, set.contains(view[lo]) { lo += 1 }
+    while hi > lo, set.contains(view[hi - 1]) { hi -= 1 }
+    view = Array(view[lo..<hi])
+    return String(String.UnicodeScalarView(view))
 }

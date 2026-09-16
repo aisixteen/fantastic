@@ -67,10 +67,8 @@ kernel modules.
 |---|---|---|---|
 | file_bridge | `FantasticFile` | both | the gated fs edge — sealed by default, running-dir clamp; read/write + read_stream/write_stream/pump (raw bytes) |
 | yaml_state | `FantasticYamlState` | both | durable YAML memory (`mem`/`data`); persists `state.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) — owns no disk of its own |
-| proxy_agent | `FantasticProxyAgent` | both | host-implemented agents (LanguageModel, etc.) |
-| tools | `FantasticTools` | both | LLM tool registry |
 | scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.json`/`history.jsonl` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
-| cli_bundle | `FantasticCliBundle` | both | scripted-CLI surface |
+| cli | `FantasticCliBundle` | both | terminal render sink (`cli.tools`): token/done/say/error/status/context + the PTY intro to stdout; unknown verbs dropped |
 | ws_bridge / relay_connector | `FantasticKernelBridge` | both | cross-kernel comms, two io_bridge derivations (sealed by default). `ws_bridge`: in-memory + WS (asymmetric; targets remote `web_ws`). `relay_connector`: dials a relay-KERNEL router (`ws://host/<guid>`, group password in `X-Fantastic-Auth`, subprotocol `fantastic.relay.v1`), reaches a `partner_guid` and TUNNELS io_bridge frames over it; our `guid` auto-mints + persists on first boot if absent (explicit wins); auto-reconnect + keepalive + directory (`list_peers`/`watch_directory`); directory typing for the kernelgroup model — advertises an opaque attrs blob (`role` manager\|kernel, `owner_guid`, `exposes`) to the relay, `set_identity` updates it live; raw `read_stream` chunks ride as native binary WS frames (no base64) |
 | web | `FantasticWeb` | both | HTTP + WS server (swift-nio — serves on macOS + Linux) |
 | web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
@@ -122,7 +120,7 @@ swift/
     FantasticFoundationModelsBackend/  Apple on-device LLM
     FantasticRunnerCore/               shared runner lifecycle (reflect/boot/start/stop);
                                        runner bundles are thin over this
-    Fantastic{File,ProxyAgent,Tools,Scheduler,
+    Fantastic{File,TextFile,Scheduler,
               CliBundle,KernelBridge}/
                                        supporting bundles
     Fantastic{Terminal,Local,Python,Ssh}{Backend,Runner,Runtime}/
@@ -145,21 +143,17 @@ app's import lines unchanged through the XCFramework → native Swift migration;
 the migration is done, nothing outside its own tests called it, and an unused
 `registerTool`/`listToolsForLlm` registry is a native tool API sitting next to a
 substrate whose tool-calling is raw prompt-and-parse. Gone with it:
-`sendJson`/`sendJsonAs`, `proxyEmit`, the tool registry, the `StateListener`
-bridge, the `ProxyAgent` typealias and `Kernel.registerProxyAgent` /
-`unregisterProxyAgent`.
+`sendJson`/`sendJsonAs`, `proxyEmit`, the tool registry and the `StateListener`
+bridge.
 
 What the embedding surface is now:
 - `Kernel.send([Item]) -> [Outcome]` — the ONE send; a single call is a
   one-element array
 - `Kernel.subscribe { event in }` — state events, closure not callback protocol
-- `registerHost(_:_:)` / `unregisterHost(_:)` from `FantasticProxyAgent` — the
-  ONE proxy-host registration path
-- `ProxyAgentHost` protocol (`handle`, `onBoot`, `onDelete`)
 - `save()` / `load(json:)` / `shutdown()`, `httpPort()`
 - HTTP routes (`/<agent_id>/`, `/<agent_id>/ws`, `/_assets/*`,
   `/_fantastic/transport.js`)
-- Bundle names: `proxy_agent.tools`, `tools.tools`, `file_bridge.tools`,
+- Bundle names: `file_bridge.tools`, `text_file.tools`, `cli.tools`,
   `web.tools`, etc.
 
 ## Third-party dependencies

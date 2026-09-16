@@ -10,7 +10,7 @@ use crate::context::{
     budget as agent_budget, estimate_one, estimate_tokens, recent_n as cfg_recent_n,
     resolve_context_window, NOTICE_ENVELOPE_RESERVE,
 };
-use crate::events::{to_caller, CallerRoute};
+use crate::events::to_caller;
 use crate::helpers::{agent_meta, now_secs};
 use crate::history::load_history;
 use crate::provider::Provider;
@@ -20,6 +20,7 @@ use crate::strategies::{
     ProjectionCtx,
 };
 use crate::view::{res_of, save_view};
+use fantastic_bundle::py_repr_value;
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ pub fn context_notice(
     omitted_marker: bool,
     dropped_n: usize,
     stripped: usize,
-    stripped_bytes: usize,
+    stripped_bytes: i64,
 ) -> Value {
     let mut lines = vec![format!(
         "[context-notice] Your conversation exceeded the window and was compacted \
@@ -84,7 +85,6 @@ pub async fn project_context(
     state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
     client_id: &str,
-    route: CallerRoute,
     name: &str,
     messages: Vec<Value>,
     store_len: usize,
@@ -119,7 +119,6 @@ pub async fn project_context(
             kernel,
             self_id,
             client_id,
-            route,
             json!({
                 "type": "context", "source": self_id.as_str(), "ts": now_secs(),
                 "phase": "too_small",
@@ -141,19 +140,25 @@ pub async fn project_context(
         .await;
         return Err(json!({"error": format!("{name}: context_insufficient — {hint}")}));
     }
-    let strat_name = meta
+    // RAW, as python's `rec.get("context_strategy", DEFAULT_STRATEGY)`: only an
+    // ABSENT key means `compact`. `as_str().unwrap_or("compact")` was a fallback
+    // that ran compact for `null`, `5` and `[]` — python refuses all three.
+    let strat_value = meta
         .get("context_strategy")
-        .and_then(Value::as_str)
-        .unwrap_or("compact")
-        .to_string();
-    if !is_known_strategy(&strat_name) {
+        .cloned()
+        .unwrap_or_else(|| json!(crate::strategies::DEFAULT_STRATEGY));
+    let Some(strat_name) = strat_value.as_str().filter(|n| is_known_strategy(n)) else {
+        // python `f"... {strat_name!r} (valid: {strategy_names()})"` — the repr of
+        // the VALUE, and `str(list)` of the registry's names.
         return Err(json!({
             "error": format!(
-                "{name}: unknown context_strategy {strat_name:?} \
-                 (valid: compact, truncate, strip, fold)"
+                "{name}: unknown context_strategy {} (valid: {})",
+                py_repr_value(&strat_value),
+                py_repr_value(&json!(crate::strategies::STRATEGY_NAMES)),
             ),
         }));
-    }
+    };
+    let strat_name = strat_name.to_string();
     let recent = cfg_recent_n(&meta);
     let pctx = ProjectionCtx {
         budget: body_budget,
@@ -181,17 +186,28 @@ pub async fn project_context(
     // Single budget authority: the strategy reserved the envelope, but guard the
     // final fit anyway — trim oldest body turns (tool-pairing-safe). Never drop the
     // last (live) turn: the failsafe above guarantees room for [notice + live turn].
+    // TRIM FROM THE MIDDLE, NOT THE FRONT. `out_body[0]` is the goal turn every
+    // strategy deliberately pins (`compact`/`truncate` both put it first) and the
+    // last entry is the live turn. Taking from the front silently undid the pin —
+    // the exact regression the pin exists to prevent, re-introduced one layer up
+    // (python, measured 2026-08-28: with a snug window the goal sentence was
+    // absent from the projection entirely, in both strategies).
     let mut out_body = proj.body;
-    loop {
-        if out_body.len() <= 1 {
-            break;
-        }
+    let over = |body: &[Value]| -> bool {
         let mut probe = system_block.clone();
         probe.push(notice.clone());
-        probe.extend(out_body.iter().cloned());
-        if estimate_tokens(&probe) <= b {
-            break;
-        }
+        probe.extend(body.iter().cloned());
+        estimate_tokens(&probe) > b
+    };
+    while out_body.len() > 2 && over(&out_body) {
+        let mut next = vec![out_body[0].clone()];
+        next.extend(out_body[2..].iter().cloned());
+        out_body = drop_orphan_tools(next);
+    }
+    // Last resort, and only when nothing else is left to give: [goal, live] still
+    // over budget. The live turn is what the model must answer, so the goal is
+    // what goes — loudly, in the notice's own count, not silently.
+    while out_body.len() > 1 && over(&out_body) {
         out_body = drop_orphan_tools(out_body[1..].to_vec());
     }
     let dropped_n = body.len().saturating_sub(out_body.len());
@@ -202,6 +218,10 @@ pub async fn project_context(
         "kept_turns": out_body.len(),
         "dropped_turns": dropped_n,
         "summarized": summarized,
+        // ALWAYS 0 here: this runtime has no pinned-facts block, and python's key
+        // is in the projection a model reads off `context_status`. An absent key
+        // is a different reply from a zero one.
+        "pinned_facts": 0,
         "stripped": proj.stripped,
         "stripped_bytes": proj.stripped_bytes,
         "folded": proj.folded,
@@ -250,7 +270,6 @@ pub async fn project_context(
         kernel,
         self_id,
         client_id,
-        route,
         json!({
             "type": "context", "source": self_id.as_str(), "ts": now_secs(),
             "phase": "compacted",

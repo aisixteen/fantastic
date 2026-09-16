@@ -13,9 +13,10 @@ The way that WORKS now, and it makes something that genuinely persists and
 re-runs:
 
 1. **Write the program to a file** on the file leg, its bytes carried over a
-   stream so nothing is escaped — `write_stream {path, bytes:<raw>, truncate:true}`,
-   or `send_binary` (same call, but write the program RAW in the LAST `bytes`
-   field — nothing escaped; see the `send` docs).
+   stream so nothing is escaped — `write_stream {path, bytes:<raw>, truncate:true}`.
+   `bytes` is VERBATIM: write the program between `<bytes>` and `</bytes>` exactly
+   as it should land (real newlines, real quotes, nothing escaped) and close the
+   call; the program ends at the first `</bytes>`.
 2. **Run it** with the command executor: `start {command:'python',
    args:['<your file>'], …}`. The file is durable on disk, so the SAME command
    run again later re-executes the SAME program against whatever the inputs hold
@@ -27,23 +28,22 @@ without any `code` field at all.
 
 ## What you CAN do now
 
-- **Compose the agents you were given.** `send('kernel', {type:'list_agents'})`
+- **Compose the agents you were given.** Send `kernel` `<type>list_agents</type>`
   for the tree, `reflect` each for its verbs, then `send`. Most tasks are solved
   entirely by wiring existing agents together.
 
 - **Run a command.** The executor is a **general-purpose COMMAND runner** — not a
   code runner. Reflect it to read its `allowed` regexes (the full command line
   must match one), then
-  `send('<executor>', {type:'start', command:'<path>', args:['<arg>', …]})`.
+  send it `<type>start</type> <command>path</command> <args><item>…</item></args>`.
   It returns `{job_id, status:'running'}` at once and streams `progress` events
-  per output line; poll `{type:'status', job_id}` for the result. `stop`,
+  per output line; poll `<type>status</type> <job_id>…</job_id>` for the result. `stop`,
   `clear` as advertised.
 
-- **Write and read files — over STREAMS, never a JSON string.** Putting file
-  contents in a payload string is the same escaping trap as `code`. Use the file
-  leg's stream verbs:
-  - write: `send('<file>', {type:'write_stream', path:'x', bytes:<raw>, truncate:true})`
-  - read:  `send('<file>', {type:'read_stream', path:'x', offset:0})` → `{bytes, next_offset, eof}`, one chunk at a time.
+- **Write and read files — over STREAMS, the document verbatim in `<bytes>`.** Use
+  the file leg's stream verbs:
+  - write: send the file leg `<type>write_stream</type> <path>x</path> <truncate>true</truncate> <bytes>…</bytes>`
+  - read:  `<type>read_stream</type> <path>x</path> <offset>0</offset>` → `{bytes, next_offset, eof}`, one chunk at a time.
   The string `read`/`write` verbs are gone.
 
 - **A worker that COMPUTES is an `exec_bridge.tools` agent — NOT a new module.**
@@ -88,7 +88,7 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
 
 ## Two facts that save turns
 
-- **Do not write the wire client yourself.** Send the command runner `{type:'connector'}`
+- **Do not write the wire client yourself.** Send the command runner `<type>connector</type>`
   and paste its `source` verbatim at the top of your program — it gives the program a
   `kernel` object (`send`/`emit`/`watch`/`on_message`). Hand-rolling the socket framing
   costs ten turns and gets the buffering wrong.
@@ -98,7 +98,7 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   There is no way to author one that can — you cannot add modules. So a "specialist
   that owns a job and delegates to children" has no form here: the thing that ACTS
   is the runner, and the clock aims at it DIRECTLY —
-  `schedule {target: <runner>, payload: {type:'start', command, args}}`, gated by
+  `<type>schedule</type> <target>runner</target> <payload><type>start</type><command>…</command><args><item>…</item></args></payload>`, gated by
   that runner's `allowed`. Point the clock at the runner and give the runner the
   reach; do not build an inert parent to hold the job. (A model spent 26,000
   characters of one turn deriving this from silence — measured 2026-09-04.)
@@ -112,3 +112,7 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   lateral grant. A specialist created under the root is NOT yours: you cannot confer
   reach on it (refused: not your child, not in your can_call), and repairing that
   costs a delete + recreate (measured 2026-09-02: twenty turns).
+- **A lateral edge is opened on the CALLEE, never on the caller.** To let `clock` call
+  your child, add `clock` to the child's `callable_by`. You never edit a peer's
+  `can_call` (you cannot, and you need not): `can_call` is yours to set only on your
+  own children, at create time. One `update_agent` on the callee ends the question.

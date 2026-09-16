@@ -15,10 +15,15 @@
 //! could match it and each reboot would mint another agent beside the last.
 
 use async_trait::async_trait;
+use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
+use fantastic_file::fs;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::refusal::{refusal, UNHANDLED};
 use fantastic_kernel::{with_operator, Agent, AgentId, Item, Kernel};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
+
+mod yaml;
 
 /// The `handler_module` value that routes to this bundle.
 pub const HANDLER_MODULE: &str = "static_loader.tools";
@@ -31,43 +36,59 @@ const MANIFEST_FIELD: &str = "manifest";
 /// The declarative roster loader bundle.
 pub struct StaticLoaderBundle;
 
-fn manifest_path(agent: &Agent) -> Option<String> {
-    agent.meta.read().ok().and_then(|g| {
-        g.get(MANIFEST_FIELD)
-            .and_then(Value::as_str)
-            .map(String::from)
-    })
+/// The raw `manifest` value off the record — reflect shows it as written.
+fn manifest_meta(agent: &Agent) -> Value {
+    agent
+        .meta
+        .read()
+        .ok()
+        .and_then(|g| g.get(MANIFEST_FIELD).cloned())
+        .unwrap_or(Value::Null)
 }
 
-/// Read + parse the manifest into the declared agent specs. Cold read, relative
-/// to cwd (the CLI passes a cwd-relative path) — the one-time bring-up path, like
-/// the persistence cold reads.
+/// Read + parse the manifest into the declared agent specs. Cold read, clamped
+/// to cwd by the running-dir law — the same one-time bring-up path as the root
+/// loader's tree read (before any file_bridge agent can exist), and through the
+/// SAME disk surface: `fantastic_file::fs`, as python imports `file_bridge.fs`.
 fn load_manifest(agent: &Agent) -> Result<Vec<Value>, String> {
-    let Some(path) = manifest_path(agent) else {
-        return Err(format!(
-            "static_loader: no `{MANIFEST_FIELD}` path on the record"
-        ));
+    let raw = manifest_meta(agent);
+    let path = match raw.as_str() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => {
+            return Err(format!(
+                "static_loader: no {} path on the record",
+                py_repr(MANIFEST_FIELD)
+            ))
+        }
     };
-    // CLAMPED to the running dir. A cold read is still a read: `fs` is the one
-    // disk surface, and a manifest path pointing outside the kernel's own dir
-    // refuses here rather than being opened because this happens at bring-up.
     let cwd = std::env::current_dir().unwrap_or_default();
-    let clamped = fantastic_file::clamp_root(std::path::Path::new(&path), &cwd)
-        .map_err(|e| format!("static_loader: manifest {path:?} is not readable: {e}"))?;
-    let text = std::fs::read_to_string(&clamped)
-        .map_err(|e| format!("static_loader: cannot read manifest {path:?}: {e}"))?;
-    let data: Value = serde_yaml::from_str(&text)
-        .map_err(|e| format!("static_loader: manifest {path:?} is not valid YAML: {e}"))?;
+    let text = fs::read_text(&cwd, &path).map_err(|e| {
+        format!(
+            "static_loader: cannot read manifest {}: {e}",
+            py_repr(&path)
+        )
+    })?;
+    let data = yaml::safe_load(&text).map_err(|e| {
+        format!(
+            "static_loader: manifest {} is not valid YAML: {e}",
+            py_repr(&path)
+        )
+    })?;
+    // `yaml.safe_load(text) or {}`: a python-FALSY document (empty, `~`, `0`,
+    // `false`, `[]`, `{}`) is an empty mapping, not a shape complaint.
+    let data = if py_truthy(&data) { data } else { json!({}) };
     let Some(obj) = data.as_object() else {
         return Err(format!(
-            "static_loader: manifest {path:?} must be a mapping with `agents:`"
+            "static_loader: manifest {} must be a mapping with `agents:`",
+            py_repr(&path)
         ));
     };
     match obj.get("agents") {
         None => Ok(Vec::new()),
         Some(Value::Array(a)) => Ok(a.clone()),
         Some(_) => Err(format!(
-            "static_loader: `agents:` in {path:?} must be a list"
+            "static_loader: `agents:` in {} must be a list",
+            py_repr(&path)
         )),
     }
 }
@@ -80,18 +101,22 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
     let mut created: Vec<String> = Vec::new();
     let mut reapplied: Vec<String> = Vec::new();
     for spec in agents {
-        let Some(obj) = spec.as_object() else {
+        // python: `not isinstance(spec, dict) or not spec.get("handler_module")`
+        // — a FALSY handler_module is as absent as none at all; any truthy value
+        // passes here and is judged by `create_agent`.
+        let handler_module = spec.as_object().and_then(|o| o.get("handler_module"));
+        if !handler_module.is_some_and(py_truthy) {
             return json!({
-                "error": format!("static_loader: each roster entry needs a handler_module: {spec}"),
-                "booted": false,
-            });
-        };
-        if obj.get("handler_module").and_then(Value::as_str).is_none() {
-            return json!({
-                "error": format!("static_loader: each roster entry needs a handler_module: {spec}"),
+                "error": format!(
+                    "static_loader: each roster entry needs a handler_module: {}",
+                    py_repr_value(&spec)
+                ),
                 "booted": false,
             });
         }
+        let obj = spec
+            .as_object()
+            .expect("a spec with a handler_module is a mapping");
         // An id-less entry cannot be idempotent: the roster is keyed by id, so
         // nothing matches the agent the LAST boot minted and this boot mints a
         // SECOND one, which the flush persists — the roster grows by one agent
@@ -103,7 +128,10 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             .filter(|s| !s.is_empty())
         else {
             return json!({
-                "error": format!("static_loader: roster entry needs an explicit id: {spec}"),
+                "error": format!(
+                    "static_loader: roster entry needs an explicit id: {}",
+                    py_repr_value(&spec)
+                ),
                 "booted": false,
             });
         };
@@ -113,16 +141,18 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             // from the manifest, never skipped: editing a grant in the yaml
             // used to change nothing at all, because the hydrated record
             // silently won and the operator got no word about it.
-            let declared_hm = obj.get("handler_module").and_then(Value::as_str);
-            if live.handler_module.as_deref() != declared_hm {
+            let declared_hm = obj.get("handler_module").unwrap_or(&Value::Null);
+            if live.handler_module.as_deref() != declared_hm.as_str() {
                 // A bundle cannot be swapped under a live agent (its
                 // in-process state belongs to the old one).
                 return json!({
                     "error": format!(
-                        "static_loader: {id:?} exists as {:?} but the manifest \
-                         declares {declared_hm:?} — a handler_module is fixed at \
-                         create; delete the agent to re-declare it",
-                        live.handler_module
+                        "static_loader: {} exists as {} but the manifest declares \
+                         {} — a handler_module is fixed at create; delete the agent \
+                         to re-declare it",
+                        py_repr(id),
+                        live.handler_module.as_deref().map_or("None".to_string(), py_repr),
+                        py_repr_value(declared_hm)
                     ),
                     "booted": false,
                 });
@@ -152,18 +182,29 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
                 }
             }
             if !patch.is_empty() {
-                patch.insert("type".to_string(), json!("update_agent"));
-                patch.insert("id".to_string(), json!(id));
+                // python spreads `**declared` LAST: a declared `type` key
+                // overrides the verb, and the verb keeps its leading position.
+                let mut call = Map::new();
+                call.insert("type".to_string(), json!("update_agent"));
+                call.insert("id".to_string(), json!(id));
+                for (k, v) in patch {
+                    call.insert(k, v);
+                }
                 let r = with_operator(kernel.send(vec![Item::new(
                     AgentId::from("kernel"),
-                    Value::Object(patch),
+                    Value::Object(call),
                 )]))
                 .await
                 .remove(0)
                 .result;
-                if let Some(e) = r.get("error") {
+                // Only a TRUTHY error is a failure — python tests `r.get("error")`.
+                if let Some(e) = r.get("error").filter(|e| py_truthy(e)) {
                     return json!({
-                        "error": format!("static_loader: re-applying {id:?}: {e}"),
+                        "error": format!(
+                            "static_loader: re-applying {}: {}",
+                            py_repr(id),
+                            py_str(e)
+                        ),
                         "booted": false,
                     });
                 }
@@ -177,8 +218,15 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         // grant is stamped + the manifest's explicit `can_call` merges on top;
         // the child boots inside create_agent. Operator authority: the loader
         // hydrating the roster it was told to build.
-        let mut payload = obj.clone();
+        // python: `{"type": "create_agent", **spec, "parent_id": agent.id}` — the
+        // verb leads (a spec `type` key overrides its VALUE, in place) and
+        // `parent_id` lands AFTER the spread, so an entry naming its own parent
+        // cannot place the agent outside the loader's subtree.
+        let mut payload = Map::new();
         payload.insert("type".to_string(), json!("create_agent"));
+        for (k, v) in obj.clone() {
+            payload.insert(k, v);
+        }
         payload.insert("parent_id".to_string(), json!(agent.id.0));
         let rec = with_operator(kernel.send(vec![Item::new(
             AgentId::from("kernel"),
@@ -191,7 +239,11 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             Some(id) => created.push(id.to_string()),
             None => {
                 return json!({
-                    "error": format!("static_loader: create failed for {spec}: {rec}"),
+                    "error": format!(
+                        "static_loader: create failed for {}: {}",
+                        py_repr_value(&spec),
+                        py_str(&rec)
+                    ),
                     "booted": false,
                 })
             }
@@ -204,12 +256,18 @@ fn reflect_reply(agent: &Agent) -> Value {
     json!({
         "id": agent.id.0,
         "sentence": "declarative YAML roster loader",
-        "display_name": agent.display_name().unwrap_or_else(|| agent.id.0.clone()),
+        // python `agent.display_name or id`: an EMPTY name is no name.
+        "display_name": agent
+            .display_name()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| agent.id.0.clone()),
         "loader": true,
-        "manifest": manifest_path(agent),
+        // The RAW record value, as python reports it — not filtered to a string.
+        "manifest": manifest_meta(agent),
+        // python's first docstring lines, in VERBS order.
         "verbs": {
-            "reflect": "No args. The loader's posture: manifest + roster-hydration.",
-            "boot": "No args. Read the manifest + hydrate the declared roster (operator).",
+            "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
+            "boot": "Hydrate the declared roster as OPERATOR.",
         },
     })
 }
@@ -243,14 +301,12 @@ impl Bundle for StaticLoaderBundle {
             }
         };
         let cwd = std::env::current_dir().unwrap_or_default();
-        match fantastic_file::clamp_root(std::path::Path::new(path), &cwd) {
-            Err(e) => Some(format!(
-                "static_loader: manifest {path:?} is not readable: {e}"
-            )),
-            Ok(clamped) => std::fs::read_to_string(&clamped)
-                .err()
-                .map(|e| format!("static_loader: manifest {path:?} is not readable: {e}")),
-        }
+        fs::read_text(&cwd, path).err().map(|e| {
+            format!(
+                "static_loader: manifest {} is not readable: {e}",
+                py_repr(path)
+            )
+        })
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -270,8 +326,17 @@ impl Bundle for StaticLoaderBundle {
         let reply = match verb {
             "reflect" => reflect_reply(&agent),
             "boot" => boot(&agent, kernel).await,
-            "shutdown" => Value::Null,
-            other => json!({ "error": format!("static_loader: unknown type {other:?}") }),
+            // Every other verb — `shutdown` included, which this bundle does not
+            // declare — is unhandled, in the one refusal shape.
+            _ => {
+                let raw = payload.get("type").cloned().unwrap_or(Value::Null);
+                let mut v = refusal(
+                    UNHANDLED,
+                    format!("static_loader: unknown type {}", py_repr_value(&raw)),
+                );
+                fantastic_kernel::refusal::with(&mut v, "verb", raw);
+                v
+            }
         };
         Ok(Some(reply))
     }

@@ -3,8 +3,11 @@
 # The reflect surface
 
 `reflect` is the one discovery verb. It returns the ADDRESSED agent
-uniformly — `{id, sentence, display_name, description?, verbs?, ...state}`
-— the root is NOT special. Compose what you get back with three flags:
+uniformly — `{id, sentence, display_name, description?, verbs?, ...state}`.
+Two things are root-only: the deployment fields (`runtime`/`env`/`version`)
+and the ANSWERING of `kernel_verbs` (advertised everywhere, answered by the
+root alone). Otherwise the root is not special. Compose the reply with three
+flags:
 
 - `tree=all|ids|none` (default `all`)
   - `all`  — the agent's whole subtree, nested + distilled
@@ -33,7 +36,7 @@ doc for the topic you are about to act on.
 Any agent may carry a short `description` — a one-line "what this agent is
 for", set at create or update:
 
-    create_agent handler_module=<bundle>.tools description="..."
+    create_agent parent_id=<owner> handler_module=<bundle>.tools description="..."
     update_agent id=<agent> description="..."
 
 It surfaces in every reflect (top-level and in each tree node), so a single

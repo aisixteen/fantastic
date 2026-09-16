@@ -13,11 +13,17 @@
 // drains below LOW_WATERMARK the reader resumes. `shell` is exempt: no pause
 // while a done-token is pending, and the accounting is cleared around it.
 //
+// What python RAISES, this raises: `int()`/`float()` of a bad arg, the
+// `struct.pack("HHHH", …)` range check behind every winsize, and a `.encode`
+// on a non-str `write.data` all fail the DISPATCH rather than answering a
+// reply the python kernel never writes.
+//
 // iOS forbids fork, so this file is macOS-only via `#if`.
 
 #if os(macOS)
 
     import Darwin
+    import FantasticFile
     import FantasticJSON
     import FantasticKernel
     import Foundation
@@ -39,13 +45,7 @@
         private let lock = NSLock()
         private var sessions: [AgentId: PtySession] = [:]
 
-        public var readme: String? {
-            """
-            terminal_backend — PTY shell session as an agent. One PTY per agent; process-memory state only.
-            Verbs: reflect, boot, write, ack, paste_image, shell, resize, output, restart, signal, stop. Output streams to this agent's own inbox as {type:"output", data} (a client watches it); {type:"closed"} when the child exits.
-            paste_image rides the BINARY channel: header {type:"paste_image", mime?} + blob = the image bytes (raw, never base64; 5 MB cap). Saves the image to a scratch file and types its path + a space into the PTY. Returns {path, bytes}.
-            """
-        }
+        public var readme: String? { Self.readmeText }
 
         public func handle(
             agentId: AgentId,
@@ -61,62 +61,68 @@
             case "boot":
                 // Python `_boot`: spawn if not running, clear stale flow-control
                 // state so a freshly-mounted streamer starts clean.
-                if let err = spawn(agent: agent, kernel: kernel) { return err }
-                sessionFor(agent.id)?.clearFlowControl()
+                try spawn(agent: agent, kernel: kernel)
+                sessionFor(agent.id)?.clearFlowControl(kernel: kernel)
                 return .object(["running": .bool(true)])
             case "write":
                 guard let session = sessionFor(agent.id) else { return notRunning }
-                let data = payload["data"].asString ?? ""
-                let written = await session.writeAll(Data(data.utf8))
-                return .object(["written": .integer(Int64(written))])
+                // Python writes `data.encode("utf-8")`: a non-str has no
+                // `.encode`, and the AttributeError fails the dispatch.
+                let raw = payload.asObject?["data"] ?? .string("")
+                guard case .string(let data) = raw else { throw noEncode(raw) }
+                switch await session.writeAll(Data(data.utf8)) {
+                case .ok(let written): return .object(["written": .integer(Int64(written))])
+                case .failed(let code): return .object(["error": .string(osErrorStr(code))])
+                }
             case "ack":
                 guard let session = sessionFor(agent.id) else { return notRunning }
-                let (unacked, paused) = session.ack(chars: pyInt(payload["chars"]) ?? 0)
-                return .object(["unacked": .integer(Int64(unacked)), "paused": .bool(paused)])
+                let chars = try pyInt(payload.asObject?["chars"] ?? .integer(0))
+                let (unacked, paused) = session.ack(chars: chars, kernel: kernel)
+                return .object([
+                    "unacked": .integer(Int64(unacked)), "paused": .bool(paused),
+                ])
             case "paste_image":
                 // The image is the blob of a binary frame; the text channel carries
                 // no bytes, and python says exactly this about a `data` that is not.
                 guard sessionFor(agent.id) != nil else { return notRunning }
                 return .object(["error": .string("paste_image: data must be bytes")])
             case "shell":
-                return await shellVerb(agent: agent, payload: payload, kernel: kernel)
+                return try await shellVerb(agent: agent, payload: payload, kernel: kernel)
             case "resize":
                 guard let session = sessionFor(agent.id) else { return notRunning }
-                let cols = pyInt(payload["cols"]) ?? DEFAULT_COLS
-                let rows = pyInt(payload["rows"]) ?? DEFAULT_ROWS
-                session.resize(cols: cols, rows: rows)
+                let cols = try pyInt(payload.asObject?["cols"] ?? .integer(Int64(DEFAULT_COLS)))
+                let rows = try pyInt(payload.asObject?["rows"] ?? .integer(Int64(DEFAULT_ROWS)))
+                // Python stores FIRST and only then packs the winsize — an
+                // out-of-range pack raises with the new cols/rows already kept.
+                try session.resize(cols: cols, rows: rows)
                 return .object([
-                    "resized": .bool(true), "cols": .integer(Int64(cols)), "rows": .integer(Int64(rows)),
+                    "resized": .bool(true), "cols": .integer(Int64(cols)),
+                    "rows": .integer(Int64(rows)),
                 ])
             case "output":
-                let maxBytes = pyInt(payload["max_bytes"]) ?? MAX_SCROLLBACK
-                var text = sessionFor(agent.id)?.scrollbackText() ?? ""
-                if maxBytes < text.utf8.count {
-                    // Python slices CODE POINTS: `text[-max_bytes:]`.
-                    text = String(String.UnicodeScalarView(text.unicodeScalars.suffix(maxBytes)))
-                }
-                return .object(["output": .string(text)])
+                let maxBytes = try pyInt(
+                    payload.asObject?["max_bytes"] ?? .integer(Int64(MAX_SCROLLBACK)))
+                let text = sessionFor(agent.id)?.scrollbackText() ?? ""
+                return .object(["output": .string(pySliceTail(text, maxBytes))])
             case "restart":
                 cleanup(agentId: agent.id)
-                if let err = spawn(agent: agent, kernel: kernel) { return err }
+                try spawn(agent: agent, kernel: kernel)
                 return .object(["restarted": .bool(true)])
             case "signal":
                 guard let session = sessionFor(agent.id) else { return notRunning }
-                let sig = pyInt(payload["signal"]) ?? Int(SIGINT)
-                if kill(session.pid, Int32(sig)) != 0 {
-                    return .object(["error": .string(osError())])
+                let sig = try pyInt(payload.asObject?["signal"] ?? .integer(Int64(SIGINT)))
+                // `os.kill(pid, signal)` takes a Py_ssize_t and CASTS it to int:
+                // an out-of-int value wraps here exactly as it does there.
+                if kill(session.pid, Int32(truncatingIfNeeded: sig)) != 0 {
+                    return .object(["error": .string(osErrorStr(errno))])
                 }
                 return .object(["signal": .integer(Int64(sig))])
             case "stop":
                 cleanup(agentId: agent.id)
                 return .object(["stopped": .bool(true)])
-            case "shutdown":
-                // A lifecycle no-op; the PTY dies in `onShutdown`/`onDelete`.
-                return .null
             default:
                 let t = payload["type"]
-                let r = t == .null ? "None" : t.asString.map(pyRepr) ?? t.serialize()
-                return .object(["error": .string("terminal: unknown type \(r)")])
+                return .object(["error": .string("terminal: unknown type \(pyRepr(t))")])
             }
         }
 
@@ -136,7 +142,7 @@
             guard kernel.agent(agentId) != nil else {
                 return (.object(["error": .string("no agent")]), Data())
             }
-            return (await pasteImage(agentId: agentId, header: header, blob: blob), Data())
+            return (try await pasteImage(agentId: agentId, header: header, blob: blob), Data())
         }
 
         public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
@@ -152,13 +158,27 @@
 
         private var notRunning: JSON { .object(["error": .string("not running")]) }
 
+        /// Python `'<t>' object has no attribute 'encode'`.
+        private func noEncode(_ v: JSON) -> PyError {
+            PyError("AttributeError", "'\(pyTypeName(v))' object has no attribute 'encode'")
+        }
+
         /// Python `_reflect`: identity + live PTY state.
         private func reflectVerb(agent: Agent) -> JSON {
             let s = sessionFor(agent.id)
-            let command =
-                s?.cmd ?? agent.metaValue(forKey: "command")?.asString ?? detectShell()
-            let cols = s?.cols ?? pyInt(agent.metaValue(forKey: "cols") ?? .null) ?? DEFAULT_COLS
-            let rows = s?.rows ?? pyInt(agent.metaValue(forKey: "rows") ?? .null) ?? DEFAULT_ROWS
+            // `(state or {}).get("cmd") or rec.get("command") or _detect_shell()`
+            // — truthiness at every step, not key presence.
+            var command = s?.cmd ?? ""
+            if command.isEmpty { command = agent.metaValue(forKey: "command")?.asString ?? "" }
+            if command.isEmpty { command = detectShell() }
+            // Stopped, the record's value is returned RAW: python neither
+            // `int()`s it nor falls back on a falsy one.
+            let cols =
+                s.map { JSON.integer(Int64($0.cols)) }
+                ?? agent.metaValue(forKey: "cols") ?? .integer(Int64(DEFAULT_COLS))
+            let rows =
+                s.map { JSON.integer(Int64($0.rows)) }
+                ?? agent.metaValue(forKey: "rows") ?? .integer(Int64(DEFAULT_ROWS))
             let flow = s?.flowSnapshot() ?? (unacked: 0, paused: false, scrollbackBytes: 0)
             return [
                 "id": .string(agent.id.value),
@@ -166,8 +186,8 @@
                 "command": .string(command),
                 "running": .bool(s != nil),
                 "pid": s.map { .integer(Int64($0.pid)) } ?? .null,
-                "cols": .integer(Int64(cols)),
-                "rows": .integer(Int64(rows)),
+                "cols": cols,
+                "rows": rows,
                 "scrollback_bytes": .integer(Int64(flow.scrollbackBytes)),
                 "paused": .bool(flow.paused),
                 "unacked": .integer(Int64(flow.unacked)),
@@ -192,55 +212,65 @@
         }
 
         /// Python `_spawn`: no-op when running; else fork the PTY child from the
-        /// record (`command`, `args`, `cwd`, `cols`, `rows`). Returns the error
-        /// reply when the fork itself fails.
-        private func spawn(agent: Agent, kernel: Kernel) -> JSON? {
-            if sessionFor(agent.id) != nil { return nil }
-            let cmd = agent.metaValue(forKey: "command")?.asString ?? detectShell()
+        /// record (`command`, `args`, `cwd`, `cols`, `rows` — each read with
+        /// python's `or` truthiness, not key presence). A fork failure RAISES,
+        /// and so does an out-of-ushort winsize (after the child exists).
+        private func spawn(agent: Agent, kernel: Kernel) throws {
+            if sessionFor(agent.id) != nil { return }
+            let cmd = truthyString(agent.metaValue(forKey: "command")) ?? detectShell()
             let args = (agent.metaValue(forKey: "args")?.asArray ?? []).compactMap { $0.asString }
-            let cwd = agent.metaValue(forKey: "cwd")?.asString ?? FileManager.default.currentDirectoryPath
-            let cols = pyInt(agent.metaValue(forKey: "cols") ?? .null) ?? DEFAULT_COLS
-            let rows = pyInt(agent.metaValue(forKey: "rows") ?? .null) ?? DEFAULT_ROWS
-            do {
-                let session = try PtySession.start(
-                    cmd: cmd, args: args, cwd: cwd, cols: cols, rows: rows,
-                    agentId: agent.id, kernel: kernel)
-                // EOF on the master: python detaches, emits `closed`, cleans up.
-                session.onExit = { [weak self] in self?.cleanup(agentId: agent.id) }
-                lock.lock()
-                sessions[agent.id] = session
-                lock.unlock()
-                return nil
-            } catch {
-                return .object(["error": .string("\(error)"), "reason": .string("pty_failed")])
-            }
+            let cwd =
+                truthyString(agent.metaValue(forKey: "cwd"))
+                ?? FileManager.default.currentDirectoryPath
+            let cols = try pyIntOr(agent.metaValue(forKey: "cols") ?? .null, DEFAULT_COLS)
+            let rows = try pyIntOr(agent.metaValue(forKey: "rows") ?? .null, DEFAULT_ROWS)
+            let session = try PtySession.start(
+                cmd: cmd, args: args, cwd: cwd, cols: cols, rows: rows,
+                agentId: agent.id, kernel: kernel)
+            // EOF on the master: python detaches, emits `closed`, cleans up.
+            session.onExit = { [weak self] in self?.cleanup(agentId: agent.id) }
+            lock.lock()
+            sessions[agent.id] = session
+            lock.unlock()
+            session.attachReader(kernel: kernel)
+        }
+
+        /// `rec.get(k) or <default>` — a missing key, a null and an empty string
+        /// all fall through.
+        private func truthyString(_ v: JSON?) -> String? {
+            guard let v, pyTruthy(v), case .string(let s) = v else { return nil }
+            return s
         }
 
         /// Python `_shell`: run one command line and collect its output from the
         /// scrollback, delimited by a done-token the shell prints after it.
-        private func shellVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
+        private func shellVerb(agent: Agent, payload: JSON, kernel: Kernel) async throws -> JSON {
             guard let session = sessionFor(agent.id) else {
                 return .object(["error": .string("shell: not running; call boot first")])
             }
-            let cmd = payload["cmd"].asString ?? ""
-            if cmd.isEmpty { return .object(["error": .string("shell: cmd required")]) }
-            let timeout = payload["timeout"].asDouble ?? payload["timeout"].asInt.map(Double.init) ?? 30.0
+            // `cmd` is tested for TRUTH and then interpolated with `str()`; the
+            // reply echoes the value as it arrived.
+            let cmd = payload.asObject?["cmd"] ?? .string("")
+            if !pyTruthy(cmd) { return .object(["error": .string("shell: cmd required")]) }
+            let timeout = try pyFloat(payload.asObject?["timeout"] ?? .double(30.0))
             // `shell` drains via scrollback, not the emit stream — it can't be left
             // at the mercy of a streamer's stale flow-control pause (a detached
             // reader means the done-token never lands → timeout). Clear on the
             // way in, and again on the way out so this call's own output doesn't
             // strand the reader paused for the next streamer.
-            session.clearFlowControl()
+            session.clearFlowControl(kernel: kernel)
             let token = "__DONE_\(hexToken(8))__"
             let waiter = session.addToken(token)
             defer {
                 session.removeToken(token)
-                session.clearFlowControl()
+                session.clearFlowControl(kernel: kernel)
             }
             let before = Array(session.scrollbackText().unicodeScalars)
-            let line = "\(cmd); printf '\\n%s\\n' '\(token)'\n"
-            _ = await session.writeAll(Data(line.utf8))
-            var completed = await waiter.wait(seconds: timeout)
+            let line = "\(pyStr(cmd)); printf '\\n%s\\n' '\(token)'\n"
+            if case .failed(let code) = await session.writeAll(Data(line.utf8)) {
+                return .object(["error": .string(osErrorStr(code))])
+            }
+            let completed = await waiter.wait(seconds: timeout)
             if !completed {
                 // Still running — Ctrl-C so the PTY shell is ready for the next
                 // call; then a brief grace for a token that was already printing.
@@ -255,7 +285,8 @@
             // `'`) and as printf's output (followed by a newline). Match the
             // second and slice before it, back to the printf's leading newline.
             var output = delta
-            let tokIdx = find(Array((token + "\r\n").unicodeScalars), in: delta)
+            let tokIdx =
+                find(Array((token + "\r\n").unicodeScalars), in: delta)
                 ?? find(Array((token + "\n").unicodeScalars), in: delta)
             if let tokIdx {
                 let lineStart = delta[..<tokIdx].lastIndex(of: "\n")
@@ -265,42 +296,46 @@
             let text = String(String.UnicodeScalarView(output))
             if !completed {
                 return .object([
-                    "cmd": .string(cmd), "output": .string(text),
+                    "cmd": cmd, "output": .string(text),
                     "completed": .bool(false), "error": .string("timeout"),
                 ])
             }
-            return .object(["cmd": .string(cmd), "output": .string(text), "completed": .bool(true)])
+            return .object(["cmd": cmd, "output": .string(text), "completed": .bool(true)])
         }
 
         /// Binary-channel `paste_image` (python `_paste_image`): save the blob to
         /// a per-session scratch file and type its absolute path + one trailing
         /// space into the PTY — no newline, so pasting an image never submits.
-        private func pasteImage(agentId: AgentId, header: JSON, blob: Data) async -> JSON {
+        private func pasteImage(agentId: AgentId, header: JSON, blob: Data) async throws -> JSON {
             guard let session = sessionFor(agentId) else { return notRunning }
             if blob.count > MAX_PASTE_IMAGE {
                 return .object([
                     "error": .string("paste_image: \(blob.count) bytes exceeds the 5 MB cap")
                 ])
             }
-            let mime = (header["mime"].asString ?? "image/png").lowercased()
+            // `(payload.get("mime") or "image/png").lower()` — an empty mime is
+            // png, not an unsupported type.
+            let raw = header.asObject?["mime"] ?? .null
+            let mime = (pyTruthy(raw) ? pyStr(raw) : "image/png").lowercased()
             guard let ext = IMAGE_EXT[mime] else {
                 return .object([
                     "error": .string("paste_image: unsupported image type \(pyRepr(mime))")
                 ])
             }
-            let dir: String
+            // `mkdtemp` failure RAISES in python — it is not part of the reply.
+            let dir = try session.pasteDirectory(agentId: agentId)
+            let name = "paste_\(hexToken(4)).\(ext)"
             do {
-                dir = try session.pasteDirectory(agentId: agentId)
+                // The scratch dir is a system temp dir (outside cwd by design) —
+                // written through `fs`'s EXTERNAL surface, the one disk module.
+                _ = try fsWriteChunk(dir, name, blob, offset: 0, truncate: true, base: "/")
             } catch {
-                return .object(["error": .string("\(error)")])
+                return .object(["error": .string(error.message)])
             }
-            let path = (dir as NSString).appendingPathComponent("paste_\(hexToken(4)).\(ext)")
-            do {
-                try blob.write(to: URL(fileURLWithPath: path))
-            } catch {
-                return .object(["error": .string("\(error)")])
+            let path = dir + "/" + name
+            if case .failed(let code) = await session.writeAll(Data((path + " ").utf8)) {
+                return .object(["error": .string(osErrorStr(code))])
             }
-            _ = await session.writeAll(Data((path + " ").utf8))
             return .object(["path": .string(path), "bytes": .integer(Int64(blob.count))])
         }
 
@@ -318,6 +353,19 @@
             defer { lock.unlock() }
             return sessions[id]
         }
+
+        /// Python `readme.md`, byte for byte.
+        static let readmeText = """
+            # terminal_backend — PTY shell
+            Verb: shell (`cmd`) runs a command in a persistent PTY, streams token/done. Per-agent interrupt/stop. One persistent PTY **session per agent** — a session is exclusive (it carries one process + its scrollback; it is not shared or multiplexed), so a client owns the backend it attaches to. The process running in the PTY (e.g. `claude`) reaches the kernel via `fantastic` CLI one-shots or the web surface.
+
+            Streaming output is flow-controlled (VSCode's terminal model, ported): the PTY reader detaches once >100K emitted chars sit unacked and re-attaches once a consumer's `ack` verb drains the backlog — real backpressure so a flood can't lock up a tab. `write` is looped + per-agent serialized so large pastes land whole and bracketed-paste sequences can't interleave. `shell` is exempt (drains via scrollback).
+
+            `paste_image` (data:bytes, mime?) saves a pasted image to a per-agent scratch file and types its path into the PTY — bridges image paste for a CLI like `claude` running under the PTY (the backend can't reach a client's clipboard; path injection mimics a file drag-drop). png/jpeg/gif/webp, ≤5 MB.
+
+            PTY output is decoded with a per-session incremental UTF-8 decoder, so a multi-byte char split across an `os.read` chunk boundary is reassembled — no replacement-char (`<?>`) litter or column-shift line breaks on resize (node-pty's behaviour, ported).
+
+            """
     }
 
     // MARK: - helpers
@@ -332,6 +380,18 @@
     /// Per-image cap (python `MAX_PASTE_IMAGE`).
     private let MAX_PASTE_IMAGE = 5 * 1024 * 1024
 
+    /// Python `text[-n:]` over CODE POINTS, guarded by `if n < len(utf8)`:
+    /// `n == 0` keeps the whole text (`text[0:]`), a negative `n` DROPS that many
+    /// leading code points, and neither traps.
+    func pySliceTail(_ text: String, _ maxBytes: Int) -> String {
+        guard maxBytes < text.utf8.count else { return text }
+        let scalars = text.unicodeScalars
+        if maxBytes > 0 {
+            return String(String.UnicodeScalarView(scalars.suffix(maxBytes)))
+        }
+        return String(String.UnicodeScalarView(scalars.dropFirst(-maxBytes)))
+    }
+
     /// Python `secrets.token_hex(n)`: 2n hex chars.
     private func hexToken(_ n: Int) -> String {
         (0..<n).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
@@ -341,43 +401,15 @@
     /// zsh/bash/sh, else `/bin/sh`.
     func detectShell() -> String {
         let fm = FileManager.default
-        if let sh = ProcessInfo.processInfo.environment["SHELL"], !sh.isEmpty, fm.fileExists(atPath: sh) {
+        if let sh = ProcessInfo.processInfo.environment["SHELL"], !sh.isEmpty,
+            fm.fileExists(atPath: sh)
+        {
             return sh
         }
         for cand in ["/bin/zsh", "/bin/bash", "/bin/sh"] where fm.fileExists(atPath: cand) {
             return cand
         }
         return "/bin/sh"
-    }
-
-    /// Python's `int(x)` of a payload field: an int, a float's integer part, a
-    /// numeric string; anything else is nil (the caller's default applies).
-    private func pyInt(_ v: JSON) -> Int? {
-        switch v {
-        case .integer(let i): return Int(i)
-        case .double(let d): return Int(d)
-        case .bool(let b): return b ? 1 : 0
-        case .string(let s): return Int(s.trimmingCharacters(in: .whitespacesAndNewlines))
-        default: return nil
-        }
-    }
-
-    /// Python's `str(OSError)`: `[Errno 3] No such process`.
-    private func osError() -> String {
-        let e = errno
-        return "[Errno \(e)] \(String(cString: strerror(e)))"
-    }
-
-    /// Python's `repr` of a str.
-    private func pyRepr(_ s: String) -> String {
-        let q: Character = (s.contains("'") && !s.contains("\"")) ? "\"" : "'"
-        var out = String(q)
-        for c in s {
-            if c == "\\" { out += "\\\\" } else if c == q { out += "\\" + String(q) }
-            else if c == "\n" { out += "\\n" } else { out.append(c) }
-        }
-        out.append(q)
-        return out
     }
 
     /// First index of `needle` in `hay` (python `str.find`).
@@ -387,6 +419,26 @@
             if Array(hay[i..<(i + needle.count)]) == needle { return i }
         }
         return nil
+    }
+
+    /// `struct.pack("HHHH", rows, cols, 0, 0)` — CPython's `np_ushort` range
+    /// check, which is what a resize to 70000 columns actually hits. `struct`'s
+    /// exception class is named `error`, so python stamps `error: …`.
+    func packWinsize(cols: Int, rows: Int) throws(PyError) -> winsize {
+        for n in [rows, cols] {
+            if n < 0 { throw PyError("error", "argument out of range") }
+            if n > 65535 {
+                throw PyError("error", "ushort format requires 0 <= number <= 65535")
+            }
+        }
+        return winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+    }
+
+    /// The outcome of a full PTY write: python's `{written:int}` or the `OSError`
+    /// it lets `_write` / `_paste_image` / `_shell` turn into `{error}`.
+    enum WriteOutcome {
+        case ok(Int)
+        case failed(Int32)
     }
 
     /// One done-token a `shell` call is waiting on (python's `asyncio.Event`).
@@ -434,6 +486,39 @@
         }
     }
 
+    /// The body of python's `_hold()`: a task that lives until it is cancelled,
+    /// so the reader attachment is WORK the kernel can see in `ps` and kill.
+    final class ReaderHolder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var released = false
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func park() async {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                    lock.lock()
+                    if released {
+                        lock.unlock()
+                        return c.resume()
+                    }
+                    continuation = c
+                    lock.unlock()
+                }
+            } onCancel: {
+                release()
+            }
+        }
+
+        func release() {
+            lock.lock()
+            released = true
+            let c = continuation
+            continuation = nil
+            lock.unlock()
+            c?.resume()
+        }
+    }
+
     // MARK: - PtySession
 
     /// Python's per-agent `_procs[id]` state, plus the reader thread.
@@ -463,6 +548,11 @@
         private var pendingBytes: [UInt8] = []
         /// Lazily-minted scratch dir for pasted images (python `paste_dir`).
         private var pasteDir: String?
+        /// ONE ordered consumer for the inbox events: python hands each emit to
+        /// the loop in read order, so `output` chunks — and the final `closed` —
+        /// arrive in the order the PTY produced them. A `Task` per chunk does
+        /// not: independent tasks interleave, and a burst arrives shuffled.
+        private let events: AsyncStream<JSON>.Continuation
         /// The bundle's hook for EOF (python's `_cleanup` from `_on_readable`).
         var onExit: (() -> Void)?
 
@@ -477,37 +567,48 @@
             self.rows = rows
             self.agentId = agentId
             self.kernel = kernel
+            let (stream, continuation) = AsyncStream<JSON>.makeStream(
+                bufferingPolicy: .unbounded)
+            self.events = continuation
+            Task { [agentId, weak kernel] in
+                for await event in stream {
+                    guard let kernel else { return }
+                    await kernel.emit(agentId, event)
+                }
+            }
             readQueue.async { [weak self] in self?.readLoop() }
         }
 
-        /// Python `_spawn`'s fork: `forkpty` + `execve` of the resolved command
-        /// with `TERM=xterm-256color`, in `cwd`. Everything the child needs is
-        /// built BEFORE the fork — only async-signal-safe calls run after it.
+        /// Python `_spawn`'s fork: `pty.fork()` and then `_execvpe` of the
+        /// command in `cwd` with `TERM=xterm-256color`. Everything the child
+        /// needs is built BEFORE the fork — only async-signal-safe calls after.
         static func start(
             cmd: String, args: [String], cwd: String, cols: Int, rows: Int,
             agentId: AgentId, kernel: Kernel
-        ) throws -> PtySession {
-            let path = resolve(cmd)
+        ) throws(PyError) -> PtySession {
+            // `_execvpe`: a command with a `/` is execed as written and its
+            // failure names the STRING; a bare one walks PATH and the exception
+            // names the failing candidate as BYTES.
+            let candidates: [(path: String, display: String)] =
+                cmd.contains("/")
+                ? [(cmd, pyRepr(cmd))]
+                : execPath().map { ("\($0)/\(cmd)", "b" + pyRepr("\($0)/\(cmd)")) }
             var env = ProcessInfo.processInfo.environment
             env["TERM"] = "xterm-256color"
             let argv: [UnsafeMutablePointer<CChar>?] = ([cmd] + args).map { strdup($0) } + [nil]
-            let envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
+            let envp: [UnsafeMutablePointer<CChar>?] =
+                env.map { strdup("\($0.key)=\($0.value)") } + [nil]
             let cwdC = strdup(cwd)
-            let pathC = strdup(path)
+            let pathC = candidates.map { strdup($0.path) }
             defer {
                 argv.forEach { free($0) }
                 envp.forEach { free($0) }
                 free(cwdC)
-                free(pathC)
+                pathC.forEach { free($0) }
             }
             var master: Int32 = 0
-            var winsize = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
-            let pid = forkpty(&master, nil, nil, &winsize)
-            if pid < 0 {
-                throw NSError(
-                    domain: "forkpty", code: Int(errno),
-                    userInfo: [NSLocalizedDescriptionKey: "forkpty failed"])
-            }
+            let pid = forkpty(&master, nil, nil, nil)
+            if pid < 0 { throw pyOSError(errno) }
             if pid == 0 {
                 // Child: stdin/out/err are the slave already. Every OTHER fd of
                 // the kernel process — sockets, other sessions' masters, an
@@ -522,28 +623,53 @@
                 _ = chdir(cwdC)
                 var a = argv
                 var e = envp
-                execve(pathC, &a, &e)
-                let msg = "\(cmd): [Errno \(errno)] \(String(cString: strerror(errno)))\r\n"
+                // `_execvpe` skips ENOENT/ENOTDIR candidates, raises the FIRST
+                // other failure if there was one, else the LAST.
+                var savedErrno: Int32 = 0
+                var savedIdx = 0
+                var lastErrno: Int32 = ENOENT
+                var lastIdx = 0
+                for (i, p) in pathC.enumerated() {
+                    execve(p, &a, &e)
+                    lastErrno = errno
+                    lastIdx = i
+                    if errno != ENOENT && errno != ENOTDIR && savedErrno == 0 {
+                        savedErrno = errno
+                        savedIdx = i
+                    }
+                }
+                let code = savedErrno != 0 ? savedErrno : lastErrno
+                let idx = savedErrno != 0 ? savedIdx : lastIdx
+                let blame = idx < candidates.count ? candidates[idx].display : pyRepr(cmd)
+                let msg = "\(cmd): \(osErrorStr(code)): \(blame)\r\n"
                 _ = msg.withCString { Darwin.write(2, $0, strlen($0)) }
                 _exit(127)
             }
+            // Python sets the winsize AFTER the fork: an out-of-ushort size
+            // raises with the child already alive.
+            var ws = try packWinsize(cols: cols, rows: rows)
+            _ = ioctl(master, TIOCSWINSZ, &ws)
             return PtySession(
                 pid: pid, masterFd: master, cmd: cmd, cols: cols, rows: rows, agentId: agentId,
                 kernel: kernel)
         }
 
-        /// `execvpe`'s PATH search, done in the parent.
-        private static func resolve(_ cmd: String) -> String {
-            if cmd.contains("/") { return cmd }
-            let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
-            for dir in path.split(separator: ":") {
-                let cand = "\(dir)/\(cmd)"
-                if FileManager.default.isExecutableFile(atPath: cand) { return cand }
-            }
-            return cmd
+        /// `os.get_exec_path(env)` — `PATH`, or `os.defpath` when it is unset.
+        private static func execPath() -> [String] {
+            let path = ProcessInfo.processInfo.environment["PATH"] ?? ":/bin:/usr/bin"
+            return path.components(separatedBy: ":")
         }
 
         // ── the reader (python `_on_readable`) ──
+
+        /// Python `_attach_reader`: the fd callback is the flow-control design,
+        /// but the ATTACHMENT is registered as this agent's work — a PTY
+        /// streaming into a kernel that appears in no `ps` row cannot be found
+        /// or cancelled. One holder per (re)attach, python's lifecycle included.
+        func attachReader(kernel: Kernel) {
+            let holder = ReaderHolder()
+            kernel.spawnTask(agent: agentId, verb: "pty_reader") { await holder.park() }
+        }
 
         private func readLoop() {
             var buffer = [UInt8](repeating: 0, count: 4096)
@@ -562,14 +688,17 @@
                     state.lock()
                     let wasStopped = stopped
                     state.unlock()
-                    if !wasStopped, let kernel = kernel {
-                        Task { [agentId] in await kernel.emit(agentId, .object(["type": .string("closed")])) }
+                    if !wasStopped {
+                        events.yield(.object(["type": .string("closed")]))
                         onExit?()
                     }
                     return
                 }
+                // EVERY non-empty read emits, even when the bytes are the first
+                // half of one char and decode to `''` — python's `_on_readable`
+                // has no empty-text guard, and a consumer counting events sees
+                // the same count here.
                 let text = decode(Array(buffer.prefix(n)))
-                if text.isEmpty { continue }
                 state.lock()
                 appendScrollback(text)
                 // Signal any pending done-token: `<token>\r\n` (printf's output),
@@ -589,11 +718,7 @@
                 if pendingTokens.isEmpty && !paused && unacked > HIGH_WATERMARK { paused = true }
                 state.unlock()
                 fire.forEach { $0.fire() }
-                if let kernel = kernel {
-                    Task { [agentId, text] in
-                        await kernel.emit(agentId, .object(["type": .string("output"), "data": .string(text)]))
-                    }
-                }
+                events.yield(.object(["type": .string("output"), "data": .string(text)]))
             }
         }
 
@@ -614,7 +739,10 @@
                     continue
                 }
                 let need = b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1
-                if need > held + 1 { pendingBytes = Array(bytes[i...]); bytes = Array(bytes[..<i]) }
+                if need > held + 1 {
+                    pendingBytes = Array(bytes[i...])
+                    bytes = Array(bytes[..<i])
+                }
                 break
             }
             return String(decoding: bytes, as: UTF8.self)
@@ -642,26 +770,33 @@
         }
 
         /// Python `_ack`.
-        func ack(chars: Int) -> (unacked: Int, paused: Bool) {
+        func ack(chars: Int, kernel: Kernel) -> (unacked: Int, paused: Bool) {
             state.lock()
-            defer { state.unlock() }
             unacked = max(0, unacked - chars)
+            var resumed = false
             if paused && unacked < LOW_WATERMARK {
                 paused = false
+                resumed = true
                 state.broadcast()
             }
-            return (unacked, paused)
+            let snapshot = (unacked, paused)
+            state.unlock()
+            if resumed { attachReader(kernel: kernel) }
+            return snapshot
         }
 
         /// Python `_clear_flow_control`: reset the accounting, resume the reader.
-        func clearFlowControl() {
+        func clearFlowControl(kernel: Kernel) {
             state.lock()
-            defer { state.unlock() }
             unacked = 0
+            var resumed = false
             if paused {
                 paused = false
+                resumed = true
                 state.broadcast()
             }
+            state.unlock()
+            if resumed { attachReader(kernel: kernel) }
         }
 
         func addToken(_ token: String) -> TokenWaiter {
@@ -681,21 +816,30 @@
         // ── writes (python `_write_all` under `write_lock`) ──
 
         /// Write the FULL buffer, serialized per session: a short write is
-        /// retried from where it stopped, a full PTY input queue is waited out.
-        func writeAll(_ data: Data) async -> Int {
-            await withCheckedContinuation { (c: CheckedContinuation<Int, Never>) in
+        /// retried from where it stopped, a full PTY input queue is waited out,
+        /// and any OTHER error is the `OSError` python reports as `{error}`.
+        func writeAll(_ data: Data) async -> WriteOutcome {
+            await withCheckedContinuation { (c: CheckedContinuation<WriteOutcome, Never>) in
                 writeQueue.async { [self] in
                     let fd = fdForWrite()
-                    guard fd >= 0 else { return c.resume(returning: 0) }
+                    guard fd >= 0 else { return c.resume(returning: .failed(EBADF)) }
                     var written = 0
+                    var failure: Int32 = 0
                     data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
                         guard let base = raw.baseAddress else { return }
                         while written < data.count {
                             let n = Darwin.write(fd, base + written, data.count - written)
-                            if n > 0 { written += n } else if n < 0 && errno == EAGAIN { usleep(1000) } else { break }
+                            if n > 0 {
+                                written += n
+                            } else if n < 0 && errno == EAGAIN {
+                                usleep(1000)
+                            } else {
+                                failure = n < 0 ? errno : EIO
+                                return
+                            }
                         }
                     }
-                    c.resume(returning: written)
+                    c.resume(returning: failure == 0 ? .ok(written) : .failed(failure))
                 }
             }
         }
@@ -715,25 +859,27 @@
             return stopped ? -1 : masterFd
         }
 
-        func resize(cols: Int, rows: Int) {
+        /// Python `_resize`: the new size is STORED first, then packed — a pack
+        /// that raises leaves the stored size changed and the ioctl unmade.
+        func resize(cols: Int, rows: Int) throws(PyError) {
             state.lock()
             self.cols = cols
             self.rows = rows
             let fd = masterFd
             state.unlock()
-            var winsize = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
-            _ = ioctl(fd, TIOCSWINSZ, &winsize)
+            var ws = try packWinsize(cols: cols, rows: rows)
+            _ = ioctl(fd, TIOCSWINSZ, &ws)
         }
 
         /// Scratch dir for pasted images, created on first use — most sessions
         /// never paste, so no temp dir is minted per spawn (python `mkdtemp`).
-        func pasteDirectory(agentId: AgentId) throws -> String {
+        func pasteDirectory(agentId: AgentId) throws(PyError) -> String {
             state.lock()
             defer { state.unlock() }
             if let dir = pasteDir { return dir }
             let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
                 "fantastic_paste_\(agentId.value)_\(hexToken(4))")
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            if mkdir(dir, 0o700) != 0 { throw pyOSError(errno, dir) }
             pasteDir = dir
             return dir
         }
@@ -754,7 +900,6 @@
             masterFd = -1
             let dir = pasteDir
             pasteDir = nil
-            let waiters = Array(pendingTokens.values)
             pendingTokens = [:]
             state.broadcast()
             state.unlock()
@@ -762,10 +907,12 @@
             var status: Int32 = 0
             waitpid(pid, &status, 0)
             if fd >= 0 { close(fd) }
-            if let dir { try? FileManager.default.removeItem(atPath: dir) }
+            // The scratch dir goes with the session (python `fs.remove`,
+            // external surface, ignoring an already-gone dir).
+            if let dir { try? fsRemove(dir, "", recursive: true, base: "/") }
             // A `shell` waiting on a token of a dead session times out on its own;
-            // nothing to fire.
-            _ = waiters
+            // nothing to fire. The ordered consumer drains what is buffered.
+            events.finish()
         }
 
         deinit {

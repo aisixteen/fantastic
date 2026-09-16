@@ -7,15 +7,26 @@ license.workspace = true
 description = "Declarative YAML roster loader — hydrates the declared agents as operator at boot."
 
 [dependencies]
+# python-format helpers: repr/str/truthiness, python-canonical.
+fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 # The running-dir clamp: `fs` is the one disk surface, and the cold manifest
 # read is not exempt (python does the same — static_loader imports file_bridge.fs).
 fantastic-file = { path = "../fantastic-file" }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-serde_yaml = "0.9"
+# The manifest is read with PyYAML's semantics (YAML 1.1 plain scalars, `<<`
+# merge keys), which no Rust YAML crate implements: libyaml gives the EVENTS
+# (with each scalar's style) and `yaml.rs` applies PyYAML's resolver +
+# SafeConstructor to them. `regex` carries PyYAML's implicit-resolver patterns
+# verbatim.
+unsafe-libyaml = "0.2"
+regex = "1"
 
 [dev-dependencies]
+# The shared agentic corpus is TEST data (`contract/`), read by the agentic
+# runner — not a manifest, so it needs no PyYAML semantics.
+serde_yaml = "0.9"
 # The shared agentic corpus declares text_file memory agents.
 fantastic-text-file = { path = "../fantastic-text-file" }
 tempfile = "3"

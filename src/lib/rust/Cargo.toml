@@ -28,8 +28,6 @@ members = [
     "crates/bundles/fantastic-scenario-probes",
     "crates/bundles/fantastic-terminal-backend",
     "crates/bundles/fantastic-exec-bridge",
-    "crates/bundles/fantastic-proxy-agent",
-    "crates/bundles/fantastic-tools",
 ]
 
 [workspace.package]

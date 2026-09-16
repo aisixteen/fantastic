@@ -19,7 +19,7 @@ struct StartKernelInMemoryTests {
     @Test func registersDefaultBundleSet() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         // Spot-check key bundles are registered + dispatchable.
-        for hm in ["file_bridge.tools", "proxy_agent.tools", "tools.tools", "ollama_backend.tools"]
+        for hm in ["file_bridge.tools", "cli.tools", "text_file.tools", "ollama_backend.tools"]
         {
             let id = "probe_\(hm.replacingOccurrences(of: ".", with: "_"))"
             let r = await kernel.send([Item(AgentId("core"), .object([
@@ -73,7 +73,12 @@ struct StartKernelInMemoryTests {
                 "id": .string("ollama_nomodel"),
             ]))])[0].result
         let r = await kernel.send([Item(AgentId("ollama_nomodel"), .object(["type": .string("reflect")]))])[0].result
-        #expect(r["model"].isNull, "ollama must not guess a model default: \(r)")
+        // B1.24: python answers `rec.get("model", cfg.default_model)`, and that
+        // default is a fail-loud SENTINEL — it says whose choice the model is
+        // rather than naming one that reaches the network.
+        #expect(
+            r["model"].asString == "(no default — set the `model` meta)",
+            "ollama must not guess a model default: \(r)")
     }
 
     @Test func httpPortIsZeroPreListener() async throws {

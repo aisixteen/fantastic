@@ -48,7 +48,7 @@ func malformedCalls(_ text: String) -> [MalformedCall] {
         guard hit.call == nil else { return nil }
         return MalformedCall(
             error: "call NOT dispatched: \(hit.fault ?? ""). Nothing ran. \(HINT)",
-            envelope: String(OPEN),
+            envelope: String(String.UnicodeScalarView(OPEN)),
             // BOTH ENDS, never just the head — the fault in a long block is
             // almost never in the first 400 chars. Shown WHOLE, DEFANGED so
             // quoting it cannot arm the scanner again.
@@ -64,13 +64,34 @@ func malformedCalls(_ text: String) -> [MalformedCall] {
 /// error self-amplifying, each report seeding the next. Breaking the opener is
 /// enough.
 func defang(_ text: String) -> String {
-    var out = text
+    var out = Array(text.unicodeScalars)
     for tag in [OPEN, CLOSE, BYTES_OPEN, BYTES_CLOSE] {
-        let s = String(tag)
-        out = out.replacingOccurrences(
-            of: s,
-            with: s.replacingOccurrences(of: "<", with: "\u{2039}")
-                .replacingOccurrences(of: ">", with: "\u{203A}"))
+        let broken: [Unicode.Scalar] = tag.map {
+            $0 == "<" ? "\u{2039}" : ($0 == ">" ? "\u{203A}" : $0)
+        }
+        out = replaceScalars(out, tag, broken)
+    }
+    return String(String.UnicodeScalarView(out))
+}
+
+/// Every occurrence of `needle` in `hay`, replaced — on CODE POINTS.
+/// `String.replacingOccurrences` compares Characters under canonical
+/// equivalence, which is neither what python's `str.replace` does nor what the
+/// scanner reading this text back will see.
+private func replaceScalars(
+    _ hay: [Unicode.Scalar], _ needle: [Unicode.Scalar], _ with: [Unicode.Scalar]
+) -> [Unicode.Scalar] {
+    guard !needle.isEmpty else { return hay }
+    var out: [Unicode.Scalar] = []
+    var i = 0
+    while i < hay.count {
+        if matchesAt(hay, needle, i) {
+            out.append(contentsOf: with)
+            i += needle.count
+        } else {
+            out.append(hay[i])
+            i += 1
+        }
     }
     return out
 }

@@ -9,6 +9,7 @@
 import FantasticJSON
 import FantasticKernel
 import Foundation
+import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
@@ -26,13 +27,26 @@ private func readMark(_ backend: AIBackend, _ key: String) -> (Int, String)? {
 @Suite("AIBackend shared machinery")
 struct AIBackendTests {
 
-    @Test func reflectMergesExtraAndKeepsOrder() async throws {
+    // B1.23: PYTHON'S KEYS, IN PYTHON'S ORDER, then the backend's extras. No
+    // `kind`, no `provider` — python's reflect has neither, and this line is
+    // rendered into every prompt.
+    @Test func reflectBaseMatchesPythonKeysAndOrder() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
         let r = await kernel.send([Item(id, .object(["type": .string("reflect")]))])[0].result
+        // The kernel appends its own frame (can_call/callable_by/…) after the
+        // bundle's body; the BODY is what this pins.
+        #expect(
+            (r.asObject?.keys.prefix(12)).map(Array.init) == [
+                "id", "sentence", "model", "endpoint", "context_window", "context_strategy",
+                "verbs", "generating", "cancel", "emits", "concurrency", "extra",
+            ], "\(r.asObject?.keys.map { $0 } ?? [])")
         #expect(r["id"].asString == id.value)
-        #expect(r["kind"].asString == "mock_backend")
-        #expect(r["provider"].asString == "mock")
+        #expect(r["kind"].isNull && r["provider"].isNull)
+        #expect(r["model"].asString == "(no default — set the `model` meta)")
+        #expect(r["endpoint"].asString == "http://mock.invalid")
+        #expect(r["generating"] == .bool(false))
+        #expect(r["concurrency"].asString == CONCURRENCY_DOC)
         #expect(r["extra"].asString == "yes")
         // The verb map is python's `_build` table, first doc line each, in
         // its order — no per-backend wording, no `backend_state`, and `cancel`
@@ -48,6 +62,36 @@ struct AIBackendTests {
         #expect(r["verbs"]["send"].asString?.hasPrefix("args: text:str (req), client_id:str? (default 'cli').") == true)
         #expect(r["verbs"]["backend_state"].isNull && r["verbs"]["cancel"].isNull)
         #expect(r["cancel"].asString == CANCEL_DOC)
+    }
+
+    // B1.23: THREE channels, python's wording. `done` is NOT one of them —
+    // `status(phase='done')` IS the completion event.
+    @Test func reflectEmitsArePythonVerbatim() async throws {
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig { .provider(MockProvider()) })
+        let r = await kernel.send([Item(id, .object(["type": .string("reflect")]))])[0].result
+        #expect(r["emits"].asObject?.keys.elementsEqual(["token", "status", "context"]) == true)
+        #expect(
+            r["emits"]["token"].asString
+                == "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to "
+                + "the caller: cli (stdout) when client_id='cli', else this agent's own inbox "
+                + "(browser filters by client_id).")
+        #expect(r["emits"]["done"].isNull)
+    }
+
+    // B1.2: the cancel doc is python's, TAG notation included — the model reads
+    // it and copies the shape.
+    @Test func cancelDocIsPythonVerbatim() {
+        #expect(
+            CANCEL_DOC
+                == "No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with the "
+                + "substrate's universal system verbs: send 'kernel' <type>ps</type> for the "
+                + "live task table, find the row {agent:'<this agent>', verb:'send'}, then "
+                + "send 'kernel' <type>cancel</type> <task_id>n</task_id>. The turn closes "
+                + "with status(phase='done', reason='cancelled') + done, its HTTP stream and "
+                + "FIFO lock are released, and the blocked caller's `send` resolves to "
+                + "{cancelled:true}. Cancel kills the task's whole SUBTREE, so any work the "
+                + "turn spawned dies with it.")
     }
 
     @Test func backendStateIsNotAVerb() async throws {
@@ -241,8 +285,8 @@ struct AIBackendTests {
         // A reasoning model's turn arrives as ONE text stream with its
         // deliberation wrapped in `<think>…</think>` (the providers do the
         // wrapping; see `ThinkingWrap`). Two uses, two texts:
-        //   • the token/done events carry the RAW completion — `accumulated` is
-        //     contractually the concatenation of the deltas the client received;
+        //   • the `token` events carry the RAW completion — every `text` the
+        //     client received, concatenated, is exactly what the model wrote;
         //   • the DURABLE assistant turn is STRIPPED, because re-feeding a
         //     reasoning model its own prior thought is against every vendor's
         //     guidance and compounds turn over turn.
@@ -261,16 +305,16 @@ struct AIBackendTests {
                 "client_id": .string("c"),
             ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, count: 2)
-        try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
+        try await waitUntil("status(done)") { sink.statusDone() != nil }
 
-        // RAW on the wire — and equal to the deltas actually emitted.
+        // RAW on the wire — the `text` of every token event, in order.
         let raw = "<think>weigh options</think>42"
-        #expect(sink.first(type: "done")?["accumulated"].asString == raw)
         let deltas = sink.snapshot().filter { $0["type"].asString == "token" }
-            .compactMap { $0["delta"].asString }.joined()
+            .compactMap { $0["text"].asString }.joined()
         #expect(deltas == raw)
-        let lastToken = sink.snapshot().last { $0["type"].asString == "token" }
-        #expect(lastToken?["accumulated"].asString == raw)
+        // B2.15: `status(phase:'done')` IS the completion. There is no `done`
+        // event at all — two events for one transition is two truths.
+        #expect(sink.first(type: "done") == nil)
 
         // STRIPPED in the durable store.
         let msgs =
@@ -301,12 +345,15 @@ struct AIBackendTests {
                 "client_id": .string("c"),
             ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, count: 2)
-        try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
+        try await waitUntil("status(done)") { sink.statusDone() != nil }
 
-        let done = sink.first(type: "done")
-        #expect(done?["error"].asString == nil)
-        #expect(done?["accumulated"].asString == "<think>all of my turn</think>")
-        #expect(done?["accumulated"].asString?.isEmpty == false)
+        // The reasoning REACHED the caller as tokens, even though none of it is
+        // persisted: an entire turn of thought is not an empty completion.
+        let streamed = sink.snapshot().filter { $0["type"].asString == "token" }
+            .compactMap { $0["text"].asString }.joined()
+        #expect(streamed == "<think>all of my turn</think>")
+        #expect(sink.statusDone()?["detail"]["reason"].asString == "ok")
+        #expect(sink.first(type: "done") == nil)
 
         // The conversation keeps no deliberation — the turn persists empty
         // content, and that is the honest record of an answer-free turn.
@@ -373,15 +420,20 @@ struct AIBackendTests {
         #expect(c["cancelled"].asBool == true)
         #expect((c["killed"].asArray ?? []).contains(.integer(taskId)))
 
-        // The client's turn is CLOSED OUT — a terminal `done` lands even though
-        // the generation was killed mid-stream (aborting a task tells nobody).
-        try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
-        let done = sink.first(type: "done")
-        #expect(done?["client_id"].asString == "c")
-        #expect(done?["error"].asString == "cancelled")
-        let status = sink.snapshot().last { $0["type"].asString == "status" }
-        #expect(status?["phase"].asString == "done")
-        #expect(status?["detail"]["reason"].asString == "cancelled")
+        // The client's turn is CLOSED OUT — the terminal `status(done)` lands
+        // even though the generation was killed mid-stream (aborting a task
+        // tells nobody). B2.3: its detail carries `started_at`, the only thing
+        // that says how long the killed turn ran, and the keys are in python's
+        // order.
+        try await waitUntil("status(done)") { sink.statusDone() != nil }
+        let status = try #require(sink.statusDone())
+        #expect(status["client_id"].asString == "c")
+        #expect(status["detail"]["reason"].asString == "cancelled")
+        #expect(status["detail"]["started_at"].asDouble != nil)
+        #expect(
+            status["detail"].asObject.map { Array($0.keys) }
+                == ["reason", "send_id", "started_at", "queue_depth"])
+        #expect(sink.first(type: "done") == nil, "there is no `done` event")
 
         // No PHANTOM generation: the in-flight entry is gone, so `status` agrees
         // the agent is idle and the row has left the table.
@@ -783,5 +835,203 @@ struct AIBackendTests {
             mark?.0 == store.count,
             "the cursor is the store length, got \(String(describing: mark))")
         #expect(mark?.1 == "probe")
+    }
+
+    // ── the prompt the model reads (B1.1, B1.4, B1.9, B1.22) ─────
+
+    // B1.1: NO JSON on the model path. A list of scalars is comma-joined, and
+    // anything nested is the REPLY notation collapsed onto the line.
+    @Test func renderReflectMatchesPythonOne() {
+        let r: JSON = .object([
+            "sentence": .string("S"),
+            "a": .null,
+            "b": .array([.string("x"), .string("y")]),
+            "c": .object(["$self": .string("*")]),
+        ])
+        #expect(renderReflect(r) == "S  a=  b=x,y  c=<$self>*</$self>")
+        // A list of scalars uses python `str`, so a bool is `True`.
+        #expect(
+            renderReflect(
+                .object(["sentence": .string("S"), "t": .array([.bool(true), .integer(1)])]))
+                == "S  t=True,1")
+    }
+
+    // B1.4: the estimate counts `json.dumps(…)` in CODE POINTS — an em dash
+    // costs its six `\u2014` characters, not three.
+    @Test func estimateOneCountsPythonJsonDumps() {
+        #expect(
+            AIContext.estimateOne(.object(["role": .string("user"), "content": .string("a — b")]))
+                == 11)
+    }
+
+    // B5.6: the numeric context knobs parse EXACTLY as python's do.
+    @Test func budgetMetaParsesLikePython() async throws {
+        func agent(_ meta: OrderedCollections.OrderedDictionary<String, JSON>) async throws
+            -> Agent
+        {
+            let (kernel, ids, _) = await bootMockKernel(
+                config: baseConfig { .provider(MockProvider()) }, backendIds: ["mock"],
+                contextWindow: 131_072, meta: meta)
+            return kernel.agent(ids["mock"]!)!
+        }
+        // `int(0.5)` is 0, `"-5"` is not digits so the reserve is 1024, and
+        // `1000.0` clamps to 50.
+        let a = try await agent([
+            "context_window": .double(0.5), "output_reserve": .string("-5"),
+            "recent_n": .double(1000.0),
+        ])
+        #expect(AIContext.resolveContextWindow(a) == 0)
+        #expect(AIContext.outputReserve(a) == 1024)
+        #expect(AIContext.budget(a) == 256)
+        #expect(AIContext.recentN(a) == 50)
+        // `"+12"` is not `isdigit()`, so the window falls through to the default;
+        // `1000.0` is not an int, so the reserve is the default; `true` is 1.
+        let b = try await agent([
+            "context_window": .string("+12"), "output_reserve": .double(1000.0),
+            "recent_n": .bool(true),
+        ])
+        #expect(AIContext.resolveContextWindow(b) == 131_072)
+        #expect(AIContext.outputReserve(b) == 1024)
+        #expect(AIContext.budget(b) == 130_048)
+        #expect(AIContext.recentN(b) == 1)
+    }
+
+    // B1.9 + B1.22: the opt-in blocks read python TRUTHINESS, and the primer
+    // reflect goes to the `kernel` ALIAS (the root id differs per runtime).
+    @Test func primerReflectTargetsKernelAliasAndFlagsArePythonTruthy() async throws {
+        let cfg = baseConfig { .provider(MockProvider()) }
+        let (kernel, ids, _) = await bootMockKernel(
+            config: cfg, backendIds: ["mock"], meta: ["context_titles": .integer(1)])
+        let backend = buildAIBackend(cfg)
+        let agent = kernel.agent(ids["mock"]!)!
+        let prompt = await backend.assembleSystemPrompt(
+            agent: agent, systemPrompt: nil, kernel: kernel)
+        // The alias resolved to the ROOT: its reflect is the first block. An
+        // unresolved target would have rendered an error here instead.
+        #expect(prompt.contains("id=core"), "\(prompt.prefix(200))")
+        #expect(!prompt.contains("unknown agent"))
+        // `context_titles: 1` is truthy in python; `asBool` read only `true`.
+        #expect(prompt.contains("## Titling your calls"))
+    }
+
+    // ── the turn text (B1.5, B1.6, B1.10, B1.20, B1.21, B5.7) ────
+
+    // B1.21: a numeric `text` runs as its digits.
+    @Test func aNumericTextIsSentAsItsDigits() async throws {
+        let script = ProviderScript([["ok " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([
+            Item(
+                ids["mock"]!,
+                .object([
+                    "type": .string("send"), "text": .integer(586), "client_id": .string("c"),
+                ]))
+        ])[0].result
+        #expect(await script.waitForCalls(1))
+        #expect(try #require(script.request(0)).last?["content"].asString == "586")
+        // A bool is NOT a number here — python's `isinstance` excludes it.
+        let s2 = ProviderScript([["ok " + doneEnvelope]])
+        let (k2, ids2, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": s2]), backendIds: ["mock"])
+        _ = await k2.send([
+            Item(
+                ids2["mock"]!,
+                .object([
+                    "type": .string("send"), "text": .bool(true), "client_id": .string("c"),
+                ]))
+        ])[0].result
+        #expect(await s2.waitForCalls(1))
+        let live = try #require(s2.request(0)).last?["content"].asString
+        #expect(live == "", "a bool stays the empty turn")
+    }
+
+    // B1.20: a message from ANOTHER agent opens with the header the KERNEL
+    // vouches for — the sender is the dispatch's context, never its prose.
+    @Test func aTurnFromAnotherAgentCarriesTheVouchedHeader() async throws {
+        let a = ProviderScript([
+            [
+                renderCall(
+                    "send",
+                    [
+                        "target_id": .string("mock2"), "reply_to": .string("null"),
+                        "payload": .object([
+                            "type": .string("send"), "text": .string("hello peer"),
+                        ]),
+                    ])
+            ]
+        ])
+        let b = ProviderScript([["ok " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": a, "mock2": b]), backendIds: ["mock", "mock2"])
+        _ = await kernel.send([
+            Item(
+                ids["mock"]!,
+                .object([
+                    "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+                ]))
+        ])[0].result
+        #expect(await b.waitForCalls(1), "the peer never ran")
+        let seen = b.requestText(0)
+        #expect(seen.contains("[from mock \u{b7} msg "), "\(seen.suffix(300))")
+        #expect(seen.contains("hello peer"))
+    }
+
+    // B1.10: a non-empty `messages` list is STATELESS — `[system] + messages +
+    // live turn`, and the row store is untouched.
+    @Test func statelessMessagesOverrideLeavesTheStoreUnchanged() async throws {
+        let script = ProviderScript([["ok " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        let id = ids["mock"]!
+        let before = conversationRows(kernel: kernel, id: id).count
+        _ = await kernel.send([
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("live"),
+                    "client_id": .string("c"),
+                    "messages": .array([
+                        .object(["role": .string("user"), "content": .string("supplied A")]),
+                        .object(["role": .string("assistant"), "content": .string("supplied B")]),
+                    ]),
+                ]))
+        ])[0].result
+        #expect(await script.waitForCalls(1))
+        let msgs = try #require(script.request(0))
+        #expect(msgs.count == 4, "[system] + 2 supplied + the live turn")
+        #expect(msgs[0]["role"].asString == "system")
+        #expect(msgs[1]["content"].asString == "supplied A")
+        #expect(msgs[2]["content"].asString == "supplied B")
+        #expect(msgs[3]["content"].asString == "live")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(
+            conversationRows(kernel: kernel, id: id).count == before,
+            "a stateless turn persists nothing")
+    }
+
+    // B1.6: `options` via python `str`, `action` via `json.dumps`.
+    @Test func inquiryTurnTextRendersOptionsAndActionLikePython() async throws {
+        let script = ProviderScript([
+            ["<call name=\"inquiry_answer\"><answer>b</answer></call>"]
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([
+            Item(
+                ids["mock"]!,
+                .object([
+                    "type": .string("inquiry"), "text": .string("pick"),
+                    "options": .array([.bool(true), .string("b")]),
+                    "action": .object(["a": .integer(1), "b": .string("\u{2014}")]),
+                    "client_id": .string("c"),
+                ]))
+        ])[0].result
+        #expect(await script.waitForCalls(1))
+        let turn = try #require(script.request(0)).last?["content"].asString ?? ""
+        #expect(turn.contains("Options: True, b"), "\(turn)")
+        // `json.dumps(act)` — python separators, ensure_ascii, so the em dash is
+        // escaped. (The plan's illustration shows it raw; the SOURCE escapes.)
+        #expect(turn.contains(#"Proposed action: {"a": 1, "b": "\u2014"}"#), "\(turn)")
     }
 }

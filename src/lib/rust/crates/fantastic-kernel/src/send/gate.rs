@@ -83,7 +83,7 @@ impl Kernel {
         if !d.allowed {
             return Some(json!({
                 "error": format!("{sender_id} may not create under {}", parent.id),
-                "reason": "unauthorized", "side": "egress", "hint": d.hint,
+                "reason": "unauthorized", "hint": d.hint, "side": "egress",
             }));
         }
         let (t_call, t_parent, t_kids) = grant_facts(Some(parent.as_ref()), "callable_by");
@@ -100,7 +100,7 @@ impl Kernel {
         if !di.allowed {
             return Some(json!({
                 "error": format!("{} does not accept a child from {sender_id}", parent.id),
-                "reason": "unauthorized", "side": "ingress", "hint": di.hint,
+                "reason": "unauthorized", "hint": di.hint, "side": "ingress",
             }));
         }
         None
@@ -188,8 +188,12 @@ impl Kernel {
         );
         if !d.allowed {
             return Some(json!({
-                "error": format!("{sender_id} may not call {verb:?} on {}", target.id),
-                "reason": "unauthorized", "side": "egress", "hint": d.hint,
+                "error": format!(
+                    "{sender_id} may not call {} on {}",
+                    fantastic_bundle::py_repr(verb),
+                    target.id
+                ),
+                "reason": "unauthorized", "hint": d.hint, "side": "egress",
             }));
         }
 
@@ -238,8 +242,12 @@ impl Kernel {
         );
         if !di.allowed {
             return Some(json!({
-                "error": format!("{} does not accept {verb:?} from {sender_id}", target.id),
-                "reason": "unauthorized", "side": "ingress", "hint": di.hint,
+                "error": format!(
+                    "{} does not accept {} from {sender_id}",
+                    target.id,
+                    fantastic_bundle::py_repr(verb)
+                ),
+                "reason": "unauthorized", "hint": di.hint, "side": "ingress",
             }));
         }
 
@@ -303,8 +311,9 @@ impl Kernel {
                     k if k.starts_with('$') => {
                         return Some(json!({
                             "error": format!(
-                                "{sender_id} cannot confer {key:?}: not a structural token \
-                                 — $self, $parent, $children and $loader are the only ones"
+                                "{sender_id} cannot confer {}: not a structural token \
+                                 — $self, $parent, $children and $loader are the only ones",
+                                fantastic_bundle::py_repr(key)
                             ),
                             "reason": "bad_arg", "arg": "can_call", "side": "delegation",
                             "hint": crate::authz::FROM_ABOVE,
@@ -336,10 +345,11 @@ impl Kernel {
                         if key == "$loader" {
                             return Some(json!({
                                 "error": format!(
-                                    "{sender_id} cannot delegate {v:?} on $loader: it \
+                                    "{sender_id} cannot delegate {} on $loader: it \
                                      resolves to {probe_key}, which you do not hold — \
                                      $loader is real reach on the kernel's control \
-                                     surface, not a structural token"
+                                     surface, not a structural token",
+                                    fantastic_bundle::py_repr(v)
                                 ),
                                 "reason": "unauthorized", "side": "delegation",
                                 "hint": crate::authz::FROM_ABOVE,
@@ -353,10 +363,11 @@ impl Kernel {
                         if !self.agents.contains_key(&AgentId::from(key.as_str())) {
                             return Some(json!({
                                 "error": format!(
-                                    "{sender_id} cannot delegate '{v}' on {key}: no such \
+                                    "{sender_id} cannot delegate {} on {key}: no such \
                                      agent — calls of one turn run concurrently, so an \
                                      agent created in this batch does not exist yet; \
-                                     create in one turn, grant in the next"
+                                     create in one turn, grant in the next",
+                                    fantastic_bundle::py_repr(v)
                                 ),
                                 "reason": "unauthorized", "side": "delegation",
                                 "missing": key,
@@ -374,11 +385,12 @@ impl Kernel {
                         let pid_s = pid.as_ref().map(|p| p.to_string());
                         return Some(json!({
                             "error": format!(
-                                "{sender_id} cannot delegate '{v}' on {key}: {key} is not \
+                                "{sender_id} cannot delegate {} on {key}: {key} is not \
                                  your child (its parent is {}) and not in your can_call — \
                                  you may only confer can_call you already hold; create \
                                  the agents you will wire as YOUR children",
-                                pid_s.as_deref().unwrap_or("none")
+                                fantastic_bundle::py_repr(v),
+                                pid_s.as_deref().unwrap_or("None")
                             ),
                             "reason": "unauthorized", "side": "delegation",
                             "parent": pid_s,

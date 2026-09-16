@@ -93,3 +93,68 @@ fn extra_facts_ride_at_the_top_level() {
     assert_eq!(v["side"], "egress");
     assert_eq!(v["reason"], "unauthorized");
 }
+
+// ─── python repr, not rust Debug ───────────────────────────────
+
+#[test]
+fn py_repr_matches_python() {
+    // The kernel's refusal texts are python's, byte for byte: python's `!r`
+    // prefers SINGLE quotes and rust's `{:?}` always uses double ones, so the
+    // two runtimes said different sentences on the same refusal.
+    assert_eq!(py_repr("ghost"), "'ghost'");
+    // Double quotes only when the text carries a `'` and no `"`.
+    assert_eq!(py_repr("it's"), "\"it's\"");
+    assert_eq!(py_repr("both'\""), "'both\\'\"'");
+    // `\t`/`\r`/`\n` escape; `é` stays raw (rust Debug would emit `\u{e9}`).
+    assert_eq!(py_repr("a\tb\r\n"), "'a\\tb\\r\\n'");
+    assert_eq!(py_repr("café"), "'café'");
+}
+
+#[test]
+fn unknown_agent_error_is_python_repr() {
+    // Measured: `refusal_unknown_agent.json` / `prompt_req_02.json` carry
+    // `no agent 'ghost'` — rust's Debug quoting said `no agent "ghost"`.
+    let v = unknown_agent("ghost", vec!["core".into()]);
+    assert_eq!(v["error"], "no agent 'ghost'");
+    // Same helper behind the placeholder hint.
+    let p = unknown_agent("<id>", vec!["core".into()]);
+    assert_eq!(
+        p["hint"],
+        "'<id>' is a PLACEHOLDER from an example, not an id — substitute one of `agents`."
+    );
+}
+
+#[test]
+fn guard_refuses_all_digit_ids_and_accepts_colons() {
+    // An all-digit id reads as a MESSAGE ID in prompt text; names are words.
+    let v = guard_agent_id("create_agent", "123").expect("all-digit id is refused");
+    assert_eq!(
+        v["error"],
+        "create_agent: id must be a name, not a number (message ids are ints); got '123'"
+    );
+    assert_eq!(v["reason"], "bad_arg");
+    assert_eq!(v["arg"], "id");
+    // Python's `str.isdigit()`, not ASCII: `٣` (ARABIC-INDIC THREE) and `²`
+    // (SUPERSCRIPT TWO) are digits to python.
+    assert!(guard_agent_id("create_agent", "٣").is_some());
+    assert!(guard_agent_id("create_agent", "²").is_some());
+    // …but a digit-LED name is not all digits.
+    assert!(guard_agent_id("create_agent", "1a").is_none());
+    // `:` is legal — python never refused it, and the minted-pid check the port
+    // invented refused ids python mints.
+    assert!(guard_agent_id("create_agent", "ai:7f").is_none());
+    // The refusals python DOES make keep python's repr in `got`. Order is
+    // python's too: `../x` carries a separator, so it is refused as one.
+    assert_eq!(
+        guard_agent_id("create_agent", "../x").unwrap()["error"],
+        "create_agent: id must be a single path segment (no separators); got '../x'"
+    );
+    assert_eq!(
+        guard_agent_id("create_agent", "a..b").unwrap()["error"],
+        "create_agent: id must be a name that is not a path traversal; got 'a..b'"
+    );
+    assert_eq!(
+        guard_agent_id("create_agent", ".hidden").unwrap()["error"],
+        "create_agent: id must be a name that is not hidden; got '.hidden'"
+    );
+}

@@ -22,13 +22,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use fantastic_bundle::{py_str, py_truthy};
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame, set_path};
 use fantastic_kernel::call_guard::guard_call_stack;
-use fantastic_kernel::{AgentId, Item, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::task::JoinHandle;
 
 /// ONE frame bound on this wire, both ends, every runtime. A corrupt length must
 /// not become a 4 GiB allocation, and a program that means to move 20 MB means to
@@ -42,7 +42,7 @@ const MAX_FRAME: u32 = 16 * 1024 * 1024;
 struct OwnerInbox {
     job_id: String,
     proxy: AgentId,
-    drain: JoinHandle<()>,
+    drain: TaskId,
 }
 
 static OWNER_INBOX: OnceLock<Mutex<HashMap<AgentId, OwnerInbox>>> = OnceLock::new();
@@ -54,16 +54,10 @@ fn owner_inbox() -> &'static Mutex<HashMap<AgentId, OwnerInbox>> {
 /// A `watch` subscription held on the job's behalf.
 struct Sub {
     proxy: AgentId,
-    drain: JoinHandle<()>,
-}
-
-impl Drop for Sub {
-    /// A dropped `JoinHandle` DETACHES its task — it does not abort it. So a `Sub`
-    /// that leaves scope by any path other than [`drop_proxy`] used to leave an
-    /// orphan drain task pushing forever into a socket nobody reads.
-    fn drop(&mut self) {
-        self.drain.abort();
-    }
+    /// The drain's row in the kernel TASK TABLE. It is registered work for as long
+    /// as the subscription lives — `ps` lists it and `cancel` reaches it — so it is
+    /// released through [`drop_proxy`], never by dropping a detached handle.
+    drain: TaskId,
 }
 
 /// Write one frame: `[4-byte BE len | kind | rest]`.
@@ -79,7 +73,9 @@ async fn write_frame(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, kind: u8, res
 
 /// Frame one JSON value onto the socket (kind `T`).
 async fn push(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, v: &Value) {
-    let body = serde_json::to_vec(v).unwrap_or_else(|_| b"{}".to_vec());
+    // python's `encode_frame` text half — `json.dumps(v, default=str)`, so the
+    // separators and the `\uXXXX` escapes match byte for byte (A13.14).
+    let body = fantastic_io_bridge::codec::encode_frame(v).into_bytes();
     write_frame(wr, b'T', &body).await;
 }
 
@@ -103,23 +99,33 @@ fn unframe(body: &[u8]) -> Option<(Value, Vec<u8>)> {
     }
 }
 
-/// Make a proxy inbox, then watch through it.
-///
-/// THE READER REGISTERS FIRST: `watch` refuses a watcher with no inbox, and the
-/// drain task is what reads this one — so the receiver is created HERE, before
-/// the watch.
-fn make_proxy(kernel: &Arc<Kernel>, proxy: &AgentId) -> fantastic_kernel::inbox::InboxReceiver {
-    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
-    kernel.inboxes.insert(proxy.clone(), tx);
-    rx
+/// Frame one queued inbox item into `envelope` (whose `payload` already holds the
+/// item's head) — kind `T` for plain JSON, kind `B` when the payload carried raw
+/// bytes, `_binary_path` naming where they belong under `payload`. THE ONE CODEC:
+/// a `write_stream` mirrored to a watching program reaches it whole, not as a
+/// header with a hole where the body was.
+async fn push_item(
+    wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    mut envelope: Value,
+    item: &fantastic_kernel::inbox::InboxItem,
+) {
+    match &item.body {
+        None => push(wr, &envelope).await,
+        Some((path, body)) => {
+            envelope["_binary_path"] = json!(format!("payload.{path}"));
+            push_binary(wr, &envelope, body).await;
+        }
+    }
 }
 
-/// Tear a proxy down. The `inboxes` removal is the rust-only step: a leaked row means
-/// `emit`'s auto-vivify path keeps `try_send`ing into a channel nobody drains, forever.
-/// The drain task is aborted by `Sub`'s `Drop` as `sub` goes out of scope here.
+/// Tear a proxy down: unwatch, DROP THE INBOX ROW, cancel the drain — python's
+/// `release`. The `inboxes` removal is the step that used to be missing: a leaked row
+/// means `emit`'s auto-vivify path keeps `try_send`ing into a channel nobody drains,
+/// forever.
 async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
     kernel.unwatch(src, &sub.proxy).await;
-    kernel.inboxes.remove(&sub.proxy);
+    kernel.remove_inbox(&sub.proxy);
+    kernel.cancel_task(&sub.drain).await;
 }
 
 /// The job's own telemetry echoes back through the owner's watcher fanout; drop it so a
@@ -183,7 +189,13 @@ pub async fn serve(
         match m.get("op").and_then(Value::as_str) {
             Some("send") => {
                 let target = m.get("target").and_then(Value::as_str).unwrap_or("");
-                let mut payload = m.get("payload").cloned().unwrap_or_else(|| json!({}));
+                // py `m.get("payload") or {}` — TRUTHINESS, so an explicit null, `0`
+                // or `[]` is an empty payload rather than a value the kernel has to
+                // make sense of.
+                let mut payload = match m.get("payload").filter(|v| py_truthy(v)) {
+                    Some(p) => p.clone(),
+                    None => json!({}),
+                };
                 // Python gets recursion guarding free inside `Agent.send`; rust's
                 // `Kernel::send` does not, so the guard is explicit here. Behavioural
                 // parity, not code parity. On refusal the reply still goes out, or the
@@ -222,12 +234,16 @@ pub async fn serve(
                 }
             }
             Some("emit") => {
-                let tgt = m
-                    .get("target")
-                    .and_then(Value::as_str)
-                    .map(AgentId::from)
-                    .unwrap_or_else(|| owner.clone());
-                let payload = m.get("payload").cloned().unwrap_or_else(|| json!({}));
+                // py `m.get("target") or owner_id`: a FALSY target is the one-arg
+                // `emit(payload)` form and lands on the owner.
+                let tgt = match m.get("target").filter(|v| py_truthy(v)) {
+                    Some(t) => AgentId::from(py_str(t).as_str()),
+                    None => owner.clone(),
+                };
+                let payload = match m.get("payload").filter(|v| py_truthy(v)) {
+                    Some(p) => p.clone(),
+                    None => json!({}),
+                };
                 kernel.emit(&tgt, payload).await;
             }
             Some("watch") => {
@@ -238,14 +254,16 @@ pub async fn serve(
                     continue; // idempotent per src
                 }
                 let proxy = AgentId::from(format!("_xbw_{job_id}_{src}").as_str());
-                let mut rx = make_proxy(&kernel, &proxy);
+                // THE READER REGISTERS FIRST: `watch` refuses a watcher with no
+                // inbox, and the drain task below is what reads this one.
+                let mut rx = kernel.ensure_inbox(&proxy);
                 // THE KERNEL DECIDES. `watch` is gated exactly like a send (it IS a
                 // read of the source) and can refuse. The refusal used to be
                 // discarded and the sub registered anyway, so the program held a
                 // subscription that simply never fired — deaf, with nothing to
                 // diagnose. Tell it, and register NOTHING.
                 if let Some(denial) = kernel.watch(&src, proxy.clone()).await {
-                    kernel.inboxes.remove(&proxy);
+                    kernel.remove_inbox(&proxy);
                     push(
                         &wr,
                         &json!({"op": "event", "src": src.as_str(), "payload": denial}),
@@ -255,9 +273,13 @@ pub async fn serve(
                 }
                 let w = Arc::clone(&wr);
                 let s = src.clone();
-                let drain = tokio::spawn(async move {
+                // REGISTERED as a kernel task `watch_drain` (A4.13): a drain lives
+                // as long as the subscription, so it is real work — visible to `ps`
+                // and reachable by `cancel` — not a detached `tokio::spawn`.
+                let drain = kernel.spawn_task(&owner, "watch_drain", async move {
                     while let Some(p) = rx.recv().await {
-                        push(&w, &json!({"op": "event", "src": s.as_str(), "payload": p})).await;
+                        let env = json!({"op": "event", "src": s.as_str(), "payload": p.payload});
+                        push_item(&w, env, &p).await;
                     }
                 });
                 subs.insert(src, Sub { proxy, drain });
@@ -279,13 +301,14 @@ pub async fn serve(
                 let prev = owner_inbox().lock().expect("OWNER_INBOX").remove(&owner);
                 if let Some(prev) = prev {
                     kernel.unwatch(&owner, &prev.proxy).await;
-                    kernel.inboxes.remove(&prev.proxy);
-                    prev.drain.abort();
+                    kernel.remove_inbox(&prev.proxy);
+                    kernel.cancel_task(&prev.drain).await;
                 }
                 let proxy = AgentId::from(format!("_xbself_{job_id}").as_str());
-                let mut rx = make_proxy(&kernel, &proxy);
+                // THE READER REGISTERS FIRST — see `watch` above.
+                let mut rx = kernel.ensure_inbox(&proxy);
                 if let Some(denial) = kernel.watch(&owner, proxy.clone()).await {
-                    kernel.inboxes.remove(&proxy);
+                    kernel.remove_inbox(&proxy);
                     push(
                         &wr,
                         &json!({"op": "event", "src": owner.as_str(), "payload": denial}),
@@ -294,10 +317,12 @@ pub async fn serve(
                     continue;
                 }
                 let w = Arc::clone(&wr);
-                let drain = tokio::spawn(async move {
+                // REGISTERED as a kernel task `inbox_drain` (A4.13) — see the
+                // `watch_drain` above.
+                let drain = kernel.spawn_task(&owner, "inbox_drain", async move {
                     while let Some(p) = rx.recv().await {
-                        if let Some(f) = inbox_framer(&p) {
-                            push(&w, &f).await;
+                        if let Some(f) = inbox_framer(&p.payload) {
+                            push_item(&w, f, &p).await;
                         }
                     }
                 });
@@ -343,7 +368,7 @@ async fn release_owner_inbox(kernel: &Arc<Kernel>, owner: &AgentId, job_id: &str
     };
     if let Some(c) = mine {
         kernel.unwatch(owner, &c.proxy).await;
-        kernel.inboxes.remove(&c.proxy);
-        c.drain.abort();
+        kernel.remove_inbox(&c.proxy);
+        kernel.cancel_task(&c.drain).await;
     }
 }

@@ -22,6 +22,9 @@ import Foundation
 import OrderedCollections
 import Yams
 
+/// python's `MANIFEST_FIELD`.
+let MANIFEST_FIELD = "manifest"
+
 public struct StaticLoaderBundle: AgentBundle {
     /// The `handler_module` value that routes to this bundle.
     public static let handlerModule = "static_loader.tools"
@@ -39,30 +42,32 @@ public struct StaticLoaderBundle: AgentBundle {
         switch payload["type"].asString ?? "" {
         case "reflect": return reflectReply(agent)
         case "boot": return await boot(agentId: agentId, agent: agent, kernel: kernel)
-        case "shutdown": return .null
-        case let other:
-            return .object(["error": .string("static_loader: unknown type \(other)")])
+        // `shutdown` is NOT a verb here: python's VERBS holds reflect + boot, so
+        // anything else — `shutdown` included — is the coded unhandled refusal.
+        default:
+            return Refusal.make(
+                Refusal.unhandled,
+                "static_loader: unknown type \(pyRepr(payload["type"]))",
+                extra: [("verb", payload["type"])])
         }
     }
 
-    /// Read the manifest THROUGH the running-dir clamp.
+    /// Read the manifest THROUGH the running-dir clamp — python
+    /// `fs.read_text(Path.cwd(), path)`.
     ///
-    /// A cold bring-up read — before any `file_bridge` agent can exist — but NOT
-    /// exempt from the running-dir law: `fs` is the one disk surface. This read
-    /// went straight to `String(contentsOfFile:)` until 2026-08-28, so a manifest
-    /// anywhere on disk was readable here while python
-    /// (`fs.read_text(Path.cwd(), path)`) and rust (`clamp_root`) both refused a
-    /// path outside the running dir.
+    /// A cold bring-up read (before any `file_bridge` agent can exist) but NOT
+    /// exempt from the running-dir law: `fs` is the one disk surface. The clamp
+    /// is `fs.resolve(cwd, path)`, not the lexical root clamp: a leading `/`
+    /// escapes, symlinks are followed, and the error tail is python's own
+    /// exception text (`fs: path '/etc/hosts' escapes root`, `[Errno 2] No such
+    /// file or directory: '<abs>'`).
     static func readManifest(_ path: String) -> (text: String?, error: String?) {
-        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        let clamped: URL
-        do { clamped = try clampRoot(path, base: cwd) } catch {
-            return (nil, "static_loader: cannot read manifest \(path): \(error)")
+        let cwd = FileManager.default.currentDirectoryPath
+        do {
+            return (try fsReadText(cwd, path, base: cwd), nil)
+        } catch {
+            return (nil, error.message)
         }
-        guard let text = try? String(contentsOf: clamped, encoding: .utf8) else {
-            return (nil, "static_loader: cannot read manifest \(path)")
-        }
-        return (text, nil)
     }
 
     /// Refuse a manifest that is absent or unreadable AT WRITE TIME, so a broken
@@ -73,55 +78,65 @@ public struct StaticLoaderBundle: AgentBundle {
     public func validateMeta(
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
     ) -> String? {
-        guard let raw = meta["manifest"] ?? record["manifest"] else { return nil }
+        guard let raw = meta[MANIFEST_FIELD] ?? record[MANIFEST_FIELD] else { return nil }
         guard let path = raw.asString, !path.isEmpty else {
-            return "static_loader: manifest must be a non-empty path string"
+            return "static_loader: \(MANIFEST_FIELD) must be a non-empty path string"
         }
-        if Self.readManifest(path).error != nil {
-            return "static_loader: manifest \(path) is not readable"
+        if let e = Self.readManifest(path).error {
+            return "static_loader: manifest \(pyRepr(path)) is not readable: \(e)"
         }
         return nil
+    }
+
+    // MARK: - the manifest
+
+    /// python `_load_manifest` — `(agents, error)`.
+    private func loadManifest(_ agent: Agent) -> (agents: [JSON], error: String?) {
+        guard let path = agent.metaValue(forKey: MANIFEST_FIELD)?.asString, !path.isEmpty else {
+            return ([], "static_loader: no \(pyRepr(MANIFEST_FIELD)) path on the record")
+        }
+        let read = Self.readManifest(path)
+        guard let text = read.text else {
+            return ([], "static_loader: cannot read manifest \(pyRepr(path)): \(read.error ?? "")")
+        }
+        let document: JSON
+        do {
+            // COMPOSE, not load: a mapping keeps its DOCUMENT ORDER, which every
+            // `{spec!r}` text and every persisted record then carries (python's
+            // dicts are ordered; a Swift Dictionary is not).
+            document = try Yams.compose(yaml: text).map(nodeToJSON) ?? .null
+        } catch {
+            // D4 residual: the tail is the YAML library's own message; PyYAML's
+            // `MarkedYAMLError` wording is not reproducible from libyaml.
+            return ([], "static_loader: manifest \(pyRepr(path)) is not valid YAML: \(error)")
+        }
+        // `yaml.safe_load(text) or {}` — a python-FALSY document (empty, `~`,
+        // `0`, `false`, `[]`, `{}`) is an empty mapping, and boots empty.
+        let data: JSON = pyTruthy(document) ? document : .object([:])
+        guard case .object(let root) = data else {
+            return ([], "static_loader: manifest \(pyRepr(path)) must be a mapping with `agents:`")
+        }
+        guard let agentsValue = root["agents"] else { return ([], nil) }
+        guard case .array(let agents) = agentsValue else {
+            return ([], "static_loader: `agents:` in \(pyRepr(path)) must be a list")
+        }
+        return (agents, nil)
     }
 
     // MARK: - boot: hydrate the declared roster as operator
 
     private func boot(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
-        guard let path = agent.metaValue(forKey: "manifest")?.asString, !path.isEmpty else {
-            return .object([
-                "error": .string("static_loader: no `manifest` path on the record"),
-                "booted": .bool(false),
-            ])
+        let (agents, err) = loadManifest(agent)
+        if let err {
+            return .object(["error": .string(err), "booted": .bool(false)])
         }
-        let read = Self.readManifest(path)
-        guard let text = read.text else {
-            return .object([
-                "error": .string(read.error ?? "static_loader: cannot read manifest"),
-                "booted": .bool(false),
-            ])
-        }
-        let parsed: Any?
-        do { parsed = try Yams.load(yaml: text) } catch {
-            return .object([
-                "error": .string("static_loader: manifest \(path) is not valid YAML: \(error)"),
-                "booted": .bool(false),
-            ])
-        }
-        guard case .object(let root) = anyToJSON(parsed as Any) else {
-            return .object([
-                "error": .string(
-                    "static_loader: manifest \(path) must be a mapping with `agents:`"),
-                "booted": .bool(false),
-            ])
-        }
-        let agents = root["agents"]?.asArray ?? []
         var created: [JSON] = []
         var reapplied: [JSON] = []
         for spec in agents {
-            guard case .object(let obj) = spec, obj["handler_module"]?.asString != nil else {
+            guard case .object(let obj) = spec, pyTruthy(obj["handler_module"] ?? .null) else {
                 return .object([
                     "error": .string(
-                        "static_loader: each roster entry needs a handler_module: \(spec.serialize())"
-                    ),
+                        "static_loader: each roster entry needs a handler_module: \(pyRepr(spec))"),
                     "booted": .bool(false),
                 ])
             }
@@ -133,7 +148,7 @@ public struct StaticLoaderBundle: AgentBundle {
             guard let id = obj["id"]?.asString, !id.isEmpty else {
                 return .object([
                     "error": .string(
-                        "static_loader: roster entry needs an explicit id: \(spec.serialize())"),
+                        "static_loader: roster entry needs an explicit id: \(pyRepr(spec))"),
                     "booted": .bool(false),
                 ])
             }
@@ -143,45 +158,53 @@ public struct StaticLoaderBundle: AgentBundle {
                 // from the manifest, never skipped: editing a grant in the yaml
                 // used to change nothing at all, because the hydrated record
                 // silently won and the operator got no word about it.
-                let declaredHM = obj["handler_module"]?.asString
-                if live.handlerModule != declaredHM {
-                    // A bundle cannot be swapped under a live agent (its
-                    // in-process state belongs to the old one).
-                    return .object([
-                        "error": .string(
-                            "static_loader: \"\(id)\" exists as "
-                                + "\"\(live.handlerModule ?? "")\" but the manifest declares "
-                                + "\"\(declaredHM ?? "")\" — a handler_module is fixed at "
-                                + "create; delete the agent to re-declare it"),
-                        "booted": .bool(false),
-                    ])
-                }
-                var patch = obj
-                patch["id"] = nil
-                patch["handler_module"] = nil
-                patch["parent_id"] = nil
+                var declared = obj
+                declared["id"] = nil
+                declared["handler_module"] = nil
+                declared["parent_id"] = nil
                 // `update_agent` REPLACES a named field, so a bare re-apply of
                 // `can_call` would delete the structural baseline the kernel
                 // stamps at create and sever the agent from its own parent and
                 // children. Merge over the baseline, as `create_agent` does.
-                for field in ["can_call", "callable_by"] {
-                    if case .object(let declared)? = patch[field],
-                        case .object(var merged) = defaultCanCall()
+                for (field, baseline) in [
+                    ("can_call", defaultCanCall()), ("callable_by", defaultCallableBy()),
+                ] {
+                    if case .object(let declaredField)? = declared[field],
+                        case .object(var merged) = baseline
                     {
-                        for (k, v) in declared { merged[k] = v }
-                        patch[field] = .object(merged)
+                        for (k, v) in declaredField { merged[k] = v }
+                        declared[field] = .object(merged)
                     }
                 }
-                if !patch.isEmpty {
-                    patch["type"] = .string("update_agent")
-                    patch["id"] = .string(id)
+                let declaredHM = obj["handler_module"] ?? .null
+                if live.handlerModule != declaredHM.asString {
+                    // A bundle cannot be swapped under a live agent (its
+                    // in-process state belongs to the old one); the manifest is
+                    // asking for a different agent under a used name.
+                    return .object([
+                        "error": .string(
+                            "static_loader: \(pyRepr(id)) exists as "
+                                + "\(pyRepr(live.handlerModule.map(JSON.string) ?? .null)) but the manifest declares "
+                                + "\(pyRepr(declaredHM)) — a handler_module is fixed at "
+                                + "create; delete the agent to re-declare it"),
+                        "booted": .bool(false),
+                    ])
+                }
+                if !declared.isEmpty {
+                    // `**declared` LAST: a spec that names `type` overrides the
+                    // verb, python's spread order.
+                    var patch: OrderedDictionary<String, JSON> = [
+                        "type": .string("update_agent"), "id": .string(id),
+                    ]
+                    for (k, v) in declared { patch[k] = v }
                     let r = await KernelTaskLocals.$currentSender.withValue(nil) {
                         await kernel.send([Item(AgentId("kernel"), .object(patch))])[0].result
                     }
-                    if r["error"] != .null {
+                    // Only a TRUTHY `error` is a failure (python `r.get("error")`).
+                    if pyTruthy(r["error"]) {
                         return .object([
                             "error": .string(
-                                "static_loader: re-applying \"\(id)\": \(r["error"].serialize())"),
+                                "static_loader: re-applying \(pyRepr(id)): \(pyStr(r["error"]))"),
                             "booted": .bool(false),
                         ])
                     }
@@ -189,26 +212,27 @@ public struct StaticLoaderBundle: AgentBundle {
                 reapplied.append(.string(id))
                 continue
             }
-            // create_agent to SELF → the declared agent becomes THIS loader's
-            // child. Baseline grant is stamped + the manifest's explicit `can_call`
-            // merges on top; the child boots inside create_agent. Operator
-            // authority: the loader hydrating the roster it was told to build.
-            var payload = obj
             // The declared agent becomes THIS loader's child ($parent = the
             // loader), but placement is stated by `parent_id`, not by who is
             // addressed: `create_agent` is kernel-owned and answered by the ROOT
             // alone. Baseline grant is stamped + the manifest's explicit
             // `can_call` merges on top; the child boots inside create_agent.
-            payload["type"] = .string("create_agent")
+            // Operator authority: the loader hydrating the roster it was told to
+            // build. `**spec` sits BETWEEN `type` and `parent_id`, python's
+            // spread order: a spec `type` overrides the verb, a spec `parent_id`
+            // never overrides the placement.
+            var payload: OrderedDictionary<String, JSON> = ["type": .string("create_agent")]
+            for (k, v) in obj { payload[k] = v }
             payload["parent_id"] = .string(agentId.value)
             let rec = await KernelTaskLocals.$currentSender.withValue(nil) {
                 await kernel.send([Item(AgentId("kernel"), .object(payload))])[0].result
             }
-            if let id = rec["id"].asString {
-                created.append(.string(id))
+            if case .object = rec, let newId = rec["id"].asString, !newId.isEmpty {
+                created.append(.string(newId))
             } else {
                 return .object([
-                    "error": .string("static_loader: create failed: \(rec.serialize())"),
+                    "error": .string(
+                        "static_loader: create failed for \(pyRepr(spec)): \(pyStr(rec))"),
                     "booted": .bool(false),
                 ])
             }
@@ -221,49 +245,97 @@ public struct StaticLoaderBundle: AgentBundle {
     }
 
     private func reflectReply(_ agent: Agent) -> JSON {
-        .object([
+        let name = agent.displayName ?? ""
+        return .object([
             "id": .string(agent.id.value),
             "sentence": .string("declarative YAML roster loader"),
-            "display_name": .string(agent.displayName ?? agent.id.value),
+            // python `agent.display_name or id` — an EMPTY name is falsy.
+            "display_name": .string(name.isEmpty ? agent.id.value : name),
             "loader": .bool(true),
-            "manifest": agent.metaValue(forKey: "manifest") ?? .null,
+            "manifest": agent.metaValue(forKey: MANIFEST_FIELD) ?? .null,
             "verbs": .object([
-                "reflect": .string("The loader's posture: what manifest it hydrates, and that it IS a loader"),
+                "reflect": .string(
+                    "The loader's posture: what manifest it hydrates, and that it IS a loader"),
                 "boot": .string("Hydrate the declared roster as OPERATOR."),
             ]),
         ])
     }
 
-    // MARK: - Yams Any → JSON
+    // MARK: - Yams Node → JSON (document order preserved)
 
-    private func anyToJSON(_ v: Any) -> JSON {
-        if v is NSNull { return .null }
-        if let b = v as? Bool { return .bool(b) }
-        if let i = v as? Int { return .integer(Int64(i)) }
-        if let i = v as? Int64 { return .integer(i) }
-        if let d = v as? Double { return .double(d) }
-        if let s = v as? String { return .string(s) }
-        if let a = v as? [Any] { return .array(a.map { anyToJSON($0) }) }
-        if let o = v as? [String: Any] {
-            var dict: OrderedDictionary<String, JSON> = [:]
-            for (k, val) in o { dict[k] = anyToJSON(val) }
-            return .object(dict)
+    /// One composed YAML node as JSON, resolving scalars by their RESOLVED TAG
+    /// (the YAML schema's own typing) and keeping every mapping in document
+    /// order.
+    private func nodeToJSON(_ node: Node) -> JSON {
+        switch node {
+        case .scalar(let scalar):
+            // `Tag.name` is internal to Yams; its `rawValue` is the same string.
+            switch node.tag.rawValue {
+            case Tag.Name.null.rawValue: return .null
+            case Tag.Name.bool.rawValue: return node.bool.map(JSON.bool) ?? .string(scalar.string)
+            case Tag.Name.int.rawValue:
+                return node.int.map { .integer(Int64($0)) } ?? .string(scalar.string)
+            case Tag.Name.float.rawValue:
+                return node.float.map(JSON.double) ?? .string(scalar.string)
+            default: return .string(scalar.string)
+            }
+        case .sequence(let sequence):
+            return .array(sequence.map(nodeToJSON))
+        case .mapping(let mapping):
+            var out: OrderedDictionary<String, JSON> = [:]
+            for pair in mapping {
+                out[pair.key.string ?? pyStr(nodeToJSON(pair.key))] = nodeToJSON(pair.value)
+            }
+            return .object(out)
+        case .alias:
+            return .null
         }
-        return .null
     }
 
+    /// python's `readme.md`, verbatim.
     static let readmeText = """
         # static_loader — declarative YAML roster
 
-        A loader agent that hydrates a fixed roster from a `fantastic.yaml`
-        manifest. `fantastic init static_loader ./fantastic.yaml` seeds it under
-        the root and boots it; on boot it reads the manifest and creates each
-        declared agent as a child of itself (as operator). Every declared agent
-        gets the Unix baseline grant plus whatever `can_call` the manifest names.
-        After boot the roster is CLOSED (deny-all: an agent cannot create_agent),
-        so the manifest is the whole roster. Idempotent by id — every entry MUST
-        carry an explicit `id`; an id-less one is refused loud (`booted: false`),
-        because nothing could match it and each reboot would mint another agent
-        beside the last one's.
+        A loader agent that hydrates a **fixed roster** from a `fantastic.yaml` manifest.
+        Use it when the set of agents should be declared, not composed live.
+
+        Init a workspace with it:
+
+        ```
+        fantastic init static_loader ./fantastic.yaml
+        ```
+
+        That seeds a `static_loader` agent (record field `manifest: ./fantastic.yaml`)
+        under the root and boots it. On `boot` the loader reads the manifest and creates
+        each declared agent as a child of itself — under `operator_context()`, so the
+        hydration is the operator's authority at boot, not standing power the loader
+        holds.
+
+        Manifest:
+
+        ```yaml
+        agents:
+          - id: memory
+            handler_module: text_file.tools
+          - id: worker
+            handler_module: exec_bridge.tools
+            allowed: ['python3 .*']   # the command(s) this leg may spawn
+            can_call:            # deny-all: name the lateral edges this agent may use
+              memory: [set, read]
+        ```
+
+        Every declared agent gets the Unix baseline grant
+        (`$self`/`$parent`/`$children`/`$loader`) plus whatever `can_call` the manifest
+        names. After boot the roster is **closed**: an agent is deny-all and cannot
+        `create_agent`, so the manifest is the whole roster. Every entry MUST carry an
+        explicit `id` — boot is idempotent by id (a reboot re-reads the manifest and
+        RE-APPLIES the declared fields over an existing agent), so the manifest and the
+        persisted tree never duplicate. An entry with no `id` is refused loud
+        (`booted: false`): nothing could match it, so each reboot would mint another
+        agent beside the last one's and persist it.
+
+        The kernel knows nothing about YAML; this bundle owns the format — the same way
+        `kernel_state` owns the on-disk `.fantastic` layout.
+
         """
 }

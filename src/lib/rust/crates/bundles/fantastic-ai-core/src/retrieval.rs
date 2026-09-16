@@ -22,6 +22,10 @@ use crate::provider::{Provider, ProviderEvent};
 use crate::strategies::strip::{pid_of, LOW};
 use crate::think::without_thinking;
 use crate::view::{apply_res, res_of, save_view};
+use fantastic_bundle::{
+    decimal_value, py_int, py_int_or, py_json_dumps, py_set_order, py_split_whitespace,
+    py_splitlines, py_str, py_strip, py_truthy,
+};
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
@@ -30,20 +34,48 @@ use std::sync::Arc;
 
 /// A message id as an int — an int, or its decimal string (a model quotes what
 /// it copied out of a tag). Anything else is not an id. Python `_as_id`.
+///
+/// THE TWO BRANCHES DIFFER ON PURPOSE: an int must be POSITIVE, a digit string
+/// need not be (`'0'` → 0, which `pull` then answers as a readable not_found).
+/// The string is python-stripped and its digits are any Unicode decimal (`'٣'`
+/// → 3); `'+5'` is not a digit string and is not an id.
 #[must_use]
 pub fn as_id(x: &Value) -> Option<i64> {
     match x {
         Value::Bool(_) => None,
+        // python: a float is not an `int`.
+        Value::Number(n) if n.is_f64() => None,
         Value::Number(n) => n.as_i64().filter(|&i| i > 0),
         Value::String(s) => {
-            let t = s.trim();
-            if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
-                t.parse::<i64>().ok().filter(|&i| i > 0)
+            let t = py_strip(s);
+            if !t.is_empty() && t.chars().all(|c| decimal_value(c).is_some()) {
+                py_int(&Value::String(t.to_string())).ok()
             } else {
                 None
             }
         }
         _ => None,
+    }
+}
+
+/// python `for x in (v or [])`: what iterating a JSON value yields, or the type
+/// name of the truthy scalar that raises `TypeError` instead.
+///
+/// A falsy value is `[]` (the `or` short-circuits); a list yields its items, a
+/// STRING its characters and an object its KEYS. A truthy int/float/bool is not
+/// iterable and python raises before the view or the recall row is written.
+fn py_iter(v: &Value) -> Result<Vec<Value>, &'static str> {
+    if !py_truthy(v) {
+        return Ok(Vec::new());
+    }
+    match v {
+        Value::Array(a) => Ok(a.clone()),
+        Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
+        Value::Object(o) => Ok(o.keys().map(|k| Value::String(k.clone())).collect()),
+        Value::Bool(_) => Err("bool"),
+        Value::Number(n) if n.is_f64() => Err("float"),
+        Value::Number(_) => Err("int"),
+        Value::Null => Ok(Vec::new()),
     }
 }
 
@@ -65,16 +97,24 @@ pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         );
     };
     let meta = agent_meta(agent_id, kernel);
-    let cap = pull_cap_chars(&meta);
-    let offset = payload
-        .get("offset")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .unwrap_or(0)
-        .max(0) as usize;
-    let length = payload
-        .get("length")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .map_or(cap, |n| n.max(0) as usize);
+    let cap = pull_cap_chars(&meta) as i64;
+    // python: `offset = max(0, int(payload.get("offset") or 0))` and
+    // `length = int(payload.get("length") or cap)` under ONE try/except — a
+    // non-integer either side is the SAME refusal, and it carries no `arg`.
+    // `length` is NOT clamped: a negative one is a python slice from the end.
+    let null = Value::Null;
+    let (offset, length) = match (
+        py_int_or(payload.get("offset").unwrap_or(&null), 0),
+        py_int_or(payload.get("length").unwrap_or(&null), cap),
+    ) {
+        (Ok(o), Ok(l)) => (o.max(0), l),
+        _ => {
+            return json!({
+                "error": "pull: offset/length must be integers",
+                "reason": "bad_arg",
+            })
+        }
+    };
     if length > cap {
         return bad_arg(
             &format!(
@@ -84,21 +124,43 @@ pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
             "length",
         );
     }
-    let got = kernel.rows.body_get(pid, offset, length.max(1));
+    let got = kernel.rows.body_get(
+        pid,
+        usize::try_from(offset).unwrap_or(0),
+        usize::try_from(length.max(1)).unwrap_or(1),
+    );
     if got.is_none() {
         // A fold id: its body is on the row itself.
         for r in load_history(agent_id, kernel, DEFAULT_CLIENT_ID).await {
             if r.get("kind").and_then(Value::as_str) == Some("fold") && row_id(&r) == Some(pid) {
-                let text = r.get("body").and_then(Value::as_str).unwrap_or("");
+                // python `str(r.get("body") or "")` — a falsy body is the empty
+                // string, a non-string one is its `str()`.
+                let body = r.get("body").cloned().unwrap_or(Value::Null);
+                let text = if py_truthy(&body) {
+                    py_str(&body)
+                } else {
+                    String::new()
+                };
                 let chars: Vec<char> = text.chars().collect();
-                let cut: String = chars.iter().take(length).collect();
+                let n = chars.len() as i64;
+                // `text[:length]` with PYTHON SLICE SEMANTICS: a negative length
+                // counts from the end, and `next_offset`/`eof` stay signed.
+                let end = if length < 0 {
+                    (n + length).max(0)
+                } else {
+                    length.min(n)
+                };
+                let cut: String = chars[..usize::try_from(end).unwrap_or(0)].iter().collect();
                 return json!({
                     "pid": pid,
                     "offset": 0,
                     "text": cut,
-                    "next_offset": length.min(chars.len()),
-                    "eof": length >= chars.len(),
-                    "refs": r.get("refs").cloned().unwrap_or(json!([])),
+                    "next_offset": length.min(n),
+                    "eof": length >= n,
+                    "refs": match r.get("refs") {
+                        Some(v) if py_truthy(v) => v.clone(),
+                        _ => json!([]),
+                    },
                     "title": r.get("title").cloned().unwrap_or(Value::Null),
                 });
             }
@@ -123,12 +185,12 @@ pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     while text.chars().count() > 64
         && estimate_one(&json!({
             "role": "user",
-            "content": serde_json::to_string(&out).unwrap_or_default()
+            "content": py_json_dumps(&out, true, None),
         })) > cap_tok
     {
         let keep = (text.chars().count() as f64 * 0.8) as usize;
         text = text.chars().take(keep).collect();
-        out = reply(&text, offset + text.chars().count(), false);
+        out = reply(&text, offset as usize + text.chars().count(), false);
     }
     out
 }
@@ -147,27 +209,30 @@ pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
 /// it wanted, and this is it — substring, case-insensitive, over rows and stored
 /// bodies, capped.
 pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let q = payload
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
+    let null = Value::Null;
+    // python `str(payload.get("query") or "").strip().lower()` — a NUMERIC query
+    // is its digits, not "no query".
+    let raw_q = payload.get("query").unwrap_or(&null);
+    let q = py_strip(&if py_truthy(raw_q) {
+        py_str(raw_q)
+    } else {
+        String::new()
+    })
+    .to_lowercase();
     if q.is_empty() {
         return bad_arg("grep: `query` is required", "query");
     }
-    let num = |k: &str, dflt: i64| -> i64 {
-        payload
-            .get(k)
-            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-            .filter(|&n| n != 0)
-            .unwrap_or(dflt)
+    // python `int(payload.get(k) or dflt)` for both, under ONE try/except that
+    // resets `limit` to 100.
+    let num = |k: &str, dflt: i64| py_int_or(payload.get(k).unwrap_or(&null), dflt);
+    let (limit, width) = match (num("limit", 100), num("width", 200)) {
+        (Ok(l), Ok(w)) => (l.clamp(1, 100) as usize, w.clamp(20, 20_000) as usize),
+        // RESIDUAL: python leaves `width` UNBOUND on this path and NameErrors the
+        // moment a line matches. There is no rust spelling of an unbound local;
+        // the default width is used and the refusal python raises is not
+        // reproduced.
+        _ => (100, 200),
     };
-    let limit = num("limit", 100).clamp(1, 100) as usize;
-    // The per-line cut. A bare default (200) the model can raise: a rule written
-    // as one long line lost its tail at 200 and the model concluded grep could
-    // not reach it (measured 2026-09-08, python fold_long).
-    let width = num("width", 200).clamp(20, 20_000) as usize;
 
     let raw_ids = payload.get("ids");
     let ids: Option<Vec<i64>> = match raw_ids {
@@ -191,10 +256,19 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     };
 
     let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID).await;
-    // A fold id in `ids` is a DESCENT: it expands to the rows it collapsed.
-    let scope: Option<HashSet<i64>> = ids
+    // A fold id in `ids` is a DESCENT: it expands to the rows it collapsed. An
+    // EMPTY list is falsy in python, so it means NO SCOPE — not "scope to
+    // nothing", which scoped every row out.
+    let scope: Option<Vec<i64>> = ids
         .as_ref()
-        .map(|v| expand_ids(&rows, v).into_iter().collect());
+        .filter(|v| !v.is_empty())
+        .map(|v| py_set_order(&expand_ids(&rows, v)));
+    let in_scope = |id: Option<i64>| -> bool {
+        match &scope {
+            None => true,
+            Some(s) => id.is_some_and(|i| s.contains(&i)),
+        }
+    };
 
     let mut matches: Vec<Value> = Vec::new();
     let mut total = 0usize;
@@ -203,20 +277,34 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     // times in one run and pushed the one body hit past the inline cap (measured
     // 2026-09-06, python recall_after_fold). The first occurrence keeps its
     // address.
+    //
+    // PYTHON'S LINE SET: `str.splitlines()` splits on `\r`, `\v`, `\f` and the
+    // information separators too, and the dedupe key / the cut use python's
+    // whitespace. Rust's `lines()` saw ONE line where python saw four.
     let mut scan = |rid: i64, text: &str, matches: &mut Vec<Value>, total: &mut usize| {
-        for (n, line) in text.lines().enumerate() {
+        for (n, line) in py_splitlines(text).into_iter().enumerate() {
             if !line.to_lowercase().contains(&q) {
                 continue;
             }
-            let key = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            let key = py_split_whitespace(line).join(" ");
             if !seen_lines.insert(key) {
                 continue;
             }
             *total += 1;
             if matches.len() < limit {
-                let cut: String = line.trim().chars().take(width).collect();
+                let cut: String = py_strip(line).chars().take(width).collect();
                 matches.push(json!({"id": rid, "line": n + 1, "text": cut}));
             }
+        }
+    };
+
+    // A row's text: the content when it is a string, else `json.dumps(content,
+    // default=str)` — ensure_ascii, so `{"k": "é"}` is scanned as
+    // `{"k": "é"}` and grep `é` matches nothing while grep `u00e9` does.
+    let row_text = |m: &Value| -> String {
+        match m.get("content") {
+            Some(Value::String(s)) => s.clone(),
+            other => py_json_dumps(other.unwrap_or(&Value::Null), true, None),
         }
     };
 
@@ -227,28 +315,21 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     // 2026-09-08, python: 22 greps, 22 zeros). An id that is itself a pid counts.
     let mut pids: Vec<i64> = Vec::new();
     for m in &rows {
-        if scope
-            .as_ref()
-            .is_some_and(|s| row_id(m).is_none_or(|id| !s.contains(&id)))
-        {
+        if !in_scope(row_id(m)) {
             continue;
         }
         if m.get("role").and_then(Value::as_str) != Some("user") {
             continue;
         }
-        let text = match m.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            other => serde_json::to_string(&other).unwrap_or_default(),
-        };
+        let text = row_text(m);
         for block in reply_blocks(&text) {
-            if let Some(p) = pid_of(block).and_then(|t| t.parse::<i64>().ok()) {
+            if let Some(p) = pid_of(block).and_then(|t| as_id(&Value::String(t.to_string()))) {
                 pids.push(p);
             }
         }
     }
     if let Some(s) = &scope {
-        let mut ordered: Vec<i64> = s.iter().copied().collect();
-        ordered.sort_unstable();
+        let mut ordered: Vec<i64> = s.clone();
         ordered.extend(pids);
         let mut seen = HashSet::new();
         pids = ordered.into_iter().filter(|p| seen.insert(*p)).collect();
@@ -263,22 +344,21 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     }
     for m in &rows {
         let Some(rid) = row_id(m) else { continue };
-        if scope.as_ref().is_some_and(|s| !s.contains(&rid)) {
+        if !in_scope(Some(rid)) {
             continue;
         }
-        let text = match m.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            other => serde_json::to_string(&other).unwrap_or_default(),
-        };
+        let text = row_text(m);
         scan(rid, &text, &mut matches, &mut total);
     }
     let (kept, cut) = fit_reply(
         &matches,
         inline_cap(&agent_meta(agent_id, kernel)),
-        Some(limit),
+        Some(limit as i64),
     );
     let more = cut || total > kept.len();
+    // PYTHON'S KEY ORDER: matches, total, truncated, next.
     let mut out = Map::new();
+    out.insert("matches".to_string(), json!(kept));
     out.insert("total".to_string(), json!(total));
     out.insert("truncated".to_string(), json!(more));
     if more {
@@ -289,7 +369,6 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
             );
         }
     }
-    out.insert("matches".to_string(), json!(kept));
     Value::Object(out)
 }
 
@@ -403,38 +482,44 @@ pub async fn context_recall(
     let mut why = "mechanical fit".to_string();
     let mut degraded = true;
     let mut expand: HashSet<i64> = HashSet::new();
-    let dry = payload.get("dry").and_then(Value::as_bool).unwrap_or(false);
+    // PYTHON TRUTHINESS: `dry:1`, `dry:"false"` and `dry:[0]` are all dry.
+    // `as_bool` accepted only a JSON `true`, so a model that wrote `1` got a
+    // model call it had asked not to make.
+    let dry = payload.get("dry").is_some_and(py_truthy);
     if let (Some(provider), false) = (provider, dry) {
         let lines: Vec<String> = head
             .iter()
             .map(|&i| {
                 let r = &view[i];
                 let content = row_content(r);
-                let title = r
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| quoted_title(content).map(str::to_string))
-                    .unwrap_or_else(|| {
-                        content
+                // python `r.get("title") or (<quoted title> or content[:80])` —
+                // TRUTHINESS, so an empty title falls through, and a non-string
+                // one is printed by `str()`.
+                let title = match r.get("title") {
+                    Some(t) if py_truthy(t) => py_str(t),
+                    _ => match quoted_title(content) {
+                        Some(t) => t.to_string(),
+                        None => content
                             .chars()
                             .take(80)
                             .collect::<String>()
-                            .replace('\n', " ")
-                    });
-                let kind = r
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .filter(|k| !k.is_empty())
-                    .unwrap_or_else(|| r.get("role").and_then(Value::as_str).unwrap_or(""));
-                let parent = r
-                    .get("parent")
-                    .and_then(Value::as_i64)
-                    .map_or("-".to_string(), |p| p.to_string());
+                            .replace('\n', " "),
+                    },
+                };
+                // `kind or role`, printed RAW through `str()`.
+                let kind = match r.get("kind") {
+                    Some(k) if py_truthy(k) => py_str(k),
+                    _ => r.get("role").map_or_else(String::new, py_str),
+                };
+                // `parent or '-'`: truthiness, so a 0/null parent is `-`.
+                let parent = match r.get("parent") {
+                    Some(p) if py_truthy(p) => py_str(p),
+                    _ => "-".to_string(),
+                };
                 format!(
                     "{} · {kind} · \"{title}\" · {}B · ↑{parent}",
                     row_id(r).unwrap_or(0),
-                    content.len()
+                    content.chars().count()
                 )
             })
             .collect();
@@ -465,24 +550,37 @@ pub async fn context_recall(
             .replace("{used}", &used.to_string())
             .replace("{done}", &done_text)
             .replace("{lines}", &lines.join("\n"));
-        if let Some(ans) = first_json(&compose(provider, &prompt).await) {
+        // python `if ans:` — an EMPTY object is no answer at all, so `degraded`
+        // stays true and `why` stays `mechanical fit`.
+        let answered = first_json(&compose(provider, &prompt).await).filter(|a| !a.is_empty());
+        if let Some(ans) = answered {
             let head_ids: HashSet<i64> = head.iter().filter_map(|&i| row_id(&view[i])).collect();
-            let want: Vec<i64> = ans
-                .get("expand")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(as_id)
-                        .filter(|x| head_ids.contains(x))
-                        .collect()
-                })
-                .unwrap_or_default();
-            why = ans
-                .get("why")
-                .and_then(Value::as_str)
-                .map(|s| s.chars().take(300).collect::<String>())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "chosen".to_string());
+            // python iterates `ans.get("expand") or []`: a list yields items, a
+            // STRING yields its characters, an object its keys — and a truthy
+            // int/float/bool RAISES before anything is saved.
+            let items = match py_iter(ans.get("expand").unwrap_or(&Value::Null)) {
+                Ok(items) => items,
+                Err(type_name) => {
+                    return json!({
+                        "error": format!("TypeError: '{type_name}' object is not iterable"),
+                        "raised": true,
+                    })
+                }
+            };
+            let want: Vec<i64> = items
+                .iter()
+                .filter_map(as_id)
+                .filter(|x| head_ids.contains(x))
+                .collect();
+            // python `str(ans.get("why") or "")[:300] or "chosen"` — `42` reads
+            // `42` and `["a"]` reads `['a']`; only a FALSY why is `chosen`.
+            why = match ans.get("why") {
+                Some(w) if py_truthy(w) => py_str(w).chars().take(300).collect::<String>(),
+                _ => String::new(),
+            };
+            if why.is_empty() {
+                why = "chosen".to_string();
+            }
             degraded = false;
             // charge each expansion at full size, newest first; drop what does not fit
             let mut total = used;
@@ -523,16 +621,20 @@ pub async fn context_recall(
     // collapsed is still the live one if nothing newer came.
     let live = rows.iter().rev().find(|r| {
         r.get("role").and_then(Value::as_str) == Some("user")
-            && r.get("parent").and_then(Value::as_i64).is_none()
+            // python `not r.get("parent")`: a 0 parent is falsy too.
+            && !r.get("parent").is_some_and(py_truthy)
+            // python `r.get("kind") in (None, "", "user")` — EXACTLY those three.
+            && matches!(
+                r.get("kind"),
+                None | Some(Value::Null) | Some(Value::String(_))
+            )
             && r.get("kind")
                 .and_then(Value::as_str)
                 .is_none_or(|k| k.is_empty() || k == "user")
             && parse_reply_tag(row_content(r)).is_none()
     });
     let live_txt = live.map_or(String::new(), |l| {
-        let text: String = row_content(l)
-            .split_whitespace()
-            .collect::<Vec<_>>()
+        let text: String = py_split_whitespace(row_content(l))
             .join(" ")
             .chars()
             .take(100)

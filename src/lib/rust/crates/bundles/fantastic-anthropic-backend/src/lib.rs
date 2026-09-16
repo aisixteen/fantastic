@@ -1,7 +1,7 @@
 //! anthropic_backend — Anthropic (Claude) Messages-API LLM bundle.
 //! Thin shell over `fantastic-ai-core`: this crate supplies only the
 //! Anthropic `Provider` (HTTPS + `x-api-key` + `anthropic-version`
-//! header + event-typed SSE, RAW TEXT + 429 retry) plus a `Bundle` that
+//! header + event-typed SSE, RAW TEXT) plus a `Bundle` that
 //! dispatches every verb through ai-core. The FIFO lock, menu cache, prompt
 //! assembly, agentic loop (incl. RAW tool-call parsing), status phase machine,
 //! and history persistence live in ai-core.
@@ -13,7 +13,10 @@
 //!   `ANTHROPIC_API_KEY`) at call time — python-canonical. There is no
 //!   key-storage verb and no sidecar: a connector is inert until the operator
 //!   wires the variable, and an absent key fails loud NAMING it.
-//! - `x-api-key` HTTP client cache (dropped on key change), 429 retry.
+//! - `x-api-key` HTTP client cache (dropped on key change). NO 429 retry and no
+//!   event for one: python's provider has no rate-limit policy at all — a 429 is
+//!   a status the endpoint ANSWERED with, and it is returned as `anthropic 429:
+//!   <body>` like every other client error.
 //!
 //! Wire translation: ai-core's plain messages → Anthropic's top-level `system`
 //! param + alternating user/assistant TEXT turns. NO native tools — Fantastic
@@ -25,11 +28,10 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::events::{emit_status, to_caller, CallerRoute};
-use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use fantastic_ai_core::retrieval;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
-use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
+use fantastic_bundle::{py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
@@ -60,35 +62,41 @@ pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 /// what's true; the request path fails loud when the model is unset/sentinel.
 pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
 
+/// What `reflect` says this agent IS — python `anthropic_backend/tools.py`'s
+/// `sentence`, verbatim. Native tool-calling is NOT used: ai_core parses the
+/// `<call>` envelope out of the raw stream.
+pub const SENTENCE: &str = "Anthropic-backed LLM agent (raw prompt-and-parse tool-calling).";
+
 /// Anthropic API version header value.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// `max_tokens` is REQUIRED by the Messages API — default if unset on the meta.
 pub const DEFAULT_MAX_TOKENS: u64 = 8192;
 
-/// Retries for a NON-JSON gateway 5xx (a CDN error page), with 1s/2s backoff.
-/// A JSON body is the API answering deliberately and is never retried.
-const GATEWAY_MAX_RETRIES: u32 = 2;
+/// EDGE TRANSPORT FAILURES — not answers, and not statements about the request.
+/// A 4xx, or any 5xx carrying a JSON body, is the endpoint DELIBERATELY
+/// answering: that is the caller's bug and it stays loud. These codes with a
+/// NON-JSON body are a CDN/proxy error page, meaning the request never reached
+/// anything that could judge it. Python `provider.py`'s `TRANSPORT_CODES`.
+const TRANSPORT_CODES: [u16; 8] = [502, 503, 504, 520, 521, 522, 523, 524];
+
+/// Attempts spent on a transport code before giving up — python `RETRIES`.
+const RETRIES: u32 = 2;
+
+/// Seconds slept between transport attempts, multiplied by the attempt number
+/// (1.5s, then 3.0s) — python `BACKOFF`.
+const BACKOFF: f64 = 1.5;
 
 /// Headless / REPL caller default.
 pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
 
 /// Hard per-generation ceiling (seconds). Releases the FIFO lock.
-pub const SEND_TIMEOUT_SECS: u64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
-
-/// Max wait honored from a `Retry-After` header on 429.
-pub const RATE_LIMIT_MAX_WAIT_SECS: u64 = 60;
-
-/// Default wait when `Retry-After` is absent / unparseable.
-pub const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 5;
-
-/// Per-agent retry budget on 429 before any chunk has been yielded.
-pub const RATE_LIMIT_MAX_RETRIES: u32 = 1;
+pub const SEND_TIMEOUT_SECS: f64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
 
 /// Per-backend config: per-client-inbox routing; serial dispatch.
 const CFG: BackendConfig = BackendConfig {
-    route: CallerRoute::PerClientInbox,
     name: "anthropic_backend",
+    provider_missing_error: None,
 };
 
 // ── Anthropic-local: x-api-key HTTP client cache ────────────────────
@@ -158,15 +166,14 @@ fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
 }
 
 /// The key comes from the ENVIRONMENT, so no kernel handle is needed here any
-/// more — this used to read a sidecar through the file agent.
-fn get_or_build_client(self_id: &AgentId) -> Result<Arc<reqwest::Client>, String> {
+/// more — this used to read a sidecar through the file agent. The key is passed
+/// in because `chat()` has already read and REFUSED on it (python checks it
+/// there, first thing); this only builds the transport.
+fn get_or_build_client(self_id: &AgentId, key: &str) -> Result<Arc<reqwest::Client>, String> {
     if let Some(c) = HTTP_CLIENTS.lock().get(self_id).cloned() {
         return Ok(c);
     }
-    let Some(key) = read_api_key() else {
-        return Err(no_key_error());
-    };
-    let client = Arc::new(build_client(&key)?);
+    let client = Arc::new(build_client(key)?);
     HTTP_CLIENTS
         .lock()
         .insert(self_id.clone(), Arc::clone(&client));
@@ -194,48 +201,48 @@ fn read_api_key() -> Option<String> {
     })
 }
 
-/// The refusal for an unwired connector — names the variables to set.
-fn no_key_error() -> String {
-    format!(
-        "anthropic_backend: no api key — set {}",
-        KEY_VARS.join(" or ")
-    )
-}
-
 // ── plain messages → Anthropic translation ──────────────────────────
 
-/// Split ai-core's messages into Anthropic's top-level `system` string + the
-/// `messages` array of plain user/assistant TEXT turns. Tool calls/replies are
-/// already inline text (`<call name=…>` / its reply tag); ai-core's
-/// `render_for_model` mapped tool replies to user-role text before we see them,
-/// so there is NO tool_use/tool_result translation. System blocks concatenate;
-/// empty turns are dropped (Anthropic rejects empty content).
-fn translate_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
-    let mut system: Option<String> = None;
+/// Python `anthropic_backend.provider._to_anthropic`: ai-core's messages →
+/// (top-level `system`, the `messages` array of plain user/assistant turns).
+///
+/// Tool calls and their replies are already inline text (`<call name=…>` / its
+/// reply tag), so there is NO tool_use/tool_result translation — pure text turns,
+/// and this transport learns nothing about the tool protocol.
+///
+/// THE LAST SYSTEM MESSAGE WINS (it is an assignment in python, not a
+/// concatenation), an empty one clears the key entirely, a falsy `content` on a
+/// user/assistant turn becomes `(no content)` rather than being dropped, and
+/// EVERY OTHER ROLE IS DROPPED — including `role:tool`, which rust used to remap
+/// to `user` and so put a turn on the wire python never sends.
+fn to_anthropic(messages: &[Value]) -> (Option<Value>, Vec<Value>) {
+    let mut system: Option<Value> = None;
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
-        let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+        // python `m.get("content", "") or ""`: absent OR falsy is the empty string.
+        let content = match m.get("content") {
+            Some(v) if py_truthy(v) => v.clone(),
+            _ => json!(""),
+        };
         match role {
-            "system" => {
-                system = Some(match system.take() {
-                    Some(prev) if !prev.is_empty() => format!("{prev}\n\n{content}"),
-                    _ => content.to_string(),
-                });
-            }
-            "user" | "tool" => {
-                out.push(json!({"role": "user", "content": content}));
-            }
-            "assistant" if !content.is_empty() => {
-                out.push(json!({"role": "assistant", "content": content}));
+            "system" => system = Some(content),
+            "user" | "assistant" => {
+                let body = if py_truthy(&content) {
+                    content
+                } else {
+                    json!("(no content)")
+                };
+                out.push(json!({"role": role, "content": body}));
             }
             _ => {}
         }
     }
-    (system, out)
+    // python `if system:` — a falsy system block means no `system` key at all.
+    (system.filter(py_truthy), out)
 }
 
-// ── Anthropic provider (x-api-key + event-typed SSE + 429 retry) ─────
+// ── Anthropic provider (x-api-key + event-typed SSE) ─────────────────
 
 struct AnthropicProvider {
     self_id: AgentId,
@@ -250,19 +257,6 @@ struct AnthropicProvider {
     /// without it every long rust turn ran to ~41k chars and the proxy's 180s
     /// cap (measured 2026-09-12: build, implicit_constraint, graph_shape).
     sampling: Map<String, Value>,
-    kernel: Arc<Kernel>,
-    client_id: String,
-}
-
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> u64 {
-    let raw = headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    match raw.trim().parse::<u64>() {
-        Ok(v) => v.clamp(1, RATE_LIMIT_MAX_WAIT_SECS),
-        Err(_) => RATE_LIMIT_DEFAULT_WAIT_SECS,
-    }
 }
 
 #[async_trait]
@@ -271,12 +265,26 @@ impl Provider for AnthropicProvider {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
+        // THE KEY IS CHECKED HERE, AND BEFORE THE MODEL — python
+        // `provider.py:112-119`. It used to gate the PROVIDER BUILD, so an
+        // unwired connector answered `{error: "anthropic_backend: no api key
+        // — set ANTHROPIC_KEY or ANTHROPIC_API_KEY"}` as a COMPLETED turn,
+        // before `status(thinking)`, with a sentence python does not have.
+        // Inside `chat` the turn has already opened: the caller sees
+        // `status(thinking)`, then `status(done, reason='error')`, and the
+        // failure RAISES like every other provider failure.
+        let Some(key) = read_api_key() else {
+            return Err(ProviderError::raised(
+                "ANTHROPIC_KEY not set in environment (.env)",
+            ));
+        };
         // NO guessy default: fail loud before the wire if no model is named.
         if self.model.is_empty() || self.model == DEFAULT_MODEL {
-            return Err("anthropic_backend: no `model` set — this connector does \
-                not guess one. Name a model on the agent record (model=...)."
-                .to_string());
+            return Err(ProviderError::raised(
+                "anthropic_backend: no `model` set — this connector does \
+                 not guess one. Name a model on the agent record (model=...).",
+            ));
         }
         // RAW, always: no native `tools`/`tool_choice` — ai-core parses the
         // `<call name=…>` envelope out of the streamed text. The optional
@@ -284,26 +292,34 @@ impl Provider for AnthropicProvider {
         // blocks back is DELETED: a model writing JSON tool calls is writing a
         // grammar this kernel does not parse, and the honest answer is to say so
         // (see `decode_sse_line`), not to translate a second dialect at the edge.
-        let (system, anthropic_messages) = translate_messages(messages);
+        // PYTHON'S KEY ORDER — `model, max_tokens, messages, stream, system`,
+        // then the record's sampling knobs. The body is what a wire capture
+        // diffs, so the order is part of the surface.
+        let (system, anthropic_messages) = to_anthropic(messages);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
         body.insert("max_tokens".into(), json!(self.max_tokens));
-        body.insert("stream".into(), json!(true));
         body.insert("messages".into(), json!(anthropic_messages));
+        body.insert("stream".into(), json!(true));
         if let Some(sys) = system {
-            body.insert("system".into(), json!(sys));
+            body.insert("system".into(), sys);
         }
         for (k, v) in &self.sampling {
             body.insert(k.clone(), v.clone());
         }
         let body = Value::Object(body);
 
-        // Retry-once-on-429 (before any chunk yielded). Emits a rate-limit
-        // say + status during the backoff.
+        // NO RATE-LIMIT POLICY. A 429 is the endpoint answering, and it is
+        // returned as `anthropic 429: <body>` exactly like every other status
+        // — python's provider has no retry, no backoff and no event for one.
+        //
+        // A GATEWAY HICCUP is the one retried case: 502/503/504/520-524 from a
+        // CDN or reverse proxy in front of the API, and ONLY when the body is
+        // not JSON. A JSON body is the API speaking deliberately — that stays
+        // loud, or a real refusal would be re-sent until the budget ran out.
         let mut attempt: u32 = 0;
-        let mut gw_attempt: u32 = 0;
         let resp = loop {
-            let client = get_or_build_client(&self.self_id)?;
+            let client = get_or_build_client(&self.self_id, &key).map_err(ProviderError::raised)?;
             // VERBATIM — `endpoint` IS the messages URL (see DEFAULT_ENDPOINT).
             let url = self.endpoint.clone();
             let resp = client
@@ -311,68 +327,30 @@ impl Provider for AnthropicProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("http: {}", error_chain(&e)))?;
-            let status = resp.status();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                if attempt < RATE_LIMIT_MAX_RETRIES {
-                    let wait = parse_retry_after(resp.headers());
-                    attempt += 1;
-                    drop(resp);
-                    to_caller(
-                        &self.kernel,
-                        &self.self_id,
-                        &self.client_id,
-                        CFG.route,
-                        json!({
-                            "type": "say",
-                            "text": format!("[provider rate limited (429); waiting {wait}s]"),
-                            "source": self.self_id.as_str(),
-                        }),
-                    )
-                    .await;
-                    let mut extras = Map::new();
-                    extras.insert("waiting_on".into(), json!("rate_limit"));
-                    extras.insert("wait_s".into(), json!(wait));
-                    emit_status(
-                        &self.kernel,
-                        &state::state_for(&self.self_id),
-                        &self.self_id,
-                        &self.client_id,
-                        CFG.route,
-                        "thinking",
-                        extras,
-                    )
-                    .await;
-                    tokio::time::sleep(Duration::from_secs(wait)).await;
-                    continue;
-                } else {
-                    let wait = parse_retry_after(resp.headers());
-                    return Err(format!("send: rate limited (429); retry in {wait}s"));
-                }
+                .map_err(|e| ProviderError::raised(format!("http: {}", error_chain(&e))))?;
+            let code = resp.status().as_u16();
+            if code < 400 {
+                break resp;
             }
-            // A GATEWAY HICCUP, not an answer. 502/503/504/520-524 from a CDN or
-            // reverse proxy in front of the API is transient; a 1-2s restart
-            // returned a Cloudflare HTML page and killed a 26-pass run at pass 5.
-            //
-            // Retried ONLY when the body is not JSON. A JSON body is the API
-            // speaking deliberately — that stays loud and is never retried, or a
-            // real refusal would be re-sent until the budget ran out.
-            let code = status.as_u16();
-            let gateway = code == 502 || code == 503 || code == 504 || (520..=524).contains(&code);
-            if gateway && gw_attempt < GATEWAY_MAX_RETRIES {
-                let body_text = resp.text().await.unwrap_or_default();
-                if serde_json::from_str::<Value>(&body_text).is_err() {
-                    let wait = 1u64 << gw_attempt; // 1s, 2s
-                    gw_attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(wait)).await;
-                    continue;
-                }
-                return Err(format!("send: provider HTTP {code}"));
+            let ctype = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            // python `(await resp.aread()).decode("utf-8", "replace")`.
+            let detail = match resp.bytes().await {
+                Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+                Err(e) => return Err(ProviderError::raised(format!("http: {}", error_chain(&e)))),
+            };
+            if !(TRANSPORT_CODES.contains(&code)
+                && !ctype.to_lowercase().contains("json")
+                && attempt < RETRIES)
+            {
+                return Err(ProviderError::raised(format!("anthropic {code}: {detail}")));
             }
-            if !status.is_success() {
-                return Err(format!("send: provider HTTP {code}"));
-            }
-            break resp;
+            attempt += 1;
+            tokio::time::sleep(Duration::from_secs_f64(BACKOFF * f64::from(attempt))).await;
         };
 
         Ok(consume_sse(resp))
@@ -391,6 +369,12 @@ struct SseState {
     buf: Vec<u8>,
     stop: bool,
     stop_reason: Option<String>,
+    /// The `type` of every `content_block_start` seen, in order — python's
+    /// `blocks` list. A bare `stop_reason` names the symptom and nothing else;
+    /// the block types are the one fact that distinguishes "the model wrote a
+    /// native tool block" from "the connection died before any content". A
+    /// block with no `type` key appends python's `None`.
+    blocks: Vec<Value>,
     wrap: fantastic_ai_core::think::ThinkWrap,
 }
 
@@ -400,6 +384,7 @@ impl SseState {
             buf: Vec::new(),
             stop: false,
             stop_reason: None,
+            blocks: Vec::new(),
             wrap: fantastic_ai_core::think::ThinkWrap::new(),
         }
     }
@@ -413,17 +398,34 @@ impl SseState {
     /// `tools` key at all — those now raise in `decode_sse_line`, so a
     /// `stop_reason` of `tool_use` with no block seen is an anomaly and says so.
     fn terminality(&self) -> Option<String> {
-        match self.stop_reason.as_deref() {
-            Some("end_turn") | Some("stop_sequence") => None,
-            Some(other) => Some(format!(
-                "anthropic stream ended without end_turn: stop_reason={other:?}"
-            )),
-            None => Some(
-                "anthropic stream ended without end_turn: no stop_reason seen \
-                 (connection cut mid-stream)"
-                    .to_string(),
-            ),
+        // A turn that ended BECAUSE the model called tools is a complete turn —
+        // python widens the terminal set when a `tool_use` block was actually
+        // seen. (This crate raises on such a block the moment it arrives, so the
+        // widening only ever matters if that raise is relaxed; the rule is
+        // python's and travels with it.)
+        let tool_use_seen = self.blocks.iter().any(|b| b.as_str() == Some("tool_use"));
+        let terminal = match self.stop_reason.as_deref() {
+            Some("end_turn" | "stop_sequence") => true,
+            Some("tool_use") => tool_use_seen,
+            _ => false,
+        };
+        if terminal {
+            return None;
         }
+        let reason = self
+            .stop_reason
+            .as_ref()
+            .map_or(Value::Null, |s| json!(s.clone()));
+        let tail = if self.stop_reason.is_none() {
+            " (none seen — connection cut mid-stream)"
+        } else {
+            ""
+        };
+        Some(format!(
+            "anthropic stream ended without end_turn: stop_reason={} blocks={}{tail}",
+            py_repr_value(&reason),
+            py_repr_value(&Value::Array(self.blocks.clone())),
+        ))
     }
 }
 
@@ -447,16 +449,18 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
         // call lost. Some `/cc`-style routes emit these for a request carrying
         // no `tools` key at all — that is exactly the case worth failing on.
         "content_block_start" => {
-            let cb = obj.get("content_block");
-            if cb.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
-                let name = cb
-                    .and_then(|b| b.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("?");
+            // python `cb = evt.get("content_block") or {}` then
+            // `blocks.append(cb.get("type"))` — a missing key appends `None`.
+            let cb = obj.get("content_block").cloned().unwrap_or(json!({}));
+            let btype = cb.get("type").cloned().unwrap_or(Value::Null);
+            st.blocks.push(btype.clone());
+            if btype.as_str() == Some("tool_use") {
+                let name = cb.get("name").cloned().unwrap_or(Value::Null);
                 return Err(format!(
-                    "anthropic stream carried a native tool_use block ({name:?}): \
+                    "anthropic stream carried a native tool_use block ({}): \
                      the model wrote a JSON tool call, which this kernel does not \
-                     parse — calls are `<call name=…>` text"
+                     parse — calls are `<call name=…>` text",
+                    py_repr_value(&name)
                 ));
             }
         }
@@ -489,13 +493,16 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
                 }
             }
         }
+        // THE WHOLE `error` OBJECT, python-rendered — `raise RuntimeError(
+        // f"anthropic stream error: {err}")` over `evt.get("error") or {}`.
+        // Reading only `message` out of it dropped the `type`, which is the
+        // field that says whether the endpoint overloaded or refused.
         "error" => {
-            let msg = obj
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("anthropic stream error");
-            return Err(format!("stream: {msg}"));
+            let err = obj.get("error").cloned().filter(py_truthy);
+            return Err(format!(
+                "anthropic stream error: {}",
+                py_str(&err.unwrap_or(json!({})))
+            ));
         }
         "message_delta" => {
             st.stop_reason = obj
@@ -549,7 +556,7 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                 let Some(chunk_res) = inner.next().await else {
                     finished = true;
                     if let Some(why) = st.terminality() {
-                        pending.push_back(Err(why));
+                        pending.push_back(Err(ProviderError::raised(why)));
                     }
                     continue;
                 };
@@ -557,7 +564,10 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                     Ok(bytes) => st.buf.extend_from_slice(&bytes),
                     Err(e) => {
                         finished = true;
-                        pending.push_back(Err(format!("stream: {}", error_chain(&e))));
+                        pending.push_back(Err(ProviderError::raised(format!(
+                            "stream: {}",
+                            error_chain(&e)
+                        ))));
                         continue;
                     }
                 }
@@ -570,14 +580,14 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                         Ok(events) => pending.extend(events.into_iter().map(Ok)),
                         Err(e) => {
                             finished = true;
-                            pending.push_back(Err(e));
+                            pending.push_back(Err(ProviderError::raised(e)));
                             break;
                         }
                     }
                     if st.stop {
                         finished = true;
                         if let Some(why) = st.terminality() {
-                            pending.push_back(Err(why));
+                            pending.push_back(Err(ProviderError::raised(why)));
                         }
                         break;
                     }
@@ -610,10 +620,13 @@ impl Bundle for AnthropicBundle {
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel).await,
-            "shutdown" => Value::Null,
+            "reflect" => reflect_reply(agent_id, kernel),
             // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`.
             "boot" => {
+                // A BOOT IS A NEW INCARNATION (python `_make_boot`): a reply
+                // answering a call the PREVIOUS one made is recorded as a row
+                // and wakes no turn.
+                state::bump_incarnation(agent_id);
                 if fantastic_ai_core::history::load_history(
                     agent_id,
                     kernel,
@@ -624,17 +637,17 @@ impl Bundle for AnthropicBundle {
                 {
                     Value::Null
                 } else {
-                    let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
-                    retrieval::context_recall(agent_id, &json!({}), kernel, p.as_ref()).await
+                    let p = build_provider(agent_id, kernel);
+                    retrieval::context_recall(agent_id, &json!({}), kernel, Some(&p)).await
                 }
             }
-            "send" => send_reply(agent_id, payload, kernel).await,
+            "send" => send_reply(agent_id, payload, kernel).await?,
             // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
             // record, this agent answers it by THINKING, and the asker writes
             // the same call either way.
             "inquiry" => match verbs::inquiry_open(payload) {
                 Err(refusal) => refusal,
-                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await, payload),
+                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await?, payload),
             },
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
@@ -643,12 +656,19 @@ impl Bundle for AnthropicBundle {
             "grep" => retrieval::grep(agent_id, payload, kernel).await,
             // Rebuild the view from the store: on boot, after folds, on request.
             "context_recall" => {
-                let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
-                retrieval::context_recall(agent_id, payload, kernel, p.as_ref()).await
+                let p = build_provider(agent_id, kernel);
+                retrieval::context_recall(agent_id, payload, kernel, Some(&p)).await
             }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
-            other => json!({"error": format!("anthropic_backend: unknown type {other:?}")}),
+            // python's VERBS map has no `shutdown` — it is an unknown type like
+            // any other, and the value is rendered with python's `repr`.
+            _ => json!({
+                "error": format!(
+                    "anthropic_backend: unknown type {}",
+                    py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
+                )
+            }),
         };
         Ok(Some(reply))
     }
@@ -662,7 +682,7 @@ impl Bundle for AnthropicBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
         Ok(())
     }
 
@@ -680,14 +700,12 @@ impl Bundle for AnthropicBundle {
 /// The provider this agent is configured for. Built per call (it is cheap and the
 /// record can change between turns), and shared by `send` and the verbs that need
 /// a completion of their own — `context_recall` asks the model which rows to keep
-/// in full. `None` when the backend is not configured to reach a model at all;
-/// the caller says so in its own words rather than guessing a provider.
-fn build_provider(
-    agent_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    client_id: &str,
-) -> Option<Arc<dyn Provider>> {
-    read_api_key()?;
+/// in full.
+///
+/// ALWAYS BUILDABLE: python's `make_provider` reads only the record, and the key
+/// is the provider's own business at call time. Gating the build on the key made
+/// an unwired connector answer a refusal python never writes.
+fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
     let max_tokens = helpers::agent_meta(agent_id, kernel)
         .get("max_tokens")
         .and_then(Value::as_u64)
@@ -702,84 +720,42 @@ fn build_provider(
                 .collect()
         })
         .unwrap_or_default();
-    Some(Arc::new(AnthropicProvider {
+    Arc::new(AnthropicProvider {
         self_id: agent_id.clone(),
         endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
         model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
         max_tokens,
         sampling,
-        kernel: Arc::clone(kernel),
-        client_id: client_id.to_string(),
-    }))
-}
-
-async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let client_id = helpers::safe_client(
-        payload
-            .get("client_id")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
-    let Some(provider) = build_provider(agent_id, kernel, &client_id) else {
-        return json!({ "error": no_key_error() });
-    };
-    verbs::send(provider, agent_id, payload, kernel, CFG).await
-}
-
-async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
-    let model = helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL);
-    let file_bridge_id_v = helpers::meta_string(agent_id, kernel, "file_bridge_id");
-    let has_key = read_api_key().is_some();
-    let generating = state::is_generating(agent_id);
-    let meta = helpers::agent_meta(agent_id, kernel);
-    let max_tokens = meta
-        .get("max_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_MAX_TOKENS);
-    let context_window = fantastic_ai_core::context::resolve_context_window(&meta);
-    let context_strategy = meta
-        .get("context_strategy")
-        .and_then(Value::as_str)
-        .unwrap_or("compact")
-        .to_string();
-    json!({
-        "id": agent_id.as_str(),
-        "sentence": "Anthropic (Claude) Messages-API LLM agent (raw prompt-and-parse tool-calling).",
-        "model": model,
-        "endpoint": endpoint,
-        "max_tokens": max_tokens,
-        // Which ROUTE this agent is on. Readable, because a model debugging why
-        // its envelope did or did not reach the wire cannot otherwise tell.
-        "tool_use": meta.get("tool_use").and_then(Value::as_bool).unwrap_or(false),
-        "file_bridge_id": file_bridge_id_v,
-        "has_api_key": has_key,
-        "generating": generating,
-        "context_window": context_window,
-        "context_strategy": context_strategy,
-        "verbs": {
-            "reflect": "Identity + model + endpoint + max_tokens + has_api_key + generating + file_bridge_id binding. No args. `has_api_key` reports whether the ENV key is set; the value is NEVER returned.",
-            "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Failfast if file_bridge_id unset OR no api key in the environment.",
-            "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
-            "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
-            "pull": "args: pid:int (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with offset: next_offset until eof.",
-            "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int?, width:int? (chars of each matched line, default 200). Finds the LINE that mentions something, wherever it is. Returns {matches:[{id, line, text}], total, truncated}.",
-            "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuilds this agent's VIEW from its store: fits the head to the budget at digest resolution, asks the model which rows it wants in full, persists the id list, logs the decision as a row. Returns {kept, expanded, dropped, budget, why, degraded}.",
-            "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
-            "status": "args: client_id:str?. Privacy-filtered queue/in-flight snapshot.",
-        },
-        "cancel": fantastic_ai_core::CANCEL_DOC,
-        "emits": {
-            "queued": "{type:'queued', source, client_id, send_id} — back-compat queue notice.",
-            "token": "{type:'token', text, source, client_id} — streaming chunk.",
-            "say": "{type:'say', text, source, client_id} — per call summary plus rate-limit notices.",
-            "status": "{type:'status', source, client_id, ts, phase, detail} — phase machine: queued|thinking|streaming|tool_calling|done. detail.waiting_on='rate_limit' + wait_s during 429 backoff.",
-            "done": "{type:'done', source, client_id} — back-compat end marker.",
-            "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. Pull counterpart: the context_status verb.",
-        },
-        "concurrency": "Per-backend FIFO lock around `send`. reflect/history skip the lock.",
     })
+}
+
+async fn send_reply(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Result<Value, BundleError> {
+    verbs::send(
+        Some(build_provider(agent_id, kernel)),
+        agent_id,
+        payload,
+        kernel,
+        CFG,
+    )
+    .await
+}
+
+/// `reflect` — python `_make_reflect` with no `reflect_extra`: the shared base
+/// body and nothing else. `max_tokens`, `tool_use`, `file_bridge_id` and
+/// `has_api_key` were rust-only keys; a model that read them learned a surface
+/// python's anthropic agent does not have.
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    Value::Object(verbs::reflect_base(
+        agent_id,
+        kernel,
+        SENTENCE,
+        DEFAULT_MODEL,
+        DEFAULT_ENDPOINT,
+    ))
 }
 
 #[cfg(test)]

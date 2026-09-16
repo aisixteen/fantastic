@@ -8,6 +8,7 @@
 
 use crate::folds::{
     chains, clean_title, expand_ids, is_open, make_fold, quoted_title, render, row_id,
+    SUMMARY_INPUT_CAP,
 };
 use crate::strategies::fold::{next_span, FOLD_RUN, KEEP_TAIL, SPAN};
 use crate::strategies::strip::{is_reply, pid_of, stub};
@@ -316,5 +317,61 @@ fn a_tag_that_is_not_a_reply_block_yields_no_pid() {
         pid_of("[reply to 9]"),
         None,
         "the ` · ` separator is required"
+    );
+}
+
+// ─── python-parity: text bytes the model reads ──────────────────────────────
+
+#[test]
+fn chain_text_is_python_json_dumps() {
+    // `json.dumps(items, ensure_ascii=False, default=str)` — `, `/`: ` separators
+    // and RAW non-ASCII. `serde_json::to_string` was compact (`,`/`:`), so every
+    // fold's summarizer input differed from python's by two chars per key.
+    let rows = vec![json!({"role": "user", "id": 1, "content": "a — b"})];
+    assert_eq!(
+        crate::folds::chain_text(&rows, &[0]),
+        "[{\"role\": \"user\", \"id\": 1, \"content\": \"a — b\"}]"
+    );
+}
+
+#[test]
+fn a_stub_says_how_big_the_body_was_in_code_points() {
+    // python prints `len(body)` — CODE POINTS. A byte count reported a non-ASCII
+    // body as bigger than the model's own `pull` of it.
+    let block = "[reply to 7 \u{b7} notes read]\néé";
+    assert_eq!(
+        stub(block),
+        "[reply to 7 \u{b7} notes read] (stripped: 2 bytes — recall by pid)"
+    );
+}
+
+#[test]
+fn quoted_title_bounds_on_code_points() {
+    // python `· "([^"]{1,140})"` counts CHARACTERS: a 140-character non-ASCII
+    // title is inside the bound, and a byte count put it outside.
+    let t = "é".repeat(140);
+    let content = format!("[reply to 1 \u{b7} n r \u{b7} \"{t}\"]");
+    assert_eq!(quoted_title(&content), Some(t.as_str()));
+    let too_long = "é".repeat(141);
+    let content = format!("[reply to 1 \u{b7} n r \u{b7} \"{too_long}\"]");
+    assert_eq!(quoted_title(&content), None);
+}
+
+#[test]
+fn chain_text_elision_tail_is_python_slice() {
+    // python `c[: per//2] + … + c[-per//2 :]`: `-per // 2` FLOORS, so the TAIL is
+    // one longer than the head when `per` is odd. The elided count is the same
+    // either way, so a halved tail silently dropped one character.
+    let per = SUMMARY_INPUT_CAP.max(400); // one row ⇒ per = SUMMARY_INPUT_CAP
+    let body: String = "abcdefghij".repeat((per / 10) + 5);
+    let rows = vec![json!({"role": "user", "id": 1, "content": body.clone()})];
+    let out = crate::folds::chain_text(&rows, &[0]);
+    let n = body.chars().count();
+    let tail: String = body.chars().skip(n - per.div_ceil(2)).collect();
+    // The rendered JSON holds the tail verbatim (no escapes in this body).
+    assert!(
+        out.contains(&tail[..40]),
+        "the tail must start {} chars from the end",
+        per.div_ceil(2)
     );
 }

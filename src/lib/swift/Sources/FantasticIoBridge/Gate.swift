@@ -41,9 +41,10 @@ public func gateWebLeg(
 }
 
 /// The fs-edge GATE — gate a verb on a leg given its rule meta (`ingress_rule` /
-/// the legacy `auth` shorthand + the envelope `auth_token`). Lifecycle/discovery
-/// verbs (`reflect`/`boot`/`shutdown`) bypass the gate so a SEALED bridge is
-/// still discoverable. Returns `nil` to ADMIT, or a deny JSON
+/// the legacy `auth` shorthand + the envelope `auth_token`). `reflect` — and ONLY
+/// `reflect` — bypasses the gate, so a SEALED bridge is still discoverable:
+/// python's `UNGATED` set holds that one verb, so a sealed `boot` is denied like
+/// any other call. Returns `nil` to ADMIT, or a deny JSON
 /// `{error, reason:"unauthorized", hint}`. Used by `file_bridge` (and the web
 /// legs) — the same sealed-by-default choke point as the cross-kernel bridges.
 public func gateVerb(
@@ -53,7 +54,7 @@ public func gateVerb(
     agentId: String,
     verb: String
 ) -> JSON? {
-    if verb == "reflect" || verb == "boot" || verb == "shutdown" { return nil }
+    if verb == "reflect" { return nil }
     let rule: IngressRule
     do {
         rule = try resolveIngress(ingressRule: ingressRule, auth: auth)

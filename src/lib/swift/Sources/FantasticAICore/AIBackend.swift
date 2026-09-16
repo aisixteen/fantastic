@@ -59,14 +59,21 @@ public func buildAIBackend(_ config: AIBackendConfig) -> AIBackend {
 /// surface that teaches a caller how to kill a turn. Byte-identical to Rust's
 /// `fantastic_ai_core::CANCEL_DOC`.
 public let CANCEL_DOC: String = """
-    No `interrupt` verb — an in-flight `send` IS a kernel task. \
-    Kill it with the substrate's universal system verbs: send 'kernel' {type:'ps'} for the live \
-    task table, find the row {agent:'<this agent>', verb:'send'}, then send 'kernel' \
-    {type:'cancel', task_id:'<agent>:<n>'}. The turn closes with status(phase='done', \
-    reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the blocked \
-    caller's `send` resolves to {cancelled:true}. Cancel kills the task's whole SUBTREE, so any \
-    work the turn spawned dies with it.
+    No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with the \
+    substrate's universal system verbs: send 'kernel' <type>ps</type> for the live task \
+    table, find the row {agent:'<this agent>', verb:'send'}, then send 'kernel' \
+    <type>cancel</type> <task_id>n</task_id>. The turn closes with status(phase='done', \
+    reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the \
+    blocked caller's `send` resolves to {cancelled:true}. Cancel kills the task's whole \
+    SUBTREE, so any work the turn spawned dies with it.
     """
+
+/// The FIFO posture every backend advertises. Python `_make_reflect`'s
+/// `concurrency`, verbatim.
+public let CONCURRENCY_DOC: String =
+    "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait "
+    + "(and receive a `queued` event so their UI can show it). `reflect`/`history`/`status` "
+    + "skip the lock and stay snappy."
 
 public final class AIBackend: @unchecked Sendable {
     public let config: AIBackendConfig
@@ -76,24 +83,33 @@ public final class AIBackend: @unchecked Sendable {
     /// Bounds runaway tool loops / a stuck provider. Mirrors Python
     /// `SEND_TIMEOUT` / Rust `SEND_TIMEOUT_SECS` (default 180s; the env
     /// override `FANTASTIC_AI_SEND_TIMEOUT` is read once at init).
+    /// Recursion guard: AI→AI→… chains refuse past this depth. Python
+    /// `MAX_CALL_DEPTH`.
+    public static let maxCallDepth = 8
+
     public static let defaultSendTimeoutSeconds: Double = 180
-    private let sendTimeoutSeconds: Double = {
-        if let raw = ProcessInfo.processInfo.environment["FANTASTIC_AI_SEND_TIMEOUT"],
-            let v = Double(raw), v > 0
-        {
-            return v
+    /// The env-derived default every backend config starts from — python's
+    /// module-level `SEND_TIMEOUT = float(os.environ.get(…, "180"))`.
+    ///
+    /// FAILS LOUD ON A BAD VALUE, exactly as that import does: python raises and
+    /// the runtime does not come up. Swift used to parse with `Double(raw)` and
+    /// SILENTLY FALL BACK to 180 on anything it could not read (`"0"` included),
+    /// so a mis-set variable produced a kernel that looked configured and was not.
+    public static let envSendTimeout: Double = {
+        guard let raw = ProcessInfo.processInfo.environment["FANTASTIC_AI_SEND_TIMEOUT"] else {
+            return AIBackend.defaultSendTimeoutSeconds
         }
-        return AIBackend.defaultSendTimeoutSeconds
+        do {
+            return try pyFloat(.string(raw))
+        } catch {
+            fatalError("FANTASTIC_AI_SEND_TIMEOUT: \(error)")
+        }
     }()
+    private var sendTimeoutSeconds: Double { config.sendTimeout }
 
     /// In-flight stream count (bumped around every pass).
     private let stateLock = NSLock()
     private var inFlight: Int = 0
-
-    /// Per-agent send coordination (FIFO lock + queue + in-flight entry)
-    /// behind the `status` verb + phase events. Lazily created per id.
-    private let runStatesLock = NSLock()
-    private var runStates: [String: AIAgentRunState] = [:]
 
     /// Context-Protocol state, keyed by agent id. `projectionCache` is the
     /// PUBLIC `context_status.last_projection` summary; `compactionMark` is the
@@ -116,23 +132,29 @@ public final class AIBackend: @unchecked Sendable {
         self.config = config
     }
 
-    /// Get (or lazily create) the coordination state for an agent. Internal, not
-    /// private: the projection seam (ContextProjection.swift, same type,
-    /// different file) reads it.
-    func runState(_ id: String) -> AIAgentRunState {
-        runStatesLock.lock()
-        defer { runStatesLock.unlock() }
-        if let s = runStates[id] { return s }
-        let s = AIAgentRunState()
-        runStates[id] = s
-        return s
+    /// The coordination state for an agent — PROCESS-GLOBAL (see `AIRunStates`),
+    /// because python's `_queue`/`_current` are module dicts every backend and
+    /// the router share.
+    func runState(_ kernel: Kernel, _ id: String) -> AIAgentRunState {
+        AIRunStates.of(kernel, id)
     }
 
     /// Fractional unix seconds — status timestamps + entry ages.
     func nowSecs() -> Double { Date().timeIntervalSince1970 }
 
     /// Opaque id for one user submission (status correlation).
-    private func mintSendId() -> String { "snd_\(UUID().uuidString.prefix(8))" }
+    ///
+    /// python `secrets.token_urlsafe(8)`: 8 random bytes, base64url, padding
+    /// stripped — ELEVEN characters and NO prefix. Swift minted `snd_<8 hex>`,
+    /// which no python-shaped consumer (or capture diff) recognises.
+    private func mintSendId() -> String {
+        var bytes = Data(count: 8)
+        for i in 0..<8 { bytes[i] = UInt8.random(in: UInt8.min...UInt8.max) }
+        return bytes.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
 
     // MARK: - Verb dispatch
 
@@ -141,37 +163,33 @@ public final class AIBackend: @unchecked Sendable {
         agentId: AgentId,
         payload: JSON,
         kernel: Kernel
-    ) async -> JSON? {
+    ) async throws -> JSON? {
         let verb = payload["type"].asString ?? ""
         guard let agent = kernel.agent(agentId) else {
             return .object(["error": .string("no agent")])
         }
         switch verb {
         case "reflect":
-            return reflectReply(agent: agent)
+            return reflectReply(agent: agent, kernel: kernel)
         case "boot":
             // On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`.
             // A fresh agent has nothing to recall and returns nothing. The
             // incarnation is bumped FIRST: a reply dispatched under the previous
             // one must not become a live turn of this one. Python `_make_boot`.
-            AIIncarnation.bump(agent.id.value)
+            AIIncarnation.bump(kernel, agent.id.value)
             if loadHistory(agent: agent, kernel: kernel).isEmpty { return nil }
             let provider = await sideProvider(agent: agent, kernel: kernel)
-            return await contextRecall(
+            return try await contextRecall(
                 agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
-        case "shutdown":
-            // A lifecycle no-op, never advertised: the AI is told by
-            // `shutdown_agents` only when its reflect map carries the verb.
-            return .null
         case "send":
-            return await sendVerb(agent: agent, payload: payload, kernel: kernel)
+            return try await sendVerb(agent: agent, payload: payload, kernel: kernel)
         // ONE INQUIRY VERB, WHOEVER RECEIVES IT: a person answers `inquiry` from a
         // record, this agent answers it by THINKING, and the asker writes the
         // same call either way.
         case "inquiry":
             let opened = inquiryOpen(payload)
             if let refusal = opened.refusal { return refusal }
-            let out = await sendVerb(agent: agent, payload: opened.send!, kernel: kernel)
+            let out = try await sendVerb(agent: agent, payload: opened.send!, kernel: kernel)
             return inquiryClose(out, payload)
         case "history":
             return historyVerb(agent: agent, payload: payload, kernel: kernel)
@@ -186,18 +204,23 @@ public final class AIBackend: @unchecked Sendable {
             return await contextStatusVerb(agent: agent, kernel: kernel)
         // Rebuild the view from the store: on boot, after folds, on request.
         case "context_recall":
-            let dry = payload["dry"].asBool ?? false
+            // PYTHON TRUTHINESS: `dry:1`, `"false"` and `[0]` are all dry.
+            // `asBool` took only a JSON `true`, so a model writing `<dry>1</dry>`
+            // got a real model call it had asked not to make.
+            let dry = pyTruthy(payload["dry"])
             let provider = dry ? nil : await sideProvider(agent: agent, kernel: kernel)
-            return await contextRecall(
+            return try await contextRecall(
                 agent: agent, payload: payload, kernel: kernel, provider: provider)
         case "status":
-            return statusVerb(agentId: agentId, payload: payload)
+            return statusVerb(agentId: agentId, payload: payload, kernel: kernel)
         default:
-            // Python's `f"{name}: unknown type {t!r}"` — the bundle name, the
-            // verb repr'd, `None` when the payload named no type.
+            // Python's `f"{name}: unknown type {t!r}"` — the bundle name and the
+            // RAW payload value repr'd: `None` when the payload named no type,
+            // `5` for a number, `'shutdown'` for a verb this bundle does not
+            // have (its verb map has no `shutdown` entry, so the lifecycle
+            // no-op swift answered was a reply python never sends).
             return .object([
-                "error": .string(
-                    "\(config.kind): unknown type \(payload["type"] == .null ? "None" : pyRepr(verb))")
+                "error": .string("\(config.kind): unknown type \(pyRepr(payload["type"]))")
             ])
         }
     }
@@ -217,43 +240,73 @@ public final class AIBackend: @unchecked Sendable {
     /// No-op when the cancelled task is some OTHER dispatch on this agent (a
     /// `history`, a `reflect`) — the entry is matched on its task id.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async {
-        let st = runState(agentId.value)
+        let st = runState(kernel, agentId.value)
         guard let entry = st.takeCurrentForCancel(taskId: String(taskId.value)) else { return }
+        // BOTH CORRELATION FIELDS, explicitly: the entry is already OUT of
+        // `_current` by now (that is what stops `status` reporting a phantom
+        // generation), so nothing can auto-fill them. `started_at` was missing,
+        // and it is the only thing that says how long the killed turn ran.
         await emitStatus(
-            agentId: agentId, clientId: entry.clientId, phase: "done", st: st,
-            extraDetail: [
-                "reason": .string("cancelled"),
-                "send_id": .string(entry.sendId),
-            ],
-            kernel: kernel)
-        await emitDone(
-            kernel: kernel, agentId: agentId,
-            streamId: entry.streamId, messageId: entry.messageId,
-            clientId: entry.clientId, accumulated: entry.textSoFar,
-            error: "cancelled")
+            kernel: kernel, agentId: agentId, clientId: entry.clientId, phase: "done",
+            detail: [
+                ("reason", .string("cancelled")),
+                ("send_id", .string(entry.sendId)),
+                ("started_at", .double(entry.startedAt)),
+            ])
     }
 
     // MARK: - reflect
 
-    private func reflectReply(agent: Agent) -> JSON {
+    /// PYTHON'S KEYS, IN PYTHON'S ORDER: `id, sentence, model, endpoint,
+    /// context_window, context_strategy, verbs, generating, cancel, emits,
+    /// concurrency`, then the backend's ordered extras.
+    ///
+    /// This line is READ BY THE MODEL — `_render_reflect` renders it into the
+    /// system prompt's `You are <id>.` line, field by field, in this order. Swift
+    /// opened with `kind`/`provider` (keys python does not have), put the extras
+    /// before the protocol fields, and carried no `generating` or `concurrency`
+    /// at all, so every swift agent's self-description was a different sentence
+    /// from python's.
+    private func reflectReply(agent: Agent, kernel: Kernel) -> JSON {
         var fields: OrderedDictionary<String, JSON> = [:]
         fields["id"] = .string(agent.id.value)
         fields["sentence"] = .string(config.sentence)
-        fields["kind"] = .string(config.kind)
-        fields["provider"] = .string(config.provider)
-        for (k, v) in config.reflectExtra(agent) {
-            fields[k] = v
-        }
-        // Context Protocol: context_window/context_strategy + the shared emits map.
+        // KEY PRESENCE, not truthiness: `rec.get("model", default)` returns a
+        // `model: null` on the record as null.
+        fields["model"] = agent.metaValue(forKey: "model") ?? .string(config.defaultModel)
+        fields["endpoint"] = agent.metaValue(forKey: "endpoint") ?? .string(config.defaultEndpoint)
+        // Context Protocol: context_window + the RAW context_strategy.
         for (k, v) in contextReflectFields(agent: agent) {
             fields[k] = v
         }
         fields["verbs"] = .object(Self.VERBS)
-        // A generation IS its kernel dispatch task; python names the way to kill
-        // it as a top-level field, not a verb.
+        // A generation IS its kernel dispatch task — the backend holds no task
+        // handle of its own. An in-flight entry present ⇔ generating.
+        fields["generating"] = .bool(runState(kernel, agent.id.value).currentSnapshot() != nil)
+        // python names the way to kill a turn as a top-level field, not a verb.
         fields["cancel"] = .string(CANCEL_DOC)
+        fields["emits"] = .object(Self.REFLECT_EMITS)
+        fields["concurrency"] = .string(CONCURRENCY_DOC)
+        for (k, v) in config.reflectExtra(agent) {
+            fields[k] = v
+        }
         return .object(fields)
     }
+
+    /// The `emits` map, byte-identical to python's. THREE channels, not four:
+    /// `done` is not one of them — `status(phase='done')` IS the completion
+    /// event, and advertising a second one is two truths for one transition.
+    static let REFLECT_EMITS: OrderedDictionary<String, JSON> = [
+        "token": .string(
+            "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id)."
+        ),
+        "status": .string(
+            "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.tool={call_id,target,verb,args,reply_preview?} for tool_calling (entry has no reply_preview, exit re-emits same call_id with it). detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued."
+        ),
+        "context": .string(
+            "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb."
+        ),
+    ]
 
     /// Python's `reflect.verbs` for every ai_core backend — the FIRST LINE of
     /// each verb's docstring, in `_build`'s order, verbatim. One map, every
@@ -281,9 +334,13 @@ enum AIPassOutcome {
     /// The RAW completion — what routing parses — and the assistant row's id,
     /// the batch token every reply tag of this turn names (`↑<turn>`).
     case ok(String, Int64)
-    /// Terminal failure (timeout, provider error, context failsafe). The string
-    /// is the message `send` reports as `{error: …}`.
+    /// Terminal failure (a MAPPED provider error). The string is the message
+    /// `send` reports as `{error, client_id}`.
     case failed(String)
+    /// The projection REFUSED the turn (too_small failsafe, unknown strategy).
+    /// Its body is returned to the caller VERBATIM — no `client_id` bolted on,
+    /// and no `status(done)`, because the model was never called.
+    case refused(JSON)
     /// The KERNEL killed the task. The turn was already closed out for the
     /// client by `onCancel`; nothing more should be emitted or routed.
     case cancelled
@@ -313,11 +370,12 @@ enum AIPassOutcome {
         // answering agent can see what it is being asked to endorse.
         var text = q
         if let opts = payload["options"].asArray, !opts.isEmpty {
-            text += "\n\nOptions: " + opts.map { $0.asString ?? $0.serialize() }
-                .joined(separator: ", ")
+            // `str(o)` per option — `true` reads `True`, a dict its python repr.
+            text += "\n\nOptions: " + opts.map { pyStr($0) }.joined(separator: ", ")
         }
         if case .object = payload["action"] {
-            text += "\n\nProposed action: " + payload["action"].serialize()
+            // `json.dumps(act)` — python separators, ensure_ascii.
+            text += "\n\nProposed action: " + pyJsonDumps(payload["action"])
         }
         var sendPayload = payload.asObject ?? [:]
         sendPayload["type"] = .string("send")
@@ -345,34 +403,79 @@ enum AIPassOutcome {
                 "request_id": payload["request_id"],
             ])
         }
-        let answer = said.arguments["answer"].asString ?? ""
+        // THE RAW VALUE, not a coerced string. python refuses a NON-STRING
+        // `answer` outright (`not isinstance(answer, str)`) and renders whatever
+        // came back with `%r` — `42`, `None`, `'...'` — so the model is shown the
+        // thing it actually wrote. Reading `asString ?? ""` turned every
+        // non-string into the empty string and quoted it with `"` python never
+        // uses.
+        let answer = said.arguments["answer"] ?? .null
         // THE PLACEHOLDER IS NOT AN ANSWER. The refusal above SHOWS the shape,
         // and a model that could not answer once will copy that example back
         // verbatim on the retry — measured 2026-09-04 on peer_review, where
         // "..." was written into review.md as the verdict and scored as a
         // reviewer that had judged. Same trap as `send_binary`'s literal
         // "@body", and it earns the same refusal.
-        if answer.trimmingCharacters(in: CharacterSet(charactersIn: " .\t\n")).isEmpty {
+        //
+        // `answer.strip().strip(".")`: python whitespace FIRST, then dots from
+        // both ends — so `'. x'` is an answer and `' ... '` is not.
+        let placeholder: Bool = {
+            guard case .string(let s) = answer else { return true }
+            return pyStripDots(pyStrip(s)).isEmpty
+        }()
+        if placeholder {
             return .object([
                 "error": .string(
                     "that is the PLACEHOLDER, not an answer — `answer` came back as "
-                        + "\"\(answer)\". Say what you actually concluded."),
+                        + "\(pyRepr(answer)). Say what you actually concluded."),
                 "reason": .string("bad_arg"), "arg": .string("answer"),
                 "request_id": payload["request_id"],
             ])
         }
         return .object([
-            "answer": .string(answer),
+            "answer": answer,
             "request_id": payload["request_id"],
         ])
     }
 
-    private func sendVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
+    private func sendVerb(agent: Agent, payload: JSON, kernel: Kernel) async throws -> JSON {
+        // THE RECURSION GUARD, BEFORE THE LOCK — so a cycle can never deadlock
+        // on the per-backend FIFO lock (A→B→A would otherwise block on A's held
+        // lock until the send ceiling expired). `_call_stack` is the caller's
+        // reserved key; nothing on the reply-routing path carries one, so a
+        // `reply_to:'self'` chain is not a cycle. Python `core.py:2197-2218`.
+        let guardClientId = safeClient(payload["client_id"].asString ?? "cli")
+        let callStack = payload["_call_stack"].asArray ?? []
+        if callStack.contains(where: { $0.asString == agent.id.value }) {
+            return .object([
+                "error": .string("\(config.kind): cycle detected"),
+                "response": .string(""),
+                "cycle": .array(callStack + [.string(agent.id.value)]),
+                "client_id": .string(guardClientId),
+            ])
+        }
+        if callStack.count >= AIBackend.maxCallDepth {
+            return .object([
+                "error": .string(
+                    "\(config.kind): max call depth \(AIBackend.maxCallDepth) reached"),
+                "response": .string(""),
+                "client_id": .string(guardClientId),
+            ])
+        }
         // MISSING `text` IS THE EMPTY STRING, not a refusal: python's
         // `payload.get("text", "")` and rust's `unwrap_or("")` both run the turn, so
         // a caller-driven agent kicking off from its system prompt alone worked on
         // two kernels and was refused on the third with a reason they never produce.
-        let text = payload["text"].asString ?? ""
+        var text = payload["text"].asString ?? ""
+        // A MESSAGE IS TEXT WHATEVER THE CALLER TYPED. The tag grammar types a
+        // bare number (`<text>586</text>` → 586), and "586" is a perfectly good
+        // message; reading only `asString` dropped it and ran an empty turn.
+        // A bool is NOT a number here, exactly as python's `isinstance` excludes
+        // it, so `<text>true</text>` stays the empty turn it was.
+        switch payload["text"] {
+        case .integer, .double: text = pyStr(payload["text"])
+        default: break
+        }
         // SANITISED AT ENTRY, as python's `_send` does. The queue/current entry held
         // the RAW id while `statusVerb` compared against `safeClient(requesting)`, so
         // a browser client `tab 1/x` asking after its OWN work was told `is_mine:false,
@@ -381,15 +484,40 @@ enum AIPassOutcome {
         // A caller-supplied `system_prompt` REPLACES the default system block
         // (the caller teaches its own role/context there). Mirrors py/rust.
         let systemPrompt = payload["system_prompt"].asString
+        // A caller-supplied `messages` list REPLACES the persisted history: the
+        // turn is FULLY STATELESS — no recall-due, no projection, nothing saved.
+        // An empty list is not an override (python's `bool(messages_override)`).
+        let messagesOverride: [JSON]? = {
+            guard let list = payload["messages"].asArray, !list.isEmpty else { return nil }
+            return list
+        }()
         // Where this pass's TEXT goes when the model issues no call of its own.
         // A one-shot handoff for the CALLER; the MODEL routes its own work with
         // `reply_to` inside its `<call>`s. Mirrors python's `send_to`.
+        // KEPT RAW, refused only when it is not a string or is blank after a full
+        // python strip: `send_to:' peer '` hands off to `' peer '` (and the
+        // unknown-agent refusal names it, spaces included), while `'\n\t'` — which
+        // `.whitespaces` alone does not strip — is no hand-off at all.
         let sendTo: String? = {
-            guard let s = payload["send_to"].asString,
-                !s.trimmingCharacters(in: .whitespaces).isEmpty
-            else { return nil }
+            guard let s = payload["send_to"].asString, !pyStrip(s).isEmpty else { return nil }
             return s
         }()
+
+        // WHO SAID IT, TO WHOM, UNDER WHICH NUMBER. A message from another AGENT
+        // opens with a header the KERNEL vouches for — the sender is the
+        // dispatch's own context, never the sender's prose. Without it a peer's
+        // message arrived anonymous (measured 2026-09-10, multisubai: solvers
+        // signed their prose by hand) and a group message was indistinguishable
+        // from a private one.
+        if let sender = KernelTaskLocals.currentOrigin?.value, sender != agent.id.value {
+            var parts = ["from \(sender)"]
+            if let to = payload["to"].asArray, !to.isEmpty {
+                parts.append("to " + to.map { pyStr($0) }.joined(separator: ", "))
+            }
+            if payload["msg"] != .null { parts.append("msg \(pyStr(payload["msg"]))") }
+            if payload["re"] != .null { parts.append("re \(pyStr(payload["re"]))") }
+            text = "[" + parts.joined(separator: " \u{b7} ") + "]\n" + text
+        }
 
         // Build the provider FIRST — backends that must refuse before
         // touching history (NIM no-api_key, FM unavailable) return their
@@ -403,15 +531,11 @@ enum AIPassOutcome {
             provider = p
         }
 
-        let streamId = "stm_\(UUID().uuidString.prefix(8))"
-        let messageId = "msg_\(UUID().uuidString.prefix(8))"
-        let userMessageId = "msg_\(UUID().uuidString.prefix(8))"
-
         // Enqueue this submission. Only ONE generation runs at a time per
         // agent (FIFO) — concurrent callers queue in arrival order, which
         // also keeps the chat-store-persisted history race-free.
         let sendId = mintSendId()
-        let st = runState(agent.id.value)
+        let st = runState(kernel, agent.id.value)
         st.enqueue(
             AIQueuedEntry(
                 clientId: clientId, text: text, sendId: sendId, queuedAt: nowSecs()))
@@ -424,9 +548,8 @@ enum AIPassOutcome {
         if await st.fifo.busy() {
             let ahead = max(0, st.queueDepth() - 1)
             await emitStatus(
-                agentId: agent.id, clientId: clientId, phase: "queued", st: st,
-                extraDetail: ["send_id": .string(sendId), "ahead": .integer(Int64(ahead))],
-                kernel: kernel)
+                kernel: kernel, agentId: agent.id, clientId: clientId, phase: "queued",
+                detail: [("send_id", .string(sendId)), ("ahead", .integer(Int64(ahead)))])
         }
 
         bumpInFlight(+1)
@@ -457,24 +580,39 @@ enum AIPassOutcome {
         }
         st.popToCurrent(
             sendId: sendId, startedAt: nowSecs(), phase: "thinking",
-            streamId: streamId, messageId: messageId,
             // The task we are running AS — how `onCancel` recognises its own turn.
             taskId: KernelTaskLocals.currentTask.map { String($0.value) })
         await emitStatus(
-            agentId: agentId, clientId: clientId, phase: "thinking", st: st,
-            kernel: kernel)
-        let produced = await runStream(
-            provider: provider,
-            streamId: streamId,
-            messageId: messageId,
-            userMessageId: userMessageId,
-            agent: agent,
-            clientId: clientId,
-            st: st,
-            userText: text,
-            systemPrompt: systemPrompt,
-            kernel: kernel
-        )
+            kernel: kernel, agentId: agentId, clientId: clientId, phase: "thinking")
+
+        // ONE CEILING OVER THE WHOLE GENERATION — recall, assembly, projection
+        // and the stream — exactly as python's `asyncio.timeout(cfg.send_timeout)`
+        // wraps `_run`. Swift bounded only the gap between two chunks, so a
+        // provider that stalled BEFORE the first token, or an assembly that hung,
+        // ran forever under a ceiling that looked like it applied.
+        let produced: AIPassOutcome?
+        let userText = text
+        do {
+            produced = try await withGenerationCeiling(sendTimeoutSeconds) { [self] in
+                try await runStream(
+                    provider: provider,
+                    agent: agent,
+                    clientId: clientId,
+                    st: st,
+                    userText: userText,
+                    systemPrompt: systemPrompt,
+                    messagesOverride: messagesOverride,
+                    kernel: kernel
+                )
+            }
+        } catch {
+            // AN UNMAPPED PROVIDER FAILURE RAISES (see `runStream`). The lock is
+            // python's `finally`: it is released on the way out, or the agent is
+            // stranded for good.
+            st.clearCurrent()
+            await st.fifo.release()
+            throw error
+        }
         // `onCancel` already cleared the entry on the killed path; clearing again
         // is a no-op. The FIFO lock is released either way — a killed generation
         // unwinds through here, it does not strand the agent.
@@ -484,6 +622,20 @@ enum AIPassOutcome {
         // `release()` frees the FIFO BEFORE routing is spawned — so a
         // self-addressed follow-up takes the lock immediately and reads a history
         // that already contains the turn it is answering.
+        guard let produced else {
+            // THE CEILING EXPIRED. python emits the terminal status INSIDE the
+            // lock and answers `{error, client_id}`; the float is rendered
+            // python's way (`180.0`, `0.05`), not as an int.
+            await emitStatus(
+                kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+                detail: [("reason", .string("timeout"))])
+            st.clearCurrent()
+            await st.fifo.release()
+            return .object([
+                "error": .string("send: timeout after \(pyFloatRepr(sendTimeoutSeconds))s"),
+                "client_id": .string(clientId),
+            ])
+        }
         st.clearCurrent()
         await st.fifo.release()
 
@@ -498,6 +650,8 @@ enum AIPassOutcome {
             ])
         case .failed(let why):
             reply = .object(["error": .string(why), "client_id": .string(clientId)])
+        case .refused(let body):
+            reply = body
         case .cancelled:
             reply = .object([
                 "error": .string("send: cancelled"), "client_id": .string(clientId),
@@ -519,12 +673,13 @@ enum AIPassOutcome {
             let deadline = sendTimeoutSeconds
             // THE COORDINATION STATE, threaded through so `await` can count what
             // is actually pending for this agent — its queue and its FIFO lock.
-            let st = runState(agentId.value)
+            let st = runState(kernel, agentId.value)
+            let incoming = text
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
                     selfId: agentId, kernel: kernel, text: textOut,
                     clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt,
-                    incoming: text,
+                    incoming: incoming,
                     // THE LAYER'S PER-CALL DEADLINE, threaded to every model call
                     // the router dispatches. The kernel defaults nothing.
                     sendTimeout: deadline,
@@ -545,25 +700,24 @@ enum AIPassOutcome {
     /// bare `nil` could not say which of four things happened.
     private func runStream(
         provider: any AIProvider,
-        streamId: String,
-        messageId: String,
-        userMessageId: String,
         agent: Agent,
         clientId: String,
         st: AIAgentRunState,
         userText: String,
         systemPrompt: String?,
+        messagesOverride: [JSON]?,
         kernel: Kernel
-    ) async -> AIPassOutcome {
+    ) async throws -> AIPassOutcome {
+        // STATELESS: the caller owns this conversation, so none of the state
+        // machinery runs — no owed recall, no projection, no persistence.
+        let stateless = messagesOverride != nil
         let agentId = agent.id
         defer { bumpInFlight(-1) }
 
-        let deadline = Date().addingTimeInterval(sendTimeoutSeconds)
-
         // A RECALL OWED FROM THE LAST FOLD BATCH runs first, so this turn is
         // assembled over the head the recall chose — python `_recall_due`.
-        if takeRecallDue(agentId.value) {
-            _ = await contextRecall(
+        if !stateless, takeRecallDue(agentId.value) {
+            _ = try await contextRecall(
                 agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
         }
         // The message list UNDER the FIFO lock (we hold it here), so serialized
@@ -579,7 +733,8 @@ enum AIPassOutcome {
         // never produce: there, an interrupted turn persists NOTHING, because
         // the exchange it was part of never happened.
         let (assembled, storeLen) = await assemble(
-            agent: agent, userText: userText, systemPrompt: systemPrompt, kernel: kernel)
+            agent: agent, userText: userText, systemPrompt: systemPrompt,
+            messagesOverride: messagesOverride, kernel: kernel)
         var messages = assembled
 
         // ROW IDS for this turn: the incoming row (a root, or a delivered reply
@@ -595,7 +750,7 @@ enum AIPassOutcome {
         // `messages` is the model view; persistence APPENDS this turn to the chat
         // store (the full conversation), so the durable store is never trimmed and
         // the notice is never persisted.
-        do {
+        if !stateless {
             switch await projectContext(
                 provider: provider, agent: agent, clientId: clientId, messages: messages,
                 // THE DURABLE STORE'S LENGTH, not the view's: `messages` carries the
@@ -608,16 +763,12 @@ enum AIPassOutcome {
                 messages = projected
             case .failed(let err):
                 // too_small failsafe / unknown-strategy — the model is NOT
-                // called. The seam already emitted context:too_small. Surface
-                // the error as a terminal done + leave the base (user turn) persisted.
-                await emitStatus(
-                    agentId: agentId, clientId: clientId, phase: "done", st: st,
-                    extraDetail: ["reason": .string("error")], kernel: kernel)
-                await emitDone(
-                    kernel: kernel, agentId: agentId, streamId: streamId, messageId: messageId,
-                    clientId: clientId, accumulated: "",
-                    error: err["error"].asString ?? "context projection error")
-                return .failed(err["error"].asString ?? "context projection error")
+                // called, so there is no generation to close out: python returns
+                // the refusal body VERBATIM and emits NOTHING here (the seam
+                // already emitted `context:too_small`). Swift announced a
+                // `status(done, reason:error)` for a turn that never started and
+                // bolted `client_id` onto a body python leaves alone.
+                return .refused(err)
             }
         }
 
@@ -631,7 +782,22 @@ enum AIPassOutcome {
         var accumulated = ""
         var firstToken = true
         do {
-            let stream = provider.chat(messages: renderForModel(messages))
+            // THE PER-BACKEND STREAM WRAPPER (nvidia's retry-once-on-429) wraps
+            // the RAW provider stream, exactly as python's `cfg.stream_wrapper`
+            // does — and it is handed this backend's own status emitter so the
+            // wait it takes is an ordinary `status` event.
+            let model = renderForModel(messages)
+            let stream: AsyncThrowingStream<AIChunk, Error>
+            if let wrapper = config.streamWrapper {
+                let emitter = AIStatusEmitter { phase, detail in
+                    await emitStatus(
+                        kernel: kernel, agentId: agentId, clientId: clientId, phase: phase,
+                        detail: detail)
+                }
+                stream = wrapper(provider, model, emitter)
+            } else {
+                stream = provider.chat(messages: model)
+            }
             for try await chunk in stream {
                 // The KERNEL killed this task (`cancel <task_id>`). `onCancel`
                 // already closed the turn out for the client — status(done,
@@ -640,37 +806,28 @@ enum AIPassOutcome {
                 // partial turn; returning drops the provider stream, whose
                 // `onTermination` cancels the upstream HTTP task.
                 if Task.isCancelled { return .cancelled }
-                if Date() > deadline {
-                    await emitStatus(
-                        agentId: agentId, clientId: clientId, phase: "done", st: st,
-                        extraDetail: ["reason": .string("timeout")], kernel: kernel)
-                    await emitDone(
-                        kernel: kernel, agentId: agentId,
-                        streamId: streamId, messageId: messageId,
-                        clientId: clientId, accumulated: accumulated,
-                        error: "send: timeout after \(Int(sendTimeoutSeconds))s")
-                    return .failed("send: timeout after \(Int(sendTimeoutSeconds))s")
-                }
                 switch chunk {
                 case .token(let delta):
                     if firstToken {
                         firstToken = false
                         await emitStatus(
-                            agentId: agentId, clientId: clientId, phase: "streaming",
-                            st: st, kernel: kernel)
+                            kernel: kernel, agentId: agentId, clientId: clientId,
+                            phase: "streaming")
                     }
                     accumulated += delta
                     st.updateCurrent { $0.textSoFar += delta }
-                    await kernel.emit(
-                        agentId,
-                        .object([
+                    // `{type:'token', text, source, client_id}` — python's four
+                    // keys. Swift carried `stream_id`/`message_id`/`delta`/
+                    // `accumulated` instead, so a client written against the
+                    // documented event read `text` as missing on this runtime
+                    // alone.
+                    await toCaller(
+                        kernel: kernel, agentId: agentId, clientId: clientId,
+                        event: [
                             "type": .string("token"),
-                            "stream_id": .string(streamId),
-                            "message_id": .string(messageId),
-                            "delta": .string(delta),
-                            "accumulated": .string(accumulated),
-                            "client_id": .string(clientId),
-                        ]))
+                            "text": .string(delta),
+                            "source": .string(agentId.value),
+                        ])
                 }
             }
         } catch {
@@ -678,15 +835,28 @@ enum AIPassOutcome {
             // OWN kill, not a provider failure. `onCancel` already emitted the
             // terminal events; stay silent.
             if Task.isCancelled { return .cancelled }
+            // TWO KINDS OF PROVIDER FAILURE (python `core.py:2324-2342`).
+            //
+            // MAPPED — a backend installed an `errorMapper` and it recognised
+            // this one (nvidia's 429 / HTTP texts): a clean, caller-facing
+            // refusal. `status(done, reason:error, error:mapped)`, reply
+            // `{error, client_id}`.
+            //
+            // UNMAPPED — everything else. The status carries `str(e)` and the
+            // handler RAISES, so the kernel settles `{error:"<Type>: <msg>",
+            // raised:true}` and the caller can tell a crash from a refusal.
+            // Swallowing it into `{error, client_id}` made every provider bug
+            // look like a decision the backend had taken.
+            if let mapped = config.errorMapper?(error) {
+                await emitStatus(
+                    kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+                    detail: [("reason", .string("error")), ("error", .string(mapped))])
+                return .failed(mapped)
+            }
             await emitStatus(
-                agentId: agentId, clientId: clientId, phase: "done", st: st,
-                extraDetail: ["reason": .string("error")], kernel: kernel)
-            await emitDone(
-                kernel: kernel, agentId: agentId,
-                streamId: streamId, messageId: messageId,
-                clientId: clientId, accumulated: accumulated,
-                error: "\(error)")
-            return .failed("\(error)")
+                kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+                detail: [("reason", .string("error")), ("error", .string(pyErrorText(error)))])
+            throw error
         }
         // The stream can also FINISH (rather than throw) when the task is
         // cancelled — same contract: the turn is already closed out, persist
@@ -707,25 +877,28 @@ enum AIPassOutcome {
         // compounds turn over turn. The RAW text (markers in) is what a reader
         // parses for tool calls — a call the model wrote mid-thought still counts —
         // and it is what the `token`/`done` events already carried.
-        let newTurns: [Row] = [
-            [
-                "role": .string("user"), "content": .string(userText),
-                "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
-            ],
-            [
-                "role": .string("assistant"), "content": .string(withoutThinking(accumulated)),
-                "id": .integer(turnId), "parent": .integer(inId),
-            ],
-        ]
-        saveHistory(agent: agent, kernel: kernel, newTurns: newTurns)
-
+        // `status(phase='done')` IS THE COMPLETION EVENT, and it is emitted
+        // BEFORE the turn is persisted — python's order (`core.py:2039-2064`).
+        // A subscriber that watches the store and the events together sees the
+        // same sequence on every runtime; swift persisted first, so its two rows
+        // landed before the event that announces them.
         await emitStatus(
-            agentId: agentId, clientId: clientId, phase: "done", st: st,
-            extraDetail: ["reason": .string("ok")], kernel: kernel)
-        await emitDone(
-            kernel: kernel, agentId: agentId,
-            streamId: streamId, messageId: messageId,
-            clientId: clientId, accumulated: accumulated, error: nil)
+            kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+            detail: [("reason", .string("ok"))])
+
+        if !stateless {
+            let newTurns: [Row] = [
+                [
+                    "role": .string("user"), "content": .string(userText),
+                    "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
+                ],
+                [
+                    "role": .string("assistant"), "content": .string(withoutThinking(accumulated)),
+                    "id": .integer(turnId), "parent": .integer(inId),
+                ],
+            ]
+            saveHistory(agent: agent, kernel: kernel, newTurns: newTurns)
+        }
 
         // The RAW completion — markers in — is what routing parses: a call the
         // model wrote mid-thought still dispatches. Only the DURABLE turn above
@@ -735,59 +908,29 @@ enum AIPassOutcome {
 
     // MARK: - status (verb + phase events)
 
-    /// Broadcast a `status` event AND keep the in-flight entry's phase in
-    /// sync so the on-demand `status` verb agrees. Mirrors Rust
-    /// `emit_status`. Routed on the agent's own inbox (swift's uniform
-    /// token/done delivery), tagged with `client_id`.
-    private func emitStatus(
-        agentId: AgentId,
-        clientId: String,
-        phase: String,
-        st: AIAgentRunState,
-        extraDetail: [String: JSON] = [:],
-        kernel: Kernel
-    ) async {
-        var sendId: String?
-        var startedAt: Double?
-        st.updateCurrent {
-            $0.phase = phase
-            sendId = $0.sendId
-            startedAt = $0.startedAt
-        }
-        var detail: OrderedDictionary<String, JSON> = [:]
-        for (k, v) in extraDetail { detail[k] = v }
-        if let sendId, detail["send_id"] == nil { detail["send_id"] = .string(sendId) }
-        if let startedAt, detail["started_at"] == nil { detail["started_at"] = .double(startedAt) }
-        if detail["queue_depth"] == nil {
-            detail["queue_depth"] = .integer(Int64(st.queueDepth()))
-        }
-        await kernel.emit(
-            agentId,
-            .object([
-                "type": .string("status"),
-                "source": .string(agentId.value),
-                "phase": .string(phase),
-                "detail": .object(detail),
-                "ts": .double(nowSecs()),
-                "client_id": .string(clientId),
-            ]))
-    }
-
     /// `status` verb — privacy-filtered snapshot of the in-flight entry +
     /// this client's own pending queue. Other clients' text is redacted.
     /// Mirrors Rust `status_snapshot`.
-    private func statusVerb(agentId: AgentId, payload: JSON) -> JSON {
-        let requesting = payload["client_id"].asString.map(safeClient)
-        let st = runState(agentId.value)
+    private func statusVerb(agentId: AgentId, payload: JSON, kernel: Kernel) -> JSON {
+        // `cid = payload.get("client_id"); if cid: cid = _safe_client(cid)` — an
+        // EMPTY string is falsy, so it is neither sanitised nor treated as a
+        // caller: it is ECHOED as `client_id: ""` and the snapshot takes the
+        // redacted branch. Swift ran `safeClient("")`, which answers `"cli"`, so
+        // a probe asking with `''` was told about cli's work.
+        let raw = payload["client_id"].asString
+        let requesting: String? = (raw?.isEmpty == false) ? safeClient(raw!) : raw
+        let asked = requesting?.isEmpty == false
+        let st = runState(kernel, agentId.value)
         let cur = st.currentSnapshot()
         let queue = st.queueSnapshot()
 
-        let currentOut: JSON = cur.map { redactEntry($0, requesting: requesting) } ?? .null
+        let currentOut: JSON = cur.map { entry(for: $0, requesting: asked ? requesting : nil) }
+            ?? .null
 
         var minePending: [JSON] = []
         var othersPending = 0
         for q in queue {
-            if let req = requesting, q.clientId == req {
+            if asked, q.clientId == requesting {
                 minePending.append(
                     .object([
                         "send_id": .string(q.sendId),
@@ -809,15 +952,38 @@ enum AIPassOutcome {
         ])
     }
 
-    /// Render the in-flight entry, exposing text fields only to its owner.
-    private func redactEntry(_ c: AICurrentEntry, requesting: String?) -> JSON {
-        let isMine = requesting.map { $0 == c.clientId } ?? false
-        let elapsed = max(0, nowSecs() - c.startedAt)
+    /// Render the in-flight entry. TWO SHAPES, python's (`_status_snapshot`):
+    ///
+    /// - a caller asked (`client_id` truthy) → the composed
+    ///   `{phase, send_id, started_at, elapsed, is_mine}`, plus `text`,
+    ///   `text_so_far` and any `last_tool` when the entry is that caller's own.
+    /// - nobody asked → `_redact_text(cur)`: the ENTRY's own keys minus the
+    ///   text-bearing ones and `task_id`, in the entry's order
+    ///   (`client_id, send_id, queued_at, started_at, phase`), then `elapsed`
+    ///   and `is_mine:false`.
+    ///
+    /// Swift rendered one shape for both, so a headless snapshot carried
+    /// `phase` before `send_id` and never carried `queued_at` at all.
+    private func entry(for c: AICurrentEntry, requesting: String?) -> JSON {
+        // `time.time() - cur.get("started_at", time.time())` — python does not
+        // clamp; a clock that stepped backwards reads negative on both.
+        let elapsed = nowSecs() - c.startedAt
+        guard let requesting else {
+            return .object([
+                "client_id": .string(c.clientId),
+                "send_id": .string(c.sendId),
+                "queued_at": .double(c.queuedAt),
+                "started_at": .double(c.startedAt),
+                "phase": .string(c.phase),
+                "elapsed": .double(elapsed),
+                "is_mine": .bool(false),
+            ])
+        }
+        let isMine = requesting == c.clientId
         var out: OrderedDictionary<String, JSON> = [
-            "client_id": .string(c.clientId),
+            "phase": .string(c.phase),
             "send_id": .string(c.sendId),
             "started_at": .double(c.startedAt),
-            "phase": .string(c.phase),
             "elapsed": .double(elapsed),
             "is_mine": .bool(isMine),
         ]
@@ -848,11 +1014,19 @@ enum AIPassOutcome {
             blocks = [override]
         } else {
             let selfId = agent.id
-            let primer = await kernel.send([Item(AgentId("core"), .object([
-                    "type": .string("reflect"),
-                    "tree": .string("ids"),
-                    "bundles": .string("ids"),
-                ]))])[0].result
+            // THE `kernel` ALIAS, not the root's own id: python targets
+            // `kernel`, and the root id differs per runtime (`core` here,
+            // `kernel_state` in python), so hard-coding it made the primer
+            // resolve differently on each.
+            let primer = await kernel.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("reflect"),
+                        "tree": .string("ids"),
+                        "bundles": .string("ids"),
+                    ]))
+            ])[0].result
             let me = await kernel.send([Item(selfId, .object(["type": .string("reflect"), "tree": .string("none")]))])[0].result
             blocks = [
                 renderReflect(primer),
@@ -869,7 +1043,10 @@ enum AIPassOutcome {
             // async/rows block only when replies arrive as rows. Each flag turns
             // its block on INDEPENDENTLY of `context_strategy`, so a comparison
             // can hold the model's behavior fixed and vary one thing.
-            let flag = { (k: String) in agent.metaValue(forKey: k)?.asBool ?? false }
+            // PYTHON TRUTHINESS: `context_titles: 1` on the record turns the
+            // block on. `asBool` read only a JSON `true`, so the flag a scalar
+            // grammar produces (`1`) silently did nothing.
+            let flag = { (k: String) in pyTruthy(agent.metaValue(forKey: k) ?? .null) }
             if flag("context_titles") { blocks.append(TITLES_HOWTO) }
             if flag("context_async") { blocks.append(ASYNC_HOWTO) }
         }
@@ -884,9 +1061,10 @@ enum AIPassOutcome {
     /// deduped and trimmed, so its length is NOT a store index; `projectContext`
     /// needs the store one to mark where this turn's reaction will land. Python
     /// `_assemble`.
-    func assemble(agent: Agent, userText: String, systemPrompt: String?, kernel: Kernel) async
-        -> ([JSON], Int)
-    {
+    func assemble(
+        agent: Agent, userText: String, systemPrompt: String?, messagesOverride: [JSON]? = nil,
+        kernel: Kernel
+    ) async -> ([JSON], Int) {
         let sysContent = await assembleSystemPrompt(
             agent: agent, systemPrompt: systemPrompt, kernel: kernel)
         // The system block is rebuilt on EVERY user turn; the store holds only the
@@ -894,7 +1072,11 @@ enum AIPassOutcome {
         // the latest state at send-time.
         var messages: [JSON] = [.object(["role": .string("system"), "content": .string(sysContent)])]
         var storeLen = 0
-        do {
+        if let override = messagesOverride {
+            // STATELESS: the caller supplies the conversation, so there is no
+            // store behind it — `storeLen` stays 0 and nothing is loaded.
+            messages.append(contentsOf: override)
+        } else {
             let hist = loadHistory(agent: agent, kernel: kernel)
             storeLen = hist.count
             // THE VIEW ARRAY IS THE STATE. When one exists and every id it names
@@ -952,30 +1134,11 @@ enum AIPassOutcome {
         }
     }
 
-    /// Emit the terminal `done` event. On the error path, `accumulated`
-    /// is included only when the backend historically did so (NIM).
-    private func emitDone(
-        kernel: Kernel,
-        agentId: AgentId,
-        streamId: String,
-        messageId: String,
-        clientId: String,
-        accumulated: String,
-        error: String?
-    ) async {
-        var event: OrderedDictionary<String, JSON> = [:]
-        event["type"] = .string("done")
-        event["stream_id"] = .string(streamId)
-        event["message_id"] = .string(messageId)
-        if error == nil || config.includeAccumulatedOnError {
-            event["accumulated"] = .string(accumulated)
-        }
-        event["client_id"] = .string(clientId)
-        if let error = error {
-            event["error"] = .string(error)
-        }
-        await kernel.emit(agentId, .object(event))
-    }
+    // NO `done` EVENT. `status(phase='done')` IS the completion — two events for
+    // one transition is two truths, and a subscriber watching the wrong one
+    // drifts silently. python emits only the status; swift emitted both, so
+    // every swift turn carried one event python never sends (and `reflect.emits`
+    // documented three channels while the code produced four).
 
     // MARK: - history
 
@@ -986,23 +1149,29 @@ enum AIPassOutcome {
         let rows = loadHistory(agent: agent, kernel: kernel)
         var digest: [JSON] = rows.compactMap { r in
             guard let id = r["id"].asInt else { return nil }
-            let content = r["content"].asString ?? ""
-            // `kind` FALLS BACK TO `role`: a plain turn carries no kind, and a
-            // reader that switches on it must still see what it is. 120
-            // CHARACTERS, newlines flattened — a head is for recognising a row,
-            // not for reading it.
+            // `str(r.get("content", ""))` — an ABSENT content is the empty
+            // string, a null one is the word `None`, and a dict is its python
+            // repr. Reading `asString ?? ""` gave every caller-written row a head
+            // of '' and a size of 0.
+            let content = pyStr(r.asObject?["content"] ?? .string(""))
+            // `kind` FALLS BACK TO `role` on python TRUTHINESS — ''/null/0 fall
+            // through, a non-string kind is kept RAW. 120 CODE POINTS, newlines
+            // flattened: a head is for recognising a row, not for reading it.
+            let scalars = content.unicodeScalars
+            var head = String.UnicodeScalarView()
+            for c in scalars.prefix(120) { head.append(c == "\n" ? " " : c) }
             return .object([
                 "id": .integer(id),
                 "parent": r["parent"],
-                "kind": r["kind"].asString.map(JSON.string) ?? r["role"],
+                "kind": pyTruthy(r["kind"]) ? r["kind"] : r["role"],
                 "role": r["role"],
-                "head": .string(String(content.prefix(120)).replacingOccurrences(of: "\n", with: " ")),
-                "bytes": .integer(Int64(content.count)),
+                "head": .string(String(head)),
+                "bytes": .integer(Int64(scalars.count)),
             ])
         }
         // python `int(payload.get("limit") or 0)`, a bad value reading as 0.
-        let limit = pyIntOr(payload["limit"], 0) ?? 0
-        if let after = asMessageId(payload["after"]) {
+        let limit = (try? pyIntOr(payload["limit"], 0)) ?? 0
+        if let after = aiAsId(payload["after"]) {
             // AN UNKNOWN CURSOR PAGES NOTHING, rather than starting over.
             let at = digest.firstIndex { $0["id"].asInt == after }.map { $0 + 1 } ?? digest.count
             digest.removeFirst(at)
@@ -1010,8 +1179,11 @@ enum AIPassOutcome {
         // THE CAP INVARIANT: a digest page must answer UNDER the inline cap or it
         // is stored and dehydrated and the model pulls its own history. `limit`
         // bounds the count; the cap bounds the bytes.
+        // `limit or None` — only ZERO is "no limit". A NEGATIVE limit is an empty
+        // page (`len(kept) >= -1` on the first item), where `limit > 0` handed
+        // back every row that fit.
         let (kept, truncated) = AIContext.fitReply(
-            digest, capTokens: AIContext.inlineCap(agent), limit: limit > 0 ? limit : nil)
+            digest, capTokens: AIContext.inlineCap(agent), limit: limit != 0 ? limit : nil)
         return .object([
             "rows": .array(kept),
             "next": truncated ? (kept.last?["id"] ?? .null) : .null,
@@ -1030,14 +1202,21 @@ enum AIPassOutcome {
 
     /// Trim + sanitise a client id — the status/queue axis, never a store key.
     /// Python `_safe_client`: `(client_id or "cli").strip() or "cli"`, then every
-    /// char that is not alphanumeric or `._-` becomes `_`. No length cap.
+    /// CODE POINT that is not alphanumeric or `._-` becomes `_`. No length cap.
+    ///
+    /// CODE POINTS, and python's alphanumeric: swift mapped CHARACTERS (grapheme
+    /// clusters) and asked `isLetter || isNumber`, so a decomposed `é` (e +
+    /// U+0301) survived as one character where python writes `e_`, and
+    /// `.whitespacesAndNewlines` left U+001C..U+001F in place where python's
+    /// `strip` removes them.
     func safeClient(_ clientId: String) -> String {
-        let trimmed = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let raw = trimmed.isEmpty ? "cli" : trimmed
-        return String(
-            raw.map { c -> Character in
-                (c.isLetter || c.isNumber || c == "." || c == "_" || c == "-") ? c : "_"
-            })
+        let stripped = pyStrip(clientId)
+        let raw = stripped.isEmpty ? "cli" : stripped
+        var out = String.UnicodeScalarView()
+        for c in raw.unicodeScalars {
+            out.append(pyIsAlnum(c) || c == "." || c == "_" || c == "-" ? c : "_")
+        }
+        return String(out)
     }
 
     /// The agent's conversation — every row, in order — from the KERNEL ROW
@@ -1093,11 +1272,41 @@ enum AIPassOutcome {
 private let tagLinks = try! NSRegularExpression(
     pattern: "^\\[reply to \\S+ \u{b7} [^\\]]*?\u{2191}(\\S+)[^\\]]*\\]")
 
+/// python `str.strip(".")` — dots off both ends, nothing else (the whitespace
+/// strip is a separate step, and the order matters: `'. x'` keeps its `x`).
+func pyStripDots(_ s: String) -> String {
+    var scalars = Array(s.unicodeScalars)
+    while scalars.first == "." { scalars.removeFirst() }
+    while scalars.last == "." { scalars.removeLast() }
+    return String(String.UnicodeScalarView(scalars))
+}
+
+/// Race `body` against the send ceiling. `nil` = the ceiling won.
+///
+/// python has `asyncio.timeout`; swift has no equivalent, so the generation and
+/// a sleeper run as siblings and the FIRST to finish decides. Losing the race
+/// cancels the other, which is what tears the provider's HTTP stream down.
+func withGenerationCeiling<T: Sendable>(
+    _ seconds: Double,
+    _ body: @escaping @Sendable () async throws -> T
+) async throws -> T? {
+    try await withThrowingTaskGroup(of: T?.self) { group in
+        group.addTask { try await body() }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            return nil
+        }
+        let first = try await group.next() ?? nil
+        group.cancelAll()
+        return first
+    }
+}
+
 /// The `↑<turn>` an incoming turn's FIRST tag names, if it is a delivered reply.
 func incomingParent(_ text: String) -> Int64? {
     let ns = text as NSString
     guard let m = tagLinks.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
         m.numberOfRanges > 1
     else { return nil }
-    return asMessageId(.string(ns.substring(with: m.range(at: 1))))
+    return aiAsId(.string(ns.substring(with: m.range(at: 1))))
 }
