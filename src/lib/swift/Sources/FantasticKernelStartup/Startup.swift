@@ -23,10 +23,8 @@ import FantasticAnthropicBackend
 import FantasticLlamaCppBackend
 import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
-import FantasticProxyAgent
 import FantasticScheduler
 import FantasticStaticLoader
-import FantasticTools
 
 import FantasticWeb
 import FantasticWebRest
@@ -61,8 +59,8 @@ public func defaultBundleRegistry() -> BundleRegistry {
         r.register(ORACLE_MODULE, OracleProbe())
     #endif
     r.register("text_file.tools", TextFileBundle())
-    r.register("proxy_agent.tools", ProxyAgentBundle())
-    r.register("tools.tools", ToolsBundle())
+    // The render sink the AI backends stream their turn to (python `cli`).
+    r.register(CliBundle.handlerModule, CliBundle())
     r.register("scheduler.tools", SchedulerBundle())
     r.register(StaticLoaderBundle.handlerModule, StaticLoaderBundle())
     // TWO io_bridge derivations sharing one engine (mirrors py's separate

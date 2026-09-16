@@ -15,6 +15,7 @@
 //! newline after an open tag, `render_reply` does; `render_reply` renders a
 //! top-level list as `<items>` and spans a multiline scalar across lines.
 
+use fantastic_bundle::py_str;
 use serde_json::{Map, Value};
 
 use super::grammar::ROUTING;
@@ -116,19 +117,18 @@ fn render_reply_field(name: &str, value: &Value) -> String {
     }
 }
 
-/// One value as the text the model reads: a string is itself (never quoted), a
-/// bool is `true`/`false`, null is empty, a number is its digits.
+/// One value as the text the model reads — python `_reply_text`: `None` is
+/// empty, a bool is lower-case `true`/`false`, and EVERYTHING ELSE is `str(v)`.
 ///
-/// A STRUCTURE reaching here is the one shape the notation cannot say — python
-/// falls back to `str(dict)`, its own repr; compact JSON is this runtime's
-/// equivalent, and both are a last resort for a list that mixes scalars with
-/// objects.
+/// `str(v)` and not JSON: a float is python's repr (`1e-05`, `1e+16`, `inf`,
+/// `nan`), and a structure the notation cannot say is python's own repr
+/// (`{'a': 1}`), which is the last resort for a list that mixes scalars with
+/// objects. Rust's `ryu` digits (`0.00001`, `1e16`) and compact JSON objects
+/// were a second dialect the model read on exactly those turns.
 fn flat_text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
         Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        other => other.to_string(),
+        other => py_str(other),
     }
 }

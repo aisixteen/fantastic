@@ -96,8 +96,6 @@ Surviving bundles that run cross-runtime against the Swift binary
 |---|---|
 | file | [`file/selftest.md`](../python/bundled_agents/file/selftest.md) |
 | yaml_state | [`yaml_state/selftest.md`](../python/bundled_agents/yaml_state/selftest.md) |
-| proxy_agent | covered by the host WS specs (`web_ws`) + native overlays |
-| tools | covered by `reflect` across the per-bundle specs |
 | scheduler | [`scheduler/selftest.md`](../python/bundled_agents/scheduler/selftest.md) |
 | cli | [`cli/selftest.md`](../python/bundled_agents/cli/selftest.md) |
 | kernel_bridge | [`kernel_bridge/selftest.md`](../python/bundled_agents/io/ws_bridge/selftest.md) |
@@ -109,9 +107,6 @@ Surviving bundles that run cross-runtime against the Swift binary
 | foundation_models_backend | native overlay (no Python equivalent) — see below |
 | exec_bridge | [`io/exec_bridge/selftest.md`](../python/bundled_agents/io/exec_bridge/selftest.md) (Full tier only) |
 | terminal_backend | [`terminal/selftest.md`](../python/bundled_agents/terminal/selftest.md) (Full tier only) |
-
-`proxy_agent` and `tools` have no standalone Python spec — they are
-exercised structurally by `reflect` and the host WS specs.
 
 View/webapp specs live in the decoupled frontend kernel — see
 [`../ts/`](../ts/); this host serves it generically via a `file` agent.

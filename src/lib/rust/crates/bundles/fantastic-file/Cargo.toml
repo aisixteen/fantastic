@@ -7,6 +7,7 @@ license.workspace = true
 description = "Filesystem-as-agent — read/write/list/delete/rename/mkdir rooted at the `root` field."
 
 [dependencies]
+# python-format helpers: repr/str/truthiness/OSError text, python-canonical.
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }

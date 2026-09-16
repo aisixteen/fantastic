@@ -54,7 +54,7 @@ fn mk_kernel() -> Arc<Kernel> {
         std::path::PathBuf::new(),
         false,
     );
-    let _ = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -209,65 +209,6 @@ async fn an_unreadable_manifest_is_refused_at_write_time() {
 }
 
 #[tokio::test]
-async fn a_manifest_outside_the_running_dir_is_refused() {
-    // The cold bring-up read is not exempt from the running-dir law — `fs` is
-    // the ONE disk surface, and a roster pointing outside the kernel's own dir
-    // would open a file the kernel may not read.
-    let kernel = mk_kernel();
-    let rec = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                "id": "sl3", "manifest": "/etc/hosts",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(rec["reason"], "invalid_meta", "{rec}");
-    assert!(
-        rec["error"]
-            .as_str()
-            .unwrap()
-            .contains("escapes the running dir"),
-        "{rec}"
-    );
-}
-
-#[tokio::test]
-async fn a_record_without_a_manifest_is_allowed_and_boot_reports_it() {
-    // A loader may exist before its roster does; `boot` says so rather than the
-    // record being unwritable.
-    let kernel = mk_kernel();
-    let rec = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "id": "sl4",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(rec["id"], json!("sl4"), "{rec}");
-    let b = kernel
-        .send(vec![Item::new(
-            AgentId::from("sl4"),
-            json!({"type": "boot"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(b["booted"], json!(false));
-    assert!(
-        b["error"].as_str().unwrap().contains("no `manifest` path"),
-        "{b}"
-    );
-}
-
-#[tokio::test]
 async fn a_roster_entry_without_an_id_is_refused_loud() {
     // #105 — the roster is keyed by id, so an id-less entry can never match the
     // agent the LAST boot minted: every reboot created ANOTHER one beside it and
@@ -308,4 +249,395 @@ async fn an_id_less_entry_is_refused_before_the_valid_ones_hydrate() {
         .result;
     assert_eq!(r["booted"], json!(false), "{r}");
     assert!(!kernel.agents.contains_key(&AgentId::from("memory")));
+}
+
+// ─── the py-parity sweep (plan A8) ───────────────────────────────────
+
+/// A loader agent built directly, so a record this bundle's `validate_meta`
+/// would refuse can still be reflected/booted (python has no such gate on the
+/// in-memory record either).
+fn loader_with_meta(meta: Map<String, Value>) -> Arc<Agent> {
+    Agent::new(
+        AgentId::from("sl"),
+        Some(HANDLER_MODULE.to_string()),
+        None,
+        meta,
+        std::path::PathBuf::new(),
+        false,
+    )
+}
+
+fn meta_of(pairs: &[(&str, Value)]) -> Map<String, Value> {
+    let mut m = Map::new();
+    for (k, v) in pairs {
+        m.insert((*k).to_string(), v.clone());
+    }
+    m
+}
+
+#[tokio::test]
+async fn an_unknown_verb_is_a_coded_refusal() {
+    // A8.1 + A8.2 — `shutdown` is not a verb of this bundle either.
+    let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
+    for verb in ["frobnicate", "shutdown"] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("static_loader"),
+                json!({"type": verb}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(
+            r,
+            json!({
+                "error": format!("static_loader: unknown type '{verb}'"),
+                "reason": "unhandled",
+                "verb": verb,
+            }),
+            "{verb}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_record_without_a_manifest_boots_with_pythons_text() {
+    // A8.4 — a loader may exist before its roster does; `boot` says so in
+    // python's words rather than the record being unwritable.
+    let kernel = mk_kernel();
+    let rec = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": HANDLER_MODULE, "id": "sl4",
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(rec["id"], json!("sl4"), "{rec}");
+    let b = kernel
+        .send(vec![Item::new(
+            AgentId::from("sl4"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        b,
+        json!({
+            "error": "static_loader: no 'manifest' path on the record",
+            "booted": false,
+        })
+    );
+}
+
+#[test]
+fn an_empty_manifest_string_is_no_manifest() {
+    // A8.20 — python tests `isinstance(path, str) and path`.
+    let agent = loader_with_meta(meta_of(&[("manifest", json!(""))]));
+    assert_eq!(
+        load_manifest(&agent).unwrap_err(),
+        "static_loader: no 'manifest' path on the record"
+    );
+}
+
+#[tokio::test]
+async fn a_manifest_outside_the_running_dir_is_refused() {
+    // A8.8 — the cold bring-up read is not exempt from the running-dir law, and
+    // the tail is python's own `fs` ValueError.
+    let kernel = mk_kernel();
+    let rec = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
+                "id": "sl3", "manifest": "/etc/hosts",
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(rec["reason"], "invalid_meta", "{rec}");
+    assert_eq!(
+        rec["error"],
+        "static_loader: manifest '/etc/hosts' is not readable: fs: path '/etc/hosts' escapes root"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_manifest_names_the_resolved_path() {
+    // A8.8 — python's OSError text, with the path `fs` resolved.
+    let kernel = mk_kernel();
+    let rec = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
+                "id": "sl5", "manifest": "nope.yaml",
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let abs = fs::realpath(&std::env::current_dir().unwrap()).join("nope.yaml");
+    assert_eq!(
+        rec["error"],
+        json!(format!(
+            "static_loader: manifest 'nope.yaml' is not readable: \
+             [Errno 2] No such file or directory: '{}'",
+            abs.display()
+        )),
+        "{rec}"
+    );
+}
+
+#[test]
+fn an_absolute_manifest_inside_cwd_is_refused() {
+    // A8.12 — `fs.resolve` refuses ANY leading '/', re-rooting nothing.
+    let (fixture, rel) = write_manifest(MANIFEST);
+    let abs = std::env::current_dir().unwrap().join(&rel);
+    let agent = loader_with_meta(meta_of(&[("manifest", json!(abs.display().to_string()))]));
+    assert_eq!(
+        load_manifest(&agent).unwrap_err(),
+        format!(
+            "static_loader: cannot read manifest '{}': fs: path '{}' escapes root",
+            abs.display(),
+            abs.display()
+        )
+    );
+    drop(fixture);
+}
+
+#[test]
+fn a_symlinked_manifest_escaping_cwd_is_refused() {
+    // A8.12 + A8.16 — the clamp resolves symlinks, and the escape is reported
+    // under the `cannot read manifest` prefix.
+    let (fixture, rel) = write_manifest(MANIFEST);
+    let link = std::path::Path::new(&rel).with_file_name("link.yaml");
+    std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
+    let rel_link = link.display().to_string();
+    let agent = loader_with_meta(meta_of(&[("manifest", json!(rel_link.clone()))]));
+    assert_eq!(
+        load_manifest(&agent).unwrap_err(),
+        format!(
+            "static_loader: cannot read manifest '{rel_link}': fs: path '{rel_link}' escapes root"
+        )
+    );
+    drop(fixture);
+}
+
+#[test]
+fn a_falsy_yaml_document_boots_empty() {
+    // A8.9 — `yaml.safe_load(text) or {}`.
+    for doc in ["", "~", "0", "false", "[]", "{}"] {
+        let (fixture, rel) = write_manifest(doc);
+        let agent = loader_with_meta(meta_of(&[("manifest", json!(rel))]));
+        assert_eq!(
+            load_manifest(&agent).unwrap(),
+            Vec::<Value>::new(),
+            "{doc:?}"
+        );
+        drop(fixture);
+    }
+    let (fixture, rel) = write_manifest("[1]");
+    let agent = loader_with_meta(meta_of(&[("manifest", json!(rel.clone()))]));
+    assert_eq!(
+        load_manifest(&agent).unwrap_err(),
+        format!("static_loader: manifest '{rel}' must be a mapping with `agents:`")
+    );
+    drop(fixture);
+}
+
+#[tokio::test]
+async fn handler_module_absent_or_falsy_is_refused_truthy_passes() {
+    // A8.10 — python tests `not spec.get("handler_module")`.
+    for entry in [
+        "  - id: a\n",
+        "  - id: a\n    handler_module: ''\n",
+        "  - id: a\n    handler_module: 0\n",
+    ] {
+        let (kernel, _fixture) = boot_with_manifest(&format!("agents:\n{entry}")).await;
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("static_loader"),
+                json!({"type": "boot"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["booted"], json!(false), "{entry}");
+        let want_spec = if entry.contains("handler_module: ''") {
+            "{'id': 'a', 'handler_module': ''}"
+        } else if entry.contains("handler_module: 0") {
+            "{'id': 'a', 'handler_module': 0}"
+        } else {
+            "{'id': 'a'}"
+        };
+        assert_eq!(
+            r["error"],
+            json!(format!(
+                "static_loader: each roster entry needs a handler_module: {want_spec}"
+            )),
+            "{entry}"
+        );
+    }
+    // A truthy non-string passes this check and is judged by `create_agent`.
+    let (kernel, _fixture) =
+        boot_with_manifest("agents:\n  - id: a\n    handler_module: 5\n").await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["booted"], json!(false), "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("static_loader: create failed for {'id': 'a', 'handler_module': 5}: "),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn a_spec_type_key_overrides_the_create_verb() {
+    // A8.14 — python spreads the spec OVER the verb, so an entry naming `type`
+    // decides what is sent. Here the manifest sends `reflect` to the kernel: no
+    // agent is created, and the loader reports the reflect's own `id` as
+    // "created" — python's behaviour, root id apart.
+    let (kernel, _fixture) = boot_with_manifest(
+        "agents:\n  - id: a\n    handler_module: mock.tools\n    type: reflect\n",
+    )
+    .await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["booted"], json!(true), "{r}");
+    assert_eq!(r["created"], json!(["core"]), "{r}");
+    assert!(!kernel.agents.contains_key(&AgentId::from("a")), "{r}");
+}
+
+#[test]
+fn reflect_display_name_empty_falls_back_to_id() {
+    // A8.11 — python `agent.display_name or id`.
+    let agent = loader_with_meta(meta_of(&[("display_name", json!(""))]));
+    assert_eq!(reflect_reply(&agent)["display_name"], json!("sl"));
+    let agent = loader_with_meta(meta_of(&[("display_name", json!("Roster"))]));
+    assert_eq!(reflect_reply(&agent)["display_name"], json!("Roster"));
+}
+
+#[test]
+fn reflect_manifest_is_the_raw_meta_value() {
+    // A8.18 — python reports `agent.record.get("manifest")` as written.
+    let agent = loader_with_meta(meta_of(&[("manifest", json!(7))]));
+    assert_eq!(reflect_reply(&agent)["manifest"], json!(7));
+    let agent = loader_with_meta(Map::new());
+    assert_eq!(reflect_reply(&agent)["manifest"], Value::Null);
+}
+
+#[test]
+fn reflect_verbs_are_python_docstrings() {
+    // A8.15 — the first line of each python docstring, in VERBS order.
+    let agent = loader_with_meta(Map::new());
+    assert_eq!(
+        reflect_reply(&agent)["verbs"],
+        json!({
+            "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
+            "boot": "Hydrate the declared roster as OPERATOR.",
+        })
+    );
+}
+
+#[test]
+fn readme_is_python_verbatim() {
+    // A8.19 — byte-for-byte the python bundle's readme.
+    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("repo's src/lib above the crate")
+        .join("python/bundled_agents/loader/static_loader/src/static_loader/readme.md");
+    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
+}
+
+#[tokio::test]
+async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
+    // A8.6 — python's text, with `{!r}` on all three names (no `Some(...)`).
+    let (kernel, fixture) = boot_with_manifest(MANIFEST).await;
+    drop(fixture);
+    let (fixture, path) =
+        write_manifest("agents:\n  - id: memory\n    handler_module: static_loader.tools\n");
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["updated"], json!(true), "{r}");
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r,
+        json!({
+            "error": "static_loader: 'memory' exists as 'mock.tools' but the manifest \
+                      declares 'static_loader.tools' — a handler_module is fixed at create; \
+                      delete the agent to re-declare it",
+            "booted": false,
+        })
+    );
+    drop(fixture);
+}
+
+#[tokio::test]
+async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
+    // A8.7 — only a TRUTHY error is a failure, and the tail is `str(error)`.
+    // (The kernel's own refusal text is pinned by C19/C26/C27, not here.)
+    let (kernel, fixture) = boot_with_manifest(MANIFEST).await;
+    drop(fixture);
+    let (_fixture, path) = write_manifest(
+        "agents:\n  - id: memory\n    handler_module: mock.tools\n    handler_module_x: 1\n    id_2: 2\n    display_name: ''\n    callable_by: 5\n",
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["updated"], json!(true), "{r}");
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["booted"], json!(false), "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("static_loader: re-applying 'memory': "),
+        "{r}"
+    );
 }

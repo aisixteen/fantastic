@@ -81,7 +81,7 @@ struct WebSocketTests {
     // codec the unit tests used to pin).
 
     @Test func wsCallRoundTripsThroughServer() async throws {
-        let kernel = try await startKernelInMemory(portHint: 0)
+        let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         await mountWebWS(kernel)
         defer {
@@ -136,7 +136,7 @@ struct WebSocketTests {
         // agent's WS endpoint, then send `{type:"watch", src:<other>}`
         // and verify emits on <other> arrive as `event` frames. This
         // is the path kernel_bridge.watch_remote drives.
-        let kernel = try await startKernelInMemory(portHint: 0)
+        let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         await mountWebWS(kernel)
         defer {
@@ -198,7 +198,7 @@ struct WebSocketTests {
         // entirely. Every browser call was ungated, bounded only by the leg's
         // ingress rule. Here the leg is OPEN inbound and granted NOTHING
         // outbound: an operator call would list every agent; a leg call refuses.
-        let kernel = try await startKernelInMemory(portHint: 0)
+        let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         await mountWebWS(kernel, granted: false)
         defer {
@@ -244,7 +244,7 @@ struct WebSocketTests {
         // closed its tab left it running to completion — billing tokens — with
         // nowhere to write the reply. Python cancels its pending set on
         // disconnect and rust aborts its JoinHandles; `teardown()` now does too.
-        let kernel = try await startKernelInMemory(portHint: 0)
+        let kernel = try await startWebKernel()
         let flag = SlowFlag()
         kernel.bundles.register("ws_slow.tools", SlowProbe(flag: flag))
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
@@ -294,5 +294,114 @@ struct WebSocketTests {
         }
         #expect(gone, "disconnect left the dispatch running")
         #expect(flag.cancelled, "the handler was never cancelled, it was abandoned")
+    }
+    /// Shared teardown for the tests below.
+    private func stopWebHost(_ kernel: Kernel) async {
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
+    }
+
+    // MARK: - A13.14 / A13.16 / A13.17 / A13.18
+
+    /// A13.14 — every server→client text frame is python's `encode_frame`:
+    /// `json.dumps(envelope, default=str)`, i.e. `', '`/`': '` separators and
+    /// `ensure_ascii=True`. `serialize()` sent compact raw UTF-8, so `·` and
+    /// `↑` crossed the wire unescaped.
+    @Test func eventFrameBytesMatchPythonJsonDumps() async throws {
+        let kernel = try await startWebKernel()
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
+        await mountWebWS(kernel)
+        defer { Task { await stopWebHost(kernel) } }
+        let port = kernel.httpPort()
+        let task = URLSession(configuration: .ephemeral)
+            .webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/core/ws")!)
+        task.resume()
+        defer { task.cancel(with: .normalClosure, reason: nil) }
+        // The connection auto-watches `core`; emit something with non-ASCII.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await kernel.emit(
+            AgentId("core"), .object(["text": .string("[reply to 128 · files reflect · ↑126]")]))
+        var frame = ""
+        for _ in 0..<5 {
+            if case .string(let s) = try await task.receive(), s.contains("\"event\"") {
+                frame = s
+                break
+            }
+        }
+        #expect(frame.hasPrefix("{\"type\": \"event\", \"payload\": {"), "\(frame)")
+        #expect(frame.contains("\\u00b7"), "\(frame)")
+        #expect(frame.contains("\\u2191"), "\(frame)")
+        #expect(!frame.contains("·"), "\(frame)")
+    }
+
+    /// A13.16 — a client Close is echoed WITH ITS PAYLOAD; swift echoed an
+    /// empty buffer, which a client reads as 1005 (no status received).
+    @Test func clientCloseIsEchoedWithItsCode() async throws {
+        let kernel = try await startWebKernel()
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
+        await mountWebWS(kernel)
+        defer { Task { await stopWebHost(kernel) } }
+        let port = kernel.httpPort()
+        let recorder = CloseRecorder()
+        let session = URLSession(
+            configuration: .ephemeral, delegate: recorder, delegateQueue: nil)
+        let task = session.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/core/ws")!)
+        task.resume()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        task.cancel(with: .normalClosure, reason: nil)
+        var code: URLSessionWebSocketTask.CloseCode?
+        for _ in 0..<40 where code == nil {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            code = recorder.code()
+        }
+        #expect(code == .normalClosure, "\(String(describing: code))")
+    }
+
+    /// A13.17 (D16) — uvicorn's 101 also carries `date` and `server: uvicorn`.
+    /// permessage-deflate needs a compression implementation and is recorded,
+    /// not ported.
+    @Test func wsUpgradeCarriesDateAndServerHeaders() async throws {
+        let kernel = try await startWebKernel()
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
+        await mountWebWS(kernel)
+        defer { Task { await stopWebHost(kernel) } }
+        let port = kernel.httpPort()
+        let sock = try RawHTTPClient(port: port)
+        defer { sock.close() }
+        try sock.write(
+            "GET /core/ws HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                + "Sec-WebSocket-Version: 13\r\n\r\n")
+        let raw = sock.readSome()
+        #expect(raw.hasPrefix("HTTP/1.1 101 "), "\(raw)")
+        #expect(raw.lowercased().contains("sec-websocket-accept:"), "\(raw)")
+        #expect(raw.contains("date: "), "\(raw)")
+        #expect(raw.contains("server: uvicorn"), "\(raw)")
+    }
+
+    /// A13.18 (D16) — the server PINGS (uvicorn's `ws_ping_interval`) and closes
+    /// 1011 when no pong comes back inside `ws_ping_timeout`. Both are 20 s, so
+    /// the behaviour is source-only; the wiring is pinned here.
+    @Test func serverPingsAndCloses1011WithoutPong() {
+        #expect(WebSocketProxyHandler.pingIntervalSeconds == 20)
+        #expect(WebSocketProxyHandler.pongTimeoutSeconds == 20)
+    }
+}
+
+/// Captures the close code the SERVER answered with.
+final class CloseRecorder: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var closeCode: URLSessionWebSocketTask.CloseCode?
+
+    func urlSession(
+        _ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?
+    ) {
+        lock.withLock { self.closeCode = closeCode }
+    }
+
+    func code() -> URLSessionWebSocketTask.CloseCode? {
+        lock.lock()
+        defer { lock.unlock() }
+        return closeCode
     }
 }

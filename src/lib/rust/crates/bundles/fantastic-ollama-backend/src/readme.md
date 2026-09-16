@@ -1,57 +1,51 @@
-# ollama_backend — local LLM, a context-managed completion agent
-Thin Provider + Bundle over `fantastic-ai-core`: this crate supplies only the
-`OllamaProvider` (NDJSON transport to a local ollama process) and a thin
-`Bundle`. The per-client chat threads, FIFO lock, prompt assembly, ONE-PASS
-generation, and context management all live in `fantastic-ai-core`.
+# ollama_backend â local LLM, a context-managed completion agent
+Talks to a local ollama. Per-client chat threads, FIFO lock, and automatic
+context management (compaction / recall / context_status). Persistence via
+`file_bridge_id`. **No agentic loop** â one provider pass per `send`.
 
-Reference implementation for the **LLM backend contract** in `fantastic-ai-core`'s
-module header. Every backend speaks it, so any caller retargets by changing one id.
+## Implementation
+A thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt
+assembly, the ONE-PASS `_run`, and all the context machinery live in
+`ai_core.core`; this module supplies the `OllamaProvider` builder (endpoint /
+model from the agent record) and `ai_core.build()` wires the rest into
+`(VERBS, handler)`.
 
-## ONE pass — and the model routes its own output
-`send` does exactly ONE provider pass. **No loop**: nothing iterates on the
-model's behalf, and emitting no `<call>` ends the turn — stop is the
-default and costs nothing.
+## Bare completion â the tool loop is the CALLER's
+This backend does NOT parse tool calls and does NOT loop. `send` performs exactly
+ONE provider pass: it streams the model's pure text and returns it. Any tool
+convention is the caller's: an authored agent teaches its convention in the
+prompt (via `system_prompt`), reads the completion, dispatches, and feeds the
+result back as the next `{send, text}` turn. The `OllamaProvider` never receives a
+`tools` array and no `message.tool_calls` are read â model-agnostic.
 
-Tool-calling is RAW and belongs to `fantastic-ai-core`. `OllamaProvider` never
-sends ollama's `tools` array nor reads `message.tool_calls`: the model writes the
-envelope as TEXT, this transport streams that text through knowing nothing about
-it, and ai-core parses and dispatches it.
-
-```
-<call name="send">
-<target_id>id</target_id>
-<reply_to>self</reply_to>
-<type>verb</type>
-</call>
-```
-
-Each call is dispatched and its reply delivered to that call's `reply_to`, which
-DEFAULTS TO SELF — leave it out and the answer arrives as the model's next turn,
-tagged `[reply to <id>]`; `null`/`"none"` discards it. `reply_to:"self"` is what
-makes a chain, one pass at a time, and only because the model asked again. A
-caller's optional `send_to` hands the pass's TEXT to one agent id instead, once,
-without propagating. A `system_prompt` override replaces the default system block
-whole, for a caller that wants a different role.
-
-## Context management — owned HERE
+## Context management â owned HERE (the conversation's owner owns its context)
 Because this backend owns the per-client conversation, it owns the context:
-per-client `chat.json` history, auto-compaction on overflow (`context_strategy`,
-default `compact`, + `[context-notice]`), and the `recall` / `context_status` verbs.
-The durable transcript is never trimmed. Requires `file_bridge_id` for the JSONL sidecar.
+- **history** â every `send` loads + appends the per-client `chat.json` thread;
+- **auto-compaction** â when the assembled prompt overflows the model's window,
+  the configured `context_strategy` (default `compact`) summarizes / elides older
+  turns ONCE at turn entry and inserts a `[context-notice]`; the durable
+  transcript is never trimmed;
+- **`recall {query?, limit?}`** â page dropped turns back from the durable store;
+- **`context_status`** â inspect budget + last compaction + the model's reaction.
 
-Verbs: `send` (args `text`, `client_id?`, `system_prompt?`, `send_to?`) · `history` ·
-`recall` · `context_status` · `status` · `reflect` · `boot` · `shutdown`.
+## Calling this agent
+`send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
+and returns `{response, final}`. A first-class peer of `exec_bridge`: a
+scheduler, a host job, a peer kernel, or a routine can call it by id. Optional
+`system_prompt:str` REPLACES the default system block (the caller supplies its own
+role / tool convention / whatever menu it built). Optional `messages:list`
+REPLACES persisted history (fully stateless â no `file_bridge_id` needed, and no
+compaction â the caller owns the context in that mode).
 
-## Cancelling a turn
-There is no `interrupt` verb: an in-flight `send` IS a kernel task. Kill it with the
-substrate's universal system verbs — `send "kernel" {type:"ps"}` for the live task
-table, find the row `{agent:<this id>, verb:"send"}`, then `send "kernel"
-{type:"cancel", task_id:"<agent>:<n>"}`. The turn closes with `status(phase="done",
-reason="cancelled")` + `done`, the HTTP stream and the FIFO lock are released, and the
-blocked caller's `send` resolves to `{cancelled:true}`. Cancel kills the task's whole
-SUBTREE, so work the turn spawned dies with it.
+## Recursion guard
+A `send` carrying a reserved `_call_stack` that already contains this agent (a
+cycle) or exceeds depth 8 is refused BEFORE the FIFO lock â so an authored agent's AI→AI
+chain can neither deadlock nor run away. Don't set `_call_stack` yourself.
 
-## Streaming routing
-`CallerRoute::CliRoundTrip`: `client_id == "cli"` → the `cli` agent; else emitted on
-the backend's own inbox tagged with `client_id`. Events: `status`
-(queued|thinking|streaming|done) · `token` · `done` · `context` (compaction).
+## Meta-possibility â any routine orchestrates the whole substrate
+Every routine (an authored agent, a host job, a peer kernel, any out-of-process caller)
+reaches every agent by id. From any of them you can read memory anywhere
+(`send(<state>, {read})`), run an inference turn (`send(<ai>, {send, ...})`),
+and/or spawn compute (`send(<py>, {start, code})`) â regardless of which kernel
+owns the target. Code steps and LLM-call steps are interchangeable, both
+directions.

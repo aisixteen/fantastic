@@ -183,7 +183,7 @@ fn boot_disk(
         fantastic_dir.clone(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     // THE MESSAGE LOG, COLD — before any child exists, so a hydrated id can
@@ -233,7 +233,7 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
         PathBuf::new(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(root);
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),

@@ -9,13 +9,6 @@
 //     let port = kernel.httpPort()
 //     // ... and `await kernel.shutdown()` when the app stops
 //
-//     class MyHost: ProxyAgentHost { ... }
-//     registerHost(AgentId("my_agent"), MyHost())
-//
-// `registerHost` is the ONE registration path — the UniFFI-shaped
-// `kernel.registerProxyAgent` wrapper is deleted along with the rest
-// of that compatibility surface.
-//
 // The Lite tier targets iOS, iPadOS, visionOS, tvOS, watchOS, and
 // sandboxed macOS. Sandbox-incompatible bundles (terminal_backend,
 // exec_bridge) are compile-time
@@ -25,8 +18,6 @@
 @_exported import FantasticJSON
 @_exported import FantasticKernel
 @_exported import FantasticKernelStartup
-@_exported import FantasticProxyAgent
-@_exported import FantasticTools
 
 import Foundation
 

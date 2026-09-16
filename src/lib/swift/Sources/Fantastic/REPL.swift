@@ -100,7 +100,7 @@ enum REPLMode {
             guard let eq = p.firstIndex(of: "=") else { continue }
             let k = String(p[..<eq])
             let v = String(p[p.index(after: eq)...])
-            payload[k] = coerce(v)
+            payload[k] = cliCoerce(v)
         }
         let reply = await kernel.send([Item(AgentId("core"), .object(payload))])[0].result
         if let id = reply["id"].asString {
@@ -204,7 +204,7 @@ enum REPLMode {
                 guard let eq = t.firstIndex(of: "=") else { continue }
                 let k = String(t[..<eq])
                 let v = String(t[t.index(after: eq)...])
-                payload[k] = coerce(v)
+                payload[k] = cliCoerce(v)
             }
             return (target, .object(payload))
         }
@@ -240,7 +240,7 @@ enum REPLMode {
         // Match Python's `_print_result`: pretty-print non-null
         // replies; suppress null silently.
         if case .null = reply { return }
-        printLine(reply.serializePretty(indent: 2))
+        printLine(FantasticCLI.replyJSON(reply))
     }
 
     // MARK: - Parsing helpers
@@ -267,22 +267,6 @@ enum REPLMode {
         }
         if !cur.isEmpty { out.append(cur) }
         return out
-    }
-
-    /// Coerce a string value into JSON. Mirrors Python's `_coerce`:
-    ///   true/false → bool
-    ///   integer    → integer
-    ///   double     → double
-    ///   else       → string
-    private static func coerce(_ v: String) -> JSON {
-        switch v.lowercased() {
-        case "true": return .bool(true)
-        case "false": return .bool(false)
-        default: break
-        }
-        if let i = Int64(v) { return .integer(i) }
-        if let d = Double(v) { return .double(d) }
-        return .string(v)
     }
 
     private static func printLine(_ s: String) {

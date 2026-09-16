@@ -24,13 +24,21 @@ pub const README: &str = include_str!("readme.md");
 /// self-authoring model reaches `self-extension` first, not a system-manual dump.
 pub const DOCS: &[(&str, &str)] = &[
     ("self-extension", include_str!("docs/self-extension.md")),
-    ("minds", include_str!("docs/minds.md")),
     ("reflect", include_str!("docs/reflect.md")),
+    ("system-verbs", include_str!("docs/system-verbs.md")),
     ("agents", include_str!("docs/agents.md")),
+    ("orchestration", include_str!("docs/orchestration.md")),
     ("memory", include_str!("docs/memory.md")),
     ("persistence", include_str!("docs/persistence.md")),
     ("transports", include_str!("docs/transports.md")),
     ("streams", include_str!("docs/streams.md")),
+    ("frontend", include_str!("docs/frontend.md")),
+    (
+        "frontend/panel-recipe",
+        include_str!("docs/frontend/panel-recipe.md"),
+    ),
+    ("frontend/routing", include_str!("docs/frontend/routing.md")),
+    ("terminal", include_str!("docs/terminal.md")),
     ("daemon", include_str!("docs/daemon.md")),
 ];
 

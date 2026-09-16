@@ -53,14 +53,6 @@ pub fn register_host_bundles() -> BundleRegistry {
         "relay_connector.tools",
         fantastic_bridge::RelayConnectorBundle,
     );
-    reg.register(
-        fantastic_proxy_agent::HANDLER_MODULE,
-        fantastic_proxy_agent::ProxyAgentBundle::new(),
-    );
-    reg.register(
-        fantastic_tools::HANDLER_MODULE,
-        fantastic_tools::ToolsBundle::new(),
-    );
     // (The former in-process lua/js script-executor bundles and the standalone
     // author bundle were removed in the de-loop refactor: execution now runs
     // through `exec_bridge` and the authoring loop is emergent — no registration.)

@@ -4,8 +4,9 @@
 //!
 //! Routing model: the kernel's `agents` map is the only routing table.
 //! `send(target_id, payload)` resolves `target_id` directly there;
-//! parent-child structure doesn't enter routing. Inboxes are auto-
-//! vivified for synthetic ids (browser clients).
+//! parent-child structure doesn't enter routing. An inbox exists only where a
+//! READER registered one (`Kernel::ensure_inbox`) — agents and synthetic browser
+//! client ids alike.
 //!
 //! ### System verbs vs bundle verbs
 //!
@@ -18,11 +19,11 @@
 //!
 //! ### Watcher fanout
 //!
-//! Every successful dispatch publishes a state event
-//! `{"type":"send", "sender":<originator>, "target":<id>, "verb":<v>,
-//! "summary": <stringified-payload>}` and fans the raw payload out to
-//! every watcher's inbox. Emits (no reply) do the same with
-//! `"type":"emit"`. Errors emit `{"type":"error", ...}`.
+//! Every dispatch — text or binary — runs [`Kernel::fanout`] BEFORE its handler:
+//! the raw payload onto the target's OWN inbox and each watcher's, plus the state
+//! event `{agent_id, kind:"send", backlog, sender, summary, payload}` for the
+//! target and for every watcher that is a real agent. `emit` does the same with
+//! `kind:"emit"`; once the handler returns, `{agent_id, kind:"drain", backlog}`.
 
 use crate::agent::{Agent, AgentId, RESERVED_RECORD_KEYS};
 use crate::kernel::Kernel;
@@ -30,6 +31,7 @@ use crate::outcome::{Item, Outcome, Status};
 use crate::tasks::{
     current_killed, current_task, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
 };
+use fantastic_bundle::{py_str, py_truthy};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -130,17 +132,61 @@ where
     CURRENT_SENDER.scope(None, fut).await
 }
 
-/// One-line, bytes-stripped, max-160-char summary for telemetry.
-/// Mirrors what Python emits as `summary` on state events.
-fn summarize_payload(payload: &Value) -> String {
-    let s = match serde_json::to_string(payload) {
-        Ok(s) => s,
-        Err(_) => format!("{payload:?}"),
-    };
-    // NOT TRUNCATED — mirrors python. A summary that silently drops the end
-    // of a payload lies about what was sent, and the reader cannot tell a
-    // short payload from a cut one. Elide visibly at render time instead.
-    s
+/// One-line, bytes-shrunk summary for telemetry — python's `_summarize_payload`.
+///
+/// `json.dumps(shrunk, default=str, ensure_ascii=False)`, so `, ` / `: `
+/// separators and raw non-ASCII, not rust's compact `serde_json::to_string`. A
+/// bytes value becomes `<bytes:N>` — the rust carrier keeps the bytes beside the
+/// payload (see [`crate::inbox::InboxItem`]), so the marker is written back at
+/// the body's own path.
+///
+/// NOT TRUNCATED — mirrors python. A summary that silently drops the end of a
+/// payload lies about what was sent, and the reader cannot tell a short payload
+/// from a cut one. Elide visibly at render time instead.
+fn summarize_payload(payload: &Value, body: Option<&(String, Vec<u8>)>) -> String {
+    match body {
+        None => fantastic_bundle::py_json_dumps(payload, false, None),
+        Some((path, bytes)) => {
+            let mut shrunk = payload.clone();
+            set_at_path(&mut shrunk, path, json!(format!("<bytes:{}>", bytes.len())));
+            fantastic_bundle::py_json_dumps(&shrunk, false, None)
+        }
+    }
+}
+
+/// Write `value` at a dotted `path` (python's `set_path`: object keys, list
+/// indices). Silently no-ops on a path that does not resolve — the only caller
+/// is the summary above, and a telemetry line is not worth a panic.
+fn set_at_path(obj: &mut Value, path: &str, value: Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut cur = obj;
+    for p in &parts[..parts.len() - 1] {
+        cur = match cur {
+            Value::Array(a) => match p.parse::<usize>() {
+                Ok(i) if i < a.len() => &mut a[i],
+                _ => return,
+            },
+            Value::Object(m) => match m.get_mut(*p) {
+                Some(v) => v,
+                None => return,
+            },
+            _ => return,
+        };
+    }
+    let last = parts[parts.len() - 1];
+    match cur {
+        Value::Array(a) => {
+            if let Ok(i) = last.parse::<usize>() {
+                if i < a.len() {
+                    a[i] = value;
+                }
+            }
+        }
+        Value::Object(m) => {
+            m.insert(last.to_string(), value);
+        }
+        _ => {}
+    }
 }
 
 /// Extract `payload["type"]` as `&str`, or `""` if missing/wrong type.
@@ -165,7 +211,6 @@ struct Dispatch {
     target: Arc<Agent>,
     payload: Value,
     verb: String,
-    sender: AgentId,
     timeout: Option<f64>,
     /// The execution's id — the kernel counter's number, and the ledger key.
     exec_id: i64,
@@ -325,7 +370,6 @@ impl Kernel {
             }
         }
 
-        let sender = current_sender().unwrap_or_else(|| target.id.clone());
         let origin = current_sender();
 
         // ONE ID SPACE, AND THE KERNEL OWNS IT. A caller supplies a NAME — a
@@ -381,14 +425,39 @@ impl Kernel {
                     timeout: item.timeout,
                 }));
             }
-            crate::ledger::Opened::Fresh => {}
+            crate::ledger::Opened::Fresh => {
+                // EVERY SEND IS A MESSAGE. The row names the call — who was
+                // asked what, by which message — and takes the outcome's status
+                // at settle; the reply body stays with the reply. `parent` is
+                // the message that made the call. Written under the id the
+                // ledger just opened, so the call, the task and the outcome are
+                // all one number. Python `Agent._ledger_open`.
+                let mut row = Map::new();
+                row.insert("id".to_string(), Value::from(exec_id));
+                row.insert("kind".to_string(), Value::from("call"));
+                row.insert(
+                    "verb".to_string(),
+                    item.payload.get("type").cloned().unwrap_or(Value::Null),
+                );
+                row.insert(
+                    "parent".to_string(),
+                    Value::from(current_task().map(TaskId::get)),
+                );
+                row.insert(
+                    "origin".to_string(),
+                    Value::from(origin.as_ref().map(|o| o.0.clone())),
+                );
+                if let Some(n) = name.as_deref() {
+                    row.insert("name".to_string(), Value::from(n));
+                }
+                let _ = self.rows.put(&target.id, row);
+            }
         }
 
         Launched::Dispatched(Box::new(Dispatch {
             target,
             payload: item.payload,
             verb,
-            sender,
             timeout: item.timeout,
             exec_id,
             task_id,
@@ -413,7 +482,6 @@ impl Kernel {
             target,
             payload,
             verb,
-            sender,
             timeout,
             exec_id,
             task_id,
@@ -459,20 +527,11 @@ impl Kernel {
             crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply);
         }
 
-        // State event + watcher fanout (synchronous; cheap subscribers).
-        let event = json!({
-            "type": "send",
-            "sender": sender.0,
-            "target": target.id.0,
-            "verb": verb,
-            "summary": summarize_payload(&payload),
-        });
-        self.publish_state(&event);
-        // Watchers see the RAW request payload (Python parity) — they're
-        // listening for verb dispatches, not event-metadata envelopes.
-        // State subscribers above already got the metadata envelope.
-        self.fanout_to_watchers(&target, &payload).await;
-
+        // NO FANOUT HERE. It ran in `run_dispatch`, BEFORE the handler — which is
+        // where python puts it and what a watcher needs: mirroring after the
+        // reply meant a watcher saw the request only once the work was already
+        // done, so its echo landed after the handler's own progress events and
+        // the measured order inverted (`>start job_started start`).
         let out = self
             .ledger
             .settle(exec_id, Outcome::new(pid, status, reply));
@@ -490,18 +549,57 @@ impl Kernel {
         // enumerated set of kinds it was told about. A new kind on an agent's
         // list is conversation to whichever reader was not. `settled` names the
         // agent as a FIELD, so the ending still says what it ended.
-        if let Some(root) = self.root() {
-            let mut row = Map::new();
-            row.insert("kind".to_string(), Value::from("settle"));
-            row.insert("parent".to_string(), Value::from(pid.map(|t| t.get())));
-            row.insert("settled".to_string(), Value::from(target.id.0.clone()));
-            row.insert("outcome".to_string(), out.to_value());
-            let _ = self.rows.put(&root.id, row);
-        }
+        self.stamp_call(pid, &out);
         // The DURABLE half, if a loader installed one. The kernel does not know
         // what this writes or where.
         self.ledger_settled();
         out
+    }
+
+    /// Settle the call: stamp the live row AND append a `settle` row.
+    ///
+    /// The stamp is python's, not the ledger's `Outcome`: `{status, error?,
+    /// reason?}` — the error is `str(result.error)` cut to 200 CODE POINTS, and
+    /// both optional keys follow python truthiness. The full outcome (pid,
+    /// result, attempts) belongs to the ledger, not to the message log: writing
+    /// it here put every reply body — binary ones included — into
+    /// `messages.xml`.
+    ///
+    /// Nothing is written when the call row is absent (a refusal that never
+    /// opened one, a hydrated id): python returns early on the same test, and
+    /// the settle row exists to END a call that was written down.
+    fn stamp_call(self: &Arc<Self>, pid: Option<TaskId>, out: &Outcome) {
+        let Some(pid) = pid else { return };
+        let Some(row) = self.rows.get_one(pid.get()) else {
+            return;
+        };
+        let mut stamp = Map::new();
+        stamp.insert("status".to_string(), Value::from(out.status.as_str()));
+        if let Some(res) = out.result.as_object() {
+            if let Some(err) = res.get("error").filter(|v| py_truthy(v)) {
+                stamp.insert(
+                    "error".to_string(),
+                    Value::from(py_str(err).chars().take(200).collect::<String>()),
+                );
+                if let Some(reason) = res.get("reason").filter(|v| py_truthy(v)) {
+                    stamp.insert("reason".to_string(), reason.clone());
+                }
+            }
+        }
+        let mut onto = Map::new();
+        onto.insert("outcome".to_string(), Value::Object(stamp.clone()));
+        self.rows.stamp(pid.get(), &onto);
+        if let Some(root) = self.root() {
+            let mut settle = Map::new();
+            settle.insert("kind".to_string(), Value::from("settle"));
+            settle.insert("parent".to_string(), Value::from(pid.get()));
+            settle.insert(
+                "settled".to_string(),
+                row.get("agent").cloned().unwrap_or(Value::Null),
+            );
+            settle.insert("outcome".to_string(), Value::Object(stamp));
+            let _ = self.rows.put(&root.id, settle);
+        }
     }
 
     /// Wait for an execution someone else owns.
@@ -601,6 +699,28 @@ impl Kernel {
             current_task(), // the dispatch we are nested inside, if any
             handle.clone(),
         );
+
+        // BEFORE THE HANDLER, once per attempt — python's `_dispatch` bumps
+        // `_in_flight`, fans out, and only then resolves the verb. Here, too, is
+        // the last point at which `CURRENT_SENDER` is still the CALLER: the spawn
+        // below re-points it at the target, so a fanout inside it would attribute
+        // every event to its own recipient. The guard publishes the matching
+        // `drain` on every exit path, timeout included.
+        let _in_flight = InFlightGuard::enter(self, target);
+        let item = match binary.clone() {
+            // The BINARY channel carries the payload's bytes at `bytes` — the key
+            // python's own payload dict holds them under — so a watcher receives
+            // the body, not a header with a hole where it was.
+            Some(blob) => {
+                let mut head = payload.clone();
+                if let Some(m) = head.as_object_mut() {
+                    m.insert("bytes".to_string(), Value::Null);
+                }
+                crate::inbox::InboxItem::binary(head, "bytes", blob)
+            }
+            None => crate::inbox::InboxItem::text(payload.clone()),
+        };
+        self.fanout(target, "send", &item).await;
 
         let join = {
             let kernel = Arc::clone(self);
@@ -742,9 +862,10 @@ impl Kernel {
     /// dispatches the JSON header through `handle` and drops the raw
     /// blob — never base64; a bundle that wants the bytes overrides it).
     ///
-    /// State events: emits `{"type":"send_binary", sender, target,
-    /// verb, summary}` for telemetry parity with text dispatch. Watcher
-    /// fanout uses the same event payload.
+    /// ONE DISPATCH PATH, text or binary: the fanout below is the same
+    /// `kind:"send"` event and the same inbox put the text channel makes, run
+    /// BEFORE the handler and carrying the raw body — there is no `send_binary`
+    /// event kind, and a watcher is not told which channel a payload rode.
     pub async fn send_with_binary(
         self: &Arc<Self>,
         target_id: &AgentId,
@@ -769,10 +890,7 @@ impl Kernel {
             );
         };
 
-        let sender = current_sender().unwrap_or_else(|| target.id.clone());
         let verb = verb_of(&header).to_string();
-        let blob_len = blob.len();
-        let summary = summarize_payload(&header);
 
         // Call gate (see `Kernel::send`) — the binary path carries the same
         // agent-originated write_stream/read_stream sends, gated two-sided.
@@ -782,6 +900,21 @@ impl Kernel {
                 return (denial, Vec::new());
             }
         }
+
+        // BEFORE the handler, with the body: this is the frame python puts on a
+        // watcher's inbox for a `write_stream`, and the only reason a watcher can
+        // ever see the bytes at all.
+        let _in_flight = InFlightGuard::enter(self, &target);
+        let mut head = header.clone();
+        if let Some(m) = head.as_object_mut() {
+            m.insert("bytes".to_string(), Value::Null);
+        }
+        self.fanout(
+            &target,
+            "send",
+            &crate::inbox::InboxItem::binary(head, "bytes", blob.clone()),
+        )
+        .await;
 
         // Run dispatch under a fresh CURRENT_SENDER scope so nested
         // sends attribute to this target (matches Python contextvars).
@@ -793,66 +926,36 @@ impl Kernel {
         })
         .await;
 
-        // State event + watcher fanout. `bytes` counts the larger of the
-        // request/reply body so telemetry reflects either direction.
-        let event = json!({
-            "type": "send_binary",
-            "sender": sender.0,
-            "target": target.id.0,
-            "verb": verb,
-            "summary": summary,
-            "bytes": blob_len.max(body.len()),
-        });
-        self.publish_state(&event);
-        // Watchers get the raw header (request envelope without the
-        // blob). Mirrors Python's payload-to-watchers semantics.
-        self.fanout_to_watchers(&target, &header).await;
-
         (reply, body)
     }
 
     /// Emit a payload to a target's inbox without dispatching. Returns
-    /// immediately. Fans the event out to watchers; publishes a state
-    /// event of type `"emit"`.
+    /// immediately. Publishes a `kind:"emit"` state event and mirrors to
+    /// watchers — the same fanout a dispatch runs, minus the in-flight bump.
     ///
-    /// AN INBOX EXISTS IFF A READER REGISTERED IT. An emit to an id nobody
-    /// holds a receiver for is a no-op, exactly as in python.
-    ///
-    /// This used to auto-vivify: it inserted a sender whose receiver was dropped
-    /// on the same line, so the channel was closed from birth — every later
-    /// `try_send` failed and the map entry stayed forever, one per synthetic id
-    /// that was ever emitted to. A queue nobody reads is not a queue.
+    /// AN EMIT TO A NON-AGENT ID IS A NO-OP. The target agent is resolved FIRST:
+    /// no agent, no inbox put, no state event. Rust used to put into any
+    /// registered inbox and publish regardless, so a synthetic WS client id
+    /// (`_ws_<hex>`) produced telemetry for a sprite that does not exist — python
+    /// drops it silently (`_proxy.py:196-200`).
     pub async fn emit(self: &Arc<Self>, target_id: &AgentId, payload: Value) {
-        if let Some(tx) = self.inboxes.get(target_id) {
-            // Never blocks the emitter, and at the bound the OLDEST payload is
-            // evicted — python's `_put_drop_oldest` and swift's
-            // `.bufferingNewest` rule, which rust used to invert.
-            tx.send(payload.clone());
-        }
+        self.emit_item(target_id, crate::inbox::InboxItem::text(payload))
+            .await;
+    }
 
-        let sender = current_sender().unwrap_or_else(|| target_id.clone());
-        let verb = verb_of(&payload).to_string();
-        let event = json!({
-            "type": "emit",
-            "sender": sender.0,
-            "target": target_id.0,
-            "verb": verb,
-            "summary": summarize_payload(&payload),
-        });
-        self.publish_state(&event);
-        // Best-effort watcher fanout — emits without a registered
-        // Agent (synthetic targets) have no watcher set; skip.
-        // Watchers see the RAW payload (Python parity) — they
-        // subscribed to learn what's flowing through the target's
-        // inbox, not metadata about it.
-        if let Some(target) = self.agents.get(target_id).map(|e| Arc::clone(&e)) {
-            self.fanout_to_watchers(&target, &payload).await;
-        }
+    /// [`Self::emit`] for a payload carrying raw bytes — a `read_stream` chunk a
+    /// bridge re-emits from a remote watch, which must reach a local watcher
+    /// WHOLE. Same no-op rule for a non-agent id.
+    pub async fn emit_item(self: &Arc<Self>, target_id: &AgentId, item: crate::inbox::InboxItem) {
+        let Some(target) = self.agents.get(target_id).map(|e| Arc::clone(&e)) else {
+            return;
+        };
+        self.fanout(&target, "emit", &item).await;
     }
 
     /// Register `watcher_id` as an observer of `src_id`'s inbox.
     /// Every subsequent `send`/`emit` targeting `src_id` mirrors the
-    /// payload into `watcher_id`'s inbox via [`Self::fanout_to_watchers`].
+    /// payload into `watcher_id`'s inbox via [`Self::fanout`].
     /// Mirror `src_id`'s inbound traffic into `watcher_id`'s inbox. Returns a
     /// refusal when the gate denies it, else `None`.
     ///
@@ -883,13 +986,14 @@ impl Kernel {
         // line, so the mirror went nowhere and the caller had no way to know.
         // Registering a consumer is what `watch` requires, not what it does.
         if !self.inboxes.contains_key(&watcher_id) {
-            let mut r = crate::refusal::refusal(
+            let who = fantastic_bundle::py_repr(&watcher_id.0);
+            let mut r = crate::refusal::refusal_hint(
                 crate::refusal::NO_CONSUMER,
                 format!(
-                    "watch: {:?} has no registered inbox, so nothing would read \
-                     what is mirrored there",
-                    watcher_id.0
+                    "watch: {who} has no registered inbox, so nothing would read \
+                     what is mirrored there"
                 ),
+                format!("register the reader first — ctx.ensure_inbox({who}) — then watch"),
             );
             crate::refusal::with(&mut r, "watcher", json!(watcher_id.0));
             crate::refusal::with(&mut r, "src", json!(src_id.0));
@@ -925,14 +1029,110 @@ impl Kernel {
         }
     }
 
-    /// Push `payload` to every watcher of `target`'s inbox.
-    pub(crate) async fn fanout_to_watchers(&self, target: &Agent, payload: &Value) {
+    /// Python's `Agent._fanout` — the ONE place a payload reaches an inbox.
+    ///
+    /// The target's OWN inbox first (a reader that registered one sees what was
+    /// sent TO it, not only what its handler replied), then the state event for
+    /// the target, then each watcher's inbox plus a state event per watcher that
+    /// is a REAL agent. A synthetic watcher (a browser client id) gets the mail
+    /// and no telemetry ray — publishing one would mint a phantom sprite.
+    ///
+    /// The whole `item` travels, bytes included: a watcher on a `write_stream`
+    /// receives the body, which is the binary frame python sends it.
+    pub(crate) async fn fanout(
+        &self,
+        target: &Arc<Agent>,
+        kind: &str,
+        item: &crate::inbox::InboxItem,
+    ) {
+        // THE CALLER, not the target. Read before any dispatch scope re-points
+        // `CURRENT_SENDER` at the target; an operator send carries JSON null.
+        let sender = current_sender();
+        let summary = summarize_payload(&item.payload, item.body.as_ref());
+        if let Some(tx) = self.inboxes.get(&target.id) {
+            // Never blocks the emitter, and at the bound the OLDEST payload is
+            // evicted — python's `_put_drop_oldest` and swift's
+            // `.bufferingNewest` rule, which rust used to invert.
+            tx.send(item.clone());
+        }
+        self.publish_state_with_body(
+            &traffic_event(
+                &target.id,
+                kind,
+                target.in_flight(),
+                sender.as_ref(),
+                &summary,
+                item,
+            ),
+            item.body.as_ref(),
+        );
         let watchers: Vec<AgentId> = target.watcher_ids.read().await.iter().cloned().collect();
         for w in watchers {
-            if let Some(tx) = self.inboxes.get(&w) {
-                tx.send(payload.clone());
+            let Some(tx) = self.inboxes.get(&w).map(|e| e.clone()) else {
+                continue;
+            };
+            tx.send(item.clone());
+            if let Some(wa) = self.agents.get(&w).map(|e| Arc::clone(&e)) {
+                self.publish_state_with_body(
+                    &traffic_event(&w, kind, wa.in_flight(), sender.as_ref(), &summary, item),
+                    item.body.as_ref(),
+                );
             }
         }
+    }
+}
+
+/// One traffic state event, in python's key order:
+/// `{agent_id, kind, backlog, sender, summary, payload}` (`ts` is stamped by
+/// `publish_state`). `sender` is the originator or JSON null — never the target's
+/// own id, which is what rust used to substitute for an operator send.
+fn traffic_event(
+    agent_id: &AgentId,
+    kind: &str,
+    backlog: i64,
+    sender: Option<&AgentId>,
+    summary: &str,
+    item: &crate::inbox::InboxItem,
+) -> Value {
+    json!({
+        "agent_id": agent_id.0,
+        "kind": kind,
+        "backlog": backlog,
+        "sender": sender.map(|s| s.0.clone()),
+        "summary": summary,
+        "payload": item.payload,
+    })
+}
+
+/// The `{agent_id, kind:"drain", backlog}` event every dispatch publishes once
+/// its handler has returned — python's `_dispatch` `finally`.
+fn drain_event(agent_id: &AgentId, backlog: i64) -> Value {
+    json!({ "agent_id": agent_id.0, "kind": "drain", "backlog": backlog })
+}
+
+/// Bump `target`'s in-flight count for the life of one dispatch, then drop it and
+/// publish the `drain` event — python's `try/finally` around the handler, which a
+/// rust early return (a timeout) must honour just the same.
+pub(crate) struct InFlightGuard {
+    kernel: Arc<Kernel>,
+    target: Arc<Agent>,
+}
+
+impl InFlightGuard {
+    pub(crate) fn enter(kernel: &Arc<Kernel>, target: &Arc<Agent>) -> Self {
+        target.in_flight_enter();
+        Self {
+            kernel: Arc::clone(kernel),
+            target: Arc::clone(target),
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.target.in_flight_leave();
+        self.kernel
+            .publish_state(&drain_event(&self.target.id, self.target.in_flight()));
     }
 }
 
@@ -1011,8 +1211,9 @@ fn dispatch(
                     let mut r = crate::refusal::refusal(
                         crate::refusal::UNHANDLED,
                         format!(
-                            "agent {:?} has no handler_module; cannot answer verb {:?}",
-                            target.id.0, verb
+                            "agent {} has no handler_module; cannot answer verb {}",
+                            fantastic_bundle::py_repr(&target.id.0),
+                            fantastic_bundle::py_repr(verb)
                         ),
                     );
                     crate::refusal::with(&mut r, "verb", json!(verb));

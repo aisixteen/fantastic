@@ -248,8 +248,9 @@ struct RoutingTests {
         // result; the model can act on one and cannot act on silence.
         //
         // In swift the catch is the SUBSTRATE's (`kernel.send` never throws), so
-        // what is asserted here is that the caught body reaches the model whole:
-        // the error text, and the `target` routing adds to it.
+        // what is asserted here is that the caught body reaches the model whole.
+        // Routing adds NOTHING to it (B1.26): the tag line already names the
+        // target, and python renders `render_reply(result)` unchanged.
         let script = ProviderScript([
             [callEnvelope(target: "raiser", payload: .object(["type": .string("reflect")]))],
             ["saw it"],
@@ -382,6 +383,10 @@ struct RoutingTests {
                 send to 'totals' carried no payload, so nothing was dispatched. A call \
                 names its verb in `<type>`, e.g. <type>reflect</type>.
                 """)
+        // B5.20: `{target!r}` is python's repr, not "wrap it in single quotes".
+        #expect(noPayloadError(target: "it's").hasPrefix("send to \"it's\" carried"))
+        #expect(noPayloadError(target: #"C:\notes"#).hasPrefix(#"send to 'C:\\notes' carried"#))
+        #expect(noPayloadError(target: "tab\there").hasPrefix(#"send to 'tab\there' carried"#))
         // The malformed report is composed in `Malformed.swift`; its opening
         // sentence is the part the model keys on.
         let report = malformedCalls(#"<call name="send"><type>reflect</type></call>"#)
@@ -663,16 +668,21 @@ struct RoutingTests {
         #expect(script.calls == 5, "done ended it; nothing reminds after")
     }
 
-    @Test func nudgeLimitBoundsANeverCallingChain() async throws {
+    // B1.3: THERE IS NO STREAK AND NO CAP. A `nudge_limit` on the record buys
+    // nothing — every call-less turn is nudged, and the chain ends where the
+    // MODEL says it ends. Python `test_silent_chain_turns_are_nudged_until_a_call_or_done`.
+    @Test func everySilentTurnIsNudgedWithNoCap() async throws {
         let script = ProviderScript([
             [callEnvelope(target: "core", payload: cheapReflect)],
             ["prose 1"],
             ["prose 2"],
             ["prose 3"],
-            ["prose 4 — would be nudged without the limit"],
+            ["prose 4 — nudged too, there is no limit"],
+            ["finished. " + doneEnvelope],
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        // A `nudge_limit` of 2 used to stop the chain at pass 4. It is not read.
         _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("update_agent"), "id": .string(ids["mock"]!.value),
                 "nudge_limit": .integer(2),
@@ -681,10 +691,14 @@ struct RoutingTests {
                 "type": .string("send"), "text": .string("go"),
                 "client_id": .string("c"),
             ]))])[0].result
-        #expect(await script.waitForCalls(4), "two nudges must arrive")
+        #expect(await script.waitForCalls(6), "every silent turn must be nudged")
+        for n in [2, 3, 4, 5] {
+            #expect(
+                script.requestText(n).contains("[no call was dispatched] Your turn emitted no"),
+                "pass \(n + 1) must be a nudge")
+        }
         try await Task.sleep(nanoseconds: 300_000_000)
-        // call, silent→nudge 1, silent→nudge 2, silent→over the limit: 4, never 5
-        #expect(script.calls == 4)
+        #expect(script.calls == 6, "done ended it; nothing reminds after")
     }
 
     @Test func aDoneCallEndsTheChainWithoutANudge() async throws {
@@ -917,6 +931,68 @@ struct RoutingTests {
         #expect(status["source"].asString == "raiser", "\(status.serialize())")
         #expect(status["ts"].asDouble != nil, "\(status.serialize())")
         #expect(status["client_id"].asString == "c", "\(status.serialize())")
+        // B2.4: the announcement goes through the SHARED emitter, so it carries
+        // the target's `queue_depth` like every other status event, and its
+        // `error` is the reply's own — never a `delivery <status>` sentence
+        // python does not write.
+        #expect(
+            status["detail"].asObject.map { Array($0.keys) } == ["reason", "error", "queue_depth"],
+            "\(status.serialize())")
+        #expect(
+            status["detail"]["error"].asString?.hasPrefix("delivery ") == false,
+            "\(status.serialize())")
+    }
+
+    /// B2.4: a CANCELLED handoff is not announced. An operator kill is a
+    /// decision, not a silent death, and waking the target with an error for
+    /// work someone deliberately stopped is noise. Swift announced every
+    /// non-completed outcome, cancels included.
+    @Test func aCancelledHandoffIsNotAnnounced() async throws {
+        // A slow destination, killed through the front door while the handoff is
+        // in flight: the outcome is `cancelled` with `{cancelled:true}` and no
+        // error at all.
+        let (kernel, _, _) = await bootStubKernel(deliveryPauseNanos: 2_000_000_000)
+        await seedStub(kernel, "ai", "delivery.tools")
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(AgentId("ai"))
+        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        defer { pump.cancel() }
+        let handoff = Task {
+            await deliverTurn(
+                kernel: kernel, target: "ai", text: "hi", clientId: "c", systemPrompt: nil)
+        }
+        let taskId = try await waitForTask(kernel: kernel, agent: AgentId("ai"), verb: "send")
+        let c = await kernel.send([
+            Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .integer(taskId)]))
+        ])[0].result
+        #expect(c["cancelled"].asBool == true)
+        await handoff.value
+        #expect(
+            !sink.snapshot().contains { $0["type"].asString == "status" },
+            "an operator kill is a decision, not a silent death to announce")
+    }
+
+    /// B2.5: a delivery is a SPAWNED kernel task (`verb:"deliver_reply"`), not
+    /// an awaited call. Awaiting each one inside the router's loop made reply 2
+    /// of a 4-call turn wait for the whole conversation reply 1 started — 26 of
+    /// 36 calls never answered, measured 2026-08-24 (`live_build`).
+    @Test func deliveriesRunAsDeliverReplyTasks() async throws {
+        let (kernel, _, sent) = await bootStubKernel(deliveryPauseNanos: 300_000_000)
+        await seedStub(kernel, "ai", "delivery.tools")
+        await seedStub(kernel, "meter", "echo.tools")
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: stubCall("meter"), clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+
+        // The router returned while the delivery is still running…
+        #expect(sent.messages().isEmpty, "the router must not wait for the handoff")
+        // …and the work is a `ps` row, so it is visible and killable.
+        let rows = await psRows(kernel)
+        #expect(
+            rows.contains {
+                $0["agent"].asString == "ai" && $0["verb"].asString == "deliver_reply"
+            }, "\(JSON.array(rows).serialize())")
+        #expect(await sent.settled(1).count == 1)
     }
 
     /// A `reflect` reply is LARGE and TRANSIENT, and the instruction for what to
@@ -1035,8 +1111,9 @@ struct RoutingTests {
         await route.value
         #expect(Set(echo.answered().map(\.0)) == Set(targets))
 
-        #expect(sent.messages().count == 1, "one destination -> exactly one delivered message")
-        let (target, payload) = try #require(sent.messages().first)
+        let delivered = await sent.settled(1)
+        #expect(delivered.count == 1, "one destination -> exactly one delivered message")
+        let (target, payload) = try #require(delivered.first)
         #expect(target == "ai")
         let blocks = (payload["text"].asString ?? "").components(separatedBy: "\n\n")
         #expect(blocks.count == 4, Comment(rawValue: payload["text"].asString ?? ""))
@@ -1059,7 +1136,8 @@ struct RoutingTests {
             sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
 
         let byDest = Dictionary(
-            sent.messages().map { ($0.0, $0.1["text"].asString ?? "") }, uniquingKeysWith: { a, _ in a })
+            await sent.settled(2).map { ($0.0, $0.1["text"].asString ?? "") },
+            uniquingKeysWith: { a, _ in a })
         #expect(Set(byDest.keys) == ["ai", "scribe"])
         let ai = byDest["ai"] ?? ""
         #expect(ai.contains(" \u{b7} 1 of 2 in batch "), Comment(rawValue: ai))
@@ -1082,8 +1160,9 @@ struct RoutingTests {
             sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
 
         #expect(Set(echo.answered().map(\.0)) == ["meter", "totals"], "the discarded call still ran")
-        #expect(sent.messages().count == 1)
-        let body = sent.messages().first?.1["text"].asString ?? ""
+        let delivered = await sent.settled(1)
+        #expect(delivered.count == 1)
+        let body = delivered.first?.1["text"].asString ?? ""
         #expect(!body.contains("totals"), Comment(rawValue: body))
         #expect(!body.contains("in batch"), "one awaited call -> no batch suffix")
     }
@@ -1111,7 +1190,7 @@ struct RoutingTests {
             selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
             sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 0.1)
 
-        let body = sent.messages().first?.1["text"].asString ?? ""
+        let body = (await sent.settled(1)).first?.1["text"].asString ?? ""
         let blocks = body.components(separatedBy: "\n\n")
         #expect(blocks.count == 3, Comment(rawValue: body))
         #expect(blocks[0].hasReplyTag("hung ping \u{b7} 1 of 3 in batch "), Comment(rawValue: blocks[0]))
@@ -1147,7 +1226,7 @@ struct RoutingTests {
         #expect(row["retries"].asInt == 2, Comment(rawValue: row.serialize()))
         #expect(row["named"].asBool == true && row["target"].asString == "vault", Comment(rawValue: row.serialize()))
         #expect(echo.answered().first?.1 == .object(["type": .string("withdraw")]), "the payload must reach the target verbatim")
-        let body = sent.messages().first?.1["text"].asString ?? ""
+        let body = (await sent.settled(1)).first?.1["text"].asString ?? ""
         #expect(body.hasPrefix("[reply to \(jid) \u{b7} vault withdraw]"), Comment(rawValue: body))
     }
 
@@ -1173,14 +1252,15 @@ struct RoutingTests {
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: call, clientId: "cli",
             sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, turnId: 412)
-        let peers = sent.messages().filter { ["solver_2", "solver_3"].contains($0.0) }
+        let landed = await sent.settled(2)
+        let peers = landed.filter { ["solver_2", "solver_3"].contains($0.0) }
         #expect(Set(peers.map(\.0)) == ["solver_2", "solver_3"], "\(peers.map(\.0))")
         for p in items.map({ $0.arguments["payload"] }) + peers.map(\.1) {
             #expect(p["to"] == .array([.string("solver_2"), .string("solver_3")]), Comment(rawValue: p.serialize()))
             #expect(p["msg"].asInt == 412 && p["re"].asInt == 398, Comment(rawValue: p.serialize()))
             #expect(p["text"].asString == "CANDIDATE 586")
         }
-        #expect(sent.messages().count == 2, "reply_to:null — nothing is owed back to ai")
+        #expect(landed.count == 2, "reply_to:null — nothing is owed back to ai")
     }
 
     // ─── `await`: an honest wait or a refusal, never a silent stall ──
@@ -1291,11 +1371,16 @@ private final class DeliveryRecorder: AgentBundle, @unchecked Sendable {
     let name = "delivery"
     private let lock = NSLock()
     private var seen: [(String, JSON)] = []
+    /// A slow destination, so a test can observe that the router did NOT wait.
+    let pauseNanos: UInt64
+
+    init(pauseNanos: UInt64 = 0) { self.pauseNanos = pauseNanos }
 
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         switch payload["type"].asString ?? "" {
         case "boot", "shutdown": return nil
         default:
+            if pauseNanos > 0 { try? await Task.sleep(nanoseconds: pauseNanos) }
             lock.withLock { seen.append((agentId.value, payload)) }
             return .object(["recorded": .bool(true)])
         }
@@ -1303,6 +1388,20 @@ private final class DeliveryRecorder: AgentBundle, @unchecked Sendable {
 
     /// Every delivered message as `(destination, payload)`, in arrival order.
     func messages() -> [(String, JSON)] { lock.withLock { seen } }
+
+    /// Wait for `count` deliveries to land. A delivery is a SPAWNED kernel task
+    /// (`verb:"deliver_reply"`) and the router does not await it — python's
+    /// `_deliver_soon` — so a caller that read `messages()` the instant
+    /// `routeReply` returned was reading a race, not a result.
+    func settled(_ count: Int, within seconds: Double = 2) async -> [(String, JSON)] {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            let seen = messages()
+            if seen.count >= count { return seen }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return messages()
+    }
 }
 
 /// A bare in-memory kernel with the two stub bundles registered (`echo.tools`,
@@ -1310,13 +1409,13 @@ private final class DeliveryRecorder: AgentBundle, @unchecked Sendable {
 /// backend: these cases drive `routeReply` directly, as python drives
 /// `_route_reply`.
 private func bootStubKernel(
-    echoPauseNanos: UInt64 = 0, hungPauseNanos: UInt64 = 0
+    echoPauseNanos: UInt64 = 0, hungPauseNanos: UInt64 = 0, deliveryPauseNanos: UInt64 = 0
 ) async -> (Kernel, EchoBundle, DeliveryRecorder) {
     let registry = BundleRegistry()
     let echo = EchoBundle(pauseNanos: echoPauseNanos)
     registry.register("echo.tools", echo)
     registry.register("hung.tools", EchoBundle(pauseNanos: hungPauseNanos))
-    let sent = DeliveryRecorder()
+    let sent = DeliveryRecorder(pauseNanos: deliveryPauseNanos)
     registry.register("delivery.tools", sent)
     let kernel = Kernel(storage: .inMemory, bundles: registry)
     let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
@@ -1339,5 +1438,126 @@ extension String {
         range(
             of: "^\\[reply to [0-9]+ \u{b7} " + NSRegularExpression.escapedPattern(for: rest),
             options: .regularExpression) != nil
+    }
+
+    // ── round-2 edges (B1.11, B1.26, B5.18, B5.19) ───────────────
+
+    // B1.11: kept RAW, refused only when it is not a string or is blank after a
+    // FULL python strip.
+    @Test func sendToIsKeptRawAndDroppedOnlyWhenBlank() async throws {
+        // A `done` turn is the one that still takes the caller's hand-off.
+        func handOff(_ sendTo: JSON) async -> [JSON] {
+            let script = ProviderScript([["finished. " + doneEnvelope]])
+            let (k, ids, recorder) = await bootMockKernel(
+                config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+            _ = await k.send([
+                Item(
+                    ids["mock"]!,
+                    .object([
+                        "type": .string("send"), "text": .string("go"),
+                        "send_to": sendTo, "client_id": .string("c"),
+                    ]))
+            ])[0].result
+            _ = await recorder.waitForPayloads(1, timeout: 1.0)
+            return recorder.payloads()
+        }
+        // `probe` reaches the recorder; ` probe ` is a DIFFERENT id and reaches
+        // nothing — the value is kept raw, spaces and all.
+        #expect(await handOff(.string("probe")).count == 1)
+        #expect(await handOff(.string(" probe ")).isEmpty, "a padded id is not `probe`")
+        // `\n\t` is blank under python's strip (`.whitespaces` alone is not), and
+        // a non-string is no target at all — neither makes a hand-off.
+        #expect(await handOff(.string("\n\t")).isEmpty)
+        #expect(await handOff(.integer(7)).isEmpty)
+    }
+
+    // B1.26: the reply block renders `result` with NO injected `target`.
+    @Test func aRaisedCallReplyBlockRendersTheResultUnchanged() async throws {
+        let script = ProviderScript([
+            [callEnvelope(target: "raiser", payload: .object(["type": .string("reflect")]))],
+            ["saw it"],
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([
+            Item(
+                ids["mock"]!,
+                .object([
+                    "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+                ]))
+        ])[0].result
+        #expect(await script.waitForCalls(2))
+        let turn2 = script.requestText(1)
+        // The body is `{error, raised}` rendered as-is. `<target>` was swift's
+        // own addition and python never writes it.
+        #expect(!turn2.contains("<target>"), "\(turn2.suffix(400))")
+    }
+
+    // B5.18: `_clean_title` on CODE POINTS, with python's strip.
+    @Test func cleanTitleMatchesPython() {
+        // A CRLF is ONE Character and TWO code points: python turns the run into
+        // a single space, swift's Character scan left it whole.
+        #expect(cleanTitle(.string("a\r\nb")) == "a b")
+        #expect(cleanTitle(.string("a]]]b")) == "a b")
+        // U+001C is whitespace to python's `strip()` and not to `.whitespaces`.
+        #expect(cleanTitle(.string("a \u{1c}")) == "a")
+        #expect(cleanTitle(.string("]]]")) == nil)
+        #expect(cleanTitle(.string("   ")) == nil)
+        #expect(cleanTitle(.integer(7)) == nil)
+        #expect(cleanTitle(nil) == nil)
+        // 140 CODE POINTS: a family emoji is 7 scalars and one Character.
+        let family = String(repeating: "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", count: 30)
+        #expect(cleanTitle(.string(family))?.unicodeScalars.count == 140)
+    }
+
+    // B5.19: a non-string `<type>` still names the reply — `?` means ABSENT.
+    @Test func aNonStringTypeTagsTheReplyWithPythonStr() async throws {
+        let script = ProviderScript([
+            [
+                renderCall(
+                    "send",
+                    [
+                        "target_id": .string("probe"), "reply_to": .string("self"),
+                        "payload": .object(["type": .integer(42)]),
+                    ])
+            ],
+            ["saw it"],
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([
+            Item(
+                ids["mock"]!,
+                .object([
+                    "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+                ]))
+        ])[0].result
+        #expect(await script.waitForCalls(2))
+        #expect(
+            script.requestText(1).contains("\u{b7} probe 42 \u{b7}"),
+            "\(script.requestText(1).prefix(300))")
+    }
+
+    // B5.12: `<to>42</to>` is a CALL python dispatches; the no-target reply comes
+    // from routing, and the echo shows what the model wrote.
+    @Test func aTruthyNonListToReachesTheNoTargetReply() async throws {
+        let script = ProviderScript([
+            ["<call name=\"send\"><to>42</to><type>reflect</type></call>"],
+            ["saw it"],
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([
+            Item(
+                ids["mock"]!,
+                .object([
+                    "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+                ]))
+        ])[0].result
+        #expect(await script.waitForCalls(2))
+        let turn2 = script.requestText(1)
+        #expect(turn2.contains("no target_id, so nothing was dispatched"), "\(turn2.suffix(400))")
+        #expect(turn2.contains("<to>42</to>"), "\(turn2.suffix(400))")
+        #expect(!turn2.contains("call NOT dispatched"), "it parses; it is not malformed")
     }
 }

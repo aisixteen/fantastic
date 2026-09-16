@@ -62,9 +62,11 @@ A program that persists and re-runs is a FILE you write plus a command that runs
 no `code` field at all:
 
 1. **Write the program to a file** on a `file_bridge` leg, its bytes carried over a STREAM so
-   nothing is escaped: `write_stream {path, bytes, truncate:true}` (or `send_binary`, which writes the
-   program RAW in its last `bytes` field — nothing escaped). A program squeezed into a JSON string is lost to one stray quote.
-2. **Run it** here: `start {command:'<interp>', args:['<your file>']}`, past the `allowed`
+   nothing is escaped: `write_stream {path, bytes, truncate:true}` — `bytes` is VERBATIM, written between
+   `<bytes>` and `</bytes>` exactly as it should land — real newlines, real quotes, nothing escaped. A
+   program squeezed into an escaped string is lost to one stray quote; the verbatim tag is why you never
+   escape it.
+2. **Run it** here: `<type>start</type> <command>interp</command> <args><item>your file</item></args>`, past the `allowed`
    gate.
 3. **Re-run** the SAME command later — the file is durable on disk, so it re-executes the
    same program against whatever the inputs hold THEN. That is what "a thing that keeps
@@ -131,7 +133,7 @@ one. Anything stronger needs an OS mechanism (`sandbox-exec`, a separate uid, a 
 and none of it is reachable in-process. Stated plainly rather than reassuringly: opening this
 leg grants local code execution to whoever can reach it.
 
-**Get the client instead of writing one:** send this agent `{type:'connector'}` — the
+**Get the client instead of writing one:** send this agent `<type>connector</type>` — the
 reply's `source` IS the reference wire client; paste it verbatim at the top of your
 program file. A program's sends carry THIS runner's identity and grants (its `can_call`;
 a target must list the runner in `callable_by`).

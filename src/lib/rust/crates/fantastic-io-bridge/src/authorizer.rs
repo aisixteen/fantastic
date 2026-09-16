@@ -15,6 +15,7 @@
 //! `ingress_rule`/`egress_rule` (symmetric), or the legacy `auth` shorthand (sets
 //! both sides). Rules are TRANSITIONAL (inline plumbing), not invocational (agents).
 
+use fantastic_bundle::py_truthy;
 use serde_json::{json, Value};
 
 pub mod egress;
@@ -123,27 +124,32 @@ pub trait EgressRule: Send + Sync {
 /// Default env var for the `password` rule when the record names none.
 pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
 
-/// Normalize a rule spec `Value` to `(type_name, secret_env_key)`. Absent/null/empty ⇒
-/// `(None, None)`. String ⇒ `(name, None)`. Object ⇒ `(type, env)`.
+/// Normalize a rule spec `Value` to `(type_name, secret_env_key)`. python
+/// `io_bridge._base.parse_spec`: a FALSY spec (absent, null, `""`, `0`, `[]`,
+/// `{}`) is `(None, None)`, a string is `(name, None)`, an object is
+/// `(type, env)`.
 ///
 /// `type` and `env` are the only spellings. This used to also accept `policy` and
 /// `token_env`; python's `parse_spec` never did, so those were rust-only legacy aliases
 /// giving one wire key two names.
+///
+/// An object with no `type` is `(None, env)` — a plain SEAL, as python resolves
+/// it. It used to be an `Err` that every caller turned into its own shape: the
+/// file gate answered a bare `{error:"rule object missing 'type'"}` and refused
+/// the write, and exec_bridge threw the same string out of `handle`.
 pub(crate) fn parse_spec(spec: Option<&Value>) -> Result<(Option<String>, Option<String>), String> {
     let Some(spec) = spec else {
         return Ok((None, None));
     };
+    if !py_truthy(spec) {
+        return Ok((None, None));
+    }
     match spec {
-        Value::Null => Ok((None, None)),
-        Value::String(s) if s.is_empty() => Ok((None, None)),
         Value::String(s) => Ok((Some(s.clone()), None)),
         Value::Object(o) => {
-            let name = o
-                .get("type")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "rule object missing 'type'".to_string())?;
+            let name = o.get("type").and_then(Value::as_str).map(str::to_string);
             let env = o.get("env").and_then(Value::as_str).map(str::to_string);
-            Ok((Some(name.to_string()), env))
+            Ok((name, env))
         }
         other => Err(format!("unsupported rule spec {other:?}")),
     }
@@ -182,20 +188,71 @@ pub fn manifold_spec(primary: Option<&Value>, auth: Option<&Value>, suffix: &str
     }
 }
 
-/// The rule TYPE name for reflect — never surfaces the rule's config. Absent ⇒
-/// `default`, which the CALLER supplies: `deny_inbound` for ingress (IO legs seal by
-/// default) and `silent` for egress. The doc here used to say `allow_all` for ingress,
-/// which is the opposite of what every caller passes and of the sealed-by-default rule.
+/// The rule TYPE name for reflect — never surfaces the rule's config. Absent,
+/// falsy or type-less ⇒ `default`, which the CALLER supplies: `deny_ingress` for
+/// ingress (IO legs seal by default) and `silent_egress` for egress. python
+/// `rule_name`: `parse_spec(spec)[0] or default`.
 pub fn rule_name(spec: Option<&Value>, default: &str) -> String {
-    match spec {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(Value::Object(o)) => o
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or(default)
-            .to_string(),
+    match parse_spec(spec) {
+        Ok((Some(name), _)) if !name.is_empty() => name,
         _ => default.to_string(),
     }
+}
+
+/// A leg's auth POSTURE for `reflect` — the rule NAMES (never their config) plus
+/// whether the leg is sealed: `{ingress_rule, egress_rule, sealed}`. python
+/// `io_bridge._base.describe`.
+///
+/// Keyed by the field you SET (read-key == write-key), so a readme-only LLM reads
+/// `ingress_rule: deny_ingress` and opens the leg with
+/// `ingress_rule: allow_all_ingress` — a direct mirror, no translation. The name
+/// is reported SCOPED whichever field it came from, EXCEPT that a name which
+/// already carries the suffix is left alone: `auth: allow_all_ingress` used to
+/// reflect as `allow_all_ingress_ingress` here, a name that resolves to nothing
+/// if written back.
+#[must_use]
+pub fn describe(meta: &serde_json::Map<String, Value>) -> Value {
+    let ingress_scoped = meta.contains_key("ingress_rule");
+    let egress_scoped = meta.contains_key("egress_rule");
+    let ing_spec = if ingress_scoped {
+        meta.get("ingress_rule")
+    } else {
+        meta.get("auth")
+    };
+    let egr_spec = if egress_scoped {
+        meta.get("egress_rule")
+    } else {
+        meta.get("auth")
+    };
+    let ingress = scoped(
+        &rule_name(ing_spec, "deny_ingress"),
+        "_ingress",
+        ingress_scoped,
+    );
+    let egress = scoped(
+        &rule_name(egr_spec, "silent_egress"),
+        "_egress",
+        egress_scoped,
+    );
+    json!({
+        "ingress_rule": ingress,
+        "egress_rule": egress,
+        "sealed": ingress != "allow_all_ingress",
+    })
+}
+
+/// python `_scoped`: report the SCOPED rule name whichever field it came from —
+/// `auth` carries a bare stem and each manifold appends its own suffix, while a
+/// name that already ends in the suffix (or was written into the scoped field) is
+/// reported as written.
+fn scoped(name: &str, suffix: &str, was_scoped: bool) -> String {
+    if was_scoped || name.ends_with(suffix) {
+        return name.to_string();
+    }
+    if suffix == "_egress" && (name == "allow_all" || name == "deny") {
+        return "silent_egress".to_string();
+    }
+    format!("{name}{suffix}")
 }
 
 /// Content-blind constant-time compare given equal length (length is not secret —

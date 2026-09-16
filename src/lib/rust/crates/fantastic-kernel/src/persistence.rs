@@ -300,8 +300,8 @@ pub async fn forget(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
 /// Returns the list of (id, root_path) pairs that registered
 /// successfully so callers can drive on-boot hooks (`boot` verb,
 /// state events, etc.). The Agents themselves are also inserted into
-/// `kernel.agents` + `parent.children` and have their inboxes
-/// auto-vivified by [`Kernel::register`].
+/// `kernel.agents` + `parent.children`. NO INBOX: a queue exists only where a
+/// reader called [`Kernel::ensure_inbox`] for one.
 pub fn load_children(
     kernel: &Kernel,
     bundles: &BundleRegistry,
@@ -336,25 +336,17 @@ pub fn load_children(
         if !agent_file.exists() {
             continue;
         }
+        // An unreadable or corrupt `agent.json` is skipped SILENTLY — python
+        // swallows both in `kernel_state/tools.py:131-155` and prints nothing
+        // (A15.3). A rust-only WARN here landed on a one-shot's stdout and
+        // stopped the reply parsing as JSON.
         let raw = match fs::read_to_string(&agent_file) {
             Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(path = %agent_file.display(), error = %e, "agent.json unreadable; skipping");
-                continue;
-            }
+            Err(_) => continue,
         };
         let rec: AgentRecord = match serde_json::from_str(&raw) {
             Ok(r) => r,
-            Err(e) => {
-                // Mirrors Python's behaviour: corrupt agent.json is a
-                // skip-with-warning, not a hard error.
-                tracing::warn!(
-                    path = %agent_file.display(),
-                    error = %e,
-                    "agent.json is not valid JSON; skipping"
-                );
-                continue;
-            }
+            Err(_) => continue,
         };
 
         // Weak-load check: if handler_module is set AND isn't in this
@@ -384,10 +376,10 @@ pub fn load_children(
             false,
         );
         let id = agent.id.clone();
-        // Register in the kernel index + auto-vivify inbox.
-        let _rx = kernel.register(Arc::clone(&agent));
+        // Register in the kernel index. No inbox — nothing here reads one.
+        kernel.register(Arc::clone(&agent));
         // Wire into parent's children map.
-        parent.children.insert(id.clone(), Arc::clone(&agent));
+        parent.add_child(Arc::clone(&agent));
         loaded.push(id.clone());
 
         // Recurse into grandchildren.

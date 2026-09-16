@@ -7,11 +7,14 @@ license.workspace = true
 description = "Recurring-task scheduler — tokio interval tick fires kernel.send on schedule."
 
 [dependencies]
+# python-format helpers (`py_repr`, `py_str`, `py_truthy`, `py_json_dumps`) — the
+# sidecar bytes and every refusal text are CPython's, so there is one spelling.
+fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 fantastic-file = { path = "../fantastic-file" }

@@ -131,6 +131,12 @@ impl BridgeTransport for MemoryTransport {
         }
     }
 
+    /// python `MemoryTransport.closed` — either half hanging up closes the leg.
+    fn closed(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.own_closed.load(Ordering::SeqCst) || self.peer_closed.load(Ordering::SeqCst)
+    }
+
     async fn close(&self) {
         use std::sync::atomic::Ordering;
         if self.own_closed.swap(true, Ordering::SeqCst) {

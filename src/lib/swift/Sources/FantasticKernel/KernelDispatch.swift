@@ -75,8 +75,7 @@ extension Kernel {
     }
 
     /// Send WITH explicit sender attribution. State events tag this
-    /// dispatch as originating from `senderId`. Mirrors the
-    /// `send_json_as` UniFFI helper used by web_ws / proxy_agent.
+    /// dispatch as originating from `senderId`. Used by web_ws.
     public func sendAs(sender: AgentId, target: AgentId, payload: JSON) async -> JSON {
         await KernelTaskLocals.$currentSender.withValue(sender) {
             await send([Item(target, payload)])[0].result

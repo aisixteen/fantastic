@@ -127,7 +127,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
         store_root.to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -272,7 +272,7 @@ fn load_children_hydrates_registered_agents() {
         root.to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&parent));
+    kernel.register(Arc::clone(&parent));
     let loaded = fantastic_kernel::persistence::load_children(&kernel, &reg, Arc::clone(&parent))
         .expect("hydrate");
     assert_eq!(loaded.len(), 2);
@@ -323,7 +323,7 @@ fn load_children_weak_load_skips_unknown_handler_module_and_subtree() {
         root.to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&parent));
+    kernel.register(Arc::clone(&parent));
     let loaded = fantastic_kernel::persistence::load_children(&kernel, &reg, Arc::clone(&parent))
         .expect("hydrate");
 
@@ -357,7 +357,7 @@ fn load_children_tolerates_corrupt_agent_json() {
         root.to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&parent));
+    kernel.register(Arc::clone(&parent));
     let loaded = fantastic_kernel::persistence::load_children(&kernel, &reg, Arc::clone(&parent))
         .expect("hydrate");
     assert!(loaded.is_empty());

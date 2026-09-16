@@ -20,17 +20,38 @@ import Foundation
 import OrderedCollections
 
 /// Render a reflect reply into a one-line `sentence  k=v  k=v` blurb.
+///
+/// NO JSON on the model path (python `_render_reflect`): a string is itself, a
+/// list of scalars is comma-joined through `str(x)`, and anything nested is the
+/// REPLY notation collapsed onto the line — `null` therefore prints as nothing,
+/// `{"$self": "*"}` as `<$self>*</$self>`, and a `["core", …]` tree as
+/// `core,web`. `serialize()` printed JSON here, which is the one notation this
+/// path does not speak.
 func renderReflect(_ v: JSON) -> String {
     guard var obj = v.asObject else { return "" }
     let sentence = obj["sentence"]?.asString ?? ""
     obj["sentence"] = nil
     var parts: [String] = []
     for (k, val) in obj {
-        let rendered = val.asString ?? val.serialize()
-        parts.append("\(k)=\(rendered)")
+        parts.append("\(k)=\(renderReflectValue(val))")
     }
     let fields = parts.joined(separator: "  ")
-    return "\(sentence)  \(fields)".trimmingCharacters(in: .whitespaces)
+    return pyStrip("\(sentence)  \(fields)")
+}
+
+/// One reflect field as the line says it — python `_render_reflect._one`.
+private func renderReflectValue(_ v: JSON) -> String {
+    if case .string(let s) = v { return s }
+    if case .array(let items) = v,
+        items.allSatisfy({
+            if case .object = $0 { return false }
+            if case .array = $0 { return false }
+            return true
+        })
+    {
+        return items.map { pyStr($0) }.joined(separator: ",")
+    }
+    return pySplitWhitespace(renderReply(v)).joined(separator: " ")
 }
 
 /// How to reach another agent, and where that send's answer goes — the block

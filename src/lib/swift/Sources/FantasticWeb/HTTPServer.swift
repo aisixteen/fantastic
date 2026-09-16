@@ -1,22 +1,18 @@
 // HTTP server backed by swift-nio (cross-platform: macOS + Linux).
 //
-// Replaces the former Apple-only Network.framework (`NWListener`)
-// implementation wholesale — swift-nio is the project's existing
-// cross-platform networking layer (the kernel_bridge already uses it),
-// so the swift kernel now serves HTTP on Linux too, at full parity with
-// python/rust. The route surface + wire behavior are unchanged.
+// Routes (python `bundled_agents/web/host/src/web/app.py` — the reference):
+//   GET  /                          → the agent-tree index (templates/index.html)
+//   GET  /_assets/favicon.png       → the bundled favicon
+//   GET  /favicon.png               → the bundled favicon
+//   GET  /{agent_id}/file/{path}    → proxy to the agent's `read_stream` SOURCE
+//   <method> /<leg>/<...>           → routes a child leg declared via `get_routes`
+//   GET  /{host_id}/ws              → WebSocket upgrade → the shared proxy
 //
-// Routes (match python/bundled_agents/web/host/app.py — the reference):
-//   GET  /                          → root link tree (agent index html)
-//   GET  /_fantastic/transport.js   → transport.js
-//   GET  /favicon.png               → 404 (not served)
-//   GET  /_assets/<name>            → vendored Three.js / xterm assets
-//   GET  /<agent_id>/               → kernel.send([Item(agentId, render_html)])[0].result
-//   GET  /<agent_id>/file/<path>    → kernel.send([Item(agentId, read_stream)])[0].result
-//   <method> /<surface>/<...>       → dynamic child routes (web_rest), via
-//                                     the owner's `handle_route` verb
-//   GET  /<agent_id>/ws             → WebSocket upgrade → the shared proxy
-//                                     (web_ws), see WebSocket.swift
+// Matching is Starlette's over the ORDERED route list: first path+method match
+// handles; else the first path-only match answers 405 with `allow`; else (path
+// ≠ `/`) the trailing slash is toggled and a match answers 307; else 404
+// `{"detail":"Not Found"}`. No transport.js, no vendored asset tree, no
+// server-side `/<id>/` render route — those were swift-only extras (D11).
 
 import FantasticIoBridge
 import FantasticJSON
@@ -36,69 +32,130 @@ public enum RouteKind: String, Sendable {
     case http
 }
 
+/// One template segment. `{name}` captures one non-empty segment
+/// (starlette's `[^/]+`); `{name:path}` swallows the rest (`.*`).
+enum PathSegment: Sendable, Equatable {
+    case literal(String)
+    case param(String)
+    case pathParam(String)
+}
+
 /// A route contributed by a child agent (web_ws / web_rest), pulled
 /// at host boot via the child's `get_routes` verb. `kind` selects the
 /// host's shared handler: `.websocket` runs the shared WS proxy;
-/// `.http` calls the owner's `handle_route` verb.
+/// `.http` calls the owning bundle's `WebRouteOwner.serveRoute`.
 public struct RouteSpec: Sendable {
     public let kind: RouteKind
     public let method: String  // uppercased; "GET" for websocket upgrades
-    public let template: [String]  // path segments; `{name}` captures a param
+    public let path: String
+    let template: [PathSegment]
     public let ownerId: AgentId
 
     public init(kind: RouteKind, method: String, path: String, ownerId: AgentId) {
         self.kind = kind
         self.method = method.uppercased()
-        self.template = RouteSpec.segments(path)
+        self.path = path
+        self.template = parseTemplate(path)
         self.ownerId = ownerId
     }
 
-    static func segments(_ path: String) -> [String] {
-        path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-    }
-
-    /// Match request `segments` against this template. Returns the
-    /// captured `{param}` values, or nil if no match.
-    func match(method: String, segments: [String]) -> [String: String]? {
-        guard self.method == method.uppercased() else { return nil }
-        guard template.count == segments.count else { return nil }
-        var params: [String: String] = [:]
-        for (t, s) in zip(template, segments) {
-            if t.hasPrefix("{") && t.hasSuffix("}") {
-                params[String(t.dropFirst().dropLast())] = s
-            } else if t != s {
-                return nil
-            }
-        }
-        return params
+    /// Match request `segments` (raw, empty ones KEPT) against this template.
+    func match(segments: [String]) -> [String: String]? {
+        matchTemplate(template, segments)
     }
 }
 
+/// Split a path into raw segments, keeping empty ones — `/a/b/` is
+/// `["", "a", "b", ""]`, so a trailing slash is a real difference (starlette
+/// matches the whole path string, it does not fold separators).
+func rawSegments(_ path: String) -> [String] {
+    path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+}
+
+func parseTemplate(_ path: String) -> [PathSegment] {
+    rawSegments(path).map { s in
+        guard s.hasPrefix("{"), s.hasSuffix("}") else { return .literal(s) }
+        let inner = String(s.dropFirst().dropLast())
+        if let colon = inner.firstIndex(of: ":"), inner[inner.index(after: colon)...] == "path" {
+            return .pathParam(String(inner[..<colon]))
+        }
+        return .param(inner)
+    }
+}
+
+func matchTemplate(_ template: [PathSegment], _ segments: [String]) -> [String: String]? {
+    var params: [String: String] = [:]
+    var i = 0
+    while i < template.count {
+        switch template[i] {
+        case .pathParam(let name):
+            // `.*` — swallows the rest, may be empty, may contain `/`.
+            guard i < segments.count else { return nil }
+            params[name] = segments[i...].joined(separator: "/")
+            return params
+        case .param(let name):
+            guard i < segments.count, !segments[i].isEmpty else { return nil }
+            params[name] = segments[i]
+        case .literal(let lit):
+            guard i < segments.count, segments[i] == lit else { return nil }
+        }
+        i += 1
+    }
+    return i == segments.count ? params : nil
+}
+
+/// What a matched route runs.
+enum RouteTarget: Sendable {
+    case index
+    case favicon
+    case fileProxy
+    case leg(AgentId)
+}
+
+/// One entry of the ordered route table.
+struct Route: Sendable {
+    let kind: RouteKind
+    /// `nil` = every method (starlette `Route(methods=None)`); otherwise the
+    /// declared set. FastAPI's `APIRoute` adds no implicit HEAD.
+    let methods: Set<String>?
+    let template: [PathSegment]
+    let target: RouteTarget
+}
+
 /// Server lifecycle owner. Started by `WebBundle.boot`, stopped by
-/// `WebBundle.shutdown`. One instance per `web.tools` agent.
+/// `WebBundle.stop`. One instance per `web.tools` agent.
 public final class WebServer: @unchecked Sendable {
     let kernel: Kernel
     private let agentId: AgentId
+    /// The port `rec.port` named — python binds exactly this, never a hint.
+    public let port: UInt16
     private let lock = NSLock()
     private var channel: Channel?
+    /// The task the `boot` verb ran under. Every request runs as its CHILD, so
+    /// a REST-originated dispatch has the web boot pid as its parent (python
+    /// serves under `CURRENT_TASK.scope`).
+    private var bootTask: TaskId?
 
     /// Process-shared event loop group — never shut down (mirrors the
     /// kernel_bridge's static-shared convention + NIO best practice).
     static let group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton
 
     /// Dynamic routes contributed by child surface agents (web_ws /
-    /// web_rest), pulled at host boot via each child's `get_routes`.
-    /// The host serves only rendering + file routes natively.
+    /// web_rest), pulled at host boot via each child's `get_routes`, in mount
+    /// order. The host serves only the four python rendering routes natively.
     private var dynamicRoutes: [RouteSpec] = []
 
-    public init(kernel: Kernel, agentId: AgentId) {
+    public init(kernel: Kernel, agentId: AgentId, port: UInt16) {
         self.kernel = kernel
         self.agentId = agentId
+        self.port = port
     }
 
-    /// Replace the routes owned by `owner` with `specs` (unmount-first,
-    /// so re-mounting is idempotent).
-    public func mountRoutes(_ specs: [RouteSpec], for owner: AgentId) {
+    /// Mount `specs` as the owner's routes — python's
+    /// `routes_by_child[child_id] = mounted`, so a re-boot or a re-mount
+    /// REPLACES what that child owns instead of stacking duplicates.
+    public func mountRoutes(_ specs: [RouteSpec]) {
+        guard let owner = specs.first?.ownerId else { return }
         lock.lock()
         defer { lock.unlock() }
         dynamicRoutes.removeAll { $0.ownerId == owner }
@@ -112,23 +169,72 @@ public final class WebServer: @unchecked Sendable {
         dynamicRoutes.removeAll { $0.ownerId == owner }
     }
 
-    func matchRoute(method: String, segments: [String]) -> (RouteSpec, [String: String])? {
+    /// python's `handle.routes_by_child` — child id → the paths it owns, in
+    /// mount order.
+    public func routesByChild() -> OrderedDictionary<AgentId, [String]> {
         lock.lock()
         let routes = dynamicRoutes
         lock.unlock()
-        for spec in routes {
-            if let params = spec.match(method: method, segments: segments) {
-                return (spec, params)
-            }
+        var out: OrderedDictionary<AgentId, [String]> = [:]
+        for r in routes { out[r.ownerId, default: []].append(r.path) }
+        return out
+    }
+
+    public func paths(for owner: AgentId) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return dynamicRoutes.filter { $0.ownerId == owner }.map { $0.path }
+    }
+
+    func matchWebSocket(segments: [String]) -> (RouteSpec, [String: String])? {
+        lock.lock()
+        let routes = dynamicRoutes
+        lock.unlock()
+        for spec in routes where spec.kind == .websocket {
+            if let params = spec.match(segments: segments) { return (spec, params) }
         }
         return nil
     }
 
-    /// Start the listener. If `portHint` is 0, the OS picks any free
-    /// port. Returns the actual bound port. Synchronous (binds + waits)
-    /// so `WebBundle.boot` gets the port immediately.
-    @discardableResult
-    public func start(portHint: UInt16) throws -> UInt16 {
+    /// The ORDERED route table a request walks: python's four baked routes
+    /// first (FastAPI appends user routes after its own `setup()` ones), then
+    /// each mounted child's declared routes in order.
+    func routeTable() -> [Route] {
+        lock.lock()
+        let dynamic = dynamicRoutes
+        lock.unlock()
+        var out: [Route] = [
+            Route(
+                kind: .http, methods: ["GET"], template: parseTemplate("/"), target: .index),
+            Route(
+                kind: .http, methods: ["GET"], template: parseTemplate("/_assets/favicon.png"),
+                target: .favicon),
+            Route(
+                kind: .http, methods: ["GET"], template: parseTemplate("/favicon.png"),
+                target: .favicon),
+            Route(
+                kind: .http, methods: ["GET"],
+                template: parseTemplate("/{agent_id}/file/{path:path}"), target: .fileProxy),
+        ]
+        for spec in dynamic {
+            out.append(
+                Route(
+                    kind: spec.kind, methods: [spec.method], template: spec.template,
+                    target: .leg(spec.ownerId)))
+        }
+        return out
+    }
+
+    /// Start the listener on exactly `port`. Synchronous (binds + waits) so
+    /// `WebBundle.boot` sees the bind failure it must log. IDEMPOTENT, like
+    /// python's `_start_serving` (`if handle.task is not None: return`) — `boot`
+    /// is idempotent and must not re-bind a port it already holds.
+    public func start() throws {
+        lock.lock()
+        let alreadyServing = channel != nil
+        if !alreadyServing { bootTask = KernelTaskLocals.currentTask }
+        lock.unlock()
+        if alreadyServing { return }
         let bootstrap = ServerBootstrap(group: WebServer.group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -141,19 +247,11 @@ public final class WebServer: @unchecked Sendable {
             }
         // `.wait()` blocks the calling thread (WebBundle.boot's task thread,
         // never an event-loop thread) until the bind resolves or throws.
-        let bound = try bootstrap.bind(host: "0.0.0.0", port: Int(portHint)).wait()
+        let bound = try bootstrap.bind(host: "0.0.0.0", port: Int(port)).wait()
         lock.lock()
         channel = bound
         lock.unlock()
-        let resolvedPort = UInt16(bound.localAddress?.port ?? 0)
-        kernel.setHttpPort(resolvedPort)
-        if let agent = kernel.agent(agentId) {
-            agent.updateMeta([
-                "port": .integer(Int64(resolvedPort)),
-                "running": .bool(true),
-            ])
-        }
-        return resolvedPort
+        kernel.setHttpPort(port)
     }
 
     public func stop() {
@@ -163,9 +261,6 @@ public final class WebServer: @unchecked Sendable {
         lock.unlock()
         ch?.close(promise: nil)
         kernel.setHttpPort(0)
-        if let agent = kernel.agent(agentId) {
-            agent.updateMeta(["running": .bool(false)])
-        }
     }
 
     // MARK: - Pipeline
@@ -181,19 +276,24 @@ public final class WebServer: @unchecked Sendable {
                 guard let self = self else {
                     return channel.eventLoop.makeSucceededFuture(nil)
                 }
-                let segs = RouteSpec.segments(splitQuery(head.uri).0)
-                if let (spec, params) = self.matchRoute(method: "GET", segments: segs),
-                    spec.kind == .websocket, params["host_id"] != nil
+                let segs = rawSegments(splitQuery(head.uri).0)
+                if let (_, params) = self.matchWebSocket(segments: segs),
+                    params["host_id"] != nil
                 {
-                    // Empty headers ⇒ upgrade approved; NIO adds Sec-WebSocket-Accept.
-                    return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
+                    // uvicorn's 101 also carries `date` + `server` (python
+                    // additionally negotiates permessage-deflate, which needs a
+                    // compression implementation — recorded, not ported).
+                    var extra = HTTPHeaders()
+                    extra.add(name: "date", value: httpDate())
+                    extra.add(name: "server", value: "uvicorn")
+                    return channel.eventLoop.makeSucceededFuture(extra)
                 }
                 return channel.eventLoop.makeSucceededFuture(nil)
             },
             upgradePipelineHandler: { [weak self] channel, head in
                 guard let self = self,
-                    case let segs = RouteSpec.segments(splitQuery(head.uri).0),
-                    let (spec, params) = self.matchRoute(method: "GET", segments: segs),
+                    case let segs = rawSegments(splitQuery(head.uri).0),
+                    let (spec, params) = self.matchWebSocket(segments: segs),
                     let hostId = params["host_id"]
                 else {
                     return channel.eventLoop.makeSucceededVoidFuture()
@@ -222,185 +322,280 @@ public final class WebServer: @unchecked Sendable {
 
     // MARK: - Request handling (HTTP; WS is handled by the upgrader above)
 
-    func handle(request: HTTPRequest) async -> HTTPResponse {
-        let (pathOnly, query) = splitQuery(request.path)
-        let segments = RouteSpec.segments(pathOnly)
-
-        // ── Built-in rendering routes (host owns these) ──
-        switch (request.method, pathOnly) {
-        case ("GET", "/"):
-            return await serveIndex()
-        case ("GET", "/_fantastic/transport.js"):
-            return HTTPResponse(
-                status: 200, contentType: "application/javascript",
-                body: WebAssets.transportJS.data(using: .utf8) ?? Data())
-        case ("GET", "/favicon.png"):
-            return HTTPResponse(status: 404, contentType: "text/plain", body: Data())
-        case ("GET", let path) where path.hasPrefix("/_assets/"):
-            if let asset = WebAssets.body(forPath: path) {
-                return HTTPResponse(
-                    status: 200, contentType: asset.contentType,
-                    body: asset.body.data(using: .utf8) ?? Data(),
-                    extraHeaders: ["Cache-Control": "public, max-age=31536000, immutable"])
-            }
-            return HTTPResponse(status: 404, contentType: "text/plain", body: Data())
-        default:
-            break
-        }
-
-        // ── Dynamic .http surfaces (web_rest children) ──
-        if let (spec, params) = matchRoute(method: request.method, segments: segments),
-            spec.kind == .http
-        {
-            return await dispatchHTTPRoute(
-                spec: spec, params: params, query: query, request: request)
-        }
-
-        // ── Built-in agent rendering routes (GET /<id>/, /<id>/file/<path>) ──
-        return await serveAgentRoute(request: request)
+    /// The web boot pid, so a request task is its child.
+    var requestParent: TaskId? {
+        lock.lock()
+        defer { lock.unlock() }
+        return bootTask
     }
 
-    /// Forward a matched HTTP route to its owning child agent via the
-    /// `handle_route` verb → `{status, content_type, body}`.
-    private func dispatchHTTPRoute(
-        spec: RouteSpec, params: [String: String], query: [String: String],
+    func handle(request: HTTPRequest) async -> HTTPResponse {
+        let (pathOnly, query) = splitQuery(request.path)
+        let segments = rawSegments(pathOnly)
+        let table = routeTable()
+
+        // Starlette `Router.app`: first FULL match wins; remember the first
+        // path-only match for the 405.
+        var partial: Route?
+        for route in table where route.kind == .http {
+            guard let params = matchTemplate(route.template, segments) else { continue }
+            if route.methods == nil || route.methods!.contains(request.method) {
+                return await serve(
+                    route: route, params: params, query: query, pathOnly: pathOnly,
+                    request: request)
+            }
+            if partial == nil { partial = route }
+        }
+        if let partial = partial {
+            let allow = (partial.methods ?? []).sorted().joined(separator: ", ")
+            return HTTPResponse(
+                status: 405, contentType: "application/json",
+                body: Data(JSON.object(["detail": .string("Method Not Allowed")]).serialize().utf8),
+                extraHeaders: [("allow", allow)])
+        }
+        // `redirect_slashes`: toggle the trailing slash and, if ANY route
+        // matches the toggled path (method ignored), answer 307.
+        if pathOnly != "/" {
+            let toggled =
+                pathOnly.hasSuffix("/") ? String(pathOnly.dropLast()) : pathOnly + "/"
+            let toggledSegments = rawSegments(toggled)
+            if table.contains(where: {
+                $0.kind == .http && matchTemplate($0.template, toggledSegments) != nil
+            }) {
+                var host = "127.0.0.1:\(port)"
+                for (k, v) in request.headers where k.lowercased() == "host" { host = v }
+                let q = request.path.firstIndex(of: "?").map { String(request.path[$0...]) } ?? ""
+                return HTTPResponse(
+                    status: 307, contentType: nil, body: Data(),
+                    extraHeaders: [("location", "http://\(host)\(toggled)\(q)")])
+            }
+        }
+        // FastAPI's 404 handler — `{"detail":"Not Found"}`, 22 bytes.
+        return HTTPResponse(
+            status: 404, contentType: "application/json",
+            body: Data(JSON.object(["detail": .string("Not Found")]).serialize().utf8))
+    }
+
+    private func serve(
+        route: Route, params: [String: String], query: [String: String], pathOnly: String,
         request: HTTPRequest
     ) async -> HTTPResponse {
-        // Header lookup is case-insensitive (NIO preserves the on-wire case).
-        var lowerHeaders: [String: String] = [:]
-        for (k, v) in request.headers { lowerHeaders[k.lowercased()] = v }
+        switch route.target {
+        case .index:
+            return await serveIndex()
+        case .favicon:
+            return HTTPResponse(status: 200, contentType: "image/png", body: Self.faviconBytes)
+        case .fileProxy:
+            return await serveFileProxy(
+                agentId: params["agent_id"] ?? "", path: params["path"] ?? "")
+        case .leg(let owner):
+            return await dispatchLegRoute(
+                owner: owner, params: params, query: query, pathOnly: pathOnly, request: request)
+        }
+    }
 
-        // ── BINARY leg (parity with py web_rest) ──
-        // A verb whose payload OR reply carries RAW bytes — text_file.patch /
-        // write_stream / read_stream — rides an octet-stream body instead of
-        // JSON: the raw body IS the blob, the rest of the envelope is JSON on
-        // `X-Fantastic-Payload`, and the one bytes-valued field is named by
-        // `X-Fantastic-Bytes-Field` (default `bytes`). Never base64; symmetric
-        // in both directions — the HTTP mirror of the WS binary frame. JSON can't
-        // hold bytes, so the blob rides the kernel's binary channel
-        // (`sendWithBinary`), exactly as the WS binary frame does.
+    /// python `_index_page` — the substrate tree rendered into
+    /// `templates/index.html`.
+    private func serveIndex() async -> HTTPResponse {
+        let primer = await kernel.send([
+            Item(AgentId("kernel"), .object(["type": .string("reflect")]))
+        ])[0].result
+        let tree = primer["tree"]
+        let body = pyTruthy(tree) ? Self.renderNode(tree) : "<li><em>empty tree</em></li>"
+        let html = Self.indexTemplate.replacingOccurrences(of: "{{tree_body}}", with: body)
+        return HTTPResponse(
+            status: 200, contentType: "text/html; charset=utf-8", body: Data(html.utf8))
+    }
+
+    /// python `_index_page._render`.
+    static func renderNode(_ node: JSON) -> String {
+        let aid = text(node["id"])
+        let nameVal = node["display_name"]
+        let name = pyTruthy(nameVal) ? text(nameVal) : aid
+        let hmVal = node["handler_module"]
+        let hm = pyTruthy(hmVal) ? text(hmVal) : "(root)"
+        let children = node["children"].asArray ?? []
+        let kids =
+            children.isEmpty
+            ? "" : "<ul>" + children.map { renderNode($0) }.joined() + "</ul>"
+        return "<li><span class=\"id\">\(esc(name))</span>"
+            + " <code>\(esc(aid))</code>"
+            + " <span class=\"hm\">\(esc(hm))</span>\(kids)</li>"
+    }
+
+    private static func text(_ v: JSON) -> String { v.asString ?? pyStr(v) }
+
+    /// python `_esc`.
+    static func esc(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    /// python `agent_file` — pipe the agent's `read_stream` SOURCE.
+    private func serveFileProxy(agentId: String, path: String) async -> HTTPResponse {
+        guard kernel.agent(AgentId(agentId)) != nil else { return Self.emptyNotFound }
+        func readChunk(_ offset: Int) async -> (JSON, Data) {
+            await kernel.sendWithBinary(
+                AgentId(agentId),
+                .object([
+                    "type": .string("read_stream"), "path": .string(path),
+                    "offset": .integer(Int64(offset)), "length": .integer(262144),
+                ]), Data())
+        }
+        var (meta, body) = await readChunk(0)
+        // Not a SOURCE: 404. A GATE denial carries its reason in the body —
+        // this kernel teaches through denials. A MISSING FILE stays a bare
+        // 404: no body, no existence leak, no path probing.
+        guard case .object = meta, meta["error"].isNull else {
+            if meta["reason"].asString == "unauthorized" {
+                var detail: OrderedDictionary<String, JSON> = [:]
+                for k in ["error", "reason", "side", "hint"] { detail[k] = meta[k] }
+                return HTTPResponse(
+                    status: 404, contentType: "application/json",
+                    body: Data(pyJsonDumps(.object(detail)).utf8))
+            }
+            return Self.emptyNotFound
+        }
+        var buf = body
+        while !(meta["eof"].asBool ?? true) {
+            let next = Int(meta["next_offset"].asInt ?? 0)
+            (meta, body) = await readChunk(next)
+            guard case .object = meta, meta["error"].isNull else { break }
+            buf.append(body)
+        }
+        // python types the proxy with `mimetypes.guess_type(path)` and falls
+        // back to octet-stream; starlette appends the charset to a `text/*`.
+        var mime = Mimetypes.guessType(path) ?? "application/octet-stream"
+        if mime.hasPrefix("text/") && !mime.contains("charset=") { mime += "; charset=utf-8" }
+        return HTTPResponse(status: 200, contentType: mime, body: buf)
+    }
+
+    /// python `Response(status_code=404)` — no body, no content-type.
+    static let emptyNotFound = HTTPResponse(status: 404, contentType: nil, body: Data())
+
+    // MARK: - leg routes
+
+    private static let octetType = "application/octet-stream"
+    private static let payloadHeader = "x-fantastic-payload"
+    private static let bytesFieldHeader = "x-fantastic-bytes-field"
+
+    /// Serve a matched leg route. The JSON leg is the leg bundle's own
+    /// `serveRoute` (python's mounted callable); the octet leg is the host's,
+    /// because a JSON `{status, content_type, body}` reply cannot carry raw
+    /// bytes or response headers.
+    private func dispatchLegRoute(
+        owner: AgentId, params: [String: String], query: [String: String], pathOnly: String,
+        request: HTTPRequest
+    ) async -> HTTPResponse {
+        // Header values decode byte-for-byte as latin-1 (starlette's ASGI
+        // layer), lowercased names.
+        var lowerHeaders: [String: String] = [:]
+        for (k, v) in request.headers { lowerHeaders[k.lowercased()] = latin1(v) }
+
         if request.method == "POST",
-            (lowerHeaders["content-type"] ?? "").hasPrefix("application/octet-stream")
+            (lowerHeaders["content-type"] ?? "").hasPrefix(Self.octetType)
         {
             return await dispatchOctetRoute(
-                spec: spec, params: params, request: request, headers: lowerHeaders)
+                owner: owner, params: params, request: request, headers: lowerHeaders)
         }
 
-        let bodyStr = request.body.flatMap { String(data: $0, encoding: .utf8) } ?? ""
         var paramsObj: OrderedDictionary<String, JSON> = [:]
-        for (k, v) in params { paramsObj[k] = .string(v) }
+        for (k, v) in params.sorted(by: { $0.key < $1.key }) { paramsObj[k] = .string(v) }
         var queryObj: OrderedDictionary<String, JSON> = [:]
-        for (k, v) in query { queryObj[k] = .string(v) }
-        // Request headers, LOWERCASED, so a route owner can read the carrier
-        // and not just the body. py/rust already hand their REST surface the
-        // headers; swift did not, which is why `auth_token` was a stated
-        // follow-on here and why an execution id had nowhere to ride.
+        for (k, v) in query.sorted(by: { $0.key < $1.key }) { queryObj[k] = .string(v) }
         var headerObj: OrderedDictionary<String, JSON> = [:]
-        for (k, v) in request.headers { headerObj[k.lowercased()] = .string(v) }
-        // NO DISPATCH HOP. Python's REST handler calls `kernel.send` itself
-        // under the leg's identity (`sender_context(self_id)`), so the batch
-        // item's dispatch is the ONLY task row a request holds; rust does the
-        // same (`with_sender(owner)`). Swift dispatched a `handle_route` verb on
-        // the leg first, so every request held a second, PARENT row — the one
-        // `shutdown_agents` waited the whole quiet window for and then
-        // cancelled, killing the very request that asked, so `shutdown_kernel`'s
-        // ack was lost and the daemon never stopped (E78, measured 2026-09-13).
-        let routePayload: JSON = .object([
-            "type": .string("handle_route"),
+        for (k, v) in lowerHeaders.sorted(by: { $0.key < $1.key }) { headerObj[k] = .string(v) }
+        let routeRequest: JSON = .object([
             "method": .string(request.method),
-            "path": .string(request.path),
+            "path": .string(pathOnly),
             "params": .object(paramsObj),
             "query": .object(queryObj),
             "headers": .object(headerObj),
-            "body": .string(bodyStr),
+            "body": .string(request.body.flatMap { String(data: $0, encoding: .utf8) } ?? ""),
         ])
-        let reply: JSON = await KernelTaskLocals.$currentSender.withValue(spec.ownerId) {
-            guard let owner = kernel.agent(spec.ownerId), let hm = owner.handlerModule,
-                let bundle = kernel.bundles.get(hm)
-            else {
-                return .object([
-                    "status": .integer(500), "content_type": .string("application/json"),
-                    "body": .string(JSON.object(["error": .string("no route owner \(spec.ownerId.value)")]).serialize()),
-                ])
-            }
-            do {
-                return try await bundle.handle(agentId: spec.ownerId, payload: routePayload, kernel: kernel) ?? .null
-            } catch {
-                return .object([
-                    "status": .integer(500), "content_type": .string("application/json"),
-                    "body": .string(JSON.object(["error": .string("\(error)")]).serialize()),
-                ])
-            }
+        guard let agent = kernel.agent(owner), let hm = agent.handlerModule,
+            let bundle = kernel.bundles.get(hm), let routeOwner = bundle as? WebRouteOwner
+        else {
+            return jsonHTTP(
+                500, .object(["error": .string("no route owner \(owner.value)")]))
         }
+        let reply = await routeOwner.serveRoute(legId: owner, request: routeRequest, kernel: kernel)
         let status = Int(reply["status"].asInt ?? 200)
-        let contentType = reply["content_type"].asString ?? "application/json"
-        let bodyOut = reply["body"].asString ?? ""
+        guard let contentType = reply["content_type"].asString else {
+            return HTTPResponse(status: status, contentType: nil, body: Data())
+        }
         return HTTPResponse(
             status: status, contentType: contentType,
-            body: bodyOut.data(using: .utf8) ?? Data())
+            body: Data((reply["body"].asString ?? "").utf8))
     }
 
-    /// The BINARY leg of an `.http` (web_rest) route. The raw request body is a
-    /// verb's one bytes-valued field; the rest of the envelope rides
-    /// `X-Fantastic-Payload`. Gate + self-id tagging + exec-id mirror the JSON
-    /// path — the difference is only the channel (`sendWithBinary`, since JSON
-    /// can't carry the bytes). A reply that itself carries bytes (read_stream)
-    /// goes back the SAME way: octet body + JSON header, never base64.
-    private static let octetType = "application/octet-stream"
-    private static let payloadHeader = "x-fantastic-payload"
-
+    /// The BINARY leg of a `.http` (web_rest) route — python's octet branch of
+    /// `_rest_call`. The raw request body is one bytes-valued field; the rest of
+    /// the envelope rides `X-Fantastic-Payload`, and the field is named by
+    /// `X-Fantastic-Bytes-Field` (default `bytes`). Never base64.
     private func dispatchOctetRoute(
-        spec: RouteSpec, params: [String: String],
+        owner: AgentId, params: [String: String],
         request: HTTPRequest, headers: [String: String]
     ) async -> HTTPResponse {
-        guard let target = params["target"] else {
+        guard let target = params["target_id"] else {
             return jsonHTTP(400, .object(["error": .string("web_rest: missing target")]))
         }
-        // The envelope is JSON on `X-Fantastic-Payload`; the raw body is the blob.
-        let payloadRaw = headers[Self.payloadHeader] ?? "{}"
-        guard let payload = try? JSON.parse(payloadRaw), case .object = payload else {
+        // python `json.loads(headers.get(...) or "{}")` — an EMPTY header value
+        // is an empty envelope, not a parse error.
+        let raw = headers[Self.payloadHeader] ?? ""
+        guard let parsed = try? JSON.parse(raw.isEmpty ? "{}" : raw) else {
+            return jsonHTTP(
+                400, .object(["error": .string("web_rest: X-Fantastic-Payload is not valid JSON")])
+            )
+        }
+        guard case .object(var payload) = parsed else {
             return jsonHTTP(
                 400,
                 .object(["error": .string("web_rest: X-Fantastic-Payload must be a JSON object")]))
         }
-        let blob = request.body ?? Data()
+        // python binds the body at `payload[field]`. Swift's JSON cannot hold
+        // raw bytes, so the blob rides the binary channel — which the target
+        // reads as its `bytes` field. Naming ANOTHER field therefore leaves the
+        // header's own `bytes` in place and sends no blob, exactly as python's
+        // target sees it.
+        let field = headers[Self.bytesFieldHeader] ?? ""
+        let blob: Data
+        if field.isEmpty || field == "bytes" {
+            payload.removeValue(forKey: "bytes")
+            blob = request.body ?? Data()
+        } else {
+            blob = Data()
+        }
 
         // GATE — same io_bridge inbound gate as the JSON path; credential on
         // X-Fantastic-Auth. The web_rest leg is the route's owner.
-        let token = headers["x-fantastic-auth"]
         if let denied = gateWebLeg(
-            kernel: kernel, legId: spec.ownerId, target: target,
-            verb: payload["type"].asString ?? "", token: token)
+            kernel: kernel, legId: owner, target: target,
+            verb: payload["type"]?.asString ?? "", token: headers["x-fantastic-auth"])
         {
             return jsonHTTP(403, denied)
         }
 
-        // NAMING an execution — parity with the JSON path. Dispatch metadata on
-        // its own header, not in the verb payload; carried on the binary
-        // envelope as `id`.
-        var header = payload
+        // NAMING an execution — dispatch metadata on its own header, not in the
+        // verb payload; carried on the binary envelope as `id`.
+        var header = JSON.object(payload)
         if let execId = headers["x-fantastic-execution-id"], !execId.isEmpty {
             header["id"] = .string(execId)
         }
-
-        // Tag the dispatch with THIS surface's id (self-id), exactly as the JSON
-        // path does by routing through the web_rest agent — so the two-sided
-        // kernel gate runs with the leg as sender and telemetry rays originate
-        // from this sprite.
-        let (reply, outBody): (JSON, Data) = await KernelTaskLocals.$currentSender.withValue(
-            spec.ownerId
-        ) {
+        let (reply, outBody): (JSON, Data) = await KernelTaskLocals.$currentSender.withValue(owner)
+        {
             await kernel.sendWithBinary(AgentId(target), header, blob)
         }
-
-        // A reply that carries raw bytes (read_stream chunk) goes back octet +
-        // JSON header. Otherwise a plain JSON reply, like the JSON path.
+        // python answers 204 for a null reply BEFORE it looks for bytes.
+        if reply.isNull { return HTTPResponse(status: 204, contentType: nil, body: Data()) }
         if !outBody.isEmpty {
             return HTTPResponse(
                 status: 200, contentType: Self.octetType, body: outBody,
                 extraHeaders: [
-                    "X-Fantastic-Payload": reply.serialize(),
-                    "X-Fantastic-Bytes-Field": "bytes",
+                    // python `json.dumps(rest)` — default separators, ensure_ascii.
+                    ("x-fantastic-payload", pyJsonDumps(reply)),
+                    ("x-fantastic-bytes-field", "bytes"),
                 ])
         }
         return jsonHTTP(200, reply)
@@ -408,86 +603,35 @@ public final class WebServer: @unchecked Sendable {
 
     private func jsonHTTP(_ status: Int, _ body: JSON) -> HTTPResponse {
         HTTPResponse(
-            status: status, contentType: "application/json",
-            body: body.serialize().data(using: .utf8) ?? Data())
+            status: status, contentType: "application/json", body: Data(body.serialize().utf8))
     }
 
-    private func serveIndex() async -> HTTPResponse {
-        let listed = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
-        let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
-        let html = """
-            <!doctype html><html><head><title>fantastic</title></head>
-            <body>
-            <h1>fantastic kernel</h1>
-            <ul>
-            \(ids.map { "<li><a href=\"/\($0)/\">\($0)</a></li>" }.joined(separator: "\n"))
-            </ul>
-            </body></html>
-            """
-        return HTTPResponse(
-            status: 200, contentType: "text/html", body: html.data(using: .utf8) ?? Data())
-    }
+    // MARK: - bundled resources
 
-    private func serveAgentRoute(request: HTTPRequest) async -> HTTPResponse {
-        guard let firstSeg = request.firstPathSegment else {
-            return HTTPResponse(status: 404, contentType: "text/plain", body: Data())
+    /// python `templates/index.html`, byte for byte.
+    static let indexTemplate: String =
+        loadResource("index", "html").flatMap {
+            String(data: $0, encoding: .utf8)
+        } ?? ""
+    /// python `favicon.png`, byte for byte.
+    static let faviconBytes: Data = loadResource("favicon", "png") ?? Data()
+
+    private static func loadResource(_ name: String, _ ext: String) -> Data? {
+        Bundle.module.url(forResource: name, withExtension: ext).flatMap {
+            try? Data(contentsOf: $0)
         }
-        let agentTarget = AgentId(firstSeg)
-        // `GET /<id>/` or `/<id>` → render_html + transport injection.
-        if request.method == "GET",
-            request.path == "/\(firstSeg)/" || request.path == "/\(firstSeg)"
-        {
-            let reply = await kernel.send([Item(agentTarget, .object(["type": .string("render_html")]))])[0].result
-            if let html = reply["html"].asString {
-                let injected = WebAssets.injectTransport(into: html)
-                return HTTPResponse(
-                    status: 200, contentType: "text/html",
-                    body: injected.data(using: .utf8) ?? Data())
-            }
-            return HTTPResponse(
-                status: 404, contentType: "text/plain",
-                body: (reply["error"].asString ?? "no render_html reply").data(using: .utf8)
-                    ?? Data())
-        }
-        // `GET /<id>/file/<path>` → pipe the agent's `read_stream` SOURCE (raw
-        // bytes, chunked; gated by the served agent's OWN leg — a sealed
-        // file_bridge denies → 404). No whole-file `read` fallback.
-        if request.method == "GET", request.path.hasPrefix("/\(firstSeg)/file/") {
-            let filePath = String(request.path.dropFirst("/\(firstSeg)/file/".count))
-            var buf = Data()
-            var offset = 0
-            while true {
-                let (meta, body) = await kernel.sendWithBinary(
-                    agentTarget,
-                    .object([
-                        "type": .string("read_stream"), "path": .string(filePath),
-                        "offset": .integer(Int64(offset)), "length": .integer(262144),
-                    ]), Data())
-                if let err = meta["error"].asString {
-                    return HTTPResponse(
-                        status: 404, contentType: "text/plain",
-                        body: err.data(using: .utf8) ?? Data())
-                }
-                buf.append(body)
-                offset = Int(meta["next_offset"].asInt ?? Int64(offset))
-                if meta["eof"].asBool ?? true { break }
-            }
-            return HTTPResponse(status: 200, contentType: guessMime(path: filePath), body: buf)
-        }
-        return HTTPResponse(
-            status: 404, contentType: "text/plain", body: "no route".data(using: .utf8) ?? Data())
     }
 }
 
 // MARK: - NIO HTTP dispatch handler
 
 /// Collects one request (head + body + end), dispatches it to the
-/// `WebServer`'s async router, and writes the response — then closes
-/// (one request per connection, `Connection: close`, mirroring the
-/// former hand-rolled server). The async hop into `kernel.send` is the
-/// project's established bridge idiom; the context is carried into the
-/// completion via `NIOLoopBound` (only ever touched on its event loop).
-final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+/// `WebServer`'s async router, and writes the response. The connection is KEPT
+/// (python never sends `Connection: close`; measured 46/46 responses keep the
+/// channel open). The async hop into `kernel.send` is the project's established
+/// bridge idiom; the context is carried into the completion via `NIOLoopBound`.
+final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable
+{
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
@@ -523,32 +667,51 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
             let server = self.server
             let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
             let eventLoop = context.eventLoop
+            let keepAlive = h.isKeepAlive
+            // The web boot pid parents every request task: python serves under
+            // `CURRENT_TASK.scope`, so a REST-originated dispatch is a CHILD of
+            // the boot task, not a root.
+            let parent = server.requestParent
             Task {
-                let resp = await server.handle(request: req)
+                let resp = await KernelTaskLocals.$currentTask.withValue(parent) {
+                    await server.handle(request: req)
+                }
                 eventLoop.execute {
                     let (ctx, handler) = bound.value
-                    handler.writeResponse(context: ctx, response: resp)
+                    handler.writeResponse(context: ctx, response: resp, keepAlive: keepAlive)
                 }
             }
         }
     }
 
-    private func writeResponse(context: ChannelHandlerContext, response: HTTPResponse) {
+    private func writeResponse(
+        context: ChannelHandlerContext, response: HTTPResponse, keepAlive: Bool
+    ) {
+        // python's header order after uvicorn's own: date, server, the
+        // handler's extras, content-length, content-type. Names lowercase.
         var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: response.contentType)
-        headers.add(name: "Content-Length", value: String(response.body.count))
-        headers.add(name: "Connection", value: "close")
+        headers.add(name: "date", value: httpDate())
+        headers.add(name: "server", value: "uvicorn")
         for (k, v) in response.extraHeaders { headers.add(name: k, value: v) }
+        // starlette omits both on a 204/304 (and on a 1xx).
+        let bodyless = response.status == 204 || response.status == 304 || response.status < 200
+        if !bodyless {
+            headers.add(name: "content-length", value: String(response.body.count))
+        }
+        if let ct = response.contentType, !bodyless {
+            headers.add(name: "content-type", value: ct)
+        }
         let respHead = HTTPResponseHead(
             version: .http1_1,
-            status: HTTPResponseStatus(statusCode: response.status, reasonPhrase: statusText(response.status)),
+            status: HTTPResponseStatus(
+                statusCode: response.status, reasonPhrase: statusText(response.status)),
             headers: headers)
         context.write(wrapOutboundOut(.head(respHead)), promise: nil)
         var buf = context.channel.allocator.buffer(capacity: response.body.count)
         buf.writeBytes(response.body)
         context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
-            context.close(promise: nil)
+            if !keepAlive { context.close(promise: nil) }
         }
     }
 }
@@ -560,24 +723,20 @@ public struct HTTPRequest: Sendable {
     public let path: String
     public let headers: [String: String]
     public let body: Data?
-
-    /// First path segment after the leading `/`. Returns nil for `/`.
-    public var firstPathSegment: String? {
-        let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let idx = trimmed.firstIndex(of: "/") else {
-            return trimmed.isEmpty ? nil : trimmed
-        }
-        return String(trimmed[..<idx])
-    }
 }
 
 public struct HTTPResponse: Sendable {
     let status: Int
-    let contentType: String
+    /// `nil` = no body at all (python's bare `Response(status_code=…)`).
+    let contentType: String?
     let body: Data
-    let extraHeaders: [String: String]
+    /// Extra response headers, IN ORDER (python emits a list of pairs; a Swift
+    /// Dictionary reordered them).
+    let extraHeaders: [(String, String)]
 
-    init(status: Int, contentType: String, body: Data, extraHeaders: [String: String] = [:]) {
+    init(
+        status: Int, contentType: String?, body: Data, extraHeaders: [(String, String)] = []
+    ) {
         self.status = status
         self.contentType = contentType
         self.body = body
@@ -588,7 +747,9 @@ public struct HTTPResponse: Sendable {
 // MARK: - shared helpers
 
 /// Split a request path into its path component + parsed query dict.
-/// `/a/b?x=1&y=2` → (`/a/b`, [x:1, y:2]).
+/// `/a/b?x=1&y=2` → (`/a/b`, [x:1, y:2]). Mirrors `urllib.parse.parse_qsl`
+/// with `keep_blank_values=True`; a repeated key keeps the LAST value, as
+/// starlette's `QueryParams.get` does.
 func splitQuery(_ path: String) -> (String, [String: String]) {
     guard let q = path.firstIndex(of: "?") else { return (path, [:]) }
     let pathOnly = String(path[..<q])
@@ -596,13 +757,39 @@ func splitQuery(_ path: String) -> (String, [String: String]) {
     var query: [String: String] = [:]
     for pair in queryStr.split(separator: "&") {
         let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
-        if kv.count == 2 {
-            query[kv[0]] = kv[1].removingPercentEncoding ?? kv[1]
-        } else if kv.count == 1 {
-            query[kv[0]] = ""
-        }
+        let key = unquotePlus(kv[0])
+        query[key] = kv.count == 2 ? unquotePlus(kv[1]) : ""
     }
     return (pathOnly, query)
+}
+
+/// `urllib.parse.unquote_plus` — `+` is a space, then percent-decoding.
+private func unquotePlus(_ s: String) -> String {
+    let plussed = s.replacingOccurrences(of: "+", with: " ")
+    return plussed.removingPercentEncoding ?? plussed
+}
+
+/// Decode a header value the way python's ASGI layer does: byte-for-byte
+/// latin-1. NIO hands us the bytes already decoded as UTF-8, so re-read each
+/// UTF-8 byte as one latin-1 code point.
+func latin1(_ s: String) -> String {
+    String(String.UnicodeScalarView(s.utf8.map { Unicode.Scalar($0) }))
+}
+
+/// uvicorn's `date` header — `email.utils.formatdate(usegmt=True)`:
+/// `Wed, 16 Sep 2026 09:41:02 GMT`, C-locale names, always GMT.
+func httpDate(_ now: Date = Date()) -> String {
+    let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+    let c = cal.dateComponents(
+        [.year, .month, .day, .hour, .minute, .second, .weekday], from: now)
+    let two = { (n: Int) in n < 10 ? "0\(n)" : "\(n)" }
+    return "\(days[(c.weekday ?? 1) - 1]), \(two(c.day ?? 1)) \(months[(c.month ?? 1) - 1]) "
+        + "\(c.year ?? 1970) \(two(c.hour ?? 0)):\(two(c.minute ?? 0)):\(two(c.second ?? 0)) GMT"
 }
 
 private func statusText(_ status: Int) -> String {
@@ -610,26 +797,12 @@ private func statusText(_ status: Int) -> String {
     case 200: return "OK"
     case 201: return "Created"
     case 204: return "No Content"
+    case 307: return "Temporary Redirect"
     case 400: return "Bad Request"
+    case 403: return "Forbidden"
     case 404: return "Not Found"
+    case 405: return "Method Not Allowed"
     case 500: return "Internal Server Error"
     default: return "Status"
-    }
-}
-
-private func guessMime(path: String) -> String {
-    let ext = (path as NSString).pathExtension.lowercased()
-    switch ext {
-    case "html", "htm": return "text/html"
-    case "css": return "text/css"
-    case "js", "mjs": return "application/javascript"
-    case "json": return "application/json"
-    case "png": return "image/png"
-    case "jpg", "jpeg": return "image/jpeg"
-    case "gif": return "image/gif"
-    case "svg": return "image/svg+xml"
-    case "txt", "md": return "text/plain"
-    case "wasm": return "application/wasm"
-    default: return "application/octet-stream"
     }
 }

@@ -34,6 +34,13 @@ pub const MESSAGES_FILE: &str = "messages.xml";
 /// turn becomes one append, not one per row.
 const DEBOUNCE_MS: u64 = 150;
 
+/// The verbs the pump's OWN kernel tasks run under. A `task` row on the pump's
+/// agent carrying one of these is the pump describing itself; persisting it
+/// would be the same recursion its `call` rows are skipped for. Python's
+/// `_MessagePump.VERBS`, which names two because python splits the read and the
+/// flush into two tasks.
+const PUMP_VERBS: [&str; 2] = ["message_pump", "message_pump_flush"];
+
 /// COLD HYDRATION of the message store — `(rows, next_id)`.
 ///
 /// Read before any agent exists, like the record tree. A file of another
@@ -122,7 +129,8 @@ pub fn install_message_pump(kernel: &Arc<Kernel>, after: i64) {
     let root = kernel
         .root()
         .map_or_else(|| AgentId::from("kernel"), |r| r.id.clone());
-    kernel.spawn_keepalive_task(&root, "message_pump", async move {
+    let pump_agent = root.clone();
+    kernel.spawn_keepalive_task(&root, PUMP_VERBS[0], async move {
         let mut tail = k.rows.subscribe(after);
         let mut said_no_store = false;
         loop {
@@ -145,6 +153,17 @@ pub fn install_message_pump(kernel: &Arc<Kernel>, after: i64) {
                 }
                 continue;
             };
+            // SKIP AT ARRIVAL, like python's `_read`: the decision is about what
+            // the row IS (its kind, its agent, its verb), and a skipped row never
+            // joins the queue at all.
+            let batch: Vec<i64> = batch
+                .into_iter()
+                .filter(|id| {
+                    k.rows
+                        .get_one(*id)
+                        .is_some_and(|row| !skips(&k, &store_id, &pump_agent, &row))
+                })
+                .collect();
             // READ THE ROW AT FLUSH TIME, not when it was queued: an outcome
             // stamped onto a `call` row inside the debounce window belongs in
             // the line we are about to write. That is why the tail carries ids.
@@ -153,9 +172,6 @@ pub fn install_message_pump(kernel: &Arc<Kernel>, after: i64) {
                 let Some(row) = k.rows.get_one(id) else {
                     continue;
                 };
-                if skips(&k, &store_id, &row) {
-                    continue;
-                }
                 lines.push_str(&row_to_xml(&row));
             }
             if lines.is_empty() {
@@ -195,14 +211,36 @@ async fn header_needed(kernel: &Arc<Kernel>, store_id: &AgentId) -> bool {
 }
 
 /// THE PUMP SKIPS ITS OWN TRAFFIC. A flush is a send, so it mints a `call` row
-/// on the store; persisting that row would mint another, forever.
-fn skips(kernel: &Arc<Kernel>, store_id: &AgentId, row: &Row) -> bool {
-    let _ = kernel;
+/// on the store; persisting that row would mint another, forever. The pump's own
+/// `task` row is the same recursion one level up, and a `settle` is the ending of
+/// a call — skipping the call but keeping its ending would bring the loop back
+/// through the other half.
+///
+/// Evaluated AT ARRIVAL, like python's `_MessagePump._skip`.
+fn skips(kernel: &Arc<Kernel>, store_id: &AgentId, pump_agent: &AgentId, row: &Row) -> bool {
     let kind = row.get("kind").and_then(Value::as_str);
     let agent = row.get("agent").and_then(Value::as_str);
+    if kind == Some("task") && agent == Some(pump_agent.0.as_str()) {
+        return row
+            .get("verb")
+            .and_then(Value::as_str)
+            .is_some_and(|v| PUMP_VERBS.contains(&v));
+    }
     // The store's own OPERATOR-CONTEXT calls: the pump's writes and probes,
     // which carry no origin because nobody sent them.
-    kind == Some("call") && agent == Some(store_id.0.as_str()) && row.get("origin").is_none()
+    if kind == Some("call") && agent == Some(store_id.0.as_str()) {
+        return row.get("origin").is_none() || row.get("origin") == Some(&Value::Null);
+    }
+    if kind == Some("settle") {
+        let Some(parent) = row.get("parent").and_then(Value::as_i64) else {
+            return false;
+        };
+        return kernel
+            .rows
+            .get_one(parent)
+            .is_some_and(|p| skips(kernel, store_id, pump_agent, &p));
+    }
+    false
 }
 
 #[cfg(test)]

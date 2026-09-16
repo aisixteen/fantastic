@@ -146,18 +146,16 @@ pub(super) async fn handle_kernel_verb(
 ) -> Value {
     match verb {
         "list_agents" => {
+            // REGISTRATION ORDER — python iterates `self.ctx.agents`, a plain
+            // dict, and the root comes first because it registered first. The
+            // port sorted by id, which put every alphabetically-earlier agent
+            // ahead of the root.
             let mut out: Vec<Value> = Vec::new();
-            for entry in kernel.agents.iter() {
-                let a = entry.value();
-                out.push(serde_json::to_value(a.record()).unwrap_or(Value::Null));
+            for id in kernel.agent_ids() {
+                if let Some(a) = kernel.agents.get(&id) {
+                    out.push(serde_json::to_value(a.record()).unwrap_or(Value::Null));
+                }
             }
-            // Sort by id for stable output.
-            out.sort_by(|a, b| {
-                a.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
-            });
             // PAGED. Absent `limit` ⇒ everything and `next: null`, so a caller
             // that never learned about paging is unaffected; the cursor is the
             // last id handed over, never an offset.
@@ -365,15 +363,14 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     // `persistence::persist` for the dirty-binding semantics.
     let _ = crate::persistence::persist(kernel, &target).await;
     let rec_value = serde_json::to_value(&rec).unwrap_or(Value::Null);
-    // Telemetry state event — Python parity (`_agent.py:637-657`):
-    // publish the full record + the list of changed fields, not just
-    // `{type, id}`. State subscribers (telemetry pane, AI test
-    // harnesses) lean on this for diff'ing agent state across events.
+    // Telemetry state event, python's shape: `{agent_id, kind:"updated",
+    // changed}` — the CHANGED KEYS, nothing more. The full record rode along as
+    // `agent` in the port; a state event is a notification that something moved,
+    // and a subscriber that wants the record reads it.
     let event = json!({
-        "type": "updated",
-        "id": rec.id,
+        "agent_id": rec.id,
+        "kind": "updated",
         "changed": changed.clone(),
-        "agent": rec_value.clone(),
     });
     kernel.publish_state(&event);
     // Emit `agent_updated` on the caller's inbox so watchers (canvas
@@ -402,8 +399,21 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
 /// A port of python's `_verb_messages`. Bodies never appear here: a `head` is
 /// 120 characters and the whole thing is behind the owning agent's `pull`.
 fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+    // THE IDS ARE READ FIRST, and reading one can RAISE: python's `_as_id`
+    // calls `int(x)` on any string `str.isdigit()` accepts, and `'²'` is a digit
+    // that is not a decimal. The whole call fails as a raised handler, before
+    // any refusal is composed.
     let ids: Vec<Option<i64>> = match payload.get("ids") {
-        Some(Value::Array(a)) => a.iter().map(as_id).collect(),
+        Some(Value::Array(a)) => {
+            let mut parsed = Vec::with_capacity(a.len());
+            for x in a {
+                match as_id(x) {
+                    Ok(v) => parsed.push(v),
+                    Err(raise) => return raise,
+                }
+            }
+            parsed
+        }
         _ => Vec::new(),
     };
     if ids.is_empty() || ids.iter().any(Option::is_none) {
@@ -415,7 +425,12 @@ fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         return r;
     }
     let mut ids: Vec<i64> = ids.into_iter().flatten().collect();
-    if let Some(after) = payload.get("after").and_then(as_id) {
+    let after = match payload.get("after").map(as_id) {
+        Some(Err(raise)) => return raise,
+        Some(Ok(v)) => v,
+        None => None,
+    };
+    if let Some(after) = after {
         if let Some(at) = ids.iter().position(|i| *i == after) {
             ids.drain(..=at);
         }
@@ -447,19 +462,26 @@ fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             refused.push(id);
             continue;
         }
-        out.push(digest(id, &row));
+        match digest(id, &row) {
+            Ok(d) => out.push(d),
+            Err(raise) => return raise,
+        }
     }
 
     // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
-    let limit = payload.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let limit = py_limit(payload);
     const CAP_BYTES: usize = 32 * 1024;
     let mut kept: Vec<Value> = Vec::new();
     let mut used = 0usize;
     for d in &out {
-        if limit > 0 && kept.len() >= limit {
+        if limit != 0 && kept.len() as i64 >= limit {
             break;
         }
-        let n = d.to_string().len();
+        // THE CAP IS PYTHON'S `len(json.dumps(d))` — `ensure_ascii` escapes, a
+        // space after every separator. A compact UTF-8 measurement lands the
+        // page and its cursor somewhere else entirely (300 cyrillic rows: 39
+        // kept against python's 72).
+        let n = fantastic_bundle::py_json_dumps(d, true, None).len();
         if used + n > CAP_BYTES {
             break;
         }
@@ -474,12 +496,54 @@ fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
 
 /// A message id from whatever the caller wrote: an int, or the decimal string a
 /// URL or a form carries. A bool is not an id.
-fn as_id(v: &Value) -> Option<i64> {
+///
+/// `Err` is a RAISE, not a refusal: python's `_as_id` gates on `str.isdigit()`
+/// and then calls `int(x)`, and the two disagree — `'²'` is a digit CPython's
+/// base-10 parser rejects, so the verb dies with a `ValueError` instead of
+/// answering. The whole call is reported as a raised handler, as python's
+/// dispatch reports any exception out of a verb body.
+fn as_id(v: &Value) -> Result<Option<i64>, Value> {
     match v {
-        Value::Number(n) => n.as_i64(),
-        Value::String(s) => s.trim().parse::<i64>().ok(),
-        _ => None,
+        Value::Number(n) => Ok(n.as_i64()),
+        Value::String(s) if fantastic_bundle::py_isdigit(s) => match fantastic_bundle::py_int(v) {
+            Ok(n) => Ok(Some(n)),
+            Err(e) => Err(raised(e.class_name(), e.message())),
+        },
+        Value::String(s) => Ok(s.trim().parse::<i64>().ok()),
+        _ => Ok(None),
     }
+}
+
+/// A python exception the way a raised verb body is recorded: `{"error":
+/// "<Class>: <message>", "raised": true}` — the shape python's dispatch builds
+/// from `type(e).__name__` and `str(e)`, which settles the item `failed`.
+fn raised(class: &str, message: &str) -> Value {
+    json!({"error": format!("{class}: {message}"), "raised": true})
+}
+
+/// `len(x)`, or python's `TypeError` for a value that has no length. A string
+/// counts CODE POINTS, a list its items, an object its keys.
+fn py_len(v: &Value) -> Result<usize, Value> {
+    match v {
+        Value::Array(a) => Ok(a.len()),
+        Value::String(s) => Ok(s.chars().count()),
+        Value::Object(o) => Ok(o.len()),
+        other => Err(raised(
+            "TypeError",
+            &format!(
+                "object of type '{}' has no len()",
+                fantastic_bundle::py_type_name(other)
+            ),
+        )),
+    }
+}
+
+/// `int(payload.get("limit") or 0)` — python's coercion, with its two
+/// exceptions swallowed to 0 exactly where python swallows them. A negative
+/// limit is NOT clamped: it is a python slice bound, and the pagers below
+/// honour it.
+fn py_limit(payload: &Value) -> i64 {
+    fantastic_bundle::py_int_or(payload.get("limit").unwrap_or(&Value::Null), 0).unwrap_or(0)
 }
 
 /// May `caller` read a row owned by `owner`? Its own always; another's only when
@@ -533,56 +597,108 @@ fn may_read(
 }
 
 /// One row at DIGEST resolution — never its body.
-fn digest(id: i64, row: &crate::rows::Row) -> Value {
-    let content = row.get("content").and_then(Value::as_str).unwrap_or("");
-    let mut d = json!({
-        "id": id,
-        "agent": row.get("agent"),
-        "parent": row.get("parent"),
-        "kind": row.get("kind").or_else(|| row.get("role")),
-        "role": row.get("role"),
-        "head": content.chars().take(120).collect::<String>().replace('\n', " "),
-        "bytes": content.len(),
-    });
-    let m = d.as_object_mut().expect("digest is an object");
-    if let Some(t) = row.get("title").filter(|v| !v.is_null()) {
-        m.insert("title".to_string(), t.clone());
+///
+/// A rule-for-rule port of python's digest block (`_verb_messages`). Three
+/// things about it are easy to get wrong and all three were:
+///
+/// * `content` is `str(row.get("content", ""))` — an ABSENT key is `""`, every
+///   other type is its python `str()` (`None` → `"None"`, `['a', 1, True]`), and
+///   `head`/`bytes` count CODE POINTS of that string, not UTF-8 bytes.
+/// * every optional key follows PYTHON TRUTHINESS (`if row.get(k):`), and the
+///   value copied in is the row's RAW value, whatever its type.
+/// * `status` comes from the nested `outcome`, never from a top-level `status`.
+///
+/// `Err` is a RAISE: python calls `len()` on a truthy `refs`/`ids` and `.get()`
+/// on a truthy `outcome`, so a scalar in either place kills the whole verb.
+fn digest(id: i64, row: &crate::rows::Row) -> Result<Value, Value> {
+    let content = row.get("content").map_or_else(String::new, py_str);
+    let mut d = Map::new();
+    d.insert("id".to_string(), json!(id));
+    d.insert(
+        "agent".to_string(),
+        row.get("agent").cloned().unwrap_or(Value::Null),
+    );
+    d.insert(
+        "parent".to_string(),
+        row.get("parent").cloned().unwrap_or(Value::Null),
+    );
+    let kind = row.get("kind").cloned().unwrap_or(Value::Null);
+    let role = row.get("role").cloned().unwrap_or(Value::Null);
+    d.insert(
+        "kind".to_string(),
+        if py_truthy(&kind) { kind } else { role.clone() },
+    );
+    d.insert("role".to_string(), role);
+    d.insert(
+        "head".to_string(),
+        Value::from(
+            content
+                .chars()
+                .take(120)
+                .collect::<String>()
+                .replace('\n', " "),
+        ),
+    );
+    d.insert("bytes".to_string(), json!(content.chars().count()));
+    if let Some(t) = row.get("title").filter(|v| py_truthy(v)) {
+        d.insert("title".to_string(), t.clone());
     }
-    if let Some(l) = row.get("level").filter(|v| !v.is_null()) {
-        m.insert("level".to_string(), l.clone());
+    if let Some(l) = row.get("level").filter(|v| py_truthy(v)) {
+        d.insert("level".to_string(), l.clone());
     }
-    if let Some(Value::Array(r)) = row.get("refs") {
-        m.insert("refs".to_string(), json!(r.len()));
+    if let Some(r) = row.get("refs").filter(|v| py_truthy(v)) {
+        d.insert("refs".to_string(), json!(py_len(r)?));
     }
     match row.get("kind").and_then(Value::as_str) {
-        Some("call") | Some("task") => {
-            m.insert(
+        Some("call" | "task") => {
+            d.insert(
                 "verb".to_string(),
                 row.get("verb").cloned().unwrap_or(Value::Null),
             );
-            if let Some(n) = row.get("name").filter(|v| !v.is_null()) {
-                m.insert("name".to_string(), n.clone());
+            if let Some(n) = row.get("name").filter(|v| py_truthy(v)) {
+                d.insert("name".to_string(), n.clone());
             }
-            if let Some(status) = row.get("status").filter(|v| !v.is_null()) {
-                m.insert("status".to_string(), status.clone());
+            if let Some(outcome) = row.get("outcome").filter(|v| py_truthy(v)) {
+                let Some(o) = outcome.as_object() else {
+                    return Err(raised(
+                        "AttributeError",
+                        &format!(
+                            "'{}' object has no attribute 'get'",
+                            fantastic_bundle::py_type_name(outcome)
+                        ),
+                    ));
+                };
+                d.insert(
+                    "status".to_string(),
+                    o.get("status").cloned().unwrap_or(Value::Null),
+                );
             }
         }
         Some("view") => {
             // A VIEW DIGEST SAYS HOW MUCH IT HOLDS, never the array itself.
-            let n = row.get("ids").and_then(Value::as_array).map_or(0, Vec::len);
-            m.insert("ids".to_string(), json!(n));
-            m.insert(
+            let ids = row.get("ids").filter(|v| py_truthy(v));
+            d.insert(
+                "ids".to_string(),
+                json!(match ids {
+                    Some(v) => py_len(v)?,
+                    None => 0,
+                }),
+            );
+            d.insert(
                 "budget".to_string(),
                 row.get("budget").cloned().unwrap_or(Value::Null),
             );
-            m.insert(
+            // ASSIGNED LAST, and it overwrites a `title` the row already
+            // carried — python's plain `d["title"] = ...`, which keeps the
+            // earlier key's POSITION when there was one.
+            d.insert(
                 "title".to_string(),
                 row.get("why").cloned().unwrap_or(Value::Null),
             );
         }
         _ => {}
     }
-    d
+    Ok(Value::Object(d))
 }
 
 /// `rows_read` — one agent's conversation WHOLE, oldest first.
@@ -606,7 +722,12 @@ fn rows_read(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         .into_iter()
         .map(Value::Object)
         .collect();
-    if let Some(after) = payload.get("after").and_then(as_id) {
+    let after = match payload.get("after").map(as_id) {
+        Some(Err(raise)) => return raise,
+        Some(Ok(v)) => v,
+        None => None,
+    };
+    if let Some(after) = after {
         // AN UNKNOWN CURSOR PAGES NOTHING, never the head again.
         let at = rows
             .iter()
@@ -615,10 +736,17 @@ fn rows_read(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             .unwrap_or(rows.len());
         rows.drain(..at);
     }
-    let limit = payload.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let truncated = limit > 0 && rows.len() > limit;
+    let limit = py_limit(payload);
+    let truncated = limit != 0 && rows.len() as i64 > limit;
     if truncated {
-        rows.truncate(limit);
+        // PYTHON'S SLICE `rows[:limit]`, negative bound included: a caller who
+        // asks for −2 drops the last two rows rather than getting the head.
+        let keep = if limit < 0 {
+            usize::try_from((rows.len() as i64).saturating_add(limit).max(0)).unwrap_or(0)
+        } else {
+            limit as usize
+        };
+        rows.truncate(keep);
     }
     let next = truncated
         .then(|| rows.last().and_then(|r| r["id"].as_i64()))

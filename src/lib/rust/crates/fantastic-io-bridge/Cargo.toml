@@ -7,4 +7,6 @@ license.workspace = true
 description = "IO base — shared library (NOT a bundle): per-leg ingress/egress rule registries + the binary-safe frame codec. Every io derivation (ws_bridge/relay_connector/web_ws/web_rest/file_bridge) imports it. Mirrors python/bundled_agents/io/io_bridge."
 
 [dependencies]
+# python-format helpers (truthiness in `parse_spec`).
+fantastic-bundle = { path = "../fantastic-bundle" }
 serde_json = { workspace = true }

@@ -1,515 +1,160 @@
-// Cross-kernel bridge bundle (WS-only, asymmetric).
+// The two io_bridge derivations — `ws_bridge` and `relay_connector`.
 //
-// Mirrors Python's `kernel_bridge.tools`. The bridge is an
-// asymmetric client: it opens a WS to the remote kernel's `web_ws`
-// surface and ships raw call frames. No B-side bridge agent is
-// needed — the remote's `web_ws` handles inbound calls natively.
+// Python ships them as two thin bundles over ONE engine: each supplies a
+// `build_transport` seam, a reflect `sentence`, the family reflect fields and a
+// readme; `io_bridge` supplies the verbs, the read loop, correlation and the
+// inbound gate. This file is that thin half — `Engine.swift` is the engine,
+// `Transports.swift` and `Relay.swift` are the two seams.
 //
-// Transports:
-//   - InMemory: both kernels in one process (unit-test backbone)
-//   - WebSocket: real WS via swift-nio (NIOWebSocketClient) against a
-//     remote `web_ws` — cross-platform (macOS + Linux)
-//
-// (HTTP transport was removed — WS subsumes its request/reply
-// semantic and adds streaming via the `watch`/`event` protocol.)
-//
-// Verbs:
-//   - boot     : open the transport per the agent's meta record
-//   - forward  : ship a `{type:"call", target, payload}` frame, await reply
-//   - watch_remote / unwatch_remote : subscribe to remote agent emits;
-//     `{type:"event"}` frames are re-emitted on this bridge's local inbox
-//   - detach   : drop the attached transport
-//   - shutdown : lifecycle no-op (the transport detaches in onShutdown/onDelete)
-//   - reflect  : identity + connectivity + verb docs
+// Verbs (all six shared): boot · reconnect · forward · watch_remote ·
+// unwatch_remote · reflect, plus the relay's four directory verbs
+// (list_peers · watch_directory · unwatch_directory · set_identity), which on a
+// ws_bridge are simply unknown types.
 
 @_exported import FantasticIoBridge
 import FantasticJSON
 import FantasticKernel
 import Foundation
+import OrderedCollections
 
-// The relay token-issuance leg is a plain HTTP POST via URLSession.data(for:)
-// — that path IS implemented on Linux (swift-corelibs-foundation, libcurl), so
-// it stays on URLSession. URLRequest/URLSession live in FoundationNetworking on
-// Linux; in Foundation on Apple. (The WS dial uses swift-nio, not URLSession.)
-#if canImport(FoundationNetworking)
-    import FoundationNetworking
-#endif
-
-/// `handler_module` of the WS derivation (ws / memory transports).
+/// `handler_module` of the WS derivation (ws / ssh+ws / memory transports).
 public let WS_HANDLER_MODULE = "ws_bridge.tools"
 /// `handler_module` of the RELAY derivation (the relay-kernel router transport).
 public let RELAY_HANDLER_MODULE = "relay_connector.tools"
 
-/// Which transport family a bundle admits — the only behavioural difference
-/// between the two derivations (they share one engine, mirroring py's separate
-/// `ws_bridge` + `relay_connector` bundles and rust's `Family`).
+/// Which derivation a bundle instance is — python's two `make_verbs` calls.
 public enum BridgeFamily: Sendable {
-    /// ws / memory (the `ws_bridge` derivation).
     case ws
-    /// the relay-kernel router (`relay_connector` derivation).
     case relay
 
     var label: String { self == .ws ? "ws_bridge" : "relay_connector" }
 
+    /// Python's `default_kind` — the reflect `transport` fallback only. `boot`
+    /// defaults to `"ws"` for BOTH families (python `_engine.boot`).
+    var defaultKind: String { self == .ws ? "ws" : "relay" }
+
     /// Python's reflect `sentence` for this derivation.
     var sentence: String {
         switch self {
-        case .ws: return "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy."
-        case .relay: return "Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay; auto-reconnecting."
+        case .ws:
+            return
+                "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy."
+        case .relay:
+            return
+                "Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay; auto-reconnecting."
         }
     }
 
-    /// Python's reflect `verbs` for this derivation — `io_bridge.make_verbs`'s
-    /// six for `ws_bridge`, plus the relay directory four for
-    /// `relay_connector`; the first doc line of each, verbatim, in order.
+    /// The verb names this derivation answers, in python's table order.
+    var verbNames: [String] {
+        let shared = ["reflect", "boot", "reconnect", "forward", "watch_remote", "unwatch_remote"]
+        return self == .ws
+            ? shared
+            : shared + ["list_peers", "watch_directory", "unwatch_directory", "set_identity"]
+    }
+
+    /// Python's reflect `verbs` — the first doc line of each, verbatim, in order.
     var verbs: JSON {
-        switch self {
-        case .ws: return [
-            "reflect": .string("Identity + transport + connectivity. No args."),
-            "boot": .string("No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."),
-            "reconnect": .string("No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry)."),
-            "forward": .string("args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."),
-            "watch_remote": .string("args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set)."),
-            "unwatch_remote": .string("args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted."),
-        ] as JSON
-        case .relay: return [
-            "reflect": .string("Identity + transport + connectivity. No args."),
-            "boot": .string("No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."),
-            "reconnect": .string("No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry)."),
-            "forward": .string("args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."),
-            "watch_remote": .string("args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set)."),
-            "unwatch_remote": .string("args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted."),
-            "list_peers": .string("No args (optional timeout). One-shot snapshot of the relay directory:"),
-            "watch_directory": .string("No args. Subscribe to the relay directory; live `peer_joined`/`peer_left`/"),
-            "unwatch_directory": .string("No args. Stop the directory subscription started by `watch_directory`."),
-            "set_identity": .string("Advertise/update this peer's DIRECTORY identity — the typed attrs the relay"),
-        ] as JSON
-        }
-    }
-    func admits(_ transportKind: String) -> Bool {
-        switch self {
-        case .ws: return transportKind == "ws" || transportKind == "memory"
-        case .relay: return transportKind == "relay" || transportKind == "memory"
-        }
+        var out: OrderedDictionary<String, JSON> = [:]
+        for name in verbNames { out[name] = .string(BridgeDocs.first[name] ?? "") }
+        return .object(out)
     }
 }
 
-// ── Transport enum ─────────────────────────────────────────────────
+/// The first line of each python verb docstring (`io_bridge/_engine.py` +
+/// `relay_connector/tools.py`), which is what reflect publishes.
+enum BridgeDocs {
+    static let first: [String: String] = [
+        "reflect": "Identity + transport + connectivity. No args.",
+        "boot":
+            "No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op.",
+        "reconnect":
+            "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
+        "forward":
+            "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
+        "watch_remote":
+            "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set).",
+        "unwatch_remote":
+            "args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted.",
+        "list_peers": "No args (optional timeout). One-shot snapshot of the relay directory:",
+        "watch_directory":
+            "No args. Subscribe to the relay directory; live `peer_joined`/`peer_left`/",
+        "unwatch_directory":
+            "No args. Stop the directory subscription started by `watch_directory`.",
+        "set_identity":
+            "Advertise/update this peer's DIRECTORY identity — the typed attrs the relay",
+    ]
 
-/// Internal transport wrapper — discriminates the (currently two)
-/// ways the bridge can reach a remote kernel.
-enum BridgeTransport {
-    case memory(InMemoryBridge)
-    case ws(WebSocketTransport)
-    case relay(RelayTransport)
+    /// Python `io_bridge.dispatch`'s teaching hint on an unknown type.
+    static let envelopeHint =
+        "every bridge frame needs a \"type\"; to reach a remote agent use "
+        + "{\"type\":\"forward\",\"target\":\"<remote_id>\","
+        + "\"payload\":{\"type\":\"<verb>\",...}} — the inner payload is itself a "
+        + "verb frame and needs its own \"type\"."
 
-    func forward(target: AgentId, payload: JSON) async -> JSON {
-        switch self {
-        case .memory(let bridge):
-            return await bridge.forward(target: target, payload: payload)
-        case .ws(let transport):
-            return await transport.forward(target: target, payload: payload)
-        case .relay(let transport):
-            return await transport.forward(target: target, payload: payload)
-        }
-    }
-
-    /// Binary forward — a `read_stream`/`write_stream` carried cross-kernel.
-    func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
-        switch self {
-        case .memory(let bridge):
-            return await bridge.binaryForward(target: target, header: header, blob: blob)
-        case .ws(let transport):
-            // Over-the-wire binary forward: a codec frame `[4B len|header|body]`
-            // shipped as a binary WS message (mirrors rust's 4b). The remote
-            // `web_ws.handleBinaryFrame` decodes it, gates, and replies with a
-            // codec binary frame (read_stream) or a text reply (write_stream).
-            return await transport.binaryForward(target: target, header: header, blob: blob)
-        case .relay(let transport):
-            // Tunneled over the relay as a binary WS message wrapped in a relay
-            // `send` envelope; the partner connector decodes, gates, dispatches.
-            return await transport.binaryForward(target: target, header: header, blob: blob)
-        }
-    }
-
-    func watchRemote(target: AgentId) async -> JSON {
-        switch self {
-        case .memory(let bridge):
-            return await bridge.watchRemote(target: target)
-        case .ws(let transport):
-            return await transport.watchRemote(target: target)
-        case .relay(let transport):
-            return await transport.watchRemote(target: target)
-        }
-    }
-
-    func unwatchRemote(target: AgentId) async -> JSON {
-        switch self {
-        case .memory(let bridge):
-            return await bridge.unwatchRemote(target: target)
-        case .ws(let transport):
-            return await transport.unwatchRemote(target: target)
-        case .relay(let transport):
-            return await transport.unwatchRemote(target: target)
-        }
-    }
-
-    // Directory surface — relay_connector only (addresses the relay's `relay` agent).
-
-    func listPeers(timeout: Double) async -> JSON {
-        guard case .relay(let transport) = self else {
-            return .object(["error": .string("transport has no relay directory")])
-        }
-        return await transport.listPeers(timeout: timeout)
-    }
-
-    func watchDirectory(timeout: Double) async -> JSON {
-        guard case .relay(let transport) = self else {
-            return .object(["error": .string("transport has no relay directory")])
-        }
-        return await transport.watchDirectory(timeout: timeout)
-    }
-
-    func unwatchDirectory() async -> JSON {
-        guard case .relay(let transport) = self else {
-            return .object(["ok": .bool(true)])
-        }
-        return await transport.unwatchDirectory()
-    }
-
-    func setIdentity(_ attrs: JSON) async -> JSON {
-        guard case .relay(let transport) = self else {
-            return .object(["error": .string("transport has no relay directory")])
-        }
-        return await transport.setIdentity(attrs)
-    }
-
-    /// Release transport resources (receive loop, heartbeat, relay socket).
-    /// memory/ws legs are torn down by ARC; the relay leg holds long-lived
-    /// Tasks + a WS, so it needs an explicit close.
-    func close() async {
-        if case .relay(let transport) = self {
-            await transport.close()
-        }
-    }
+    /// Python `_engine._reflect`'s `emits`.
+    static let emits: JSON = [
+        "bridge_up":
+            "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
+        "bridge_down":
+            "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
+        "<remote event>":
+            "events from `watch_remote` subscriptions are re-emitted on this agent's inbox with their original `{type, ...}` shape",
+    ]
 }
-
-// ── In-memory bridge ───────────────────────────────────────────────
-
-public actor InMemoryBridge {
-    private weak var remoteKernel: Kernel?
-    /// The local bridge agent we re-emit `event` payloads on after a
-    /// `watch` subscription. Set by `KernelBridgeBundle.attachInMemory`.
-    private var localBridgeId: AgentId?
-    private weak var localKernel: Kernel?
-    /// One drain task per active watch_remote subscription — a KERNEL task
-    /// (in `ps`, within reach of `cancel`), cancelled through the table on
-    /// unwatch_remote so the synthetic relay inbox stops draining.
-    private var watchTasks: [AgentId: TaskId] = [:]
-    /// Synthetic watcher ids per target — needed for `unwatch` so we
-    /// remove the same id we registered in `watch`.
-    private var watcherIds: [AgentId: AgentId] = [:]
-
-    public init(remote: Kernel) {
-        self.remoteKernel = remote
-    }
-
-    public func setLocalSink(agentId: AgentId, kernel: Kernel) {
-        self.localBridgeId = agentId
-        self.localKernel = kernel
-    }
-
-    public func forward(target: AgentId, payload: JSON) async -> JSON {
-        guard let remote = remoteKernel else {
-            return .object(["error": .string("remote kernel gone")])
-        }
-        // Operator authority on the REMOTE: a forwarded frame is a fresh transport
-        // entry — the local sender is meaningless in the remote kernel (in a real
-        // cross-process bridge it wouldn't cross at all), and admission was already
-        // gated by the bridge leg's ingress_rule. Without this the in-memory
-        // backbone leaks the local sender into the remote, where it's an unknown
-        // agent → deny-all.
-        return await KernelTaskLocals.$currentSender.withValue(nil) {
-            await remote.send([Item(target, payload)])[0].result
-        }
-    }
-
-    /// Binary forward — ships a raw chunk to the remote on the symmetric binary
-    /// channel + returns `(reply, body)`. In-process, a direct `sendWithBinary`.
-    public func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
-        guard let remote = remoteKernel else {
-            return (.object(["error": .string("remote kernel gone")]), Data())
-        }
-        // Operator on the remote — see `forward`.
-        return await KernelTaskLocals.$currentSender.withValue(nil) {
-            await remote.sendWithBinary(target, header, blob)
-        }
-    }
-
-    /// Wire up a watch on the remote kernel: every emit on
-    /// `target`'s inbox is mirrored onto this bridge agent's local
-    /// inbox via `localKernel.emit`. Uses the substrate's standard
-    /// `watch(src:watcher:)` mechanism with a synthetic watcher id;
-    /// a background Task drains the watcher's inbox AsyncStream and
-    /// re-emits on the local sink.
-    ///
-    /// In-memory bridges are paired in tests; production uses
-    /// `WebSocketTransport.watchRemote` which talks to the remote's
-    /// `web_ws` server. The in-memory shape mirrors the WS path so
-    /// tests don't drift from production semantics.
-    public func watchRemote(target: AgentId) async -> JSON {
-        guard let remote = remoteKernel else {
-            return .object(["error": .string("remote kernel gone")])
-        }
-        guard let sink = localBridgeId, let local = localKernel else {
-            return .object([
-                "error": .string("in-memory bridge has no local sink (call setLocalSink)")
-            ])
-        }
-        // Idempotent — re-watching same target is a no-op.
-        if watchTasks[target] != nil {
-            return .object([
-                "ok": .bool(true),
-                "watching": .string(target.value),
-                "already": .bool(true),
-            ])
-        }
-        let watcherId = AgentId(
-            "inmem_relay_\(UUID().uuidString.prefix(8))_\(target.value)")
-        watcherIds[target] = watcherId
-        // OPERATOR on the REMOTE kernel. `watch` is gated there like a send, but
-        // this bridge's LOCAL agent id means nothing in the remote's grant space
-        // — cross-kernel authorization is the transport's own ingress rule, and
-        // the caller already passed the LOCAL gate to reach this bridge at all.
-        // Gating again with a foreign id would refuse every legitimate
-        // `watch_remote`.
-        // THE READER REGISTERS FIRST: `watch` refuses a watcher with no inbox,
-        // and the drain task below is what reads this one — so claim the stream
-        // before asking to be watched.
-        let stream = remote.ensureInbox(watcherId)
-        KernelTaskLocals.$currentSender.withValue(nil) {
-            remote.watch(src: target, watcher: watcherId)
-        }
-
-        let task = local.spawnTask(agent: sink, verb: "watch_remote") {
-            for await event in stream {
-                if Task.isCancelled { break }
-                await local.emit(sink, event)
-            }
-        }
-        watchTasks[target] = task
-        return .object([
-            "ok": .bool(true),
-            "watching": .string(target.value),
-        ])
-    }
-
-    public func unwatchRemote(target: AgentId) async -> JSON {
-        guard let remote = remoteKernel else {
-            return .object(["error": .string("remote kernel gone")])
-        }
-        if let watcherId = watcherIds.removeValue(forKey: target) {
-            remote.unwatch(src: target, watcher: watcherId)
-        }
-        if let task = watchTasks.removeValue(forKey: target), let local = localKernel {
-            _ = await local.cancelTask(task)
-        }
-        return .object([
-            "ok": .bool(true),
-            "unwatched": .string(target.value),
-        ])
-    }
-}
-
-// ── Bundle ─────────────────────────────────────────────────────────
 
 public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
-    /// Which io_bridge derivation this instance is — the only difference between
-    /// `ws_bridge.tools` and `relay_connector.tools` (one engine, two registrations).
     public let family: BridgeFamily
     public var name: String { family.label }
-    private let lock = NSLock()
-    private var bridges: [AgentId: BridgeTransport] = [:]
 
-    /// Default `.ws` keeps the in-memory test seam (`attachInMemory`) ergonomic.
+    let stateLock = NSLock()
+    var states: [AgentId: BridgeState] = [:]
+    private var injectedTransports: [AgentId: any BridgeTransport] = [:]
+
+    /// Default `.ws` keeps the in-memory test seam ergonomic.
     public init(family: BridgeFamily = .ws) {
         self.family = family
     }
 
-    /// Attach an in-memory bridge for `agentId` pointing at `remote`.
-    /// The app calls this after creating a `kernel_bridge.tools` agent.
-    /// `localKernel` is the kernel that owns `agentId` — needed so
-    /// `watch_remote` can re-emit events on the local bridge's inbox.
-    public func attachInMemory(agentId: AgentId, remote: Kernel, localKernel: Kernel) {
-        let bridge = InMemoryBridge(remote: remote)
-        // setLocalSink is an async-actor call but attach is sync; use
-        // a Task to wire the sink eagerly. Forwards landing before
-        // the sink is set still work (forward doesn't need sink).
-        Task {
-            await bridge.setLocalSink(agentId: agentId, kernel: localKernel)
-        }
-        attachTransport(agentId: agentId, transport: .memory(bridge))
+    // MARK: - test seam (python `_test_transport_inject`)
+
+    /// Inject a pre-built transport for `agentId`; the next `boot` of a leg whose
+    /// record says `transport: "memory"` POPS it. Python's memory pair cannot be
+    /// carried in `agent.json` either — the test wires it and then boots.
+    public func injectTransport(agentId: AgentId, transport: any BridgeTransport) {
+        stateLock.lock()
+        injectedTransports[agentId] = transport
+        stateLock.unlock()
     }
 
-    /// Used by `Transports.swift`'s public attach helpers. Internal
-    /// to the module — callers go through `attachInMemory` or
-    /// `attachWebSocket`.
-    func attachTransport(agentId: AgentId, transport: BridgeTransport) {
-        lock.lock()
-        defer { lock.unlock() }
-        bridges[agentId] = transport
+    /// Inject a `memory` transport serving `remote` in-process.
+    public func injectMemoryTransport(agentId: AgentId, remote: Kernel) {
+        injectTransport(agentId: agentId, transport: MemoryTransport(remote: remote))
     }
 
-    /// Drop the transport for `agentId`. Returns whether a transport
-    /// was attached. A cloud leg is closed asynchronously (it owns a
-    /// receive loop, heartbeat, and relay socket that must be released).
-    @discardableResult
-    public func detach(agentId: AgentId) -> Bool {
-        lock.lock()
-        let removed = bridges.removeValue(forKey: agentId)
-        lock.unlock()
-        if let removed {
-            Task { await removed.close() }
-        }
-        return removed != nil
+    func takeInjected(_ agentId: AgentId) -> (any BridgeTransport)? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return injectedTransports.removeValue(forKey: agentId)
     }
 
-    /// The process is stopping / the record is going: release the transport
-    /// (its receive loop, heartbeat, relay socket).
+    // MARK: - lifecycle
+
     public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
-        _ = detach(agentId: agentId)
+        await teardown(agentId)
     }
 
+    /// Python `on_delete` — cancels the read loop, closes the transport, kills
+    /// the ssh tunnel (if any), rejects pending.
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
-        _ = detach(agentId: agentId)
-    }
-
-    /// Sync lookup helper — keeps the NSLock outside any async scope.
-    private func bridgeFor(_ agentId: AgentId) -> BridgeTransport? {
-        lock.lock()
-        defer { lock.unlock() }
-        return bridges[agentId]
-    }
-
-    /// Assemble the directory-attributes blob to advertise from the record's
-    /// well-known keys (`role`/`owner_guid`/`exposes`). Defaults are OMITTED
-    /// (role=kernel / owner_guid=null / exposes=[]) so a plain peer advertises
-    /// nothing — the relay's own defaults stand. Opaque to the relay; mirrors py
-    /// `_identity_from_record` / rust `identity_from_meta`.
-    private func relayIdentity(_ agent: Agent) -> JSON {
-        var attrs: JSON = [:]
-        if let role = agent.metaValue(forKey: "role")?.asString, role != "kernel" {
-            attrs["role"] = .string(role)
-        }
-        if let owner = agent.metaValue(forKey: "owner_guid"), owner.asString != nil {
-            attrs["owner_guid"] = owner
-        }
-        if let exposes = agent.metaValue(forKey: "exposes"), case .array(let a) = exposes,
-            !a.isEmpty
-        {
-            attrs["exposes"] = exposes
-        }
-        return attrs
-    }
-
-    /// Boot a `relay_connector` leg: dial the relay-kernel router and attach.
-    /// Mirrors the Rust `"relay"` boot arm + Python's `build_transport`. Required
-    /// meta: `relay_url` (ws://host:port), `partner_guid` (the peer kernel to reach).
-    /// `guid` (our id = the WS path) is auto-minted + persisted on first boot if
-    /// absent (explicit wins, never regenerated). Optional: `relay_token`
-    /// (the group password for X-Fantastic-Auth, default ""). No certs/mTLS — the
-    /// relay auths the connection at the WS upgrade and routes by `target`.
-    private func bootRelay(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
-        guard let relayURLStr = agent.metaValue(forKey: "relay_url")?.asString,
-            let relayURL = URL(string: relayURLStr)
-        else {
-            return .object(["error": .string("relay_connector: relay_url required")])
-        }
-        // `guid` (our WS path) is auto-minted ONCE on first boot if absent and
-        // persisted into the record, so every later hydration re-dials the SAME path;
-        // an explicit guid always wins, and a minted one is never regenerated (read
-        // verbatim next boot). Mirrors py/rust.
-        let guid: String
-        if let existing = agent.metaValue(forKey: "guid")?.asString, !existing.isEmpty {
-            guid = existing
-        } else {
-            guid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            _ = agent.updateMeta(["guid": .string(guid)])
-            await kernel.persistRecord(agent)
-        }
-        guard let partnerGuid = agent.metaValue(forKey: "partner_guid")?.asString,
-            !partnerGuid.isEmpty
-        else {
-            return .object(["error": .string("relay_connector: partner_guid required")])
-        }
-        let token = agent.metaValue(forKey: "relay_token")?.asString ?? ""
-        // `reconnect` (s) backoff before each re-dial; default 10, 0 = one-shot.
-        let reconnect = agent.metaValue(forKey: "reconnect")?.asDouble ?? 10
-        // Directory typing: validate `role` and advertise the attrs blob on connect.
-        if let role = agent.metaValue(forKey: "role")?.asString, role != "manager",
-            role != "kernel"
-        {
-            return .object([
-                "error": .string("relay_connector: role must be manager|kernel, got \(role)")
-            ])
-        }
-        let identity = relayIdentity(agent)
-        // Resolve the per-leg ingress + egress rules from the record (`ingress_rule`
-        // / `egress_rule`, else the legacy `auth` shorthand). A bad rule fails loudly.
-        let ingress: IngressRule
-        let egress: EgressRule
-        do {
-            let auth = agent.metaValue(forKey: "auth")
-            ingress = try resolveIngress(
-                ingressRule: agent.metaValue(forKey: "ingress_rule"), auth: auth)
-            egress = try resolveEgress(
-                egressRule: agent.metaValue(forKey: "egress_rule"), auth: auth)
-        } catch {
-            return .object(["error": .string("relay_connector: bad auth rule: \(error)")])
-        }
-        do {
-            let transport = try await RelayTransport.connect(
-                relayURL: relayURL, guid: guid, token: token, partnerGuid: partnerGuid,
-                reconnect: reconnect, identity: identity,
-                localAgentId: agentId, localKernel: kernel, ingress: ingress, egress: egress)
-            attachTransport(agentId: agentId, transport: .relay(transport))
-            return .object([
-                "booted": .bool(true),
-                "transport": .string("relay"),
-            ])
-        } catch {
-            return .object(["error": .string("relay_connector: connect failed: \(error)")])
-        }
+        await teardown(agentId)
     }
 
     public var readme: String? {
-        """
-        kernel_bridge — cross-kernel comms (WS-only, asymmetric).
-        Opens a WS to the remote's `web_ws` and ships raw call frames; \
-        the remote dispatches `kernel.send` natively, no peer bridge. \
-        Verbs: forward (await reply), watch_remote/unwatch_remote (stream \
-        remote emits onto this bridge's inbox). Weak binding — remote is \
-        addressed by URL + path only, no shared types.
-        Transports: ws (default) · relay. relay (relay_connector) reaches a peer \
-        through a relay-KERNEL router: dial ws://<host>/<guid> (group password in \
-        X-Fantastic-Auth, subprotocol fantastic.relay.v1), the relay routes by \
-        `target` and tunnels the bridge frames — symmetric RPC + binary streams \
-        (raw bytes, no base64). Meta: transport=relay, relay_url, guid (our id = \
-        WS path), partner_guid (peer to reach), relay_token (X-Fantastic-Auth).
-        Authorization: two symmetric, typed per-leg rules — `ingress_rule` (the \
-        inbound FILTER) and `egress_rule` (the outbound DECORATOR), each \
-        {type, env}; an `auth` shorthand carries a bare STEM that each manifold \
-        scopes. Types: allow_all_ingress \
-        | deny_ingress (default — refuse inbound calls, reply \
-        {reason:"unauthorized"}) | password (kernel-GROUP shared secret: ingress \
-        checks the envelope auth_token against the group token from an env var, \
-        default FANTASTIC_GROUP_TOKEN; egress presents it). These per-leg rules \
-        gate the tunneled bridge calls, INDEPENDENT of the relay's own connection \
-        auth. Resolved by name from the IngressRules/EgressRules registries. Swift \
-        enforces ingress on the relay leg only — its sole inbound-call path (ws is \
-        an asymmetric client; in-memory forward is a direct kernel call).
-        """
+        family == .ws ? Self.wsReadme : Self.relayReadme
     }
+
+    // MARK: - dispatch
 
     public func handle(
         agentId: AgentId,
@@ -517,233 +162,257 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         kernel: Kernel
     ) async throws -> JSON? {
         let verb = payload["type"].asString ?? ""
+        guard family.verbNames.contains(verb) else { return unknownType(payload["type"]) }
         switch verb {
         case "reflect":
-            let attached = bridgeFor(agentId) != nil
-            // The per-leg rule TYPE names (config like a `token_env` is never
-            // surfaced). Read-key == write-key (py parity): `ingress_rule` (inbound
-            // FILTER, default deny_ingress — the SEAL) / `egress_rule` (outbound
-            // DECORATOR, default silent); `auth` is a legacy WRITE shorthand only,
-            // never reflected. Swift gates only the relay_connector inbound-call path.
-            let a = kernel.agent(agentId)
-            let authMeta = a?.metaValue(forKey: "auth")
-            // SEALED BY DEFAULT — an io leg with no rule reflects as deny_ingress.
-            // Through `manifoldSpec` so a leg configured via the `auth` STEM reflects
-            // the SCOPED name it actually resolved to — read-key == write-key, and
-            // reflect never shows a name that would not resolve if written straight back.
-            let ingressName = ruleName(
-                manifoldSpec(a?.metaValue(forKey: "ingress_rule"), authMeta, "_ingress"),
-                default: "deny_ingress")
-            let egressName = ruleName(
-                manifoldSpec(a?.metaValue(forKey: "egress_rule"), authMeta, "_egress"),
-                default: "silent_egress")
-            return [
-                "id": .string(agentId.value),
-                "kind": .string(family.label),
-                "sentence": .string(family.sentence),
-                // `connected` is the canonical field (python/rust); the transport
-                // attaches only after a successful boot/handshake, so it tracks
-                // attachment.
-                "connected": .bool(attached),
-                "ingress_rule": .string(ingressName),
-                "egress_rule": .string(egressName),
-                "sealed": .bool(ingressName != "allow_all_ingress"),
-                "verbs": family.verbs,
-            ] as JSON
+            return try await reflectVerb(agentId: agentId, kernel: kernel)
         case "boot":
-            // Idempotent: if already attached, no-op.
-            if bridgeFor(agentId) != nil {
-                return .object(["already": .bool(true)])
-            }
-            // Read transport config from the agent's meta record
-            // (matches Python's `_boot` in
-            // kernel_bridge/tools.py). Required field: `transport`.
-            // For "ws": `host` + `local_port` + `peer_id` (the WS
-            //   path segment on the remote — typically the id of a
-            //   web_ws-served agent like `core`).
-            // For "memory": injection-only (use `attachInMemory`).
-            guard let agent = kernel.agent(agentId) else {
-                return .object(["error": .string("no agent")])
-            }
-            let kind =
-                agent.metaValue(forKey: "transport")?.asString
-                ?? (family == .relay ? "relay" : "ws")
-            // The derivation only opens transports in its own family — a
-            // relay_connector can't open a ws socket and vice-versa (the split).
-            guard family.admits(kind) else {
-                return .object([
-                    "error": .string(
-                        "\(family.label): transport \"\(kind)\" not in this derivation")
-                ])
-            }
-            // NOTE: the `auth` policy (deny stem) is enforced only on the
-            // relay_connector leg below — Swift's sole inbound-`call` dispatcher.
-            // The ws transport is an asymmetric client (no inbound calls) and the
-            // in-memory forward is a direct kernel call, so there is no inbound
-            // frame to gate on those paths (matches the relay e2e coverage).
-            switch kind {
-            case "ws":
-                guard let host = agent.metaValue(forKey: "host")?.asString,
-                    let port = agent.metaValue(forKey: "local_port")?.asInt,
-                    let peerId = agent.metaValue(forKey: "peer_id")?.asString
-                else {
-                    return .object([
-                        "error": .string(
-                            "bridge: ws transport requires host + local_port + peer_id meta"
-                        )
-                    ])
-                }
-                let url = URL(string: "ws://\(host):\(port)/\(peerId)/ws")
-                guard let url else {
-                    return .object([
-                        "error": .string("bridge: malformed ws url")
-                    ])
-                }
-                await attachWebSocket(agentId: agentId, endpoint: url, kernel: kernel)
-                return .object([
-                    "booted": .bool(true),
-                    "transport": .string("ws"),
-                ])
-            case "memory":
-                return .object([
-                    "error": .string(
-                        "bridge: memory transport requires explicit attachInMemory")
-                ])
-            case "relay":
-                return await bootRelay(agentId: agentId, agent: agent, kernel: kernel)
-            default:
-                return .object([
-                    "error": .string("bridge: unknown transport \(kind)")
-                ])
-            }
-        case "shutdown":
-            // A lifecycle no-op; the transport detaches in `onShutdown`/`onDelete`.
-            return .null
+            return await bootLeg(agentId: agentId, kernel: kernel)
         case "reconnect":
             // Python `_reconnect`: teardown + boot. Explicit, because a dropped
             // transport is never re-dialed on its own — a real network problem
             // stays visible to the operator instead of flapping in the dark.
-            _ = detach(agentId: agentId)
-            return try await handle(
-                agentId: agentId, payload: .object(["type": .string("boot")]), kernel: kernel)
+            await teardown(agentId)
+            return await bootLeg(agentId: agentId, kernel: kernel)
         case "forward":
-            // Python is canonical: the arg name is `target`.
-            let targetStr = payload["target"].asString
-            guard let targetStr else {
-                return .object([
-                    "error": .string(
-                        "bridge.forward: target (str) + payload (dict) required"
-                    )
-                ])
-            }
-            guard let transport = bridgeFor(agentId) else {
-                return Refusal.make(
-                    Refusal.notConnected, "bridge.forward: not connected",
-                    hint: "call boot first")
-            }
-            return await transport.forward(
-                target: AgentId(targetStr),
-                payload: payload["payload"])
+            return try await forwardVerb(agentId: agentId, payload: payload, kernel: kernel)
         case "watch_remote":
-            let targetStr = payload["target"].asString
-            guard let targetStr else {
-                return .object([
-                    "error": .string("bridge.watch_remote: target (str) required")
-                ])
-            }
-            guard let transport = bridgeFor(agentId) else {
-                return Refusal.make(
-                    Refusal.notConnected, "bridge.watch_remote: not connected",
-                    hint: "call boot first")
-            }
-            return await transport.watchRemote(target: AgentId(targetStr))
+            return await watchVerb(
+                agentId: agentId, payload: payload, verb: "watch_remote", frameType: "watch",
+                replyKey: "watching")
         case "unwatch_remote":
-            let targetStr = payload["target"].asString
-            guard let targetStr else {
-                return .object([
-                    "error": .string("bridge.unwatch_remote: target (str) required")
-                ])
+            return await watchVerb(
+                agentId: agentId, payload: payload, verb: "unwatch_remote", frameType: "unwatch",
+                replyKey: "unwatched")
+        case "list_peers":
+            guard let transport = try relayTransport(agentId, "list_peers") else {
+                return notConnected("list_peers")
             }
-            guard let transport = bridgeFor(agentId) else {
-                return Refusal.make(
-                    Refusal.notConnected, "bridge.unwatch_remote: not connected",
-                    hint: "call boot first")
+            return await transport.listPeers(
+                timeout: try pyFloat(payload.asObject?["timeout"] ?? .double(30.0)))
+        case "watch_directory":
+            guard let transport = try relayTransport(agentId, "watch_directory") else {
+                return notConnected("watch_directory")
             }
-            return await transport.unwatchRemote(target: AgentId(targetStr))
-        case "list_peers", "watch_directory", "unwatch_directory":
-            // Directory surface (relay_connector): addresses the relay's own `relay`
-            // agent (target:"relay"), not the partner.
-            guard let transport = bridgeFor(agentId) else {
-                return Refusal.make(
-                    Refusal.notConnected, "relay_connector.\(verb): not connected",
-                    hint: "call boot first")
+            return await transport.watchDirectory()
+        case "unwatch_directory":
+            // Pre-boot this is simply OK — there is no subscription to stop.
+            guard let transport = try relayTransport(agentId, "unwatch_directory") else {
+                return .object(["ok": .bool(true)])
             }
-            let timeout = payload["timeout"].asDouble ?? 30
-            switch verb {
-            case "list_peers": return await transport.listPeers(timeout: timeout)
-            case "watch_directory": return await transport.watchDirectory(timeout: timeout)
-            default: return await transport.unwatchDirectory()
-            }
+            return await transport.unwatchDirectory()
         case "set_identity":
-            // Advertise/update this peer's directory typing (role/owner_guid/exposes):
-            // persisted (so it re-announces next boot) + pushed to the relay live.
-            guard let transport = bridgeFor(agentId) else {
-                return Refusal.make(
-                    Refusal.notConnected, "relay_connector.set_identity: not connected",
-                    hint: "call boot first")
-            }
-            if let role = payload["role"].asString, role != "manager", role != "kernel" {
-                return .object([
-                    "error": .string("relay_connector.set_identity: role must be manager|kernel")
-                ])
-            }
-            guard let agent = kernel.agent(agentId) else {
-                return .object(["error": .string("relay_connector.set_identity: no agent")])
-            }
-            // Merge only the provided well-known keys into the record + persist (an
-            // explicit null retracts a field, e.g. owner_guid:null = become standalone).
-            var changed = false
-            if case .object(let m) = payload {
-                for k in ["role", "owner_guid", "exposes"] where m[k] != nil {
-                    _ = agent.updateMeta([k: m[k]!])
-                    changed = true
-                }
-            }
-            if changed { await kernel.persistRecord(agent) }
-            return await transport.setIdentity(relayIdentity(agent))
+            return try await setIdentityVerb(agentId: agentId, payload: payload, kernel: kernel)
         default:
-            return .object(["error": .string("unknown verb \(verb)")])
+            return unknownType(payload["type"])
         }
     }
 
-    /// Binary forward — `forward` carrying a raw request chunk (write_stream over
-    /// the wire) / returning a raw reply chunk (read_stream). The local caller
-    /// does `sendWithBinary(<bridge>, {type:forward, target, payload}, blob)`;
-    /// in-process this streams cross-kernel directly. Non-`forward` binary verbs
-    /// route through the text `handle` (the blob is unused).
+    /// `forward` carrying a raw request chunk / returning a raw reply chunk.
+    /// Every other binary verb routes through the text `handle`.
     public func handleBinary(
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
     ) async throws -> (JSON?, Data) {
-        let verb = header["type"].asString ?? ""
-        guard verb == "forward" else {
-            let reply = try await handle(agentId: agentId, payload: header, kernel: kernel)
-            return (reply, Data())
+        guard header["type"].asString == "forward" else {
+            return (try await handle(agentId: agentId, payload: header, kernel: kernel), Data())
         }
-        guard let target = header["target"].asString, case .object = header["payload"] else {
-            return (
-                .object(["error": .string("bridge.forward: target + payload (object) required")]),
-                Data()
-            )
-        }
-        guard let transport = bridgeFor(agentId) else {
-            return (
-                Refusal.make(
-                    Refusal.notConnected, "bridge.forward: not connected",
-                    hint: "call boot first"),
-                Data()
-            )
-        }
-        return await transport.binaryForward(
-            target: AgentId(target), header: header["payload"], blob: blob)
+        return try await binaryForwardVerb(
+            agentId: agentId, header: header, blob: blob, kernel: kernel)
     }
+
+    // MARK: - reflect
+
+    /// Python `_engine._reflect` + the family's `reflect_fields`, in python's key
+    /// order. The relay's fields OVERWRITE `connected` in place (a leg
+    /// mid-reconnect reads false), so the key keeps its position.
+    private func reflectVerb(agentId: AgentId, kernel: Kernel) async throws -> JSON {
+        let meta = kernel.agent(agentId)?.meta ?? [:]
+        let st = state(agentId)
+        let recordKind = meta["transport"] ?? .null
+        let kind =
+            !st.transportKind.isEmpty
+            ? st.transportKind : (pyTruthy(recordKind) ? pyStr(recordKind) : family.defaultKind)
+        var connected = false
+        if let t = st.transport { connected = await !t.isClosed() }
+        var out: OrderedDictionary<String, JSON> = [
+            "id": .string(agentId.value),
+            "sentence": .string(family.sentence),
+            "transport": .string(kind),
+            "connected": .bool(connected),
+            "pending_count": .integer(Int64(st.pendingCount)),
+        ]
+        // The active per-leg rule TYPE names — keyed by the field you SET, so
+        // read-key == write-key and `reflect` → edit is a direct mirror.
+        for (k, v) in describe(meta) { out[k] = v }
+        switch family {
+        case .ws:
+            out["host"] = meta["host"] ?? .null
+            out["peer_id"] = meta["peer_id"] ?? .null
+            out["local_port"] = meta["local_port"] ?? .null
+            out["remote_port"] = meta["remote_port"] ?? .null
+            out["tunnel_pid"] = st.extra["tunnel_pid"] ?? .null
+        case .relay:
+            if let relay = st.transport as? RelayTransport {
+                out["connected"] = .bool(await relay.isLive)
+            } else {
+                out["connected"] = .bool(false)
+            }
+            out["relay_url"] = meta["relay_url"] ?? .null
+            out["guid"] = meta["guid"] ?? .null
+            out["partner_guid"] = meta["partner_guid"] ?? .null
+            out["reconnect"] = .double(try pyFloat(meta["reconnect"] ?? .double(DEFAULT_RECONNECT)))
+            let role = meta["role"] ?? .null
+            out["role"] = pyTruthy(role) ? role : .string("kernel")
+            out["owner_guid"] = meta["owner_guid"] ?? .null
+            let exposes = meta["exposes"] ?? .null
+            out["exposes"] = pyTruthy(exposes) ? exposes : .array([])
+        }
+        out["verbs"] = family.verbs
+        out["emits"] = BridgeDocs.emits
+        return .object(out)
+    }
+
+    // MARK: - the relay directory verbs
+
+    /// The live relay transport, or nil when the leg is not connected. A relay
+    /// leg booted on another transport has no directory at all — python reaches
+    /// for a method that is not there.
+    private func relayTransport(_ agentId: AgentId, _ verb: String) throws -> RelayTransport? {
+        guard let transport = state(agentId).transport else { return nil }
+        guard let relay = transport as? RelayTransport else {
+            throw PyError(
+                "AttributeError", "'MemoryTransport' object has no attribute '\(verb)'")
+        }
+        return relay
+    }
+
+    private func notConnected(_ verb: String) -> JSON {
+        Refusal.make(
+            Refusal.notConnected, "relay_connector.\(verb): not connected",
+            hint: "call boot first")
+    }
+
+    /// Python `_set_identity`: validate the role, merge the well-known keys into
+    /// the record (persisted, so they re-announce next boot), push them live.
+    private func setIdentityVerb(agentId: AgentId, payload: JSON, kernel: Kernel) async throws
+        -> JSON
+    {
+        guard let transport = try relayTransport(agentId, "set_identity") else {
+            return notConnected("set_identity")
+        }
+        // `"role" in payload and payload["role"] is not None and … not in ROLES`.
+        if let role = payload.asObject?["role"], role != .null,
+            !RELAY_ROLES.contains(pyStr(role))
+        {
+            return Refusal.bad("set_identity", "role", "one of \(RELAY_ROLES_TEXT)")
+        }
+        guard let agent = kernel.agent(agentId) else { return notConnected("set_identity") }
+        var patch: OrderedDictionary<String, JSON> = [:]
+        if case .object(let m) = payload {
+            for k in ["role", "owner_guid", "exposes"] where m[k] != nil { patch[k] = m[k]! }
+        }
+        if !patch.isEmpty {
+            _ = agent.updateMeta(patch)
+            await kernel.persistRecord(agent)
+        }
+        return await transport.setIdentity(relayIdentity(kernel.agent(agentId)?.meta ?? [:]))
+    }
+
+    /// Python `_identity_from_record`: the attrs blob we advertise. Defaults are
+    /// OMITTED (role=kernel / owner_guid=null / exposes=[]) so a plain peer
+    /// advertises nothing and the wire stays identical to an un-typed leg.
+    func relayIdentity(_ meta: OrderedDictionary<String, JSON>) -> JSON {
+        var attrs: OrderedDictionary<String, JSON> = [:]
+        let role = meta["role"] ?? .null
+        if pyTruthy(role), pyStr(role) != "kernel" { attrs["role"] = role }
+        if let owner = meta["owner_guid"], owner != .null { attrs["owner_guid"] = owner }
+        let exposes = meta["exposes"] ?? .null
+        if pyTruthy(exposes) { attrs["exposes"] = exposes }
+        return .object(attrs)
+    }
+
+    /// Python `io_bridge.dispatch`'s miss: the common slip is a frame with no
+    /// `type`, or a `forward` whose inner payload dropped its own.
+    private func unknownType(_ t: JSON) -> JSON {
+        .object([
+            "error": .string("bridge: unknown type \(pyRepr(t))"),
+            "hint": .string(BridgeDocs.envelopeHint),
+        ])
+    }
+
+    // MARK: - readmes (python `readme.md`, byte for byte)
+
+    static let wsReadme = """
+        # ws_bridge — outbound WebSocket bridge
+
+        Dials a remote `web_ws` surface. **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
+        Token on frame envelope (`auth_token`). Same `ingress_rule`/`egress_rule`/`auth` as every io_bridge leg.
+
+        Verbs: `boot` · `reconnect` · `forward(target,payload[,timeout])` · `watch_remote(target)` · `unwatch_remote(target)` · `reflect`
+        Transports: `ws` (default) · `ssh+ws` · `memory` (test)
+        Emits: `bridge_up` · `bridge_down` · remote events via `watch_remote`
+
+        """
+
+    static let relayReadme = """
+        # relay_connector — relay-kernel router bridge
+
+        Dial a relay-KERNEL (`../fantastic_relay`) at `ws://<host>/<guid>` with the group
+        password in `X-Fantastic-Auth` and subprotocol `fantastic.relay.v1`. Reach a
+        partner kernel by its GUID; the relay routes by `target`. Same verbs/auth surface
+        as `ws_bridge` (both ride the shared `io_bridge` engine) — `forward`,
+        `watch_remote`/`unwatch_remote` work identically; replies and binary
+        `read_stream` chunks are tunneled over the relay.
+
+        **Sealed by default** — open the inbound leg: `update_agent <id> ingress_rule=allow_all_ingress`
+        (or `password` for the group token). The bridge-leg `ingress_rule`/`egress_rule`
+        gate the tunneled calls and are INDEPENDENT of the relay's own connection auth.
+
+        **Self-healing** — the leg auto-connects (eager initial dial + background
+        auto-connect) and auto-reconnects with the `reconnect` backoff (seconds, default
+        10; `0` = one-shot/legacy, raise on first failure). `reflect.connected` tracks the
+        LIVE socket. A no-reply `keepalive` verb is sent every `heartbeat` seconds to keep
+        the relay's liveness view of us green.
+
+        **Directory** (the relay's own `relay` agent, addressed `target:"relay"`, NOT the
+        partner) — render/track the live peer list without polling:
+        - `list_peers` → one-shot `{peers:[{guid, status(green|yellow|red), last_seen, since}]}`.
+        - `watch_directory` / `unwatch_directory` → subscribe; live `peer_joined`/
+          `peer_left`/`peer_evicted`/`peer_status` events re-emit on THIS connector's inbox
+          (a local `kernel.watch(<connector_id>)` sees them).
+
+        **Identity** — `guid` (our id = the WS path) is **auto-minted on first boot if
+        absent and persisted** into the record, so every later hydration re-dials the SAME
+        `ws://host/<guid>`; pass an explicit `guid` to pick your own (it always wins), and a
+        minted one is never regenerated. `partner_guid` stays explicit (you can't invent a
+        peer's address) — discover it via the partner's `reflect` or the directory
+        (`list_peers`). Caveat: a persisted `guid` is a durable identity, so cloning a
+        `.fantastic` store to another machine carries the same id and the relay will see a
+        duplicate — re-mint by clearing `guid` on the clone.
+
+        **Directory typing (kernelgroup)** — a connector advertises an opaque **attrs blob**
+        to the relay (the relay STORES + reflects it into `list_peers` entries + a
+        `peer_updated` event, and never interprets it). Well-known keys:
+        - `role` — `"manager" | "kernel"` (default `kernel`). A **manager** owns kernels and
+          exposes control; a **kernel** is driven (standalone, or owned by a manager).
+        - `owner_guid` — the managing peer's **kernel-instance guid** (that peer's
+          ROOT-record `guid`, surfaced as the top-level `guid` in its root `reflect` — the
+          kernel's own persisted identity, NOT a relay LEG's `guid`; this connector's own
+          `guid` below is the WS-path leg id, a separate identity). `null` = standalone.
+        - `exposes` — an opaque control-surface list the peer advertises (e.g.
+          `["stop","restart"]`).
+
+        Set them at create (record meta) and they advertise on connect (re-announced on
+        every reconnect — the relay drops per-connection state on a drop). `set_identity`
+        (verb: optional `role`/`owner_guid`/`exposes`, merged) updates them live + persists,
+        so a manager can publish/retract a kernel's control surface at runtime. **reach ≠
+        control**: the directory carries who-owns-what; driving a kernel owned by another
+        manager is a plain `forward` to that manager (gated by ingress, as always). A plain
+        peer (no typed keys) advertises nothing — identical to an un-typed leg.
+
+        Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` (peer to
+        reach) · `relay_token` (X-Fantastic-Auth) · `heartbeat` (s, default 30) ·
+        `reconnect` (s, default 10) · `role` · `owner_guid` · `exposes`. Transport: `relay`.
+
+        """
 }

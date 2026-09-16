@@ -1,40 +1,8 @@
-# terminal_backend — PTY shell session as an agent
+# terminal_backend — PTY shell
+Verb: shell (`cmd`) runs a command in a persistent PTY, streams token/done. Per-agent interrupt/stop. One persistent PTY **session per agent** — a session is exclusive (it carries one process + its scrollback; it is not shared or multiplexed), so a client owns the backend it attaches to. The process running in the PTY (e.g. `claude`) reaches the kernel via `fantastic` CLI one-shots or the web surface.
 
-One PTY per agent. Process-memory state only; no `.fantastic/` sidecars
-(paste blobs go to the OS tempdir). Verbs (verb-for-verb mirror of the
-Python `terminal_backend.tools`):
+Streaming output is flow-controlled (VSCode's terminal model, ported): the PTY reader detaches once >100K emitted chars sit unacked and re-attaches once a consumer's `ack` verb drains the backlog — real backpressure so a flood can't lock up a tab. `write` is looped + per-agent serialized so large pastes land whole and bracketed-paste sequences can't interleave. `shell` is exempt (drains via scrollback).
 
-- `reflect`     → `{id, sentence, cmd, cwd, env, cols, rows, running, in_flight_bytes, unacked, paste_dir?, verbs, emits}`
-- `boot`        — if `record.auto_start` (default true), spawns the PTY via `record.cmd` (default `["bash"]` on Unix, `["powershell"]` on Windows). Idempotent.
-- `spawn`       — `{cmd:[str], cwd?, env?, cols?, rows?}` start PTY child. Overrides record meta if payload args present.
-- `write`       — `{data:str}` write UTF-8 bytes to PTY master. Serialized per-agent.
-- `ack`         — `{count:int}` decrement unacked-byte counter; resumes reader if it falls below 100K.
-- `resize`      — `{cols:int, rows:int}` fires SIGWINCH; TUI apps redraw.
-- `paste_image` — `{data:bytes|base64, mime?}` save bytes to OS tempdir; cap 5 MB; type absolute path + trailing space into PTY.
-- `interrupt`   — SIGINT to PTY child.
-- `signal`      — `{signal:str|int}` send named signal.
-- `stop`        — SIGKILL the child; close master; remove from TERMINALS map.
+`paste_image` (data:bytes, mime?) saves a pasted image to a per-agent scratch file and types its path into the PTY — bridges image paste for a CLI like `claude` running under the PTY (the backend can't reach a client's clipboard; path injection mimics a file drag-drop). png/jpeg/gif/webp, ≤5 MB.
 
-Streaming output is flow-controlled (VSCode terminal model, ported):
-the PTY reader pauses once >100K emitted bytes sit unacked, resumes
-once a consumer's `ack` verb drains the backlog below 100K. `write` is
-looped and per-agent serialized so large pastes land whole and a
-bracketed-paste sequence can't interleave with another write.
-
-`paste_image` overrides `Bundle::handle_binary` for direct byte access:
-a clipboard image arrives as a binary frame and skips the base64
-round-trip; the bytes are written to a per-agent scratch file in the OS
-tempdir and the absolute path is typed into the PTY with a trailing
-space (mimics a drag-drop, doesn't submit). The backend can't reach a
-client's clipboard, so path injection bridges the paste.
-
-PTY output is decoded with a per-session incremental UTF-8 decoder
-(`encoding_rs::Decoder`), so a multi-byte char split across a read
-boundary is reassembled — no replacement-char (`<?>`) litter or column-
-shift line breaks on resize. Mirrors what node-pty does for VSCode.
-
-Events emitted to this agent's **OWN** inbox (a client watches it):
-
-- `{type:"data", text:str}` — decoded output (per read chunk)
-- `{type:"exited", exit_code:i32}` — child died
-- `{type:"error", error:str}` — read/write failure
+PTY output is decoded with a per-session incremental UTF-8 decoder, so a multi-byte char split across an `os.read` chunk boundary is reassembled — no replacement-char (`<?>`) litter or column-shift line breaks on resize (node-pty's behaviour, ported).

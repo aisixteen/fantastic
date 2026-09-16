@@ -27,6 +27,7 @@
 //! Nothing is repaired. A call that does not parse is reported with its fault
 //! named and the minimal shape to send; the model fixes it.
 
+use fantastic_bundle::{is_alnum, is_space, py_str, py_truthy};
 use fantastic_kernel::{coerce_scalar, py_strip};
 use serde_json::{Map, Value};
 
@@ -112,7 +113,7 @@ pub fn envelopes(text: &str) -> Vec<(usize, usize, Option<usize>)> {
         };
         let after = pos + OPEN.len();
         let rest = text.get(after..).unwrap_or("");
-        if !rest.starts_with(char::is_whitespace) || !rest.trim_start().starts_with("name") {
+        if !rest.starts_with(is_ws) || !rest.trim_start_matches(is_ws).starts_with("name") {
             i = after;
             continue;
         }
@@ -147,7 +148,7 @@ fn next_tag(body: &str, from: usize) -> Option<(usize, usize, String)> {
                         closed_at = Some(lt + 1 + off);
                         break;
                     }
-                    if c.is_alphanumeric() || c == '_' || c == '$' || c == '.' || c == '-' {
+                    if is_alnum(c) || c == '_' || c == '$' || c == '.' || c == '-' {
                         name.push(c);
                     } else {
                         break;
@@ -331,7 +332,11 @@ fn head(block: &str) -> Option<(String, usize)> {
     }
     let mut end = i + 1;
     for (off, c) in chars {
-        if c.is_alphanumeric() || c == '_' {
+        // python `\w`: `_` plus `str.isalnum()` (Lu/Ll/Lt/Lm/Lo + the numeric
+        // categories). `char::is_alphanumeric` also admits Other_Alphabetic
+        // (U+093E, U+0345, U+24B6), so `<k_नाम>`/`<xⒶ>` dispatched here and were
+        // `text after the last tag` to python.
+        if is_alnum(c) || c == '_' {
             end = i + off + c.len_utf8();
         } else {
             break;
@@ -347,10 +352,17 @@ fn head(block: &str) -> Option<(String, usize)> {
     Some((block[start..end].to_string(), after + 1))
 }
 
+/// PYTHON'S WHITESPACE, not rust's: `\s` in a python `str` pattern is
+/// `str.isspace()`, which includes the information separators `\x1c`–`\x1f`. So
+/// `<call\x1cname="send">` IS an envelope to python and was not to rust.
+fn is_ws(c: char) -> bool {
+    is_space(c)
+}
+
 fn skip_ws(s: &str, from: usize) -> usize {
     let mut i = from;
     for c in s[from.min(s.len())..].chars() {
-        if c.is_whitespace() {
+        if is_ws(c) {
             i += c.len_utf8();
         } else {
             break;
@@ -399,7 +411,7 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
         .and_then(Value::as_str)
         .map(py_strip)
         .filter(|t| !t.is_empty());
-    if target.is_none() && to.is_none() {
+    if target.is_none() && !to.as_ref().is_some_and(py_truthy) {
         return Err(Malformed::new(
             "a send names its target: `<target_id>agent id</target_id>`, or several \
              recipients as `<to><item>id</item><item>id</item></to>`",
@@ -409,8 +421,9 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
     if let Some(t) = target {
         args.insert("target_id".to_string(), Value::String(t.to_string()));
     }
-    if let Some(list) = to {
-        args.insert("to".to_string(), Value::Array(list));
+    // python `if to:` — inserted whenever TRUTHY, whatever shape it has.
+    if let Some(list) = to.filter(py_truthy) {
+        args.insert("to".to_string(), list);
     }
     for key in &ROUTING[2..] {
         if let Some(v) = fields.remove(*key) {
@@ -421,35 +434,39 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
     Ok(Some(ToolCall::new("send", args)))
 }
 
-/// `to` as python leaves it: a non-blank string becomes a one-element list, a
-/// list keeps its non-blank members as trimmed strings, anything else (a bare
-/// number, an object) is not a recipient list and falls through to the
-/// "names its target" refusal.
-fn normalize_to(raw: Option<Value>) -> Option<Vec<Value>> {
+/// `to` as python leaves it — and python leaves MOST of it alone.
+///
+/// A non-blank string becomes a one-element list; a list keeps its non-blank
+/// `str(t).strip()` members; EVERY OTHER VALUE IS KEPT RAW (`<to>42</to>` sends
+/// `{to: 42}` on to routing, which answers with its own no-target reply the
+/// model can read). Only a python-FALSY `to` with no target is the malformed
+/// refusal — `<to>0</to>`, `<to></to>`.
+fn normalize_to(raw: Option<Value>) -> Option<Value> {
     match raw {
         Some(Value::String(s)) => {
             let t = py_strip(&s);
-            (!t.is_empty()).then(|| vec![Value::String(t.to_string())])
+            if t.is_empty() {
+                // python leaves the blank string as itself; it is falsy either way.
+                Some(Value::String(s.clone()))
+            } else {
+                Some(Value::Array(vec![Value::String(t.to_string())]))
+            }
         }
-        Some(Value::Array(items)) => {
-            let kept: Vec<Value> = items
+        Some(Value::Array(items)) => Some(Value::Array(
+            items
                 .iter()
                 .map(scalar_text)
                 .filter(|s| !s.is_empty())
                 .map(Value::String)
-                .collect();
-            (!kept.is_empty()).then_some(kept)
-        }
-        _ => None,
+                .collect(),
+        )),
+        other => other,
     }
 }
 
 /// One recipient as text — python's `str(t).strip()` over whatever the notation
-/// produced.
+/// produced: `True`, `1e+20`, `{'a': 'x'}`, `['y']`. `Value::to_string`'s JSON
+/// (`true`, `1e20`, `{"a":"x"}`) was a second dialect for the same list.
 fn scalar_text(v: &Value) -> String {
-    match v {
-        Value::String(s) => py_strip(s).to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
+    py_strip(&py_str(v)).to_string()
 }

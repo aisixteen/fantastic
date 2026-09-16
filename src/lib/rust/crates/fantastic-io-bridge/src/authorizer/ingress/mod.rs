@@ -39,3 +39,17 @@ pub fn resolve(spec: Option<&Value>) -> Result<Arc<dyn IngressRule>, String> {
     };
     Ok(rule)
 }
+
+/// The rule name in `spec` that this registry does not implement, if any —
+/// python's `getattr(resolve_ingress(...), "unknown", None)`. A bundle's
+/// `validate_meta` refuses the WRITE with it, next to the typo, rather than
+/// letting the leg seal silently three calls later.
+#[must_use]
+pub fn unknown(spec: Option<&Value>) -> Option<String> {
+    let (name, _) = parse_spec(spec).ok()?;
+    let name = name?;
+    (!REGISTRY.contains(&name.as_str())).then_some(name)
+}
+
+/// name -> ingress rule. New ingress rule types register HERE and in `resolve`.
+const REGISTRY: [&str; 3] = ["allow_all_ingress", "deny_ingress", "password_ingress"];

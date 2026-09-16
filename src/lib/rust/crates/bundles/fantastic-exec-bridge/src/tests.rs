@@ -74,7 +74,7 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let pid = agent_id_for(tmp);
     let mut create = json!({
@@ -614,9 +614,7 @@ async fn the_child_self_reaps_when_the_control_socket_closes() {
 // ─── durable jobs, end to end ───────────────────────────────────
 
 fn inbox(kernel: &Arc<Kernel>, id: &AgentId) -> fantastic_kernel::inbox::InboxReceiver {
-    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
-    kernel.inboxes.insert(id.clone(), tx);
-    rx
+    kernel.ensure_inbox(id)
 }
 
 async fn until(
@@ -627,7 +625,7 @@ async fn until(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(v)) if pred(&v) => return Some(v),
+            Ok(Some(v)) if pred(&v.payload) => return Some(v.payload),
             Ok(Some(_)) => {}
             Ok(None) => return None,
             Err(_) => {}
@@ -928,7 +926,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let a = AgentId::from(agent_id_for(&tmp).as_str());
     let _ = kernel
@@ -1278,4 +1276,862 @@ async fn stop_releases_the_proxies_a_real_job_held() {
     for p in &proxies {
         assert!(!kernel.inboxes.contains_key(p), "{p} leaked past `stop`");
     }
+}
+
+#[test]
+fn a_typeless_rule_object_seals_like_python() {
+    // A1.2 — python's `parse_spec` reads `{env: 'X'}` as no rule at all, which
+    // is a plain SEAL. Rust used to answer `{error:"rule object missing 'type'"}`
+    // (no `reason`, so nothing could branch on it) and swift threw out of
+    // `handle`.
+    let mut meta = Map::new();
+    meta.insert("ingress_rule".into(), json!({"env": "X"}));
+    let denied = gate(&meta, &AgentId::from("px"), "start").expect("a type-less rule seals");
+    assert_eq!(denied["reason"], "unauthorized", "{denied}");
+    assert_eq!(denied["error"], "edge sealed by policy");
+    // …and the WRITE is accepted, as python accepts it.
+    assert!(ExecBridgeBundle.validate_meta(&meta, &Map::new()).is_none());
+}
+
+#[test]
+fn reflect_reports_egress_posture() {
+    // A1.1 — every io leg's reflect answers python's `describe`: the two rule
+    // names and `sealed`, in that order, at the end of the reply.
+    let kernel = Kernel::new();
+    let id = AgentId::from("px");
+    let root = fantastic_kernel::Agent::new(
+        id.clone(),
+        Some(HANDLER_MODULE.to_string()),
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    let kernel = Arc::new(kernel);
+    kernel.register(Arc::clone(&root));
+    let r = reflect_reply(&id, &kernel);
+    let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        &keys[keys.len() - 3..],
+        ["ingress_rule", "egress_rule", "sealed"]
+    );
+    assert_eq!(r["ingress_rule"], "deny_ingress");
+    assert_eq!(r["egress_rule"], "silent_egress");
+    assert_eq!(r["sealed"], true);
+}
+
+// ─── python parity (plan §2 A4) ──────────────────────────────────
+//
+// Each test below pins a text, a coercion or an ordering to the canonical python
+// (`PB/io/exec_bridge/src/exec_bridge/tools.py`). Where python's own behaviour is a
+// quirk the plan marks (D5/D6), the quirk is what is pinned.
+
+/// A4.18 — the vendored readme is python's, byte for byte.
+///
+/// Skips (loudly) when the python tree is absent, like
+/// `connector_matches_python_source`: the container's rust stage copies only
+/// `src/lib/rust/`.
+#[test]
+fn readme_matches_python_source() {
+    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../..")
+        .join("src/lib/python/bundled_agents/io/exec_bridge/src/exec_bridge/readme.md");
+    let Ok(src) = std::fs::read_to_string(&py) else {
+        eprintln!("skipping: python tree not present at {}", py.display());
+        return;
+    };
+    assert_eq!(src, README, "readme has drifted from {}", py.display());
+}
+
+/// A4.2 — reflect's prose blocks are python's, verbatim.
+#[tokio::test]
+async fn reflect_texts_match_python_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = reflect_reply(&a, &kernel);
+    assert_eq!(
+        r["authoring"],
+        "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line."
+    );
+    assert_eq!(
+        r["inbox"],
+        "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first turn arrives."
+    );
+    assert_eq!(
+        r["emits"]["progress"],
+        "{type:'progress', job_id, n, line, stream} — one per output line"
+    );
+}
+
+/// A4.17 — `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
+/// verb's docstring. Several are truncated mid-sentence; that is the python text.
+#[tokio::test]
+async fn reflect_verbs_are_python_first_docstring_lines() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = reflect_reply(&a, &kernel);
+    let verbs = r["verbs"].as_object().expect("verbs object");
+    assert_eq!(
+        verbs.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "start",
+            "status",
+            "stop",
+            "interrupt",
+            "clear",
+            "connector",
+            "reflect",
+            "boot"
+        ]
+    );
+    assert_eq!(
+        verbs["start"],
+        "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra"
+    );
+    assert_eq!(
+        verbs["clear"],
+        "args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM"
+    );
+    assert_eq!(
+        verbs["boot"],
+        "No-op. Nothing auto-restarts: a command is started by a caller, not by the"
+    );
+    assert_eq!(
+        verbs["reflect"],
+        "Identity + running job count + auth posture. No args."
+    );
+}
+
+/// A4.10 — reflect coerces like python: a falsy `cwd` reads `<process default>` and
+/// a truthy one is reported AS WRITTEN; `allowed` items go through `str()`.
+#[tokio::test]
+async fn reflect_coerces_like_python() {
+    let tmp = TempDir::new().unwrap();
+    let mut meta = Map::new();
+    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    meta.insert("cwd".to_string(), json!(""));
+    meta.insert("allowed".to_string(), json!(["ls", 7, true]));
+    let (kernel, a) = mk_kernel_with(&tmp, meta).await;
+    let r = reflect_reply(&a, &kernel);
+    assert_eq!(r["cwd"], "<process default>");
+    // `str(7)` and `str(True)` — not JSON's `7`/`true`.
+    assert_eq!(r["allowed"], json!(["ls", "7", "True"]));
+
+    let tmp2 = TempDir::new().unwrap();
+    let mut m2 = Map::new();
+    m2.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    m2.insert("cwd".to_string(), json!(5));
+    let (k2, b) = mk_kernel_with(&tmp2, m2).await;
+    assert_eq!(reflect_reply(&b, &k2)["cwd"], json!(5));
+}
+
+/// A4.3 — `shutdown` is not a verb here: python's `VERBS` has no such key, so it is
+/// MAIL like any other unowned type. It used to answer `null`, which read as a
+/// successful lifecycle call.
+#[tokio::test]
+async fn shutdown_is_mail_not_a_verb() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "shutdown"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"],
+        "exec_bridge: unknown type 'shutdown' (no running job to receive it)"
+    );
+}
+
+/// A4.4 — every refusal quotes with python's `repr`, and an ABSENT `type` is `None`.
+#[tokio::test]
+async fn refusal_texts_use_python_repr() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    // `unknown type {t!r}` over the RAW value — an ABSENT type is `None`. Driven
+    // through the bundle directly: `kernel.send` refuses a typeless payload before
+    // any handler sees it.
+    let r = fantastic_kernel::bundle::Bundle::handle(&ExecBridgeBundle, &a, &json!({}), &kernel)
+        .await
+        .expect("handle")
+        .expect("reply");
+    assert_eq!(
+        r["error"],
+        "exec_bridge: unknown type None (no running job to receive it)"
+    );
+    // `no job {jid!r}`.
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": "gone"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], "exec_bridge: no job 'gone'");
+    assert_eq!(r["reason"], "not_found");
+    // `command not allowed: {line!r} — this leg permits: {pats}` — the line repr'd,
+    // the pattern list printed as python prints a `list[str]`.
+    let mut meta = Map::new();
+    meta.insert("allowed".to_string(), json!(["ls( .*)?"]));
+    assert_eq!(
+        command_permitted(&meta, "rm -rf /").expect("unlisted"),
+        "exec_bridge: command not allowed: 'rm -rf /' — this leg permits: ['ls( .*)?']"
+    );
+}
+
+/// A4.5 — `validate_meta`'s texts are python's up to the engine tail after `': '`
+/// (that tail is the D4/D5 residual).
+#[test]
+fn validate_meta_texts_match_python() {
+    let b = ExecBridgeBundle;
+    let mut empty = Map::new();
+    empty.insert("allowed".to_string(), json!([]));
+    assert_eq!(
+        b.validate_meta(&empty, &Map::new()).expect("refused"),
+        "allowed must be a non-empty list of regexes, e.g. <allowed><item>ls( .*)?</item></allowed>"
+    );
+    let mut broken = Map::new();
+    broken.insert("allowed".to_string(), json!(["("]));
+    let e = b.validate_meta(&broken, &Map::new()).expect("refused");
+    assert!(
+        e.starts_with("allowed contains a broken regex '(': "),
+        "{e}"
+    );
+    // The spec is repr'd, not JSON-printed.
+    let mut pw = Map::new();
+    pw.insert("auth".to_string(), json!("password"));
+    assert_eq!(
+        b.validate_meta(&pw, &Map::new()).expect("refused"),
+        "auth='password' is not applicable to the process edge: a leg with no wire \
+         envelope can never present a token — legal values: allow_all_ingress, deny_ingress"
+    );
+}
+
+/// A4.19 — only an UNKNOWN RULE NAME is refused. A falsy spec and a type-less rule
+/// object are a plain seal (python resolves them to `DenyInbound()` with no
+/// `unknown`), and `password_ingress` resolves fine here — it is the stem check that
+/// refuses it on this edge.
+#[test]
+fn validate_meta_refuses_only_unknown_ingress_rules() {
+    let b = ExecBridgeBundle;
+    for silent in [json!(""), json!(null), json!({"env": "X"})] {
+        let mut meta = Map::new();
+        meta.insert("ingress_rule".to_string(), silent.clone());
+        assert!(
+            b.validate_meta(&meta, &Map::new()).is_none(),
+            "{silent} must seal silently"
+        );
+    }
+    let mut bogus = Map::new();
+    bogus.insert("ingress_rule".to_string(), json!({"type": "nope"}));
+    assert_eq!(
+        b.validate_meta(&bogus, &Map::new()).expect("refused"),
+        "ingress_rule={'type': 'nope'} is not a rule this bundle implements — \
+         legal values: allow_all_ingress, deny_ingress"
+    );
+}
+
+/// A4.7 (D5) — `allowed` is compiled in PYTHON's `re` dialect: named groups,
+/// backreferences and lookaround all work. `regex` rejects every one of them at
+/// compile time, which silently turned a working python policy into a leg that
+/// permitted nothing.
+#[test]
+fn allowed_accepts_python_regex_syntax() {
+    let b = ExecBridgeBundle;
+    for pat in [
+        r"(?P<exe>ls)( .*)?",
+        r"(?P<q>['\x22])x(?P=q)",
+        r"echo (?!secret).*",
+        r"(\w+) \1",
+    ] {
+        let mut meta = Map::new();
+        meta.insert("allowed".to_string(), json!([pat]));
+        assert!(
+            b.validate_meta(&meta, &Map::new()).is_none(),
+            "python accepts {pat}"
+        );
+    }
+    let mut named = Map::new();
+    named.insert("allowed".to_string(), json!([r"(?P<exe>ls)( .*)?"]));
+    assert!(command_permitted(&named, "ls -la").is_none());
+    assert!(command_permitted(&named, "rm").is_some());
+    let mut backref = Map::new();
+    backref.insert("allowed".to_string(), json!([r"(\w+) \1"]));
+    assert!(command_permitted(&backref, "go go").is_none());
+    assert!(command_permitted(&backref, "go stop").is_some());
+}
+
+/// A4.8 — `job_id` is read under python TRUTHINESS: a falsy one means ALL of this
+/// agent's jobs, and a truthy non-string is not found, echoed raw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_job_id_means_all_jobs() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    for falsy in [json!(""), json!(null), json!(0), json!([])] {
+        let r = kernel
+            .send(vec![Item::new(
+                a.clone(),
+                json!({"type": "status", "job_id": falsy}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["jobs"], json!([]), "falsy job_id must mean ALL: {r}");
+    }
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "stop", "job_id": 7}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], "exec_bridge: no job 7");
+    assert_eq!(r["job_id"], json!(7), "the raw value is echoed: {r}");
+}
+
+/// A4.9 — `start` coerces exactly as python does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_coerces_args_env_and_cwd_like_python() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let call = |p: Value| {
+        let kernel = Arc::clone(&kernel);
+        let a = a.clone();
+        async move { kernel.send(vec![Item::new(a, p)]).await.remove(0).result }
+    };
+    // A command of nothing but whitespace is MISSING, not a spawn of "".
+    let r = call(json!({"type": "start", "command": "  \t "})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["arg"], "command", "{r}");
+    // An explicit null `args` is not a list.
+    let r = call(json!({"type": "start", "command": "ls", "args": null})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "args", "{r}");
+    // A falsy `env` is an EMPTY block, not a refusal (py `payload.get("env") or {}`).
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    for falsy in [json!(null), json!({}), json!(0), json!("")] {
+        let r = call(json!({"type": "start", "command": py.to_string_lossy(),
+                            "args": ["-c", "pass"], "env": falsy}))
+        .await;
+        assert!(r["job_id"].is_string(), "falsy env must be accepted: {r}");
+    }
+    // A truthy non-dict `env` refuses.
+    let r = call(json!({"type": "start", "command": "ls", "env": ["A=1"]})).await;
+    assert_eq!(r["arg"], "env", "{r}");
+    // Bools are ints in python, so they are legal argv items — as `True`/`False`.
+    let r = call(json!({"type": "start", "command": py.to_string_lossy(),
+                        "args": ["-c", "import sys; print(sys.argv[1:])", true, 2, 1.5]}))
+    .await;
+    assert!(r["job_id"].is_string(), "{r}");
+    let st = call(json!({"type": "status", "job_id": r["job_id"].clone()})).await;
+    assert_eq!(
+        st["jobs"][0]["args"],
+        json!(["-c", "import sys; print(sys.argv[1:])", "True", "2", "1.5"])
+    );
+}
+
+/// A4.12 + A4.20 — `status` lists this agent's jobs in START order (python's dict is
+/// insertion-ordered), and each `task_id` is the kernel's INT.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_lists_jobs_in_start_order() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut started = Vec::new();
+    for _ in 0..3 {
+        let r = kernel
+            .send(vec![Item::new(
+                a.clone(),
+                py_start(&py, "import time; time.sleep(30)", false),
+            )])
+            .await
+            .remove(0)
+            .result;
+        started.push(r["job_id"].as_str().expect("job_id").to_string());
+    }
+    let st = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
+    let listed: Vec<String> = st["jobs"]
+        .as_array()
+        .expect("jobs")
+        .iter()
+        .map(|j| j["job_id"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(listed, started, "status must list jobs in start order");
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// A4.20 — the task id in a `status` snapshot is an INT, the number `cancel
+/// task_id=<id>` takes, not a quoted copy of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_task_id_is_an_integer() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(30)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let st = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        st["jobs"][0]["task_id"].is_i64(),
+        "task_id must be an int: {st}"
+    );
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// A4.22 — a NAMED `clear` drops the row whatever its status. python's filter is
+/// `k == jid if jid else v["status"] not in ("running", "stopping")`: the label only
+/// decides which rows a BARE `clear` sweeps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clear_named_job_drops_it_regardless_of_status() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(2)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = r["job_id"].clone();
+    // A BARE clear leaves it — it is running.
+    let bare = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(bare["cleared"], 0, "a running row is not swept: {bare}");
+    let named = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "clear", "job_id": jid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        named["cleared"], 1,
+        "a NAMED running row is dropped: {named}"
+    );
+    let st = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(st["jobs"], json!([]));
+}
+
+/// A4.15 — `progress.n` is the PUMP's counter, so it keeps counting after `clear`
+/// has dropped the row. python's pump closes over the job dict; popping `_jobs`
+/// leaves that dict (and its counter) alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_count_survives_clear() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "import time\nprint('L1', flush=True)\ntime.sleep(2)\nprint('L2', flush=True)\n",
+                false,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = r["job_id"].clone();
+    let first = until(&mut rx, |v| v["type"] == "progress", 20)
+        .await
+        .expect("no first progress");
+    assert_eq!(first["n"], 1, "{first}");
+    let cleared = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "clear", "job_id": jid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(cleared["cleared"], 1, "{cleared}");
+    let second = until(
+        &mut rx,
+        |v| v["type"] == "progress" && v["line"] == "L2",
+        20,
+    )
+    .await
+    .expect("no second progress");
+    assert_eq!(
+        second["n"], 2,
+        "the counter restarted at the clear: {second}"
+    );
+}
+
+/// A4.21 — output is collected RAW: the newline stays on each line, a lone `\r` is
+/// data (`rstrip("\n")` only), a final line with no newline gets none added, and an
+/// invalid byte is REPLACED while the pipe keeps draining.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_is_collected_raw_like_python() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "import sys\nsys.stdout.buffer.write(b'a\\r\\nb\\xff')\n",
+                false,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let done = until(&mut rx, |v| v["type"] == "job_done", 20)
+        .await
+        .expect("no job_done");
+    assert_eq!(done["stdout"], "a\r\nb\u{fffd}", "{done}");
+}
+
+/// A4.14 (D6) — a line past asyncio's 65536-byte StreamReader bound is not
+/// truncated: python's `readline` RAISES, the pump reports the raise as the job's
+/// stderr, and stdout comes back EMPTY.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_overlong_line_is_a_pump_error() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "print('x' * 200000)\n", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let done = until(&mut rx, |v| v["type"] == "job_done", 25)
+        .await
+        .expect("no job_done");
+    assert_eq!(done["stdout"], "", "{}", done["stdout"]);
+    assert_eq!(
+        done["stderr"],
+        "[pump error] Separator is not found, and chunk exceed the limit"
+    );
+}
+
+/// A4.6 — a signal death reports `exit_code = -signal`, `ok:false`. `ExitStatus::
+/// code()` answers `None` for a signal, which read as "still running" everywhere
+/// liveness is `exit_code.is_none()` and lost the cause of death from `job_done`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_killed_job_reports_negative_signal_exit_code() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(30)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+    let done = until(&mut rx, |v| v["type"] == "job_done", 20)
+        .await
+        .expect("no job_done");
+    assert_eq!(done["exit_code"], -9, "{done}");
+    assert_eq!(done["ok"], false, "{done}");
+}
+
+/// A4.25 — liveness is "the OS process has not exited", not "the pipes reached
+/// EOF". A program that closes stdout/stderr and keeps running is still LIVE: its
+/// mail is queued and reflect counts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn liveness_is_process_exit_not_pipe_eof() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "import os, sys, time\nsys.stdout.flush()\nos.close(1)\nos.close(2)\ntime.sleep(4)\n",
+                false,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // Give both pipes time to hit EOF while the process is still sleeping.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        reflect_reply(&a, &kernel)["running"],
+        1,
+        "reflect counts a live process whose pipes are closed"
+    );
+    let mail = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(mail["queued"], true, "mail must reach a live job: {mail}");
+    let st = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(st["jobs"][0]["exit_code"], json!(null), "{st}");
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// A4.24 — a spawn failure reads exactly as python's `OSError`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_failure_text_matches_python() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "start", "command": "nope"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"],
+        "exec_bridge: spawn failed: [Errno 2] No such file or directory: 'nope'"
+    );
+    assert_eq!(r["reason"], "transport_error");
+}
+
+/// A4.23 — the two control vars are written OVER the caller's `env`, so a program
+/// cannot claim another agent's identity or point the control fd somewhere else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn caller_env_cannot_override_the_control_vars() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({
+                "type": "start",
+                "command": py.to_string_lossy(),
+                "args": ["-u", "-c", "import os; print('ID', os.environ['FANTASTIC_SELF_ID'], 'FD', os.environ['FANTASTIC_CTRL_FD'])"],
+                "env": {"FANTASTIC_SELF_ID": "root", "FANTASTIC_CTRL_FD": "0", "MINE": "kept"},
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let done = until(&mut rx, |v| v["type"] == "job_done", 25)
+        .await
+        .expect("no job_done");
+    let out = done["stdout"].as_str().unwrap_or("");
+    assert!(out.contains(&format!("ID {a} ")), "{done}");
+    assert!(
+        !out.contains("FD 0"),
+        "the caller chose the control fd: {done}"
+    );
+}
+
+/// A4.16 — the ingress gate never takes a credential from the RECORD. A token is a
+/// wire-envelope fact and the process edge has no envelope; reading one off the
+/// record would let a leg satisfy its own password rule with a secret it stores.
+#[test]
+fn the_record_auth_token_is_never_a_credential() {
+    let env = "FANTASTIC_GROUP_TOKEN_EXEC_A4_16";
+    std::env::set_var(env, "s3cret");
+    let mut meta = Map::new();
+    meta.insert(
+        "ingress_rule".to_string(),
+        json!({"type": "password_ingress", "env": env}),
+    );
+    meta.insert("auth_token".to_string(), json!("s3cret"));
+    let denied = gate(&meta, &AgentId::from("px"), "start")
+        .expect("a record-held token must not satisfy the rule");
+    assert_eq!(denied["reason"], "unauthorized", "{denied}");
+    assert_eq!(
+        denied["error"], "invalid or missing group token",
+        "{denied}"
+    );
+    std::env::remove_var(env);
+}
+
+/// A4.11 — the relay coerces like python: a FALSY payload becomes `{}` and a FALSY
+/// emit target becomes the OWNER (the one-arg `emit(payload)` form).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_coerces_falsy_payload_and_target() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut owner_rx = inbox(&kernel, &a);
+    let (mut child, stop, relay) = wire(&kernel, &a, "jc");
+    // A null payload is dispatched as `{}`, not as null.
+    wire_write(
+        &mut child,
+        &json!({"op": "send", "rid": 1, "target": a.as_str(), "payload": null}),
+    )
+    .await;
+    let reply = wire_read(&mut child).await;
+    assert_eq!(reply["op"], "reply", "{reply}");
+    // The kernel refuses a typeless payload, and WHICH refusal says what it got: a
+    // non-object is `send: payload required`, an empty OBJECT `send: payload.type
+    // required`. The second one is the proof that `null` became `{}`.
+    assert_eq!(reply["data"]["arg"], "payload.type", "{reply}");
+
+    // No target at all ⇒ the OWNER, with an empty payload.
+    wire_write(&mut child, &json!({"op": "emit"})).await;
+    let ev = until(&mut owner_rx, |_| true, 5)
+        .await
+        .expect("no emit reached the owner");
+    assert_eq!(ev, json!({}), "a falsy payload must become {{}}: {ev}");
+    // An EMPTY target is falsy, so it is the owner too.
+    wire_write(
+        &mut child,
+        &json!({"op": "emit", "target": "", "payload": {"type": "ping"}}),
+    )
+    .await;
+    let ev = until(&mut owner_rx, |v| v["type"] == "ping", 5)
+        .await
+        .expect("an empty target did not fall back to the owner");
+    assert_eq!(ev["type"], "ping");
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+}
+
+/// A4.13 (D6) — a program's subscriptions hold KERNEL TASKS: `watch` forks a
+/// `watch_drain`, `on_message` an `inbox_drain`, so `ps` lists them and `cancel`
+/// reaches them. They used to be detached `tokio::spawn`s, invisible and unkillable.
+///
+/// Each fork is also a MESSAGE: since C36 its task id IS the id of a `task` row
+/// on the runner, so `rows_read` explains a `ps` row that has already ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watching_program_holds_drain_task_rows() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let (mut child, stop, relay) = wire(&kernel, &a, "jd");
+    wire_write(&mut child, &json!({"op": "watch", "src": a.as_str()})).await;
+    wire_write(&mut child, &json!({"op": "onmessage"})).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut verbs: Vec<String> = Vec::new();
+    while tokio::time::Instant::now() < deadline {
+        verbs = kernel
+            .tasks
+            .rows()
+            .iter()
+            .filter_map(|r| r["verb"].as_str().map(str::to_string))
+            .collect();
+        if verbs.iter().any(|v| v == "watch_drain") && verbs.iter().any(|v| v == "inbox_drain") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(verbs.iter().any(|v| v == "watch_drain"), "{verbs:?}");
+    assert!(verbs.iter().any(|v| v == "inbox_drain"), "{verbs:?}");
+    // Each is OWNED by the runner, so `ps` attributes it and `cancel` can reach it.
+    for row in kernel.tasks.rows() {
+        if row["verb"] == "watch_drain" || row["verb"] == "inbox_drain" {
+            assert_eq!(row["agent"], a.as_str(), "{row}");
+            assert!(row["id"].is_i64(), "{row}");
+        }
+    }
+
+    // C36 — and each one is a ROW, under the id `ps` reported.
+    let store: Vec<_> = kernel
+        .rows
+        .for_agent(&a)
+        .into_iter()
+        .filter(|r| r.get("kind") == Some(&json!("task")))
+        .collect();
+    for verb in ["watch_drain", "inbox_drain"] {
+        let row = store
+            .iter()
+            .find(|r| r.get("verb") == Some(&json!(verb)))
+            .unwrap_or_else(|| panic!("no `{verb}` task row: {store:?}"));
+        let id = row["id"].as_i64().expect("a row id");
+        assert!(
+            kernel.tasks.rows().iter().any(|t| t["id"] == json!(id)),
+            "the task id is the row id for {verb}"
+        );
+    }
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+    // …and the release after the read loop takes both rows back out.
+    let left: Vec<String> = kernel
+        .tasks
+        .rows()
+        .iter()
+        .filter_map(|r| r["verb"].as_str().map(str::to_string))
+        .filter(|v| v == "watch_drain" || v == "inbox_drain")
+        .collect();
+    assert!(left.is_empty(), "drain rows leaked past teardown: {left:?}");
 }

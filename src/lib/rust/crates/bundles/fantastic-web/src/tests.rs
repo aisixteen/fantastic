@@ -42,7 +42,7 @@ fn mk_kernel(tmp: &TempDir, register_ws: bool, register_rest: bool) -> Arc<Kerne
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -57,71 +57,6 @@ async fn wait_until_port_accepts(port: u16) {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-}
-
-#[test]
-fn readme_present_and_titled() {
-    assert!(!README.is_empty());
-    assert!(README.contains("web — axum HTTP host"));
-}
-
-#[test]
-fn transport_js_self_invokes_global() {
-    assert!(TRANSPORT_JS.contains("fantastic_transport"));
-    assert!(TRANSPORT_JS.contains("BroadcastChannel"));
-}
-
-#[test]
-fn root_index_includes_transport_script() {
-    assert!(ROOT_INDEX_HTML.contains("transport.js"));
-}
-
-#[test]
-fn inject_transport_adds_script_before_head_close() {
-    let html = "<html><head><title>x</title></head><body>hi</body></html>";
-    let out = inject_transport(html);
-    assert!(out.contains(r#"<script src="/transport.js"></script>"#));
-    let idx_script = out.find("/transport.js").unwrap();
-    let idx_close = out.find("</head>").unwrap();
-    assert!(idx_script < idx_close);
-}
-
-#[test]
-fn inject_transport_is_idempotent() {
-    // `inject_transport` now also adds a default favicon `<link>`
-    // (Python parity). Idempotency requires BOTH tags to be present
-    // already.
-    let html = r#"<html><head><link rel="icon" type="image/png" href="/_assets/favicon.png"><script src="/transport.js"></script></head><body>x</body></html>"#;
-    assert_eq!(inject_transport(html), html);
-}
-
-#[test]
-fn inject_transport_handles_no_head() {
-    let html = "<body>x</body>";
-    let out = inject_transport(html);
-    assert!(out.contains(r#"<script src="/transport.js"></script>"#));
-    assert!(out.contains(r#"<link rel="icon" type="image/png" href="/_assets/favicon.png">"#));
-    assert!(out.ends_with("<body>x</body>"));
-}
-
-#[test]
-fn guess_mime_known_types() {
-    assert_eq!(guess_mime("a.html"), "text/html; charset=utf-8");
-    assert_eq!(guess_mime("a.CSS"), "text/css; charset=utf-8");
-    assert_eq!(guess_mime("a.png"), "image/png");
-    assert_eq!(guess_mime("a.json"), "application/json");
-    assert_eq!(guess_mime("unknown"), "text/plain; charset=utf-8");
-}
-
-#[test]
-fn translate_path_substitutes_python_placeholders() {
-    assert_eq!(translate_path("/{host_id}/ws"), "/:host_id/ws");
-    assert_eq!(
-        translate_path("/{rest}/_reflect/{target_id}"),
-        "/:rest/_reflect/:target_id"
-    );
-    assert_eq!(translate_path("/static"), "/static");
-    assert_eq!(translate_path("/{x:path}"), "/*x");
 }
 
 /// `web` alone (no web_ws child) must NOT expose `/<id>/ws`. The
@@ -345,111 +280,6 @@ async fn web_with_rest_child_serves_rest() {
     assert!(resp.status().is_success(), "status: {}", resp.status());
     let body: Value = resp.json().await.expect("body json");
     assert!(body["agents"].is_array(), "body: {body}");
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-/// Boot web alone, then create a `web_ws` child + emit `routes_changed`,
-/// verify the WS endpoint becomes available without restarting axum.
-#[tokio::test]
-async fn runtime_added_ws_child_hot_mounts() {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message as TMessage;
-
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_kernel(&tmp, true, false);
-    let port = free_port();
-    let web_id = "web_hot";
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
-                "id": web_id,
-                "port": port,
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let boot_reply = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "boot"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
-    wait_until_port_accepts(port).await;
-
-    // Sanity: no WS yet.
-    let url_http = format!("http://127.0.0.1:{port}/{web_id}/ws");
-    let pre = reqwest::Client::new()
-        .get(&url_http)
-        .send()
-        .await
-        .expect("pre http");
-    assert_eq!(pre.status().as_u16(), 404, "pre-mount must 404");
-
-    // Stage the child + trigger a re-mount via `routes_changed` emit.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({
-                "type": "create_agent", "parent_id": web_id,
-                "handler_module": "web_ws.tools",
-                "id": "wws_hot",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    // `create_agent` itself emits `created` which the subscriber treats
-    // as a re-mount signal — but we also explicitly emit
-    // `routes_changed` for spec parity. Both should be idempotent.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("wws_hot"),
-            json!({"type": "routes_changed"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-
-    // The subscriber tokio::spawns the rebuild; poll until the WS
-    // upgrades or we time out.
-    let mut ok = false;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        let url_ws = format!("ws://127.0.0.1:{port}/{web_id}/ws");
-        if let Ok((mut ws, _)) = tokio_tungstenite::connect_async(&url_ws).await {
-            let frame = json!({"type": "call", "target": "kernel", "payload": {"type": "list_agents"}, "id": "hot1"});
-            if ws.send(TMessage::Text(frame.to_string())).await.is_err() {
-                continue;
-            }
-            if let Ok(Some(Ok(TMessage::Text(t)))) =
-                tokio::time::timeout(Duration::from_secs(1), ws.next()).await
-            {
-                if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    if v["type"] == "reply" && v["id"] == "hot1" {
-                        ok = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    assert!(ok, "WS endpoint never became live after hot-mount");
 
     let _ = kernel
         .send(vec![Item::new(
@@ -741,7 +571,7 @@ async fn oversized_chunk_rejected() {
         .expect("ws connect");
 
     // Past MAX_CHUNK_SIZE, which is 4 KB under test (see the consts in `lib.rs`).
-    let big_blob = vec![0u8; 2 * super::MAX_CHUNK_SIZE];
+    let big_blob = vec![0u8; 2 * crate::ws::MAX_CHUNK_SIZE];
     let header = json!({"target": "nonexistent", "type": "noop", "id": "big1"});
     let frame = build_binary_frame(&header, &big_blob);
     let frames = send_binary_and_drain(&mut ws, frame).await;
@@ -781,8 +611,8 @@ async fn oversized_total_rejected() {
     // the total cap one chunk before the last. Both caps are tiny under test, so
     // this is a few KB rather than the 101 MB it used to push across the socket.
     let upload_id = "u_huge";
-    let chunk_size = super::MAX_CHUNK_SIZE;
-    let total_chunks: u32 = (super::MAX_UPLOAD_SIZE / chunk_size) as u32 + 1;
+    let chunk_size = crate::ws::MAX_CHUNK_SIZE;
+    let total_chunks: u32 = (crate::ws::MAX_UPLOAD_SIZE / chunk_size) as u32 + 1;
     let one_mb = vec![0u8; chunk_size];
 
     let mut saw_total_error = false;
@@ -931,207 +761,6 @@ async fn pending_uploads_drop_on_ws_disconnect() {
 // These tests boot the HTTP layer + hit each asset URL with reqwest
 // and verify content-type + non-empty body + immutable cache header.
 
-async fn boot_web_for_assets(kernel: &Arc<Kernel>, port: u16, web_id: &str) {
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
-                "id": web_id,
-                "port": port,
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let boot_reply = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "boot"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
-    wait_until_port_accepts(port).await;
-}
-
-#[tokio::test]
-async fn assets_three_js_served_with_javascript_mime() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_kernel(&tmp, false, false);
-    let port = free_port();
-    let web_id = "web_three_js";
-    boot_web_for_assets(&kernel, port, web_id).await;
-
-    let url = format!("http://127.0.0.1:{port}/_assets/three.module.js");
-    let resp = reqwest::get(&url).await.expect("http get");
-    assert_eq!(resp.status().as_u16(), 200, "expected 200");
-    let ct = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        ct.starts_with("application/javascript"),
-        "content-type was {ct:?}"
-    );
-    let body = resp.text().await.expect("body");
-    assert!(
-        body.len() > 100_000,
-        "three.module.js looks too small: {} bytes",
-        body.len()
-    );
-    assert!(
-        body.contains("THREE") || body.contains("three"),
-        "body doesn't look like Three.js"
-    );
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn assets_xterm_js_served_with_javascript_mime() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_kernel(&tmp, false, false);
-    let port = free_port();
-    let web_id = "web_xterm_js";
-    boot_web_for_assets(&kernel, port, web_id).await;
-
-    let url = format!("http://127.0.0.1:{port}/_assets/xterm.min.js");
-    let resp = reqwest::get(&url).await.expect("http get");
-    assert_eq!(resp.status().as_u16(), 200);
-    let ct = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        ct.starts_with("application/javascript"),
-        "content-type was {ct:?}"
-    );
-    let body = resp.text().await.expect("body");
-    assert!(
-        body.len() > 50_000,
-        "xterm.min.js too small: {} bytes",
-        body.len()
-    );
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn assets_xterm_css_served_with_css_mime() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_kernel(&tmp, false, false);
-    let port = free_port();
-    let web_id = "web_xterm_css";
-    boot_web_for_assets(&kernel, port, web_id).await;
-
-    let url = format!("http://127.0.0.1:{port}/_assets/xterm.min.css");
-    let resp = reqwest::get(&url).await.expect("http get");
-    assert_eq!(resp.status().as_u16(), 200);
-    let ct = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(ct.starts_with("text/css"), "content-type was {ct:?}");
-    let body = resp.text().await.expect("body");
-    assert!(body.contains("xterm"), "css body looks wrong");
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn assets_xterm_addon_fit_served() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_kernel(&tmp, false, false);
-    let port = free_port();
-    let web_id = "web_addon_fit";
-    boot_web_for_assets(&kernel, port, web_id).await;
-
-    let url = format!("http://127.0.0.1:{port}/_assets/xterm-addon-fit.min.js");
-    let resp = reqwest::get(&url).await.expect("http get");
-    assert_eq!(resp.status().as_u16(), 200);
-    let ct = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        ct.starts_with("application/javascript"),
-        "content-type was {ct:?}"
-    );
-    let body = resp.text().await.expect("body");
-    assert!(!body.is_empty());
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn assets_carry_immutable_cache_control() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_kernel(&tmp, false, false);
-    let port = free_port();
-    let web_id = "web_cache_ctl";
-    boot_web_for_assets(&kernel, port, web_id).await;
-
-    let url = format!("http://127.0.0.1:{port}/_assets/three.module.js");
-    let resp = reqwest::get(&url).await.expect("http get");
-    let cache = resp
-        .headers()
-        .get("cache-control")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        cache.contains("immutable"),
-        "expected immutable cache-control; got {cache:?}"
-    );
-    assert!(
-        cache.contains("max-age="),
-        "expected max-age in cache-control; got {cache:?}"
-    );
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
 // ── ingest_chunk unit tests (pure assembly, no WS) ──────────────────
 
 #[test]
@@ -1143,13 +772,17 @@ fn ingest_chunk_assembles_out_of_order() {
     let mut map = std::collections::HashMap::new();
     let hdr = json!({"target": "x", "type": "upload"});
     // Arrive last-index first, then 0, then 1.
-    assert!(ingest_chunk(&mut map, "u", 2, 3, b"C".to_vec(), &hdr)
-        .expect("early last chunk acks, not errors")
-        .is_none());
-    assert!(ingest_chunk(&mut map, "u", 0, 3, b"A".to_vec(), &hdr)
-        .unwrap()
-        .is_none());
-    let (header, blob) = ingest_chunk(&mut map, "u", 1, 3, b"B".to_vec(), &hdr)
+    assert!(
+        crate::ws::ingest_chunk(&mut map, "u", 2, 3, b"C".to_vec(), &hdr)
+            .expect("early last chunk acks, not errors")
+            .is_none()
+    );
+    assert!(
+        crate::ws::ingest_chunk(&mut map, "u", 0, 3, b"A".to_vec(), &hdr)
+            .unwrap()
+            .is_none()
+    );
+    let (header, blob) = crate::ws::ingest_chunk(&mut map, "u", 1, 3, b"B".to_vec(), &hdr)
         .unwrap()
         .expect("assembled once all 3 present");
     assert_eq!(blob, b"ABC", "index-ordered concat regardless of arrival");
@@ -1161,10 +794,12 @@ fn ingest_chunk_assembles_out_of_order() {
 fn ingest_chunk_total_mismatch_errors_and_drops() {
     let mut map = std::collections::HashMap::new();
     let hdr = json!({"type": "upload"});
-    assert!(ingest_chunk(&mut map, "u", 0, 2, b"A".to_vec(), &hdr)
-        .unwrap()
-        .is_none());
-    let err = ingest_chunk(&mut map, "u", 1, 3, b"B".to_vec(), &hdr)
+    assert!(
+        crate::ws::ingest_chunk(&mut map, "u", 0, 2, b"A".to_vec(), &hdr)
+            .unwrap()
+            .is_none()
+    );
+    let err = crate::ws::ingest_chunk(&mut map, "u", 1, 3, b"B".to_vec(), &hdr)
         .expect_err("total_chunks mismatch must error");
     assert!(err.contains("total_chunks mismatch"), "{err}");
     assert!(map.is_empty(), "mismatched entry dropped");
@@ -1174,7 +809,7 @@ fn ingest_chunk_total_mismatch_errors_and_drops() {
 fn ingest_chunk_single_chunk_completes_immediately() {
     let mut map = std::collections::HashMap::new();
     let hdr = json!({"type": "upload"});
-    let (_h, blob) = ingest_chunk(&mut map, "u", 0, 1, b"solo".to_vec(), &hdr)
+    let (_h, blob) = crate::ws::ingest_chunk(&mut map, "u", 0, 1, b"solo".to_vec(), &hdr)
         .unwrap()
         .expect("a 1-chunk upload assembles on the first frame");
     assert_eq!(blob, b"solo");
@@ -1211,7 +846,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     // The file_bridge clamps its root under the kernel's running dir, which the
@@ -1584,12 +1219,12 @@ async fn finished_call_handles_are_pruned_before_the_next_push() {
         let t = kernel.spawn_task(&agent, "ws_call", async {});
         // Let it finish, then push: the NEXT push must prune it.
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        super::track_call(&kernel, &pending, t);
+        crate::ws::track_call(&kernel, &pending, t);
         tokio::task::yield_now().await;
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let live = kernel.spawn_task(&agent, "ws_call", std::future::pending::<()>());
-    super::track_call(&kernel, &pending, live);
+    crate::ws::track_call(&kernel, &pending, live);
     let held = pending.lock().unwrap().len();
     assert!(held <= 2, "pending grew unbounded: {held} ids held");
 
@@ -1598,4 +1233,1238 @@ async fn finished_call_handles_are_pruned_before_the_next_push() {
     assert_eq!(held, 1, "the in-flight id was pruned away");
     assert!(kernel.tasks.contains(&live));
     kernel.cancel_task(&live).await;
+}
+
+// ═══ batch 6: python-parity twins ═══════════════════════════════════
+
+/// Stage one `web` host with an OPEN `web_rest` child and an OPEN
+/// `file_bridge` rooted at `<tmp>/served`, booted and accepting. The shape
+/// every HTTP-envelope twin below needs.
+async fn stage_host(
+    tmp: &TempDir,
+    port: u16,
+    web_id: &str,
+    rest_id: &str,
+    fb_id: &str,
+) -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, WebBundle);
+    kernel
+        .bundles
+        .register("web_rest.tools", fantastic_web_rest::WebRestBundle);
+    kernel
+        .bundles
+        .register("web_ws.tools", fantastic_web_ws::WebWsBundle);
+    kernel
+        .bundles
+        .register("file_bridge.tools", fantastic_file::FileBundle);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    std::fs::write(served.join("hello.txt"), "hello world\n").unwrap();
+    std::fs::write(served.join("empty.txt"), "").unwrap();
+    std::fs::write(served.join("doc.pdf"), b"%PDF-1.4\n").unwrap();
+    std::fs::write(served.join("na\u{ef}ve.txt"), "naive!\n").unwrap();
+
+    for item in [
+        json!({"type": "create_agent", "parent_id": "kernel",
+               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+        json!({"type": "create_agent", "parent_id": "core",
+               "handler_module": "file_bridge.tools", "id": fb_id, "root": "served",
+               "ingress_rule": "allow_all_ingress",
+               "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
+                               rest_id: "*", web_id: "*"}}),
+        json!({"type": "create_agent", "parent_id": web_id,
+               "handler_module": "web_rest.tools", "id": rest_id,
+               "ingress_rule": "allow_all_ingress",
+               "can_call": {"core": "*", "kernel": "*", fb_id: "*"}}),
+        json!({"type": "update_agent", "id": "core", "callable_by": {
+               "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
+        json!({"type": "update_agent", "id": web_id, "can_call": {
+               "$self": "*", "$parent": "*", "$children": "*", fb_id: "*"}}),
+    ] {
+        let reply = kernel
+            .send(vec![Item::new(AgentId::from("core"), item)])
+            .await
+            .remove(0)
+            .result;
+        assert!(reply.get("error").is_none(), "stage: {reply}");
+    }
+    let boot = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(boot["running"], true, "boot: {boot}");
+    wait_until_port_accepts(port).await;
+    kernel
+}
+
+/// A11.2 — the readme is python's file, byte for byte.
+#[test]
+fn readme_is_python_verbatim() {
+    assert_eq!(
+        README,
+        include_str!("../../../../../python/bundled_agents/web/host/src/web/readme.md")
+    );
+}
+
+/// A11.3 — the `/` scaffold is python's template, byte for byte (no `.visit`
+/// rule, no legend, no `transport.js` tag).
+#[test]
+fn index_html_is_python_verbatim() {
+    assert_eq!(
+        ROOT_INDEX_HTML,
+        include_str!("../../../../../python/bundled_agents/web/host/src/web/templates/index.html")
+    );
+}
+
+/// A11.10 — the file proxy types through CPython's `mimetypes` table, with
+/// starlette's `; charset=utf-8` on `text/*` and octet-stream for a miss.
+#[test]
+fn file_proxy_content_type_matches_python_mimetypes() {
+    assert_eq!(mimetypes::content_type("doc.pdf"), "application/pdf");
+    assert_eq!(
+        mimetypes::content_type("a/b/note.txt"),
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(
+        mimetypes::content_type("page.HTML"),
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(
+        mimetypes::content_type("style.css"),
+        "text/css; charset=utf-8"
+    );
+    assert_eq!(mimetypes::content_type("data.json"), "application/json");
+    assert_eq!(mimetypes::content_type("logo.png"), "image/png");
+    assert_eq!(mimetypes::content_type("logo.svg"), "image/svg+xml");
+    // an ENCODING suffix names the compression, not the type
+    assert_eq!(mimetypes::content_type("dump.tar.gz"), "application/x-tar");
+    // a compound suffix rewrites first
+    assert_eq!(mimetypes::content_type("pack.tgz"), "application/x-tar");
+    // unknown and extension-less both fall back
+    assert_eq!(
+        mimetypes::content_type("blob.zzz"),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        mimetypes::content_type("README"),
+        "application/octet-stream"
+    );
+}
+
+/// A13.14 — every server→client text frame is python's
+/// `json.dumps(envelope, default=str)`: `, `/`: ` separators and ensure_ascii,
+/// so `·` and `↑` leave escaped, not as raw UTF-8.
+#[test]
+fn event_frame_bytes_match_python_json_dumps() {
+    let frame =
+        json!({"type": "event", "payload": {"text": "[reply to 128 · files reflect · ↑126]"}});
+    assert_eq!(
+        fantastic_io_bridge::codec::encode_frame(&frame),
+        "{\"type\": \"event\", \"payload\": {\"text\": \"[reply to 128 \\u00b7 files reflect \\u00b7 \\u2191126]\"}}"
+    );
+}
+
+/// A13.18 — uvicorn's keepalive contract, pinned at the source (a live twin
+/// would have to idle 40 s). The loop pings every `PING_INTERVAL` and closes
+/// `1011 keepalive ping timeout` when no pong lands inside `PING_TIMEOUT`.
+#[test]
+fn server_pings_and_closes_1011_without_pong() {
+    assert_eq!(crate::ws::PING_INTERVAL, std::time::Duration::from_secs(20));
+    assert_eq!(crate::ws::PING_TIMEOUT, std::time::Duration::from_secs(20));
+    assert_eq!(crate::ws::CLOSE_INTERNAL_ERROR, 1011);
+    assert_eq!(
+        crate::ws::KEEPALIVE_TIMEOUT_REASON,
+        "keepalive ping timeout"
+    );
+}
+
+/// A11.3 (D11) — the route table is python's FOUR baked routes. The rust-only
+/// extras are gone: no `/<id>/` server-side render, no `/transport.js`, no
+/// `/_assets/*` vendored JS, no `/favicon.ico`.
+#[tokio::test]
+async fn render_route_is_absent() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_d11", "wr_d11", "fb_d11").await;
+    let client = reqwest::Client::new();
+    for gone in [
+        "/web_d11/",
+        "/transport.js",
+        "/favicon.ico",
+        "/_assets/three.module.js",
+        "/_assets/xterm.min.js",
+    ] {
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}{gone}"))
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(resp.status().as_u16(), 404, "{gone} must not be a route");
+    }
+    // The four that remain DO serve.
+    for kept in ["/", "/favicon.png", "/_assets/favicon.png"] {
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}{kept}"))
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(resp.status().as_u16(), 200, "{kept} must serve");
+    }
+    // `/` is python's `_index_page` markup: id, code, hm — no `↗` visit link,
+    // because there is no server-side render route to link to.
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .expect("get /");
+    assert_eq!(resp.headers()["content-type"], "text/html; charset=utf-8");
+    let page = resp.text().await.unwrap();
+    assert!(!page.contains("class=\"visit\""), "no ↗ link: {page}");
+    assert!(!page.contains("transport.js"), "no transport tag");
+    assert!(
+        page.contains(
+            r#"<li><span class="id">core</span> <code>core</code> <span class="hm">(root)</span>"#
+        ),
+        "python's node markup: {page}"
+    );
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/fb_d11/file/hello.txt"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers()["content-type"],
+        "text/plain; charset=utf-8",
+        "A11.10: python's mimetypes table types the proxy"
+    );
+    assert_eq!(resp.text().await.unwrap(), "hello world\n");
+    stop(&kernel, "web_d11").await;
+}
+
+/// A13.6 + A13.9 — an unmatched path is FastAPI's `{"detail":"Not Found"}`, a
+/// path that matches under another method is `405` with that route's `Allow`
+/// and FastAPI's `{"detail":"Method Not Allowed"}`, and a trailing slash that
+/// would match after toggling is a `307` carrying the `Host`.
+#[tokio::test]
+async fn unmatched_paths_and_methods_answer_fastapi_json() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_404", "rest", "fb_404").await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/nope"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+    assert_eq!(resp.headers()["content-type"], "application/json");
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, r#"{"detail":"Not Found"}"#);
+    assert_eq!(body.len(), 22, "python measured 22 bytes");
+
+    // `/rest/files` is mounted POST-only: every other method is 405 allow: POST.
+    for method in [
+        reqwest::Method::GET,
+        reqwest::Method::PUT,
+        reqwest::Method::HEAD,
+        reqwest::Method::OPTIONS,
+    ] {
+        let resp = client
+            .request(method.clone(), format!("http://127.0.0.1:{port}/rest/core"))
+            .send()
+            .await
+            .expect("req");
+        assert_eq!(resp.status().as_u16(), 405, "{method} on a POST route");
+        assert_eq!(resp.headers()["allow"], "POST");
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        assert_eq!(resp.headers()["content-length"], "31");
+        if method != reqwest::Method::HEAD {
+            assert_eq!(
+                resp.text().await.unwrap(),
+                r#"{"detail":"Method Not Allowed"}"#
+            );
+        }
+    }
+    // HEAD on a GET route is 405 too — FastAPI's APIRoute adds no implicit HEAD.
+    let resp = client
+        .request(
+            reqwest::Method::HEAD,
+            format!("http://127.0.0.1:{port}/rest/_reflect/core"),
+        )
+        .send()
+        .await
+        .expect("head");
+    assert_eq!(resp.status().as_u16(), 405);
+    assert_eq!(resp.headers()["allow"], "GET");
+
+    // `/rest/` toggles to `/rest`, which matches nothing → 404 (measured).
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/rest/"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+    assert_eq!(resp.text().await.unwrap(), r#"{"detail":"Not Found"}"#);
+    stop(&kernel, "web_404").await;
+}
+
+/// A13.9 — starlette's ordered walk: `POST /rest/_reflect` hits the POST
+/// route's `{target_id}` (the literal `_reflect` GET route is a different
+/// method, so it cannot shadow it), and a trailing slash redirects `307`.
+#[tokio::test]
+async fn post_to_reflect_literal_dispatches_to_that_target() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_ord", "rest", "fb_ord").await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/rest/_reflect"))
+        .header("content-type", "application/json")
+        .body(r#"{"type":"reflect"}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "python dispatches to target `_reflect`"
+    );
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["reason"], "unknown_agent",
+        "the target named `_reflect` does not exist: {body}"
+    );
+    stop(&kernel, "web_ord").await;
+}
+
+/// A13.9 — `GET /rest/_reflect/core/` toggles to a matching route, so python
+/// answers `307` with an absolute `location` built from the `Host` header and
+/// the query string carried through. `content-length: 0`.
+#[tokio::test]
+async fn trailing_slash_answers_307_with_location() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_307", "rest", "fb_307").await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/rest/_reflect/core/?tree=none"
+        ))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 307);
+    assert_eq!(
+        resp.headers()["location"],
+        format!("http://127.0.0.1:{port}/rest/_reflect/core?tree=none")
+    );
+    assert_eq!(resp.headers()["content-length"], "0");
+    stop(&kernel, "web_307").await;
+}
+
+/// A13.13 — no request-body limit: axum's 2 MiB `DefaultBodyLimit` refused a
+/// 3 MB write where python answers `written: 3000000`.
+#[tokio::test]
+async fn rest_post_accepts_bodies_over_2mb() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_big", "rest", "fb_big").await;
+    let blob = vec![b'x'; 3_000_000];
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/rest/fb_big"))
+        .header("content-type", "application/octet-stream")
+        .header(
+            "x-fantastic-payload",
+            r#"{"type":"write_stream","path":"big.bin","truncate":true}"#,
+        )
+        .body(blob)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["written"], 3_000_000, "body: {body}");
+    stop(&kernel, "web_big").await;
+}
+
+/// Shared teardown.
+async fn stop(kernel: &Arc<Kernel>, web_id: &str) {
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// A13.7 — the response header BLOCK, in python's order: uvicorn writes `date`
+/// then `server`, starlette then the handler's own headers, then
+/// `content-length`, then `content-type`; a `204` carries neither of the last
+/// two. Read off the raw socket, because that is where order lives.
+#[tokio::test]
+async fn rest_response_header_order_matches_python() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_hdr", "rest", "fb_hdr").await;
+
+    async fn header_names(port: u16, request: &str) -> (String, Vec<String>) {
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        sock.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = Vec::new();
+        loop {
+            let mut chunk = [0u8; 1024];
+            let n = sock.read(&mut chunk).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let head = text.split("\r\n\r\n").next().unwrap_or("").to_string();
+        let mut lines = head.split("\r\n");
+        let status = lines.next().unwrap_or("").to_string();
+        let names = lines
+            .filter(|l| !l.is_empty())
+            .map(|l| l.split(':').next().unwrap_or("").to_ascii_lowercase())
+            .collect();
+        (status, names)
+    }
+
+    // JSON reply: date, server, content-length, content-type.
+    let (status, names) = header_names(
+        port,
+        &format!(
+            "POST /rest/core HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\ncontent-type: application/json\r\ncontent-length: 22\r\n\r\n{{\"type\":\"list_agents\"}}"
+        ),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert_eq!(names, ["date", "server", "content-length", "content-type"]);
+
+    // 405: date, server, allow, content-length, content-type.
+    let (status, names) = header_names(
+        port,
+        &format!("GET /rest/core HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 405"), "{status}");
+    assert_eq!(
+        names,
+        ["date", "server", "allow", "content-length", "content-type"]
+    );
+
+    // 204: date, server only.
+    let (status, names) = header_names(
+        port,
+        &format!(
+            "POST /rest/fb_hdr HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\ncontent-type: application/json\r\ncontent-length: 15\r\n\r\n{{\"type\":\"boot\"}}"
+        ),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 204"), "{status}");
+    assert_eq!(names, ["date", "server"]);
+
+    // octet: date, server, x-fantastic-payload, x-fantastic-bytes-field,
+    // content-length, content-type.
+    let (status, names) = header_names(
+        port,
+        &format!(
+            "POST /rest/fb_hdr HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\ncontent-type: application/octet-stream\r\nx-fantastic-payload: {{\"type\":\"read_stream\",\"path\":\"hello.txt\"}}\r\ncontent-length: 0\r\n\r\n"
+        ),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert_eq!(
+        names,
+        [
+            "date",
+            "server",
+            "x-fantastic-payload",
+            "x-fantastic-bytes-field",
+            "content-length",
+            "content-type"
+        ]
+    );
+    stop(&kernel, "web_hdr").await;
+}
+
+/// A13.2 + A13.4 + A13.12 + A11.20 — the octet leg's header contract.
+#[tokio::test]
+async fn octet_leg_header_contract_matches_python() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_oct", "rest", "fb_oct").await;
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/rest/fb_oct");
+
+    // A13.2 — the reply header is `json.dumps(rest)`: `, `/`: ` separators and
+    // ensure_ascii, so `naïve` leaves as `naïve`, never raw UTF-8.
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/octet-stream")
+        .header(
+            "x-fantastic-payload",
+            r#"{"type":"read_stream","path":"na\u00efve.txt"}"#,
+        )
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers()["x-fantastic-payload"],
+        r#"{"path": "na\u00efve.txt", "offset": 0, "next_offset": 7, "eof": true, "size": 7}"#
+    );
+    assert_eq!(resp.headers()["x-fantastic-bytes-field"], "bytes");
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), b"naive!\n");
+
+    // A13.4 — an EMPTY payload header parses as `{}` (`headers.get(...) or "{}"`),
+    // so the dispatch is a typeless send, not a 400.
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/octet-stream")
+        .header("x-fantastic-payload", "")
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "an empty header is an empty envelope"
+    );
+    let body: Value = resp.json().await.expect("json");
+    // The envelope reached the target as `{}` — a 400 would mean the leg had
+    // treated the empty value as a parse failure. (python's refusal TEXT here
+    // is `send: payload.type required`, which arrives with A13.3's move of the
+    // octet leg onto the batch.)
+    assert!(body.get("error").is_some(), "body: {body}");
+
+    // A13.12 — request header values decode byte-for-byte as latin-1, so a raw
+    // UTF-8 path arrives mojibaked exactly as starlette hands it to python.
+    let mut raw = reqwest::header::HeaderValue::from_bytes(
+        "{\"type\":\"read_stream\",\"path\":\"na\u{ef}ve.txt\"}".as_bytes(),
+    )
+    .expect("header");
+    raw.set_sensitive(false);
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/octet-stream")
+        .header("x-fantastic-payload", raw)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["reason"], "not_found",
+        "latin-1 mangles the path: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("na\u{c3}\u{af}ve.txt"),
+        "the path is the latin-1 reading of the raw bytes: {body}"
+    );
+
+    // A11.20 — `x-fantastic-bytes-field` names the field the body lands under.
+    // The default name binds the body as the chunk...
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/octet-stream")
+        .header(
+            "x-fantastic-payload",
+            r#"{"type":"write_stream","path":"bf1.bin","truncate":true}"#,
+        )
+        .header("x-fantastic-bytes-field", "bytes")
+        .body("abcdef")
+        .send()
+        .await
+        .expect("post");
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["written"], 6, "body: {body}");
+    // ...any OTHER name leaves the target with no chunk at all (`written: 0`)...
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/octet-stream")
+        .header(
+            "x-fantastic-payload",
+            r#"{"type":"write_stream","path":"bf2.bin","truncate":true}"#,
+        )
+        .header("x-fantastic-bytes-field", "data")
+        .body("abcdef")
+        .send()
+        .await
+        .expect("post");
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["written"], 0,
+        "a foreign field name writes nothing: {body}"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join("served/bf2.bin")).unwrap(),
+        b""
+    );
+    // ...and a header `bytes` key is a JSON value where raw bytes belong.
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/octet-stream")
+        .header(
+            "x-fantastic-payload",
+            r#"{"type":"write_stream","path":"bf3.bin","bytes":"abc"}"#,
+        )
+        .header("x-fantastic-bytes-field", "data")
+        .body("abcdef")
+        .send()
+        .await
+        .expect("post");
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["reason"], "missing_arg", "body: {body}");
+    assert_eq!(
+        body["error"],
+        "write_stream: bytes (one raw chunk) required"
+    );
+    assert!(!tmp.path().join("served/bf3.bin").exists());
+    stop(&kernel, "web_oct").await;
+}
+
+/// A11.17 — the GET `_reflect` shortcuts read their flags exactly as python's
+/// `_reflect_payload` does (`readme=1|true|yes` ⇒ `True`, any other non-falsy
+/// value is a DOC KEY, `tree`/`bundles` only from the three tiers), and a null
+/// reply is a bare 404.
+#[tokio::test]
+async fn get_reflect_query_flags_match_python() {
+    assert_eq!(routes::reflect_payload(""), json!({"type": "reflect"}));
+    assert_eq!(
+        routes::reflect_payload("readme=true"),
+        json!({"type": "reflect", "readme": true})
+    );
+    assert_eq!(
+        routes::reflect_payload("readme=1"),
+        json!({"type": "reflect", "readme": true})
+    );
+    assert_eq!(
+        routes::reflect_payload("readme=yes"),
+        json!({"type": "reflect", "readme": true})
+    );
+    assert_eq!(
+        routes::reflect_payload("readme=0"),
+        json!({"type": "reflect"})
+    );
+    assert_eq!(
+        routes::reflect_payload("readme=no"),
+        json!({"type": "reflect"})
+    );
+    assert_eq!(
+        routes::reflect_payload("readme="),
+        json!({"type": "reflect"})
+    );
+    assert_eq!(
+        routes::reflect_payload("readme=self-extension"),
+        json!({"type": "reflect", "readme": "self-extension"})
+    );
+    assert_eq!(
+        routes::reflect_payload("tree=ids&bundles=none"),
+        json!({"type": "reflect", "tree": "ids", "bundles": "none"})
+    );
+    assert_eq!(
+        routes::reflect_payload("tree=deep"),
+        json!({"type": "reflect"})
+    );
+
+    // ...and over the wire: `?readme=true` is 200 (rust used to answer 400
+    // "invalid digit found in string"), and a null reply is a 404.
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_q", "rest", "fb_q").await;
+    let client = reqwest::Client::new();
+    for q in ["?readme=true", "?readme=1", "?tree=ids", ""] {
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/rest/_reflect/fb_q{q}"))
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(resp.status().as_u16(), 200, "query {q:?}");
+    }
+    stop(&kernel, "web_q").await;
+}
+
+/// A11.11 + A11.12 — the reflect frame is python's, key for key.
+#[tokio::test]
+async fn reflect_sentence_and_verbs_match_python() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_r", "rest", "fb_r").await;
+    let reply = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_r"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let obj = reply.as_object().expect("object");
+    // The bundle's own frame, in python's key order; the kernel then appends
+    // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
+    assert_eq!(
+        obj.keys().map(String::as_str).take(9).collect::<Vec<_>>(),
+        vec![
+            "id",
+            "sentence",
+            "port",
+            "running",
+            "served_agent_count",
+            "surfaces",
+            "routes",
+            "browser_reachable",
+            "verbs",
+        ]
+    );
+    assert_eq!(
+        obj["sentence"],
+        json!("HTTP host — rendering routes baked in; call surfaces mounted from sub-agents.")
+    );
+    assert_eq!(obj["port"], json!(port));
+    assert_eq!(obj["running"], json!(true));
+    assert_eq!(obj["served_agent_count"], json!(kernel.agents.len()));
+    assert_eq!(
+        obj["surfaces"],
+        json!({"rest": ["/rest/{target_id}", "/rest/_reflect", "/rest/_reflect/{target_id}"]})
+    );
+    // The io leg is open AND both call gates name the host, so the file bridge
+    // is the one agent a browser could actually fetch.
+    assert_eq!(obj["browser_reachable"], json!(["fb_r"]));
+    assert!(obj["routes"]["GET /<agent_id>/file/<path>"]
+        .as_str()
+        .expect("route contract")
+        .starts_with("Streams a file by read_stream-ing through the named agent."));
+    assert_eq!(
+        obj["verbs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["reflect", "boot", "stop", "mount", "unmount"]
+    );
+    assert_eq!(
+        obj["verbs"]["reflect"],
+        json!("Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).")
+    );
+    stop(&kernel, "web_r").await;
+}
+
+/// A11.14 — `boot` answers `{running, surfaces}`, a missing port RAISES, and
+/// `stop` answers `{stopped:bool}`.
+#[tokio::test]
+async fn boot_and_stop_replies_match_python() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_b", "rest", "fb_b").await;
+    let boot = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_b"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(boot, json!({"running": true, "surfaces": ["rest"]}));
+    let stopped = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_b"),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(stopped, json!({"stopped": true}));
+    let again = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_b"),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(again, json!({"stopped": false}));
+
+    // A record with no `port` RAISES — no default, no fallback.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": HANDLER_MODULE, "id": "web_noport"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let boot = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_noport"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(boot["raised"], json!(true), "boot: {boot}");
+    assert_eq!(
+        boot["error"],
+        json!("RuntimeError: webapp web_noport: rec.port is required (no default). Set port on create_agent or via update_agent.")
+    );
+}
+
+/// A11.13 — `mount` / `unmount` are verbs with python's replies, and an
+/// unknown type is `web: unknown type 'x'`.
+#[tokio::test]
+async fn mount_unmount_and_unknown_verb_match_python() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_m", "rest", "fb_m").await;
+    let call = |payload: Value| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            kernel
+                .send(vec![Item::new(AgentId::from("web_m"), payload)])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    assert_eq!(
+        call(json!({"type": "mount"})).await,
+        json!({"error": "web.mount: child_id required"})
+    );
+    assert_eq!(
+        call(json!({"type": "unmount"})).await,
+        json!({"error": "web.unmount: child_id required"})
+    );
+    assert_eq!(
+        call(json!({"type": "mount", "child_id": "rest"})).await,
+        json!({"mounted": ["/rest/{target_id}", "/rest/_reflect", "/rest/_reflect/{target_id}"]})
+    );
+    assert_eq!(
+        call(json!({"type": "unmount", "child_id": "rest"})).await,
+        json!({"unmounted": "rest"})
+    );
+    assert_eq!(
+        call(json!({"type": "shutdown"})).await,
+        json!({"error": "web: unknown type 'shutdown'"})
+    );
+    assert_eq!(
+        call(json!({"type": "render_html"})).await,
+        json!({"error": "web: unknown type 'render_html'"})
+    );
+    stop(&kernel, "web_m").await;
+    assert_eq!(
+        call(json!({"type": "mount", "child_id": "rest"})).await,
+        json!({"error": "web.mount: not running"})
+    );
+    assert_eq!(
+        call(json!({"type": "unmount", "child_id": "rest"})).await,
+        json!({"error": "web.unmount: not running"})
+    );
+}
+
+/// A11.18 — routes change at boot and through `mount`/`unmount`, never through
+/// a state subscriber watching for `created`/`routes_changed`.
+#[tokio::test]
+async fn a_child_created_after_boot_mounts_only_through_mount() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = mk_kernel(&tmp, true, false);
+    let web_id = "web_hot";
+    for item in [json!({"type": "create_agent", "parent_id": "kernel",
+               "handler_module": HANDLER_MODULE, "id": web_id, "port": port})]
+    {
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("core"), item)])
+            .await
+            .remove(0)
+            .result;
+    }
+    // Unmount before boot is refused, not silently ignored.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        kernel
+            .send(vec![Item::new(
+                AgentId::from(web_id),
+                json!({"type": "unmount", "child_id": "ws_hot"}),
+            )])
+            .await
+            .remove(0)
+            .result,
+        json!({"error": "web.unmount: not running"})
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    wait_until_port_accepts(port).await;
+
+    // A child created AFTER boot is not routed until it is mounted.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": web_id,
+                   "handler_module": "web_ws.tools", "id": "ws_hot",
+                   "ingress_rule": "allow_all_ingress"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let ws_url = format!("http://127.0.0.1:{port}/{web_id}/ws");
+    let resp = reqwest::Client::new()
+        .get(&ws_url)
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404, "no auto-remount");
+
+    assert_eq!(
+        kernel
+            .send(vec![Item::new(
+                AgentId::from(web_id),
+                json!({"type": "mount", "child_id": "ws_hot"}),
+            )])
+            .await
+            .remove(0)
+            .result,
+        json!({"mounted": ["/{host_id}/ws"]})
+    );
+    let (sock, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web_id}/ws"))
+        .await
+        .expect("ws connect after mount");
+    drop(sock);
+
+    assert_eq!(
+        kernel
+            .send(vec![Item::new(
+                AgentId::from(web_id),
+                json!({"type": "unmount", "child_id": "ws_hot"}),
+            )])
+            .await
+            .remove(0)
+            .result,
+        json!({"unmounted": "ws_hot"})
+    );
+    let resp = reqwest::Client::new()
+        .get(&ws_url)
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "unmount takes effect immediately"
+    );
+    stop(&kernel, web_id).await;
+}
+
+/// A11.1 — boot ANNOUNCES the URL by sending `say` to `cli`, and falls back to
+/// the stderr line only when that send answered something (no cli ⇒ refusal).
+#[tokio::test]
+async fn boot_announces_say_to_cli() {
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, WebBundle);
+    kernel.bundles.register("cli_probe.tools", SayProbe);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let port = free_port();
+    for item in [
+        json!({"type": "create_agent", "parent_id": "kernel",
+               "handler_module": "cli_probe.tools", "id": "cli",
+               "callable_by": {"$self": "*", "$parent": "*", "$children": "*", "web_say": "*"}}),
+        json!({"type": "create_agent", "parent_id": "kernel",
+               "handler_module": HANDLER_MODULE, "id": "web_say", "port": port,
+               "can_call": {"$self": "*", "$parent": "*", "$children": "*", "cli": "*"}}),
+    ] {
+        let reply = kernel
+            .send(vec![Item::new(AgentId::from("core"), item)])
+            .await
+            .remove(0)
+            .result;
+        assert!(reply.get("error").is_none(), "stage: {reply}");
+    }
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_say"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let said = SAID.lock().expect("said").clone();
+    assert!(
+        said.iter().any(|s| s
+            == &format!(
+            "listening on http://127.0.0.1:{port}/ · rest/ws are children (reflect kernel for ids)"
+        )),
+        "cli never heard the announcement: {said:?}"
+    );
+    stop(&kernel, "web_say").await;
+}
+
+/// Every `say` text the boot announcement sent, for `boot_announces_say_to_cli`.
+static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A stand-in `cli` that records `say` and answers `None`, as python's does.
+struct SayProbe;
+
+#[async_trait::async_trait]
+impl fantastic_kernel::bundle::Bundle for SayProbe {
+    fn name(&self) -> &str {
+        "cli_probe"
+    }
+    async fn handle(
+        &self,
+        _agent_id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
+        if payload.get("type").and_then(Value::as_str) == Some("say") {
+            SAID.lock().expect("said").push(
+                payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            );
+        }
+        Ok(None)
+    }
+}
+
+/// A11.21 (D6) — a REST-originated dispatch runs inside the boot dispatch's
+/// task scope, so python's uvicorn-task parentage is reproduced at the source.
+///
+/// RESIDUAL: the observable `parent` still differs. python reports the boot pid
+/// even after that task is gone (§8 "Dangling REST parent pid", measured 7);
+/// rust's `TaskTable::register_marked` DROPS a parent that has left the table,
+/// so a request arriving after boot returned reports `parent: null`. Carrying a
+/// dead pid is a kernel-table change, not a web one.
+#[tokio::test]
+async fn ingress_dispatch_parent_matches_python() {
+    let kernel = Arc::new(Kernel::new());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let boot = kernel.spawn_task(&AgentId::from("web_p"), "boot", async move {
+        let _ = rx.await;
+    });
+    let state = AppState {
+        kernel: Arc::clone(&kernel),
+        web_agent_id: AgentId::from("web_p"),
+        boot_task: Some(boot),
+    };
+    let seen = state
+        .scoped(async { fantastic_kernel::current_task() })
+        .await;
+    assert_eq!(
+        seen,
+        Some(boot),
+        "a request handler runs under the boot task"
+    );
+    // While the boot task lives, work forked from a request names it as parent.
+    let forked = state
+        .scoped(async { kernel.spawn_task(&AgentId::from("web_p"), "ws_call", async {}) })
+        .await;
+    let rows = kernel.tasks.rows();
+    let row = rows
+        .iter()
+        .find(|r| r["id"] == json!(forked.0))
+        .expect("the forked task is in ps");
+    assert_eq!(row["parent"], json!(boot.0), "rows: {rows:?}");
+    let _ = tx.send(());
+}
+
+/// A13.16 — a client Close is ECHOED with its payload. Rust used to break the
+/// loop and abort the send task before the queued reply flushed, so the client
+/// saw `1006` (abnormal) instead of the code it sent.
+#[tokio::test]
+async fn client_close_is_echoed_with_its_code() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = mk_kernel(&tmp, true, false);
+    let web_id = "web_close";
+    for item in [
+        json!({"type": "create_agent", "parent_id": "kernel",
+               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+        json!({"type": "create_agent", "parent_id": web_id,
+               "handler_module": "web_ws.tools", "id": "ws_close",
+               "ingress_rule": "allow_all_ingress"}),
+    ] {
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("core"), item)])
+            .await
+            .remove(0)
+            .result;
+    }
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    wait_until_port_accepts(port).await;
+
+    let (mut sock, resp) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web_id}/ws"))
+            .await
+            .expect("ws connect");
+    // A13.17 (partial) — uvicorn's 101 block order, plus `server: uvicorn`.
+    // RESIDUAL: python also sends `Sec-WebSocket-Extensions: permessage-deflate`
+    // and capitalised header names; hyper lowercases every name and tungstenite
+    // has no deflate codec, so neither is reproducible from here.
+    let names: Vec<String> = resp
+        .headers()
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "upgrade",
+            "connection",
+            "sec-websocket-accept",
+            "date",
+            "server"
+        ]
+    );
+    assert_eq!(resp.headers()["server"], "uvicorn");
+
+    sock.send(TMessage::Close(Some(
+        tokio_tungstenite::tungstenite::protocol::CloseFrame {
+            code: CloseCode::Normal,
+            reason: "bye".into(),
+        },
+    )))
+    .await
+    .expect("send close");
+    let echoed = tokio::time::timeout(Duration::from_secs(5), sock.next())
+        .await
+        .expect("close echo in time");
+    match echoed {
+        Some(Ok(TMessage::Close(Some(frame)))) => {
+            assert_eq!(
+                frame.code,
+                CloseCode::Normal,
+                "the client's code comes back"
+            );
+            assert_eq!(frame.reason, "bye");
+        }
+        other => panic!("expected the close echo, got {other:?}"),
+    }
+    stop(&kernel, web_id).await;
+}
+
+// ─── C86 / A13.14 binary half — a watcher gets the BODY ──────────────
+
+#[tokio::test]
+async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
+    // A browser watching an agent that receives a `write_stream` must get the
+    // BYTES, as python does: `[4B len | head with _binary_path | body]`. The
+    // port fanned out the header without the blob, so no watcher could ever
+    // receive the binary frame python sends.
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_watch_bin";
+    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+
+    // The connection AUTO-WATCHES the host agent it connected to.
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+    // Let the auto-watch land before the traffic it must mirror.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let blob: Vec<u8> = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x01];
+    let _ = kernel
+        .send_with_binary(
+            &AgentId::from(web_id),
+            json!({"type": "write_stream", "path": "x.bin"}),
+            blob.clone(),
+        )
+        .await;
+
+    let mut binary: Option<Vec<u8>> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+    while tokio::time::Instant::now() < deadline && binary.is_none() {
+        match tokio::time::timeout(Duration::from_millis(100), ws.next()).await {
+            Ok(Some(Ok(TMessage::Binary(b)))) => binary = Some(b),
+            Ok(Some(_)) | Err(_) => {}
+            Ok(None) => break,
+        }
+    }
+    let wire = binary.expect("the watcher must receive a BINARY event frame");
+    let (header, body) =
+        fantastic_io_bridge::codec::decode_binary_frame(&wire).expect("a well-formed frame");
+    assert_eq!(header["type"], "event");
+    assert_eq!(header["payload"]["type"], "write_stream");
+    assert_eq!(header["payload"]["path"], "x.bin");
+    assert_eq!(header["payload"]["bytes"], Value::Null);
+    assert_eq!(header["_binary_path"], "payload.bytes");
+    assert_eq!(body, blob, "the raw body rides beside the head, not base64");
+
+    stop(&kernel, web_id).await;
 }

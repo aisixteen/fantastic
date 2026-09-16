@@ -118,7 +118,7 @@ cargo check  -p fantastic-cli    --no-default-features --features embedded
 Passes clean — that's the contract the sandboxed/no-subprocess tier
 ships against.
 
-## Bundle map (16 — 12 iOS-safe + 4 full-tier)
+## Bundle map (14 — 10 iOS-safe + 4 full-tier)
 
 The frontend ships no native view bundles — it is served generically
 from `ts/dist` via a `file` agent (the host never names the frontend).
@@ -137,8 +137,6 @@ iOS-safe bundles (compile under either tier):
 | `fantastic-ollama-backend`  | local LLM via ollama; LLM contract reference impl             |
 | `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible, api_key sidecar, 429 retry) |
 | `fantastic-kernel-bridge`   | cross-kernel comms over memory / WS (asymmetric, WS-only)      |
-| `fantastic-tools`           | registrable tool-calling layer for LLM agents (send IS the tool call) |
-| `fantastic-proxy-agent`     | host-implemented agents (embedding-app features as first-class agents) |
 
 Full-tier-only bundles (subprocess; excluded from embedded slice):
 
@@ -178,8 +176,6 @@ rust/
 │       ├── fantastic-ollama-backend/      local LLM (thin binding over ai-core)
 │       ├── fantastic-nvidia-nim-backend/  NVIDIA NIM LLM (thin binding over ai-core)
 │       ├── fantastic-kernel-bridge/       cross-kernel comms
-│       ├── fantastic-tools/               tool-calling layer for LLMs
-│       ├── fantastic-proxy-agent/         host-implemented agents
 │       ├── fantastic-runner-core/         shared runner lifecycle (Transport seam; internal)
 │       ├── fantastic-terminal-backend/    PTY  (full-tier only)
 │       ├── fantastic-python-runtime/      python -c (full-tier only)
@@ -207,7 +203,7 @@ and calling `reg.register(...)` in the relevant
 Browsers, embedding apps, and LLM clients consume the kernel through
 HTTP + WebSocket:
 
-- **HTTP** `/`, `/<id>/`, `/<id>/file/<path>`, `/transport.js`.
+- **HTTP** `/`, `/_assets/favicon.png`, `/favicon.png`, `/<id>/file/<path>`.
 - **WS `/<id>/ws`** — text frames: `call` / `emit` / `watch` /
   `unwatch` / `reply` / `error` / `event`. **Binary frames** carry
   byte-heavy payloads as `[4-byte BE u32 hdr_len][JSON header][raw blob]`.

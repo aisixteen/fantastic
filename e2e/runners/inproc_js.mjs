@@ -68,8 +68,11 @@ function loadScenario(id) {
         entry = { role: m[1], verbs: {} };
         sc.roster.push(entry);
         inVerbs = false;
-      } else if (entry && (m = line.match(/^\s+(id|sentence):\s*(.+)$/))) {
-        entry[m[1]] = m[2].trim();
+      } else if (entry && (m = line.match(/^\s+(id|sentence|answer):\s*(.+)$/))) {
+        // `answer` is the human's POLICY ON THE RECORD (host.py carries it as
+        // `meta["answer"]`); without it the human refuses every inquiry and
+        // holds no proposal — measured 2026-09-13, E14:js `proposal: null`.
+        entry[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
       } else if (entry && line.match(/^\s+verbs:\s*$/)) {
         inVerbs = true;
       } else if (entry && inVerbs && (m = line.match(/^\s+(\w+):\s*(.+)$/))) {
@@ -266,7 +269,7 @@ for (const entry of sc.roster) {
           return { error: `user_probe: inquiry: \`kind\` must be one of ${KINDS}`,
                    reason: "bad_arg", arg: "kind" };
         }
-        const answer = k.get(id)?.answer;
+        const answer = k.get(id)?.meta?.answer;
         // NO DEFAULT — an unwired `user` says so rather than inventing a
         // human's words.
         if (typeof answer !== "string" || !answer) {
@@ -276,7 +279,7 @@ for (const entry of sc.roster) {
         // AUTHORITY FIRST, THEN THE ANSWER. A grant that was REFUSED must not
         // be answered over: saying "granted" over a door that never opened
         // sends the sender back to an unchanged wall.
-        const grants = k.get(id)?.grants;
+        const grants = k.get(id)?.meta?.grants;
         if (Array.isArray(grants)) {
           for (const g of grants) {
             if (!g || typeof g !== "object") continue;
@@ -313,7 +316,9 @@ for (const entry of sc.roster) {
     });
     k.register(new Agent({
       id: entry.id, parentId: "kernel_state", handlerModule: "user_probe.tools",
-      answer: entry.answer,
+      // Record fields live in `meta` on this kernel's Agent (python's record is
+      // one flat dict); a top-level `answer` on the init was silently dropped.
+      meta: { answer: entry.answer },
       sentence: "The human. Send me an inquiry when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
       verbs: {
         inquiry: "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the sender may not perform itself: it is HELD, never run here.",
@@ -394,6 +399,22 @@ const out = await runLoop(
   { maxPasses: sc.limits.max_turns ?? 10 },
 );
 console.log(`\n  passes: ${out.passes}   calls: ${out.calls}`);
+// THE TRANSCRIPT, as the host runner prints it: a verdict with nothing to
+// explain it is not a measurement. `hist` is the live message list the loop
+// appended to — every user turn (the task, each delivered reply) and every
+// assistant turn, in order.
+let turnNo = 0;
+for (const m of hist.slice(2)) {
+  const text = String(m.content ?? "");
+  if (m.role === "assistant") {
+    turnNo++;
+    console.log(`\n-- turn ${turnNo} - ASSISTANT <-`);
+    for (const line of text.split("\n")) console.log(`  > ${line}`);
+  } else {
+    console.log(`\n-- ${String(m.role).toUpperCase()} ->`);
+    for (const line of text.split("\n")) console.log(`  < ${line}`);
+  }
+}
 
 let ok = true;
 for (const check of sc.expect) {
@@ -411,7 +432,10 @@ for (const check of sc.expect) {
     console.log(`\n  proposal: ${JSON.stringify(action)}`);
     if (!action?.target || !action?.id) { ok = false; continue; }
     for (let i = 0; i < 2; i++) {
-      await k.send([{ target: action.target, payload: action.payload ?? {}, id: action.id }]);
+      const pressed = await k.send([{ target: action.target, payload: action.payload ?? {}, id: action.id }]);
+      // The press is a MEASUREMENT; print what the kernel answered so a refused
+      // or joined press is visible beside the side-effect count it explains.
+      console.log(`  press ${i + 1}: ${JSON.stringify(pressed[0])}`);
     }
     continue;
   }

@@ -79,15 +79,21 @@ struct FileBundleTests {
             #expect(header[r["arg"].asString ?? "?"] != nil, "\(r)")
             #expect(body.isEmpty)
         }
-        let (r, _) = await call(k, ["type": "pump", "source_path": "a.txt", "sink_path": "b.txt", "chunk": .integer(-1)]).pair
+        let (r, _) = await call(
+            k,
+            ["type": "pump", "source_path": "a.txt", "sink_path": "b.txt", "chunk": .integer(-1)]
+        ).pair
         #expect(r["reason"].asString == "bad_arg" && r["arg"].asString == "chunk", "\(r)")
         // the legal shape still streams; header keys match python (no bytes_len)
-        let (m, b) = await bin(k, ["type": "read_stream", "path": "a.txt", "offset": .integer(1), "length": .integer(1)])
+        let (m, b) = await bin(
+            k,
+            ["type": "read_stream", "path": "a.txt", "offset": .integer(1), "length": .integer(1)])
         #expect(String(decoding: b, as: UTF8.self) == "b", "\(m)")
         #expect(m["next_offset"].asInt == 2)
         #expect(m["bytes_len"].isNull)
         // a huge length reads only what exists
-        let (m2, b2) = await bin(k, ["type": "read_stream", "path": "a.txt", "length": .integer(Int64.max)])
+        let (m2, b2) = await bin(
+            k, ["type": "read_stream", "path": "a.txt", "length": .integer(Int64.max)])
         #expect(b2.count == 3, "\(m2)")
         #expect(m2["eof"].asBool == true)
     }
@@ -101,7 +107,8 @@ struct FileBundleTests {
         try fm.createDirectory(at: outside, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: outside) }
         try Data("outside".utf8).write(to: outside.appendingPathComponent("secret.txt"))
-        try fm.createSymbolicLink(at: dir.appendingPathComponent("docs"), withDestinationURL: outside)
+        try fm.createSymbolicLink(
+            at: dir.appendingPathComponent("docs"), withDestinationURL: outside)
         // The lexical form is in-root; the canonical form is not.
         let (m, b) = await bin(k, ["type": "read_stream", "path": "docs/secret.txt"])
         #expect(m["reason"].asString == "transport_error", "\(m)")
@@ -149,7 +156,8 @@ struct FileBundleTests {
         write(dir, "src/a.txt", "x")
         let r = await call(k, ["type": "delete", "path": "src"])
         #expect(r["reason"].asString == "transport_error", "\(r)")
-        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("src/a.txt").path))
+        #expect(
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent("src/a.txt").path))
         let r2 = await call(k, ["type": "delete", "path": "src", "recursive": .bool(true)])
         #expect(r2["deleted"].asBool == true, "\(r2)")
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("src").path))
@@ -198,7 +206,8 @@ struct FileBundleTests {
         replies.append(await call(k, ["type": "list", "path": "/"]))
         replies.append(await call(k, ["type": "delete", "path": .string(abs)]))
         replies.append(await call(k, ["type": "mkdir", "path": "/x"]))
-        replies.append(await call(k, ["type": "rename", "old_path": .string(abs), "new_path": "y"]))
+        replies.append(
+            await call(k, ["type": "rename", "old_path": .string(abs), "new_path": "y"]))
         for r in replies {
             #expect(r["reason"].asString == "bad_arg", "\(r)")
             #expect(r["error"].asString?.contains("root-relative") == true, "\(r)")
@@ -219,7 +228,8 @@ struct FileBundleTests {
         let r4 = await call(k, ["type": "delete", "path": "nope"])
         #expect(r4["reason"].asString == "not_found", "\(r4)")
         let r5 = await call(k, ["type": "frobnicate"])
-        #expect(r5["reason"].asString == "unhandled" && r5["verb"].asString == "frobnicate", "\(r5)")
+        #expect(
+            r5["reason"].asString == "unhandled" && r5["verb"].asString == "frobnicate", "\(r5)")
     }
 
     @Test func listShowsDotfilesAndHonoursHiddenMeta() async {
@@ -235,10 +245,16 @@ struct FileBundleTests {
         let r = await call(k, ["type": "list"])
         #expect(names(r) == [".gitignore", "visible.txt"], "\(r)")
         // an operator's `hidden` override is honoured — `.git` unhidden
-        _ = await k.send([Item("core", .object(["type": "update_agent", "id": "fs", "hidden": .array([])]))])[0].result
+        _ = await k.send([
+            Item("core", .object(["type": "update_agent", "id": "fs", "hidden": .array([])]))
+        ])[0].result
         let r2 = await call(k, ["type": "list"])
         #expect(names(r2) == [".git", ".gitignore", "visible.txt"], "\(r2)")
-        _ = await k.send([Item("core", .object(["type": "update_agent", "id": "fs", "hidden": .array(["visible.txt"])]))])[0].result
+        _ = await k.send([
+            Item(
+                "core",
+                .object(["type": "update_agent", "id": "fs", "hidden": .array(["visible.txt"])]))
+        ])[0].result
         let r3 = await call(k, ["type": "list"])
         #expect(names(r3) == [".git", ".gitignore"], "\(r3)")
         let refl = await call(k, ["type": "reflect"])
@@ -250,7 +266,9 @@ struct FileBundleTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         write(dir, "big.bin", String(repeating: "x", count: 100))
         // 5 bytes at offset 0, no truncate: the FILE is still 100 bytes.
-        let (w, _) = await bin(k, ["type": "write_stream", "path": "big.bin", "offset": .integer(0)], Data("hello".utf8))
+        let (w, _) = await bin(
+            k, ["type": "write_stream", "path": "big.bin", "offset": .integer(0)],
+            Data("hello".utf8))
         #expect(w["written"].asInt == 5, "\(w)")
         #expect(w["offset"].asInt == 0)
         #expect(w["size"].asInt == 100, "size must be the file's, not the cursor: \(w)")
@@ -275,7 +293,8 @@ struct FileBundleTests {
         let (k2, dir2) = await openBridge(meta: ["id": "fs2", "root": "/", "ingress_rule": .null])
         defer { try? FileManager.default.removeItem(at: dir2) }
         let r2 = await k2.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
-        #expect(r2["sealed"].asBool == true && r2["ingress_rule"].asString == "deny_ingress", "\(r2)")
+        #expect(
+            r2["sealed"].asBool == true && r2["ingress_rule"].asString == "deny_ingress", "\(r2)")
         #expect(r2["root_error"].asString?.contains("escapes the running dir") == true, "\(r2)")
     }
 
@@ -293,12 +312,21 @@ struct FileBundleTests {
         let r = await call(k, ["type": "read_stream", "path": "a.txt"])
         #expect(r["bytes"].asString == "hello\nwörld" && r["eof"].asBool == true, "\(r)")
         // A bare number is a document too (the tag grammar types it).
-        let n = await call(k, ["type": "write_stream", "path": "n.txt", "bytes": .integer(42), "truncate": .bool(true)])
+        let n = await call(
+            k,
+            [
+                "type": "write_stream", "path": "n.txt", "bytes": .integer(42),
+                "truncate": .bool(true),
+            ])
         #expect(n["error"].isNull, "\(n)")
-        #expect((await call(k, ["type": "read_stream", "path": "n.txt"]))["bytes"].asString == "42")
-        // No chunk at all is python's `missing` refusal, never a channel lecture.
-        let m = await call(k, ["type": "write_stream", "path": "a.txt"])
-        #expect(m["reason"].asString == "missing_arg" && m["error"].asString == "write_stream: bytes (one raw chunk) required", "\(m)")
+        #expect(
+            (await call(k, ["type": "read_stream", "path": "n.txt"]))["bytes"].asString == "42")
+        // An explicit `null` is not a chunk — python's `missing` refusal, never a
+        // channel lecture. (An ABSENT `bytes` key is an empty chunk: A2.7 below.)
+        let m = await call(k, ["type": "write_stream", "path": "a.txt", "bytes": .null])
+        #expect(
+            m["reason"].asString == "missing_arg"
+                && m["error"].asString == "write_stream: bytes (one raw chunk) required", "\(m)")
         let nf = await call(k, ["type": "read_stream", "path": "nope.txt"])
         #expect(nf["reason"].asString == "not_found", "\(nf)")
     }
@@ -320,12 +348,408 @@ struct FileBundleTests {
         // and at the write: create_agent refuses with invalid_meta
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let r = await k.send([Item("core", .object([
-            "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools",
-            "id": "pw", "ingress_rule": "password_ingress",
-        ]))])[0].result
+        let r = await k.send([
+            Item(
+                "core",
+                .object([
+                    "type": "create_agent", "parent_id": "core",
+                    "handler_module": "file_bridge.tools",
+                    "id": "pw", "ingress_rule": "password_ingress",
+                ]))
+        ])[0].result
         #expect(r["reason"].asString == "invalid_meta", "\(r)")
     }
+
+    // ─── python parity (A1, A2) ─────────────────────────────────
+
+    /// A2.1 — reflect key order is python's: the posture keys sit AFTER `verbs`
+    /// and `root_error` is last.
+    @Test func reflectKeyOrderMatchesPython() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await call(k, ["type": "reflect"])
+        // The BUNDLE's keys, in python's order (the kernel frame — can_call,
+        // kernel_verbs, tree — is appended after them by the substrate).
+        #expect(
+            Array(r.asObject?.keys ?? []).prefix(9) == [
+                "id", "sentence", "root", "readonly", "hidden_count", "verbs", "ingress_rule",
+                "egress_rule", "sealed",
+            ], "\(Array(r.asObject?.keys ?? []))")
+        let (k2, dir2) = await openBridge(meta: ["id": "fs2", "root": "../nope"])
+        defer { try? FileManager.default.removeItem(at: dir2) }
+        let r2 = await k2.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
+        // `root_error` is last of the bundle's own keys.
+        #expect(
+            Array(r2.asObject?.keys ?? []).prefix(10).last == "root_error",
+            "\(Array(r2.asObject?.keys ?? []))")
+    }
+
+    /// A2.2 — the root-escape text is python's, `{!r}` on the CONFIGURED string.
+    @Test func rootEscapeErrorIsPythonText() async {
+        let (k, dir) = await openBridge(meta: ["id": "fs2", "root": "../x"])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await k.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
+        #expect(r["root_error"].asString == "fs: root '../x' escapes the running dir", "\(r)")
+        #expect(r["root"].asString == "../x", "the configured string, verbatim: \(r)")
+        let l = await k.send([Item(AgentId("fs2"), .object(["type": "list"]))])[0].result
+        #expect(l["error"].asString == "fs: root '../x' escapes the running dir", "\(l)")
+        #expect(l["reason"].asString == "transport_error", "\(l)")
+    }
+
+    /// A2.3 — every refusal quotes with python's `{x!r}`, not swift's `"…"`.
+    @Test func refusalTextsUsePythonRepr() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "f.txt", "f")
+        #expect(
+            (await call(k, ["type": "nope"]))["error"].asString
+                == "file_bridge: unknown type 'nope'")
+        // (A `type: null` never reaches the bundle here: the swift KERNEL refuses
+        // it first with `send: payload.type must be a non-empty string`, where
+        // python dispatches it and file_bridge answers `unknown type None`. That
+        // is a kernel-side difference, not this bundle's — the bundle's own
+        // rendering of a null verb is `pyRepr(.null)` == `None`.)
+        #expect(pyRepr(JSON.null) == "None")
+        #expect(
+            (await call(k, ["type": "list", "path": "nope"]))["error"].asString
+                == "path 'nope' does not exist")
+        #expect(
+            (await call(k, ["type": "list", "path": "f.txt"]))["error"].asString
+                == "list: path must be a directory; 'f.txt' is not one")
+        #expect(
+            (await call(k, ["type": "read_stream", "path": "no pe.txt"]))["error"].asString
+                == "file 'no pe.txt' not found")
+        #expect(
+            (await call(k, ["type": "list", "path": "../x"]))["error"].asString
+                == "fs: path '../x' escapes root")
+        // validate_meta names the SPEC as written, not the resolved rule name.
+        #expect(
+            FileBundle().validateMeta(["ingress_rule": "bogus_ingress"], record: [:])
+                == "ingress_rule='bogus_ingress' is not a rule this bundle implements — "
+                + "legal values: allow_all_ingress, deny_ingress")
+        #expect(
+            FileBundle().validateMeta(
+                ["ingress_rule": .object(["type": "password_ingress", "env": "X"])], record: [:])
+                == "ingress_rule={'type': 'password_ingress', 'env': 'X'} is not applicable to "
+                + "the fs edge: a leg with no wire envelope can never present a token — "
+                + "legal values: allow_all_ingress, deny_ingress")
+    }
+
+    /// A2.4 / A2.5 — an unknown verb is `unhandled` BEFORE the gate; `boot` is
+    /// gated (a sealed leg denies it) and `shutdown` is not a verb at all.
+    @Test func unknownVerbOnSealedBridgeIsUnhandled() async {
+        let (k, dir) = await openBridge(meta: ["ingress_rule": .null])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await call(k, ["type": "frobnicate"])
+        #expect(r["reason"].asString == "unhandled" && r["verb"].asString == "frobnicate", "\(r)")
+        let s = await call(k, ["type": "shutdown"])
+        #expect(s["reason"].asString == "unhandled" && s["verb"].asString == "shutdown", "\(s)")
+        let b = await call(k, ["type": "boot"])
+        #expect(b["reason"].asString == "unauthorized", "a sealed boot is denied: \(b)")
+        // reflect is the ONE ungated verb.
+        #expect((await call(k, ["type": "reflect"]))["sealed"].asBool == true)
+    }
+
+    /// A2.5 — the same on an OPEN leg: `boot` answers null, `shutdown` unhandled.
+    @Test func sealedBootIsDeniedAndShutdownIsUnhandled() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect((await call(k, ["type": "boot"])).isNull)
+        #expect((await call(k, ["type": "shutdown"]))["reason"].asString == "unhandled")
+    }
+
+    /// A2.6 — the text-channel `read_stream` reply key order is python's.
+    @Test func textReadStreamReplyKeyOrder() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.txt", "abc")
+        let r = await call(k, ["type": "read_stream", "path": "a.txt"])
+        #expect(
+            Array(r.asObject?.keys ?? [])
+                == ["path", "offset", "bytes", "next_offset", "eof", "size"], "\(r)")
+    }
+
+    /// A2.7 — an ABSENT `bytes` key writes an EMPTY chunk (python
+    /// `payload.get("bytes", b"")`); the check order is readonly, path, bytes.
+    @Test func writeStreamWithoutBytesWritesAnEmptyChunk() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let w = await call(k, ["type": "write_stream", "path": "empty.txt"])
+        #expect(w["written"].asInt == 0 && w["size"].asInt == 0, "\(w)")
+        #expect(
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent("empty.txt").path))
+        // a bad path still wins over the absent chunk
+        let bad = await call(k, ["type": "write_stream", "path": .integer(5)])
+        #expect(bad["reason"].asString == "bad_arg" && bad["arg"].asString == "path", "\(bad)")
+    }
+
+    /// A2.8 — the bundle readme is python's `readme.md`, byte for byte.
+    @Test func readmeIsPythonVerbatim() throws {
+        let expected = try String(
+            contentsOf: pythonSource("io/file_bridge/src/file_bridge/readme.md"), encoding: .utf8)
+        #expect(FileBundle().readme == expected)
+    }
+
+    /// A2.9 — the pre-disk order: readonly wins over a root that escapes.
+    @Test func readonlyWinsOverRootEscape() async {
+        let (k, dir) = await openBridge(meta: ["root": "../x", "readonly": .bool(true)])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for payload: OrderedDictionary<String, JSON> in [
+            ["type": "delete", "path": "a"], ["type": "mkdir", "path": "a"],
+            ["type": "rename", "old_path": "a", "new_path": "b"],
+            ["type": "write_stream", "path": "a", "bytes": "x"],
+        ] {
+            let r = await call(k, payload)
+            #expect(r["error"].asString == "agent is readonly", "\(payload) → \(r)")
+            #expect(r["reason"].asString == "unauthorized", "\(r)")
+        }
+    }
+
+    /// A2.10 — the pump's `or` fallbacks are python's, and a source that
+    /// answers no chunk is refused rather than looped on.
+    @Test func pumpFalsyArgsFallBackLikePython() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.txt", "abcdef")
+        // empty source/sink = self; empty source_path falls through to `path`;
+        // absent sink_path = the source path.
+        let r = await call(
+            k,
+            [
+                "type": "pump", "source": "", "sink": "", "source_path": "", "path": "a.txt",
+                "sink_path": "b.txt",
+            ])
+        #expect(r["source"].asString == "a.txt" && r["sink"].asString == "b.txt", "\(r)")
+        #expect(r["bytes"].asInt == 6 && r["chunks"].asInt == 1, "\(r)")
+        #expect(
+            (try? String(contentsOf: dir.appendingPathComponent("b.txt"), encoding: .utf8))
+                == "abcdef")
+        // a SOURCE that is not a stream provider: refused, named with `{src!r}`.
+        let bad = await call(k, ["type": "pump", "source": "core", "source_path": "a.txt"])
+        #expect(bad["reason"].asString == "transport_error", "\(bad)")
+        #expect(
+            bad["error"].asString?.hasPrefix("pump: read from 'core' failed: ") == true, "\(bad)")
+    }
+
+    /// A2.11 — a `list` entry's `path` is relative to the RESOLVED root, and a
+    /// stat failure reports `-1`.
+    @Test func listPathsAreRelativeToResolvedRoot() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "x/a.txt", "a")
+        let r = await call(k, ["type": "list", "path": "sub/../x"])
+        #expect(r["files"][0]["path"].asString == "x/a.txt", "\(r)")
+        #expect(r["files"][0]["size"].asInt == 1, "\(r)")
+        let dot = await call(k, ["type": "list", "path": "."])
+        #expect(dot["files"][0]["path"].asString == "x", "\(dot)")
+        // a dangling symlink cannot be stat'ed: python reports -1, not an error
+        try? FileManager.default.createSymbolicLink(
+            at: dir.appendingPathComponent("x/gone"),
+            withDestinationURL: dir.appendingPathComponent("x/missing.txt"))
+        let r2 = await call(k, ["type": "list", "path": "x"])
+        let gone = (r2["files"].asArray ?? []).first { $0["name"].asString == "gone" }
+        #expect(gone?["size"].asInt == -1, "\(r2)")
+    }
+
+    /// A2.12 — an OS failure renders as python's `str(OSError)`.
+    @Test func osErrorTextIsPythonOSErrorStr() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "src/a.txt", "x")
+        let r = await call(k, ["type": "delete", "path": "src"])
+        #expect(
+            r["error"].asString
+                == "[Errno 66] Directory not empty: \(pyRepr(dir.appendingPathComponent("src").path))",
+            "\(r)")
+        let m = await call(k, ["type": "mkdir", "path": "src/a.txt/deeper"])
+        #expect(
+            m["error"].asString
+                == "[Errno 20] Not a directory: \(pyRepr(dir.appendingPathComponent("src/a.txt/deeper").path))",
+            "\(m)")
+    }
+
+    /// A2.13 — `truncate`, `recursive` and `readonly` use python truthiness.
+    @Test func truncateAndRecursiveUsePythonTruthiness() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "t.txt", "abcdef")
+        // a truthy STRING truncates
+        let w = await call(
+            k, ["type": "write_stream", "path": "t.txt", "bytes": "z", "truncate": "yes"])
+        #expect(w["size"].asInt == 1, "\(w)")
+        // `0` is falsy: no truncate
+        let w2 = await call(
+            k,
+            [
+                "type": "write_stream", "path": "t.txt", "bytes": "q", "offset": .integer(0),
+                "truncate": .integer(0),
+            ])
+        #expect(w2["size"].asInt == 1, "\(w2)")
+        write(dir, "d/a.txt", "x")
+        #expect(
+            (await call(k, ["type": "delete", "path": "d", "recursive": .integer(0)]))["reason"]
+                .asString == "transport_error")
+        #expect(
+            (await call(k, ["type": "delete", "path": "d", "recursive": "sure"]))["deleted"].asBool
+                == true)
+        // `readonly` too: the string "no" is TRUE in python
+        _ = await k.send([
+            Item("core", .object(["type": "update_agent", "id": "fs", "readonly": "no"]))
+        ])[0].result
+        #expect(
+            (await call(k, ["type": "mkdir", "path": "q"]))["error"].asString == "agent is readonly"
+        )
+        _ = await k.send([
+            Item("core", .object(["type": "update_agent", "id": "fs", "readonly": .integer(0)]))
+        ])[0].result
+        #expect((await call(k, ["type": "mkdir", "path": "q"]))["created"].asBool == true)
+    }
+
+    /// A2.14 — `hidden_count` is the stored LIST's length (duplicates and
+    /// non-strings counted); only the filtering compares names.
+    @Test func hiddenCountIsListLength() async {
+        let (k, dir) = await openBridge(meta: [
+            "hidden": .array([.string(".a"), .string(".a"), .integer(5)])
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, ".a", "a")
+        write(dir, "b.txt", "b")
+        #expect((await call(k, ["type": "reflect"]))["hidden_count"].asInt == 3)
+        let l = await call(k, ["type": "list"])
+        #expect((l["files"].asArray ?? []).compactMap { $0["name"].asString } == ["b.txt"], "\(l)")
+    }
+
+    /// A2.15 — a DANGLING symlink leaf pointing outside the root escapes
+    /// (python's `realpath(strict=False)` follows it), and nothing is created
+    /// through it.
+    @Test func danglingSymlinkPointingOutsideRootRefuses() async throws {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        let outside = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fantastic-dangling-\(UUID().uuidString)")
+        try fm.createSymbolicLink(
+            at: dir.appendingPathComponent("out.txt"), withDestinationURL: outside)
+        for payload: OrderedDictionary<String, JSON> in [
+            ["type": "write_stream", "path": "out.txt", "bytes": "x"],
+            ["type": "delete", "path": "out.txt"],
+            ["type": "read_stream", "path": "out.txt"],
+        ] {
+            let r = await call(k, payload)
+            #expect(r["reason"].asString == "transport_error", "\(payload) → \(r)")
+            #expect(r["error"].asString == "fs: path 'out.txt' escapes root", "\(r)")
+        }
+        #expect(!fm.fileExists(atPath: outside.path), "nothing was created through the link")
+    }
+
+    /// A2.20 — reflect's `root`: the resolved path (keeping `/private`), the
+    /// configured string verbatim on escape.
+    @Test func reflectRootIsVerbatimOnEscapeAndResolvedOtherwise() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await call(k, ["type": "reflect"])
+        #expect(r["root"].asString == dir.path, "\(r)")
+        let (k2, dir2) = await openBridge(meta: ["id": "fs2", "root": "~/nope"])
+        defer { try? FileManager.default.removeItem(at: dir2) }
+        let r2 = await k2.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
+        // `~` is NOT expanded: it is a literal directory name under the workdir.
+        #expect(r2["root"].asString?.hasSuffix("/~/nope") == true, "\(r2)")
+        #expect(r2["root_error"].isNull, "\(r2)")
+    }
+
+    /// A2.20 — an ABSENT root serves the workdir, for reflect AND data verbs.
+    @Test func absentRootServesTheWorkdir() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await k.send([
+            Item(
+                "core",
+                .object([
+                    "type": "create_agent", "parent_id": "core",
+                    "handler_module": "file_bridge.tools",
+                    "id": "wd", "ingress_rule": "allow_all_ingress",
+                ]))
+        ])[0].result
+        #expect(r["id"].asString == "wd", "\(r)")
+        let cwd = FileManager.default.currentDirectoryPath
+        let refl = await k.send([Item(AgentId("wd"), .object(["type": "reflect"]))])[0].result
+        #expect(refl["root"].asString == pyRealpath(cwd), "\(refl)")
+        let l = await k.send([Item(AgentId("wd"), .object(["type": "list"]))])[0].result
+        let names = (l["files"].asArray ?? []).compactMap { $0["name"].asString }
+        #expect(names.contains("Package.swift"), "the workdir itself is served: \(names)")
+    }
+
+    /// A2.21 — symlinks are stat'ed THROUGH: a linked file reads its target's
+    /// size, a linked dir lists as a dir.
+    @Test func symlinkedFileReadsTargetSizeAndSymlinkedDirListsAsDir() async throws {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        write(dir, "real.txt", "abcdef")
+        write(dir, "d/inner.txt", "i")
+        try fm.createSymbolicLink(
+            at: dir.appendingPathComponent("alias.txt"),
+            withDestinationURL: dir.appendingPathComponent("real.txt"))
+        try fm.createSymbolicLink(
+            at: dir.appendingPathComponent("dlink"),
+            withDestinationURL: dir.appendingPathComponent("d"))
+        let r = await call(k, ["type": "read_stream", "path": "alias.txt"])
+        #expect(r["size"].asInt == 6 && r["bytes"].asString == "abcdef", "\(r)")
+        let l = await call(k, ["type": "list"])
+        let entries = l["files"].asArray ?? []
+        let alias = entries.first { $0["name"].asString == "alias.txt" }
+        let dlink = entries.first { $0["name"].asString == "dlink" }
+        #expect(alias?["size"].asInt == 6, "\(l)")
+        #expect(dlink?["type"].asString == "dir" && dlink?["size"].isNull == true, "\(l)")
+    }
+
+    /// A1.1 — an `auth` stem that already carries its suffix is reported as
+    /// written, not scoped a second time.
+    @Test func reflectPostureKeepsAnAlreadyScopedAuthStem() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // NO `ingress_rule` key at all: the `auth` stem is what resolves.
+        let made = await k.send([
+            Item(
+                "core",
+                .object([
+                    "type": "create_agent", "parent_id": "core",
+                    "handler_module": "file_bridge.tools",
+                    "id": "fs2", "auth": "allow_all_ingress",
+                ]))
+        ])[0].result
+        #expect(made["id"].asString == "fs2", "\(made)")
+        let r = await k.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
+        #expect(r["ingress_rule"].asString == "allow_all_ingress", "\(r)")
+        #expect(r["sealed"].asBool == false, "\(r)")
+        #expect(r["egress_rule"].asString == "allow_all_ingress_egress", "\(r)")
+    }
+
+    /// A1.3 — a present `ingress_rule: null` is a SEAL: python tests key
+    /// presence, so it never falls back to the `auth` stem.
+    @Test func nullIngressRuleDoesNotFallBackToAuth() async {
+        let (k, dir) = await openBridge(meta: [
+            "id": "fs2", "ingress_rule": .null, "auth": "allow_all",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await k.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
+        #expect(r["ingress_rule"].asString == "deny_ingress" && r["sealed"].asBool == true, "\(r)")
+        let l = await k.send([Item(AgentId("fs2"), .object(["type": "list"]))])[0].result
+        #expect(l["reason"].asString == "unauthorized", "\(l)")
+    }
+}
+
+/// The canonical python source tree — the parity reference these tests read
+/// their expected bytes from (python is immutable, so a copy here would be the
+/// thing that drifts).
+func pythonSource(_ relative: String) -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()  // FantasticBundlesTests
+        .deletingLastPathComponent()  // Tests
+        .deletingLastPathComponent()  // swift
+        .deletingLastPathComponent()  // lib
+        .appendingPathComponent("python/bundled_agents")
+        .appendingPathComponent(relative)
 }
 
 extension JSON {

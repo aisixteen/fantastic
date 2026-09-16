@@ -109,9 +109,9 @@ extension AIBackend {
                 + "window for even one turn; reduce agents/menu or raise context_window"
             setProjection(agentKey, .object(["fired": .bool(false), "too_small": .bool(true)]))
             clearMark(agentKey)
-            await kernel.emit(
-                agent.id,
-                .object([
+            await toCaller(
+                kernel: kernel, agentId: agent.id, clientId: clientId,
+                event: [
                     "type": .string("context"), "source": .string(agentKey),
                     "ts": .double(nowSecs()), "phase": .string("too_small"),
                     "detail": .object([
@@ -125,19 +125,23 @@ extension AIBackend {
                             String(pyStr(body[body.count - 1]["content"]).unicodeScalars.prefix(200))),
                         "hint": .string(hint),
                     ]),
-                    "client_id": .string(clientId),
-                ]))
+                ])
             return .failed(
                 .object(["error": .string("\(config.kind): context_insufficient — \(hint)")]))
         }
-        let stratName = AIContext.strategyName(agent)
-        guard let strat = AIStrategies.getStrategy(stratName) else {
+        // ONLY A STRING NAMES A STRATEGY. A `context_strategy` of null or 5 is a
+        // misconfiguration, and the refusal renders the value python's way
+        // rather than quietly running compact.
+        let stratValue = AIContext.strategy(agent)
+        let stratName = stratValue.asString ?? ""
+        guard case .string = stratValue, let strat = AIStrategies.getStrategy(stratName) else {
             // python: f"{cfg.name}: unknown context_strategy {strat_name!r} (valid: {strategy_names()})"
             let names = "[" + AIStrategies.strategyNames().map(pyRepr).joined(separator: ", ") + "]"
             return .failed(
                 .object([
                     "error": .string(
-                        "\(config.kind): unknown context_strategy \(pyRepr(stratName)) (valid: \(names))")
+                        "\(config.kind): unknown context_strategy \(pyRepr(stratValue)) (valid: \(names))"
+                    )
                 ]))
         }
         let ctx = ProjectionCtx(
@@ -234,9 +238,9 @@ extension AIBackend {
         // the reader scanned an assistant turn written BEFORE the notice and reported
         // a reaction to a compaction the model had not yet seen.
         setMark(agentKey, index: storeLen, client: clientId)
-        await kernel.emit(
-            agent.id,
-            .object([
+        await toCaller(
+            kernel: kernel, agentId: agent.id, clientId: clientId,
+            event: [
                 "type": .string("context"), "source": .string(agentKey),
                 "ts": .double(nowSecs()), "phase": .string("compacted"),
                 "detail": .object([
@@ -249,8 +253,7 @@ extension AIBackend {
                     "stripped_bytes": .integer(Int64(proj.strippedBytes)),
                     "folded": .integer(Int64(proj.folded)),
                 ]),
-                "client_id": .string(clientId),
-            ]))
+            ])
         return .projected(stable + [notice] + outBody)
     }
 
@@ -344,7 +347,11 @@ extension AIBackend {
     /// part it went looking for — the caller says how many turns it wants, and
     /// each one arrives intact. Python `_recall_render`.
     private func recallRender(_ m: JSON) -> String {
-        m["content"].asString ?? m["content"].serialize()
+        // A NON-STRING CONTENT IS PYTHON'S DUMP, not compact raw JSON:
+        // `json.dumps(content, default=str)` writes `', '`/`': '` and escapes
+        // every non-ASCII scalar, so `{"k": "\u00e9"}` is what the model reads
+        // back — and what its own `grep` has to match against.
+        m["content"].asString ?? pyJsonDumps(m["content"])
     }
 
     /// args: query?:str (case-insensitive substring over the serialized turn —
@@ -358,16 +365,15 @@ extension AIBackend {
     func recallVerb(agent: Agent, payload: JSON, kernel: Kernel) -> JSON {
         let full = loadHistory(agent: agent, kernel: kernel)
         let rawQ = payload["query"]
-        let q = (pythonTruthy(rawQ) ? pyStr(rawQ) : "").lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let limit = max(1, min(pyIntOr(payload["limit"], 20) ?? 20, 100))
+        let q = pyStrip((pyTruthy(rawQ) ? pyStr(rawQ) : "").lowercased())
+        let limit = max(1, min((try? pyIntOr(payload["limit"], 20)) ?? 20, 100))
         var indexed = Array(full.enumerated())
         // An int and only an int (python: `isinstance(before, int)`, bools out).
         if case .integer(let before) = payload["before"] {
             indexed = indexed.filter { $0.offset < Int(before) }
         }
         if !q.isEmpty {
-            indexed = indexed.filter { $0.element.serialize().lowercased().contains(q) }
+            indexed = indexed.filter { pyJsonDumps($0.element).lowercased().contains(q) }
         }
         let truncated = indexed.count > limit
         var page = Array(indexed.suffix(limit))
@@ -450,32 +456,18 @@ extension AIBackend {
             "context_window": .integer(AIContext.resolveContextWindow(agent)),
             "output_reserve": .integer(AIContext.outputReserve(agent)),
             "budget": .integer(AIContext.budget(agent)),
-            "strategy": .string(AIContext.strategyName(agent)),
+            "strategy": AIContext.strategy(agent),
             "last_projection": getProjection(agent.id.value),
             "last_reaction": reaction ?? .null,
             "view_source": getViewSource(agent.id.value).map(JSON.string) ?? .null,
         ])
     }
 
-    /// Shared protocol verb docs + the `emits` map, merged into reflect across
-    /// all backends (the wire is shared even though per-backend `verbs` differ).
+    /// The two context-posture fields reflect carries, in python's order.
     func contextReflectFields(agent: Agent) -> OrderedDictionary<String, JSON> {
         var out: OrderedDictionary<String, JSON> = [:]
         out["context_window"] = .integer(AIContext.resolveContextWindow(agent))
-        out["context_strategy"] = .string(AIContext.strategyName(agent))
-        out["emits"] = .object([
-            "token": .string(
-                "{type:'token', stream_id, message_id, delta, accumulated, client_id}"),
-            "status": .string(
-                "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail}"
-            ),
-            "done": .string(
-                "{type:'done', stream_id, message_id, accumulated?, client_id, error?}"),
-            // Python `_make_reflect`'s `emits.context`, verbatim.
-            "context": .string(
-                "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb."
-            ),
-        ])
+        out["context_strategy"] = AIContext.strategy(agent)
         return out
     }
 }

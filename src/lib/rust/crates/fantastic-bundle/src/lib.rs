@@ -1,17 +1,31 @@
-//! Bundle trait re-exported by every fantastic_canvas Rust bundle.
+//! Python-format helpers every fantastic_canvas Rust bundle shares.
 //!
-//! Mirrors the Python contract: a bundle answers verbs via a handler,
-//! optionally implements `on_delete` / `on_shutdown` lifecycle hooks.
-//! The CLI links bundles in at compile time — adding a bundle to a
-//! build means adding its crate to the workspace and calling
-//! `reg.register(...)` in the relevant `register_default_bundles()`.
-//!
-//! Phase 1 stub — the real trait lands alongside the kernel substrate
-//! impl (task #228). Keeping the crate present so the workspace
-//! compiles end-to-end and downstream bundles can declare a
-//! `fantastic-bundle` dep without a missing-crate error.
+//! Python is the canonical runtime, and its refusals, reflect texts and
+//! persisted bytes are built from CPython's own formatters: `{x!r}`, `{x}`,
+//! truthiness, `json.dumps`, `int()`, `OSError`'s text. A bundle that needs one
+//! of those takes it from here, so there is ONE Rust spelling of each, pinned to
+//! CPython by the vectors in `tests.rs` (measured with CPython 3.11).
 
 #![deny(missing_docs)]
 
-/// Marker trait — full async signature lands with the kernel substrate.
-pub trait BundlePlaceholder {}
+mod int;
+mod json;
+mod oserror;
+mod pyset;
+mod repr;
+mod text;
+mod unicode;
+mod unicode_tables;
+
+pub use int::{py_float, py_int, py_int_or, py_type_name, PyError};
+pub use json::py_json_dumps;
+pub use oserror::{
+    io_error_str, os_error_class, os_error_str, os_error_str2, strerror, utf8_decode_error_str,
+};
+pub use pyset::py_set_order;
+pub use repr::{py_float_repr, py_repr, py_repr_value, py_str, py_truthy};
+pub use text::{py_isdigit, py_split_whitespace, py_splitlines, py_strip};
+pub use unicode::{decimal_value, is_alnum, is_digit, is_printable, is_space};
+
+#[cfg(test)]
+mod tests;

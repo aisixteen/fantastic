@@ -79,15 +79,45 @@ struct REPLParseTests {
     }
 }
 
+// A14.10 — ONE `k=v` rule for every CLI surface (one-shot, `reflect`, the
+// REPL's `@id verb k=v` and `add k=v`): python `kernel/modes/parse.py:_coerce`.
 @Suite("CLI k=v coercion")
 struct ParseKVTests {
     @Test func coercesScalarTypes() {
-        #expect(parseKV("true").asBool == true)
-        #expect(parseKV("false").asBool == false)
-        #expect(parseKV("12345").asInt == 12345)
-        #expect(parseKV("bridge").asString == "bridge")
-        // Non-integer numeric strings stay strings (parseKV only
-        // coerces whole Int64s + bools).
-        #expect(parseKV("1.5").asString == "1.5")
+        #expect(cliCoerce("true").asBool == true)
+        #expect(cliCoerce("false").asBool == false)
+        // The bool test is `v.lower()` — case-insensitive.
+        #expect(cliCoerce("TRUE").asBool == true)
+        #expect(cliCoerce("FALSE").asBool == false)
+        #expect(cliCoerce("12345").asInt == 12345)
+        #expect(cliCoerce("bridge").asString == "bridge")
+        // A decimal is a float, and so is an exponent — python `float()`.
+        #expect(cliCoerce("1.5").asDouble == 1.5)
+        #expect(cliCoerce("1e3").asDouble == 1000.0)
+    }
+
+    @Test func coercesJsonObjectAndArray() {
+        // The OPERATOR's extra branch: a `{…}` / `[…]` literal that parses.
+        #expect(cliCoerce(#"{"a": 1}"#)["a"].asInt == 1)
+        #expect(cliCoerce("[1, 2]").asArray?.count == 2)
+        // A literal that does NOT parse stays the string as written.
+        #expect(cliCoerce("{nope").asString == "{nope")
+        #expect(cliCoerce("{a: 1}").asString == "{a: 1}")
+    }
+
+    @Test func duplicateKeyLastWins() {
+        // python `{"type": verb, **_parse_kv(...)}`: a repeat keeps its FIRST
+        // position and takes the LAST value. `uniqueKeysWithValues` used to
+        // trap here with `Fatal error: Duplicate key`.
+        let p = cliPayload(verb: "list_agents", kvTokens: ["limit=1", "limit=2"])
+        #expect(p["limit"].asInt == 2)
+        #expect(p.asObject?.count == 2)
+        // `type=` overrides the verb in place — still the first key.
+        let t = cliPayload(verb: "reflect", kvTokens: ["type=list_agents"])
+        #expect(t["type"].asString == "list_agents")
+        #expect(t.asObject?.keys.first == "type")
+        #expect(t.asObject?.count == 1)
+        // A token with no `=` is skipped, not an error.
+        #expect(cliPayload(verb: "reflect", kvTokens: ["junk"]).asObject?.count == 1)
     }
 }

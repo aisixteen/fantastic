@@ -38,20 +38,21 @@ let KEY_VARS = ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY"]
 
 /// Read the key from the environment. Nothing else is consulted: not the agent
 /// record, not a sidecar, not settings.
+///
+/// Python's `os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")`
+/// — an EMPTY variable is no key, and the value is used as it stands.
 func readApiKey() -> String? {
     for v in KEY_VARS {
-        if let raw = ProcessInfo.processInfo.environment[v] {
-            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { return t }
-        }
+        if let raw = ProcessInfo.processInfo.environment[v], !raw.isEmpty { return raw }
     }
     return nil
 }
 
-/// The refusal for an unwired connector — names the variables to set.
-func noKeyError() -> String {
-    "anthropic_backend: no api key — set \(KEY_VARS.joined(separator: " or "))"
-}
+/// What an unwired connector RAISES, inside the turn (`provider.py:112-119`).
+/// Not a refusal body: python raises here, so the caller's settle reads
+/// `{error:"RuntimeError: …", raised:true}` and the status event `str(e)`.
+let MISSING_KEY_ERROR = "ANTHROPIC_KEY not set in environment (.env)"
+
 /// NO guessy default (by default, no defaults): this connector never names a
 /// model that reaches the network. The sentinel exists ONLY so `reflect` can say
 /// what is true; `chat()` fails loud when the model is unset or still this value.
@@ -70,48 +71,91 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
         self.core = buildAIBackend(
             AIBackendConfig(
                 kind: "anthropic_backend",
-                provider: "anthropic",
                 sentence:
                     "Anthropic-backed LLM agent (raw prompt-and-parse tool-calling).",
-                includeAccumulatedOnError: true,
-                reflectExtra: { agent in
-                    [
-                        "endpoint": .string(Self.endpoint(agent: agent)),
-                        "model": .string(Self.model(agent: agent)),
-                    ]
-                },
+                defaultModel: DEFAULT_MODEL,
+                defaultEndpoint: DEFAULT_ENDPOINT,
+                // NO reflect extras: python's anthropic binding passes no
+                // `reflect_extra`, and `model`/`endpoint` are base fields.
                 makeProvider: { agent, _, _ in
                     // THE ENVIRONMENT IS THE ONLY SOURCE — python-canonical.
                     // The key used to be read off the agent's own meta, which
                     // means it was WRITTEN INTO agent.json on disk; rust and
                     // python's nvidia bundle both kept it out of the record for
                     // exactly that reason. Now nothing persists it at all.
-                    guard let apiKey = readApiKey() else {
-                        return .refused(
-                            .object([
-                                "error": .string(noKeyError()),
-                                "reason": .string("no_api_key"),
-                            ]))
-                    }
-                    return .provider(
+                    //
+                    // A MISSING KEY IS NOT A REFUSAL HERE. python builds the
+                    // provider unconditionally and checks the variable inside
+                    // `chat()`, so the turn reaches `status(thinking)` and then
+                    // raises; refusing at construction skipped the event and
+                    // answered a body python never sends.
+                    .provider(
                         AnthropicProvider(
                             endpoint: Self.endpoint(agent: agent),
                             model: Self.model(agent: agent),
-                            apiKey: apiKey,
+                            apiKey: readApiKey(),
                             maxTokens: agent.metaValue(forKey: "max_tokens")?.asInt
-                                ?? Int64(DEFAULT_MAX_TOKENS)))
+                                ?? Int64(DEFAULT_MAX_TOKENS),
+                            // RUNNER (meta) params — sampling/budget knobs saved on
+                            // the record, distinct from connection (endpoint/key/
+                            // model). Merged verbatim into the request body.
+                            sampling: Self.sampling(agent.metaValue(forKey: "sampling"))))
                 }
             ))
     }
 
-    public var readme: String? {
-        """
-        anthropic_backend — Anthropic Messages-API LLM agent; thin over FantasticAICore.
-        Verbs: the shared ai_core set (reflect it); the api key comes from the ENVIRONMENT (ANTHROPIC_KEY, else ANTHROPIC_API_KEY) and is never stored; 429 + gateway retry.
-        Tool-calling is RAW: the provider streams text and FantasticAICore parses the <call name=…> envelope (tool_parse); a native tool_use block that arrives anyway is a LOUD error.
-        `endpoint` overrides the API host; set it for any proxy, or the default host is used with your key and answers 401.
-        """
-    }
+    public var readme: String? { Self.readmeText }
+
+    /// THE PYTHON FILE, BYTE FOR BYTE (`anthropic_backend/readme.md`). Persisted as
+    /// `agents/<id>/readme.md` and served by `reflect readme=true`, so a swift
+    /// kernel and a python one hand a reader the same document. A swift-written
+    /// summary of it was a second, shorter truth about the same bundle.
+    static let readmeText = #"""
+        # anthropic_backend — Claude, a context-managed completion agent
+        Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Persistence via `file_bridge_id`.
+
+        ## Implementation
+        This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
+
+        ## Bare completion — the tool loop is the CALLER's
+        This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
+        provider pass. It NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use`
+        blocks; the `AnthropicProvider` streams plain `text_delta` content, returned verbatim.
+        Any tool convention is the caller's — an authored agent teaches it in the prompt (via
+        `system_prompt`), reads the completion, dispatches, and feeds the result back as the
+        next `{send, text}` turn.
+
+        ## Context management — owned HERE
+        Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
+        (`context_strategy`, default `compact`, + `[context-notice]`), and the `recall` /
+        `context_status` verbs. The conversation's owner owns its context.
+
+        ## Calling this agent
+        `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
+        and returns `{response, final}`. A first-class peer of `exec_bridge`: a scheduler,
+        a host job, a peer kernel, or a routine can call it by id. Optional `system_prompt:str`
+        REPLACES the default system block (the caller supplies its own role / tool convention).
+        Optional `messages:list` REPLACES persisted history (fully stateless — no compaction;
+        the caller owns the context in that mode).
+
+        ## Streaming
+        You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
+        consumes the same stream (the driving caller, a browser tab, a peer). You do not route
+        your own output — you complete; the caller reads it and decides what to do next.
+
+        ## Recursion guard
+        A `send` carrying a reserved `_call_stack` that already contains this agent (a cycle)
+        or exceeds depth 8 is refused BEFORE the FIFO lock — so an authored agent's AI→AI chain can
+        neither deadlock nor run away. Don't set `_call_stack` yourself.
+
+        ## Meta-possibility — any routine orchestrates the whole substrate
+        Every routine (this AI, a host job, a peer kernel, or any out-of-process caller)
+        reaches every agent by id. From any of them you can read memory anywhere (`send(<state>,
+        {read})`), run an inference turn (`send(<ai>, {send, ...})`), and/or spawn compute
+        (`send(<py>, {start, code})`) — regardless of which kernel owns the target. Code
+        steps and LLM-call steps are interchangeable, both directions.
+
+        """#
 
     public func handle(
         agentId: AgentId,
@@ -121,7 +165,7 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
         // NO key-storage verbs: the key is read from the ENVIRONMENT at call
         // time, as in python and rust. A connector stays inert until the
         // operator wires the variable.
-        return await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+        return try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
     /// The kernel is killing a task of this agent — close the turn out for the
@@ -139,6 +183,14 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     fileprivate static func model(agent: Agent) -> String {
         agent.metaValue(forKey: "model")?.asString ?? DEFAULT_MODEL
     }
+
+    /// The record's `sampling` object with null values dropped, in the record's
+    /// key order — python's `{k: v for k, v in sampling.items() if v is not None}`.
+    /// Anything that is not an object (unset, or a scalar) is empty.
+    static func sampling(_ raw: JSON?) -> OrderedDictionary<String, JSON> {
+        guard let obj = raw?.asObject else { return [:] }
+        return obj.filter { !$0.value.isNull }
+    }
 }
 
 /// Messages-API SSE provider — `x-api-key` auth, 429 retry with `retry-after`,
@@ -146,49 +198,85 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
 struct AnthropicProvider: AIProvider {
     let endpoint: String
     let model: String
-    let apiKey: String
+    /// READ AT CONSTRUCTION, CHECKED IN `chat()` — nil when neither variable is
+    /// set, which is a RAISE inside the turn, not a refusal before it.
+    let apiKey: String?
     let maxTokens: Int64
+    /// RUNNER (meta) PARAMS — the record's `sampling` object, merged VERBATIM
+    /// into the request body after the fixed fields, exactly as python's
+    /// provider does (`body.update(self._sampling)`). This is what bounds a
+    /// reasoning model's deliberation (`thinking_token_budget`) and kills the
+    /// CoT-repetition loop (`no_repeat_ngram_size`, `repetition_penalty`):
+    /// without it a long swift turn ran past the harness's 180s send cap
+    /// (measured 2026-09-15: E20 build failed 3/3).
+    let sampling: OrderedDictionary<String, JSON>
 
     /// 502/503/504/520-524 from a CDN in front of the API is a hiccup, not an
     /// answer: a 1-2s restart once returned a Cloudflare HTML page and killed a
     /// 26-pass run at pass 5. Retried ONLY when the body is not JSON — a JSON
     /// body is the API speaking deliberately, and re-sending a real refusal
     /// until the budget ran out would be worse than failing loudly.
-    static let gatewayMaxRetries = 2
-    static let rateLimitMaxRetries = 1
+    ///
+    /// NOTHING ELSE IS RETRIED — a 429 included. python's anthropic provider has
+    /// no rate-limit branch at all: the endpoint answered deliberately, the
+    /// caller is over quota, and silently sleeping inside the turn burns the
+    /// send ceiling while the caller sees a `thinking` phase that never ends.
+    /// (The nvidia backend, whose free tier rate-limits by design, keeps its
+    /// one retry — there, and only there.)
+    static let transportCodes: Set<Int> = [502, 503, 504, 520, 521, 522, 523, 524]
+    static let retries = 2
+    static let backoff = 1.5
+
+    /// The Messages-API request body in PYTHON'S KEY ORDER —
+    /// `model, max_tokens, messages, stream`, then `system` when the chat carries
+    /// a non-empty one, then every `sampling` key LAST in the record's order
+    /// (python: `body.update(self._sampling)`) so an explicit knob wins over a
+    /// fixed field of the same name. Swift emitted `stream` before `messages`,
+    /// which is the same request and a different byte stream.
+    func requestBody(messages: [JSON]) -> OrderedDictionary<String, JSON> {
+        let (system, turns) = translateAnthropicMessages(messages)
+        var body: OrderedDictionary<String, JSON> = [:]
+        body["model"] = .string(model)
+        body["max_tokens"] = .integer(maxTokens)
+        body["messages"] = .array(turns)
+        body["stream"] = .bool(true)
+        // `if system:` — an EMPTY system block is no `system` key at all.
+        if let system, !system.isEmpty { body["system"] = .string(system) }
+        for (k, v) in sampling { body[k] = v }
+        return body
+    }
 
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
         let endpoint = endpoint
         let model = model
         let apiKey = apiKey
-        let maxTokens = maxTokens
+        // RAW, always: no native `tools`/`tool_choice`.
+        let payload = JSON.object(requestBody(messages: messages)).serialize()
         return AsyncThrowingStream { continuation in
             let task = Task {
+                // THE KEY FIRST, THEN THE MODEL — python's order inside `chat()`
+                // (`provider.py:112-119`), so an agent missing both is told
+                // about the variable it has to export rather than about a model
+                // it cannot reach anyway.
+                guard let apiKey, !apiKey.isEmpty else {
+                    continuation.finish(throwing: PyError("RuntimeError", MISSING_KEY_ERROR))
+                    return
+                }
                 if model.isEmpty || model == DEFAULT_MODEL {
                     continuation.finish(
-                        throwing: AnthropicError.stream(
+                        throwing: PyError(
+                            "RuntimeError",
                             "anthropic_backend: no `model` set — this connector does not "
                                 + "guess one. Name a model on the agent record (model=...)."))
                     return
                 }
-                let (system, turns) = translateAnthropicMessages(messages)
-                var body: OrderedDictionary<String, JSON> = [:]
-                body["model"] = .string(model)
-                body["max_tokens"] = .integer(maxTokens)
-                body["stream"] = .bool(true)
-                body["messages"] = .array(turns)
-                if let system { body["system"] = .string(system) }
-                // RAW, always: no native `tools`/`tool_choice`.
-                let payload = JSON.object(body).serialize()
-
                 // VERBATIM — `endpoint` IS the messages URL, as in python
                 // (see DEFAULT_ENDPOINT). It used to be treated as a base with
                 // `/messages` appended, so one meta key meant two things across
                 // runtimes and a working proxy URL 404'd on the other kernel.
                 let url = endpoint
 
-                var rateAttempt = 0
-                var gatewayAttempt = 0
+                var attempt = 0
 
                 while true {
                     var req = HTTPClientRequest(url: url)
@@ -204,77 +292,70 @@ struct AnthropicProvider: AIProvider {
                             req, timeout: .seconds(600))
                         let code = Int(response.status.code)
 
-                        if code == 429, rateAttempt < Self.rateLimitMaxRetries {
-                            rateAttempt += 1
-                            let wait = response.headers.first(name: "retry-after")
-                                .flatMap(Int.init) ?? 5
-                            try? await Task.sleep(
-                                nanoseconds: UInt64(min(wait, 60)) * 1_000_000_000)
-                            continue
-                        }
-                        let isGateway =
-                            code == 502 || code == 503 || code == 504 || (520...524).contains(code)
-                        if isGateway, gatewayAttempt < Self.gatewayMaxRetries {
-                            let bodyText = try? await response.body.collect(upTo: 1 << 16)
-                            let raw = bodyText.map { String(buffer: $0) } ?? ""
-                            if (try? JSON.parse(Data(raw.utf8))) == nil {
-                                let wait = UInt64(1 << gatewayAttempt)  // 1s, 2s
-                                gatewayAttempt += 1
-                                try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
-                                continue
-                            }
-                            continuation.finish(throwing: AnthropicError.http(code))
-                            return
-                        }
                         if code >= 400 {
-                            continuation.finish(throwing: AnthropicError.http(code))
-                            return
-                        }
-
-                        var state = AnthropicStreamState()
-                        var streamError: String? = nil
-                        for try await line in bytesToLines(response.body) {
-                            let d = decodeAnthropicSSELine(line, state: &state)
-                            for token in d.tokens { continuation.yield(.token(token)) }
-                            if let err = d.error {
-                                streamError = err
-                                break
+                            // THE BODY IS THE ANSWER. python raises with the
+                            // status AND what the endpoint said; swift threw a
+                            // bare `send: provider HTTP <code>` and dropped the
+                            // one sentence naming the cause.
+                            let collected = try? await response.body.collect(upTo: 1 << 20)
+                            let detail = collected.map { String(buffer: $0) } ?? ""
+                            let ctype = response.headers.first(name: "content-type") ?? ""
+                            if !(Self.transportCodes.contains(code)
+                                && !ctype.lowercased().contains("json")
+                                && attempt < Self.retries)
+                            {
+                                continuation.finish(
+                                    throwing: PyError("RuntimeError", "anthropic \(code): \(detail)")
+                                )
+                                return
                             }
-                            if d.done { break }
-                        }
-                        // The model spent the tail of its turn reasoning: close
-                        // the span so the text a parser reads stays balanced.
-                        for token in state.wrap.finish() { continuation.yield(.token(token)) }
+                            attempt += 1
+                            FileHandle.standardOutput.write(
+                                Data(
+                                    ("[anthropic] \(code) "
+                                        + "(\(ctype.isEmpty ? "no content-type" : ctype)) — "
+                                        + "transport error, retry \(attempt)/\(Self.retries)\n")
+                                        .utf8))
+                        } else {
+                            var state = AnthropicStreamState()
+                            for try await line in bytesToLines(response.body) {
+                                let d = decodeAnthropicSSELine(line, state: &state)
+                                for token in d.tokens { continuation.yield(.token(token)) }
+                                // python RAISES from inside the loop, so the
+                                // half-open think span is NOT closed on this
+                                // path — the turn ends with the error, not with
+                                // a tidy marker.
+                                if let err = d.error {
+                                    continuation.finish(throwing: PyError("RuntimeError", err))
+                                    return
+                                }
+                                if d.done { break }
+                            }
+                            // AT END OF BODY, BEFORE TERMINALITY — a stream cut
+                            // mid-thought still closes its `<think>` span, so the
+                            // marker pair a parser reads is always balanced. Closing
+                            // it only on `message_stop` left the span open on exactly
+                            // the turns that were cut.
+                            for token in state.wrap.finish() { continuation.yield(.token(token)) }
 
-                        if let streamError {
-                            continuation.finish(throwing: AnthropicError.stream(streamError))
+                            if let why = anthropicTerminalityError(state) {
+                                continuation.finish(throwing: PyError("RuntimeError", why))
+                                return
+                            }
+                            continuation.finish()
                             return
                         }
-                        if let why = anthropicTerminalityError(state) {
-                            continuation.finish(throwing: AnthropicError.stream(why))
-                            return
-                        }
-                        continuation.finish()
-                        return
                     } catch {
                         continuation.finish(throwing: error)
                         return
                     }
+                    // `BACKOFF * attempt` — 1.5s, then 3.0s, exactly as python
+                    // sleeps at the bottom of its retry loop.
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(Self.backoff * Double(attempt) * 1_000_000_000))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-}
-
-/// Failures that carry their own text, matching rust's error strings.
-enum AnthropicError: Error, CustomStringConvertible {
-    case http(Int)
-    case stream(String)
-    var description: String {
-        switch self {
-        case .http(let code): return "send: provider HTTP \(code)"
-        case .stream(let msg): return msg
         }
     }
 }

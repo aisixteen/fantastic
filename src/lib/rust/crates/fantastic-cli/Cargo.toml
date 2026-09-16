@@ -11,6 +11,7 @@ name = "fantastic_kernel"
 path = "src/main.rs"
 
 [dependencies]
+fantastic-bundle = { path = "../fantastic-bundle" }
 fantastic-kernel = { path = "../fantastic-kernel" }
 fantastic-core = { path = "../bundles/fantastic-core" }
 fantastic-file = { path = "../bundles/fantastic-file" }
@@ -29,15 +30,11 @@ fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
 # TEST-ONLY fixture agents the shared e2e scenarios name. OPTIONAL and
 # off by default — a production binary carries none of it.
 fantastic-scenario-probes = { path = "../bundles/fantastic-scenario-probes", optional = true }
-fantastic-proxy-agent = { path = "../bundles/fantastic-proxy-agent" }
-fantastic-tools = { path = "../bundles/fantastic-tools" }
 # Full-tier-only bundles — subprocess-using; only compiled into the
 # `full` feature build. iOS embedded slice MUST NOT pull them in.
 fantastic-terminal-backend = { path = "../bundles/fantastic-terminal-backend", optional = true }
 fantastic-exec-bridge = { path = "../bundles/fantastic-exec-bridge", optional = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 
 [features]

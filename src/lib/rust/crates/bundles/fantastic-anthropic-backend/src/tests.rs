@@ -56,7 +56,7 @@ async fn mk_kernel_with(
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let ant = ant_id_for(tmp);
     let fid = format!("ff_{}", ant);
@@ -116,9 +116,7 @@ fn open_client_inbox(
     kernel: &Arc<Kernel>,
     agent_id: &AgentId,
 ) -> fantastic_kernel::inbox::InboxReceiver {
-    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
-    kernel.inboxes.insert(agent_id.clone(), tx);
-    rx
+    kernel.ensure_inbox(agent_id)
 }
 
 /// Build an Anthropic event-typed SSE body from `data` objects. Each gets
@@ -138,42 +136,78 @@ fn sse(events: &[Value]) -> String {
 }
 
 #[test]
-fn readme_present_and_titled() {
-    assert!(!README.is_empty());
-    assert!(README.contains("anthropic_backend"));
+fn readme_is_python_verbatim() {
+    // B4.9 — the readme a model reads about this backend is the PYTHON bundle's,
+    // byte for byte. Each runtime had written its own, so the same agent
+    // described itself differently depending on where it ran.
+    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("repo's src/lib above the crate")
+        .join(
+            "python/bundled_agents/ai/anthropic/anthropic_backend/src/anthropic_backend/readme.md",
+        );
+    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
 }
 
 #[test]
-fn translate_messages_splits_system_and_text_turns() {
-    // RAW: tool calls and their replies are inline TEXT, never native `tool_use` /
-    // `tool_result` blocks — so translation is pure text turns and this transport
-    // learns nothing about the tool protocol.
-    //
-    // A `role:tool` turn is not something ai-core produces: routing delivers a
-    // reply as an ordinary `user` turn tagged `[reply to <id>]`. It arrives only as
-    // a LEGACY turn in an old store or from a caller-supplied `messages` override,
-    // and ai-core maps it to `role:user` before we see it — mapped again here
-    // because many chat templates render no `tool` role at all.
+fn to_anthropic_matches_python() {
+    // python `_to_anthropic`: the LAST system message wins, a falsy content on a
+    // user/assistant turn becomes `(no content)`, and every other role — including
+    // `role:tool` — is DROPPED.
     let messages = vec![
-        json!({"role":"system","content":"sys-a"}),
-        json!({"role":"system","content":"sys-b"}),
+        json!({"role":"system","content":"A"}),
+        json!({"role":"user","content":""}),
+        json!({"role":"assistant","content":null}),
+        json!({"role":"tool","content":"x"}),
         json!({"role":"user","content":"hi"}),
-        json!({"role":"assistant","content":"thinking <tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>"}),
-        json!({"role":"tool","content":"<tool_response name=\"send\">[]</tool_response>"}),
     ];
-    let (system, out) = translate_messages(&messages);
-    assert_eq!(system.as_deref(), Some("sys-a\n\nsys-b"));
-    assert_eq!(out.len(), 3);
-    assert_eq!(out[0]["role"], "user");
-    // assistant turn → a plain TEXT turn carrying the <tool_call> inline.
-    assert_eq!(out[1]["role"], "assistant");
-    assert!(out[1]["content"].as_str().unwrap().contains("<tool_call>"));
-    // role:tool → a plain user TEXT turn carrying the <tool_response>.
-    assert_eq!(out[2]["role"], "user");
-    assert!(out[2]["content"]
-        .as_str()
-        .unwrap()
-        .contains("<tool_response"));
+    let (system, out) = to_anthropic(&messages);
+    assert_eq!(system, Some(json!("A")));
+    assert_eq!(
+        out,
+        vec![
+            json!({"role":"user","content":"(no content)"}),
+            json!({"role":"assistant","content":"(no content)"}),
+            json!({"role":"user","content":"hi"}),
+        ]
+    );
+    // A LATER EMPTY SYSTEM OVERRIDES `A` — assignment, not concatenation — and a
+    // falsy system block means the body carries no `system` key at all.
+    let mut later = messages.clone();
+    later.push(json!({"role":"system","content":""}));
+    let (system, _) = to_anthropic(&later);
+    assert_eq!(system, None);
+}
+
+#[test]
+fn request_body_key_order_matches_python() {
+    // python `AnthropicProvider.chat`: model, max_tokens, messages, stream,
+    // system, then the record's sampling knobs merged last.
+    let (system, anthropic_messages) = to_anthropic(&[
+        json!({"role":"system","content":"S"}),
+        json!({"role":"user","content":"hi"}),
+    ]);
+    let mut body = serde_json::Map::new();
+    body.insert("model".into(), json!("m"));
+    body.insert("max_tokens".into(), json!(8192));
+    body.insert("messages".into(), json!(anthropic_messages));
+    body.insert("stream".into(), json!(true));
+    if let Some(sys) = system {
+        body.insert("system".into(), sys);
+    }
+    body.insert("top_p".into(), json!(0.9));
+    assert_eq!(
+        body.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "model".to_string(),
+            "max_tokens".to_string(),
+            "messages".to_string(),
+            "stream".to_string(),
+            "system".to_string(),
+            "top_p".to_string(),
+        ]
+    );
 }
 
 /// THE KEY LIVES IN THE ENVIRONMENT, which is process-global — so the test that
@@ -217,7 +251,10 @@ impl Drop for KeyEnv {
 }
 
 #[tokio::test]
-async fn reflect_shape_has_api_key_tracks_the_env() {
+async fn reflect_keys_are_python_keys_in_python_order() {
+    // python `_make_reflect` with no `reflect_extra`. `max_tokens`, `tool_use`,
+    // `file_bridge_id` and `has_api_key` were rust-only keys — a model that read
+    // them off this reflect learned a surface the canonical runtime does not have.
     let _key = KeyEnv::set(None).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
@@ -226,10 +263,33 @@ async fn reflect_shape_has_api_key_tracks_the_env() {
         .await
         .remove(0)
         .result;
+    // The kernel's own reflect frame (`can_call`, `tree`, …) is appended AFTER
+    // the bundle's body; what this pins is the bundle's half, in python's order.
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(11).cloned().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "id".to_string(),
+            "sentence".to_string(),
+            "model".to_string(),
+            "endpoint".to_string(),
+            "context_window".to_string(),
+            "context_strategy".to_string(),
+            "verbs".to_string(),
+            "generating".to_string(),
+            "cancel".to_string(),
+            "emits".to_string(),
+            "concurrency".to_string(),
+        ],
+        "{r:#?}"
+    );
+    for gone in ["max_tokens", "tool_use", "file_bridge_id", "has_api_key"] {
+        assert!(r.get(gone).is_none(), "{gone} is not a python reflect key");
+    }
     assert_eq!(r["id"], ant.as_str());
-    assert_eq!(r["has_api_key"], false);
     assert_eq!(r["model"], "test-model");
-    assert_eq!(r["max_tokens"], DEFAULT_MAX_TOKENS);
+    assert_eq!(r["generating"], false);
+    assert_eq!(r["context_strategy"], "compact");
     // The key-storage verbs are GONE — the key is read from the environment and
     // this bundle never persists it.
     assert!(r["verbs"]["set_api_key"].is_null());
@@ -237,10 +297,34 @@ async fn reflect_shape_has_api_key_tracks_the_env() {
 }
 
 #[tokio::test]
-async fn send_without_api_key_returns_clean_error() {
+async fn reflect_sentence_is_python_verbatim() {
     let _key = KeyEnv::set(None).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
+    let r = kernel
+        .send(vec![Item::new(ant, json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["sentence"],
+        "Anthropic-backed LLM agent (raw prompt-and-parse tool-calling)."
+    );
+}
+
+/// THE KEY IS THE PROVIDER'S BUSINESS, CHECKED INSIDE THE TURN — python
+/// `provider.py:112-119`. The turn opens (`status(thinking)`), the key check
+/// raises, `status(done, reason='error')` carries `str(e)`, and the caller reads
+/// the kernel's settle of a handler raise. Rust used to refuse BEFORE the
+/// provider was built, with a sentence (`anthropic_backend: no api key — set
+/// ANTHROPIC_KEY or ANTHROPIC_API_KEY`) python does not have, as a COMPLETED
+/// execution with no events at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_key_raises_inside_chat_after_status_thinking() {
+    let _key = KeyEnv::set(None).await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
+    let mut rx = open_client_inbox(&kernel, &ant);
     let r = kernel
         .send(vec![Item::new(
             ant.clone(),
@@ -249,12 +333,54 @@ async fn send_without_api_key_returns_clean_error() {
         .await
         .remove(0)
         .result;
-    let err = r["error"].as_str().unwrap_or("");
-    // NAMES THE VARIABLE — an unwired connector must say what to set, which a
-    // bare "api_key not set" never did.
-    assert!(
-        err.contains("ANTHROPIC_KEY") && err.contains("ANTHROPIC_API_KEY"),
-        "expected the refusal to name the env vars, got {err:?}",
+    assert_eq!(
+        r["error"],
+        json!("RuntimeError: ANTHROPIC_KEY not set in environment (.env)")
+    );
+    assert_eq!(r["raised"], json!(true));
+
+    let mut seen: Vec<(String, Value)> = Vec::new();
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        let ev = ev.payload;
+        if ev.get("type").and_then(Value::as_str) == Some("status") {
+            seen.push((
+                ev["phase"].as_str().unwrap_or("").to_string(),
+                ev["detail"].clone(),
+            ));
+        }
+    }
+    assert_eq!(
+        seen.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+        vec!["thinking", "done"]
+    );
+    let done = &seen[1].1;
+    assert_eq!(done["reason"], json!("error"));
+    assert_eq!(
+        done["error"],
+        json!("ANTHROPIC_KEY not set in environment (.env)")
+    );
+}
+
+/// The key is checked BEFORE the model — with neither wired, the key error is
+/// the one the caller reads (python's order in `chat`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_key_wins_over_a_missing_model() {
+    let _key = KeyEnv::set(None).await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut extra = Map::new();
+    extra.insert("model".to_string(), json!(DEFAULT_MODEL));
+    let (kernel, ant, _fid) = mk_kernel_with(&tmp, None, extra).await;
+    let r = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "hi", "client_id": "test"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"],
+        json!("RuntimeError: ANTHROPIC_KEY not set in environment (.env)")
     );
 }
 
@@ -309,6 +435,7 @@ async fn send_streams_tokens_via_event_typed_sse() {
     while tokio::time::Instant::now() < deadline && !saw_done {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
             Ok(Some(ev)) => {
+                let ev = ev.payload;
                 let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
                 if ty == "token" {
                     if let Some(t) = ev.get("text").and_then(Value::as_str) {
@@ -405,11 +532,20 @@ async fn an_envelope_split_across_text_deltas_dispatches() {
     );
 }
 
+// ── transport retry: python's policy, and ONLY python's ──────────────
+//
+// A 4xx — 429 INCLUDED — or any 5xx carrying a JSON body is the endpoint
+// answering deliberately: returned as `anthropic <code>: <body>`, never retried,
+// and with no event of its own. Rust used to retry a 429 once, announce the wait
+// with a `say` + a `status(waiting_on=rate_limit)` event and report the give-up
+// as `send: rate limited (429); retry in Ns` — three surfaces python does not
+// have. Only a TRANSPORT code with a NON-JSON body is retried: that is a CDN
+// error page, meaning the request never reached anything that could judge it.
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rate_limit_retry_once_then_succeeds() {
+async fn a_429_is_answered_loudly_and_never_retried() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
-    // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
     let endpoint = format!("{}/v1/messages", server.uri());
     let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
     let _key = KeyEnv::set(Some("sk-ant-x")).await;
@@ -421,86 +557,190 @@ async fn rate_limit_retry_once_then_succeeds() {
                 .insert_header("retry-after", "1")
                 .set_body_string("rate limited"),
         )
-        .up_to_n_times(1)
         .expect(1)
         .mount(&server)
         .await;
-    let body = sse(&[
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        // `done` because a call-less turn is nudged: without it this stub answers
-        // the nudge with the same body forever and the mock's `expect(1)` fails
-        // on the count rather than on the retry this test is about.
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok<call name=\"done\"></call>"}}),
-        json!({"type":"content_block_stop","index":0}),
-        // The real API always sends stop_reason before message_stop; a mock without
-        // it now reads as a cut stream (the provider raises), which is the point.
-        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
-        json!({"type":"message_stop"}),
-    ]);
+
+    let mut rx = open_client_inbox(&kernel, &ant);
+    let reply = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "go", "client_id": "test_rl"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        reply["error"],
+        json!("RuntimeError: anthropic 429: rate limited")
+    );
+    assert_eq!(reply["raised"], json!(true));
+
+    // NO rate-limit surface at all: no `say`, no `status(waiting_on)`.
+    let mut phases: Vec<String> = Vec::new();
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        let ev = ev.payload;
+        let ty = ev
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        assert_ne!(ty, "say", "python emits no say for a 429: {ev:#?}");
+        if ty == "status" {
+            assert!(
+                ev.get("detail").and_then(|d| d.get("waiting_on")).is_none(),
+                "python emits no rate-limit wait status: {ev:#?}"
+            );
+            phases.push(
+                ev.get("phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            );
+        }
+    }
+    assert_eq!(phases, vec!["thinking".to_string(), "done".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_json_transport_code_gives_up_after_the_bound() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("{}/v1/messages", server.uri());
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+
+    // Bounded, not infinite — python `test_transport_error_gives_up_after_the
+    // _bound`: RETRIES + 1 requests, then the status is returned as an answer.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(521).set_body_raw("<!DOCTYPE html>", "text/html"))
+        .expect(u64::from(RETRIES + 1))
+        .mount(&server)
+        .await;
+
+    let reply = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        reply["error"],
+        json!("RuntimeError: anthropic 521: <!DOCTYPE html>")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_json_error_body_is_never_retried() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("{}/v1/messages", server.uri());
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+
+    // The proxy answered deliberately; retrying would spend the same broken
+    // request N times and hide the caller's bug — python
+    // `test_json_error_body_is_never_retried`.
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(body),
+            ResponseTemplate::new(503).set_body_raw("{\"type\":\"error\"}", "application/json"),
         )
         .expect(1)
         .mount(&server)
         .await;
 
-    let client_id = "test_rl";
-    let mut rx = open_client_inbox(&kernel, &ant);
-    let send_kernel = Arc::clone(&kernel);
-    let ant_for_task = ant.clone();
-    let join = tokio::spawn(async move {
-        send_kernel
-            .send(vec![Item::new(
-                ant_for_task.clone(),
-                json!({"type": "send", "text": "go", "client_id": client_id}),
-            )])
-            .await
-            .remove(0)
-            .result
-    });
-
-    let mut saw_rate_status = false;
-    let mut tokens = String::new();
-    let mut saw_done = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while tokio::time::Instant::now() < deadline && !saw_done {
-        match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(ev)) => {
-                let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
-                match ty {
-                    "token" => {
-                        if let Some(t) = ev.get("text").and_then(Value::as_str) {
-                            tokens.push_str(t);
-                        }
-                    }
-                    "status"
-                        if ev
-                            .get("detail")
-                            .and_then(|d| d.get("waiting_on"))
-                            .and_then(Value::as_str)
-                            == Some("rate_limit") =>
-                    {
-                        saw_rate_status = true;
-                    }
-                    "done" => saw_done = true,
-                    _ => {}
-                }
-            }
-            Ok(None) => break,
-            Err(_) => {}
-        }
-    }
-    let r = join.await.unwrap();
-    assert!(
-        saw_rate_status,
-        "expected status(waiting_on=rate_limit) event"
+    let reply = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        reply["error"],
+        json!("RuntimeError: anthropic 503: {\"type\":\"error\"}")
     );
-    assert_eq!(tokens, "ok<call name=\"done\"></call>");
-    assert_eq!(r["response"], "ok<call name=\"done\"></call>");
+}
+
+/// `stop_reason='tool_use'` over nothing but text means the stream did not carry
+/// what its stop_reason claims — python
+/// `test_tool_use_stop_reason_without_a_tool_use_block_is_an_anomaly`. A bare
+/// stop_reason names the symptom and nothing else, which is why the error names
+/// the block types it DID see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_use_stop_reason_without_a_tool_use_block_is_an_anomaly() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("{}/v1/messages", server.uri());
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+    let body = sse(&[
+        json!({"type":"content_block_start","content_block":{"type":"text"}}),
+        json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}),
+        json!({"type":"content_block_stop"}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+        json!({"type":"message_stop"}),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let reply = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        reply["error"],
+        json!(
+            "RuntimeError: anthropic stream ended without end_turn: \
+             stop_reason='tool_use' blocks=['text']"
+        )
+    );
+}
+
+/// A CUT stream — no `stop_reason` at all — names that it saw none, python
+/// `provider.py`'s ` (none seen — connection cut mid-stream)` tail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cut_stream_says_no_stop_reason_was_seen() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("{}/v1/messages", server.uri());
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+    let body = sse(&[
+        json!({"type":"content_block_start","content_block":{"type":"text"}}),
+        json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let reply = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        reply["error"],
+        json!(
+            "RuntimeError: anthropic stream ended without end_turn: \
+             stop_reason=None blocks=['text'] (none seen — connection cut mid-stream)"
+        )
+    );
 }
 
 // ── the RAW route is the only route ──────────────────────────────────
@@ -595,7 +835,7 @@ async fn a_native_tool_use_block_is_a_loud_error_not_a_silent_drop() {
 #[tokio::test]
 async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
     assert_eq!(DEFAULT_MODEL, "(no default — set the `model` meta)");
-    let kernel = Arc::new(Kernel::new());
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
     for m in [DEFAULT_MODEL.to_string(), String::new()] {
         let p = AnthropicProvider {
             self_id: AgentId::from("ant_x"),
@@ -603,12 +843,10 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             model: m,
             max_tokens: 16,
             sampling: Map::new(),
-            kernel: Arc::clone(&kernel),
-            client_id: "cli".to_string(),
         };
         let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
-            Err(e) => e,
+            Err(e) => e.message,
         };
         assert!(
             err.contains("anthropic_backend: no `model` set") && err.contains("model=..."),

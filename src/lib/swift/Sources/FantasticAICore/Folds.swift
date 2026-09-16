@@ -264,8 +264,12 @@ enum AIFolds {
                     "role": rows[i]["role"], "id": rows[i]["id"], "content": .string(c),
                 ]))
         }
-        let s = JSON.array(items).serialize()
-        return String(s.unicodeScalars.prefix(SUMMARY_INPUT_CAP))
+        // `json.dumps(items, ensure_ascii=False, default=str)` — PYTHON
+        // SEPARATORS (`', '` / `': '`), raw non-ASCII, cut at the cap in CODE
+        // POINTS. A compact dump is a different byte count, which is a different
+        // cut and therefore a different summarizer input.
+        let s = pyJsonDumps(.array(items), ensureAscii: false)
+        return String(String.UnicodeScalarView(s.unicodeScalars.prefix(SUMMARY_INPUT_CAP)))
     }
 
     /// The `· "<title>"` a rendered row carries, if any — python's

@@ -456,32 +456,21 @@ pub fn tree_node(target: &Agent) -> Value {
             }
         }
     }
-    let mut children: Vec<Value> = target
-        .children
+    // CREATION ORDER, not sorted: python walks `_children`, a plain dict.
+    let children: Vec<Value> = target
+        .children_snapshot()
         .iter()
-        .map(|entry| tree_node(entry.value()))
+        .map(|c| tree_node(c))
         .collect();
-    children.sort_by(|a, b| {
-        a.get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
-    });
     obj.insert("children".to_string(), Value::Array(children));
     Value::Object(obj)
 }
 
-/// Flat id index of an agent + all descendants (DFS, self first,
-/// children sorted by id). The cheap `tree=ids` tier.
+/// Flat id index of an agent + all descendants (DFS, self first, children in
+/// CREATION ORDER — python's dict walk). The cheap `tree=ids` tier.
 pub fn descendant_ids(target: &Agent) -> Vec<String> {
     let mut out = vec![target.id.0.clone()];
-    let mut kids: Vec<_> = target
-        .children
-        .iter()
-        .map(|e| Arc::clone(e.value()))
-        .collect();
-    kids.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-    for c in kids {
+    for c in target.children_snapshot() {
         out.extend(descendant_ids(&c));
     }
     out

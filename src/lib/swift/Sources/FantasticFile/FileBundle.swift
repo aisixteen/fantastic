@@ -1,10 +1,11 @@
 // Filesystem-as-agent bundle — the fs-transport member of the io family.
 //
-// Mirrors py `file_bridge.tools` (the spec) and rust `fantastic-file`. Each
-// agent owns a `root` directory (from agent meta) and a `readonly` flag;
-// every verb resolves the supplied path within `root` and refuses if the
-// result escapes — LEXICALLY (`..`, absolute) and CANONICALLY (an in-root
-// symlink pointing outside).
+// Mirrors py `file_bridge.tools` (the spec) and rust `fantastic-file`. This
+// agent is the GATE (the ingress rule) + the verb shape over `Fs.swift`, the one
+// disk surface; it never touches the disk itself. Each agent owns a `root`
+// directory (from agent meta) and a `readonly` flag; every verb resolves its
+// path within `root` through `fsResolve`, which refuses `..`, an absolute path
+// and any symlink pointing out of the root.
 //
 // Verbs: reflect / boot / list / read_stream / write_stream /
 //        pump / delete / rename / mkdir.
@@ -21,9 +22,9 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "file_bridge.tools"
 
-/// Default hidden-file names hidden from `list`. Matches py/rust so
-/// cross-runtime workdirs stay symmetric.
-let DEFAULT_HIDDEN: Set<String> = [
+/// Default hidden-file names hidden from `list` — python's `DEFAULT_HIDDEN`, in
+/// its order (the list's LENGTH is `hidden_count`, so it is a list, not a set).
+let DEFAULT_HIDDEN: [String] = [
     ".git", ".env", ".fantastic", "node_modules", "__pycache__",
 ]
 
@@ -44,19 +45,6 @@ func readonlyRefusal() -> JSON {
         hint: "this leg accepts reads only; an operator may clear `readonly`")
 }
 
-/// The `not_found` refusal shape python emits (`{error, reason:"not_found",
-/// path}`). Python's closed set carries `NOT_FOUND`; swift's `Refusal.codes`
-/// does not yet, and `Refusal.make` TRAPS on a code outside its set — so the
-/// shape is spelled here until the kernel adds the constant. Same code, same
-/// keys as python; nothing else differs.
-func notFound(_ error: String, path: String) -> JSON {
-    .object([
-        "error": .string(error),
-        "reason": .string("not_found"),
-        "path": .string(path),
-    ])
-}
-
 /// `password_ingress` is meaningless on an in-process leg: the token is read
 /// off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
 /// presents one, so the rule could only ever refuse (python) or, worse, be
@@ -67,43 +55,12 @@ func notFound(_ error: String, path: String) -> JSON {
 public func passwordRefusal(_ meta: OrderedDictionary<String, JSON>, edge: String) -> String? {
     for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
         if let spec = meta[field], ruleName(spec, default: "") == stem {
-            return "\(field)=\(spec.serialize()) is not applicable to the \(edge): "
+            return "\(field)=\(pyRepr(spec)) is not applicable to the \(edge): "
                 + "a leg with no wire envelope can never present a token — "
                 + "legal values: allow_all_ingress, deny_ingress"
         }
     }
     return nil
-}
-
-/// Clamp `raw` under `base`, or throw. THE running-dir law, exported.
-///
-/// Mirror of rust's `fantastic_file::clamp_root`. Public because the cold
-/// bring-up readers need it too: `static_loader` reads its manifest before any
-/// file_bridge agent can exist, and that read is NOT exempt from the clamp —
-/// python does the same through `fs.read_text(Path.cwd(), path)`.
-///
-/// Compared LEXICALLY (no canonicalize) so the check does not require the path
-/// to exist, and so both sides stay in the same form — canonicalizing only the
-/// base would mismatch a non-canonical absolute root on macOS (`/var` vs
-/// `/private/var`). The per-path symlink check is `FileBundle.resolvePath`,
-/// which canonicalizes BOTH sides of the deepest existing ancestor.
-public func clampRoot(_ raw: String, base: URL) throws -> URL {
-    struct Escape: Error, CustomStringConvertible {
-        let raw: String
-        var description: String { "path \(raw) escapes the running directory" }
-    }
-    // Absoluteness is a property of the STRING, not of the URL:
-    // `URL(fileURLWithPath:)` absolutizes a relative path against the CWD, so
-    // asking the URL always says "absolute" and the base would be discarded —
-    // a relative `agents/x/agent.json` then resolved against the cwd instead of
-    // the store root and was refused as an escape.
-    let combined =
-        raw.hasPrefix("/")
-        ? URL(fileURLWithPath: raw).standardizedFileURL
-        : base.appendingPathComponent(raw).standardizedFileURL
-    let root = base.standardizedFileURL.path
-    if combined.path == root || combined.path.hasPrefix(root + "/") { return combined }
-    throw Escape(raw: raw)
 }
 
 /// A refusal carried as an error, so argument helpers compose with `try`.
@@ -114,8 +71,8 @@ struct Refused: Error {
 /// A string argument that is a ROOT-RELATIVE path: absent/null ⇒ `""`; a
 /// non-string or an absolute path is `bad_arg` (the absolute form is refused,
 /// never silently re-rooted — python used to `lstrip("/")` against its own
-/// docstring; #117).
-func pathArg(_ verb: String, _ payload: JSON, _ name: String) throws -> String {
+/// docstring; #117). Mirrors py `_path_arg`.
+func pathArg(_ verb: String, _ payload: JSON, _ name: String) throws(Refused) -> String {
     let p: String
     switch payload[name] {
     case .null: p = ""
@@ -133,7 +90,7 @@ func pathArg(_ verb: String, _ payload: JSON, _ name: String) throws -> String {
 /// `bad_arg` naming the arg. Mirrors py `_int_arg`. Parsed as Int64 and
 /// refused BEFORE any unsigned conversion — `UInt64(-1)` is a trap.
 func intArg(_ verb: String, _ payload: JSON, _ name: String, default def: Int64, minimum: Int64)
-    throws -> Int64
+    throws(Refused) -> Int64
 {
     switch payload[name] {
     case .null: return def
@@ -147,10 +104,7 @@ public struct FileBundle: AgentBundle {
 
     public init() {}
 
-    public var readme: String? {
-        "file_bridge — the gated filesystem edge of the io family. Each agent owns `root` (clamped"
-            + " INSIDE the running dir — the running-dir law); verbs are path-safe."
-    }
+    public var readme: String? { Self.readmeText }
 
     /// Refuse an `ingress_rule` no resolver implements. An unknown rule now SEALS
     /// rather than throwing, so the edge is safe either way — but reporting
@@ -161,25 +115,43 @@ public struct FileBundle: AgentBundle {
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
     ) -> String? {
         if let spec = meta["ingress_rule"], let rule = try? IngressRules.resolve(spec),
-            let deny = rule as? IngressRules.DenyInbound, let bad = deny.unknown
+            let deny = rule as? IngressRules.DenyInbound, deny.unknown != nil
         {
-            return "ingress_rule=\"\(bad)\" is not a rule this bundle implements — "
+            // The SPEC as written, python's `{spec!r}` — naming the resolved rule
+            // instead hid the typo the operator has to find.
+            return "ingress_rule=\(pyRepr(spec)) is not a rule this bundle implements — "
                 + "legal values: allow_all_ingress, deny_ingress"
         }
         return passwordRefusal(meta, edge: "fs edge")
     }
+
+    /// The verbs this bundle serves, in python's `VERBS` order.
+    static let verbs: [String] = [
+        "reflect", "boot", "list", "read_stream", "write_stream", "pump", "delete", "rename",
+        "mkdir",
+    ]
 
     public func handle(
         agentId: AgentId,
         payload: JSON,
         kernel: Kernel
     ) async throws -> JSON? {
-        let verb = payload["type"].asString ?? ""
         guard let agent = kernel.agent(agentId) else {
             return .object(["error": .string("no agent \(agentId)")])
         }
+        let type = payload["type"]
+        let verb = type.asString ?? ""
+        // UNKNOWN VERB FIRST — before the gate and before any clamp, as python's
+        // `VERBS.get(t)` is. A sealed bridge answers `unhandled` for a verb it
+        // does not have, not `unauthorized` (`shutdown` is one of those).
+        guard Self.verbs.contains(verb) else {
+            return Refusal.make(
+                Refusal.unhandled, "file_bridge: unknown type \(pyRepr(type))",
+                extra: [("verb", type)])
+        }
         // GATE — the fs edge is an io_bridge leg: SEALED by default. Every verb
-        // except discovery/lifecycle is denied until opened (ingress_rule=allow_all).
+        // except `reflect` is denied until opened (ingress_rule=allow_all_ingress);
+        // python's UNGATED set is `{"reflect"}` alone, so a sealed `boot` denies.
         // NO token: the fs edge has no wire envelope, so nothing can present one.
         // It used to pass the record's `auth_token` — a persisted secret in the
         // portable workdir satisfied a `password_ingress` leg, the one thing the
@@ -193,12 +165,20 @@ public struct FileBundle: AgentBundle {
         {
             return denied
         }
+        let base = workdirBase(kernel: kernel)
         switch verb {
         case "reflect":
-            // Discovery shows the configured root verbatim (no clamp — py parity).
-            return reflect(agent: agent, kernel: kernel)
-        case "boot", "shutdown":
+            return reflect(agent: agent, base: base)
+        case "boot":
             return .null
+        case "list":
+            return listFiles(agent: agent, payload: payload, base: base)
+        case "delete":
+            return deleteFile(agent: agent, payload: payload, base: base)
+        case "rename":
+            return renameFile(agent: agent, payload: payload, base: base)
+        case "mkdir":
+            return makeDir(agent: agent, payload: payload, base: base)
         // THE STREAM VERBS ON THE TEXT CHANNEL, as python serves them: a model
         // writes a document VERBATIM between `<bytes>` and `</bytes>` and the
         // tag grammar delivers it as utf-8 bytes to the same handler; a chunk
@@ -208,58 +188,44 @@ public struct FileBundle: AgentBundle {
         // refusal rust carried in 43 e2e logs). The binary channel stays for
         // real blobs.
         case "read_stream":
-            guard let root = clampedRoot(agent: agent, kernel: kernel) else {
-                return Refusal.make(Refusal.transportError, rootEscapeError(agent: agent))
-            }
-            let (reply, body) = readStream(root: root, header: payload)
+            let (reply, body) = readStream(agent: agent, payload: payload, base: base)
             guard case .object(var o) = reply, o["error"] == nil else { return reply }
-            o["bytes"] = .string(String(decoding: body, as: UTF8.self))
-            return .object(o)
+            // python's key order: path, offset, bytes, next_offset, eof, size.
+            var out: OrderedDictionary<String, JSON> = [:]
+            out["path"] = o["path"]
+            out["offset"] = o["offset"]
+            out["bytes"] = .string(String(decoding: body, as: UTF8.self))
+            out["next_offset"] = o["next_offset"]
+            out["eof"] = o["eof"]
+            out["size"] = o["size"]
+            return .object(out)
         case "write_stream":
-            if agent.metaValue(forKey: "readonly")?.asBool == true { return readonlyRefusal() }
-            guard let root = clampedRoot(agent: agent, kernel: kernel) else {
-                return Refusal.make(Refusal.transportError, rootEscapeError(agent: agent))
-            }
+            if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) { return readonlyRefusal() }
+            let blob: Data
             switch payload["bytes"] {
-            case .string(let text):
-                return writeStream(root: root, header: payload, blob: Data(text.utf8))
+            case .string(let text): blob = Data(text.utf8)
             // The tag grammar types a bare number; a number is a document too.
-            case .integer(let n):
-                return writeStream(root: root, header: payload, blob: Data(String(n).utf8))
-            case .double(let d):
-                return writeStream(root: root, header: payload, blob: Data("\(d)".utf8))
+            case .integer(let n): blob = Data(String(n).utf8)
+            case .double(let d): blob = Data(pyFloatRepr(d).utf8)
+            case .null where payload.asObject?["bytes"] == nil:
+                // ABSENT is an empty chunk (python `payload.get("bytes", b"")`);
+                // an explicit `null` is not a chunk at all.
+                blob = Data()
             default:
                 return Refusal.missing("write_stream", "bytes (one raw chunk)")
             }
+            return writeStream(agent: agent, payload: payload, blob: blob, base: base)
         case "pump":
             // The PUMP coordinates a SOURCE→SINK copy over the binary channel
             // (it never touches bytes itself), so it rides the text channel.
             return await pump(agent: agent, payload: payload, kernel: kernel)
         default:
-            // Every DATA verb clamps the root to the running dir FIRST — the
-            // running-dir law: a root that escapes the kernel's workdir refuses.
-            guard let root = clampedRoot(agent: agent, kernel: kernel) else {
-                return Refusal.make(Refusal.transportError, rootEscapeError(agent: agent))
-            }
-            switch verb {
-            case "list":
-                return listFiles(root: root, agent: agent, payload: payload)
-            case "delete":
-                return deleteFile(root: root, agent: agent, payload: payload)
-            case "rename":
-                return renameFile(root: root, agent: agent, payload: payload)
-            case "mkdir":
-                return makeDir(root: root, agent: agent, payload: payload)
-            default:
-                return Refusal.make(
-                    Refusal.unhandled, "file_bridge: unknown type \"\(verb)\"",
-                    extra: [("verb", .string(verb))])
-            }
+            return nil
         }
     }
 
-    /// Binary channel: `read_stream` (empty request → reply BODY = one raw chunk),
-    /// `write_stream` (request BODY = one raw chunk → status reply, no body), and
+    /// Binary channel: `read_stream` (empty request → reply BODY = one raw chunk)
+    /// and `write_stream` (request BODY = one raw chunk → status reply, no body).
     /// Symmetric with py/rust's `bytes`-in-the-dict; never base64. Same
     /// sealed-by-default gate + running-dir clamp as the text channel. Any other
     /// verb routes through the text `handle` (its blob is unused).
@@ -284,463 +250,293 @@ public struct FileBundle: AgentBundle {
         {
             return (denied, Data())
         }
-        guard let root = clampedRoot(agent: agent, kernel: kernel) else {
-            return (Refusal.make(Refusal.transportError, rootEscapeError(agent: agent)), Data())
-        }
+        let base = workdirBase(kernel: kernel)
         if verb == "read_stream" {
-            return readStream(root: root, header: header)
+            return readStream(agent: agent, payload: header, base: base)
         }
-        if agent.metaValue(forKey: "readonly")?.asBool == true {
+        if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) {
             return (readonlyRefusal(), Data())
         }
-        return (writeStream(root: root, header: header, blob: blob), Data())
+        return (writeStream(agent: agent, payload: header, blob: blob, base: base), Data())
     }
 
     // MARK: - Verbs
 
-    private func reflect(agent: Agent, kernel: Kernel) -> JSON {
-        let root = rootPath(agent: agent)
-        let readonly = agent.metaValue(forKey: "readonly")?.asBool ?? false
-        // The auth POSTURE, python's `describe(rec)`: rule NAMES (never config),
-        // keyed by the field a caller WRITES (read-key == write-key), + `sealed`.
-        let ingress = ruleName(
-            manifoldSpec(
-                agent.metaValue(forKey: "ingress_rule"), agent.metaValue(forKey: "auth"),
-                "_ingress"),
-            default: "deny_ingress")
-        let egress = ruleName(
-            manifoldSpec(
-                agent.metaValue(forKey: "egress_rule"), agent.metaValue(forKey: "auth"),
-                "_egress"),
-            default: "silent_egress")
+    /// python `_reflect`: identity + the clamped root + the readonly flag + the
+    /// auth posture. NEVER refuses — a root that escapes shows the configured
+    /// string plus `root_error`.
+    private func reflect(agent: Agent, base: String) -> JSON {
+        let root = rootStr(agent)
+        var rootDisplay: String
+        var rootError: String? = nil
+        do {
+            rootDisplay = try fsResolveRoot(root, base: base)
+        } catch {
+            rootDisplay = root
+            rootError = error.message
+        }
         var out: OrderedDictionary<String, JSON> = [
             "id": .string(agent.id.value),
             "sentence": .string(
                 "Filesystem edge of the io family — sealed by default, running-dir only."),
-            "root": .string(root.path),
-            "readonly": .bool(readonly),
+            "root": .string(rootDisplay),
+            "readonly": .bool(pyTruthy(agent.metaValue(forKey: "readonly") ?? .null)),
             "hidden_count": .integer(Int64(hidden(agent: agent).count)),
-            "ingress_rule": .string(ingress),
-            "egress_rule": .string(egress),
-            "sealed": .bool(ingress != "allow_all_ingress"),
             "verbs": [
-                "reflect": "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
+                "reflect":
+                    "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
                 "boot": "No-op. Returns None.",
-                "list": "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …).",
-                "read_stream": "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns",
-                "write_stream": "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default =",
+                "list":
+                    "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …).",
+                "read_stream":
+                    "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns",
+                "write_stream":
+                    "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default =",
                 "pump": "The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE",
-                "delete": "args: path:str (req), recursive:bool=False. Returns {path, deleted:true}.",
-                "rename": "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
-                "mkdir": "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
+                "delete":
+                    "args: path:str (req), recursive:bool=False. Returns {path, deleted:true}.",
+                "rename":
+                    "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
+                "mkdir":
+                    "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
             ] as JSON,
         ]
-        if clampedRoot(agent: agent, kernel: kernel) == nil {
-            // Reflect NEVER refuses — the configured root is shown + the violation.
-            out["root_error"] = .string(rootEscapeError(agent: agent))
-        }
+        // The auth posture, python's `**_describe(rec)` — after `verbs`.
+        for (k, v) in describe(agent.meta) { out[k] = v }
+        if let rootError { out["root_error"] = .string(rootError) }
         return .object(out)
     }
 
-    private func listFiles(root: URL, agent: Agent, payload: JSON) -> JSON {
+    private func listFiles(agent: Agent, payload: JSON, base: String) -> JSON {
+        let root = rootStr(agent)
         let relative: String
-        let target: URL
+        do { relative = try pathArg("list", payload, "path") } catch { return error.json }
+        let rdir: String
+        let entries: [String]
         do {
-            relative = try pathArg("list", payload, "path")
-            target = try resolvePath("list", root: root, path: relative)
-        } catch let r as Refused {
-            return r.json
+            if !(try fsExists(root, relative, base: base)) {
+                return notFound("path \(pyRepr(relative)) does not exist", path: relative)
+            }
+            if !(try fsIsDir(root, relative, base: base)) {
+                return Refusal.bad("list", "path", "a directory; \(pyRepr(relative)) is not one")
+            }
+            rdir = try fsResolveRoot(root, base: base)
+            entries = try fsListDir(root, relative, base: base)
         } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
-        }
-        let fm = FileManager.default
-        // Python's branches, in python's order: absent ⇒ not_found (+path);
-        // present but not a dir ⇒ bad_arg; the OS refusing the walk ⇒ transport_error.
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: target.path, isDirectory: &isDir) else {
-            return notFound("path \"\(relative)\" does not exist", path: relative)
-        }
-        guard isDir.boolValue else {
-            return Refusal.bad("list", "path", "a directory; \"\(relative)\" is not one")
-        }
-        let entries: [URL]
-        do {
-            // No `.skipsHiddenFiles`: dotfiles are listed unless the record's
-            // `hidden` names them — python/rust hide ONLY that list (#60).
-            entries = try fm.contentsOfDirectory(
-                at: target, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
-                options: [])
-        } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+            return Refusal.make(Refusal.transportError, error.message)
         }
         let hiddenNames = hidden(agent: agent)
         var files: [JSON] = []
-        for url in entries {
-            let name = url.lastPathComponent
-            if hiddenNames.contains(name) { continue }
-            let resourceValues = try? url.resourceValues(forKeys: [
-                .isDirectoryKey, .fileSizeKey,
-            ])
-            let isDir = resourceValues?.isDirectory ?? false
-            let rel = (relative.isEmpty ? name : "\(relative)/\(name)")
-            var entry: OrderedDictionary<String, JSON> = [:]
-            entry["name"] = .string(name)
-            entry["path"] = .string(rel)
-            entry["type"] = .string(isDir ? "dir" : "file")
-            if !isDir, let size = resourceValues?.fileSize {
-                entry["size"] = .integer(Int64(size))
+        for entry in entries {
+            let entryName = String(entry[entry.index(after: entry.lastIndex(of: "/")!)...])
+            if hiddenNames.contains(.string(entryName)) { continue }
+            // python `entry.relative_to(rdir)` — relative to the RESOLVED root,
+            // so `sub/../x` lists as `x/a.txt` and `.` as `a.txt`.
+            let rel = String(entry.dropFirst(rdir == "/" ? 1 : rdir.count + 1))
+            var record: OrderedDictionary<String, JSON> = [:]
+            record["name"] = .string(entryName)
+            record["path"] = .string(rel)
+            if pathIsDir(entry) {
+                record["type"] = .string("dir")
+            } else {
+                record["type"] = .string("file")
+                record["size"] = .integer(pathSize(entry) ?? -1)
             }
-            files.append(.object(entry))
+            files.append(.object(record))
         }
-        files.sort {
-            ($0["name"].asString ?? "") < ($1["name"].asString ?? "")
-        }
-        return .object([
-            "path": .string(relative),
-            "files": .array(files),
-        ])
+        return .object(["path": .string(relative), "files": .array(files)])
     }
 
     /// `delete path recursive?` — a file, an EMPTY dir, or (`recursive:true`) a
-    /// dir tree. A symlink is UNLINKED, never followed (`attributesOfItem` does
-    /// not follow, so a dangling one is still a deletable name). A bare delete
-    /// on a populated dir refuses like python's `rmdir` (it used to `removeItem`
-    /// regardless, #57).
-    private func deleteFile(root: URL, agent: Agent, payload: JSON) -> JSON {
+    /// dir tree. A symlink is UNLINKED, never followed, so a dangling one is
+    /// still a deletable name (python `fs.remove`).
+    private func deleteFile(agent: Agent, payload: JSON, base: String) -> JSON {
         if let ro = readonlyError(agent: agent) { return ro }
+        let root = rootStr(agent)
         let relative: String
-        let target: URL
-        do {
-            (relative, target) = try targetArg("delete", root: root, payload, "path")
-        } catch let r as Refused {
-            return r.json
-        } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+        do { relative = try targetArg("delete", root, payload, "path", base: base) } catch {
+            return error.json
         }
-        let fm = FileManager.default
-        let recursive = payload["recursive"].asBool ?? false
-        guard let attrs = try? fm.attributesOfItem(atPath: target.path) else {
-            return notFound("path \"\(relative)\" does not exist", path: relative)
-        }
-        let kind = attrs[.type] as? FileAttributeType
         do {
-            if kind == .typeDirectory && !recursive {
-                let contents = try fm.contentsOfDirectory(atPath: target.path)
-                if !contents.isEmpty {
-                    return Refusal.make(
-                        Refusal.transportError,
-                        "delete \"\(relative)\": Directory not empty (pass recursive:true)")
-                }
+            // `exists` follows symlinks — a DANGLING link is still a deletable name.
+            let present = try fsExists(root, relative, base: base)
+            let link = present ? true : try fsIsSymlink(root, relative, base: base)
+            if !present && !link {
+                return notFound("path \(pyRepr(relative)) does not exist", path: relative)
             }
-            try fm.removeItem(at: target)
-            return .object([
-                "path": .string(relative),
-                "deleted": .bool(true),
-            ])
+            try fsRemove(
+                root, relative, recursive: pyTruthy(payload["recursive"]), base: base)
         } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+            return Refusal.make(Refusal.transportError, error.message)
         }
+        return .object(["path": .string(relative), "deleted": .bool(true)])
     }
 
-    private func renameFile(root: URL, agent: Agent, payload: JSON) -> JSON {
+    private func renameFile(agent: Agent, payload: JSON, base: String) -> JSON {
         if let ro = readonlyError(agent: agent) { return ro }
-        let oldRel: String
-        let oldURL: URL
-        let newRel: String
-        let newURL: URL
+        let root = rootStr(agent)
+        let old: String
+        let new: String
         do {
-            (oldRel, oldURL) = try targetArg("rename", root: root, payload, "old_path")
-            (newRel, newURL) = try targetArg("rename", root: root, payload, "new_path")
-        } catch let r as Refused {
-            return r.json
+            old = try targetArg("rename", root, payload, "old_path", base: base)
+            new = try targetArg("rename", root, payload, "new_path", base: base)
         } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
-        }
-        guard FileManager.default.fileExists(atPath: oldURL.path) else {
-            return notFound("path \"\(oldRel)\" does not exist", path: oldRel)
+            return error.json
         }
         do {
-            try FileManager.default.createDirectory(
-                at: newURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            // py `os.replace` / rust `fs::rename` semantics: an existing
-            // destination is atomically CLOBBERED — the tmp+rename commit every
-            // consumer (text_file among them) builds its atomicity on.
-            if FileManager.default.fileExists(atPath: newURL.path) {
-                _ = try FileManager.default.replaceItemAt(newURL, withItemAt: oldURL)
-            } else {
-                try FileManager.default.moveItem(at: oldURL, to: newURL)
+            if !(try fsExists(root, old, base: base)) {
+                return notFound("path \(pyRepr(old)) does not exist", path: old)
             }
-            return .object([
-                "old_path": .string(oldRel),
-                "new_path": .string(newRel),
-            ])
+            try fsRename(root, old, new, base: base)
         } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+            return Refusal.make(Refusal.transportError, error.message)
         }
+        return .object(["old_path": .string(old), "new_path": .string(new)])
     }
 
-    private func makeDir(root: URL, agent: Agent, payload: JSON) -> JSON {
+    private func makeDir(agent: Agent, payload: JSON, base: String) -> JSON {
         if let ro = readonlyError(agent: agent) { return ro }
+        let root = rootStr(agent)
         let relative: String
-        let target: URL
-        do {
-            (relative, target) = try targetArg("mkdir", root: root, payload, "path")
-        } catch let r as Refused {
-            return r.json
-        } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+        do { relative = try targetArg("mkdir", root, payload, "path", base: base) } catch {
+            return error.json
         }
-        do {
-            try FileManager.default.createDirectory(
-                at: target, withIntermediateDirectories: true)
-            return .object([
-                "path": .string(relative),
-                "created": .bool(true),
-            ])
-        } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+        do { try fsMkdir(root, relative, base: base) } catch {
+            return Refusal.make(Refusal.transportError, error.message)
         }
+        return .object(["path": .string(relative), "created": .bool(true)])
     }
 
     // MARK: - Helpers
 
-    /// The record's `hidden` list (names hidden from `list`), or DEFAULT_HIDDEN.
-    private func hidden(agent: Agent) -> Set<String> {
-        if let arr = agent.metaValue(forKey: "hidden")?.asArray {
-            return Set(arr.compactMap { $0.asString })
+    /// python `_hidden(rec)` — `list(rec.get("hidden", DEFAULT_HIDDEN))`: the
+    /// stored LIST, duplicates and non-strings included (`hidden_count` is its
+    /// length); a set is used only for the filtering compare.
+    private func hidden(agent: Agent) -> [JSON] {
+        switch agent.metaValue(forKey: "hidden") {
+        case .some(.array(let a)): return a
+        // `list("abc")` is its characters, `list({...})` its keys.
+        case .some(.string(let s)): return s.map { .string(String($0)) }
+        case .some(.object(let o)): return o.keys.map { .string($0) }
+        default: return DEFAULT_HIDDEN.map { .string($0) }
         }
-        return DEFAULT_HIDDEN
     }
 
-    /// The configured root verbatim (reflect shows this; data verbs clamp it).
-    private func rootPath(agent: Agent) -> URL {
-        if let rootStr = agent.metaValue(forKey: "root")?.asString {
-            return URL(fileURLWithPath: rootStr)
-        }
-        return agent.rootPath
-    }
-
-    private func rootEscapeError(agent: Agent) -> String {
-        "fs: root \"\(agent.metaValue(forKey: "root")?.asString ?? "")\" escapes the running dir"
+    /// python `_root_str(rec)` — `rec.get("root", "") or ""`, as the string
+    /// `fs.resolve_root` clamps (`str(root or "")`).
+    private func rootStr(_ agent: Agent) -> String {
+        let raw = agent.metaValue(forKey: "root") ?? .null
+        return pyTruthy(raw) ? pyStr(raw) : ""
     }
 
     /// The kernel's RUNNING DIRECTORY — its disk workdir (the dir that holds
     /// `.fantastic`). In production this is the process cwd, matching py
     /// `Path.cwd()`; for an in-memory kernel that still touches disk we fall
     /// back to the process cwd.
-    private func workdirBase(kernel: Kernel) -> URL {
-        if let wd = kernel.storage.workdir { return wd }
-        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    private func workdirBase(kernel: Kernel) -> String {
+        if let wd = kernel.storage.workdir { return wd.path }
+        return FileManager.default.currentDirectoryPath
     }
 
-    /// THE RUNNING-DIR LAW — clamp the configured root to the running dir
-    /// (`base`). A relative root resolves under it; an absolute root is allowed
-    /// ONLY if it lies inside it; outside escapes refuse. Mirrors py
-    /// `fs.resolve_root` (whose base is `Path.cwd()`). Returns the clamped root,
-    /// or nil on escape.
-    private func clampedRoot(agent: Agent, kernel: Kernel) -> URL? {
-        let base = workdirBase(kernel: kernel).standardizedFileURL
-        let rawStr = agent.metaValue(forKey: "root")?.asString
-        let candidate: URL
-        if let rawStr, !rawStr.isEmpty {
-            // Test the raw STRING for absoluteness — `URL(fileURLWithPath:)` on a
-            // relative path resolves it against the process cwd, which would
-            // wrongly read a workdir-relative root (".fantastic") as outside.
-            candidate =
-                rawStr.hasPrefix("/")
-                ? URL(fileURLWithPath: rawStr).standardizedFileURL
-                : base.appendingPathComponent(rawStr).standardizedFileURL
-        } else {
-            // No root meta ⇒ the agent's own dir (already inside the workdir).
-            candidate = agent.rootPath.standardizedFileURL
-        }
-        // Must lie inside the running dir. Compare CANONICALIZED paths
-        // (Kernel.canonPath: symlinks + the macOS `/private/var` ≡ `/var` alias)
-        // — `agent.rootPath` is often the `/private`-resolved form while the
-        // workdir base is not, and a raw string compare would wrongly refuse a
-        // root that IS inside (the sibling of the storeReldir double-nest bug).
-        let c = Kernel.canonPath(candidate.path)
-        let b = Kernel.canonPath(base.path)
-        if c == b || c.hasPrefix(b + "/") {
-            return candidate
-        }
-        return nil
-    }
-
-    /// Resolve `path` under `root`, refusing escapes — the one refusal shape.
-    ///
-    /// Two checks, both required:
-    /// 1. LEXICAL — `clampRoot` folds `..` and refuses a climb above the root
-    ///    (`transport_error`, "… escapes root" — the code python's `fs`
-    ///    ValueError maps to). An absolute path is `bad_arg` (via `pathArg`).
-    /// 2. CANONICAL — the deepest EXISTING ancestor of the joined path is
-    ///    canonicalized and re-checked against the canonical root. This is what
-    ///    follows symlinks: an in-root `docs -> /etc` used to pass the lexical
-    ///    check and be followed at open time (#30 — python refused it, the ports
-    ///    served `/etc/passwd`). BOTH sides go through `Kernel.canonPath` so the
-    ///    macOS `/var` ≡ `/private/var` alias cannot mismatch. A root that does
-    ///    not exist yet has nothing under it to follow, so the check is skipped;
-    ///    a dangling symlink LEAF does not "exist" (fileExists follows), so its
-    ///    parent is checked instead — which is what makes it deletable.
-    func resolvePath(_ verb: String, root: URL, path: String) throws -> URL {
-        if path.hasPrefix("/") {
-            throw Refused(json: Refusal.bad(verb, "path", "a root-relative path (no leading '/')"))
-        }
-        let escape = Refused(
-            json: Refusal.make(Refusal.transportError, "fs: path \"\(path)\" escapes root"))
-        guard let joined = try? clampRoot(path, base: root) else { throw escape }
-        let fm = FileManager.default
-        if fm.fileExists(atPath: root.path) {
-            var probe = joined
-            while probe.path != "/" && !fm.fileExists(atPath: probe.path) {
-                probe = probe.deletingLastPathComponent()
-            }
-            let c = Kernel.canonPath(probe.path)
-            let r = Kernel.canonPath(root.path)
-            if !(c == r || c.hasPrefix(r + "/")) { throw escape }
-        }
-        return joined
-    }
-
-    /// `pathArg` + `resolvePath` for a MUTATING verb: the path must name
-    /// something INSIDE the root — empty/`.` is `missing_arg`, anything
+    /// python `_target_arg` — `pathArg` for a MUTATING verb: the path must name
+    /// something INSIDE the root; empty/`.` is `missing_arg` and anything
     /// resolving to the root itself is `bad_arg`. `delete {path:"",
-    /// recursive:true}` used to remove the whole served store (#97): the root
-    /// is the boundary, not an operand.
-    func targetArg(_ verb: String, root: URL, _ payload: JSON, _ name: String) throws -> (
-        String, URL
-    ) {
+    /// recursive:true}` used to remove the whole served store (#97): the root is
+    /// the boundary, not an operand.
+    func targetArg(_ verb: String, _ root: String, _ payload: JSON, _ name: String, base: String)
+        throws(Refused) -> String
+    {
         let p = try pathArg(verb, payload, name)
         if p.isEmpty || p == "." { throw Refused(json: Refusal.missing(verb, name)) }
-        let target = try resolvePath(verb, root: root, path: p)
-        if target.standardizedFileURL.path == root.standardizedFileURL.path {
+        let isRoot: Bool
+        do {
+            isRoot = try fsResolve(root, p, base: base) == (try fsResolveRoot(root, base: base))
+        } catch {
+            throw Refused(json: Refusal.make(Refusal.transportError, error.message))
+        }
+        if isRoot {
             throw Refused(
                 json: Refusal.bad(verb, name, "a path inside the root, not the root itself"))
         }
-        return (p, target)
+        return p
     }
 
     private func readonlyError(agent: Agent) -> JSON? {
-        if agent.metaValue(forKey: "readonly")?.asBool == true {
-            return readonlyRefusal()
-        }
+        // NOT a ternary with `nil`: `JSON` is ExpressibleByNilLiteral, so the
+        // else-branch types as `JSON.null` and every mutating verb answered
+        // `null` instead of running.
+        if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) { return readonlyRefusal() }
         return nil
     }
 
-    private func fileSize(_ url: URL) -> Int64 {
-        let n = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber
-        return n.flatMap { $0 }?.int64Value ?? 0
-    }
-
-    // MARK: - Streams (binary channel)
+    // MARK: - Streams
 
     /// SOURCE — read ONE raw chunk at `offset`. Reply `{path, offset,
     /// next_offset, eof, size}` + body = the raw bytes (binary channel; never
     /// base64). Stateless cursor: pull the next with `offset=next_offset` to eof.
-    private func readStream(root: URL, header: JSON) -> (JSON, Data) {
+    private func readStream(agent: Agent, payload: JSON, base: String) -> (JSON, Data) {
+        let root = rootStr(agent)
         let path: String
         let offset: Int64
         let length: Int64
-        let target: URL
         do {
-            path = try pathArg("read_stream", header, "path")
-            offset = try intArg("read_stream", header, "offset", default: 0, minimum: 0)
-            length = try intArg("read_stream", header, "length", default: 65536, minimum: 1)
-            target = try resolvePath("read_stream", root: root, path: path)
-        } catch let r as Refused {
-            return (r.json, Data())
+            path = try pathArg("read_stream", payload, "path")
+            offset = try intArg("read_stream", payload, "offset", default: 0, minimum: 0)
+            length = try intArg("read_stream", payload, "length", default: 65536, minimum: 1)
         } catch {
-            return (Refusal.make(Refusal.transportError, "\(error)"), Data())
+            return (error.json, Data())
         }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir),
-            !isDir.boolValue
-        else {
-            // Python parity: the refusal names its reason and path (consumers —
-            // text_file checkpoints among them — branch on `reason`).
-            return (notFound("file \"\(path)\" not found", path: path), Data())
-        }
-        guard let handle = try? FileHandle(forReadingFrom: target) else {
-            return (Refusal.make(Refusal.transportError, "cannot open \"\(path)\""), Data())
-        }
-        defer { try? handle.close() }
-        let size = fileSize(target)
-        // Read only what EXISTS: the request bounds the chunk, the file bounds
-        // the request — a caller-chosen `length` never sizes a buffer.
-        let want = min(length, max(0, size - offset))
-        var chunk = Data()
-        if want > 0 {
-            do {
-                try handle.seek(toOffset: UInt64(offset))
-                chunk = try handle.read(upToCount: Int(want)) ?? Data()
-            } catch {
-                return (Refusal.make(Refusal.transportError, "read \"\(path)\": \(error)"), Data())
+        let chunk: Data
+        let size: Int64
+        do {
+            if !(try fsIsFile(root, path, base: base)) {
+                return (notFound("file \(pyRepr(path)) not found", path: path), Data())
             }
+            (chunk, size) = try fsReadChunk(
+                root, path, offset: offset, length: length, base: base)
+        } catch {
+            return (Refusal.make(Refusal.transportError, error.message), Data())
         }
         let nextOffset = offset + Int64(chunk.count)
-        let meta: JSON = .object([
-            "path": .string(path),
-            "offset": .integer(offset),
-            "next_offset": .integer(nextOffset),
-            "eof": .bool(nextOffset >= size),
-            "size": .integer(size),
-        ])
-        return (meta, chunk)
+        return (
+            .object([
+                "path": .string(path),
+                "offset": .integer(offset),
+                "next_offset": .integer(nextOffset),
+                "eof": .bool(nextOffset >= size),
+                "size": .integer(size),
+            ]), chunk
+        )
     }
 
     /// SINK — write ONE raw chunk (`blob`) at `offset` (default: append at end).
     /// `truncate:true` on the first chunk starts fresh. Returns
     /// `{path, written, offset, size}` — `size` is the FILE's size after the
     /// write (py `stat().st_size`), not the write cursor (#59).
-    private func writeStream(root: URL, header: JSON, blob: Data) -> JSON {
+    private func writeStream(agent: Agent, payload: JSON, blob: Data, base: String) -> JSON {
+        let root = rootStr(agent)
         let path: String
-        let offsetIn: Int64?
-        let target: URL
+        let offsetIn: Int64
         do {
-            path = try pathArg("write_stream", header, "path")
-            offsetIn =
-                header["offset"].isNull
-                ? nil
-                : try intArg("write_stream", header, "offset", default: 0, minimum: 0)
-            target = try resolvePath("write_stream", root: root, path: path)
-        } catch let r as Refused {
-            return r.json
+            path = try pathArg("write_stream", payload, "path")
+            offsetIn = try intArg("write_stream", payload, "offset", default: -1, minimum: 0)
         } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+            return error.json
         }
-        let truncate = header["truncate"].asBool ?? false
+        let off: Int64
+        let size: Int64
         do {
-            try FileManager.default.createDirectory(
-                at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            (off, size) = try fsWriteChunk(
+                root, path, blob, offset: offsetIn < 0 ? nil : offsetIn,
+                truncate: pyTruthy(payload["truncate"]), base: base)
         } catch {
-            return Refusal.make(Refusal.transportError, "mkdir parent: \(error)")
-        }
-        if !FileManager.default.fileExists(atPath: target.path) {
-            FileManager.default.createFile(atPath: target.path, contents: nil)
-        }
-        guard let handle = try? FileHandle(forWritingTo: target) else {
-            return Refusal.make(Refusal.transportError, "cannot open \"\(path)\" for writing")
-        }
-        defer { try? handle.close() }
-        let off: UInt64
-        do {
-            if truncate { try handle.truncate(atOffset: 0) }
-            if let o = offsetIn {
-                off = UInt64(o)
-                try handle.seek(toOffset: off)
-            } else {
-                off = try handle.seekToEnd()
-            }
-            try handle.write(contentsOf: blob)
-            try handle.synchronize()
-        } catch {
-            return Refusal.make(Refusal.transportError, "write \"\(path)\": \(error)")
+            return Refusal.make(Refusal.transportError, error.message)
         }
         return .object([
             "path": .string(path),
             "written": .integer(Int64(blob.count)),
-            "offset": .integer(Int64(off)),
-            "size": .integer(fileSize(target)),
+            "offset": .integer(off),
+            "size": .integer(size),
         ])
     }
 
@@ -749,61 +545,88 @@ public struct FileBundle: AgentBundle {
     /// over the binary channel, so a `network_bridge` SOURCE pumps to a
     /// `file_bridge` SINK the same as fs→fs. Each end SELF-gates + SELF-clamps.
     private func pump(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
-        let selfId = agent.id.value
-        let src = payload["source"].asString ?? selfId
-        let sink = payload["sink"].asString ?? selfId
-        let spath = payload["source_path"].asString ?? payload["path"].asString ?? ""
-        let dpath = payload["sink_path"].asString ?? spath
-        let chunk: Int64
-        do {
-            chunk = try intArg("pump", payload, "chunk", default: 65536, minimum: 1)
-        } catch let r as Refused {
-            return r.json
-        } catch {
-            return Refusal.make(Refusal.transportError, "\(error)")
+        let selfId = JSON.string(agent.id.value)
+        // python's `or` fallbacks: a FALSY value takes the default, whatever
+        // its type (`""`, `0`, `[]` all fall through).
+        let src = pyTruthy(payload["source"]) ? payload["source"] : selfId
+        let sink = pyTruthy(payload["sink"]) ? payload["sink"] : selfId
+        let spath =
+            pyTruthy(payload["source_path"])
+            ? payload["source_path"] : (pyTruthy(payload["path"]) ? payload["path"] : .string(""))
+        let dpath = pyTruthy(payload["sink_path"]) ? payload["sink_path"] : spath
+        let length: Int64
+        do { length = try intArg("pump", payload, "chunk", default: 65536, minimum: 1) } catch {
+            return error.json
         }
         var offset: Int64 = 0
         var first = true
         var chunks: Int64 = 0
         while true {
             let (rmeta, body) = await kernel.sendWithBinary(
-                AgentId(src),
+                AgentId(pyStr(src)),
                 .object([
-                    "type": .string("read_stream"), "path": .string(spath),
-                    "offset": .integer(offset), "length": .integer(chunk),
+                    "type": .string("read_stream"), "path": spath,
+                    "offset": .integer(offset), "length": .integer(length),
                 ]), Data())
-            if rmeta["error"].asString != nil {
+            // python: the reply must be a dict carrying a `bytes` chunk. On this
+            // channel the chunk rides beside the header, so a reply that carries
+            // an `error` (or is not an object at all) is the same refusal.
+            guard case .object(let ro) = rmeta, ro["error"] == nil else {
                 return Refusal.make(
-                    Refusal.transportError, "pump: read from \"\(src)\" failed: \(rmeta.serialize())")
+                    Refusal.transportError,
+                    "pump: read from \(pyRepr(src)) failed: \(pyStr(rmeta))")
             }
             let (wmeta, _) = await kernel.sendWithBinary(
-                AgentId(sink),
+                AgentId(pyStr(sink)),
                 .object([
-                    "type": .string("write_stream"), "path": .string(dpath),
+                    "type": .string("write_stream"), "path": dpath,
                     "offset": .integer(offset), "truncate": .bool(first),
                 ]), body)
-            if wmeta["error"].asString != nil {
+            guard case .object(let wo) = wmeta, !pyTruthy(wo["error"] ?? .null) else {
                 return Refusal.make(
-                    Refusal.transportError, "pump: write to \"\(sink)\" failed: \(wmeta.serialize())")
+                    Refusal.transportError,
+                    "pump: write to \(pyRepr(sink)) failed: \(pyStr(wmeta))")
             }
             first = false
             chunks += 1
-            let next = rmeta["next_offset"].asInt
-            if rmeta["eof"].asBool ?? true {
-                offset = next ?? offset
+            let next = rmeta["next_offset"]
+            if pyTruthy(rmeta["eof"]) {
+                if case .integer(let n) = next { offset = n }
                 break
             }
-            guard let n = next, n > offset else {
+            guard case .integer(let n) = next, n > offset else {
                 // No forward progress and no eof: a SOURCE that would loop forever.
                 return Refusal.make(
                     Refusal.transportError,
-                    "pump: source \"\(src)\" made no progress at offset \(offset)")
+                    "pump: source \(pyRepr(src)) made no progress at offset \(offset)")
             }
             offset = n
         }
         return .object([
-            "source": .string(spath), "sink": .string(dpath),
+            "source": spath, "sink": dpath,
             "bytes": .integer(offset), "chunks": .integer(chunks),
         ])
     }
+
+    /// python's `readme.md`, verbatim.
+    static let readmeText = """
+        # file_bridge — filesystem edge
+
+        Verbs: `read(path)` · `write(path,content)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `reflect`
+        **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
+        - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
+        - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
+        - `pump(source?, source_path, sink?, sink_path?, chunk=65536)` → server-side SOURCE→SINK copy in ONE call (vs driving each chunk over the wire). Both ends bound by id + the stream verbs, each SELF-gating — so any provider (a `network_bridge` SOURCE, a `file_bridge` SINK) composes. Omitted `source`/`sink` = this bridge.
+        A consumer (file serving · a pump · kernel_state) is **storage-agnostic** — it pulls/pushes by id, so a `network_bridge` answering the same verbs serves a *remote* file the same way (G1).
+
+        **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
+        **Running-dir law**: root is clamped inside the kernel's cwd — `../`, `~`, absolute paths
+        outside, and outward symlinks all refuse. Even when open, the edge never leaves the dir.
+
+        """
+}
+
+/// The `not_found` refusal python emits (`{error, reason:"not_found", path}`).
+func notFound(_ error: String, path: String) -> JSON {
+    Refusal.make(Refusal.notFound, error, extra: [("path", .string(path))])
 }

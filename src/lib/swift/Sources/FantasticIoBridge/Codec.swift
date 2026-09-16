@@ -17,10 +17,17 @@ import FantasticJSON
 import Foundation
 
 public enum Codec {
+    /// python `encode_frame`'s TEXT half — `json.dumps(envelope, default=str)`,
+    /// i.e. `', '`/`': '` separators and `ensure_ascii=True`. Every
+    /// server→client text frame (web_ws replies/events, the ws + relay legs,
+    /// the exec relay) goes through here; `serialize()` sent compact raw UTF-8,
+    /// so `·` and `↑` crossed the wire unescaped.
+    public static func encodeText(_ envelope: JSON) -> String { pyJsonDumps(envelope) }
+
     /// Encode a binary frame `[4B len | header | body]`. `header` should already
     /// carry `_binary_path` (and null at that path) per the convention.
     public static func encodeBinaryFrame(header: JSON, body: Data) -> Data {
-        let head = (header.serialize().data(using: .utf8)) ?? Data("{}".utf8)
+        let head = (encodeText(header).data(using: .utf8)) ?? Data("{}".utf8)
         var out = Data(capacity: 4 + head.count + body.count)
         var len = UInt32(head.count).bigEndian
         withUnsafeBytes(of: &len) { out.append(contentsOf: $0) }
@@ -29,19 +36,46 @@ public enum Codec {
         return out
     }
 
-    /// Decode a binary frame → `(header, body)`. Errors on a short/malformed frame.
-    public static func decodeBinaryFrame(_ data: Data) -> (header: JSON, body: Data)? {
-        guard data.count >= 4 else { return nil }
+    /// python `decode_frame`'s `ValueError` — one error type for every malformed
+    /// frame, so a read loop catches ONE thing and keeps its socket.
+    public struct FrameError: Error, CustomStringConvertible, Sendable, Equatable {
+        public let message: String
+        public init(_ message: String) { self.message = message }
+        public var description: String { message }
+    }
+
+    /// Decode a binary frame → `(header, body)`.
+    ///
+    /// A frame arrives from a PEER, so every length in it is hostile until
+    /// checked: a 4-byte prefix claiming 4 GiB of header on a 3-byte frame would
+    /// slice garbage. The bounds are checked here, once, and every malformed
+    /// frame leaves as a `FrameError` CARRYING WHY — python's text. It used to
+    /// return `nil`, so the one caller that has to name the fault (the ws read
+    /// loop's skip line) had nothing to name it with.
+    public static func decodeBinaryFrame(_ data: Data) throws(FrameError) -> (
+        header: JSON, body: Data
+    ) {
+        guard data.count >= 4 else {
+            throw FrameError("binary frame shorter than its 4-byte header (\(data.count)B)")
+        }
         let h =
             (UInt32(data[data.startIndex]) << 24) | (UInt32(data[data.startIndex + 1]) << 16)
             | (UInt32(data[data.startIndex + 2]) << 8) | UInt32(data[data.startIndex + 3])
         let headerLen = Int(h)
-        guard data.count >= 4 + headerLen else { return nil }
+        guard data.count >= 4 + headerLen else {
+            throw FrameError(
+                "binary frame header claims \(headerLen)B but only "
+                    + "\(data.count - 4)B follow the length prefix")
+        }
         let headerData = data.subdata(in: (data.startIndex + 4)..<(data.startIndex + 4 + headerLen))
         let body = data.subdata(in: (data.startIndex + 4 + headerLen)..<data.endIndex)
-        guard let headerStr = String(data: headerData, encoding: .utf8),
-            let header = try? JSON.parse(headerStr)
-        else { return nil }
-        return (header, body)
+        guard let headerStr = String(data: headerData, encoding: .utf8) else {
+            throw FrameError("bad binary frame header: 'utf-8' codec can't decode bytes")
+        }
+        do {
+            return (try JSON.parse(headerStr), body)
+        } catch {
+            throw FrameError("bad binary frame header: \(error)")
+        }
     }
 }

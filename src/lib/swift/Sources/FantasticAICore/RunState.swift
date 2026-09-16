@@ -48,18 +48,22 @@ struct AIQueuedEntry: Sendable {
 }
 
 /// The submission currently holding the lock (drives the `status` verb).
+///
+/// KEY ORDER IS THE WIRE ORDER for the redacted snapshot: python promotes the
+/// QUEUED entry (`client_id, text, send_id, queued_at`) and adds `started_at`,
+/// `phase`, `text_so_far`, `task_id` after it, and `_redact_text` keeps that
+/// order minus the text-bearing keys.
 struct AICurrentEntry: Sendable {
     let clientId: String
     let text: String
     let sendId: String
+    /// When this submission ENTERED THE QUEUE — carried through the promotion,
+    /// so a redacted snapshot can say how long it waited before it ran.
+    let queuedAt: Double
     let startedAt: Double
     var phase: String  // thinking | streaming | tool_calling | done
     var textSoFar: String
     var lastTool: JSON?
-    /// The `done` event's correlation ids — held here so `onCancel` can close
-    /// the turn out for the client after the generation is gone.
-    let streamId: String
-    let messageId: String
     /// The KERNEL TASK this generation runs as (`"<agent>:<n>"`) — the pid `ps`
     /// reports. `cancel <task_id>` kills the turn; the bundle's `onCancel`
     /// matches on this to know the killed task is ITS generation (not some other
@@ -96,18 +100,15 @@ final class AIAgentRunState: @unchecked Sendable {
 
     /// Remove the entry with `sendId` from the queue and make it the
     /// current in-flight entry, started now at `phase`.
-    func popToCurrent(
-        sendId: String, startedAt: Double, phase: String,
-        streamId: String, messageId: String, taskId: String?
-    ) {
+    func popToCurrent(sendId: String, startedAt: Double, phase: String, taskId: String?) {
         lock.lock()
         defer { lock.unlock() }
         guard let i = queue.firstIndex(where: { $0.sendId == sendId }) else { return }
         let e = queue.remove(at: i)
         current = AICurrentEntry(
-            clientId: e.clientId, text: e.text, sendId: e.sendId,
+            clientId: e.clientId, text: e.text, sendId: e.sendId, queuedAt: e.queuedAt,
             startedAt: startedAt, phase: phase, textSoFar: "", lastTool: nil,
-            streamId: streamId, messageId: messageId, taskId: taskId)
+            taskId: taskId)
     }
 
     /// Drop a still-QUEUED submission (its generation was cancelled before it

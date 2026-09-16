@@ -106,7 +106,7 @@ async fn wired() -> Arc<Kernel> {
         std::env::temp_dir().join("c21-rust"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
         .send(vec![Item::new(

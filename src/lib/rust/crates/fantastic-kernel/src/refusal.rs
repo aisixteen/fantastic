@@ -32,6 +32,7 @@
 //! stated a fact and withheld every fact that would have repaired it. A refusal
 //! that cannot be acted on costs the same as no reply.
 
+use fantastic_bundle::py_repr;
 use serde_json::{Map, Value};
 
 /// The call gate said no (carries `side`).
@@ -161,30 +162,39 @@ pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
         return Some(bad(
             verb,
             "id",
-            &format!("a single path segment (no separators); got {agent_id:?}"),
+            &format!(
+                "a single path segment (no separators); got {}",
+                py_repr(agent_id)
+            ),
         ));
     }
     if agent_id == "." || agent_id == ".." || agent_id.contains("..") {
         return Some(bad(
             verb,
             "id",
-            &format!("a name that is not a path traversal; got {agent_id:?}"),
+            &format!(
+                "a name that is not a path traversal; got {}",
+                py_repr(agent_id)
+            ),
         ));
     }
     if agent_id.starts_with('.') {
         return Some(bad(
             verb,
             "id",
-            &format!("a name that is not hidden; got {agent_id:?}"),
+            &format!("a name that is not hidden; got {}", py_repr(agent_id)),
         ));
     }
-    if agent_id.contains(':') {
-        // The minted-pid namespace: `<agent>:<hex>` in the one id space the
-        // ledger and task table share.
+    if fantastic_bundle::py_isdigit(agent_id) {
+        // Message ids are plain integers; in prompt text an all-digit agent id
+        // would read as one. Names are words.
         return Some(bad(
             verb,
             "id",
-            &format!("a name without ':' (the minted-pid namespace); got {agent_id:?}"),
+            &format!(
+                "a name, not a number (message ids are ints); got {}",
+                py_repr(agent_id)
+            ),
         ));
     }
     None
@@ -251,7 +261,7 @@ pub fn unknown_agent(agent_id: &str, mut live_ids: Vec<String>) -> Value {
     live_ids.sort();
     let count = live_ids.len();
     live_ids.truncate(UNKNOWN_AGENT_IDS_MAX);
-    let mut v = refusal(UNKNOWN_AGENT, format!("no agent {agent_id:?}"));
+    let mut v = refusal(UNKNOWN_AGENT, format!("no agent {}", py_repr(agent_id)));
     with(&mut v, "agent_count", Value::from(count));
     with(
         &mut v,
@@ -266,8 +276,9 @@ pub fn unknown_agent(agent_id: &str, mut live_ids: Vec<String>) -> Value {
             &mut v,
             "hint",
             Value::String(format!(
-                "{agent_id:?} is a PLACEHOLDER from an example, not an id — \
-                 substitute one of `agents`."
+                "{} is a PLACEHOLDER from an example, not an id — \
+                 substitute one of `agents`.",
+                py_repr(agent_id)
             )),
         );
     }

@@ -7,6 +7,10 @@ license.workspace = true
 description = "Recursive Agent substrate + Kernel shared context for the fantastic_canvas medium."
 
 [dependencies]
+# CPython-format helpers (`py_repr`, `py_str`, …) — the kernel's refusal texts
+# are python's, byte for byte, so it reads them from the one shared crate
+# instead of keeping a Debug-quoting copy.
+fantastic-bundle = { path = "../fantastic-bundle" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

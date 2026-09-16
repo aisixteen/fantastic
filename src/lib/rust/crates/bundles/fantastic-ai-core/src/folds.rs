@@ -16,6 +16,7 @@
 //! Mirrors python `ai_core/folds.py`, which is the immutable reference.
 
 use crate::tool_parse::extract_tool_calls;
+use fantastic_bundle::py_json_dumps;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -317,9 +318,13 @@ pub fn chain_text(rows: &[Value], chain: &[usize]) -> String {
             let c = row_content(&rows[i]);
             let chars: Vec<char> = c.chars().collect();
             let text = if chars.len() > per {
-                let half = per / 2;
-                let head: String = chars[..half].iter().collect();
-                let tail: String = chars[chars.len() - half..].iter().collect();
+                // python `c[: per // 2] + … + c[-per // 2 :]`: `-per // 2` FLOORS,
+                // so the tail is `(per + 1) / 2` — one longer than the head when
+                // `per` is odd. Halving both ends dropped a character.
+                let head_n = per / 2;
+                let tail_n = per.div_ceil(2);
+                let head: String = chars[..head_n].iter().collect();
+                let tail: String = chars[chars.len() - tail_n..].iter().collect();
                 format!("{head} …[{} chars elided]… {tail}", chars.len() - per)
             } else {
                 c.to_string()
@@ -327,7 +332,9 @@ pub fn chain_text(rows: &[Value], chain: &[usize]) -> String {
             json!({"role": row_role(&rows[i]), "id": row_id(&rows[i]), "content": text})
         })
         .collect();
-    let s = serde_json::to_string(&items).unwrap_or_default();
+    // python `json.dumps(items, ensure_ascii=False, default=str)[:CAP]` — the
+    // separators are `, `/`: `, non-ASCII rides RAW, and the cut is code points.
+    let s = py_json_dumps(&Value::Array(items), false, None);
     s.chars().take(SUMMARY_INPUT_CAP).collect()
 }
 
@@ -340,7 +347,10 @@ pub fn quoted_title(content: &str) -> Option<&str> {
     while let Some(rel) = content[i..].find("· \"") {
         let start = i + rel + "· \"".len();
         if let Some(close) = content[start..].find('"') {
-            if (1..=140).contains(&close) {
+            // 1..=140 CODE POINTS, as python's `[^"]{1,140}` — a byte bound cut a
+            // non-ASCII title short of what python matches.
+            let n = content[start..start + close].chars().count();
+            if (1..=140).contains(&n) {
                 return Some(&content[start..start + close]);
             }
         }

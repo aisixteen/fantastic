@@ -234,4 +234,44 @@ struct AsyncRepliesTests {
         text = r["matches"][0]["text"].asString ?? ""
         #expect(text.contains("cafebabe"))
     }
+
+    // ── code points, not graphemes (B5.1) ────────────────────────────────
+
+    // A CRLF is ONE Character and TWO code points, so a grapheme-counted page
+    // and a grapheme-counted width both return more than python returns.
+    //
+    // NOTE: the STORED-BODY branch's page still comes from `kernel.rows.bodyGet`,
+    // which counts graphemes today — `ViewRecallTests.pullPagesACrlfBodyByCodePoints`
+    // lands with C70. What is pinned here is the FOLD branch and the grep width,
+    // which are this batch's.
+    @Test func pullAndGrepWidthCountCodePoints() async throws {
+        let (kernel, agent, f) = await boot()
+        let fold = f.fold([], "t", String(repeating: "a\r\nb", count: 3), false)
+        f.seed([fold])
+        let pid = try #require(rowId(fold))
+        let r = await verb(kernel, agent, "pull", ["pid": .integer(pid), "length": .integer(5)])
+        #expect(r["text"].asString == "a\r\nba", "\(r.serialize())")
+        #expect(r["next_offset"].asInt == 5)
+
+        // `line.strip()[:width]` counts code points too.
+        let (k2, a2, f2) = await boot()
+        f2.seed([f2.row("user", String(repeating: "a\r\n", count: 8) + "needle", "u:1")])
+        let g = await verb(k2, a2, "grep", ["query": .string("needle"), "width": .integer(20)])
+        #expect(g["total"].asInt == 1, "\(g.serialize())")
+    }
+
+    // `Character` `contains` cannot find `e` inside `é` and DOES find text
+    // python calls different (NFC vs NFD). A grep answers on code points.
+    @Test func grepMatchesCodePointsNotGraphemes() async throws {
+        let (kernel, agent, f) = await boot()
+        // `é` written NFD is `e` + U+0301: python's substring test finds `e`.
+        f.seed([f.row("user", "caf\u{65}\u{301} time", "u:1")])
+        let hit = await verb(kernel, agent, "grep", ["query": .string("cafe")])
+        #expect(hit["total"].asInt == 1, "\(hit.serialize())")
+        // And the NFC form is NOT the NFD form.
+        let (k2, a2, f2) = await boot()
+        f2.seed([f2.row("user", "caf\u{e9} time", "u:1")])
+        let miss = await verb(k2, a2, "grep", ["query": .string("caf\u{65}\u{301}")])
+        #expect(miss["total"].asInt == 0, "\(miss.serialize())")
+    }
 }

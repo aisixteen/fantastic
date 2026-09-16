@@ -113,6 +113,20 @@ pub trait BridgeTransport: Send + Sync {
     /// `ConnectionClosed`; subsequent `send_frame` likewise.
     async fn close(&self);
 
+    /// python `_BaseTransport.closed` — the engine's `connected` and every
+    /// forward/watch pre-check read it. Default `false`: a python `websockets`
+    /// client has no `closed` attribute, so a ws leg NEVER reports closed (§7 —
+    /// do not add drop detection here).
+    fn closed(&self) -> bool {
+        false
+    }
+
+    /// The relay leg's `is_live` — a usable socket exists RIGHT NOW (not closed,
+    /// not mid-reconnect). Only `relay_connector`'s reflect reads it.
+    fn is_live(&self) -> bool {
+        !self.closed()
+    }
+
     /// Directory snapshot from a relay-kernel router (`relay_connector` only):
     /// `{peers:[{guid,status,last_seen,since}]}`. Default: not a relay transport.
     async fn list_peers(&self, _timeout_s: f64) -> Value {

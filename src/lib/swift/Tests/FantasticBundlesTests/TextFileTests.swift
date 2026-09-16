@@ -47,8 +47,11 @@ struct TextFileTests {
         return (kernel, dir)
     }
 
+    /// The BATCH binary item, not `sendWithBinary`: the batch is what mints the
+    /// task row and the pid, and a checkpoint id IS that pid (python has no
+    /// batch-free binary path at all).
     private func callBin(_ k: Kernel, _ header: JSON, _ blob: String) async -> JSON {
-        await k.sendWithBinary(AgentId("ed"), header, Data(blob.utf8)).0
+        await k.send([Item(AgentId("ed"), header, binary: Data(blob.utf8))])[0].result
     }
 
     private func call(_ k: Kernel, _ payload: JSON) async -> JSON {
@@ -356,9 +359,11 @@ struct TextFileTests {
             #expect(r["error"].asString?.contains("target") == true, "\(verb): \(r)")
         }
         for verb in ["write", "patch", "append"] {
-            let (r, _) = await kernel.sendWithBinary(
-                AgentId("bare"),
-                .object(["type": .string(verb), "path": .string("x")]), Data("y".utf8))
+            let r = await kernel.send([
+                Item(
+                    AgentId("bare"), .object(["type": .string(verb), "path": .string("x")]),
+                    binary: Data("y".utf8))
+            ])[0].result
             #expect(r["reason"].asString == "not_found", "\(verb): \(r)")
         }
     }
@@ -552,14 +557,375 @@ struct TextFileTests {
         }
     }
 
+    /// A3.1 — the byte verbs name their OWN `bytes` argument, and the guard sits
+    /// inside the verb (python `tools.py:358-372,392-402,467-477`), never in
+    /// `handle`: the order is unwired → path/edits → bytes.
     @Test func textChannelBytesGuardIsMissingArg() async {
         let (k, dir) = await openEditor()
         defer { try? FileManager.default.removeItem(at: dir) }
-        for verb in ["write", "patch", "append"] {
-            let r = await call(k, .object(["type": .string(verb), "path": .string("x")]))
-            #expect(r["reason"].asString == "missing_arg", "\(verb): \(r)")
-            #expect(r["arg"].asString?.hasPrefix("bytes") == true, "\(verb): \(r)")
+        let cases: [(JSON, String)] = [
+            (
+                .object(["type": .string("write"), "path": .string("x")]),
+                "bytes (the document — str is utf-8-encoded)"
+            ),
+            (
+                .object(["type": .string("append"), "path": .string("x")]),
+                "bytes (one chunk — str is utf-8-encoded)"
+            ),
+            (
+                .object([
+                    "type": .string("patch"),
+                    "edits": .array([.object(["path": .string("x"), "hunks": .integer(1)])]),
+                ]),
+                "bytes (the utf-8 patch — all hunks, in edits order)"
+            ),
+        ]
+        for (payload, arg) in cases {
+            let r = await call(k, payload)
+            #expect(r["reason"].asString == "missing_arg", "\(payload.serialize()): \(r)")
+            #expect(r["arg"].asString == arg, "\(payload.serialize()): \(r)")
+            #expect(r["error"].asString?.hasSuffix(": \(arg) required") == true, "\(r)")
         }
+    }
+
+    /// A3.1 — the precheck ORDER: a bytes-less `write` on an UNWIRED editor is
+    /// `not_found`, not `missing_arg`, and a wired one complains about `path`
+    /// before `bytes`. Python refuses in verb order; `handle` refuses nothing.
+    @Test func bytesGuardComesAfterUnwiredAndPath() async {
+        let registry = BundleRegistry()
+        registry.register("text_file.tools", TextFileBundle())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        _ = await kernel.send([
+            Item(
+                "core",
+                .object([
+                    "type": "create_agent", "parent_id": "core",
+                    "handler_module": "text_file.tools", "id": "bare",
+                ]))
+        ])[0].result
+        for verb in ["write", "patch", "append"] {
+            let r = await kernel.send([
+                Item(AgentId("bare"), .object(["type": .string(verb)]))
+            ])[0].result
+            #expect(r["reason"].asString == "not_found", "\(verb): \(r)")
+        }
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for verb in ["write", "append"] {
+            let r = await call(k, .object(["type": .string(verb)]))
+            #expect(r["arg"].asString == "path", "\(verb): \(r)")
+        }
+        let p = await call(k, .object(["type": .string("patch")]))
+        #expect(p["arg"].asString == "edits (a list of {path, hunks, if_match?})", "\(p)")
+    }
+
+    /// A3.2 — python's `VERBS` has no `shutdown`, so it is an unknown type like
+    /// any typo (it used to answer a silent `null`).
+    @Test func shutdownIsUnhandled() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await call(k, .object(["type": .string("shutdown")]))
+        #expect(r["reason"].asString == "unhandled", "\(r)")
+        #expect(r["error"].asString == "text_file: unknown type 'shutdown'", "\(r)")
+        #expect(r["verb"].asString == "shutdown", "\(r)")
+    }
+
+    /// A3.3 — every quoted value in a refusal is python's `repr`: single quotes
+    /// on a str, bare on an int.
+    @Test func refusalTextsQuoteLikePythonRepr() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "c.txt", "keep\n")
+        let unknown = await call(k, .object(["type": .string("frobnicate")]))
+        #expect(unknown["error"].asString == "text_file: unknown type 'frobnicate'", "\(unknown)")
+        let noCkpt = await call(
+            k,
+            .object([
+                "type": .string("restore"), "path": .string("c.txt"),
+                "ckpt_id": .integer(999_999),
+            ]))
+        #expect(
+            noCkpt["error"].asString == "restore: no checkpoint 999999 for 'c.txt'", "\(noCkpt)")
+        #expect(noCkpt["reason"].asString == "not_found", "\(noCkpt)")
+        let hunks = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([.object(["path": .string("a.py"), "hunks": .string("2")])]),
+            ]), block("x", "y"))
+        #expect(
+            hunks["error"].asString == "patch: edits must be edit 0 ('a.py'): `hunks` (int >= 1)",
+            "\(hunks)")
+        // a document that is not utf-8 names itself with `repr`, too
+        try? Data([0xff, 0xfe, 0xff]).write(to: dir.appendingPathComponent("b.bin"))
+        let binary = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([.object(["path": .string("b.bin"), "hunks": .integer(1)])]),
+            ]), block("x", "y"))
+        #expect(
+            binary["error"].asString == "patch: edits must be 'b.bin': a utf-8 text file",
+            "\(binary)")
+    }
+
+    /// A3.4 — every edit is validated (python has no `break`), so the reported
+    /// sum is the WHOLE claim, not the prefix that happened to fit.
+    @Test func hunkClaimSumsEveryEdit() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.py", "one\n")
+        _ = await seed(k, "b.py", "two\n")
+        let blob = block("one", "ONE") + "\n" + block("two", "TWO")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([
+                    .object(["path": .string("a.py"), "hunks": .integer(3)]),
+                    .object(["path": .string("b.py"), "hunks": .integer(1)]),
+                ]),
+            ]), blob)
+        #expect(
+            r["error"].asString == "patch: edits must be hunk counts that sum to the blob's "
+                + "blocks — edits claim 4, the patch holds 2", "\(r)")
+        #expect(read(dir, "a.py") == "one\n")
+    }
+
+    /// A3.5 — the per-edit mismatch body puts `path` between `reason` and
+    /// `expected` (python `tools.py:544-550`).
+    @Test func perEditVersionMismatchKeyOrder() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.py", "one\n")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([
+                    .object([
+                        "path": .string("a.py"), "hunks": .integer(1),
+                        "if_match": .string(String(repeating: "0", count: 16)),
+                    ])
+                ]),
+            ]), block("one", "ONE"))
+        #expect(
+            Array(r.asObject?.keys ?? []) == ["error", "reason", "path", "expected", "actual"],
+            "\(r.serialize())")
+    }
+
+    /// A3.6 — `validate_meta` refuses a `target_id` this bundle cannot use.
+    @Test func emptyTargetIdIsInvalidMeta() async {
+        let registry = BundleRegistry()
+        registry.register("text_file.tools", TextFileBundle())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        let r = await kernel.send([
+            Item(
+                "core",
+                .object([
+                    "type": "create_agent", "parent_id": "core",
+                    "handler_module": "text_file.tools", "id": "ed2",
+                    "target_id": .string(""),
+                ]))
+        ])[0].result
+        #expect(r["reason"].asString == "invalid_meta", "\(r.serialize())")
+        #expect(
+            r["error"].asString == "target_id must be a non-empty file_bridge agent id",
+            "\(r.serialize())")
+    }
+
+    /// A3.7 — `checkpoint` / `dry_run` are python-TRUTHY, `if_match` guards on
+    /// any non-null value (a non-string never matches and echoes raw), and a
+    /// FALSY `ckpt_id` is missing.
+    @Test func argTypingFollowsPythonTruthiness() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "t.txt", "one\n")
+        let w = await callBin(
+            k,
+            .object([
+                "type": .string("write"), "path": .string("t.txt"),
+                "checkpoint": .integer(1),
+            ]), "two\n")
+        #expect(w["ckpt_id"].asInt != nil, "\(w.serialize())")
+        let mism = await callBin(
+            k,
+            .object([
+                "type": .string("write"), "path": .string("t.txt"),
+                "if_match": .integer(12345),
+            ]), "three\n")
+        #expect(mism["reason"].asString == "version_mismatch", "\(mism.serialize())")
+        #expect(mism["expected"].asInt == 12345, "\(mism.serialize())")
+        #expect(read(dir, "t.txt") == "two\n")
+        let zero = await call(
+            k,
+            .object([
+                "type": .string("restore"), "path": .string("t.txt"), "ckpt_id": .integer(0),
+            ]))
+        #expect(zero["reason"].asString == "missing_arg", "\(zero.serialize())")
+        #expect(zero["arg"].asString == "ckpt_id", "\(zero.serialize())")
+        let dry = await callBin(
+            k,
+            .object([
+                "type": .string("patch"), "dry_run": .string("yes"),
+                "edits": .array([.object(["path": .string("t.txt"), "hunks": .integer(1)])]),
+            ]), block("two", "TWO"))
+        #expect(dry["dry_run"].asBool == true, "\(dry.serialize())")
+        #expect(read(dir, "t.txt") == "two\n")
+    }
+
+    /// A3.8 — the leg-reply check: a reply that is not an object IS the failure
+    /// (`str(None)` = `"None"`), and an object fails only on a TRUTHY `error`,
+    /// so `{"error": ""}` is a SUCCESS.
+    @Test func legFailureFollowsPythonTruthiness() async {
+        let registry = BundleRegistry()
+        registry.register("probe_leg.tools", ProbeLegBundle())
+        registry.register("text_file.tools", TextFileBundle())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        for (id, mode) in [("nul", "null"), ("blank", "blank_error")] {
+            _ = await kernel.send([
+                Item(
+                    "core",
+                    .object([
+                        "type": "create_agent", "parent_id": "core",
+                        "handler_module": "probe_leg.tools", "id": .string(id),
+                        "mode": .string(mode), "callable_by": .object(["ed": .string("*")]),
+                        "ingress_rule": "allow_all_ingress",
+                    ]))
+            ])[0].result
+        }
+        _ = await kernel.send([
+            Item(
+                "core",
+                .object([
+                    "type": "create_agent", "parent_id": "core",
+                    "handler_module": "text_file.tools", "id": "ed",
+                    "can_call": .object(["nul": .string("*"), "blank": .string("*")]),
+                ]))
+        ])[0].result
+        let nul = await kernel.send([
+            Item(
+                AgentId("ed"),
+                .object([
+                    "type": .string("read"), "path": .string("x"), "on": .string("nul"),
+                ]))
+        ])[0].result
+        #expect(nul["error"].asString == "None", "\(nul.serialize())")
+        let blank = await kernel.send([
+            Item(
+                AgentId("ed"),
+                .object([
+                    "type": .string("read"), "path": .string("x"), "on": .string("blank"),
+                ]))
+        ])[0].result
+        #expect(blank["total"].asInt == 0, "\(blank.serialize())")
+        #expect(blank["eof"].asBool == true, "\(blank.serialize())")
+    }
+
+    /// A3.9 — a truthy non-string `path` travels to the leg VERBATIM (the tag
+    /// grammar types `<path>2024</path>` as an int) and earns the LEG's bad_arg;
+    /// only a falsy path is `missing_arg`.
+    @Test func nonStringPathReachesTheLeg() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await call(k, .object(["type": .string("read"), "path": .integer(2024)]))
+        #expect(r["error"].asString == "read_stream: path must be a string", "\(r.serialize())")
+        #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
+        let empty = await call(k, .object(["type": .string("read"), "path": .string("")]))
+        #expect(empty["reason"].asString == "missing_arg", "\(empty.serialize())")
+    }
+
+    /// A3.10 — a ckpt id is an INT everywhere it appears: the `write` reply, the
+    /// `checkpoint` reply, the `checkpoints` listing and the patch's `ckpt_ids`;
+    /// `drop` echoes the caller's value as given.
+    @Test func checkpointIdsAreIntsEverywhere() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "p.txt", "a = 1\n")
+        let c = await call(k, .object(["type": .string("checkpoint"), "path": .string("p.txt")]))
+        #expect(c["ckpt_id"].asInt != nil, "\(c.serialize())")
+        let ls = await call(k, .object(["type": .string("checkpoints"), "path": .string("p.txt")]))
+        #expect(ls["ckpts"].asArray?.count == 1, "\(ls.serialize())")
+        #expect(ls["ckpts"][0]["id"].asInt == c["ckpt_id"].asInt, "\(ls.serialize())")
+        if case .integer = ls["ckpts"][0]["id"] {} else {
+            Issue.record("ckpt listing id is not an int: \(ls.serialize())")
+        }
+        let p = await callBin(
+            k,
+            .object([
+                "type": .string("patch"), "checkpoint": .bool(true),
+                "edits": .array([.object(["path": .string("p.txt"), "hunks": .integer(1)])]),
+            ]), block("a = 1", "a = 2"))
+        #expect(p["ckpt_ids"][0]["ckpt_id"].asInt != nil, "\(p.serialize())")
+        let d = await call(
+            k,
+            .object([
+                "type": .string("drop"), "path": .string("p.txt"),
+                "ckpt_id": c["ckpt_id"],
+            ]))
+        #expect(d["dropped"].asBool == true, "\(d.serialize())")
+        #expect(d["ckpt_id"].asInt == c["ckpt_id"].asInt, "\(d.serialize())")
+    }
+
+    /// A3.13 — the bundle readme is python's `readme.md`, byte for byte.
+    @Test func readmeIsPythonVerbatim() throws {
+        let expected = try String(
+            contentsOf: pythonSource("text_file/src/text_file/readme.md"), encoding: .utf8)
+        #expect(TextFileBundle().readme == expected)
+    }
+
+    /// A3.14 — python `rec.get("description") or <default>`: an EMPTY
+    /// description is falsy and reflects the default sentence.
+    @Test func emptyDescriptionReflectsTheDefaultSentence() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await k.send([
+            Item(
+                "core",
+                .object([
+                    "type": "update_agent", "id": "ed", "description": .string(""),
+                ]))
+        ])[0].result
+        let r = await call(k, .object(["type": .string("reflect")]))
+        #expect(
+            r["sentence"].asString?.hasPrefix("Text documents on a file surface") == true,
+            "\(r["sentence"].serialize())")
+    }
+
+    /// A3.15 — an EMPTY SEARCH hunk counts `len(s) + 1` CODE POINTS (`"a\r\nb"`
+    /// is 4 code points, not 3 graphemes) and inserts at the start.
+    @Test func emptySearchHunkCountsCodePoints() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "e.txt", "")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([.object(["path": .string("e.txt"), "hunks": .integer(1)])]),
+            ]), block("", "hello"))
+        #expect(r["patched"].asBool == true, "\(r.serialize())")
+        #expect(read(dir, "e.txt") == "hello")
+        _ = await seed(k, "crlf.txt", "a\r\nb")
+        let amb = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([.object(["path": .string("crlf.txt"), "hunks": .integer(1)])]),
+            ]), block("", "x"))
+        #expect(amb["reason"].asString == "ambiguous", "\(amb.serialize())")
+        #expect(
+            amb["failed"][0]["reason"].asString == "search text matches 5 places",
+            "\(amb.serialize())")
     }
 
     @Test func unknownTypeCarriesVerb() async {
@@ -640,5 +1006,30 @@ struct TextFileTests {
         }
         // …and the file was not touched by any of them.
         #expect(read(dir, "m.py") == "a = 1\n")
+    }
+}
+
+/// A stand-in file leg whose reply SHAPE is the thing under test: `mode:null`
+/// answers a non-object reply, `mode:blank_error` an object carrying a FALSY
+/// `error`. Python's leg check reads both through `str(r)` / truthiness.
+struct ProbeLegBundle: AgentBundle {
+    let name = "probe_leg"
+
+    private func reply(_ agentId: AgentId, _ kernel: Kernel) -> JSON {
+        let mode = kernel.agent(agentId)?.metaValue(forKey: "mode")?.asString ?? "null"
+        if mode == "blank_error" {
+            return .object(["error": .string(""), "eof": .bool(true), "size": .integer(0)])
+        }
+        return .null
+    }
+
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        reply(agentId, kernel)
+    }
+
+    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
+        async throws -> (JSON?, Data)
+    {
+        (reply(agentId, kernel), Data())
     }
 }

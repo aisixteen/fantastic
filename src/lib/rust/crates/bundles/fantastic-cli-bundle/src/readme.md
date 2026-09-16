@@ -1,13 +1,4 @@
-cli — terminal render sink.
+# cli — stdout renderer
+Renders token/done/say/error events to stdout. Ephemeral — composed per-process when stdin is a tty, never persisted.
 
-Receives `token`, `done`, `say`, `error`, `status`, `context` payloads and prints them to
-stdout. Unknown verbs are silently DROPPED: this is a sink, and a render surface that
-refused an unexpected event would turn a cosmetic gap into a failed send for its caller.
-
-It NEVER inspects the tree. Producers push what they know — an agent announces its own
-endpoints during boot — because the producer owns the information and this sink only
-formats it.
-
-Agents reach it by id (`cli`), so it is subject to the same two-sided gate as anything
-else: an agent that streams here needs egress to `cli`, and `cli` needs `callable_by`
-naming that agent.
+A DUMB SINK for the PTY intro too: it prints what it is told and never inspects the tree. `intro_booting` (kernel→cli, pre-boot) prints the identity + pull/push control-plane map; agents announce their OWN endpoints during boot (e.g. web sends/publishes a `say` with its listening URL); `booted` (kernel→cli, post-boot) is the "all booted" close. Best-effort, tty-only.

@@ -18,7 +18,7 @@ import Testing
 struct KernelBridgeRefusalTests {
     private func kernelWithLeg() async -> Kernel {
         let registry = BundleRegistry()
-        registry.register("relay_connector.tools", KernelBridgeBundle())
+        registry.register("relay_connector.tools", KernelBridgeBundle(family: .relay))
         let kernel = Kernel(storage: .inMemory, bundles: registry)
         let root = Agent(id: "core", handlerModule: nil, parentId: nil)
         kernel.register(root)
@@ -37,10 +37,9 @@ struct KernelBridgeRefusalTests {
         ["type": "unwatch_remote", "target": "x"] as JSON,
         ["type": "list_peers"] as JSON,
         ["type": "watch_directory"] as JSON,
-        // `unwatch_directory` is deliberately NOT here: swift/rust refuse it
-        // pre-boot while python answers `{ok:true}` (stopping something that was
-        // never started is a no-op). That parity gap is #109's neighbour, not
-        // #109 — pinning it either way here would freeze the wrong answer.
+        // `unwatch_directory` is NOT here: python answers `{ok:true}` pre-boot
+        // (stopping something never started is a no-op), and swift now matches —
+        // `RelayTransportTests.directoryRepliesMatchPython` pins that half.
         ["type": "set_identity", "role": "manager"] as JSON,
     ])
     func everyPreBootRefusalSharesOneCode(payload: JSON) async throws {

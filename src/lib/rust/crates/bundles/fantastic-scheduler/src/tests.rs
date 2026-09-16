@@ -129,7 +129,7 @@ async fn mk_probed(
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let sch_id = scheduler_id_for(tmp);
     if with_store {
@@ -230,6 +230,25 @@ async fn wait_for(mut pred: impl FnMut() -> bool, secs: f64) -> bool {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     pred()
+}
+
+/// Stop a scheduler's tick loop the way an operator would.
+///
+/// `shutdown` is NOT a verb (A5.3) — python has no such key and it answers
+/// `scheduler: unknown type 'shutdown'`. The tick loop is a kernel TASK, so the way
+/// to stop one is to cancel that task (or delete the agent, which does the same
+/// through `on_delete`).
+async fn stop_tick(kernel: &Arc<Kernel>, sch: &AgentId) {
+    let ids: Vec<fantastic_kernel::TaskId> = kernel
+        .tasks
+        .rows()
+        .iter()
+        .filter(|r| r["verb"] == "tick_loop" && r["agent"] == sch.as_str())
+        .filter_map(|r| r["id"].as_i64().map(fantastic_kernel::TaskId))
+        .collect();
+    for id in ids {
+        kernel.cancel_task(&id).await;
+    }
 }
 
 #[test]
@@ -508,11 +527,7 @@ async fn tick_loop_fires_due_schedule() {
         .result;
     // tick_sec is 0.1 on the test agent → wait ~1.5s for at least one fire.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let _ = kernel
-        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
-        .await
-        .remove(0)
-        .result;
+    stop_tick(&kernel, &sch).await;
     let listed = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
         .await
@@ -546,9 +561,7 @@ async fn due_schedules_fire_as_one_concurrent_batch() {
         .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await;
     let both = wait_for(|| hits.has("p_slow") && hits.has("p_fast"), 3.0).await;
-    let _ = kernel
-        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
-        .await;
+    stop_tick(&kernel, &sch).await;
     assert!(both, "both probes must be hit");
     let gap = hits.get("p_fast").unwrap().0 - hits.get("p_slow").unwrap().0;
     assert!(
@@ -581,9 +594,7 @@ async fn next_run_is_persisted_before_the_fire() {
         .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
         .await;
     let hit = wait_for(|| hits.has("p_cap"), 3.0).await;
-    let _ = kernel
-        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
-        .await;
+    stop_tick(&kernel, &sch).await;
     assert!(hit, "probe must be hit");
     let (at, doc) = hits.get("p_cap").unwrap();
     let doc = doc.expect("store had no schedules.json at fire time");
@@ -757,4 +768,507 @@ async fn a_non_numeric_tick_sec_is_refused_at_write_time() {
         "{r}"
     );
     assert!(!kernel.agents.contains_key(&AgentId::from("sch_ticks")));
+}
+
+// ─── python parity (plan §2 A5) ──────────────────────────────────
+
+/// A5.2 — the vendored readme is python's, byte for byte (two lines + `\n`).
+#[test]
+fn scheduler_readme_is_python_verbatim() {
+    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../..")
+        .join("src/lib/python/bundled_agents/scheduler/src/scheduler/readme.md");
+    let Ok(src) = std::fs::read_to_string(&py) else {
+        eprintln!("skipping: python tree not present at {}", py.display());
+        return;
+    };
+    assert_eq!(src, README, "readme has drifted from {}", py.display());
+}
+
+/// A5.1 — the `schedule_fired` emit doc is python's, two em-dashes and all.
+#[tokio::test]
+async fn reflect_emits_is_python_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = reflect_reply(&sch, &kernel);
+    assert_eq!(
+        r["emits"]["schedule_fired"],
+        "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
+    );
+}
+
+/// A5.15 — `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
+/// verb's docstring. `boot`'s is truncated mid-sentence; that is the python text.
+#[tokio::test]
+async fn reflect_verbs_are_python_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = reflect_reply(&sch, &kernel);
+    let verbs = r["verbs"].as_object().expect("verbs object");
+    assert_eq!(
+        verbs.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "reflect",
+            "boot",
+            "schedule",
+            "unschedule",
+            "list",
+            "pause",
+            "resume",
+            "tick_now",
+            "history"
+        ]
+    );
+    assert_eq!(
+        verbs["boot"],
+        "Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write"
+    );
+    assert_eq!(
+        verbs["unschedule"],
+        "args: schedule_id:str (req). Returns {removed:bool, schedule_id}."
+    );
+    assert_eq!(
+        verbs["list"],
+        "No args. Returns {schedules: [<schedule record>, ...]}."
+    );
+}
+
+/// A5.3 — `shutdown` is not a verb: python's `VERBS` has no such key, so it is an
+/// unknown type. It used to answer `null`, which read as a successful stop.
+#[tokio::test]
+async fn shutdown_is_an_unknown_type() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], "scheduler: unknown type 'shutdown'");
+}
+
+/// A5.13 — refusals quote with python's `repr`.
+#[tokio::test]
+async fn refusal_text_uses_python_repr() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "tick_now", "schedule_id": "nope"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], "schedule 'nope' not found");
+    // A truthy NON-string id is echoed through repr too.
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "tick_now", "schedule_id": 7}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], "schedule 7 not found");
+}
+
+/// A5.4 — `boot` is idempotent and says only `{running:true}`; a caller cannot
+/// branch on whether it was the first.
+#[tokio::test]
+async fn boot_twice_replies_running_only() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    for _ in 0..2 {
+        let r = kernel
+            .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r, json!({"running": true}), "{r}");
+    }
+    stop_tick(&kernel, &sch).await;
+}
+
+/// A5.5 — the validation ORDER is python's: payload shape → `interval_seconds` →
+/// target → `payload.type` → `timeout`. A call with two faults is told about the
+/// first one python names.
+#[tokio::test]
+async fn schedule_validation_order_is_pythons() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let call = |p: Value| {
+        let kernel = Arc::clone(&kernel);
+        let sch = sch.clone();
+        async move { kernel.send(vec![Item::new(sch, p)]).await.remove(0).result }
+    };
+    // No target AND a bad interval ⇒ the INTERVAL is named (it is checked first).
+    let r = call(json!({"type": "schedule", "interval_seconds": "60",
+                        "payload": {"type": "ping"}}))
+    .await;
+    assert_eq!(r["arg"], "interval_seconds", "{r}");
+    // A non-object payload beats the interval.
+    let r = call(json!({"type": "schedule", "payload": [1], "interval_seconds": "60"})).await;
+    assert_eq!(r["arg"], "payload", "{r}");
+    // No target AND no payload.type ⇒ the TARGET is named.
+    let r = call(json!({"type": "schedule", "payload": {}})).await;
+    assert_eq!(r["error"], "schedule: target required", "{r}");
+    // A truthy NON-STRING target is stored verbatim.
+    let r = call(json!({"type": "schedule", "target": 7, "payload": {"type": "ping"}})).await;
+    assert_eq!(r["schedule"]["target"], json!(7), "{r}");
+}
+
+/// A5.6 — `timeout` is stored AS SENT: an int `5` stays `5`, it does not become
+/// `5.0` on its way through an `f64`.
+#[tokio::test]
+async fn an_int_timeout_stays_an_int() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "schedule", "target": "core",
+                   "payload": {"type": "list_agents"}, "timeout": 5}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["schedule"]["timeout"], json!(5), "{r}");
+    assert!(r["schedule"]["timeout"].is_i64(), "{r}");
+}
+
+/// A5.7 — `schedule_id` is read under python TRUTHINESS, and the raw value is
+/// echoed back.
+#[tokio::test]
+async fn empty_schedule_id_is_absent_like_python() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let call = |p: Value| {
+        let kernel = Arc::clone(&kernel);
+        let sch = sch.clone();
+        async move { kernel.send(vec![Item::new(sch, p)]).await.remove(0).result }
+    };
+    for falsy in [json!(""), json!(null), json!(0)] {
+        let r = call(json!({"type": "unschedule", "schedule_id": falsy})).await;
+        assert_eq!(r["error"], "unschedule: schedule_id required", "{r}");
+        let r = call(json!({"type": "tick_now", "schedule_id": falsy})).await;
+        assert_eq!(r["error"], "tick_now: schedule_id required", "{r}");
+        // A falsy id on pause/resume is the WHOLE-SCHEDULER form.
+        let r = call(json!({"type": "pause", "schedule_id": falsy})).await;
+        assert_eq!(r["scheduler_id"], sch.as_str(), "{r}");
+    }
+    // A truthy non-string id is echoed raw.
+    let r = call(json!({"type": "unschedule", "schedule_id": 7})).await;
+    assert_eq!(r["removed"], false, "{r}");
+    assert_eq!(r["schedule_id"], json!(7), "{r}");
+}
+
+/// A5.11 — `paused` is python TRUTHINESS on both the agent meta and each schedule;
+/// reflect still answers a bool.
+#[tokio::test]
+async fn paused_meta_uses_python_truthiness() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": sch.as_str(), "paused": "no"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // A non-empty string is TRUE in python — `paused: "no"` is a paused scheduler.
+    let r = reflect_reply(&sch, &kernel);
+    assert_eq!(r["paused"], true, "{r}");
+    assert!(r["paused"].is_boolean(), "{r}");
+}
+
+/// A5.12 — there is NO 0.1 s floor on `tick_sec`: a faster tick is what the
+/// operator asked for, and reflect reports it as written.
+#[tokio::test]
+async fn tick_sec_below_a_tenth_is_not_clamped() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": sch.as_str(), "tick_sec": 0.02}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(tick_sec(&sch, &kernel), 0.02);
+    assert_eq!(reflect_reply(&sch, &kernel)["tick_sec"], json!(0.02));
+}
+
+/// A5.10 — the sidecar bytes are python's `json.dumps`: `indent=2` for
+/// schedules.json, defaults (`, ` / `: `, `ensure_ascii`) for a history line.
+#[tokio::test]
+async fn history_line_uses_python_json_layout() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "schedule", "target": "córe",
+                   "payload": {"type": "list_agents"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r["schedule_id"].is_string(), "{r}");
+    let body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".fantastic/agents/{}/schedules.json", sch.as_str())),
+    )
+    .expect("schedules.json");
+    // indent 2, and NON-ASCII ESCAPED — python's `ensure_ascii` default.
+    assert!(body.starts_with("[\n  {\n    \"id\":"), "{body}");
+    assert!(body.is_ascii(), "{body}");
+    assert!(body.contains("c\\u00f3re"), "{body}");
+}
+
+/// A5.14 (D6) — the process schedule cache is NOT evicted by `delete_agent`.
+/// python's `_cache` is a module global keyed by agent id and nothing removes it, so
+/// an agent recreated under the same id in the same process inherits its
+/// predecessor's schedules.
+#[tokio::test]
+async fn recreated_scheduler_keeps_the_process_cache() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "schedule", "target": "core", "payload": {"type": "list_agents"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let sid = r["schedule_id"].clone();
+    assert!(sid.is_string(), "{r}");
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "delete_agent", "id": sch.as_str()}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        SCHEDULE_CACHE.lock().get(&sch).map(Vec::len),
+        Some(1),
+        "delete must not evict the process cache"
+    );
+}
+
+/// A5.8 — a non-`completed` fire reads `'<status>: ' + str(detail)`, and a detail
+/// python never had reads `None`. `completed` keeps `error` null even when the
+/// reply itself carries an `error` key: the STATUS is the verdict.
+#[test]
+fn cancelled_fire_error_reads_none() {
+    assert_eq!(
+        fire_outcome(Status::Cancelled, Value::Null),
+        (Value::Null, json!("cancelled: None"))
+    );
+    assert_eq!(
+        fire_outcome(Status::Cancelled, json!({})),
+        (Value::Null, json!("cancelled: None"))
+    );
+    assert_eq!(
+        fire_outcome(Status::TimedOut, json!({"error": "gone"})),
+        (Value::Null, json!("timed_out: gone"))
+    );
+    // A non-dict result is `str()`'d whole.
+    assert_eq!(
+        fire_outcome(Status::Failed, json!([1, "x"])),
+        (Value::Null, json!("failed: [1, 'x']"))
+    );
+    // `completed` carries the reply through and leaves `error` null.
+    assert_eq!(
+        fire_outcome(Status::Completed, json!({"error": "domain said no"})),
+        (json!({"error": "domain said no"}), Value::Null)
+    );
+}
+
+/// A5.9 — the RAM cache is updated BEFORE the persist, so a tick whose write failed
+/// keeps its bumped `run_count`/`next_run` and does not re-fire on the next sweep.
+///
+/// Warming the cache only on success made the opposite true: every sweep re-read the
+/// stale list, re-fired the same schedule and failed to persist again, forever.
+///
+/// The persist-failure TEXT this wraps is acceptance-deferred until C13.
+#[tokio::test]
+async fn failed_tick_persist_does_not_refire_next_tick() {
+    let tmp = TempDir::new().unwrap();
+    // NO STORE: every `persist_blob` fails, which is the point.
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_np"], None, false).await;
+    SCHEDULE_CACHE.lock().insert(
+        sch.clone(),
+        vec![json!({
+            "id": "sch_fixed",
+            "target": "p_np",
+            "payload": {"type": "hit"},
+            "interval_seconds": 60,
+            "created_at": now() - 120.0,
+            "next_run": now() - 1.0,
+            "run_count": 0,
+            "paused": false,
+        })],
+    );
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(wait_for(|| hits.has("p_np"), 3.0).await, "never fired");
+    // Let several more sweeps go by (tick_sec is 0.1s).
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    stop_tick(&kernel, &sch).await;
+    let listed = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+        .await
+        .remove(0)
+        .result;
+    let s = listed["schedules"][0].clone();
+    assert_eq!(
+        s["run_count"], 1,
+        "the failed persist re-fired the tick: {s}"
+    );
+    assert!(
+        s["next_run"].as_f64().unwrap_or(0.0) > now(),
+        "next_run was not kept: {s}"
+    );
+}
+
+/// A5.9, the other half — `tick_now` ROLLS THE CACHE BACK when its persist fails
+/// (python decrements `run_count` by hand), while `pause` keeps its change.
+#[tokio::test]
+async fn a_failed_persist_rolls_back_tick_now_but_not_pause() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, _hits) = mk_probed(&tmp, &["p_rb"], None, false).await;
+    SCHEDULE_CACHE.lock().insert(
+        sch.clone(),
+        vec![json!({
+            "id": "sch_rb",
+            "target": "p_rb",
+            "payload": {"type": "hit"},
+            "interval_seconds": 60,
+            "created_at": now(),
+            "next_run": now() + 60.0,
+            "run_count": 0,
+            "paused": false,
+        })],
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "tick_now", "schedule_id": "sch_rb"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r["error"].is_string(), "the persist must fail: {r}");
+    assert_eq!(
+        SCHEDULE_CACHE.lock()[&sch][0]["run_count"],
+        0,
+        "tick_now must roll its bump back"
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "pause", "schedule_id": "sch_rb"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r["error"].is_string(), "the persist must fail: {r}");
+    assert_eq!(
+        SCHEDULE_CACHE.lock()[&sch][0]["paused"],
+        true,
+        "pause keeps its change on a failed persist"
+    );
+}
+
+/// A5.16's rust mirror — the per-schedule pause/resume reply leads with the FLAG,
+/// then the id (python's key order).
+#[tokio::test]
+async fn pause_reply_key_order_matches_python() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "pause", "schedule_id": "nope"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["paused", "schedule_id"]
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "resume", "schedule_id": "nope"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["resumed", "schedule_id"]
+    );
+}
+
+/// A15.2 — a failed tick persist and a failed history append each print python's
+/// `logging.lastResort` line (`scheduler/tools.py:236-239,286-289`), not rust's
+/// old `tracing` text. Captured through the injected writer the fix introduces.
+#[tokio::test]
+async fn a_failed_persist_prints_python_line() {
+    let tmp = TempDir::new().unwrap();
+    // NO STORE: every `persist_blob` fails, which is the point.
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_log"], None, false).await;
+    // Swap the stderr writer for a buffer. Parallel tests may write into it too,
+    // so every assertion is scoped to THIS scheduler's id.
+    *LOG_SINK.lock() = Some(Vec::new());
+    SCHEDULE_CACHE.lock().insert(
+        sch.clone(),
+        vec![json!({
+            "id": "sch_log",
+            "target": "p_log",
+            "payload": {"type": "hit"},
+            "interval_seconds": 60,
+            "created_at": now() - 120.0,
+            "next_run": now() - 1.0,
+            "run_count": 0,
+            "paused": false,
+        })],
+    );
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(wait_for(|| hits.has("p_log"), 3.0).await, "never fired");
+    // The history append runs after the fire — give it a sweep to land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stop_tick(&kernel, &sch).await;
+    let lines: Vec<String> = LOG_SINK
+        .lock()
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l.contains(sch.as_str()))
+        .collect();
+    let persist = lines
+        .iter()
+        .find(|l| l.starts_with(&format!("scheduler {sch}: persist failed: ")))
+        .unwrap_or_else(|| panic!("no persist line in {lines:?}"));
+    assert!(persist.contains("no store"), "{persist}");
+    let history = lines
+        .iter()
+        .find(|l| l.starts_with(&format!("scheduler {sch}: history persist failed: ")))
+        .unwrap_or_else(|| panic!("no history line in {lines:?}"));
+    assert!(history.contains("no store"), "{history}");
 }

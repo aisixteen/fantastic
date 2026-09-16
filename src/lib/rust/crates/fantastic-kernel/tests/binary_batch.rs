@@ -65,7 +65,7 @@ async fn mk() -> (TempDir, Arc<Kernel>, Arc<Mutex<Vec<u8>>>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
         .send(vec![Item::new(

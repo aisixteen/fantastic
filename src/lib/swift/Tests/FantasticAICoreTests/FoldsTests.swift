@@ -363,4 +363,39 @@ struct FoldsTests {
         let levels = f.foldsOf().map { $0["level"].asInt ?? 1 }
         #expect(!levels.isEmpty && (levels.max() ?? 0) >= 2, "the head was left uncoalesced while under budget: \(levels)")
     }
+
+    // B5.22: `_summarize` splits the model's text with python's `splitlines()`.
+    // Splitting on `"\n"` as a CHARACTER read a CRLF summary as ONE line, so the
+    // whole summary became the title and the body fell back to it.
+    @Test func crlfSummarySplitsLikePython() async throws {
+        let f = FoldFixture(agent: AI)
+        let a = f.chain("a", 8)
+        let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
+        _ = await fold(
+            body,
+            f.ctx(
+                Int64(Double(AIContext.estimateTokens(body)) * 0.6),
+                summarize: { _ in "\"TITLE line\"\r\n\r\nBody line one.\r\nBody line two." }))
+        let fd = try #require(f.foldsOf().first)
+        #expect(fd["title"].asString == "TITLE line", "\(fd["title"].serialize())")
+        let content = fd["content"].asString ?? ""
+        #expect(content.contains("Body line one."), "\(content)")
+        #expect(!content.contains("TITLE line\r\n"), "the title is not the whole text")
+    }
+
+    // B5.22: `body or title` falls back to the UNCUT title, not the cut one.
+    @Test func summaryBodyFallsBackToTheUncutTitle() async throws {
+        let f = FoldFixture(agent: AI)
+        let a = f.chain("a", 8)
+        let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
+        let long = String(repeating: "t", count: 200)
+        _ = await fold(
+            body,
+            f.ctx(
+                Int64(Double(AIContext.estimateTokens(body)) * 0.6),
+                summarize: { _ in long }))
+        let fd = try #require(f.foldsOf().first)
+        #expect(fd["title"].asString?.count == 140, "the title is cut at 140")
+        #expect((fd["content"].asString ?? "").contains(long), "the BODY keeps all 200")
+    }
 }

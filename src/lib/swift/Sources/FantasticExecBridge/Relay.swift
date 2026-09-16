@@ -31,9 +31,17 @@
         private let queue: DispatchQueue
         private var source: DispatchSourceRead?
         private var buf = Data()
-        private var subs: [String: (proxy: AgentId, task: Task<Void, Never>)] = [:]
+        private var subs: [String: (proxy: AgentId, task: TaskId)] = [:]
         private var selfProxy: AgentId?
         private var closed = false
+        /// This relay's own row in the kernel task table (py `spawn_task(id, "relay",
+        /// …)`). Every forwarded send/emit and every drain is parented to it, so a
+        /// program's work is rowed under work that is still alive.
+        private var taskId: TaskId?
+        /// Resumed once, when the socket closes — what keeps the relay's kernel task
+        /// alive for exactly as long as the child's wire is.
+        private var done: CheckedContinuation<Void, Never>?
+        private var finished = false
 
         /// ONE frame bound on this wire, both ends, every runtime. A corrupt length
         /// must never become a multi-GB allocation, and a program that means to move
@@ -48,19 +56,19 @@
         /// swift's concurrency checker asks about — every access below goes through it.
         private final class OwnerInboxTable: @unchecked Sendable {
             private let lock = NSLock()
-            private var map: [String: (jobId: String, proxy: AgentId, task: Task<Void, Never>)] = [:]
-            func take(_ owner: String) -> (jobId: String, proxy: AgentId, task: Task<Void, Never>)? {
+            private var map: [String: (jobId: String, proxy: AgentId, task: TaskId)] = [:]
+            func take(_ owner: String) -> (jobId: String, proxy: AgentId, task: TaskId)? {
                 lock.withLock { map.removeValue(forKey: owner) }
             }
             func takeIfOwned(_ owner: String, by jobId: String)
-                -> (jobId: String, proxy: AgentId, task: Task<Void, Never>)?
+                -> (jobId: String, proxy: AgentId, task: TaskId)?
             {
                 lock.withLock {
                     guard map[owner]?.jobId == jobId else { return nil }
                     return map.removeValue(forKey: owner)
                 }
             }
-            func put(_ owner: String, _ e: (jobId: String, proxy: AgentId, task: Task<Void, Never>)) {
+            func put(_ owner: String, _ e: (jobId: String, proxy: AgentId, task: TaskId)) {
                 lock.withLock { map[owner] = e }
             }
         }
@@ -74,17 +82,41 @@
             self.queue = DispatchQueue(label: "exec_bridge.relay.\(jobId)")
         }
 
-        func start() {
-            let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-            src.setEventHandler { [weak self] in self?.readable() }
-            src.setCancelHandler { [weak self] in self?.finish() }
-            source = src
-            src.resume()
+        /// THE RELAY'S KERNEL TASK BODY (py `_serve_ctrl` under `spawn_task(id,
+        /// "relay", …)`): open the socket and stay suspended until the child closes
+        /// it. Everything the program asks for is forwarded under `taskId`, so a
+        /// program's `send` rows under the relay, not under the `start` dispatch that
+        /// settled the instant `start` replied.
+        func run(taskId: TaskId?) async {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                queue.async { [weak self] in
+                    guard let self else {
+                        c.resume()
+                        return
+                    }
+                    if self.finished {
+                        c.resume()
+                        return
+                    }
+                    self.taskId = taskId
+                    self.done = c
+                    let src = DispatchSource.makeReadSource(fileDescriptor: self.fd, queue: self.queue)
+                    src.setEventHandler { [weak self] in self?.readable() }
+                    src.setCancelHandler { [weak self] in self?.finish() }
+                    self.source = src
+                    src.resume()
+                }
+            }
         }
 
         /// Close the socket. The child's reader then EOFs and it reaps itself.
         func stop() {
-            queue.async { [weak self] in self?.source?.cancel() }
+            queue.async { [weak self] in
+                guard let self else { return }
+                // A stop that beats `run` (a job torn down inside its own `start`)
+                // has no source to cancel, so it must finish the relay itself.
+                if let src = self.source { src.cancel() } else { self.finish() }
+            }
         }
 
         // MARK: - reading
@@ -124,7 +156,7 @@
                 guard let v = try? JSON.parse(rest) else { return nil }
                 return (v, Data())
             case UInt8(ascii: "B"):
-                guard let f = Codec.decodeBinaryFrame(rest) else { return nil }
+                guard let f = try? Codec.decodeBinaryFrame(rest) else { return nil }
                 return (f.header, f.body)
             default:
                 return nil
@@ -133,7 +165,7 @@
 
         /// Frame one JSON value onto the socket (kind `T`).
         private func push(_ v: JSON) {
-            writeFrame(kind: UInt8(ascii: "T"), Data(v.serialize().utf8))
+            writeFrame(kind: UInt8(ascii: "T"), Data(Codec.encodeText(v).utf8))
         }
 
         /// Frame a header + raw body onto the socket (kind `B`). `header` already
@@ -169,7 +201,10 @@
             switch op {
             case "send":
                 let target = m["target"].asString ?? ""
-                let payload = m["payload"]
+                // python `m.get("payload") or {}` — a falsy payload IS the empty
+                // object, so a program that sends nothing reaches a handler that can
+                // read `type` without raising.
+                let payload = pyTruthy(m["payload"]) ? m["payload"] : .object([:])
                 let rid = m["rid"]
                 // A kind-B frame (bytes alongside, `_binary_path` = `payload.<field>`)
                 // is the BINARY channel — `sendWithBinary`, as a WS binary frame would
@@ -177,20 +212,28 @@
                 // split is the only way a program's `write_stream` payload reaches the
                 // bundle, or a `read_stream` chunk comes back.
                 let binary = m["_binary_path"] != .null
+                let relayTask = taskId
                 Task { [weak self] in
-                    // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS. The relay runs off
-                    // a DispatchQueue, outside the handler's task-local sender, so
-                    // this forwarded send used to carry NO sender — the OPERATOR,
-                    // ungated (measured live 2026-09-01: a spawned program reached
-                    // any agent). Python's relay inherits the handler's context and
-                    // is gated as the owner; re-enter that identity here for parity.
+                    // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS, UNDER THE RELAY'S
+                    // TASK. The relay runs off a DispatchQueue, outside the handler's
+                    // task-locals, so this forwarded send used to carry NO sender —
+                    // the OPERATOR, ungated (measured live 2026-09-01: a spawned
+                    // program reached any agent) — and no parent row. Python's relay
+                    // is a registered task and inherits the owner's identity; re-enter
+                    // both here.
                     let owner = self?.owner
-                    let (data, body): (JSON, Data) = await KernelTaskLocals.$currentSender
-                        .withValue(owner) {
-                            if binary {
-                                return await kernel.sendWithBinary(AgentId(target), payload, blob)
+                    let (data, body): (JSON, Data) = await KernelTaskLocals.$currentTask
+                        .withValue(relayTask) {
+                            await KernelTaskLocals.$currentSender.withValue(owner) {
+                                if binary {
+                                    return await kernel.sendWithBinary(
+                                        AgentId(target), payload, blob)
+                                }
+                                return (
+                                    await kernel.send([Item(AgentId(target), payload)])[0].result,
+                                    Data()
+                                )
                             }
-                            return (await kernel.send([Item(AgentId(target), payload)])[0].result, Data())
                         }
                     self?.queue.async {
                         var env: JSON = .object(["op": .string("reply"), "rid": rid, "data": data])
@@ -206,10 +249,18 @@
                     }
                 }
             case "emit":
-                // No `target` ⇒ the OWNER agent (the one-arg `emit(payload)` form).
-                let tgt = m["target"].asString.map { AgentId($0) } ?? owner
-                let payload = m["payload"]
-                Task { await kernel.emit(tgt, payload) }
+                // python `m.get("target") or owner_id` / `m.get("payload") or {}` —
+                // a FALSY target (absent, null, `""`) is the OWNER agent, which is the
+                // one-arg `emit(payload)` form.
+                let raw = m["target"]
+                let tgt = pyTruthy(raw) ? AgentId(pyStr(raw)) : owner
+                let payload = pyTruthy(m["payload"]) ? m["payload"] : .object([:])
+                let relayTask = taskId
+                Task {
+                    await KernelTaskLocals.$currentTask.withValue(relayTask) {
+                        await kernel.emit(tgt, payload)
+                    }
+                }
             case "watch":
                 guard let src = m["src"].asString, subs[src] == nil else { return }
                 // `_xb…`, not `_pyw…`: two spawner bundles in one kernel must not
@@ -239,13 +290,19 @@
                         ]))
                     return
                 }
-                let t = Task { [weak self] in
-                    for await p in stream {
-                        self?.queue.async {
-                            self?.push(
-                                .object([
-                                    "op": .string("event"), "src": .string(src), "payload": p,
-                                ]))
+                // A DRAIN LIVES AS LONG AS THE SUBSCRIPTION, and it is a kernel TASK
+                // (py `spawn_task(id, "watch_drain", …)`): `ps` shows what a watching
+                // program is holding, and it is parented to this relay.
+                let t = KernelTaskLocals.$currentTask.withValue(taskId) {
+                    kernel.spawnTask(agent: owner, verb: "watch_drain") { [weak self] in
+                        for await p in stream {
+                            self?.queue.async {
+                                self?.push(
+                                    .object([
+                                        "op": .string("event"), "src": .string(src),
+                                        "payload": p,
+                                    ]))
+                            }
                         }
                     }
                 }
@@ -253,7 +310,7 @@
             case "unwatch":
                 guard let src = m["src"].asString, let sub = subs.removeValue(forKey: src)
                 else { return }
-                sub.task.cancel()
+                Task { _ = await kernel.cancelTask(sub.task) }
                 Task { await kernel.unwatch(src: AgentId(src), watcher: sub.proxy) }
                 kernel.removeInbox(sub.proxy)  // the proxy row is OURS to release
             case "onmessage":
@@ -273,17 +330,19 @@
                         ]))
                     return
                 }
-                let t = Task { [weak self] in
-                    for await p in stream {
-                        // The job's own telemetry echoes back through the owner's
-                        // fanout; drop it so a tool does not receive its own
-                        // progress/job_started/job_done as inbox mail.
-                        switch p["type"].asString {
-                        case "progress", "job_started", "job_done": continue
-                        default: break
-                        }
-                        self?.queue.async {
-                            self?.push(.object(["op": .string("inbox"), "payload": p]))
+                let t = KernelTaskLocals.$currentTask.withValue(taskId) {
+                    kernel.spawnTask(agent: o, verb: "inbox_drain") { [weak self] in
+                        for await p in stream {
+                            // The job's own telemetry echoes back through the owner's
+                            // fanout; drop it so a tool does not receive its own
+                            // progress/job_started/job_done as inbox mail.
+                            switch p["type"].asString {
+                            case "progress", "job_started", "job_done": continue
+                            default: break
+                            }
+                            self?.queue.async {
+                                self?.push(.object(["op": .string("inbox"), "payload": p]))
+                            }
                         }
                     }
                 }
@@ -302,8 +361,8 @@
         /// predecessor served by a DIFFERENT relay.
         private func supersedePredecessor(_ kernel: Kernel) {
             guard let prev = Self.ownerInbox.take(owner.value) else { return }
-            prev.task.cancel()
             let o = owner
+            Task { _ = await kernel.cancelTask(prev.task) }
             Task { await kernel.unwatch(src: o, watcher: prev.proxy) }
             kernel.removeInbox(prev.proxy)
         }
@@ -312,8 +371,8 @@
         /// predecessor tearing down late must not unhook its replacement.
         private func releaseOwnerInbox(_ kernel: Kernel) {
             guard let mine = Self.ownerInbox.takeIfOwned(owner.value, by: jobId) else { return }
-            mine.task.cancel()
             let o = owner
+            Task { _ = await kernel.cancelTask(mine.task) }
             Task { await kernel.unwatch(src: o, watcher: mine.proxy) }
             kernel.removeInbox(mine.proxy)
         }
@@ -325,7 +384,7 @@
             closed = true
             if let kernel {
                 for (src, sub) in subs {
-                    sub.task.cancel()
+                    Task { _ = await kernel.cancelTask(sub.task) }
                     Task { await kernel.unwatch(src: AgentId(src), watcher: sub.proxy) }
                     kernel.removeInbox(sub.proxy)  // the proxy row is OURS to release
                 }
@@ -334,6 +393,11 @@
             subs.removeAll()
             selfProxy = nil
             close(fd)
+            // The relay's kernel task ends with its socket — not before, not after.
+            finished = true
+            let c = done
+            done = nil
+            c?.resume()
         }
     }
 #endif

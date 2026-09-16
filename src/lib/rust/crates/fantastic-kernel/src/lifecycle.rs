@@ -92,7 +92,8 @@ pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
                     .is_some_and(|a| a.iter().all(|x| x.is_string()));
             if !ok {
                 return Some(format!(
-                    "{field}[{k:?}] must be \"*\" or a list of verb strings"
+                    "{field}[{}] must be \"*\" or a list of verb strings",
+                    fantastic_bundle::py_repr(k)
                 ));
             }
         }
@@ -221,10 +222,8 @@ pub(crate) async fn create_from_payload(
     // root): a freshly-created store must already be a registered child so it can
     // persist its OWN record through itself (find_store sees it). No-ops in
     // InMemory mode or when no provider is wired (RAM — see `persistence::persist`).
-    let _rx = kernel.register(Arc::clone(&new_agent));
-    parent
-        .children
-        .insert(new_agent.id.clone(), Arc::clone(&new_agent));
+    kernel.register(Arc::clone(&new_agent));
+    parent.add_child(Arc::clone(&new_agent));
 
     // Persist + seed readme (the bundle ships its readme via `Bundle::readme()`).
     // Both go through the provider's stream verbs; merge-not-overwrite.
@@ -237,11 +236,14 @@ pub(crate) async fn create_from_payload(
         }
     }
 
+    // LIFECYCLE SHAPE, python's: `{agent_id, kind, …}` like every other state
+    // event, so one subscriber reads one shape. `created` with a `handler_module`
+    // was a rust-only kind nothing else answers; `name` is what a view renders.
     let event = json!({
-        "type": "created",
-        "id": new_agent.id.0,
+        "agent_id": new_agent.id.0,
+        "kind": "added",
+        "name": new_agent.display_name().unwrap_or_else(|| new_agent.id.0.clone()),
         "parent_id": parent.id.0,
-        "handler_module": hm,
     });
     kernel.publish_state(&event);
 
@@ -402,7 +404,7 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     // Detach from parent's children map.
     if let Some(parent_id) = target.parent_id.as_ref() {
         if let Some(parent) = kernel.agents.get(parent_id).map(|e| Arc::clone(&e)) {
-            parent.children.remove(&target.id);
+            parent.remove_child(&target.id);
         }
     }
     // Unregister + drop inbox.
@@ -411,7 +413,11 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     // verb) — the substrate owns no `fs` surface here. No-op without a wired
     // provider or in InMemory mode (the dir, if any, was never ours to remove).
     let _ = persistence::forget(kernel, target).await;
-    let event = json!({ "type": "removed", "id": target.id.0 });
+    let event = json!({
+        "agent_id": target.id.0,
+        "kind": "removed",
+        "name": target.display_name().unwrap_or_else(|| target.id.0.clone()),
+    });
     kernel.publish_state(&event);
 }
 

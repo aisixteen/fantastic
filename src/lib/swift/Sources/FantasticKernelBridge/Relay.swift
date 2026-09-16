@@ -1,34 +1,39 @@
-// relay_connector transport — a relay-KERNEL router (../fantastic_relay).
+// relay_connector transport seam — a relay-KERNEL router (../fantastic_relay).
 //
-// Swift mirror of python `relay_connector/_relay.py` + rust `transport/relay.rs`.
-// We dial `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, header
-// `X-Fantastic-Auth: <group password>` checked once at the WS upgrade) over the
-// cross-platform `NIOWebSocketClient`, and reach a fixed `partner` GUID. The relay
-// routes by `target` and delivers peer→peer ONE-WAY as `{type:"event", source,
-// payload}` — no relay-level reply correlation.
+// Python `relay_connector/_relay.py`, shape for shape. We dial
+// `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, header
+// `X-Fantastic-Auth: <group password>` checked once at the WS upgrade) and reach
+// a fixed `partner` GUID. The relay routes by `target` and delivers peer→peer
+// ONE-WAY as `{type:"event", source, payload}` — there is NO relay-level reply
+// correlation for peer→peer.
 //
-// So this transport TUNNELS the kernel-bridge frames (`call`/`reply`/`event`):
-// `send` wraps each in a relay envelope `{type:"send", target:<partner>,
-// payload:<frame>}`; `receive` accepts only `{type:"event", source==partner}` and
-// unwraps the inner frame. Like the canonical kernel it is a SYMMETRIC peer — it
-// both `forward`s (call → await reply) AND serves inbound `call` frames by
-// dispatching them on the local kernel and replying. The per-leg ingress/egress
-// rules gate the tunneled calls (this is the ONLY inbound-call path in swift, so
-// the gate lives here). PURE STREAMS: a control frame rides as a TEXT WS frame, a
-// raw `read_stream` chunk as a BINARY WS frame `[4B len|header|body]` (no base64);
-// the bridge frame's `_binary_path` is lifted to `payload.<path>` on the wire and
-// shifted back on the far side (the relay forwards the body verbatim).
+// So this transport TUNNELS the io_bridge engine's frames: `send` wraps each in
+// `{type:"send", target:<partner>, payload:<frame>}`, `recv` unwraps the
+// partner's `event.payload` back into a bridge frame. Correlation, the inbound
+// gate and the verbs are the ENGINE's — this file owns only the socket, the
+// self-healing re-dial, the heartbeat and the relay's own directory surface.
+//
+// PURE STREAMS: a control frame rides as a TEXT WS frame, a raw `read_stream`
+// chunk as a BINARY WS frame `[4B len|header|body]` (no base64); the bridge
+// frame's `_binary_path` is lifted to `payload.<path>` on the wire.
 
 import FantasticIoBridge
 import FantasticJSON
 import FantasticKernel
 import Foundation
+import OrderedCollections
 
-private let HEARTBEAT_SECONDS: UInt64 = 30
+/// Python `_relay.SUBPROTOCOL` / `DEFAULT_HEARTBEAT` / `DEFAULT_RECONNECT`.
+public let RELAY_SUBPROTOCOL = "fantastic.relay.v1"
+public let DEFAULT_HEARTBEAT = 30.0
+public let DEFAULT_RECONNECT = 10.0
+/// Python `ROLES`, rendered as python renders the tuple in its refusals.
+let RELAY_ROLES = ["manager", "kernel"]
+let RELAY_ROLES_TEXT = "('manager', 'kernel')"
 
 /// The WS message surface the transport rides on — `NIOWebSocketClient` in
-/// production, a paired in-process hub in tests (so the symmetric dispatch +
-/// envelope wrap/unwrap are unit-testable without a network).
+/// production, a paired in-process hub in tests (so the envelope wrap/unwrap is
+/// unit-testable without a network).
 public protocol RelayWire: Sendable {
     func send(_ message: NIOWebSocketClient.Message) async throws
     func receive() async throws -> NIOWebSocketClient.Message
@@ -37,468 +42,300 @@ public protocol RelayWire: Sendable {
 
 extension NIOWebSocketClient: RelayWire {}
 
-public actor RelayTransport {
+public actor RelayTransport: BridgeTransport {
     /// The current WS surface, or nil while disconnected / mid-reconnect.
     private var client: (any RelayWire)?
     private let partner: String
-    /// Re-dials a fresh connection on reconnect (nil for a test-attached fixed
-    /// wire — that leg is one-shot).
+    /// Re-dials a fresh connection (nil for a test-attached fixed wire).
     private let dialer: (@Sendable () async throws -> any RelayWire)?
     /// Backoff before each re-dial (0 = one-shot: a drop is terminal).
     private let reconnectSecs: Double
-    /// Directory attributes we advertise to the relay (an opaque blob — the relay
-    /// stores + reflects it, never interprets it). Re-announced on every (re)connect;
-    /// `setIdentity` replaces it. `.object([:])` ⇒ a plain peer, no announce sent.
+    private let heartbeatSecs: Double
+    /// How this transport FORKS. Production passes the kernel's `spawnTask`, so
+    /// the heartbeat is a `ps` row under its connector and `cancel` reaches it.
+    private let spawn: (@Sendable (String, @escaping @Sendable () async -> Void) -> Void)?
+    /// Directory attributes we advertise (opaque to the relay). `{}` ⇒ a plain
+    /// peer, no announce sent.
     private var identity: JSON
-
-    /// Outstanding text forwards keyed by id; resumed on the matching reply.
-    private var pending: [String: CheckedContinuation<JSON, Never>] = [:]
-    /// Outstanding BINARY forwards keyed by id; resumed with `(reply, body)`.
-    private var binaryPending: [String: CheckedContinuation<(JSON, Data), Never>] = [:]
-    private var nextId: UInt64 = 1
-    /// Outstanding relay-LEVEL requests (the directory `call`/`watch target:relay`),
-    /// keyed by minted id — distinct from the partner bridge-frame `pending`.
-    private var relayPending: [String: CheckedContinuation<JSON, Never>] = [:]
+    /// Relay-LEVEL request correlation (the directory `call`/`watch
+    /// target:relay`) — distinct from the engine's bridge-frame correlation.
+    private var relayPending: [String: RelayWaiter] = [:]
     private var relayNextId: UInt64 = 0
-    private let forwardTimeoutSeconds: Double = 30.0
-
-    /// Local sink for inbound `event` re-emit + inbound `call` dispatch.
-    private var eventSink: AgentId?
-    private weak var kernel: Kernel?
-
-    /// Per-leg INGRESS rule (default AllowAll); consulted in `dispatch` before an
-    /// inbound `call` reaches the kernel — the single auth choke point. EGRESS
-    /// (default Silent) stamps the leg's credential on outbound frames.
-    private var ingress: IngressRule = IngressRules.AllowAll()
-    private var egress: EgressRule = EgressRules.Silent()
-
-    private var receiveTask: Task<Void, Never>?
-    private var heartbeatTask: Task<Void, Never>?
-    private var open = true
+    private var heartbeatGeneration = 0
+    private var closedFlag = false
 
     private init(
         client: (any RelayWire)?, partner: String,
         dialer: (@Sendable () async throws -> any RelayWire)?, reconnectSecs: Double,
-        identity: JSON = [:]
+        heartbeatSecs: Double, identity: JSON,
+        spawn: (@Sendable (String, @escaping @Sendable () async -> Void) -> Void)?
     ) {
         self.client = client
         self.partner = partner
         self.dialer = dialer
         self.reconnectSecs = reconnectSecs
+        self.heartbeatSecs = heartbeatSecs
         self.identity = identity
+        self.spawn = spawn
     }
 
     /// Test seam: attach to a pre-built wire (a paired in-process hub) instead of
-    /// dialing a real relay. One-shot (no dialer). Wires the local kernel sink +
-    /// auth rules + loops, the same as `connect`'s tail.
+    /// dialing a real relay. One-shot (no dialer), like python's fixed-`ws`
+    /// construction.
     public static func attach(
         wire: any RelayWire,
         partnerGuid: String,
-        localAgentId: AgentId? = nil,
-        localKernel: Kernel? = nil,
-        ingress: IngressRule = IngressRules.AllowAll(),
-        egress: EgressRule = EgressRules.Silent()
+        identity: JSON = [:]
     ) async -> RelayTransport {
         let t = RelayTransport(
-            client: wire, partner: partnerGuid, dialer: nil, reconnectSecs: 0)
-        await t.finishBoot(
-            localAgentId: localAgentId, localKernel: localKernel,
-            ingress: ingress, egress: egress)
+            client: wire, partner: partnerGuid, dialer: nil, reconnectSecs: 0,
+            heartbeatSecs: 0, identity: identity, spawn: nil)
+        await t.onSocketOpen()
         return t
     }
 
-    /// Dial the relay as `guid`, tunnel to `partnerGuid`, wire the local kernel
-    /// sink + auth rules, then start the receive + heartbeat loops. The initial
-    /// dial is eager; with `reconnect > 0` a failed dial still returns a (healing)
-    /// transport, and a later drop re-dials after the backoff.
+    /// Python `RelayTransport.connect`: eager first dial. On failure — one-shot
+    /// (`reconnect <= 0`) raises so boot fails loudly; otherwise the leg boots
+    /// and `recv()` auto-connects in the background.
     public static func connect(
         relayURL: URL,
         guid: String,
         token: String,
         partnerGuid: String,
-        reconnect: Double = 10,
+        heartbeat: Double = DEFAULT_HEARTBEAT,
+        reconnect: Double = DEFAULT_RECONNECT,
         identity: JSON = [:],
-        localAgentId: AgentId? = nil,
-        localKernel: Kernel? = nil,
-        ingress: IngressRule = IngressRules.AllowAll(),
-        egress: EgressRule = EgressRules.Silent()
+        spawn: (@Sendable (String, @escaping @Sendable () async -> Void) -> Void)? = nil
     ) async throws -> RelayTransport {
-        // The path GUID rides in the URL; the subprotocol + auth header are set by
-        // the client. (appendingPathComponent keeps the ws:// scheme.)
         let dialURL = relayURL.appendingPathComponent(guid)
         let dialer: @Sendable () async throws -> any RelayWire = {
             try await NIOWebSocketClient.connect(
-                url: dialURL, subprotocols: ["fantastic.relay.v1"], authToken: token)
+                url: dialURL, subprotocols: [RELAY_SUBPROTOCOL], authToken: token)
         }
         var initial: (any RelayWire)?
         do {
             initial = try await dialer()
         } catch {
-            if reconnect <= 0 { throw error }  // one-shot: boot fails loudly.
-            initial = nil  // heal in the background.
+            if reconnect <= 0 { throw ConnectionClosed("\(error)") }
+            initial = nil  // heal in the background
         }
         let t = RelayTransport(
             client: initial, partner: partnerGuid, dialer: dialer, reconnectSecs: reconnect,
-            identity: identity)
-        await t.finishBoot(
-            localAgentId: localAgentId, localKernel: localKernel,
-            ingress: ingress, egress: egress)
+            heartbeatSecs: heartbeat, identity: identity, spawn: spawn)
+        if initial != nil { await t.onSocketOpen() }
         return t
     }
 
-    /// A usable socket exists right now (not closed, not mid-reconnect).
-    public var isLive: Bool { open && client != nil }
+    /// Python `is_live`: a usable socket exists right now (not closed, not
+    /// mid-reconnect). `reflect.connected` reads THIS, not `closed`.
+    public var isLive: Bool { !closedFlag && client != nil }
 
-    private func finishBoot(
-        localAgentId: AgentId?, localKernel: Kernel?,
-        ingress: IngressRule, egress: EgressRule
-    ) async {
-        if let localAgentId, let localKernel {
-            self.eventSink = localAgentId
-            self.kernel = localKernel
-        }
-        self.ingress = ingress
-        self.egress = egress
-        await announce()  // advertise on the eager socket (no-op if not yet connected)
-        receiveTask = Task { [weak self] in await self?.receiveLoop() }
-        heartbeatTask = Task { [weak self] in await self?.heartbeatLoop() }
+    /// Python `closed`: EXPLICIT close only — a transient drop is healed by
+    /// `recv()`, so the leg survives blips and the engine does not tear it down.
+    public func isClosed() async -> Bool { closedFlag }
+
+    // MARK: - socket lifecycle
+
+    /// Python `_on_socket_open`: run after EVERY successful (re)dial — start the
+    /// heartbeat and re-advertise our identity (the relay drops per-connection
+    /// state, so the announce must ride each new socket).
+    private func onSocketOpen() async {
+        startHeartbeat()
+        await announce()
     }
 
-    /// Advertise our directory attributes to the relay (`{type:"announce", attrs,
-    /// target:"relay"}`, fire-and-forget). No-op for a plain peer (empty blob) or
-    /// while disconnected (the next reconnect re-announces).
+    private func startHeartbeat() {
+        heartbeatGeneration += 1
+        guard heartbeatSecs > 0, let spawn else { return }
+        let generation = heartbeatGeneration
+        spawn("relay_heartbeat") { [weak self] in
+            await self?.heartbeatLoop(generation: generation)
+        }
+    }
+
+    /// Python `_heartbeat_loop`: keep the relay peer `green`. Any inbound text
+    /// frame refreshes `last_seen`; the relay's `keepalive` verb is a no-reply
+    /// refresh — exactly that, with no wire noise.
+    private func heartbeatLoop(generation: Int) async {
+        while !closedFlag && generation == heartbeatGeneration {
+            try? await Task.sleep(nanoseconds: UInt64(heartbeatSecs * 1_000_000_000))
+            if closedFlag || generation != heartbeatGeneration { return }
+            guard let client else { return }  // disconnected; recv() restarts it
+            do {
+                try await client.send(
+                    .text(Codec.encodeText(.object(["type": .string("keepalive")]))))
+            } catch {
+                return
+            }
+        }
+    }
+
+    /// Python `_announce`: advertise our attrs (`target:"relay"`,
+    /// fire-and-forget). No-op for a plain peer or while disconnected.
     private func announce() async {
-        guard case .object(let m) = identity, !m.isEmpty, let client = client else { return }
+        guard case .object(let m) = identity, !m.isEmpty, let client else { return }
         let frame: JSON = .object([
             "type": .string("announce"), "attrs": identity, "target": .string("relay"),
         ])
-        try? await client.send(.text(frame.serialize()))
+        do {
+            try await client.send(.text(Codec.encodeText(frame)))
+        } catch {
+            self.client = nil  // the socket is gone; recv() re-dials + re-announces
+        }
     }
 
-    /// Replace the advertised directory attributes and re-announce now (a manager
-    /// publishing/retracting a kernel's control surface). The caller persists the
-    /// new attrs into the record so they re-announce on the next boot.
+    /// Python `set_identity`: replace the advertised attrs and re-announce now.
     public func setIdentity(_ attrs: JSON) async -> JSON {
-        identity = attrs
+        identity = pyTruthy(attrs) ? attrs : .object([:])
         await announce()
-        return .object(["ok": .bool(true), "attrs": attrs])
+        return .object(["ok": .bool(true), "attrs": identity])
     }
 
-    // ── receive loop ───────────────────────────────────────────────
+    // MARK: - send / recv
 
-    private func receiveLoop() async {
-        while open {
-            if client == nil {
-                guard let c = await reconnect() else { break }  // gave up / closed
-                client = c
-                await announce()  // re-advertise: the relay dropped our state on the disconnect
-            }
-            let msg: NIOWebSocketClient.Message
-            do {
-                msg = try await client!.receive()
-            } catch {
-                // Drop: heal (reconnect on the next loop) unless one-shot/closed.
-                client = nil
-                if reconnectSecs <= 0 { break }
-                continue
-            }
-            switch msg {
-            case .text(let s):
-                guard let env = try? JSON.parse(s) else { continue }
-                switch env["type"].asString {
-                case "reply":
-                    // Relay-LEVEL reply (a directory list_peers/watch ack) — resolve
-                    // the pending request; never reaches the engine's bridge path.
-                    if let id = env["id"].asString,
-                        let cont = relayPending.removeValue(forKey: id)
-                    {
-                        cont.resume(returning: env["data"])
-                    }
-                case "event":
-                    let source = env["source"].asString
-                    if source == "relay" {
-                        // Directory event → emit on THIS connector's inbox so a local
-                        // watcher renders peer_joined|left|evicted|peer_status.
-                        if let sink = eventSink, let kernel = kernel {
-                            await kernel.emit(sink, env["payload"])
-                        }
-                    } else if source == partner {
-                        await dispatch(env["payload"], body: Data(), isBinary: false)
-                    }
-                default:
-                    break
-                }
-            case .binary(let bytes):
-                guard let (env, body) = Codec.decodeBinaryFrame(Data(bytes)),
-                    env["type"].asString == "event",
-                    env["source"].asString == partner
-                else { continue }
-                // A binary frame → dispatch on the binary channel even if `body` is
-                // empty (a read_stream REQUEST has no input bytes but its REPLY does).
-                await dispatch(env["payload"], body: body, isBinary: true)
-            }
-        }
-        failAllPending("relay_connector connection closed")
-    }
-
-    /// (Re)dial with the backoff. Returns a live wire, or nil if closed / one-shot.
-    private func reconnect() async -> (any RelayWire)? {
-        guard reconnectSecs > 0, let dialer = dialer else { return nil }
-        while open {
-            try? await Task.sleep(nanoseconds: UInt64(reconnectSecs * 1_000_000_000))
-            if !open { return nil }
-            if let c = try? await dialer() { return c }
-        }
-        return nil
-    }
-
-    private func heartbeatLoop() async {
-        // Keep the relay peer `green`: the relay's `keepalive` verb is a no-reply
-        // refresh — any inbound .text frame touches the peer's last_seen.
-        while open {
-            try? await Task.sleep(nanoseconds: HEARTBEAT_SECONDS * 1_000_000_000)
-            if !open { break }
-            guard let client = client else { continue }  // disconnected; receiveLoop heals.
-            try? await client.send(
-                .text(JSON.object(["type": .string("keepalive")]).serialize()))
-        }
-    }
-
-    /// Route one unwrapped inbound bridge frame: a `reply`/`error` resolving a
-    /// pending forward, an `event` re-emit, or an inbound `call` gated + dispatched
-    /// on the local kernel (text or binary). `body` is empty for a text frame.
-    private func dispatch(_ frame: JSON, body: Data, isBinary: Bool) async {
-        switch frame["type"].asString {
-        case "reply":
-            guard let id = frame["id"].asString else { return }
-            if let cont = pending.removeValue(forKey: id) {
-                cont.resume(returning: frame["data"])
-            } else if let cont = binaryPending.removeValue(forKey: id) {
-                // read_stream → body carries raw bytes; write_stream → empty body.
-                cont.resume(returning: (frame["data"], body))
-            }
-        case "error":
-            guard let id = frame["id"].asString else { return }
-            let err: JSON = .object([
-                "error": .string("remote error: \(frame["error"].asString ?? "unknown")")
-            ])
-            if let cont = pending.removeValue(forKey: id) {
-                cont.resume(returning: err)
-            } else if let cont = binaryPending.removeValue(forKey: id) {
-                cont.resume(returning: (err, Data()))
-            }
-        case "event":
-            if let sink = eventSink, let kernel = kernel {
-                await kernel.emit(sink, frame["payload"])
-            }
-        case "call":
-            await dispatchCall(frame, body: body, isBinary: isBinary)
-        default:
-            break  // keepalive / unknown — ignored (py/rust parity)
-        }
-    }
-
-    /// Inbound `call` — AUTH GATE first (the single choke point), then dispatch on
-    /// the local kernel and tunnel the reply back. A call that arrived as a BINARY
-    /// frame goes through `sendWithBinary` (so a read_stream reply can carry raw
-    /// bytes) even when the request `body` is empty.
-    private func dispatchCall(_ frame: JSON, body: Data, isBinary: Bool) async {
-        let id = frame["id"]
-        let target = frame["target"].asString ?? ""
-        let inner = frame["payload"]
-        let verb = inner["type"].asString ?? ""
-        let decision = ingress.authorize(
-            AuthAction(
-                kind: "call", target: target, verb: verb,
-                token: frame["auth_token"].asString))
-        if target.isEmpty {
-            _ = await sendReply(
-                id: id, data: .object(["error": .string("relay_connector: empty call target")]))
-            return
-        }
-        // FORWARDED, not re-worded — the rule's own reason AND the repair it
-        // names, so a peer hitting a sealed leg learns how to open it.
-        if case .deny(let d) = decision {
-            _ = await sendReply(id: id, data: d.asRefusal)
-            return
-        }
-        guard let kernel = kernel else {
-            _ = await sendReply(
-                id: id, data: .object(["error": .string("relay_connector: no local kernel")]))
-            return
-        }
-        // UNDER THE LEG'S OWN IDENTITY. A relay peer's frame reaching
-        // `kernel.send` with a nil `currentSender` is an OPERATOR call — the
-        // two-sided gate is skipped and the leg's `can_call` bounds nothing. The
-        // leg id is the one we re-emit events on (`eventSink`, set at boot);
-        // python's read task inherits the same id from its boot dispatch.
-        let legId = eventSink ?? AgentId("relay_connector")
-        if !isBinary {
-            // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already
-            // sends NAMES the execution, so a reconnect that replays its queue
-            // joins the original instead of running the side effect twice.
-            let reply = await KernelTaskLocals.$currentSender.withValue(legId) {
-                await kernel.send([
-                    Item.fromFrame(AgentId(target), inner, frameId: id.asString)
-                ])[0].result
-            }
-            _ = await sendReply(id: id, data: reply)
-        } else {
-            let (reply, replyBody) = await KernelTaskLocals.$currentSender.withValue(legId) {
-                await kernel.sendWithBinary(AgentId(target), inner, body)
-            }
-            if replyBody.isEmpty {
-                // write_stream status → a plain text reply (no body).
-                _ = await sendReply(id: id, data: reply)
-            } else {
-                // read_stream reply → a binary reply, body raw at `data.bytes`.
-                var header: JSON = .object(["type": .string("reply"), "id": id, "data": reply])
-                header["_binary_path"] = .string("data.bytes")
-                _ = await sendBinary(header: header, body: replyBody)
-            }
-        }
-    }
-
-    // ── send path (wrap in the relay envelope) ─────────────────────
-
-    /// Wrap a text bridge frame in `{type:send, target:partner, payload:<frame>}`
-    /// and ship it as a TEXT WS message.
-    private func sendText(_ frame: JSON) async -> Bool {
-        guard open, let client = client else { return false }
-        let env: JSON = .object([
+    public func send(_ frame: JSON) async throws {
+        guard let client else { throw ConnectionClosed("relay_connector: not connected") }
+        let envelope: JSON = .object([
             "type": .string("send"), "target": .string(partner), "payload": frame,
         ])
         do {
-            try await client.send(.text(env.serialize()))
-            return true
+            try await client.send(.text(Codec.encodeText(envelope)))
         } catch {
-            self.client = nil  // socket gone; receiveLoop re-dials.
-            return false
+            self.client = nil  // the socket is gone; recv() will re-dial
+            throw ConnectionClosed("\(error)")
         }
     }
 
-    /// Wrap a binary bridge frame (header + raw body) in the relay envelope and
-    /// ship it as a BINARY WS message. The header's `_binary_path` is lifted to
-    /// `payload.<path>` so the partner restores the body inside the tunneled frame.
-    private func sendBinary(header: JSON, body: Data) async -> Bool {
-        guard open, let client = client else { return false }
+    public func sendBinary(header: JSON, body: Data) async throws {
+        guard let client else { throw ConnectionClosed("relay_connector: not connected") }
         var inner = header
         let innerPath = inner["_binary_path"].asString
         if case .object(var m) = inner {
             m["_binary_path"] = nil
             inner = .object(m)
         }
-        var env: JSON = .object([
+        var envelope: JSON = .object([
             "type": .string("send"), "target": .string(partner), "payload": inner,
         ])
-        if let p = innerPath {
-            env["_binary_path"] = .string("payload.\(p)")
-        }
+        if let innerPath { envelope["_binary_path"] = .string("payload.\(innerPath)") }
         do {
             try await client.send(
-                .binary([UInt8](Codec.encodeBinaryFrame(header: env, body: body))))
-            return true
+                .binary([UInt8](Codec.encodeBinaryFrame(header: envelope, body: body))))
         } catch {
-            self.client = nil  // socket gone; receiveLoop re-dials.
-            return false
+            self.client = nil
+            throw ConnectionClosed("\(error)")
         }
     }
 
-    private func sendReply(id: JSON, data: JSON) async -> Bool {
-        await sendText(.object(["type": .string("reply"), "id": id, "data": data]))
+    /// Python `recv`: own the socket lifecycle. Only `{type:"event"}` matters —
+    /// `source == "relay"` is a directory event (surfaced as a bridge `event`),
+    /// `source == partner` is the tunnelled bridge frame. Everything else is
+    /// skipped; a relay-level `reply` resolves a directory request and never
+    /// reaches the engine.
+    public func recv() async throws -> (frame: JSON, body: Data, isBinary: Bool) {
+        while !closedFlag {
+            guard let wire = client else {
+                guard let redialled = await reconnect() else { break }
+                client = redialled
+                await onSocketOpen()
+                continue
+            }
+            let msg: NIOWebSocketClient.Message
+            do {
+                msg = try await wire.receive()
+            } catch {
+                client = nil
+                if reconnectSecs <= 0 {
+                    throw ConnectionClosed("relay_connector: connection dropped")
+                }
+                try? await Task.sleep(nanoseconds: UInt64(reconnectSecs * 1_000_000_000))
+                continue
+            }
+            let envelope: JSON
+            let body: Data
+            let isBinary: Bool
+            switch msg {
+            case .text(let s):
+                guard let parsed = try? JSON.parse(s), case .object = parsed else { continue }
+                envelope = parsed
+                body = Data()
+                isBinary = false
+            case .binary(let bytes):
+                guard let (header, raw) = try? Codec.decodeBinaryFrame(Data(bytes)),
+                    case .object = header
+                else { continue }
+                envelope = header
+                body = raw
+                isBinary = true
+            }
+            switch envelope["type"].asString {
+            case "reply":
+                // Relay-LEVEL reply (a directory ack) — resolve the pending
+                // request; python answers `msg.get("data") or {}`.
+                if let rid = envelope["id"].asString,
+                    let waiter = relayPending.removeValue(forKey: rid)
+                {
+                    let data = envelope["data"]
+                    waiter.finish(pyTruthy(data) ? data : .object([:]))
+                }
+            case "event":
+                let payload = envelope["payload"]
+                guard case .object = payload else { continue }
+                let source = envelope["source"].asString
+                if source == "relay" {
+                    // A DIRECTORY event — surfaced as a bridge `event` so the
+                    // engine re-emits it on this connector's inbox.
+                    return (
+                        .object(["type": .string("event"), "payload": payload]), Data(), false
+                    )
+                }
+                if source == partner { return (payload, body, isBinary) }
+            default:
+                break
+            }
+        }
+        throw ConnectionClosed("relay_connector: closed")
     }
 
-    // ── verbs ──────────────────────────────────────────────────────
-
-    public func forward(target: AgentId, payload: JSON) async -> JSON {
-        guard open else {
-            return .object([
-                "error": .string("relay_connector: not connected"),
-                "reason": .string(Refusal.notConnected),
-            ])
+    /// Python `_reconnect_ws`: (re)dial with the backoff. nil = explicitly
+    /// closed or one-shot.
+    private func reconnect() async -> (any RelayWire)? {
+        guard reconnectSecs > 0, let dialer else { return nil }
+        while !closedFlag {
+            try? await Task.sleep(nanoseconds: UInt64(reconnectSecs * 1_000_000_000))
+            if closedFlag { return nil }
+            if let c = try? await dialer() { return c }
         }
-        let id = mintId()
-        var frame: JSON = .object([
-            "type": .string("call"), "id": .string(id),
-            "target": .string(target.value), "payload": payload,
-        ])
-        if let token = egress.credential() {
-            frame["auth_token"] = .string(token)
-        }
-        let sent = await sendText(frame)
-        if !sent {
-            return .object([
-                "error": .string("relay_connector.forward: send failed"),
-                "reason": .string("transport_error"),
-            ])
-        }
-        return await withCheckedContinuation { cont in
-            pending[id] = cont
-            Task { await self.timeoutPending(id: id) }
-        }
+        return nil
     }
 
-    public func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
-        guard open else {
-            return (
+    public func close() async {
+        guard !closedFlag else { return }
+        closedFlag = true
+        heartbeatGeneration += 1
+        let waiters = relayPending
+        relayPending.removeAll()
+        for (_, w) in waiters {
+            w.finish(
                 .object([
-                    "error": .string("relay_connector: not connected"),
-                    "reason": .string(Refusal.notConnected),
-                ]), Data()
-            )
+                    "error": .string("relay_connector: closed"),
+                    "reason": .string("transport_closed"),
+                ]))
         }
-        let id = mintId()
-        // STANDARD call envelope (py/rust parity): inner call in `payload`,
-        // `_binary_path` naming where the raw body belongs for the receiver.
-        var wire: JSON = .object([
-            "type": .string("call"), "id": .string(id),
-            "target": .string(target.value), "payload": header,
-            "_binary_path": .string("payload.bytes"),
-        ])
-        if let token = egress.credential() {
-            wire["auth_token"] = .string(token)
-        }
-        let sent = await sendBinary(header: wire, body: blob)
-        if !sent {
-            return (
-                .object([
-                    "error": .string("relay_connector.binaryForward: send failed"),
-                    "reason": .string("transport_error"),
-                ]), Data()
-            )
-        }
-        return await withCheckedContinuation { cont in
-            binaryPending[id] = cont
-            Task { await self.timeoutBinaryPending(id: id) }
-        }
+        await client?.close()
+        client = nil
     }
 
-    public func watchRemote(target: AgentId) async -> JSON {
-        let ok = await sendText(
-            .object(["type": .string("watch"), "src": .string(target.value)]))
-        return ok
-            ? .object(["ok": .bool(true), "watching": .string(target.value)])
-            : .object(["error": .string("relay_connector.watch_remote: send failed")])
-    }
+    // MARK: - directory surface (the relay's own `relay` agent)
 
-    public func unwatchRemote(target: AgentId) async -> JSON {
-        let ok = await sendText(
-            .object(["type": .string("unwatch"), "src": .string(target.value)]))
-        return ok
-            ? .object(["ok": .bool(true), "unwatched": .string(target.value)])
-            : .object(["error": .string("relay_connector.unwatch_remote: send failed")])
-    }
-
-    // ── directory surface (the relay's own `relay` agent) ─────────
-
-    /// Send a relay-LEVEL frame to the directory (`target:"relay"` + a minted id)
-    /// and await the correlated `{type:"reply", id, data}`. Bypasses the partner
-    /// tunnel — directory frames are not `send`-wrapped.
+    /// Python `_relay_request`: a relay-LEVEL frame with a minted id, awaiting
+    /// the correlated `{type:"reply", id, data}`. Directory frames bypass the
+    /// partner tunnel — they are not `send`-wrapped.
     private func relayRequest(_ frame: JSON, timeout: Double) async -> JSON {
-        guard open, let client = client else {
+        guard let client else {
             return .object([
                 "error": .string("relay_connector: not connected"),
-                "reason": .string(Refusal.notConnected),
+                "reason": .string("not_connected"),
             ])
         }
         relayNextId += 1
@@ -507,119 +344,124 @@ public actor RelayTransport {
         out["id"] = .string(rid)
         out["target"] = .string("relay")
         do {
-            try await client.send(.text(out.serialize()))
+            try await client.send(.text(Codec.encodeText(out)))
         } catch {
             self.client = nil
             return .object([
-                "error": .string("relay_connector: directory send failed"),
+                "error": .string("relay_connector: directory send failed: \(error)"),
                 "reason": .string("transport_error"),
             ])
         }
-        return await withCheckedContinuation { cont in
-            relayPending[rid] = cont
-            Task { await self.timeoutRelayPending(id: rid, timeout: timeout) }
+        return await withCheckedContinuation { (c: CheckedContinuation<JSON, Never>) in
+            let waiter = RelayWaiter(c)
+            relayPending[rid] = waiter
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                await self?.timeoutRelayPending(rid, timeout)
+            }
         }
     }
 
-    /// Directory snapshot → `{peers:[{guid,status,last_seen,since}]}`.
-    public func listPeers(timeout: Double = 30) async -> JSON {
-        await relayRequest(
-            .object(["type": .string("call"), "payload": .object(["type": .string("list_peers")])]),
-            timeout: timeout)
+    private func timeoutRelayPending(_ rid: String, _ timeout: Double) {
+        guard let waiter = relayPending.removeValue(forKey: rid) else { return }
+        waiter.finish(
+            .object([
+                "error": .string(
+                    "relay_connector: directory timeout after \(pyFloatRepr(timeout))s"),
+                "reason": .string("timeout"),
+            ]))
     }
 
-    /// Subscribe to the relay directory; `peer_*` events re-emit on the connector inbox.
+    /// Python `list_peers`: one-shot snapshot → `{peers:[{guid,status,…}]}`.
+    public func listPeers(timeout: Double = 30) async -> JSON {
+        await relayRequest(
+            .object([
+                "type": .string("call"),
+                "payload": .object(["type": .string("list_peers")]),
+            ]), timeout: timeout)
+    }
+
+    /// Python `watch_directory`: subscribe; `peer_*` events re-emit on the
+    /// connector's inbox. The timeout is FIXED at 10.0 — the verb takes none.
     public func watchDirectory(timeout: Double = 10) async -> JSON {
         await relayRequest(.object(["type": .string("watch")]), timeout: timeout)
     }
 
-    /// Stop the directory subscription (the relay sends no reply for unwatch).
+    /// Python `unwatch_directory`: the relay sends no reply for unwatch.
     public func unwatchDirectory() async -> JSON {
-        guard open, let client = client else { return .object(["ok": .bool(true)]) }
-        try? await client.send(
-            .text(
-                JSON.object(["type": .string("unwatch"), "target": .string("relay")]).serialize()))
+        guard let client else { return .object(["ok": .bool(true)]) }
+        do {
+            try await client.send(
+                .text(
+                    Codec.encodeText(
+                        .object([
+                            "type": .string("unwatch"), "target": .string("relay"),
+                        ]))))
+        } catch {
+            self.client = nil
+        }
         return .object(["ok": .bool(true), "unwatched": .string("relay")])
     }
+}
 
-    private func timeoutRelayPending(id: String, timeout: Double) async {
-        try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-        if let cont = relayPending.removeValue(forKey: id) {
-            cont.resume(
-                returning: .object([
-                    "error": .string("relay_connector: directory timeout after \(Int(timeout))s"),
-                    "reason": .string("timeout"),
-                ]))
+/// Carries one directory continuation into the pending table.
+final class RelayWaiter: @unchecked Sendable {
+    private let continuation: CheckedContinuation<JSON, Never>
+    init(_ c: CheckedContinuation<JSON, Never>) { continuation = c }
+    func finish(_ reply: JSON) { continuation.resume(returning: reply) }
+}
+
+// MARK: - the relay build_transport seam
+
+extension KernelBridgeBundle {
+    /// Python `relay_connector._relay.build_transport`. Required: `relay_url`,
+    /// `partner_guid`. `guid` (our WS path) is auto-minted on first boot if
+    /// absent and PERSISTED, so every later hydration re-dials the SAME path; an
+    /// explicit guid always wins and a minted one is never regenerated.
+    func buildRelayTransport(
+        agentId: AgentId, meta: OrderedDictionary<String, JSON>, kernel: Kernel, st: BridgeState
+    ) async throws -> any BridgeTransport {
+        let relayURLValue = meta["relay_url"] ?? .null
+        let partnerValue = meta["partner_guid"] ?? .null
+        guard pyTruthy(relayURLValue), pyTruthy(partnerValue) else {
+            throw BridgeConfigError("relay_connector requires relay_url, partner_guid")
         }
+        // The guid is minted only AFTER the required fields validate, so a
+        // half-configured leg leaves no durable identity behind.
+        var guid = pyTruthy(meta["guid"] ?? .null) ? pyStr(meta["guid"]!) : ""
+        if guid.isEmpty, let agent = kernel.agent(agentId) {
+            guid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            _ = agent.updateMeta(["guid": .string(guid)])
+            await kernel.persistRecord(agent)
+        }
+        let roleValue = meta["role"] ?? .null
+        if case .null = roleValue {
+            // absent / null — python's `if role is not None` skips the check
+        } else if !RELAY_ROLES.contains(pyStr(roleValue)) {
+            throw BridgeConfigError(
+                "relay_connector role must be one of \(RELAY_ROLES_TEXT), got \(pyRepr(roleValue))")
+        }
+        let tokenValue = meta["relay_token"] ?? .null
+        let token = pyTruthy(tokenValue) ? pyStr(tokenValue) : ""
+        let heartbeat = try floatArg(meta["heartbeat"] ?? .double(DEFAULT_HEARTBEAT))
+        let reconnect = try floatArg(meta["reconnect"] ?? .double(DEFAULT_RECONNECT))
+        guard let relayURL = URL(string: pyStr(relayURLValue)) else {
+            throw BridgeConfigError("relay_connector: malformed relay_url")
+        }
+        return try await RelayTransport.connect(
+            relayURL: relayURL, guid: guid, token: token, partnerGuid: pyStr(partnerValue),
+            heartbeat: heartbeat, reconnect: reconnect, identity: relayIdentity(meta),
+            spawn: { verb, work in
+                kernel.spawnTask(agent: agentId, verb: verb, work: work)
+            })
     }
 
-    public func close() async {
-        guard open else { return }
-        open = false
-        receiveTask?.cancel()
-        heartbeatTask?.cancel()
-        await client?.close()
-        client = nil
-        failAllPending("relay_connector closed")
-    }
-
-    // ── helpers ────────────────────────────────────────────────────
-
-    private func timeoutPending(id: String) async {
-        try? await Task.sleep(nanoseconds: UInt64(forwardTimeoutSeconds * 1_000_000_000))
-        if let cont = pending.removeValue(forKey: id) {
-            cont.resume(
-                returning: .object([
-                    "error": .string(
-                        "relay_connector.forward: timeout after \(Int(forwardTimeoutSeconds))s"),
-                    "reason": .string("timeout"),
-                ]))
+    /// `float(x)` inside `build_transport`: python raises the bare ValueError.
+    private func floatArg(_ v: JSON) throws -> Double {
+        do {
+            return try pyFloat(v)
+        } catch let e as PyError {
+            throw BridgeConfigError(e.message)
         }
-    }
-
-    private func timeoutBinaryPending(id: String) async {
-        try? await Task.sleep(nanoseconds: UInt64(forwardTimeoutSeconds * 1_000_000_000))
-        if let cont = binaryPending.removeValue(forKey: id) {
-            cont.resume(
-                returning: (
-                    .object([
-                        "error": .string(
-                            "relay_connector.binaryForward: timeout after \(Int(forwardTimeoutSeconds))s"
-                        ),
-                        "reason": .string("timeout"),
-                    ]), Data()
-                ))
-        }
-    }
-
-    private func failAllPending(_ reason: String) {
-        for (_, cont) in pending {
-            cont.resume(
-                returning: .object([
-                    "error": .string(reason), "reason": .string(Refusal.transportClosed),
-                ]))
-        }
-        pending.removeAll()
-        for (_, cont) in binaryPending {
-            cont.resume(
-                returning: (
-                    .object([
-                        "error": .string(reason), "reason": .string(Refusal.transportClosed),
-                    ]), Data()
-                ))
-        }
-        binaryPending.removeAll()
-        for (_, cont) in relayPending {
-            cont.resume(
-                returning: .object([
-                    "error": .string(reason), "reason": .string(Refusal.transportClosed),
-                ]))
-        }
-        relayPending.removeAll()
-    }
-
-    private func mintId() -> String {
-        nextId &+= 1
-        return "rc_\(nextId)"
     }
 }

@@ -32,6 +32,22 @@ private func boot(
 
 private func dry() -> JSON { .object(["dry": .bool(true)]) }
 
+/// A model-call counter a `@Sendable` provider closure may bump.
+private final class AskCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func bump() {
+        lock.lock()
+        n += 1
+        lock.unlock()
+    }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return n
+    }
+}
+
 @Suite("the view array is the state", .serialized)
 struct ViewRecallTests {
     init() { AIStripStrategy.forget(AI) }
@@ -142,7 +158,8 @@ struct ViewRecallTests {
         let (kernel, agent, f, backend) = await boot()
         let a = f.chain("a", 20)
         f.seed([f.row("user", "GOAL", "user:goal")] + a)
-        let r = await backend.contextRecall(agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        let r = try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil)
         #expect(r["degraded"].asBool == true && (r["kept"].asInt ?? 0) >= 1)
         let v = try #require(loadView(agent.id, kernel: kernel))
         #expect(v["ids"]?.asArray?.first?["id"].asInt == f.id("user:goal"), "the goal turn is always in")
@@ -150,7 +167,8 @@ struct ViewRecallTests {
         let rec = rows.filter { $0["kind"].asString == "recall" }
         #expect(rec.count == 1 && (rec.first?["content"].asString ?? "").contains("[recall "))
         // a second recall is deterministic on the same store (modulo its own new row)
-        let r2 = await backend.contextRecall(agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        let r2 = try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil)
         #expect((r2["kept"].asInt ?? 0) >= (r["kept"].asInt ?? 0) - 1)
     }
 
@@ -171,7 +189,8 @@ struct ViewRecallTests {
                 "expand": .array(want.map(JSON.integer)), "why": .string("the last two replies matter"),
             ]).serialize()
         }
-        let r = await backend.contextRecall(agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
+        let r = try await backend.contextRecall(
+            agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
         #expect(r["degraded"].asBool == false && r["why"].asString == "the last two replies matter")
         let v = try #require(loadView(agent.id, kernel: kernel))
         let fullReplies = (v["ids"]?.asArray ?? []).filter {
@@ -187,7 +206,8 @@ struct ViewRecallTests {
         backend.setMark(AI, index: 3, client: "cli")
         AIStripStrategy.set(AI, ["n:1"])
         let before = backend.loadHistory(agent: agent, kernel: kernel).count
-        _ = await backend.contextRecall(agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        _ = try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil)
         #expect(backend.getProjection(AI) == .null)
         #expect(markOf(backend, AI) == nil)
         #expect(!AIStripStrategy.has(AI))
@@ -257,7 +277,7 @@ struct ViewRecallTests {
         let agentId = ids[id]!
         let f = FoldFixture(kernel: kernel, agent: id)
         f.seed([f.row("user", "GOAL", "user:goal")])
-        AIIncarnation.set(id, 1)
+        AIIncarnation.set(kernel, id, 1)
         _ = await kernel.send([Item(agentId, .object(["type": .string("boot")]))])[0].result  // reboot → incarnation 2
         let afterBoot = script.calls
         await deliverTurn(
@@ -268,7 +288,7 @@ struct ViewRecallTests {
         #expect(rows.last?["kind"].asString == "late" && (rows.last?["content"].asString ?? "").contains("late"))
         await deliverTurn(
             kernel: kernel, target: id, text: "[reply to n:2 · n r]\nfresh", clientId: "c",
-            systemPrompt: nil, born: AIIncarnation.of(id))
+            systemPrompt: nil, born: AIIncarnation.of(kernel, id))
         #expect(script.calls == afterBoot + 1, "a reply from THIS incarnation runs a turn")
     }
 
@@ -301,8 +321,12 @@ struct ViewRecallTests {
         f.seed(
             [f.row("user", "TASK 0: first", "user:t0")] + f.chain("a", 2)
                 + [f.row("user", "TASK 1: latest work", "user:t1")])
-        _ = await backend.contextRecall(agent: agent, payload: dry(), kernel: kernel, provider: nil)
-        let rec = try #require(backend.loadHistory(agent: agent, kernel: kernel).last { $0["kind"].asString == "recall" })
+        _ = try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        let rec = try #require(
+            backend.loadHistory(agent: agent, kernel: kernel).last {
+                $0["kind"].asString == "recall"
+            })
         let content = rec["content"].asString ?? ""
         #expect(content.contains("live task: \(f.id("user:t1")) \"TASK 1: latest work\""), Comment(rawValue: content))
     }
@@ -315,10 +339,277 @@ struct ViewRecallTests {
             + [f.row("user", "TASK 1: latest work", "user:t1")] + b
         f.seed(rows)
         f.seed([f.fold([f.id("user:t1")] + f.ids(b), "task 1 folded", "body", false)])
-        _ = await backend.contextRecall(agent: agent, payload: dry(), kernel: kernel, provider: nil)
-        let rec = try #require(backend.loadHistory(agent: agent, kernel: kernel).last { $0["kind"].asString == "recall" })
+        _ = try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        let rec = try #require(
+            backend.loadHistory(agent: agent, kernel: kernel).last {
+                $0["kind"].asString == "recall"
+            })
         let content = rec["content"].asString ?? ""
         // chain b's own root ("task b") is the newest root and the fold collapsed it too
         #expect(content.contains("live task: \(f.id("user:b"))"), Comment(rawValue: content))
+    }
+
+    // ── round-2 self-verb edges (B3.5, B5.2 … B5.11) ─────────────────────
+
+    // B3.5 r2: `limit or None` — only ZERO means "no limit"; a NEGATIVE limit
+    // returns an empty page.
+    @Test func historyNegativeLimitIsAnEmptyPage() async throws {
+        let (kernel, agent, f, _) = await boot()
+        f.seed(f.chain("a", 1, big: false))
+        let r = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("history"), "limit": .integer(-1),
+                ]))
+        ])[0].result
+        #expect(r["rows"].asArray?.isEmpty == true, "\(r.serialize())")
+        #expect(r["next"] == .null)
+        #expect((r["total"].asInt ?? 0) > 0)
+    }
+
+    // B5.7: the digest of a CALLER-WRITTEN row — `kind or role` on python
+    // truthiness, `head`/`bytes` from `str(content)`.
+    @Test func historyDigestsACallerWrittenRowLikePython() async throws {
+        let (kernel, agent, f, _) = await boot()
+        f.seed([
+            .object([
+                "role": .string("user"), "kind": .string(""),
+                "content": .object(["a": .integer(1)]),
+                "id": .integer(kernel.rows.mintId()), "parent": .null,
+            ])
+        ])
+        let r = await kernel.send([Item(agent.id, .object(["type": .string("history")]))])[0].result
+        let row = try #require(r["rows"].asArray?.first)
+        #expect(row["kind"].asString == "user", "an EMPTY kind falls back to role")
+        #expect(row["head"].asString == "{'a': 1}")
+        #expect(row["bytes"].asInt == 8)
+    }
+
+    // B5.2: `splitlines()` is python's boundary set — the INFORMATION
+    // SEPARATORS split lines too, and swift's `isNewline` misses them.
+    @Test func grepSplitsOnInformationSeparators() async throws {
+        let (kernel, agent, f, _) = await boot()
+        f.seed([f.row("user", "[from rest]\nneedle one\u{0c}needle two\rneedle three", "u:1")])
+        let r = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("grep"), "query": .string("needle"),
+                ]))
+        ])[0].result
+        #expect(r["total"].asInt == 3, "\(r.serialize())")
+        let lines = (r["matches"].asArray ?? []).map { $0["line"].asInt }
+        #expect(lines == [2, 3, 4])
+        // `x\u{1c}needle` is two lines to python, one to `Character.isNewline`.
+        let (k2, a2, f2, _) = await boot()
+        f2.seed([f2.row("user", "x\u{1c}needle here", "u:1")])
+        let r2 = await k2.send([
+            Item(
+                a2.id,
+                .object([
+                    "type": .string("grep"), "query": .string("needle"),
+                ]))
+        ])[0].result
+        #expect(r2["matches"].asArray?.first?["line"].asInt == 2, "\(r2.serialize())")
+    }
+
+    // B5.8: a non-string content is `json.dumps(content, default=str)` — every
+    // non-ASCII scalar ESCAPED. The model greps what it was shown.
+    @Test func nonStringContentIsPythonsEscapedDump() async throws {
+        let (kernel, agent, f, _) = await boot()
+        f.seed([
+            .object([
+                "role": .string("user"), "content": .object(["k": .string("\u{e9}")]),
+                "id": .integer(kernel.rows.mintId()), "parent": .null,
+            ])
+        ])
+        let rec = await kernel.send([Item(agent.id, .object(["type": .string("recall")]))])[0]
+            .result
+        #expect(
+            rec["messages"].asArray?.first?["content"].asString == #"{"k": "\u00e9"}"#,
+            "\(rec.serialize())")
+        let hit = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("grep"), "query": .string("u00e9"),
+                ]))
+        ])[0].result
+        #expect(hit["total"].asInt == 1, "\(hit.serialize())")
+        let miss = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("grep"), "query": .string("\u{e9}"),
+                ]))
+        ])[0].result
+        #expect(miss["total"].asInt == 0, "\(miss.serialize())")
+    }
+
+    // B5.9: the AI's own `_as_id` — a digit string is STRIPPED first and `'0'`
+    // IS an id, so `pull pid:'0'` reaches `not_found`, not `bad_arg`.
+    @Test func pullPidPaddedStringPagesLikePython() async throws {
+        let (kernel, agent, f, _) = await boot()
+        f.seed(f.chain("a", 1, big: false))
+        let zero = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("pull"), "pid": .string("0"),
+                ]))
+        ])[0].result
+        #expect(zero["reason"].asString == "not_found", "\(zero.serialize())")
+        #expect(zero["error"].asString?.contains("no stored body for pid 0") == true)
+        // `'+5'` is not all digits — that one IS a bad arg.
+        let plus = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("pull"), "pid": .string("+5"),
+                ]))
+        ])[0].result
+        #expect(plus["reason"].asString == "bad_arg", "\(plus.serialize())")
+        // A PADDED digit string resolves: `' 12 '` is 12.
+        let body = "the body of the reply"
+        let pid = kernel.rows.mintId()
+        _ = try kernel.rows.bodyPut(agent.id, pid: pid, text: body)
+        let padded = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("pull"), "pid": .string(" \(pid) "),
+                ]))
+        ])[0].result
+        #expect(padded["text"].asString == body, "\(padded.serialize())")
+    }
+
+    // B5.10: a scope is scanned in CPython's int-SET order, which decides which
+    // row owns a line two bodies share.
+    @Test func grepScopeScansBodiesInPythonSetOrder() {
+        #expect(pySetOrder([1116, 1065, 1066, 1080]) == [1080, 1065, 1066, 1116])
+        // The table grows when `fill*5 >= mask*3`, and the order changes with it.
+        #expect(pySetOrder([1, 2, 3]) == [1, 2, 3])
+        #expect(pySetOrder(Array(1...9)).count == 9)
+    }
+
+    // B5.11 + B5.1: pull on a FOLD body slices python's way — a negative length
+    // counts from the END — and counts CODE POINTS.
+    @Test func pullFoldNegativeLengthSlicesLikePython() async throws {
+        let (kernel, agent, f, _) = await boot()
+        let fold = f.fold([], "t", "abcdefghij", false)
+        f.seed([fold])
+        let pid = try #require(rowId(fold))
+        let r = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("pull"), "pid": .integer(pid), "length": .integer(-3),
+                ]))
+        ])[0].result
+        #expect(r["text"].asString == "abcdefg", "\(r.serialize())")
+        #expect(r["next_offset"].asInt == -3)
+        #expect(r["eof"] == .bool(false))
+    }
+
+    // B5.3: `dry` is python-truthy — `1` is dry and makes NO model call.
+    @Test func dryIsPythonTruthy() async throws {
+        let (kernel, agent, f, backend) = await boot()
+        f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 6, big: false))
+        let asked = AskCounter()
+        let provider = ComputedProvider { _ in
+            asked.bump()
+            return #"{"expand": [], "why": "asked"}"#
+        }
+        let r = try await backend.contextRecall(
+            agent: agent, payload: .object(["dry": .integer(1)]), kernel: kernel,
+            provider: provider)
+        #expect(asked.count == 0, "dry:1 must make no model call")
+        #expect(r["degraded"] == .bool(true) && r["why"].asString == "mechanical fit")
+    }
+
+    // B5.4: the model's answer is read with python's rules.
+    @Test func recallModelAnswerFollowsPython() async throws {
+        // An EMPTY answer is NO answer: degraded stays true.
+        let (k1, a1, f1, b1) = await boot()
+        f1.seed([f1.row("user", "GOAL", "user:goal")] + f1.chain("a", 6, big: false))
+        let empty = try await b1.contextRecall(
+            agent: a1, payload: .object([:]), kernel: k1,
+            provider: ComputedProvider { _ in "{}" })
+        #expect(empty["degraded"] == .bool(true) && empty["why"].asString == "mechanical fit")
+
+        // `why: 0` is FALSY — it reads `chosen`, not `0`.
+        let (k2, a2, f2, b2) = await boot()
+        f2.seed([f2.row("user", "GOAL", "user:goal")] + f2.chain("a", 6, big: false))
+        let zero = try await b2.contextRecall(
+            agent: a2, payload: .object([:]), kernel: k2,
+            provider: ComputedProvider { _ in #"{"expand": [], "why": 0}"# })
+        #expect(zero["why"].asString == "chosen", "\(zero.serialize())")
+        #expect(zero["degraded"] == .bool(false))
+
+        // A non-string `why` is its python `str`.
+        let (k3, a3, f3, b3) = await boot()
+        f3.seed([f3.row("user", "GOAL", "user:goal")] + f3.chain("a", 6, big: false))
+        let listy = try await b3.contextRecall(
+            agent: a3, payload: .object([:]), kernel: k3,
+            provider: ComputedProvider { _ in #"{"expand": [], "why": ["a"]}"# })
+        #expect(listy["why"].asString == "['a']", "\(listy.serialize())")
+    }
+
+    // B5.4: `expand` is ITERATED as python iterates it — a string yields its
+    // code points, and a SCALAR raises before anything is written.
+    @Test func expandIsIteratedLikePython() async throws {
+        let (k1, a1, f1, b1) = await boot()
+        f1.seed([f1.row("user", "GOAL", "user:goal")] + f1.chain("a", 6, big: false))
+        // A string expands to its characters — none of them is a head id, so the
+        // answer still counts (degraded false) and nothing is expanded.
+        let chars = try await b1.contextRecall(
+            agent: a1, payload: .object([:]), kernel: k1,
+            provider: ComputedProvider { _ in #"{"expand": "12", "why": "w"}"# })
+        #expect(chars["degraded"] == .bool(false) && chars["expanded"].asInt == 0)
+
+        // A truthy int is NOT iterable: python raises before save_view and the
+        // recall row, so neither is written.
+        let (k2, a2, f2, b2) = await boot()
+        f2.seed([f2.row("user", "GOAL", "user:goal")] + f2.chain("a", 6, big: false))
+        let before = b2.loadHistory(agent: a2, kernel: k2).count
+        await #expect(throws: PyError.self) {
+            _ = try await b2.contextRecall(
+                agent: a2, payload: .object([:]), kernel: k2,
+                provider: ComputedProvider { _ in #"{"expand": 5, "why": "w"}"# })
+        }
+        #expect(loadView(a2.id, kernel: k2) == nil, "no view is written")
+        #expect(b2.loadHistory(agent: a2, kernel: k2).count == before, "no recall row is written")
+    }
+
+    // B5.5: `context_strategy` is read RAW — only an ABSENT key means compact.
+    @Test func aNullContextStrategyIsReportedRawAndRefused() async throws {
+        let (kernel, agent, f, backend) = await boot(
+            contextWindow: 12000, meta: ["output_reserve": .integer(0), "context_strategy": .null])
+        let st = await kernel.send([
+            Item(
+                agent.id,
+                .object([
+                    "type": .string("context_status")
+                ]))
+        ])[0].result
+        #expect(st["strategy"] == .null, "\(st.serialize())")
+        let r = await kernel.send([Item(agent.id, .object(["type": .string("reflect")]))])[0].result
+        #expect(r["context_strategy"] == .null)
+        // The projection REFUSES by name rather than silently running compact.
+        f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 20))
+        let big = (0..<40).map { plainTurn("user", "\(BIG) \($0)") }
+        let outcome = await backend.projectContext(
+            provider: MockProvider(), agent: agent, clientId: "c",
+            messages: [plainTurn("system", "sys")] + big, storeLen: big.count, kernel: kernel)
+        guard case .failed(let err) = outcome else {
+            Issue.record("the projection ran compact instead of refusing")
+            return
+        }
+        #expect(
+            err["error"].asString
+                == "mock_backend: unknown context_strategy None "
+                + "(valid: ['compact', 'truncate', 'strip', 'fold'])", "\(err.serialize())")
     }
 }

@@ -1,83 +1,43 @@
-# anthropic_backend — Anthropic (Claude) LLM agent
-Anthropic Messages-API LLM backend. Thin Provider + Bundle over
-`fantastic-ai-core`: this crate supplies only the Anthropic `Provider`
-(HTTPS + `x-api-key` auth + event-typed SSE streaming raw text + 429
-rate-limit retry) and a thin `Bundle` that dispatches every verb
-through `fantastic-ai-core`. The FIFO lock, prompt assembly, ONE-PASS
-generation, tool-call parsing + reply routing, context management, and history
-all live in `fantastic-ai-core`. **No loop.**
+# anthropic_backend — Claude, a context-managed completion agent
+Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Persistence via `file_bridge_id`.
 
-This crate implements the **LLM backend contract** defined in
-`fantastic-ai-core`'s module header. Verbs + events are identical across
-backends, so a caller retargets by changing one id.
+## Implementation
+This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
-## ONE pass — and the model routes its own output
-`send` does exactly ONE provider pass. **No loop**: nothing iterates on the
-model's behalf, and emitting no `<call>` ends the turn — stop is the
-default and costs nothing.
-
-Tool-calling is RAW and belongs to `fantastic-ai-core`. By default this backend
-sends no Anthropic `tools`/`input_schema`: the model writes the envelope as TEXT,
-the Anthropic `Provider` streams that text through as plain `text_delta` content
-knowing nothing about it, and ai-core parses and dispatches it. Wire translation
-is just the `system` role → Anthropic's top-level `system` param + alternating
-user/assistant TEXT turns.
-
-**No `tool_use` route.** It existed, declared one `send` tool and translated the
-blocks back into a text envelope; it is DELETED. The envelope it translated into
-no longer exists, and a model writing JSON tool calls is writing a grammar this
-kernel does not parse — so a native `tool_use` block is a LOUD ERROR now. Some
-`/cc`-style routes emit one for a request carrying no `tools` key at all, which
-is exactly the case worth failing on: its arguments are JSON nobody reads, and a
-silent drop ends the turn looking finished with the call lost.
-
-```
-<call name="send">
-<target_id>id</target_id>
-<reply_to>self</reply_to>
-<type>verb</type>
-</call>
-```
-
-Each call is dispatched and its reply delivered to that call's `reply_to`, which
-DEFAULTS TO SELF — leave it out and the answer arrives as the model's next turn,
-tagged `[reply to <id>]`; `null`/`"none"` discards it. `reply_to:"self"` is what
-makes a chain, one pass at a time, and only because the model asked again. A
-caller's optional `send_to` hands the pass's TEXT to one agent id instead, once,
-without propagating. A `system_prompt` override replaces the default system block
-whole, for a caller that wants a different role.
+## Bare completion — the tool loop is the CALLER's
+This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
+provider pass. It NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use`
+blocks; the `AnthropicProvider` streams plain `text_delta` content, returned verbatim.
+Any tool convention is the caller's — an authored agent teaches it in the prompt (via
+`system_prompt`), reads the completion, dispatches, and feeds the result back as the
+next `{send, text}` turn.
 
 ## Context management — owned HERE
-Per-client `chat.json` history, auto-compaction on overflow, and the `recall` /
+Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
+(`context_strategy`, default `compact`, + `[context-notice]`), and the `recall` /
 `context_status` verbs. The conversation's owner owns its context.
 
-**Streaming routing**: this backend uses per-client-inbox routing
-(`CallerRoute::PerClientInbox`). Every stream event is emitted on the
-CALLER's own `client_id` inbox — NOT the backend agent's own inbox.
-A watcher of the backend agent's id does NOT see these events.
+## Calling this agent
+`send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
+and returns `{response, final}`. A first-class peer of `exec_bridge`: a scheduler,
+a host job, a peer kernel, or a routine can call it by id. Optional `system_prompt:str`
+REPLACES the default system block (the caller supplies its own role / tool convention).
+Optional `messages:list` REPLACES persisted history (fully stateless — no compaction;
+the caller owns the context in that mode).
 
-Verbs: `send` · `history` · `recall` · `context_status` ·
-`status` · `boot` · `shutdown` ·
-`reflect`.
+## Streaming
+You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
+consumes the same stream (the driving caller, a browser tab, a peer). You do not route
+your own output — you complete; the caller reads it and decides what to do next.
 
-There is NO `interrupt` verb: an in-flight `send` IS a kernel task. Cancel a
-turn with the substrate's universal system verbs — `send "kernel" {type:"ps"}`,
-find the row `{agent:<this id>, verb:"send"}`, then `send "kernel"
-{type:"cancel", task_id:"<agent>:<n>"}`. The turn closes with
-`status(phase="done", reason="cancelled")` + `done`, the HTTP stream and the
-FIFO lock are released, and the blocked caller's `send` resolves to
-`{cancelled:true}`.
+## Recursion guard
+A `send` carrying a reserved `_call_stack` that already contains this agent (a cycle)
+or exceeds depth 8 is refused BEFORE the FIFO lock — so an authored agent's AI→AI chain can
+neither deadlock nor run away. Don't set `_call_stack` yourself.
 
-Extras beyond the contract:
-
-- THE API KEY COMES FROM THE ENVIRONMENT (`ANTHROPIC_KEY`, else `ANTHROPIC_API_KEY`), read at call time.
-  There is no key-storage verb and no sidecar: this bundle never writes the key
-  anywhere, so it cannot leak through a record, a reflect or `kernel.list()`.
-  An unset variable fails loud NAMING it — a connector stays inert until the
-  operator wires it.
-- `reflect` reports `has_api_key: bool` only — never the value.
-
-On HTTP 429 BEFORE any chunk has been yielded, the bundle retries
-once after sleeping `min(60s, max(1s, Retry-After || 5s))`. A `say`
-event + `status(thinking, waiting_on=rate_limit)` event surface the
-wait via the caller's inbox. Mid-stream 429 propagates as an error.
+## Meta-possibility — any routine orchestrates the whole substrate
+Every routine (this AI, a host job, a peer kernel, or any out-of-process caller)
+reaches every agent by id. From any of them you can read memory anywhere (`send(<state>,
+{read})`), run an inference turn (`send(<ai>, {send, ...})`), and/or spawn compute
+(`send(<py>, {start, code})`) — regardless of which kernel owns the target. Code
+steps and LLM-call steps are interchangeable, both directions.

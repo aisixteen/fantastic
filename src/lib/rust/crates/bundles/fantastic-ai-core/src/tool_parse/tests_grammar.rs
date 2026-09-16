@@ -426,3 +426,65 @@ fn a_call_written_inside_bytes_is_document_not_envelope() {
     let bad = crate::tool_parse::malformed_calls(t);
     assert!(bad.is_empty(), "nothing is malformed: {bad:?}");
 }
+
+#[test]
+fn a_truthy_non_list_to_is_kept_raw() {
+    // python keeps `to` verbatim unless it is a string or a list, and refuses at
+    // PARSE only when there is no string target AND `to` is falsy. `<to>42</to>`
+    // therefore parses and routing answers with its own no-target reply; rust's
+    // `normalize_to` used to map it to none and answer the malformed-parse text.
+    let calls = extract_tool_calls("<call name=\"send\"><to>42</to><type>reflect</type></call>");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].arguments.get("to"), Some(&json!(42)));
+    assert!(calls[0].arguments.get("target_id").is_none());
+    // …and a FALSY one with no target is still the refusal.
+    let bad = malformed_calls("<call name=\"send\"><to>0</to><type>reflect</type></call>");
+    assert_eq!(bad.len(), 1, "{bad:?}");
+    assert!(
+        bad[0].error.contains("a send names its target"),
+        "{:?}",
+        bad[0].error
+    );
+}
+
+#[test]
+fn to_items_are_python_str() {
+    // Recipients are `str(t).strip()`: `True`, `1e+20`, and a structure's python
+    // repr. `Value::to_string` gave `true`, `1e20` and JSON.
+    let calls = extract_tool_calls(
+        "<call name=\"send\"><to><item>true</item><item>1e20</item>\
+         <item><a>x</a></item><item><item>y</item></item></to><type>reflect</type></call>",
+    );
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(
+        calls[0].arguments.get("to"),
+        Some(&json!(["True", "1e+20", "{'a': 'x'}", "['y']"]))
+    );
+}
+
+#[test]
+fn name_and_space_classes_follow_python() {
+    // python `\w` is `_` + `str.isalnum()`. `char::is_alphanumeric` also admits
+    // Other_Alphabetic, so `<k_नाम>` and `<xⒶ>` dispatched here and were `text
+    // after the last tag` to python.
+    let src = "<call name=\"send\"><target_id>a</target_id><type>t</type>\
+               <k_\u{93e}>v</k_\u{93e}></call>";
+    assert!(
+        extract_tool_calls(src).is_empty(),
+        "U+093E is not a name character to python — this does not dispatch"
+    );
+    let bad = malformed_calls(src);
+    assert_eq!(bad.len(), 1, "{bad:?}");
+    assert!(
+        bad[0].error.contains("text after the last tag"),
+        "{:?}",
+        bad[0].error
+    );
+    // python `\s` is `str.isspace()`, which includes `\x1c`–`\x1f`: this IS an
+    // envelope.
+    let calls = extract_tool_calls(
+        "<call\u{1c}name=\"send\"><target_id>a</target_id><type>reflect</type></call>",
+    );
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].arguments.get("target_id"), Some(&json!("a")));
+}

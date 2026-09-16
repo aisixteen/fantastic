@@ -46,16 +46,12 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         self.core = buildAIBackend(
             AIBackendConfig(
                 kind: "foundation_models_backend",
-                provider: "apple_foundation_models",
                 sentence:
                     "Apple Foundation Models LLM agent (on-device; raw prompt-and-parse tool-calling).",
+                defaultModel: Self.modelLabel(),
+                defaultEndpoint: "(on-device)",
                 compactPrompt: true,
-                reflectExtra: { _ in
-                    [
-                        "available": .bool(Self.isAvailable()),
-                        "model": .string(Self.modelLabel()),
-                    ]
-                },
+                reflectExtra: { _ in ["available": .bool(Self.isAvailable())] },
                 // Always-inject durable memory: the shared core appends
                 // this AFTER the substrate prompt. Each memory DOCUMENT's
                 // content + any custom `instructions` meta land in the FM
@@ -105,7 +101,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         if payload["type"].asString == "boot" {
             await mountMemoryAgents(agentId: agentId, kernel: kernel)
         }
-        return await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+        return try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
     /// The kernel is killing a task of this agent. If it is the in-flight

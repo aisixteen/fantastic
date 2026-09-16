@@ -107,7 +107,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
         store_root.to_path_buf(),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }

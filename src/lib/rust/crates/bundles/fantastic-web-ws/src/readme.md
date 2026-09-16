@@ -1,2 +1,8 @@
-# web_ws — WebSocket verb channel
-Child of a web agent. Mounts `ws://host/<agent_id>/ws`. Full duplex: call / emit / watch / state_subscribe frames. The streaming surface. **Sealed by default** — a bare leg refuses every frame; open it with `update_agent <id> ingress_rule=allow_all_ingress` (or `password`). The credential rides the frame envelope (`auth_token`). Binary frames carry the raw-bytes codec `[4B len | JSON header | raw body]` (read_stream/write_stream chunks — never base64).
+# web_ws — inbound WebSocket leg
+
+Mounts `ws://host/<id>/ws` on a parent `web` agent. **Sealed by default** — a bare leg
+denies all frames. Open: `update_agent <id> ingress_rule=allow_all_ingress`.
+Token on frame **envelope** (`auth_token`, sibling of `type`/`target` — never inside payload).
+
+Frames: `call` · `emit` · `watch` · `unwatch` · `state_subscribe` · `state_unsubscribe`
+Binary frames supported (4-byte-BE-length header + JSON envelope + raw bytes).

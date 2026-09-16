@@ -30,21 +30,17 @@
 //! would trip [`fantastic_kernel::call_guard`] as a false cycle on turn 2. The
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
-use crate::events::{emit_status, CallerRoute};
+use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::REFLECT_NUDGE;
 use crate::state::state_for;
 use crate::tool_parse::{extract_tool_calls, malformed_calls};
+use fantastic_bundle::{py_repr, py_str, py_strip, py_truthy};
+use fantastic_kernel::outcome::Status;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-
-/// Consecutive silent chain turns the reminder tolerates before the chain is
-/// let go (record meta `nudge_limit` overrides). A safety bound on an
-/// unattended kernel, not a budget — the harness's max_turns is the outer
-/// backstop. Mirrors python `_NUDGE_LIMIT`.
-pub(crate) const NUDGE_LIMIT: u64 = 24;
 
 /// ROUTING TURNS with a live batch, per agent — the first summand of `await`'s
 /// `pending`. It counts TURNS, not calls: what the model is waiting for is a
@@ -73,39 +69,6 @@ fn inflight_count(self_id: &str) -> u64 {
 const AWAIT_REFUSED: &str = "[await refused] nothing of yours is in flight and \
 nothing is queued for you, so there is nothing to wait for. Act — make the call — \
 or end the chain with <call name=\"done\"></call>.";
-
-/// (kernel instance, agent id, client id) → consecutive silent chain turns so
-/// far. Scoped to the KERNEL, not the process: two kernels in one process (the
-/// test suite, an app embedding several) may carry the same agent/client ids.
-type StreakKey = (usize, String, String);
-
-fn silent_streaks() -> &'static Mutex<HashMap<StreakKey, u64>> {
-    static S: OnceLock<Mutex<HashMap<StreakKey, u64>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn streak_key(kernel: &Arc<Kernel>, self_id: &str, client_id: &str) -> StreakKey {
-    (
-        Arc::as_ptr(kernel) as usize,
-        self_id.to_string(),
-        client_id.to_string(),
-    )
-}
-
-fn silent_reset(kernel: &Arc<Kernel>, self_id: &str, client_id: &str) {
-    silent_streaks()
-        .lock()
-        .expect("silent streaks poisoned")
-        .remove(&streak_key(kernel, self_id, client_id));
-}
-
-/// Bump and return this chain's silent streak.
-fn silent_bump(kernel: &Arc<Kernel>, self_id: &str, client_id: &str) -> u64 {
-    let mut m = silent_streaks().lock().expect("silent streaks poisoned");
-    let e = m.entry(streak_key(kernel, self_id, client_id)).or_insert(0);
-    *e += 1;
-    *e
-}
 
 /// What a call that named a VERB but no agent gets told.
 ///
@@ -136,21 +99,107 @@ list of agent ids.";
 /// payload really has no verb in it, and saying so is the useful answer. Same
 /// shape as [`NO_TARGET_ERROR`], byte-identical across runtimes.
 pub fn no_payload_error(target: &str) -> String {
+    // `{target!r}`: python's repr picks the quote (double when the text holds a
+    // single one) and escapes `\`, `\t`, `\n` — wrapping the raw text in single
+    // quotes printed `send to 'it's'` and `send to 'tab	there'`.
     format!(
-        "send to '{target}' carried no payload, so nothing was dispatched. \
-         A call names its verb in `<type>`, e.g. <type>reflect</type>."
+        "send to {} carried no payload, so nothing was dispatched. \
+         A call names its verb in `<type>`, e.g. <type>reflect</type>.",
+        py_repr(target)
     )
 }
 
-/// Hand `text` to `target` as a fresh turn. Exactly python's `_deliver`.
-async fn deliver(
+/// Read the target's incarnation and hand `text` over — python's
+/// `_deliver_soon`, whose whole job is to capture `born` BEFORE the delivery
+/// runs. A delivery that crosses the target's next boot is recorded, not acted
+/// on (see [`deliver`]).
+fn deliver_soon(
     kernel: &Arc<Kernel>,
     target: &str,
     text: &str,
     client_id: &str,
     system_prompt: Option<&str>,
-    route: CallerRoute,
 ) {
+    let born = crate::state::incarnation(&AgentId::from(target));
+    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born);
+}
+
+/// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
+/// not return until the whole turn is done — model call, streaming, and that
+/// turn's own routing. Awaiting each delivery inline made reply 2 of a 4-call
+/// turn wait for the entire conversation reply 1 started, and if the chain ended
+/// first it was never delivered at all: measured on python 2026-08-24, 26 of 36
+/// calls never answered, misread three separate times as a model being stubborn.
+///
+/// A KERNEL TASK named `deliver_reply` on the TARGET (python
+/// `kernel.ctx.spawn_task(target, "deliver_reply", coro)`), not a bare spawn: it
+/// is a `ps` row, `cancel` reaches it, and it cannot be orphaned.
+#[allow(clippy::too_many_arguments)]
+fn deliver_soon_with_born(
+    kernel: &Arc<Kernel>,
+    target: &str,
+    text: &str,
+    client_id: &str,
+    system_prompt: Option<&str>,
+    born: u64,
+) {
+    let target_id = AgentId::from(target);
+    let work_kernel = Arc::clone(kernel);
+    let (target, text) = (target.to_string(), text.to_string());
+    let client_id = client_id.to_string();
+    let system_prompt = system_prompt.map(str::to_string);
+    kernel.spawn_task(&target_id, "deliver_reply", async move {
+        deliver(
+            &work_kernel,
+            &target,
+            &text,
+            &client_id,
+            system_prompt.as_deref(),
+            born,
+        )
+        .await;
+    });
+}
+
+/// Hand `text` to `target` as a fresh turn. Exactly python's `_deliver`.
+///
+/// `pub(crate)` only so the late-reply twin can hand it a STALE `born`, exactly
+/// as python's own test calls `_deliver(..., born=1)`.
+///
+/// `born` is the target's incarnation as of when this delivery was DECIDED. A
+/// boot bumps that counter, so a reply that crosses a reboot answers a call the
+/// previous incarnation made: the agent that asked is gone and the one that
+/// replaced it is on other work. It is kept as a ROW — real data, in the ledger
+/// and in the store — but it wakes no turn. Measured 2026-09-06 (python): the
+/// rebooted agent was woken by answers to its predecessor's calls and finished
+/// THAT work instead of the new instruction.
+pub(crate) async fn deliver(
+    kernel: &Arc<Kernel>,
+    target: &str,
+    text: &str,
+    client_id: &str,
+    system_prompt: Option<&str>,
+    born: u64,
+) {
+    let target_agent = AgentId::from(target);
+    if crate::state::incarnation(&target_agent) != born {
+        crate::history::append_history(
+            &target_agent,
+            kernel,
+            client_id,
+            &[json!({
+                "role": "user",
+                "parent": Value::Null,
+                "kind": "late",
+                "content": format!(
+                    "[late reply — answered a call made before this agent last \
+                     booted; recorded, not acted on]\n{text}"
+                ),
+            })],
+        )
+        .await;
+        return;
+    }
     let mut payload = Map::new();
     payload.insert("type".to_string(), json!("send"));
     payload.insert("text".to_string(), json!(text));
@@ -189,42 +238,30 @@ async fn deliver(
         out.status,
         out.result.get("error").and_then(Value::as_str)
     ));
-    let failed = !out.is_completed() || out.result.get("error").and_then(Value::as_str).is_some();
+    // FAILED IS `failed`/`timed_out` — python `out["status"] in ("failed",
+    // "timed_out")` — plus any truthy `error` on the reply itself. `cancelled`
+    // is NOT announced: an operator kill already told whoever asked for it, and
+    // rust's `!is_completed()` turned every cancel into a spurious error event.
+    let reply_error = out.result.get("error").filter(|v| py_truthy(v));
+    let failed = matches!(out.status, Status::Failed | Status::TimedOut) || reply_error.is_some();
     if failed {
-        let why = out
-            .result
-            .get("error")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("delivery {}", out.status));
+        // The reply's own error, else the RAW status — python passes
+        // `out["status"]`, so the text is `failed`/`timed_out` with no prefix.
+        // Rust wrote `delivery failed`, a string no python subscriber matches.
+        let why = reply_error.map_or_else(|| json!(out.status.as_str()), |e| e.clone());
         let target_id = AgentId::from(target);
         let mut detail = Map::new();
         detail.insert("reason".to_string(), json!("error"));
-        detail.insert("error".to_string(), json!(why));
+        detail.insert("error".to_string(), why);
         emit_status(
             kernel,
             &state_for(&target_id),
             &target_id,
             client_id,
-            route,
             "done",
             detail,
         )
         .await;
-    }
-}
-
-/// python truthiness, for the `target_id or target` fall-through below. A FALSY
-/// `target_id` (absent, `null`, `""`, `0`, `{}`, `[]`) falls through to `target`;
-/// a truthy non-string one does NOT, and lands on [`NO_TARGET_ERROR`].
-fn is_falsy(v: &Value) -> bool {
-    match v {
-        Value::Null => true,
-        Value::Bool(b) => !b,
-        Value::Number(n) => n.as_f64() == Some(0.0),
-        Value::String(s) => s.is_empty(),
-        Value::Array(a) => a.is_empty(),
-        Value::Object(o) => o.is_empty(),
     }
 }
 
@@ -250,7 +287,9 @@ fn clean_title(raw: Option<&Value>) -> Option<String> {
             out.push(c);
         }
     }
-    let out: String = out.trim().chars().take(140).collect();
+    // PYTHON'S STRIP (White_Space + `\x1c`–`\x1f`) and 140 CODE POINTS:
+    // `trim()` left an information separator on the title.
+    let out: String = py_strip(&out).chars().take(140).collect();
     (!out.is_empty()).then_some(out)
 }
 
@@ -382,7 +421,6 @@ pub async fn route_reply(
     system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
-    route: CallerRoute,
     turn_id: Option<i64>,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
@@ -403,7 +441,6 @@ pub async fn route_reply(
             system_prompt,
             incoming,
             send_timeout,
-            route,
             turn_id,
         )
         .await
@@ -463,7 +500,6 @@ async fn route_reply_gated(
     system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
-    route: CallerRoute,
     turn_id: Option<i64>,
 ) {
     let sp = system_prompt.as_deref();
@@ -534,7 +570,7 @@ async fn route_reply_gated(
         }
         let args = &call.arguments;
         let chosen: Option<&Value> = match args.get("target_id") {
-            Some(v) if !is_falsy(v) => Some(v),
+            Some(v) if py_truthy(v) => Some(v),
             _ => args.get("target"),
         };
         let target: Option<&str> = chosen
@@ -621,11 +657,14 @@ async fn route_reply_gated(
         if target == self_id.as_str() && !payload.contains_key("client_id") {
             payload.insert("client_id".to_string(), json!(client_id));
         }
-        let verb = payload
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-            .to_string();
+        // python `payload.get("type", "?")`, then `str()` into the reply tag: a
+        // NON-STRING type tags the reply with its own text (`… a 42 …`,
+        // `… a True …`, `… a {'a': 'x'} …`), and `?` means the key was ABSENT.
+        // `as_str().unwrap_or("?")` printed `?` for every one of them.
+        let verb = match payload.get("type") {
+            Some(v) => py_str(v),
+            None => "?".to_string(),
+        };
 
         // NO `send_binary`, NO FENCE, NO BLOB LIFT. The document rides in the
         // payload as `bytes`, verbatim, because the grammar carries it verbatim
@@ -703,10 +742,9 @@ async fn route_reply_gated(
     // The PID is the same id `ps`/`cancel` use, so a reply names a row the
     // model can act on.
     let meta = crate::helpers::agent_meta(&self_id, &kernel);
-    let async_on = meta
-        .get("context_async")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // PYTHON TRUTHINESS (`bool(rec.get("context_async"))`): a record that says
+    // `1` or `"on"` turns full-async on, and `as_bool` silently did not.
+    let async_on = meta.get("context_async").is_some_and(py_truthy);
     let cap = crate::context::inline_cap(&meta);
     let blocks: Vec<Block> = units
         .into_iter()
@@ -737,7 +775,9 @@ async fn route_reply_gated(
                                 &json!({"role": "user", "content": body}),
                             ) > cap;
                             if over && kernel.rows.body_put(&self_id, p.0, &body).is_ok() {
-                                let size = body.len();
+                                // CODE POINTS: python prints `len(body)`, and
+                                // the model pulls that many characters back.
+                                let size = body.chars().count();
                                 // THE STUB NAMES GREP FIRST. It used to offer only
                                 // `pull`, and a model hunting one line paged 16
                                 // bodies (measured 2026-09-06, python
@@ -772,14 +812,13 @@ async fn route_reply_gated(
     // THE TAIL BELOW IS PYTHON'S ORDER, step for step (core.py:1160-1176), and
     // every step of it is load-bearing.
     //
-    // A CHAIN turn (its incoming text was a delivered reply, or a nudge) that
-    // dispatched NOTHING is REMINDED AGAIN — the model is queried until it emits a
-    // call, `done`, or a question. Until 2026-09-01 the reminder fired ONCE and a
-    // second silent turn ended the chain silently (python-canonical fix: a
-    // planning-heavy model wrote prose for two turns and the run read as finished
-    // with the task untouched). A chat turn is not a chain: prose to a person is
-    // the product. Bounded by `nudge_limit` on the record (default `NUDGE_LIMIT`)
-    // so an unattended kernel cannot spin forever on a model that never calls.
+    // EVERY CALL-LESS TURN IS REMINDED — no streak, no cap (python `_route_reply`:
+    // "No streak, no cap: both exits are above this branch and both already
+    // returned"). The two honest ends are ABOVE this branch and both return:
+    // `done` finishes and `await` waits. A bound here was rust-only, and what it
+    // bounded was the reminder rather than the work: on the 25th silent turn the
+    // chain was dropped in silence, which is the exact failure the reminder exists
+    // to prevent.
     //
     // THE GATE IS `not calls and not units`, not `no blocks`: a turn whose calls
     // all carried `reply_to:null` dispatched real work and is owed no reply, and
@@ -802,14 +841,6 @@ async fn route_reply_gated(
     // model's own prose for the old `{"type":"question"}` line — a text convention
     // had to recognise, with the human living outside it entirely.
     let nudging = !any_calls && !any_blocks && chained;
-    // RESET BEFORE DELIVERING, which python gets for free and rust does not:
-    // `_deliver_soon` only SCHEDULES the delivered turn, so python's trailing reset
-    // still lands before that turn routes. Here `deliver` awaits a `send` whose own
-    // routing is spawned, so a reset AFTER it races the delivered turn's streak
-    // bump — and wipes it, which buys the chain one extra nudge past its limit.
-    if !nudging {
-        silent_reset(&kernel, self_id.as_str(), &client_id);
-    }
     trace(&format!(
         "blocks={} any_calls={} nudging={}",
         blocks.len(),
@@ -817,7 +848,7 @@ async fn route_reply_gated(
         nudging
     ));
     if any_blocks {
-        deliver_grouped(&kernel, blocks, &client_id, sp, route, turn_id).await;
+        deliver_grouped(&kernel, blocks, &client_id, sp, turn_id).await;
         trace("delivered");
     }
     if done_called {
@@ -826,7 +857,7 @@ async fn route_reply_gated(
         // text is what it asked to have delivered.
         if !any_blocks {
             if let Some(to) = send_to.as_deref() {
-                deliver(&kernel, to, &text, &client_id, sp, route).await;
+                deliver_soon(&kernel, to, &text, &client_id, sp);
             }
         }
         return;
@@ -842,7 +873,6 @@ async fn route_reply_gated(
         // turn another message may ALREADY be running under the lock. Routing
         // happens AFTER the turn released that lock, so "queued" alone would
         // read empty at exactly the moment something is about to arrive.
-        silent_reset(&kernel, self_id.as_str(), &client_id);
         let st = state_for(&self_id);
         let queued = st.queue.lock().expect("queue poisoned").len() as u64;
         let running = u64::from(st.lock.try_lock().is_err());
@@ -851,47 +881,16 @@ async fn route_reply_gated(
             let mut detail = Map::new();
             detail.insert("reason".to_string(), json!("awaiting"));
             detail.insert("pending".to_string(), json!(pending));
-            emit_status(&kernel, &st, &self_id, &client_id, route, "done", detail).await;
+            emit_status(&kernel, &st, &self_id, &client_id, "done", detail).await;
             return;
         }
         // Nothing to wait for: say so, as a turn, so the model acts instead of
         // waiting forever on an empty inbox.
-        deliver(
-            &kernel,
-            self_id.as_str(),
-            AWAIT_REFUSED,
-            &client_id,
-            sp,
-            route,
-        )
-        .await;
+        deliver_soon(&kernel, self_id.as_str(), AWAIT_REFUSED, &client_id, sp);
         return;
     }
     if nudging {
-        let streak = silent_bump(&kernel, self_id.as_str(), &client_id);
-        let limit = kernel
-            .agents
-            .get(&self_id)
-            .and_then(|a| {
-                a.meta
-                    .read()
-                    .ok()
-                    .and_then(|m| m.get("nudge_limit").and_then(Value::as_u64))
-            })
-            .unwrap_or(NUDGE_LIMIT);
-        if streak <= limit {
-            deliver(
-                &kernel,
-                self_id.as_str(),
-                NO_CALL_NUDGE,
-                &client_id,
-                sp,
-                route,
-            )
-            .await;
-        } else {
-            silent_reset(&kernel, self_id.as_str(), &client_id);
-        }
+        deliver_soon(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp);
         return;
     }
     if any_calls {
@@ -901,7 +900,7 @@ async fn route_reply_gated(
     // this pass's TEXT to `send_to`, once. It must not propagate — a caller cannot
     // spend the model's turns for it.
     if let Some(to) = send_to.as_deref() {
-        deliver(&kernel, to, &text, &client_id, sp, route).await;
+        deliver_soon(&kernel, to, &text, &client_id, sp);
     }
 }
 
@@ -925,7 +924,6 @@ async fn deliver_grouped(
     blocks: Vec<Block>,
     client_id: &str,
     sp: Option<&str>,
-    route: CallerRoute,
     turn_id: Option<i64>,
 ) {
     // Destination order = first appearance, so the model reads them in the order
@@ -943,6 +941,19 @@ async fn deliver_grouped(
     // THE BATCH TOKEN IS THE TURN'S OWN ID when one exists (python), so every
     // `↑` and every `batch` on a reply points at a row the model can see.
     let token = turn_id.map_or_else(mint_batch_token, |t| t.to_string());
+    // EVERY DESTINATION'S INCARNATION, READ NOW — before any delivery is spawned.
+    // python reads `born` for all of them in one synchronous loop
+    // (`_deliver_soon`), so a target that reboots while a sibling delivery is
+    // still thinking is still judged against the incarnation this turn addressed.
+    let born: HashMap<String, u64> = order
+        .iter()
+        .map(|d| {
+            (
+                d.clone(),
+                crate::state::incarnation(&AgentId::from(d.as_str())),
+            )
+        })
+        .collect();
     for dest in order {
         let parts = by_dest.remove(&dest).unwrap_or_default();
         let m = parts.len();
@@ -970,13 +981,51 @@ async fn deliver_grouped(
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        deliver(kernel, &dest, &body, client_id, sp, route).await;
+        deliver_soon_with_born(
+            kernel,
+            &dest,
+            &body,
+            client_id,
+            sp,
+            born.get(&dest).copied().unwrap_or_default(),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_payload_error_uses_python_repr() {
+        // `{target!r}`: python's repr picks the quote and escapes the controls.
+        assert!(no_payload_error("it's").starts_with("send to \"it's\" carried"));
+        assert!(no_payload_error("C:\\notes").starts_with("send to 'C:\\\\notes' carried"));
+        assert!(no_payload_error("tab\there").starts_with("send to 'tab\\there' carried"));
+    }
+
+    #[test]
+    fn clean_title_matches_python() {
+        // Runs of `]`/`\r`/`\n` collapse to ONE space, then python's strip
+        // (White_Space + `\x1c`–`\x1f`), then 140 CODE POINTS.
+        assert_eq!(
+            clean_title(Some(&json!("a]]\r\nb"))),
+            Some("a b".to_string())
+        );
+        assert_eq!(
+            clean_title(Some(&json!("  a \u{1c}"))),
+            Some("a".to_string()),
+            "python strips the information separators; `trim()` leaves them"
+        );
+        // 150 family emoji cut to 140 CODE POINTS (not graphemes, not bytes).
+        let long = "\u{1f468}".repeat(150);
+        let cut = clean_title(Some(&json!(long))).unwrap();
+        assert_eq!(cut.chars().count(), 140);
+        // Non-string / strip-empty is no title at all.
+        assert_eq!(clean_title(Some(&json!(7))), None);
+        assert_eq!(clean_title(Some(&json!("\u{1d}\n"))), None);
+        assert_eq!(clean_title(None), None);
+    }
 
     /// The model-facing strings are PROMPTS, not diagnostics: a model reads them
     /// and retries from them, and all four runtimes must say the same words. Pinned
@@ -1038,7 +1087,7 @@ mod tests {
         let f = |v: Value| {
             let obj = v.as_object().unwrap().clone();
             let chosen: Option<&Value> = match obj.get("target_id") {
-                Some(v) if !is_falsy(v) => Some(v),
+                Some(v) if py_truthy(v) => Some(v),
                 _ => obj.get("target"),
             };
             chosen

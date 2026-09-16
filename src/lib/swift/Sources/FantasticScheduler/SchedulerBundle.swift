@@ -31,6 +31,10 @@ public let HANDLER_MODULE = "scheduler.tools"
 /// Python's `HISTORY_MAX`.
 public let HISTORY_MAX = 500
 
+/// Seconds between tick-loop sweeps when the record does not name one (python
+/// `DEFAULT_TICK_SEC`).
+public let DEFAULT_TICK_SEC = 1.0
+
 public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public let name = "scheduler"
 
@@ -46,20 +50,24 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// is still alive (measured 2026-09-11: `p_slow/hit`, `p_fast/hit`,
     /// `p_cap/hit` all landed under a dispatch that had already ended).
     private var tasks: [String: TaskId] = [:]
+    /// python's module-global `_cache`: the RAM copy of each scheduler's
+    /// schedules, keyed by agent id.
+    ///
+    /// It is updated BEFORE the persist, and NOTHING evicts it — not `delete_agent`
+    /// (python's `_cache` outlives the record), and not a failed write. A tick that
+    /// bumped `next_run` and could not save must not re-fire the same tick on the
+    /// next sweep; `schedule`/`tick_now` are the two that DO roll back, because a
+    /// phantom schedule (or run) nobody can see on disk is worse than the refusal.
+    /// Bad JSON on disk reads as an empty list, exactly as `json.JSONDecodeError`
+    /// does there.
+    private var cache: [String: [JSON]] = [:]
 
+    /// python's `readme.md`, verbatim — two lines and the trailing newline.
     public var readme: String? {
         """
-        scheduler — recurring tasks as an agent.
+        # scheduler — recurring tasks
+        Verbs: schedule, unschedule, list, pause, resume, tick_now, history. Persistence (schedules.json, history.jsonl) is automatic THROUGH the loader (`kernel_state`) — nothing to wire; a write failfasts only when no store is wired at the root.
 
-        State persists THROUGH the loader (nothing to wire; a write failfasts only
-        when no store is wired): `agents/<id>/schedules.json` + `history.jsonl`.
-
-        Verbs: reflect · boot · schedule {target, payload, interval_seconds, timeout?} ·
-        unschedule {schedule_id} · list · pause/resume {schedule_id?} · tick_now {schedule_id} ·
-        history {limit?, schedule_id?}. A tick bumps run_count/next_run of every DUE schedule,
-        persists FIRST, then fires them all as ONE batch `kernel.send([{target, payload, timeout?}, …])`
-        (concurrent; `timeout` = seconds per fire, absent = wait forever) and emits one
-        `schedule_fired` per outcome to the scheduler's OWN inbox (the target gets the payload).
         """
     }
 
@@ -72,8 +80,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         switch verb {
         case "reflect": return reflectReply(agentId, kernel: kernel)
         case "boot": return await bootReply(agentId, kernel: kernel)
-        // A lifecycle no-op; the tick loop is cancelled in `onShutdown`/`onDelete`.
-        case "shutdown": return .null
         case "schedule": return await scheduleReply(agentId, payload: payload, kernel: kernel)
         case "unschedule": return await unscheduleReply(agentId, payload: payload, kernel: kernel)
         case "list": return await listReply(agentId, kernel: kernel)
@@ -82,7 +88,12 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         case "tick_now": return await tickNowReply(agentId, payload: payload, kernel: kernel)
         case "history": return await historyReply(agentId, payload: payload, kernel: kernel)
         default:
-            return .object(["error": .string("scheduler: unknown type '\(verb)'")])
+            // python `{t!r}`: an absent `type` reads `None`, a number reads bare.
+            // `shutdown` is NOT a verb here — python's VERBS table has no such key,
+            // so it lands in exactly this branch.
+            return .object([
+                "error": .string("scheduler: unknown type \(pyRepr(payload["type"]))")
+            ])
         }
     }
 
@@ -125,6 +136,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         _ = await stopTick(agentId, kernel: kernel)
     }
 
+    /// The tick loop dies with the agent — the SCHEDULE CACHE does NOT. python's
+    /// `_cache` is a module global nothing removes from, so a scheduler recreated
+    /// under the same id sees the schedules the process already knew.
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
         _ = await stopTick(agentId, kernel: kernel)
     }
@@ -186,24 +200,45 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         return e
     }
 
-    private func loadSchedules(_ id: AgentId, _ kernel: Kernel) async -> [JSON] {
-        guard let raw = await fileRead(id, kernel, Self.schedulesBlob),
-            let parsed = try? JSON.parse(raw), let arr = parsed.asArray
-        else { return [] }
-        return arr
+    private func cached(_ id: AgentId) -> [JSON]? { lock.withLock { cache[id.value] } }
+
+    /// The RAM copy IS the state (python mutates `_cache` in place). Setting it is
+    /// a separate step from persisting, so a failed write can still be kept.
+    private func setCache(_ id: AgentId, _ schedules: [JSON]) {
+        lock.withLock { cache[id.value] = schedules }
     }
 
+    private func loadSchedules(_ id: AgentId, _ kernel: Kernel) async -> [JSON] {
+        if let hit = cached(id) { return hit }
+        guard let raw = await fileRead(id, kernel, Self.schedulesBlob), !raw.isEmpty else {
+            setCache(id, [])
+            return []
+        }
+        // Unreadable JSON is an EMPTY list, not a crash — python's
+        // `except json.JSONDecodeError: _cache[sid] = []`.
+        let parsed = (try? JSON.parse(raw))?.asArray ?? []
+        setCache(id, parsed)
+        return parsed
+    }
+
+    /// RAM FIRST, then disk — and the caller decides what a write failure means.
     @discardableResult
     private func saveSchedules(_ id: AgentId, _ kernel: Kernel, _ schedules: [JSON]) async
         -> JSON?
     {
-        await fileWrite(
-            id, kernel, Self.schedulesBlob, JSON.array(schedules).serializePretty(indent: 2))
+        setCache(id, schedules)
+        return await fileWrite(
+            id, kernel, Self.schedulesBlob,
+            pyJsonDumps(.array(schedules), indent: 2))
     }
 
-    private func appendHistory(_ id: AgentId, _ kernel: Kernel, _ event: JSON) async {
+    /// Returns the persist error, if any — python's `_append_history` hands it
+    /// back so `_fire_many` can name it on stderr.
+    @discardableResult
+    private func appendHistory(_ id: AgentId, _ kernel: Kernel, _ event: JSON) async -> JSON? {
         let prev = await fileRead(id, kernel, Self.historyBlob) ?? ""
-        var combined = prev + event.serialize() + "\n"
+        // python `json.dumps(event, default=str)` — compact, ensure_ascii.
+        var combined = prev + pyJsonDumps(event) + "\n"
         // Ring-trim past 2× MAX.
         let lines = combined.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
@@ -212,7 +247,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         if real.count > 2 * HISTORY_MAX {
             combined = real.suffix(HISTORY_MAX).joined(separator: "\n") + "\n"
         }
-        _ = await fileWrite(id, kernel, Self.historyBlob, combined)
+        return await fileWrite(id, kernel, Self.historyBlob, combined)
     }
 
     private func readHistory(_ id: AgentId, _ kernel: Kernel, _ limit: Int) async -> [JSON] {
@@ -226,19 +261,32 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
 
     // ── tick loop ───────────────────────────────────────────────
 
+    /// python `_tick_sec`: the record's sweep interval when it is a POSITIVE
+    /// NUMBER (a bool is not one), else the documented default.
+    ///
+    /// NO FLOOR. `max(0.1, …)` silently overrode an operator who asked for a 50 ms
+    /// sweep, and `validateMeta` already refuses everything this read cannot use,
+    /// so the clamp could only ever contradict a legal record.
+    private func tickSec(_ agent: Agent?) -> Double {
+        guard let v = agent?.metaValue(forKey: "tick_sec"), let d = v.asDouble, d > 0 else {
+            return DEFAULT_TICK_SEC
+        }
+        return d
+    }
+
     private func tickLoop(_ agentId: AgentId, _ kernel: Kernel) async {
         while !Task.isCancelled {
-            let tickSec = max(
-                0.1, kernel.agent(agentId)?.metaValue(forKey: "tick_sec")?.asDouble ?? 1.0)
-            try? await Task.sleep(nanoseconds: UInt64(tickSec * 1_000_000_000))
-            if Task.isCancelled { return }
             guard let agent = kernel.agent(agentId) else { return }  // deleted → exit
-            if agent.metaValue(forKey: "paused")?.asBool == true { continue }
+            try? await Task.sleep(nanoseconds: UInt64(tickSec(agent) * 1_000_000_000))
+            if Task.isCancelled { return }
+            // python truthiness on the record's `paused`: `0`, `""` and `[]` are not
+            // paused, and any non-empty value is.
+            if pyTruthy(kernel.agent(agentId)?.metaValue(forKey: "paused") ?? .null) { continue }
             let now = nowSecs()
             var schedules = await loadSchedules(agentId, kernel)
             var due: [JSON] = []
             for i in schedules.indices {
-                if schedules[i]["paused"].asBool == true { continue }
+                if pyTruthy(schedules[i]["paused"]) { continue }
                 let nextRun = schedules[i]["next_run"].asDouble ?? 0
                 if now < nextRun { continue }
                 // Persist BEFORE the fire: run_count/next_run are bumped and saved
@@ -251,7 +299,15 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
                 due.append(schedules[i])
             }
             if due.isEmpty { continue }
-            await saveSchedules(agentId, kernel, schedules)
+            // THE BUMP IS KEPT even when the write fails: RAM is updated first, so a
+            // persist fault cannot make the next sweep re-fire the same tick. The
+            // fault is NAMED — python `scheduler/tools.py:236-239`; swallowing it
+            // left a scheduler that ticked forever and lost every schedule on boot
+            // with no line anywhere saying why.
+            if let err = await saveSchedules(agentId, kernel, schedules) {
+                RuntimeLog.warn(
+                    "scheduler \(agentId.value): persist failed: \(pyStr(err["error"]))")
+            }
             await fireMany(agentId, due, kernel)
         }
     }
@@ -273,13 +329,18 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             let payload = sch.asObject?["payload"] ?? .object([:])
             var error: JSON = .null
             var result: JSON = .null
-            if out.status != .completed {
-                let detail = out.result["error"].asString ?? out.result.serialize()
-                error = .string("\(out.status.rawValue): \(detail)")
-            } else if let err = out.result["error"].asString {
-                error = .string(err)
-            } else {
+            if out.status == .completed {
+                // COMPLETED means completed. A reply that happens to carry an
+                // `error` key is still the target's ANSWER — python puts it in
+                // `result` and leaves `error` null; hoisting it reported a failed
+                // fire for a verb that had answered.
                 result = out.result
+            } else {
+                // python: `res.get("error") if isinstance(res, dict) else res`,
+                // rendered with `str()` — so a cancelled fire with no detail reads
+                // `cancelled: None`.
+                let detail: JSON = out.result.asObject != nil ? out.result["error"] : out.result
+                error = .string("\(out.status.rawValue): \(pyStr(detail))")
             }
             let event: JSON = .object([
                 "type": .string("schedule_fired"),
@@ -292,7 +353,10 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
                 "ts": .double(ts),
                 "duration_ms": .integer(durationMs),
             ])
-            await appendHistory(agentId, kernel, event)
+            if let err = await appendHistory(agentId, kernel, event) {
+                RuntimeLog.warn(
+                    "scheduler \(agentId.value): history persist failed: \(pyStr(err["error"]))")
+            }
             // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
             // `schedule_fired` doubled every delivery to a live program's
             // on_message — the payload send IS the tick; telemetry rides the
@@ -321,8 +385,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         return .object([
             "id": .string(agentId.value),
             "sentence": .string("Recurring-task scheduler."),
-            "tick_sec": .double(agent?.metaValue(forKey: "tick_sec")?.asDouble ?? 1.0),
-            "paused": .bool(agent?.metaValue(forKey: "paused")?.asBool ?? false),
+            "tick_sec": .double(tickSec(agent)),
+            // python `bool(rec.get("paused"))` — truthiness in, a BOOL out.
+            "paused": .bool(pyTruthy(agent?.metaValue(forKey: "paused") ?? .null)),
             "running": .bool(running),
             "verbs": .object([
                 "reflect": .string("Identity + tick state. No args."),
@@ -337,35 +402,36 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             ]),
             "emits": .object([
                 "schedule_fired": .string(
-                    "{type, schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} emitted on the scheduler's OWN inbox on every fire (never the target's)"
+                    "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
                 )
             ]),
         ])
     }
 
-    /// Atomically start + register the tick task if none is live for `id`.
-    /// Returns false if one was already running (idempotent boot). Synchronous
-    /// so the NSLock never spans an `await`.
-    private func startTaskIfAbsent(_ id: String, _ make: () -> TaskId) -> Bool {
+    /// Start + register the tick task unless a LIVE one is already registered.
+    /// Synchronous so the NSLock never spans an `await`.
+    ///
+    /// python's condition is `id not in _tick_tasks or _tick_tasks[id].done()` — a
+    /// loop whose task has ENDED (cancelled, or the agent was deleted and
+    /// recreated) is restarted. Holding the stale id and doing nothing left a
+    /// scheduler that reported `{running:true}` and never ticked again.
+    private func startTickIfNotLive(_ agentId: AgentId, _ kernel: Kernel) {
         lock.lock()
         defer { lock.unlock() }
-        if tasks[id] != nil { return false }
-        tasks[id] = make()
-        return true
+        if let tid = tasks[agentId.value], kernel.tasks.contains(tid) { return }
+        tasks[agentId.value] = kernel.spawnTask(agent: agentId, verb: "tick_loop") {
+            [weak self] in
+            guard let self else { return }
+            await self.tickLoop(agentId, kernel)
+        }
     }
 
     private func bootReply(_ agentId: AgentId, kernel: Kernel) async -> JSON {
         // Boot never needs a store (python): the tick loop starts; a WRITE
         // surfaces the loader's error when none is wired.
-        let started = startTaskIfAbsent(agentId.value) {
-            kernel.spawnTask(agent: agentId, verb: "tick_loop") { [weak self] in
-                guard let self else { return }
-                await self.tickLoop(agentId, kernel)
-            }
-        }
-        if !started {
-            return .object(["running": .bool(true), "already_booted": .bool(true)])
-        }
+        startTickIfNotLive(agentId, kernel)
+        // ALWAYS the same reply. `already_booted` was a key python never emits, so
+        // a caller branching on the reply saw two shapes for one idempotent verb.
         return .object(["running": .bool(true)])
     }
 
@@ -388,10 +454,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     private func scheduleReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
-        let target = payload["target"].asString ?? ""
-        if target.isEmpty {
-            return .object(["error": .string("schedule: target required")])
-        }
+        // PYTHON'S ORDER, and it is observable: payload shape → interval_seconds →
+        // target → payload.type → timeout. A call with two faults must name the same
+        // one python names.
         var schedPayload = payload.asObject?["payload"] ?? .object([:])
         if schedPayload.isNull { schedPayload = .object([:]) }
         guard schedPayload.asObject != nil else {
@@ -399,23 +464,37 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             // error rather than as the downstream "payload.type required".
             return Refusal.bad("schedule", "payload", "an object with type")
         }
-        if (schedPayload["type"].asString ?? "").isEmpty {
-            return .object(["error": .string("schedule: payload.type required")])
-        }
         let (interval, intervalBad) = intArg(payload, "interval_seconds", 60, "schedule", 1)
         if let intervalBad { return intervalBad }
+        // `payload.get("target", "")` under truthiness — and a TRUTHY non-string is
+        // stored verbatim, the way python stores whatever it was handed.
+        let target = payload.asObject?["target"] ?? .string("")
+        if !pyTruthy(target) {
+            return .object(["error": .string("schedule: target required")])
+        }
+        if !pyTruthy(schedPayload["type"]) {
+            return .object(["error": .string("schedule: payload.type required")])
+        }
         // Per-fire bound, seconds. Optional: absent = wait forever (never defaulted).
-        var timeout: Double? = nil
+        // STORED AS SENT — an int `5` stays `5`; widening it to `5.0` changed the
+        // persisted bytes and every reply that echoes the schedule.
+        var timeout: JSON = .null
         if let raw = payload.asObject?["timeout"], !raw.isNull {
-            guard let t = raw.asDouble, t > 0 else {
+            let positive: Bool
+            switch raw {
+            case .integer(let n): positive = n > 0
+            case .double(let d): positive = d > 0
+            default: positive = false
+            }
+            guard positive else {
                 return Refusal.bad("schedule", "timeout", "a positive number of seconds")
             }
-            timeout = t
+            timeout = raw
         }
         let now = nowSecs()
         var sch: JSON = .object([
             "id": .string(mintId()),
-            "target": .string(target),
+            "target": target,
             "payload": schedPayload,
             "interval_seconds": .integer(interval),
             "created_at": .double(now),
@@ -423,30 +502,38 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             "run_count": .integer(0),
             "paused": .bool(false),
         ])
-        if let timeout { sch["timeout"] = .double(timeout) }
+        if !timeout.isNull { sch["timeout"] = timeout }
         var schedules = await loadSchedules(agentId, kernel)
         schedules.append(sch)
         if let err = await saveSchedules(agentId, kernel, schedules) {
-            // Nothing is cached in RAM: a failed persist leaves no phantom schedule.
+            // ROLL THE APPEND BACK: a failed persist leaves no phantom schedule in
+            // RAM either (python re-filters `_cache` by id).
+            setCache(agentId, schedules.filter { $0["id"] != sch["id"] })
             return persistErr("schedule", err)
         }
         return .object(["schedule_id": sch["id"], "schedule": sch])
     }
 
     private func unscheduleReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
-        guard let sid = payload["schedule_id"].asString else {
+        // TRUTHINESS, and the id is echoed RAW — python compares and returns
+        // whatever it was given.
+        let sid = payload["schedule_id"]
+        guard pyTruthy(sid) else {
             return .object(["error": .string("unschedule: schedule_id required")])
         }
         var schedules = await loadSchedules(agentId, kernel)
         let before = schedules.count
-        schedules.removeAll { $0["id"].asString == sid }
+        schedules.removeAll { $0["id"] == sid }
         let removed = schedules.count < before
+        // RAM FIRST, unconditionally (python assigns `_cache[id]` before it looks at
+        // `removed`), so a failed write still forgets the schedule.
+        setCache(agentId, schedules)
         if removed {
             if let err = await saveSchedules(agentId, kernel, schedules) {
                 return persistErr("unschedule", err)
             }
         }
-        return .object(["removed": .bool(removed), "schedule_id": .string(sid)])
+        return .object(["removed": .bool(removed), "schedule_id": sid])
     }
 
     private func listReply(_ agentId: AgentId, kernel: Kernel) async -> JSON {
@@ -467,45 +554,56 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         -> JSON
     {
         let key = paused ? "paused" : "resumed"
-        if let sid = payload["schedule_id"].asString {
+        let sid = payload["schedule_id"]
+        if pyTruthy(sid) {
             var schedules = await loadSchedules(agentId, kernel)
             var touched = 0
-            for i in schedules.indices where schedules[i]["id"].asString == sid {
+            for i in schedules.indices where schedules[i]["id"] == sid {
                 schedules[i]["paused"] = .bool(paused)
                 touched += 1
             }
+            // RAM FIRST: a failed write leaves the flag flipped in memory, so the
+            // very next tick already honours it.
             if touched > 0, let err = await saveSchedules(agentId, kernel, schedules) {
                 return persistErr(paused ? "pause" : "resume", err)
             }
-            var out: JSON = .object(["schedule_id": .string(sid)])
+            // FLAG FIRST — python's dict literal is `{"paused": …, "schedule_id": …}`.
+            var out: JSON = .object([:])
             out[key] = .bool(touched > 0)
+            out["schedule_id"] = sid
             return out
         }
         if let agent = kernel.agent(agentId) {
             _ = agent.updateMeta(["paused": .bool(paused)])
             await kernel.persistRecord(agent)
         }
-        var out: JSON = .object(["scheduler_id": .string(agentId.value)])
+        var out: JSON = .object([:])
         out[key] = .bool(true)
+        out["scheduler_id"] = .string(agentId.value)
         return out
     }
 
     private func tickNowReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
-        guard let sid = payload["schedule_id"].asString else {
+        let sid = payload["schedule_id"]
+        guard pyTruthy(sid) else {
             return .object(["error": .string("tick_now: schedule_id required")])
         }
         var schedules = await loadSchedules(agentId, kernel)
-        guard let i = schedules.firstIndex(where: { $0["id"].asString == sid }) else {
-            return .object(["error": .string("schedule '\(sid)' not found")])
+        guard let i = schedules.firstIndex(where: { $0["id"] == sid }) else {
+            return .object(["error": .string("schedule \(pyRepr(sid)) not found")])
         }
         // Same order as the tick: bump → persist → fire.
         let count = schedules[i]["run_count"].asInt ?? 0
         schedules[i]["run_count"] = .integer(count + 1)
         if let err = await saveSchedules(agentId, kernel, schedules) {
+            // ROLLED BACK in RAM too (python's `s["run_count"] -= 1`): a run nothing
+            // recorded must not show up in the next `list`.
+            schedules[i]["run_count"] = .integer(count)
+            setCache(agentId, schedules)
             return persistErr("tick_now", err)
         }
         await fireMany(agentId, [schedules[i]], kernel)
-        return .object(["fired": .bool(true), "schedule_id": .string(sid)])
+        return .object(["fired": .bool(true), "schedule_id": sid])
     }
 
     private func historyReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
@@ -513,8 +611,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         if let limitBad { return limitBad }
         let limit = min(500, Int(rawLimit))
         var entries = await readHistory(agentId, kernel, limit)
-        if let sid = payload["schedule_id"].asString {
-            entries = entries.filter { $0["schedule_id"].asString == sid }
+        let sid = payload["schedule_id"]
+        if pyTruthy(sid) {
+            entries = entries.filter { $0["schedule_id"] == sid }
         }
         return .object(["history": .array(entries), "count": .integer(Int64(entries.count))])
     }

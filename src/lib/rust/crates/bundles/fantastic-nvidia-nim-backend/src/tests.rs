@@ -45,7 +45,7 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let nim = nim_id_for(tmp);
     let fid = format!("ff_{}", nim);
@@ -101,15 +101,22 @@ fn open_client_inbox(
     kernel: &Arc<Kernel>,
     agent_id: &AgentId,
 ) -> fantastic_kernel::inbox::InboxReceiver {
-    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
-    kernel.inboxes.insert(agent_id.clone(), tx);
-    rx
+    kernel.ensure_inbox(agent_id)
 }
 
 #[test]
-fn readme_present_and_titled() {
-    assert!(!README.is_empty());
-    assert!(README.contains("nvidia_nim_backend"));
+fn readme_is_python_verbatim() {
+    // B4.5 — the readme a model reads about this backend is the PYTHON bundle's,
+    // byte for byte. Each runtime had written its own, so the same agent
+    // described itself differently depending on where it ran.
+    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("repo's src/lib above the crate")
+        .join(
+            "python/bundled_agents/ai/nvidia/nvidia_nim_backend/src/nvidia_nim_backend/readme.md",
+        );
+    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
 }
 
 /// THE KEY LIVES IN THE ENVIRONMENT, which is process-global — so the test that
@@ -166,6 +173,9 @@ async fn reflect_shape_has_api_key_tracks_the_env() {
     assert!(r["verbs"]["clear_api_key"].is_null());
 }
 
+/// python `test_send_requires_api_key`: the refusal is `send`'s, minted after
+/// the recursion guard, VERBATIM, and carrying the caller's `client_id`. Rust
+/// minted it in the backend before the guard and without the `client_id`.
 #[tokio::test]
 async fn send_without_api_key_returns_clean_error() {
     let _key = KeyEnv::set(None).await;
@@ -179,11 +189,24 @@ async fn send_without_api_key_returns_clean_error() {
         .await
         .remove(0)
         .result;
-    let err = r["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("NVIDIA_API_KEY"),
-        "expected api_key-not-set error, got {err:?}",
+    assert_eq!(
+        r,
+        json!({
+            "error": "nvidia_nim_backend: no api key — set NVIDIA_API_KEY",
+            "client_id": "test",
+        })
     );
+    // THE GUARD RUNS FIRST — a cycle is refused even with no key wired.
+    let cycled = kernel
+        .send(vec![Item::new(
+            nim.clone(),
+            json!({"type": "send", "text": "hi", "client_id": "test",
+                   "_call_stack": [nim.as_str()]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(cycled["error"], json!("nvidia_nim_backend: cycle detected"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -232,6 +255,7 @@ async fn send_streams_tokens_via_sse() {
     while tokio::time::Instant::now() < deadline && !saw_done {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
             Ok(Some(ev)) => {
+                let ev = ev.payload;
                 let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
                 if ty == "token" {
                     if let Some(t) = ev.get("text").and_then(Value::as_str) {
@@ -256,12 +280,12 @@ async fn send_streams_tokens_via_sse() {
 /// Join a decoded pass into the text ai-core would see.
 fn decoded_text(deltas: &[Value]) -> String {
     let mut wrap = ThinkWrap::new();
-    let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
+    let mut out: VecDeque<Result<ProviderEvent, ProviderError>> = VecDeque::new();
     for d in deltas {
         decode_delta_into(d, &mut wrap, &mut out);
     }
     if let Some(m) = wrap.close_marker() {
-        out.push(Ok(ProviderEvent::Token(m.to_string())));
+        out.push_back(Ok(ProviderEvent::Token(m.to_string())));
     }
     out.into_iter()
         .map(|e| match e.expect("no decode errors") {
@@ -350,8 +374,10 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         .await
         .remove(0)
         .result;
-    let messages = h["messages"].as_array().expect("messages array");
-    assert_eq!(messages.last().unwrap()["content"], "ack");
+    // `history` is the DIGEST (python `{rows, next, total}`); the persisted
+    // assistant turn is stripped of its deliberation.
+    let rows = h["rows"].as_array().expect("rows array");
+    assert_eq!(rows.last().unwrap()["head"], "ack");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -405,6 +431,9 @@ async fn rate_limit_retry_once_then_succeeds() {
             .result
     });
 
+    // NO `say`. python `_stream_with_rate_limit_retry` emits the wait as a
+    // STATUS and nothing else; the extra `say` was a rust-only line in the
+    // caller's stream.
     let mut saw_say = false;
     let mut saw_rate_status = false;
     let mut tokens = String::new();
@@ -416,6 +445,7 @@ async fn rate_limit_retry_once_then_succeeds() {
     while tokio::time::Instant::now() < deadline && !saw_done {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
             Ok(Some(ev)) => {
+                let ev = ev.payload;
                 let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
                 match ty {
                     "token" => {
@@ -423,15 +453,7 @@ async fn rate_limit_retry_once_then_succeeds() {
                             tokens.push_str(t);
                         }
                     }
-                    "say"
-                        if ev
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .map(|s| s.contains("rate limited"))
-                            .unwrap_or(false) =>
-                    {
-                        saw_say = true;
-                    }
+                    "say" => saw_say = true,
                     "status"
                         if ev
                             .get("detail")
@@ -450,13 +472,211 @@ async fn rate_limit_retry_once_then_succeeds() {
         }
     }
     let r = join.await.unwrap();
-    assert!(saw_say, "expected say(rate limited) event");
+    assert!(!saw_say, "python emits no say during a 429 backoff");
     assert!(
         saw_rate_status,
         "expected status(waiting_on=rate_limit) event"
     );
     assert_eq!(tokens, "ok<call name=\"done\"></call>");
     assert_eq!(r["response"], "ok<call name=\"done\"></call>");
+}
+
+/// A stub that writes ONE SSE line, HOLDS the connection for `stall`, then
+/// finishes. A provider that drains the whole body before yielding cannot
+/// produce a token inside that window; python's yields per line.
+///
+/// Raw TCP because the mock-server crates answer with a COMPLETE body — the one
+/// thing this must not do.
+async fn stalling_sse_server(first: String, rest: String, stall: Duration) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (first, rest) = (first.clone(), rest.clone());
+            tokio::spawn(async move {
+                // Drain the whole request (headers + Content-Length body), or the
+                // client blocks writing a 20KB prompt into a socket nobody reads.
+                let mut req: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let head_end = req.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                    if let Some(h) = head_end {
+                        let head = String::from_utf8_lossy(&req[..h]).to_lowercase();
+                        let len: usize = head
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|t| t.split("\r\n").next())
+                            .and_then(|t| t.trim().parse().ok())
+                            .unwrap_or(0);
+                        if req.len() >= h + len {
+                            break;
+                        }
+                    }
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => req.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                            Transfer-Encoding: chunked\r\n\r\n";
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock
+                    .write_all(format!("{:x}\r\n{first}\r\n", first.len()).as_bytes())
+                    .await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(stall).await;
+                let _ = sock
+                    .write_all(format!("{:x}\r\n{rest}\r\n0\r\n\r\n", rest.len()).as_bytes())
+                    .await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+    port
+}
+
+/// B2.11: TOKENS REACH THE CALLER WHILE THE BODY IS STILL OPEN. This provider
+/// used to drain the whole response into a `Vec` and hand it over only once the
+/// stream had ENDED, so `text_so_far`, the `token` events and the `streaming`
+/// phase all arrived at once at the end — a long turn read as a stalled one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tokens_and_streaming_status_arrive_before_the_body_ends() {
+    let first =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok<call name=\\\"done\\\"></call>\"}}]}\n\n"
+            .to_string();
+    let port = stalling_sse_server(
+        first,
+        "data: [DONE]\n\n".to_string(),
+        Duration::from_secs(2),
+    )
+    .await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, nim, _fid) = mk_kernel(&tmp, Some(format!("http://127.0.0.1:{port}/v1"))).await;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
+    let mut rx = open_client_inbox(&kernel, &nim);
+    let send_kernel = Arc::clone(&kernel);
+    let nim_for_task = nim.clone();
+    let join = tokio::spawn(async move {
+        send_kernel
+            .send(vec![Item::new(
+                nim_for_task,
+                json!({"type": "send", "text": "go", "client_id": "t"}),
+            )])
+            .await
+            .remove(0)
+            .result
+    });
+
+    // INSIDE the stall — the body has not ended yet.
+    let mut token = String::new();
+    let mut saw_streaming = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1200);
+    while tokio::time::Instant::now() < deadline && !(saw_streaming && !token.is_empty()) {
+        if let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+            let ev = ev.payload;
+            match ev.get("type").and_then(Value::as_str) {
+                Some("token") => token.push_str(ev["text"].as_str().unwrap_or("")),
+                Some("status") if ev["phase"] == json!("streaming") => saw_streaming = true,
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        !join.is_finished(),
+        "the stub must still be holding the body open"
+    );
+    assert_eq!(token, "ok<call name=\"done\"></call>");
+    assert!(
+        saw_streaming,
+        "status(streaming) must precede the body's end"
+    );
+    let r = join.await.unwrap();
+    assert_eq!(r["response"], "ok<call name=\"done\"></call>");
+}
+
+/// PROVIDER FAILURE, KIND 1 (B2.1): MAPPED. nvidia is the one backend with an
+/// `error_mapper` — an `httpx.HTTPStatusError` that survives the retry budget
+/// becomes a clean sentence the caller READS on a COMPLETED turn, with its
+/// `client_id`, and the handler does not fail. Every other failure raises.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mapped_rate_limit_is_an_answer_not_a_raise() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let endpoint = format!("{}/v1", server.uri());
+    let (kernel, nim, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
+
+    // 429 forever: one retry is spent, then `_map_error`'s text is the reply.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "1")
+                .set_body_string("rate limited"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut rx = open_client_inbox(&kernel, &nim);
+    let r = kernel
+        .send(vec![Item::new(
+            nim.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], json!("send: rate limited (429); retry in 1s"));
+    assert_eq!(r["client_id"], json!("t"));
+    assert!(r.get("raised").is_none(), "a mapped error answers: {r:#?}");
+
+    let mut done: Option<Value> = None;
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        let ev = ev.payload;
+        if ev.get("type").and_then(Value::as_str) == Some("status")
+            && ev.get("phase").and_then(Value::as_str) == Some("done")
+        {
+            done = Some(ev["detail"].clone());
+        }
+    }
+    let detail = done.expect("status(done)");
+    assert_eq!(detail["reason"], json!("error"));
+    assert_eq!(
+        detail["error"],
+        json!("send: rate limited (429); retry in 1s")
+    );
+}
+
+/// UNMAPPED, same backend: a no-model refusal is not an HTTP status, so python's
+/// mapper returns None and the raise goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unmapped_nim_failure_still_raises() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": nim.as_str(), "model": DEFAULT_MODEL}),
+        )])
+        .await;
+    let r = kernel
+        .send(vec![Item::new(
+            nim.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["raised"], json!(true));
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("RuntimeError: nvidia_nim_backend: no `model` set"),
+        "{r:#?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -551,7 +771,7 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         .await;
 
     let client_id = "test_int";
-    let _rx = open_client_inbox(&kernel, &nim);
+    let mut rx = open_client_inbox(&kernel, &nim);
     let send_kernel = Arc::clone(&kernel);
     let nim_for_task = nim.clone();
     let join = tokio::spawn(async move {
@@ -596,6 +816,27 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         .expect("send must return promptly after cancel")
         .unwrap();
     assert_eq!(send_reply, json!({"cancelled": true}));
+    // B2.3 — the cancel `status(done)` detail carries `started_at`. The entry is
+    // already TAKEN by the hook, so `emit_status`'s auto-fill has nothing to
+    // read: python passes it explicitly, and rust's cancel detail was the one
+    // `done` event without it.
+    let mut done: Option<Value> = None;
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        let ev = ev.payload;
+        if ev.get("type").and_then(Value::as_str) == Some("status")
+            && ev.get("phase").and_then(Value::as_str) == Some("done")
+        {
+            done = Some(ev["detail"].clone());
+        }
+    }
+    let detail = done.expect("status(done, cancelled)");
+    assert_eq!(
+        detail.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["reason", "send_id", "started_at", "queue_depth"],
+        "{detail:#?}"
+    );
+    assert_eq!(detail["reason"], json!("cancelled"));
+    assert!(detail["started_at"].as_f64().unwrap_or(0.0) > 0.0);
     // No phantom generation left behind — the hook cleared it.
     let st = kernel
         .send(vec![Item::new(nim.clone(), json!({"type": "status"}))])
@@ -622,11 +863,53 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
         };
         let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
-            Err(e) => e,
+            Err(e) => e.message,
         };
         assert!(
             err.contains("nvidia_nim_backend: no `model` set") && err.contains("model=..."),
             "unexpected error: {err}"
         );
     }
+}
+
+#[tokio::test]
+async fn reflect_keys_are_python_keys_in_python_order() {
+    // python `_make_reflect` + `_reflect_extra`: the shared base, then
+    // `has_api_key` alone. `file_bridge_id` was a rust-only key.
+    let tmp = TempDir::new().unwrap();
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
+    let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
+    let r = kernel
+        .send(vec![Item::new(nim, json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(12).cloned().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "id",
+            "sentence",
+            "model",
+            "endpoint",
+            "context_window",
+            "context_strategy",
+            "verbs",
+            "generating",
+            "cancel",
+            "emits",
+            "concurrency",
+            "has_api_key",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>(),
+        "{r:#?}"
+    );
+    assert_eq!(
+        r["sentence"],
+        "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling)."
+    );
+    assert_eq!(r["has_api_key"], true);
+    assert!(r.get("file_bridge_id").is_none(), "{r:#?}");
 }

@@ -45,8 +45,6 @@ let package = Package(
         .library(name: "FantasticBundles", targets: [
             "FantasticFile",
             "FantasticTextFile",
-            "FantasticProxyAgent",
-            "FantasticTools",
             "FantasticScheduler",
             "FantasticCliBundle",
             "FantasticKernelBridge",
@@ -111,7 +109,10 @@ let package = Package(
         // (file_bridge / web_ws / web_rest / the bridges) imports it.
         .target(
             name: "FantasticIoBridge",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
+            dependencies: [
+                "FantasticKernel", "FantasticJSON",
+                .product(name: "OrderedCollections", package: "swift-collections"),
+            ]
         ),
         .target(
             name: "FantasticFile",
@@ -120,16 +121,6 @@ let package = Package(
         ),
         .target(
             name: "FantasticTextFile",
-            dependencies: ["FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
-        ),
-        .target(
-            name: "FantasticProxyAgent",
-            dependencies: ["FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
-        ),
-        .target(
-            name: "FantasticTools",
             dependencies: ["FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
@@ -160,6 +151,9 @@ let package = Package(
             name: "FantasticKernelBridge",
             dependencies: [
                 "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
+                // Reflect and the record meta are ORDERED maps: python's key
+                // order is the contract, so the engine cannot use a Dictionary.
+                .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 // HTTP/1 + WebSocket: the cross-platform WS CLIENT
@@ -186,11 +180,10 @@ let package = Package(
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
             ],
             resources: [
-                .copy("Resources/three.module.js"),
-                .copy("Resources/xterm.min.js"),
-                .copy("Resources/xterm.min.css"),
-                .copy("Resources/xterm-addon-fit.min.js"),
-                .copy("Resources/transport.js"),
+                // python `web/templates/index.html` + `web/favicon.png`, byte
+                // for byte — the only static bytes the host serves.
+                .copy("Resources/index.html"),
+                .copy("Resources/favicon.png"),
             ]
         ),
         // Composable web surfaces (children of a `web` host). They run
@@ -272,7 +265,9 @@ let package = Package(
         ),
         .target(
             name: "FantasticTerminalBackend",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
+            // `fs` is the one disk surface: the pasted-image scratch file is
+            // written and dropped through it, as python's terminal does.
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticFile"]
         ),
 
         // ── Startup layer (Phase 8A) ─────────────────────────────
@@ -289,7 +284,7 @@ let package = Package(
                 // so a default build carries none of it.
                 "FantasticScenarioProbes",
                 "FantasticKernel", "FantasticJSON",
-                "FantasticFile", "FantasticProxyAgent", "FantasticTools",
+                "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticTextFile",
@@ -304,7 +299,6 @@ let package = Package(
             name: "FantasticKernelStartupTests",
             dependencies: [
                 "FantasticKernelStartup", "FantasticKernel", "FantasticJSON",
-                "FantasticProxyAgent",
             ]
         ),
         // The subprocess bundle's own suite — the ORPHAN gate: `cancel` must
@@ -324,7 +318,7 @@ let package = Package(
 
         // ── Apple-app umbrella targets ───────────────────────────
         // `@_exported import` the kernel public surface so app code
-        // sees `Kernel`, `ProxyAgent`, `startKernelInMemory`, etc.
+        // sees `Kernel`, `startKernelInMemory`, etc.
         // through a stable product name. Embedded skips Pro-tier
         // bundle deps so it doesn't drag subprocess-using code into
         // iOS/sandboxed builds even though those bundles compile to
@@ -334,7 +328,6 @@ let package = Package(
             dependencies: [
                 "FantasticJSON", "FantasticKernel",
                 "FantasticKernelStartup",
-                "FantasticProxyAgent", "FantasticTools",
             ]
         ),
         .target(
@@ -342,7 +335,6 @@ let package = Package(
             dependencies: [
                 "FantasticJSON", "FantasticKernel",
                 "FantasticKernelStartup",
-                "FantasticProxyAgent", "FantasticTools",
                 "FantasticExecBridge", "FantasticTerminalBackend",
             ]
         ),
@@ -353,11 +345,17 @@ let package = Package(
             dependencies: [
                 "FantasticKernelStartup", "FantasticKernel", "FantasticJSON",
                 "FantasticKernelBridge",
+                // `fantastic help` prints the `cli` bundle's help.md — the CLI
+                // renders it, so the bytes live in the bundle (python reads the
+                // same file out of the installed `cli` package).
+                "FantasticCliBundle",
             ]
         ),
         .testTarget(
             name: "FantasticCLITests",
-            dependencies: ["Fantastic", "FantasticJSON", "FantasticKernel"]
+            dependencies: [
+                "Fantastic", "FantasticJSON", "FantasticKernel", "FantasticCliBundle",
+            ]
         ),
 
         .testTarget(
@@ -386,7 +384,7 @@ let package = Package(
             name: "FantasticBundlesTests",
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
-                "FantasticFile", "FantasticProxyAgent", "FantasticTools",
+                "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticTextFile", "FantasticKernelStartup",

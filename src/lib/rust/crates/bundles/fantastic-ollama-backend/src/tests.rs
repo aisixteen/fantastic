@@ -13,16 +13,6 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// A free TCP port that is then RELEASED — a subsequent connect refuses. Used to
-/// simulate an unreachable ollama endpoint deterministically.
-fn free_then_closed_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 fn backend_id_for(tmp: &TempDir, tag: &str) -> String {
     format!(
         "ob_{}_{}",
@@ -52,7 +42,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
         tmp.path().join(".fantastic"),
         false,
     );
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     let backend_id = backend_id_for(tmp, tag);
@@ -101,9 +91,7 @@ fn rebind_backend_inbox(
     kernel: &Arc<Kernel>,
     backend: &AgentId,
 ) -> fantastic_kernel::inbox::InboxReceiver {
-    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
-    kernel.inboxes.insert(backend.clone(), tx);
-    rx
+    kernel.ensure_inbox(backend)
 }
 
 /// Build an ollama-style NDJSON body from message objects.
@@ -120,7 +108,7 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
     let mut out = Vec::new();
     for _ in 0..40 {
         while let Some(v) = rx.try_recv() {
-            out.push(v);
+            out.push(v.payload);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
         if out.iter().any(|v| {
@@ -128,7 +116,7 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
                 && v.get("phase").and_then(Value::as_str) == Some("done")
         }) {
             while let Some(v) = rx.try_recv() {
-                out.push(v);
+                out.push(v.payload);
             }
             break;
         }
@@ -137,9 +125,16 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
 }
 
 #[test]
-fn readme_present_and_titled() {
-    assert!(!README.is_empty());
-    assert!(README.contains("ollama_backend"));
+fn readme_is_python_verbatim() {
+    // B4.5 — the readme a model reads about this backend is the PYTHON bundle's,
+    // byte for byte. Each runtime had written its own, so the same agent
+    // described itself differently depending on where it ran.
+    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("repo's src/lib above the crate")
+        .join("python/bundled_agents/ai/ollama/ollama_backend/src/ollama_backend/readme.md");
+    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
 }
 
 #[tokio::test]
@@ -250,12 +245,12 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
 /// Join a decoded pass into the text ai-core would see.
 fn decoded_text(chunks: &[Value]) -> String {
     let mut wrap = ThinkWrap::new();
-    let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
+    let mut out: VecDeque<Result<ProviderEvent, ProviderError>> = VecDeque::new();
     for c in chunks {
         decode_chunk_into(c, &mut wrap, &mut out);
     }
     if let Some(m) = wrap.close_marker() {
-        out.push(Ok(ProviderEvent::Token(m.to_string())));
+        out.push_back(Ok(ProviderEvent::Token(m.to_string())));
     }
     out.into_iter()
         .map(|e| match e.expect("no decode errors") {
@@ -334,8 +329,8 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         .await
         .remove(0)
         .result;
-    let messages = h["messages"].as_array().expect("messages array");
-    assert_eq!(messages.last().unwrap()["content"], "ack");
+    let rows = h["rows"].as_array().expect("rows array");
+    assert_eq!(rows.last().unwrap()["head"], "ack");
 }
 
 #[tokio::test]
@@ -401,43 +396,13 @@ async fn sends_temperature_default_and_override() {
     assert_eq!(last["options"]["temperature"], json!(0.15));
 }
 
-#[test]
-fn list_models_parses_tag_names_in_order() {
-    // ollama's `/api/tags` shape → just the names, in order. Extra fields ignored,
-    // odd/nameless entries skipped (never a panic).
-    let body = json!({
-        "models": [
-            {"name": "gemma3:12b", "size": 8_000_000_000_u64},
-            {"name": "llama3:8b"},
-            {"no_name": true},
-            {"name": "mistral:7b"}
-        ]
-    });
-    assert_eq!(
-        parse_tag_names(&body),
-        vec![
-            "gemma3:12b".to_string(),
-            "llama3:8b".to_string(),
-            "mistral:7b".to_string()
-        ]
-    );
-    // Absent/empty `models` → an empty list, not an error.
-    assert!(parse_tag_names(&json!({})).is_empty());
-    assert!(parse_tag_names(&json!({"models": []})).is_empty());
-}
-
 #[tokio::test]
-async fn list_models_served_returns_names_in_order() {
+async fn list_models_is_unknown_type() {
+    // D7: `list_models` was a rust-only verb. Python's ollama backend never had
+    // one, so a model that read it off `reflect` was taught a probe that does not
+    // exist on the canonical runtime — it is now an unknown type like any other.
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/tags"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "models": [{"name": "gemma3:12b"}, {"name": "llama3:8b"}]
-        })))
-        .mount(&server)
-        .await;
-
     let (kernel, backend) = mk_kernel(&tmp, "lm", &server.uri()).await;
     let reply = kernel
         .send(vec![Item::new(
@@ -447,63 +412,21 @@ async fn list_models_served_returns_names_in_order() {
         .await
         .remove(0)
         .result;
-    assert_eq!(reply["models"], json!(["gemma3:12b", "llama3:8b"]));
-    assert!(
-        reply.get("error").is_none(),
-        "no error on success: {reply:#?}"
-    );
-}
-
-#[tokio::test]
-async fn list_models_payload_endpoint_overrides_record() {
-    // The backend record points at a DEAD endpoint, but the payload override wins —
-    // proving a caller can probe an ARBITRARY endpoint with no configured record.
-    let tmp = TempDir::new().unwrap();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/tags"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"models": [{"name": "probe:1b"}]})),
-        )
-        .mount(&server)
-        .await;
-
-    let dead = format!("http://127.0.0.1:{}", free_then_closed_port());
-    let (kernel, backend) = mk_kernel(&tmp, "lmo", &dead).await;
-    let reply = kernel
-        .send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "list_models", "endpoint": server.uri()}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(reply["models"], json!(["probe:1b"]));
-}
-
-#[tokio::test]
-async fn list_models_unreachable_returns_error_naming_the_endpoint() {
-    let tmp = TempDir::new().unwrap();
-    let dead = format!("http://127.0.0.1:{}", free_then_closed_port());
-    let (kernel, backend) = mk_kernel(&tmp, "lmx", &dead).await;
-    let reply = kernel
-        .send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "list_models"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let err = reply
-        .get("error")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("expected an error, got: {reply:#?}"));
-    assert!(err.contains("ollama:"), "human-readable prefix: {err}");
-    assert!(
-        err.contains(&dead) && err.contains("/api/tags"),
-        "the message must name the probed url: {err}"
+    assert_eq!(
+        reply["error"],
+        json!("ollama_backend: unknown type 'list_models'")
     );
     assert!(reply.get("models").is_none());
+    // And it is gone from the verb menu the model reads.
+    let reflect = kernel
+        .send(vec![Item::new(backend, json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        reflect["verbs"].get("list_models").is_none(),
+        "{reflect:#?}"
+    );
 }
 
 #[tokio::test]
@@ -537,23 +460,32 @@ async fn history_persists_and_round_trips() {
         .await
         .remove(0)
         .result;
-    let messages = h["messages"].as_array().expect("messages array");
-    assert!(
-        messages.len() >= 2,
-        "expected >=2 messages, got {messages:#?}"
-    );
-    assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[0]["content"], "ping");
-    let last = messages.last().unwrap();
+    let digest = h["rows"].as_array().expect("rows array");
+    assert!(digest.len() >= 2, "expected >=2 rows, got {digest:#?}");
+    assert_eq!(digest[0]["role"], "user");
+    assert_eq!(digest[0]["head"], "ping");
+    let last = digest.last().unwrap();
     assert_eq!(last["role"], "assistant");
-    assert_eq!(last["content"], "ack");
+    assert_eq!(last["head"], "ack");
 
     // The turns live in the KERNEL's row store — one table, keyed by the one
     // counter, agent id IS conversation id. They used to be an append-only
     // JSONL sidecar on the backend's own leg, split per client; that split gave
     // two clients on one agent two threads that could not see each other, and
     // the encoding was this bundle's private choice rather than the kernel's.
-    let rows = kernel.rows.for_agent(&backend);
+    // The kernel's own bookkeeping — a `call` row per dispatch, a `task` row per
+    // fork — rides the same list and is not conversation (C36).
+    let rows: Vec<_> = kernel
+        .rows
+        .for_agent(&backend)
+        .into_iter()
+        .filter(|r| {
+            !matches!(
+                r.get("kind").and_then(Value::as_str),
+                Some("call" | "task" | "body" | "view" | "settle")
+            )
+        })
+        .collect();
     assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["content"], "ping");
     assert_eq!(rows[1]["content"], "ack");
@@ -589,11 +521,102 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
         };
         let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
-            Err(e) => e,
+            Err(e) => e.message,
         };
         assert!(
             err.contains("ollama_backend: no `model` set") && err.contains("model=..."),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[tokio::test]
+async fn reflect_extras_match_python() {
+    // python `_reflect_extra`: temperature defaults to the provider's 0.3, and
+    // `num_ctx`/`num_predict`/`think` are null unless SET on the record. They
+    // land AFTER `concurrency`, exactly as `out.update(extra)` does.
+    let tmp = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    let (kernel, backend) = mk_kernel(&tmp, "rx", &server.uri()).await;
+    let r = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(15).cloned().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "id",
+            "sentence",
+            "model",
+            "endpoint",
+            "context_window",
+            "context_strategy",
+            "verbs",
+            "generating",
+            "cancel",
+            "emits",
+            "concurrency",
+            "temperature",
+            "num_ctx",
+            "num_predict",
+            "think",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>(),
+        "{r:#?}"
+    );
+    assert_eq!(
+        r["sentence"],
+        "Ollama-backed LLM agent (raw prompt-and-parse tool-calling)."
+    );
+    assert_eq!(r["temperature"], 0.3);
+    assert_eq!(r["num_ctx"], Value::Null);
+    assert_eq!(r["num_predict"], Value::Null);
+    assert_eq!(r["think"], Value::Null);
+    // The rust-only key is gone.
+    assert!(r.get("file_bridge_id").is_none(), "{r:#?}");
+
+    // Set them, and python's conversions apply: `float(t)`, `int(x) if x`,
+    // `bool(x) if x is not None`.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": backend.as_str(),
+                   "temperature": "0.7", "num_ctx": "4096", "num_predict": 0,
+                   "think": 0}),
+        )])
+        .await;
+    let r = kernel
+        .send(vec![Item::new(backend, json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["temperature"], 0.7);
+    assert_eq!(r["num_ctx"], 4096);
+    assert_eq!(r["num_predict"], Value::Null, "0 is falsy → None");
+    assert_eq!(r["think"], false, "present-and-not-null → bool(x)");
+}
+
+/// B3.1 — python `handler`'s `{name}: unknown type {t!r}`: python's repr (single
+/// quotes), and `shutdown` is NOT in the VERBS map, so it is unknown like
+/// anything else. The prefix is the BACKEND's name — rust answered `ollama:`
+/// where python answers `ollama_backend:`.
+#[tokio::test]
+async fn unknown_type_is_pythons_repr_and_shutdown_is_unknown() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "unk", "http://127.0.0.1:1").await;
+    for (verb, want) in [
+        ("garbage", "ollama_backend: unknown type 'garbage'"),
+        ("shutdown", "ollama_backend: unknown type 'shutdown'"),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(agent.clone(), json!({"type": verb}))])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["error"], json!(want));
     }
 }

@@ -16,7 +16,8 @@
 // bookkeeping context: these verbs take caller-supplied paths, which is exactly
 // what the confused-deputy rule forbids escalating.
 //
-// Checkpoint ids ARE the dispatch's kernel task pid (`<agent>:<hex8>`).
+// Checkpoint ids ARE the dispatch's kernel task pid — an INT, one id space with
+// `ps`, the trace and the chat turn that caused the mutation.
 
 import CryptoKit
 import FantasticJSON
@@ -97,6 +98,24 @@ public struct TextFileBundle: AgentBundle {
 
     public var readme: String? { Self.readmeText }
 
+    /// Refuse a write this bundle cannot honour: `target_id`, when present, must
+    /// be a non-empty agent-id string (the default surface this agent operates
+    /// on). Mirrors py `text_file.validate_meta`.
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        guard let t = meta["target_id"] else { return nil }
+        if case .string(let s) = t, !s.isEmpty { return nil }
+        return "target_id must be a non-empty file_bridge agent id"
+    }
+
+    /// The verbs that operate on a target surface, in python's `VERBS` order.
+    /// Anything outside this set (plus `reflect`/`boot`) is an unknown type —
+    /// python has no `shutdown` here, so `shutdown` is refused like any typo.
+    static let surfaceVerbs: [String] = [
+        "read", "write", "patch", "append", "checkpoint", "checkpoints", "restore", "drop",
+    ]
+
     // ─── the target surface ─────────────────────────────────────
 
     private func target(_ agent: Agent, _ payload: JSON) -> String? {
@@ -126,148 +145,215 @@ public struct TextFileBundle: AgentBundle {
         KernelTaskLocals.currentTask?.value ?? 0
     }
 
-    private func versionMismatch(want: String, have: String) -> JSON {
+    /// python's version-mismatch body. The per-edit form inside `patch` carries
+    /// `path` BETWEEN `reason` and `expected`; the standalone `if_match` guard
+    /// has no `path` at all. `expected` echoes the caller's raw value.
+    private func versionMismatch(want: JSON, have: String) -> JSON {
         .object([
             "error": .string("version mismatch — the document changed since you read it"),
             "reason": .string("version_mismatch"),
-            "expected": .string(want),
+            "expected": want,
             "actual": .string(have),
         ])
     }
 
+    /// The per-edit form, `path` BETWEEN `reason` and `expected`.
+    private func versionMismatchAt(path: JSON, want: JSON, have: String) -> JSON {
+        .object([
+            "error": .string("version mismatch — the document changed since you read it"),
+            "reason": .string("version_mismatch"),
+            "path": path,
+            "expected": want,
+            "actual": .string(have),
+        ])
+    }
+
+    // ─── the leg-IO seam (three functions, one per channel shape) ─
+    // EVERY byte this agent moves crosses the file_bridge leg through exactly
+    // these functions, which are channel-shaped rather than verb-shaped: each
+    // call site already speaks (path, offset, length) or (path, offset,
+    // truncate, bytes) and reads its outcome through `legFailure`. Moving that
+    // traffic onto the batch (C37) therefore replaces the two transport bodies
+    // below and touches no verb.
+
+    /// One `read_stream` chunk: the leg's reply plus the chunk itself, which
+    /// rides the binary body here and `r["bytes"]` in python.
+    private func legReadChunk(
+        _ kernel: Kernel, fb: String, path: JSON, offset: Int, length: Int
+    ) async -> (JSON, Data) {
+        await kernel.sendWithBinary(
+            AgentId(fb),
+            .object([
+                "type": .string("read_stream"), "path": path,
+                "offset": .integer(Int64(offset)), "length": .integer(Int64(length)),
+            ]), Data())
+    }
+
+    /// One `write_stream` chunk. An absent `offset`/`truncate` means append at
+    /// the end (creating the file) — python omits both keys for `append`.
+    private func legWriteChunk(
+        _ kernel: Kernel, fb: String, path: JSON, offset: Int?, truncate: Bool?, bytes: Data
+    ) async -> JSON {
+        var p: OrderedDictionary<String, JSON> = [
+            "type": .string("write_stream"), "path": path,
+        ]
+        if let offset { p["offset"] = .integer(Int64(offset)) }
+        if let truncate { p["truncate"] = .bool(truncate) }
+        return await kernel.sendWithBinary(AgentId(fb), .object(p), bytes).0
+    }
+
+    /// A leg call that moves no bytes (`rename`, `delete`, `list`).
+    private func legCall(_ kernel: Kernel, fb: String, _ payload: JSON) async -> JSON {
+        await kernel.send([Item(AgentId(fb), payload)])[0].result
+    }
+
+    /// python's leg-reply check, spelled once for every channel: a reply that is
+    /// not an object IS the failure (`{"error": str(r)}`, so a `None` reads as
+    /// `"None"`); an object fails only on a TRUTHY `error`.
+    /// NOT a ternary: `JSON` is `ExpressibleByNilLiteral`, so `? r : nil` types
+    /// both arms as `JSON` and a SUCCESS would come back as `.some(.null)`.
+    private func legFailure(_ r: JSON) -> JSON? {
+        guard case .object = r else { return .object(["error": .string(pyStr(r))]) }
+        if pyTruthy(r["error"]) { return r }
+        return nil
+    }
+
     // ─── stream I/O (every byte through the gated leg) ──────────
 
-    private func readAll(_ kernel: Kernel, fb: String, path: String) async
-        -> Result<Data, JSON>
-    {
+    private func readAll(_ kernel: Kernel, fb: String, path: JSON) async -> Result<Data, JSON> {
         var raw = Data()
         var offset = 0
         while true {
-            let (r, body) = await kernel.sendWithBinary(
-                AgentId(fb),
-                .object([
-                    "type": .string("read_stream"), "path": .string(path),
-                    "offset": .integer(Int64(offset)), "length": .integer(Int64(CHUNK)),
-                ]), Data())
-            guard case .object = r else {
-                return .failure(.object(["error": .string("\(fb): no reply")]))
-            }
-            if r["error"].asString != nil { return .failure(r) }
-            if !body.isEmpty { raw.append(body) }
-            if r["eof"].asBool ?? true { break }
-            if body.isEmpty { break }
+            let (r, body) = await legReadChunk(
+                kernel, fb: fb, path: path, offset: offset, length: CHUNK)
+            if let err = legFailure(r) { return .failure(err) }
+            raw.append(body)
+            // python: `if r.get("eof") or not b: break` — an ABSENT `eof` is
+            // falsy and keeps pulling, it does not end the file.
+            if pyTruthy(r["eof"]) || body.isEmpty { break }
             offset = Int(r["next_offset"].asInt ?? Int64(offset + body.count))
         }
         return .success(raw)
     }
 
-    private func writeChunks(_ kernel: Kernel, fb: String, path: String, data: Data) async
-        -> JSON?
-    {
+    private func writeChunks(_ kernel: Kernel, fb: String, path: JSON, data: Data) async -> JSON? {
         var off = 0
         var first = true
         while first || off < data.count {
             let end = min(off + CHUNK, data.count)
             let chunk = data.subdata(in: off..<end)
-            let (r, _) = await kernel.sendWithBinary(
-                AgentId(fb),
-                .object([
-                    "type": .string("write_stream"), "path": .string(path),
-                    "offset": .integer(Int64(off)), "truncate": .bool(first),
-                ]), chunk)
-            guard case .object = r else {
-                return .object(["error": .string("\(fb): no reply")])
-            }
-            if r["error"].asString != nil { return r }
+            let r = await legWriteChunk(
+                kernel, fb: fb, path: path, offset: off, truncate: first, bytes: chunk)
+            if let err = legFailure(r) { return err }
             off += chunk.count
             first = false
         }
         return nil
     }
 
-    private func legCall(_ kernel: Kernel, fb: String, _ payload: JSON) async -> JSON {
-        await kernel.send([Item(AgentId(fb), payload)])[0].result
+    private func writeAtomic(_ kernel: Kernel, fb: String, path: JSON, data: Data) async -> JSON? {
+        // python f-strings the path, whatever the notation typed it as.
+        let tmp = "\(pyStr(path)).tmp.\(pid())"
+        if let err = await writeChunks(kernel, fb: fb, path: .string(tmp), data: data) {
+            return err
+        }
+        return legFailure(
+            await legCall(
+                kernel, fb: fb,
+                .object([
+                    "type": .string("rename"), "old_path": .string(tmp), "new_path": path,
+                ])))
     }
 
-    private func writeAtomic(_ kernel: Kernel, fb: String, path: String, data: Data) async
-        -> JSON?
-    {
-        let tmp = "\(path).tmp.\(pid())"
-        if let err = await writeChunks(kernel, fb: fb, path: tmp, data: data) { return err }
-        let r = await legCall(
-            kernel, fb: fb,
-            .object([
-                "type": .string("rename"), "old_path": .string(tmp), "new_path": .string(path),
-            ]))
-        guard case .object = r else { return .object(["error": .string("\(fb): no reply")]) }
-        if r["error"].asString != nil { return r }
+    /// python `_ckpt_path`: `.ckpt/<path, `/` flattened>/<ckpt id>`. Both halves
+    /// go through python's `f"{…}"`, so an id the notation typed as an int
+    /// (`<ckpt_id>29</ckpt_id>`) renders exactly as python spells it.
+    private func ckptPath(_ path: JSON, _ ckptId: JSON) -> String {
+        "\(CKPT_DIR)/\(pyStr(path).replacingOccurrences(of: "/", with: "__"))/\(pyStr(ckptId))"
+    }
+
+    /// The caller's `ckpt_id`, verbatim — a ckpt id IS a pid, and a pid is a
+    /// NUMBER, so a model writing `<ckpt_id>29</ckpt_id>` hands over an integer
+    /// and demanding a string only refuses the model its own checkpoint back
+    /// (measured 2026-09-10 on `undo:rust`). Only a FALSY value is missing,
+    /// python's `if not ckpt_id` — `0` included, since 0 is never minted.
+    private func ckptArg(_ payload: JSON) -> JSON? {
+        let v = payload["ckpt_id"]
+        // NOT a ternary — see `legFailure`.
+        if pyTruthy(v) { return v }
         return nil
     }
 
-    /// A checkpoint id from the payload, whatever the notation typed it as.
-    ///
-    /// A ckpt id IS a pid, and a pid is a NUMBER — so a model writing
-    /// `<ckpt_id>29</ckpt_id>` hands over an integer, and reading it as a string
-    /// only refuses the model its own checkpoint back ("restore: ckpt_id
-    /// required", measured 2026-09-10 on `undo:rust`). Python accepts anything
-    /// truthy here for the same reason.
-    private func ckptArg(_ payload: JSON) -> String? {
-        switch payload["ckpt_id"] {
-        case .string(let s): return s.isEmpty ? nil : s
-        case .integer(let n): return String(n)
-        case .double(let d): return String(d)
-        default: return nil
+    /// A `.ckpt` dir entry's id: python `int(name) if name.isdigit() else name`.
+    /// `str.isdigit()` is per-scalar Unicode, not ASCII, so `"٣"` reads as 3;
+    /// anything else stays the raw name.
+    private func ckptId(fromName name: String) -> JSON {
+        var value: Int64 = 0
+        var any = false
+        for s in name.unicodeScalars {
+            guard s.properties.numericType == .decimal,
+                let d = s.properties.numericValue.map({ Int64($0) })
+            else { return .string(name) }
+            let (m, mo) = value.multipliedReportingOverflow(by: 10)
+            guard !mo else { return .string(name) }
+            let (a, ao) = m.addingReportingOverflow(d)
+            guard !ao else { return .string(name) }
+            value = a
+            any = true
         }
+        return any ? .integer(value) : .string(name)
     }
 
-    /// A ckpt id on the wire: python emits the minted pid as an INT and a
-    /// `.ckpt` dir entry as `int(name) if name.isdigit() else name`.
-    private func ckptJSON(_ id: String) -> JSON {
-        Int64(id).map(JSON.integer) ?? .string(id)
+    /// python `want is not None and _version(raw) != want`: the guard fires
+    /// whenever `if_match` is PRESENT and non-null, and a non-string value can
+    /// never equal a hex digest, so it always mismatches.
+    private func matches(_ want: JSON, _ have: String) -> Bool {
+        if case .string(let s) = want { return s == have }
+        return false
     }
 
-    private func ckptPath(_ path: String, _ ckptId: String) -> String {
-        "\(CKPT_DIR)/\(path.replacingOccurrences(of: "/", with: "__"))/\(ckptId)"
-    }
-
-    private func ifMatchGuard(_ kernel: Kernel, fb: String, path: String, payload: JSON)
+    private func ifMatchGuard(_ kernel: Kernel, fb: String, path: JSON, payload: JSON)
         async -> JSON?
     {
-        guard let want = payload["if_match"].asString else { return nil }
+        let want = payload["if_match"]
+        if want.isNull { return nil }
         switch await readAll(kernel, fb: fb, path: path) {
         case .failure(let e): return e
         case .success(let data):
             let have = version(data)
             // NOT a ternary: JSON is ExpressibleByNilLiteral, so `? nil :` would
             // coerce to `.some(.null)` and a MATCH would read as a failure.
-            if have == want { return nil }
+            if matches(want, have) { return nil }
             return versionMismatch(want: want, have: have)
         }
     }
 
     /// Commit the pre-image BEFORE any mutate touches the target. A file that
     /// does not exist yet checkpoints as ABSENT (restore = delete).
-    private func takeCheckpoint(_ kernel: Kernel, fb: String, path: String) async
-        -> Result<String, JSON>
+    private func takeCheckpoint(_ kernel: Kernel, fb: String, path: JSON) async
+        -> Result<Int64, JSON>
     {
-        let ckptId = String(pid())
+        let id = pid()
         var data: Data?
         switch await readAll(kernel, fb: fb, path: path) {
         case .success(let d): data = d
         case .failure(let e):
             if e["reason"].asString == "not_found" { data = nil } else { return .failure(e) }
         }
-        let dest = ckptPath(path, ckptId)
-        if let err = await writeChunks(kernel, fb: fb, path: dest, data: data ?? Data()) {
+        let dest = ckptPath(path, .integer(id))
+        if let err = await writeChunks(
+            kernel, fb: fb, path: .string(dest), data: data ?? Data())
+        {
             return .failure(err)
         }
         if data == nil {
-            if let err = await writeChunks(kernel, fb: fb, path: dest + ".absent", data: Data())
+            if let err = await writeChunks(
+                kernel, fb: fb, path: .string(dest + ".absent"), data: Data())
             {
                 return .failure(err)
             }
         }
-        return .success(ckptId)
+        return .success(id)
     }
 
     // ─── patch grammar (moved from file_bridge — same guarantees) ─
@@ -310,8 +396,11 @@ public struct TextFileBundle: AgentBundle {
         return hunks
     }
 
+    /// python `str.count(sub)`: non-overlapping hits, and an EMPTY needle hits
+    /// once per position — `len(s) + 1` CODE POINTS, not grapheme clusters
+    /// (`"a\r\nb"` is 4 code points and matches 5 places).
     private func countOccurrences(of needle: String, in haystack: String) -> Int {
-        if needle.isEmpty { return haystack.count + 1 }
+        if needle.isEmpty { return haystack.unicodeScalars.count + 1 }
         var count = 0
         var lower = haystack.startIndex
         while let r = haystack.range(
@@ -323,33 +412,56 @@ public struct TextFileBundle: AgentBundle {
         return count
     }
 
+    /// python `str.replace(old, new, 1)`: an EMPTY needle inserts at the start.
     private func replaceFirst(_ needle: String, with replacement: String, in haystack: String)
         -> String
     {
+        if needle.isEmpty { return replacement + haystack }
         guard let r = haystack.range(of: needle, options: [.literal]) else { return haystack }
         return haystack.replacingCharacters(in: r, with: replacement)
     }
 
     // ─── verbs ──────────────────────────────────────────────────
 
-    private func pathOf(_ payload: JSON, _ verb: String) -> Result<String, JSON> {
-        guard let p = payload["path"].asString, !p.isEmpty else {
-            return .failure(Refusal.missing(verb, "path"))
-        }
+    /// python `path = payload.get("path", ""); if not path: return missing(…)`.
+    /// Only a FALSY path is missing; a truthy non-string (the tag grammar types
+    /// `<path>2024</path>` as an int) travels to the leg VERBATIM and earns the
+    /// leg's own `bad_arg`, which is the refusal that names the real problem.
+    private func pathOf(_ payload: JSON, _ verb: String) -> Result<JSON, JSON> {
+        let p = payload["path"]
+        guard pyTruthy(p) else { return .failure(Refusal.missing(verb, "path")) }
         return .success(p)
     }
 
+    /// python's `bytes` argument, channel-agnostic: the binary body when the
+    /// call carried one, else the JSON leg's text courtesy (a `str` IS the
+    /// document, utf-8 — ai_core encodes for the MODEL, but a spawned program's
+    /// ctrl-fd wire is JSON and has no bytes type). Anything else reads as
+    /// ABSENT, which each byte verb refuses AFTER its path/edits check.
+    private func bytesArg(_ payload: JSON, _ blob: Data?) -> Data? {
+        if let blob, !blob.isEmpty { return blob }
+        if case .string(let s) = payload["bytes"] { return Data(s.utf8) }
+        return blob
+    }
+
+    /// The lock key for a document: python keys `_LOCKS` on the raw path value.
+    private func lockKey(_ path: JSON) -> String { pyStr(path) }
+
     private func reflect(_ agent: Agent) -> JSON {
-        let sentence =
-            agent.metaValue(forKey: "description")?.asString
-            ?? "Text documents on a file surface — any format, the caller's choice: "
-                + "line-read, atomic write, SEARCH/REPLACE patch, append; versioning "
-                + "and checkpoints ON DEMAND."
-        let targetId = agent.metaValue(forKey: "target_id")?.asString
+        // python `rec.get("description") or <default>` — an EMPTY description is
+        // falsy and falls back to the default sentence.
+        let described = agent.metaValue(forKey: "description") ?? .null
+        let sentence: JSON =
+            pyTruthy(described)
+            ? described
+            : .string(
+                "Text documents on a file surface — any format, the caller's choice: "
+                    + "line-read, atomic write, SEARCH/REPLACE patch, append; versioning "
+                    + "and checkpoints ON DEMAND.")
         return .object([
             "id": .string(agent.id.value),
-            "sentence": .string(sentence),
-            "target_id": targetId.map { JSON.string($0) } ?? .null,
+            "sentence": sentence,
+            "target_id": agent.metaValue(forKey: "target_id") ?? .null,
             "patch_grammar": .string(
                 "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / "
                     + "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match its "
@@ -381,7 +493,7 @@ public struct TextFileBundle: AgentBundle {
     }
 
     private func readReply(_ kernel: Kernel, fb: String, payload: JSON) async -> JSON {
-        let path: String
+        let path: JSON
         switch pathOf(payload, "read") {
         case .failure(let e): return e
         case .success(let p): path = p
@@ -402,7 +514,9 @@ public struct TextFileBundle: AgentBundle {
         case .failure(let e): return e
         case .success(let d): data = d
         }
-        if data.contains(0) { return Refusal.bad("read", "path", "a text file (this one is binary)") }
+        if data.contains(0) {
+            return Refusal.bad("read", "path", "a text file (this one is binary)")
+        }
         guard let text = String(data: data, encoding: .utf8) else {
             return Refusal.bad("read", "path", "valid utf-8 (this file is not)")
         }
@@ -418,7 +532,7 @@ public struct TextFileBundle: AgentBundle {
             }
         }
         return .object([
-            "path": .string(path),
+            "path": path,
             "lines": .array(page),
             "total": .integer(Int64(allLines.count)),
             "eof": .bool(overflow || span >= allLines.count),
@@ -426,74 +540,74 @@ public struct TextFileBundle: AgentBundle {
         ])
     }
 
-    private func writeReply(_ kernel: Kernel, fb: String, payload: JSON, blob: Data) async
+    private func writeReply(_ kernel: Kernel, fb: String, payload: JSON, blob: Data?) async
         -> JSON
     {
-        let path: String
+        let path: JSON
         switch pathOf(payload, "write") {
         case .failure(let e): return e
         case .success(let p): path = p
         }
-        if blob.isEmpty && payload["bytes"].isNull {
+        guard let data = bytesArg(payload, blob) else {
             return Refusal.missing("write", "bytes (the document — str is utf-8-encoded)")
         }
-        return await locked(fb, [path]) {
-            await writeLocked(kernel, fb: fb, path: path, payload: payload, blob: blob)
+        return await locked(fb, [lockKey(path)]) {
+            await writeLocked(kernel, fb: fb, path: path, payload: payload, data: data)
         }
     }
 
     /// The locked half of `write`: the `if_match` check happens here, under
     /// the document lock, and stays valid through the rename.
     private func writeLocked(
-        _ kernel: Kernel, fb: String, path: String, payload: JSON, blob: Data
+        _ kernel: Kernel, fb: String, path: JSON, payload: JSON, data: Data
     ) async -> JSON {
         if let err = await ifMatchGuard(kernel, fb: fb, path: path, payload: payload) {
             return err
         }
-        var ckptId: String?
-        if payload["checkpoint"].asBool == true {
+        var ckptId: Int64?
+        if pyTruthy(payload["checkpoint"]) {
             switch await takeCheckpoint(kernel, fb: fb, path: path) {
             case .failure(let e): return e
             case .success(let id): ckptId = id
             }
         }
-        if let err = await writeAtomic(kernel, fb: fb, path: path, data: blob) {
+        if let err = await writeAtomic(kernel, fb: fb, path: path, data: data) {
             return err
         }
         var out: OrderedDictionary<String, JSON> = [
-            "path": .string(path),
-            "size": .integer(Int64(blob.count)),
-            "version": .string(version(blob)),
+            "path": path,
+            "size": .integer(Int64(data.count)),
+            "version": .string(version(data)),
         ]
-        if let ckptId { out["ckpt_id"] = ckptJSON(ckptId) }
+        // python `if ckpt_id:` — the pid 0 an operator call mints is falsy and
+        // never reaches the reply.
+        if let ckptId, ckptId != 0 { out["ckpt_id"] = .integer(ckptId) }
         return .object(out)
     }
 
-    private func appendReply(_ kernel: Kernel, fb: String, payload: JSON, blob: Data) async
+    private func appendReply(_ kernel: Kernel, fb: String, payload: JSON, blob: Data?) async
         -> JSON
     {
-        let path: String
+        let path: JSON
         switch pathOf(payload, "append") {
         case .failure(let e): return e
         case .success(let p): path = p
         }
-        if blob.isEmpty && payload["bytes"].isNull {
+        guard let data = bytesArg(payload, blob) else {
             return Refusal.missing("append", "bytes (one chunk — str is utf-8-encoded)")
         }
-        return await locked(fb, [path]) {
+        return await locked(fb, [lockKey(path)]) {
             // absent offset = append at end (creates the file)
-            let (r, _) = await kernel.sendWithBinary(
-                AgentId(fb),
-                .object(["type": .string("write_stream"), "path": .string(path)]), blob)
-            guard case .object = r else { return .object(["error": .string("\(fb): no reply")]) }
-            if r["error"].asString != nil { return r }
+            let r = await legWriteChunk(
+                kernel, fb: fb, path: path, offset: nil, truncate: nil, bytes: data)
+            if let err = legFailure(r) { return err }
             let whole: Data
             switch await readAll(kernel, fb: fb, path: path) {
             case .failure(let e): return e
             case .success(let d): whole = d
             }
             return .object([
-                "path": .string(path),
+                "path": path,
                 "size": r["size"],
                 "version": .string(version(whole)),
             ])
@@ -503,11 +617,11 @@ public struct TextFileBundle: AgentBundle {
     private struct PlannedEdit {
         let path: String
         let hunks: [(String, String)]
-        let ifMatch: String?
+        let ifMatch: JSON
         var newBytes: Data = Data()
     }
 
-    private func patchReply(_ kernel: Kernel, fb: String, payload: JSON, blob: Data) async
+    private func patchReply(_ kernel: Kernel, fb: String, payload: JSON, blob: Data?) async
         -> JSON
     {
         // A TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file
@@ -519,10 +633,10 @@ public struct TextFileBundle: AgentBundle {
         guard let edits = payload["edits"].asArray, !edits.isEmpty else {
             return Refusal.missing("patch", "edits (a list of {path, hunks, if_match?})")
         }
-        if blob.isEmpty {
+        guard let data = bytesArg(payload, blob), !data.isEmpty else {
             return Refusal.missing("patch", "bytes (the utf-8 patch — all hunks, in edits order)")
         }
-        guard let patch = String(data: blob, encoding: .utf8) else {
+        guard let patch = String(data: data, encoding: .utf8) else {
             return Refusal.bad("patch", "bytes", "valid utf-8 (the patch is text)")
         }
         let hunks: [(String, String)]
@@ -540,34 +654,36 @@ public struct TextFileBundle: AgentBundle {
         }
         // ── address the one hunk stream: split by per-edit counts ──
         var plan: [PlannedEdit] = []
-        var cursor = 0
+        var cursor: Int64 = 0
         for (i, e) in edits.enumerated() {
-            guard let path = e["path"].asString, !path.isEmpty else {
+            guard case .object = e, let path = e["path"].asString, !path.isEmpty else {
                 return Refusal.bad("patch", "edits", "edit \(i): an object with a `path`")
             }
             // `.integer` ONLY — `asInt` promotes a whole double, so `hunks: 1.0`
             // would pass here and be refused by python/rust. Same typing rule as
             // `intArg`: a present-but-wrong count is a typo, not a coercion.
             guard case .integer(let n) = e["hunks"], n >= 1 else {
-                return Refusal.bad("patch", "edits", "edit \(i) (\"\(path)\"): `hunks` (int >= 1)")
+                return Refusal.bad(
+                    "patch", "edits", "edit \(i) (\(pyRepr(path))): `hunks` (int >= 1)")
             }
-            let n2 = Int(n)
             if plan.contains(where: { $0.path == path }) {
                 return Refusal.bad(
                     "patch", "edits",
                     "each path at most once — put all of a file's hunks in one edit")
             }
-            if cursor + n2 > hunks.count {
-                cursor += n2
-                break
-            }
+            // python slices `hunks[cursor:cursor + n]`: a slice past the end is
+            // SHORT, never an error, so EVERY edit is still validated and the
+            // reported sum is the whole claim, not the prefix that fit.
+            let (sum, over) = cursor.addingReportingOverflow(n)
+            let lo = Int(min(cursor, Int64(hunks.count)))
+            let hi = over ? hunks.count : Int(min(sum, Int64(hunks.count)))
             plan.append(
                 PlannedEdit(
-                    path: path, hunks: Array(hunks[cursor..<cursor + n2]),
-                    ifMatch: e["if_match"].asString))
-            cursor += n2
+                    path: path, hunks: lo < hi ? Array(hunks[lo..<hi]) : [],
+                    ifMatch: e["if_match"]))
+            cursor = over ? Int64.max : sum
         }
-        if cursor != hunks.count || plan.count != edits.count {
+        if cursor != Int64(hunks.count) {
             return Refusal.bad(
                 "patch", "edits",
                 "hunk counts that sum to the blob's blocks — edits claim \(cursor), "
@@ -589,20 +705,20 @@ public struct TextFileBundle: AgentBundle {
         // ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
         for i in plan.indices {
             let raw: Data
-            switch await readAll(kernel, fb: fb, path: plan[i].path) {
+            switch await readAll(kernel, fb: fb, path: .string(plan[i].path)) {
             case .failure(let e): return e
             case .success(let d): raw = d
             }
-            if let want = plan[i].ifMatch {
+            let want = plan[i].ifMatch
+            if !want.isNull {
                 let have = version(raw)
-                if have != want {
-                    var out = versionMismatch(want: want, have: have)
-                    out["path"] = .string(plan[i].path)
-                    return out
+                if !matches(want, have) {
+                    return versionMismatchAt(
+                        path: .string(plan[i].path), want: want, have: have)
                 }
             }
             guard var working = String(data: raw, encoding: .utf8) else {
-                return Refusal.bad("patch", "edits", "\"\(plan[i].path)\": a utf-8 text file")
+                return Refusal.bad("patch", "edits", "\(pyRepr(plan[i].path)): a utf-8 text file")
             }
             for (idx, hunk) in plan[i].hunks.enumerated() {
                 let (search, replace) = hunk
@@ -627,7 +743,7 @@ public struct TextFileBundle: AgentBundle {
             }
             plan[i].newBytes = Data(working.utf8)
         }
-        if payload["dry_run"].asBool == true {
+        if pyTruthy(payload["dry_run"]) {
             return .object([
                 "dry_run": .bool(true),
                 "edits": .array(plan.map {
@@ -638,18 +754,20 @@ public struct TextFileBundle: AgentBundle {
         // ── CHECKPOINT ALL, then APPLY ALL; a mid-apply failure restores ──
         // everything already written. Pre-images are ALWAYS taken (they ARE
         // the rollback); `checkpoint:true` only KEEPS them.
-        var ckpts: [(String, String)] = []
+        var ckpts: [(String, Int64)] = []
         for e in plan {
-            switch await takeCheckpoint(kernel, fb: fb, path: e.path) {
+            switch await takeCheckpoint(kernel, fb: fb, path: .string(e.path)) {
             case .failure(let err): return err
             case .success(let id): ckpts.append((e.path, id))
             }
         }
-        var written: [(String, String)] = []
+        var written: [(String, Int64)] = []
         for (e, ck) in zip(plan, ckpts) {
-            if let err = await writeAtomic(kernel, fb: fb, path: e.path, data: e.newBytes) {
+            if let err = await writeAtomic(
+                kernel, fb: fb, path: .string(e.path), data: e.newBytes)
+            {
                 for (path, id) in written {
-                    await restoreFrom(kernel, fb: fb, path: path, ckptId: id)
+                    await restoreFrom(kernel, fb: fb, path: .string(path), ckptId: .integer(id))
                 }
                 var out = err
                 out["restored"] = .array(written.map { .string($0.0) })
@@ -669,13 +787,13 @@ public struct TextFileBundle: AgentBundle {
                 ])
             }),
         ]
-        if payload["checkpoint"].asBool == true {
+        if pyTruthy(payload["checkpoint"]) {
             out["ckpt_ids"] = .array(ckpts.map {
-                .object(["path": .string($0.0), "ckpt_id": ckptJSON($0.1)])
+                .object(["path": .string($0.0), "ckpt_id": .integer($0.1)])
             })
         } else {
             for (path, id) in ckpts {
-                await dropQuiet(kernel, fb: fb, path: path, ckptId: id)
+                await dropQuiet(kernel, fb: fb, path: .string(path), ckptId: .integer(id))
             }
         }
         return .object(out)
@@ -684,33 +802,32 @@ public struct TextFileBundle: AgentBundle {
     /// Rollback arm of the patch transaction: put the pre-image back (or
     /// delete a file that did not exist). Best-effort — it runs INSIDE a
     /// failure path that is already being reported.
-    private func restoreFrom(_ kernel: Kernel, fb: String, path: String, ckptId: String) async {
+    private func restoreFrom(_ kernel: Kernel, fb: String, path: JSON, ckptId: JSON) async {
         let src = ckptPath(path, ckptId)
-        let (absent, _) = await kernel.sendWithBinary(
-            AgentId(fb),
-            .object([
-                "type": .string("read_stream"), "path": .string(src + ".absent"),
-                "offset": .integer(0), "length": .integer(1),
-            ]), Data())
-        if case .object = absent, absent["error"].asString == nil {
-            _ = await legCall(kernel, fb: fb, .object(["type": .string("delete"), "path": .string(path)]))
+        let (absent, _) = await legReadChunk(
+            kernel, fb: fb, path: .string(src + ".absent"), offset: 0, length: 1)
+        if legFailure(absent) == nil {
+            _ = await legCall(
+                kernel, fb: fb, .object(["type": .string("delete"), "path": path]))
             return
         }
-        if case .success(let data) = await readAll(kernel, fb: fb, path: src) {
+        if case .success(let data) = await readAll(kernel, fb: fb, path: .string(src)) {
             _ = await writeAtomic(kernel, fb: fb, path: path, data: data)
         }
     }
 
     /// Self-cleaning arm: a COMMITTED transaction discards its pre-images.
-    private func dropQuiet(_ kernel: Kernel, fb: String, path: String, ckptId: String) async {
+    private func dropQuiet(_ kernel: Kernel, fb: String, path: JSON, ckptId: JSON) async {
         let src = ckptPath(path, ckptId)
-        _ = await legCall(kernel, fb: fb, .object(["type": .string("delete"), "path": .string(src)]))
         _ = await legCall(
-            kernel, fb: fb, .object(["type": .string("delete"), "path": .string(src + ".absent")]))
+            kernel, fb: fb, .object(["type": .string("delete"), "path": .string(src)]))
+        _ = await legCall(
+            kernel, fb: fb,
+            .object(["type": .string("delete"), "path": .string(src + ".absent")]))
     }
 
     private func checkpointReply(_ kernel: Kernel, fb: String, payload: JSON) async -> JSON {
-        let path: String
+        let path: JSON
         switch pathOf(payload, "checkpoint") {
         case .failure(let e): return e
         case .success(let p): path = p
@@ -724,37 +841,37 @@ public struct TextFileBundle: AgentBundle {
         case .failure(let e): return e
         case .success(let id):
             return .object([
-                "ckpt_id": ckptJSON(id), "path": .string(path),
+                "ckpt_id": .integer(id), "path": path,
                 "version": .string(version(data)),
             ])
         }
     }
 
     private func checkpointsReply(_ kernel: Kernel, fb: String, payload: JSON) async -> JSON {
-        let path: String
+        let path: JSON
         switch pathOf(payload, "checkpoints") {
         case .failure(let e): return e
         case .success(let p): path = p
         }
-        let dir = "\(CKPT_DIR)/\(path.replacingOccurrences(of: "/", with: "__"))"
+        let dir = "\(CKPT_DIR)/\(pyStr(path).replacingOccurrences(of: "/", with: "__"))"
         let r = await legCall(
             kernel, fb: fb, .object(["type": .string("list"), "path": .string(dir)]))
-        guard case .object = r, r["error"].asString == nil else {
+        if legFailure(r) != nil {
             // no dir yet = no checkpoints, honestly empty
-            return .object(["path": .string(path), "ckpts": .array([])])
+            return .object(["path": path, "ckpts": .array([])])
         }
         var ckpts: [JSON] = []
         for f in r["files"].asArray ?? [] {
             guard f["type"].asString == "file",
                 let name = f["name"].asString, !name.hasSuffix(".absent")
             else { continue }
-            ckpts.append(.object(["id": ckptJSON(name), "size": f["size"]]))
+            ckpts.append(.object(["id": ckptId(fromName: name), "size": f["size"]]))
         }
-        return .object(["path": .string(path), "ckpts": .array(ckpts)])
+        return .object(["path": path, "ckpts": .array(ckpts)])
     }
 
     private func restoreReply(_ kernel: Kernel, fb: String, payload: JSON) async -> JSON {
-        let path: String
+        let path: JSON
         switch pathOf(payload, "restore") {
         case .failure(let e): return e
         case .success(let p): path = p
@@ -762,7 +879,7 @@ public struct TextFileBundle: AgentBundle {
         guard let ckptId = ckptArg(payload) else {
             return Refusal.missing("restore", "ckpt_id")
         }
-        return await locked(fb, [path]) {
+        return await locked(fb, [lockKey(path)]) {
             await restoreLocked(kernel, fb: fb, path: path, ckptId: ckptId, payload: payload)
         }
     }
@@ -770,47 +887,44 @@ public struct TextFileBundle: AgentBundle {
     /// The locked half of `restore`: `if_match` checked under the document
     /// lock, then the atomic put-back (or delete).
     private func restoreLocked(
-        _ kernel: Kernel, fb: String, path: String, ckptId: String, payload: JSON
+        _ kernel: Kernel, fb: String, path: JSON, ckptId: JSON, payload: JSON
     ) async -> JSON {
         if let err = await ifMatchGuard(kernel, fb: fb, path: path, payload: payload) {
             return err
         }
         let src = ckptPath(path, ckptId)
         // An `.absent` twin means the pre-image was NO FILE — restore deletes.
-        let (absent, _) = await kernel.sendWithBinary(
-            AgentId(fb),
-            .object([
-                "type": .string("read_stream"), "path": .string(src + ".absent"),
-                "offset": .integer(0), "length": .integer(1),
-            ]), Data())
-        if case .object = absent, absent["error"].asString == nil {
+        let (absent, _) = await legReadChunk(
+            kernel, fb: fb, path: .string(src + ".absent"), offset: 0, length: 1)
+        if legFailure(absent) == nil {
             let r = await legCall(
-                kernel, fb: fb, .object(["type": .string("delete"), "path": .string(path)]))
-            guard case .object = r, r["error"].asString == nil else { return r }
+                kernel, fb: fb, .object(["type": .string("delete"), "path": path]))
+            if let err = legFailure(r) { return err }
             return .object([
-                "restored": .bool(true), "path": .string(path), "deleted": .bool(true),
+                "restored": .bool(true), "path": path, "deleted": .bool(true),
             ])
         }
         let data: Data
-        switch await readAll(kernel, fb: fb, path: src) {
+        switch await readAll(kernel, fb: fb, path: .string(src)) {
         case .failure(let e):
             if e["reason"].asString == "not_found" {
-                return .object([
-                    "error": .string("restore: no checkpoint \"\(ckptId)\" for \"\(path)\""),
-                    "reason": .string("not_found"),
-                ])
+                // python `f"…{ckpt_id!r} for {path!r}"` — the RAW values, so an
+                // int id prints bare and a str id quoted.
+                return Refusal.make(
+                    Refusal.notFound,
+                    "restore: no checkpoint \(pyRepr(ckptId)) for \(pyRepr(path))")
             }
             return e
         case .success(let d): data = d
         }
         if let err = await writeAtomic(kernel, fb: fb, path: path, data: data) { return err }
         return .object([
-            "restored": .bool(true), "path": .string(path), "version": .string(version(data)),
+            "restored": .bool(true), "path": path, "version": .string(version(data)),
         ])
     }
 
     private func dropReply(_ kernel: Kernel, fb: String, payload: JSON) async -> JSON {
-        let path: String
+        let path: JSON
         switch pathOf(payload, "drop") {
         case .failure(let e): return e
         case .success(let p): path = p
@@ -821,34 +935,30 @@ public struct TextFileBundle: AgentBundle {
         let src = ckptPath(path, ckptId)
         let r = await legCall(
             kernel, fb: fb, .object(["type": .string("delete"), "path": .string(src)]))
-        guard case .object = r, r["error"].asString == nil else { return r }
+        if let err = legFailure(r) { return err }
         // best-effort: the `.absent` twin, if any (its absence is not an error)
         _ = await legCall(
             kernel, fb: fb,
             .object(["type": .string("delete"), "path": .string(src + ".absent")]))
         return .object([
             // python echoes the caller's `ckpt_id` AS GIVEN
-            "dropped": .bool(true), "ckpt_id": payload["ckpt_id"], "path": .string(path),
+            "dropped": .bool(true), "ckpt_id": ckptId, "path": path,
         ])
     }
 
-    /// One dispatch used by BOTH channels — the byte verbs take the blob, the
-    /// rest ignore it.
-    private func dispatch(agent: Agent, payload: JSON, blob: Data, kernel: Kernel) async
+    /// One dispatch used by BOTH channels. `blob` is the binary body when the
+    /// call came over the binary channel and nil on the JSON channel; either
+    /// way the byte verbs resolve their document with `bytesArg` AFTER the
+    /// unwired and path/edits checks, which is python's order.
+    private func dispatch(agent: Agent, payload: JSON, blob: Data?, kernel: Kernel) async
         -> JSON
     {
-        let verb = payload["type"].asString ?? ""
+        let typed = payload["type"]
+        let verb = typed.asString ?? ""
         if verb == "reflect" { return reflect(agent) }
-        if verb == "boot" || verb == "shutdown" { return .null }
-        guard let fb = target(agent, payload) else {
-            switch verb {
-            case "read", "write", "patch", "append", "checkpoint", "checkpoints",
-                "restore", "drop":
-                return unwired(verb)
-            default:
-                return unknownType(verb)
-            }
-        }
+        if verb == "boot" { return .null }
+        guard Self.surfaceVerbs.contains(verb) else { return unknownType(typed) }
+        guard let fb = target(agent, payload) else { return unwired(verb) }
         switch verb {
         case "read": return await readReply(kernel, fb: fb, payload: payload)
         case "write": return await writeReply(kernel, fb: fb, payload: payload, blob: blob)
@@ -857,35 +967,23 @@ public struct TextFileBundle: AgentBundle {
         case "checkpoint": return await checkpointReply(kernel, fb: fb, payload: payload)
         case "checkpoints": return await checkpointsReply(kernel, fb: fb, payload: payload)
         case "restore": return await restoreReply(kernel, fb: fb, payload: payload)
-        case "drop": return await dropReply(kernel, fb: fb, payload: payload)
-        default:
-            return unknownType(verb)
+        default: return await dropReply(kernel, fb: fb, payload: payload)
         }
     }
 
-    private func unknownType(_ verb: String) -> JSON {
+    /// python `refusal(UNHANDLED, f"text_file: unknown type {t!r}", verb=t)` —
+    /// the RAW type value, so a str is quoted and an int prints bare.
+    private func unknownType(_ typed: JSON) -> JSON {
         Refusal.make(
-            Refusal.unhandled, "text_file: unknown type \"\(verb)\"",
-            extra: [("verb", .string(verb))])
+            Refusal.unhandled, "text_file: unknown type \(pyRepr(typed))",
+            extra: [("verb", typed)])
     }
 
     public func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         guard let agent = kernel.agent(agentId) else {
             return .object(["error": .string("no agent \(agentId)")])
         }
-        let verb = payload["type"].asString ?? ""
-        // The byte verbs carry RAW BYTES — binary channel, OR the text courtesy
-        // (py-canonical, 2026-09-01): a str `bytes` in the payload IS the
-        // document, utf-8. ai_core encodes for the MODEL; a spawned program's
-        // ctrl-fd wire is JSON (no bytes type), so the str form is its one path.
-        if verb == "write" || verb == "patch" || verb == "append" {
-            if let text = payload["bytes"].asString {
-                return await dispatch(
-                    agent: agent, payload: payload, blob: Data(text.utf8), kernel: kernel)
-            }
-            return Refusal.missing(verb, "bytes (the document — str is utf-8-encoded)")
-        }
-        return await dispatch(agent: agent, payload: payload, blob: Data(), kernel: kernel)
+        return await dispatch(agent: agent, payload: payload, blob: nil, kernel: kernel)
     }
 
     public func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
@@ -902,14 +1000,27 @@ public struct TextFileBundle: AgentBundle {
 
         A stateless TEXT-DOCUMENT agent. It owns no disk and no format: every byte
         rides a `send` to a `file_bridge` agent's stream verbs, so the running-dir
-        clamp and the ingress gate apply unchanged. Memory here is whatever you write.
+        clamp and the ingress gate apply unchanged, and what a document *contains* is
+        entirely the caller's business — notes, markdown, JSON, source code. Memory
+        here is whatever you write.
 
         Name the surface per call with `on: <file_bridge id>`, or set a default
-        `target_id` on this agent's record. The operator wires BOTH ends.
+        `target_id` on this agent's record. The operator wires BOTH ends: this agent's
+        `can_call` names the leg, the leg's `callable_by` accepts this agent.
 
-        Verbs: `read` (line-numbered, paged) · `write` (atomic tmp+rename) · `patch`
-        (SEARCH/REPLACE blocks, all-or-nothing, fails loud) · `append` · ON DEMAND:
+        Verbs: `read` (line-numbered, paged, rejects binary) · `write` (atomic:
+        tmp + rename on the target) · `patch` (a TRANSACTION over
+        `edits:[{path, hunks, if_match?}]` — even one file rides the array; verify
+        every hunk of every edit, checkpoint all, apply all, self-clean; any failure
+        writes nothing or restores what landed; fails loud on `no_match`/`ambiguous`) · `append` · and ON DEMAND:
         `checkpoint` / `checkpoints` / `restore` / `drop` (pre-images as plain files
-        under `.ckpt/`), a `version` content-hash on every reply, an `if_match` guard.
+        under `.ckpt/` on the same surface — visible, caller-retained) plus a
+        `version` content-hash on every reply and an `if_match` guard on every mutate.
+
+        Atomicity, honestly: this agent owns the TRANSACTION protocol (tmp→rename
+        commit, checkpoint-before-mutate, verify-all-before-any-hunk); the file leg
+        owns per-op atomicity (one rename). A crash mid-sequence leaves visible
+        tmp/checkpoint debris — never lost data, never a half-written target.
+
         """
 }

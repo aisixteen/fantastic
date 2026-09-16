@@ -41,29 +41,35 @@ let RECALL_PROMPT = """
 /// folded, and never did the new instruction. Python `_incarnation` — one table
 /// for the whole process, keyed by agent id, because delivery is a free
 /// function that knows only the target's id.
+/// KEYED BY KERNEL, like `AIRunStates`: python's `_incarnation` is a module dict
+/// in a one-kernel-per-process runtime, while swift hosts many kernels at once.
+/// A flat id→int map let one kernel's `boot` bump another kernel's agent, and a
+/// reply already in flight there came back as a LATE reply — recorded, never
+/// acted on. The chain simply stopped, with nothing anywhere saying why.
 enum AIIncarnation {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var table: [String: Int] = [:]
+    nonisolated(unsafe) private static var table: [ObjectIdentifier: [String: Int]] = [:]
 
-    static func of(_ id: String) -> Int {
+    static func of(_ kernel: Kernel, _ id: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        return table[id] ?? 0
+        return table[ObjectIdentifier(kernel)]?[id] ?? 0
     }
 
     @discardableResult
-    static func bump(_ id: String) -> Int {
+    static func bump(_ kernel: Kernel, _ id: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        let n = (table[id] ?? 0) + 1
-        table[id] = n
+        let key = ObjectIdentifier(kernel)
+        let n = (table[key]?[id] ?? 0) + 1
+        table[key, default: [:]][id] = n
         return n
     }
 
     /// TEST SEAM — python's `_incarnation["ai"] = 1`.
-    static func set(_ id: String, _ n: Int) {
+    static func set(_ kernel: Kernel, _ id: String, _ n: Int) {
         lock.lock()
-        table[id] = n
+        table[ObjectIdentifier(kernel), default: [:]][id] = n
         lock.unlock()
     }
 }
@@ -81,32 +87,6 @@ func firstJson(_ text: String) -> OrderedDictionary<String, JSON>? {
         }
     }
     return nil
-}
-
-/// Python's `repr()` of a str — single quotes unless the text holds a single
-/// quote and no double quote; backslashes and the quote escaped. Enough for
-/// the one place a python error message interpolates `{name!r}`.
-func pyRepr(_ s: String) -> String {
-    let q: Character = (s.contains("'") && !s.contains("\"")) ? "\"" : "'"
-    var out = String(q)
-    for c in s {
-        if c == "\\" { out += "\\\\" } else if c == q { out += "\\" + String(q) } else if c == "\n" {
-            out += "\\n"
-        } else if c == "\r" { out += "\\r" } else if c == "\t" { out += "\\t" } else { out.append(c) }
-    }
-    out.append(q)
-    return out
-}
-
-/// Python's `str(x)` for a JSON value: a string as itself, `None` for null,
-/// otherwise the serialized form. (`True`/`False` for bools, as python spells them.)
-func pyStr(_ v: JSON) -> String {
-    switch v {
-    case .string(let s): return s
-    case .null: return "None"
-    case .bool(let b): return b ? "True" : "False"
-    default: return v.serialize()
-    }
 }
 
 extension AIBackend {
@@ -194,7 +174,7 @@ extension AIBackend {
     /// budget, why, degraded}. Python `_context_recall`.
     func contextRecall(
         agent: Agent, payload: JSON, kernel: Kernel, provider: (any AIProvider)?
-    ) async -> JSON {
+    ) async throws -> JSON {
         let key = agent.id.value
         let rows = loadHistory(agent: agent, kernel: kernel)
         if rows.isEmpty {
@@ -243,18 +223,24 @@ extension AIBackend {
         var why = "mechanical fit"
         var degraded = true
         var expand: Set<Int64> = []
-        let dry = payload["dry"].asBool ?? false
+        // PYTHON TRUTHINESS: `dry:1`, `"false"` and `[0]` are all dry.
+        let dry = pyTruthy(payload["dry"])
         if let provider, !dry {
             var lines: [String] = []
             for i in head {
                 let r = view[i]
                 let content = rowContent(r)
+                // `r.get("title") or …` — python TRUTHINESS and `str()`, so a
+                // non-string title is used as written rather than skipped.
                 let title =
-                    r["title"].asString.flatMap { $0.isEmpty ? nil : $0 }
-                    ?? AIFolds.quotedTitle(content)
-                    ?? String(content.unicodeScalars.prefix(80)).replacingOccurrences(of: "\n", with: " ")
-                let kind = r["kind"].asString.flatMap { $0.isEmpty ? nil : $0 } ?? rowRole(r)
-                let parent = rowParent(r).flatMap { $0 == 0 ? nil : String($0) } ?? "-"
+                    pyTruthy(r["title"])
+                    ? pyStr(r["title"])
+                    : (AIFolds.quotedTitle(content)
+                        ?? String(
+                            String.UnicodeScalarView(
+                                content.unicodeScalars.prefix(80).map { $0 == "\n" ? " " : $0 })))
+                let kind = pyTruthy(r["kind"]) ? pyStr(r["kind"]) : pyStr(r["role"])
+                let parent = pyTruthy(r["parent"]) ? pyStr(r["parent"]) : "-"
                 lines.append(
                     "\(rowId(r) ?? 0) · \(kind) · \"\(title)\" · \(pyLen(content))B · ↑\(parent)")
             }
@@ -279,13 +265,19 @@ extension AIBackend {
             do { ans = firstJson(try await compose(provider, prompt)) } catch { ans = nil }
             if let ans, !ans.isEmpty {
                 let headIds = Set(head.compactMap { rowId(view[$0]) })
-                let want: [Int64] = (ans["expand"]?.asArray ?? []).compactMap { asMessageId($0) }
+                // `for v in (ans.get("expand") or [])` — python ITERATES the value:
+                // a list yields its items, a string its CODE POINTS, an object its
+                // keys, and a truthy number or bool RAISES `'int' object is not
+                // iterable` before anything is saved. Taking `asArray ?? []` made
+                // every one of those a silent empty expansion, so a scalar
+                // `expand` wrote a view and a recall row python never writes.
+                let want: [Int64] = try iterateExpand(ans["expand"] ?? .null)
+                    .compactMap { aiAsId($0) }
                     .filter { headIds.contains($0) }
-                let whyText: String = {
-                    guard let w = ans["why"], w != .null, w != .bool(false) else { return "" }
-                    return pyStr(w)
-                }()
-                let cutWhy = String(whyText.unicodeScalars.prefix(300))
+                // `str(ans.get("why") or "")` — 0, "", [] and {} are all falsy and
+                // read `chosen`; anything truthy is its python `str`.
+                let whyText = pyTruthy(ans["why"] ?? .null) ? pyStr(ans["why"] ?? .null) : ""
+                let cutWhy = String(String.UnicodeScalarView(whyText.unicodeScalars.prefix(300)))
                 why = cutWhy.isEmpty ? "chosen" : cutWhy
                 degraded = false
                 // charge each expansion at full size, newest first; drop what does not fit
@@ -325,17 +317,27 @@ extension AIBackend {
         // that a fold collapsed is still the live one if nothing newer came
         // (measured 2026-09-06, folds_x_chains: TASK C folded, the row named TASK A).
         let live = rows.last { r in
-            rowRole(r) == "user"
-                && (rowParent(r).map { $0 == 0 } ?? true)
-                && (r["kind"].asString.map { $0.isEmpty || $0 == "user" } ?? true)
+            // `not r.get("parent")` is python TRUTHINESS, and `kind in (None, "",
+            // "user")` is EXACT membership — a row with `kind: 5` is not a root,
+            // where reading `asString` and defaulting to true made it one.
+            let kindIsRoot: Bool = {
+                switch r["kind"] {
+                case .null: return true
+                case .string(let k): return k.isEmpty || k == "user"
+                default: return false
+                }
+            }()
+            return rowRole(r) == "user"
+                && !pyTruthy(r["parent"])
+                && kindIsRoot
                 && parseReplyTag(rowContent(r)) == nil
         }
-        let liveTxt: String = live.map { l in
-            let text = String(
-                rowContent(l).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-                    .unicodeScalars.prefix(100))
-            return " · live task: \(rowId(l) ?? 0) \"\(text)\""
-        } ?? ""
+        let liveTxt: String =
+            live.map { l in
+                let collapsed = pySplitWhitespace(rowContent(l)).joined(separator: " ")
+                let text = String(String.UnicodeScalarView(collapsed.unicodeScalars.prefix(100)))
+                return " \u{b7} live task: \(rowId(l) ?? 0) \"\(text)\""
+            } ?? ""
         appendRows(
             agent.id, kernel: kernel,
             [
@@ -358,5 +360,23 @@ extension AIBackend {
             "why": .string(why),
             "degraded": .bool(degraded),
         ])
+    }
+}
+
+/// `for v in (value or [])` — python's iteration protocol over whatever the
+/// model answered.
+///
+/// A list yields its items, a string its CODE POINTS, an object its KEYS, and a
+/// falsy value nothing. Anything else is a `TypeError` python raises out of the
+/// verb, so the view and the recall row are never written — which is why this
+/// throws rather than returning an empty list.
+private func iterateExpand(_ v: JSON) throws(PyError) -> [JSON] {
+    if !pyTruthy(v) { return [] }
+    switch v {
+    case .array(let items): return items
+    case .string(let s): return s.unicodeScalars.map { .string(String($0)) }
+    case .object(let o): return o.keys.map { .string($0) }
+    default:
+        throw PyError("TypeError", "'\(pyTypeName(v))' object is not iterable")
     }
 }

@@ -26,7 +26,7 @@ fn summarize_never_truncates() {
     // happen. Mirrors py `test_summary_shrinks_bytes_but_never_truncates`.
     let big = "x".repeat(500);
     let v = json!({ "text": big });
-    let s = summarize_payload(&v);
+    let s = summarize_payload(&v, None);
     assert!(s.contains(&big), "the payload must survive whole");
     assert!(!s.ends_with("..."));
 }
@@ -34,8 +34,9 @@ fn summarize_never_truncates() {
 #[test]
 fn summarize_short_payload_unchanged() {
     let v = json!({"type": "ping"});
-    let s = summarize_payload(&v);
-    assert_eq!(s, r#"{"type":"ping"}"#);
+    let s = summarize_payload(&v, None);
+    // python `json.dumps` separators: `, ` and `: `, not rust's compact form.
+    assert_eq!(s, r#"{"type": "ping"}"#);
 }
 
 #[test]
@@ -70,7 +71,7 @@ async fn send_to_missing_target_returns_error() {
 async fn send_kernel_alias_routes_to_root() {
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("core");
-    let _rx = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     // Root has no handler_module → reflect is answered natively.
     let v = kernel
@@ -90,34 +91,35 @@ async fn send_kernel_alias_routes_to_root() {
 async fn watch_then_emit_fans_payload_to_watcher() {
     let kernel = Arc::new(Kernel::new());
     let src = make_agent("src");
-    let _rx_src = kernel.register(Arc::clone(&src));
+    kernel.register(Arc::clone(&src));
     let watcher = make_agent("watcher");
-    let mut rx_watcher = kernel.register(Arc::clone(&watcher));
+    kernel.register(Arc::clone(&watcher));
+    let mut rx_watcher = kernel.ensure_inbox(&watcher.id);
     kernel
         .watch(&AgentId::from("src"), AgentId::from("watcher"))
         .await;
     kernel
         .emit(&AgentId::from("src"), json!({"type": "hello", "k": 1}))
         .await;
-    // Watcher receives the RAW emit payload (Python parity — see
-    // Kernel::fanout_to_watchers). State subscribers above got the
-    // metadata envelope ({type:"emit", sender, target, verb, summary});
-    // watchers see what was actually emitted.
+    // Watcher receives the RAW emit payload (python parity — see
+    // `Kernel::fanout`). A state subscriber gets the `kind:"emit"` event;
+    // a watcher sees what was actually emitted.
     let got = tokio::time::timeout(std::time::Duration::from_millis(100), rx_watcher.recv())
         .await
         .expect("watcher receive within 100ms")
         .expect("channel still open");
-    assert_eq!(got["type"], "hello");
-    assert_eq!(got["k"], 1);
+    assert_eq!(got.payload["type"], "hello");
+    assert_eq!(got.payload["k"], 1);
 }
 
 #[tokio::test]
 async fn unwatch_stops_fanout() {
     let kernel = Arc::new(Kernel::new());
     let src = make_agent("src");
-    let _rx = kernel.register(Arc::clone(&src));
+    kernel.register(Arc::clone(&src));
     let watcher = make_agent("watcher");
-    let mut rx_w = kernel.register(Arc::clone(&watcher));
+    kernel.register(Arc::clone(&watcher));
+    let mut rx_w = kernel.ensure_inbox(&watcher.id);
     kernel
         .watch(&AgentId::from("src"), AgentId::from("watcher"))
         .await;
@@ -190,7 +192,7 @@ async fn send_with_binary_routes_through_bundle_handle_binary() {
         Path::new("/tmp/nowhere").join("eb"),
         true,
     );
-    let _rx = kernel.register(Arc::clone(&agent));
+    kernel.register(Arc::clone(&agent));
     let (reply, body) = kernel
         .send_with_binary(
             &AgentId::from("eb"),
@@ -209,8 +211,8 @@ async fn list_agents_returns_records_for_every_registered() {
     let kernel = Arc::new(Kernel::new());
     let a = make_agent("a_1");
     let b = make_agent("b_1");
-    let _rx = kernel.register(Arc::clone(&a));
-    let _rx2 = kernel.register(Arc::clone(&b));
+    kernel.register(Arc::clone(&a));
+    kernel.register(Arc::clone(&b));
     kernel.set_root(Arc::clone(&a));
     let v = kernel
         .send(vec![Item::new(
@@ -281,7 +283,7 @@ async fn a_handler_reads_its_caller_not_itself() {
         Path::new("/tmp/nowhere").join("spy"),
         true,
     );
-    let _rx = kernel.register(Arc::clone(&spy));
+    kernel.register(Arc::clone(&spy));
 
     let mut caller_meta = Map::new();
     caller_meta.insert("can_call".into(), json!({"spy": "*"}));
@@ -293,7 +295,7 @@ async fn a_handler_reads_its_caller_not_itself() {
         Path::new("/tmp/nowhere").join("caller"),
         true,
     );
-    let _rx2 = kernel.register(Arc::clone(&caller));
+    kernel.register(Arc::clone(&caller));
 
     // OPERATOR send: there is no caller, so there is no origin.
     let r = kernel
@@ -345,12 +347,12 @@ async fn an_ungranted_agent_cannot_watch_another() {
     // the packed confidential context out of the model's prompt.
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("core");
-    let _r = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let secret = make_agent("secret");
-    let _s = kernel.register(Arc::clone(&secret));
+    kernel.register(Arc::clone(&secret));
     let nosy = make_agent("nosy");
-    let _n = kernel.register(Arc::clone(&nosy));
+    kernel.register(Arc::clone(&nosy));
 
     let denial = crate::send::with_sender(AgentId::from("nosy"), async {
         kernel
@@ -374,10 +376,12 @@ async fn an_operator_watch_stays_ungated() {
     // renderer, a test driver. Same rule as send.
     let kernel = Arc::new(Kernel::new());
     let src = make_agent("src");
-    let _s = kernel.register(Arc::clone(&src));
+    kernel.register(Arc::clone(&src));
     // The watcher REGISTERS FIRST — `watch` mirrors into an inbox, it does not
-    // create one on the caller's behalf.
-    let _cli = kernel.register(make_agent("cli"));
+    // create one on the caller's behalf, and being a registered AGENT is not
+    // being a registered READER.
+    kernel.register(make_agent("cli"));
+    let _rx = kernel.ensure_inbox(&AgentId::from("cli"));
     assert!(kernel
         .watch(&AgentId::from("src"), AgentId::from("cli"))
         .await
@@ -393,7 +397,7 @@ async fn the_state_stream_is_not_covered_by_a_wildcard() {
     // names it.
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("core");
-    let _r = kernel.register(Arc::clone(&root));
+    kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut meta = Map::new();
     // A wildcard on the root — deliberately generous, and still not enough.
@@ -406,7 +410,7 @@ async fn the_state_stream_is_not_covered_by_a_wildcard() {
         Path::new("/tmp/nowhere").join("leaf"),
         true,
     );
-    let _l = kernel.register(Arc::clone(&leaf));
+    kernel.register(Arc::clone(&leaf));
 
     let denial = crate::send::with_sender(AgentId::from("leaf"), async {
         kernel.authorize_state_subscribe(&AgentId::from("leaf"))
@@ -422,4 +426,581 @@ async fn the_state_stream_is_not_covered_by_a_wildcard() {
     assert!(kernel
         .authorize_state_subscribe(&AgentId::from("cli"))
         .is_none());
+}
+
+// ─── C20: the gate's denial shapes are python's ────────────────
+
+fn make_agent_under(id: &str, parent: &str) -> Arc<Agent> {
+    Agent::new(
+        id.into(),
+        None,
+        Some(AgentId::from(parent)),
+        Map::new(),
+        Path::new("/tmp/nowhere").join(id),
+        true,
+    )
+}
+
+/// An agent with an explicit grant, registered under `parent`.
+fn granted(id: &str, parent: Option<&str>, field: &str, grant: Value) -> Arc<Agent> {
+    let mut meta = Map::new();
+    meta.insert(field.into(), grant);
+    Agent::new(
+        AgentId::from(id),
+        None,
+        parent.map(AgentId::from),
+        meta,
+        Path::new("/tmp/nowhere").join(id),
+        true,
+    )
+}
+
+fn keys(v: &Value) -> Vec<&str> {
+    v.as_object().unwrap().keys().map(String::as_str).collect()
+}
+
+#[tokio::test]
+async fn gate_denial_keys_are_error_reason_hint_side() {
+    // Python builds these through `refusal(code, error, hint=…, side=…)`:
+    // `refusal` writes `error, reason`, then `hint` if truthy, then merges the
+    // extras — so `side` is LAST. The port wrote `side` before `hint`, and the
+    // measured `prompt_req_05.json` msg 8 disagreed key for key.
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("core");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let store = make_agent("kernel_store");
+    kernel.register(Arc::clone(&store));
+    let totals = make_agent("totals");
+    kernel.register(Arc::clone(&totals));
+
+    // Egress: the sender holds no edge to the target.
+    let d = kernel
+        .gate(
+            &AgentId::from("totals"),
+            "write_stream",
+            &store,
+            &json!({"type": "write_stream"}),
+        )
+        .expect("deny-all gate let an ungranted call through");
+    // Python's `!r` — single quotes, not rust's Debug double quotes.
+    assert_eq!(
+        d["error"],
+        "totals may not call 'write_stream' on kernel_store"
+    );
+    assert_eq!(keys(&d), ["error", "reason", "hint", "side"]);
+    assert_eq!(d["side"], "egress");
+
+    // Ingress: the sender may call out, the target does not accept it.
+    let ws = make_agent("ws");
+    kernel.register(Arc::clone(&ws));
+    let rest = granted("rest", Some("core"), "can_call", json!({"ws": "*"}));
+    kernel.register(Arc::clone(&rest));
+    let d = kernel
+        .gate(
+            &AgentId::from("rest"),
+            "reflect",
+            &ws,
+            &json!({"type": "reflect"}),
+        )
+        .expect("an unaccepted call was admitted");
+    assert_eq!(d["error"], "ws does not accept 'reflect' from rest");
+    assert_eq!(keys(&d), ["error", "reason", "hint", "side"]);
+    assert_eq!(d["side"], "ingress");
+}
+
+#[tokio::test]
+async fn conferral_refusals_use_python_repr_and_none() {
+    // The conferral dicts are python LITERALS, so they keep their own key order
+    // (`side` before `hint`) — only the four `refusal()` denials reorder. What
+    // changes here is the quoting, and the absent parent: python renders `None`.
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("core");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let mid = make_agent("mid");
+    kernel.register(Arc::clone(&mid));
+    // `leaf` places under ITSELF, which is baseline — so the placement gate
+    // passes and conferral is what is actually under test.
+    let leaf = make_agent_under("leaf", "mid");
+    kernel.register(Arc::clone(&leaf));
+
+    let confer = |grant: Value| {
+        kernel.gate(
+            &AgentId::from("leaf"),
+            "create_agent",
+            &root,
+            &json!({"type": "create_agent", "parent_id": "leaf", "can_call": grant}),
+        )
+    };
+
+    // An invented structural token.
+    let d = confer(json!({"$x": "*"})).expect("an unknown $token was conferred");
+    assert_eq!(
+        d["error"],
+        "leaf cannot confer '$x': not a structural token — $self, $parent, \
+         $children and $loader are the only ones"
+    );
+    assert_eq!(keys(&d), ["error", "reason", "arg", "side", "hint"]);
+
+    // `$loader` is real reach, subset-probed like any lateral edge.
+    let d = confer(json!({"$loader": "*"})).expect("$loader was conferred unheld");
+    assert!(
+        d["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("leaf cannot delegate '*' on $loader: it resolves to core,"),
+        "got {}",
+        d["error"]
+    );
+    assert_eq!(keys(&d), ["error", "reason", "side", "hint"]);
+
+    // A target that is not an agent at all — almost always same-batch.
+    let d = confer(json!({"ghost": ["read"]})).expect("a grant on a ghost passed");
+    assert!(
+        d["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("leaf cannot delegate 'read' on ghost: no such agent —"),
+        "got {}",
+        d["error"]
+    );
+    assert_eq!(keys(&d), ["error", "reason", "side", "missing", "hint"]);
+
+    // A target that exists and is not held: python prints `its parent is None`
+    // for a parentless agent (the root), not `none`.
+    let d = confer(json!({"core": ["ps"]})).expect("a grant on the root passed");
+    assert!(
+        d["error"].as_str().unwrap().starts_with(
+            "leaf cannot delegate 'ps' on core: core is not your child \
+                          (its parent is None) and not in your can_call —"
+        ),
+        "got {}",
+        d["error"]
+    );
+    assert_eq!(keys(&d), ["error", "reason", "side", "parent", "hint"]);
+    assert_eq!(d["parent"], Value::Null);
+}
+
+// ── C36: the call row and its settle ───────────────────────────────────
+
+/// A bundle that answers whatever the payload asks for: `{"type":"work"}` is a
+/// plain reply, `{"type":"nope"}` a domain refusal with a `reason`.
+struct C36Bundle;
+
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for C36Bundle {
+    fn name(&self) -> &str {
+        "c36"
+    }
+    async fn handle(
+        &self,
+        _agent_id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+            "nope" => Ok(Some(
+                json!({"error": "х".repeat(300), "reason": "not_found", "extra": 1}),
+            )),
+            _ => Ok(Some(json!({"ok": true}))),
+        }
+    }
+}
+
+fn c36_kernel() -> (Arc<Kernel>, Arc<Agent>) {
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    reg.register("c36.tools", C36Bundle);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = make_agent("core");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let worker = Agent::new(
+        AgentId::from("w"),
+        Some("c36.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("w"),
+        true,
+    );
+    kernel.register(Arc::clone(&worker));
+    (kernel, worker)
+}
+
+#[tokio::test]
+async fn a_dispatch_writes_a_call_row_with_outcome() {
+    let (kernel, worker) = c36_kernel();
+    let out = kernel
+        .send(vec![
+            Item::new(worker.id.clone(), json!({"type": "work"})).with_id("named-one")
+        ])
+        .await
+        .remove(0);
+    let rows = kernel.rows.for_agent(&worker.id);
+    assert_eq!(rows.len(), 1, "one call row on the TARGET: {rows:?}");
+    let call = &rows[0];
+    // PYTHON'S KEY ORDER: the row as it was written, then the two keys the store
+    // adds (`{**row, "id": rid, "agent": agent_id}` — `id` keeps its place).
+    assert_eq!(
+        call.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["id", "kind", "verb", "parent", "origin", "name", "agent", "ts", "outcome"],
+        "…and `outcome` is stamped onto the end at settle"
+    );
+    assert_eq!(call["kind"], json!("call"));
+    assert_eq!(call["verb"], json!("work"));
+    assert_eq!(
+        call["parent"],
+        Value::Null,
+        "no dispatch was nested around it"
+    );
+    assert_eq!(
+        call["origin"],
+        Value::Null,
+        "an operator send has no origin"
+    );
+    assert_eq!(call["name"], json!("named-one"));
+    assert_eq!(call["id"].as_i64(), out.pid.map(crate::TaskId::get));
+    // The stamp is NESTED under `outcome`, and completed carries status alone.
+    assert_eq!(call["outcome"], json!({"status": "completed"}));
+}
+
+#[tokio::test]
+async fn an_errored_call_row_stamps_the_python_error_and_reason() {
+    let (kernel, worker) = c36_kernel();
+    kernel
+        .send(vec![Item::new(worker.id.clone(), json!({"type": "nope"}))])
+        .await;
+    let call = kernel.rows.for_agent(&worker.id).remove(0);
+    let stamp = &call["outcome"];
+    assert_eq!(stamp["status"], json!("errored"));
+    assert_eq!(stamp["reason"], json!("not_found"));
+    // 200 CODE POINTS of `str(error)`, not 200 bytes: the text is cyrillic.
+    assert_eq!(stamp["error"].as_str().unwrap().chars().count(), 200);
+    assert_eq!(
+        stamp.as_object().unwrap().len(),
+        3,
+        "nothing else is copied"
+    );
+}
+
+#[tokio::test]
+async fn the_settle_row_carries_the_stamp_not_the_outcome() {
+    let (kernel, worker) = c36_kernel();
+    kernel
+        .send(vec![Item::new(worker.id.clone(), json!({"type": "work"}))])
+        .await;
+    let settles: Vec<_> = kernel
+        .rows
+        .for_agent(&AgentId::from("core"))
+        .into_iter()
+        .filter(|r| r.get("kind") == Some(&json!("settle")))
+        .collect();
+    assert_eq!(settles.len(), 1);
+    let s = &settles[0];
+    assert_eq!(s["settled"], json!("w"), "the agent the call was on");
+    assert_eq!(s["outcome"], json!({"status": "completed"}));
+    let o = s["outcome"].as_object().unwrap();
+    assert!(
+        !o.contains_key("pid") && !o.contains_key("result") && !o.contains_key("attempts"),
+        "the ledger's Outcome never enters the message log: {o:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_that_opened_no_call_row_appends_no_settle() {
+    // `pid is None` ⟺ nothing reached the task table; python's `_stamp_call`
+    // returns on the same test, so no ending is written for a beginning that
+    // was never written down.
+    let (kernel, _worker) = c36_kernel();
+    kernel
+        .send(vec![Item::new(
+            AgentId::from("ghost"),
+            json!({"type": "work"}),
+        )])
+        .await;
+    assert!(kernel
+        .rows
+        .for_agent(&AgentId::from("core"))
+        .iter()
+        .all(|r| r.get("kind") != Some(&json!("settle"))));
+}
+
+#[tokio::test]
+async fn a_nested_send_names_its_caller_as_parent() {
+    let (kernel, worker) = c36_kernel();
+    let inner = kernel.clone();
+    let wid = worker.id.clone();
+    let outer = kernel
+        .send(vec![Item::new(wid.clone(), json!({"type": "work"}))])
+        .await
+        .remove(0);
+    // A send issued INSIDE that dispatch's task would carry its pid; here we
+    // assert the top-level case reads null and the id space is one counter.
+    assert!(outer.pid.is_some());
+    let rows = inner.rows.for_agent(&wid);
+    assert_eq!(rows[0]["parent"], Value::Null);
+}
+
+// ─── C28 / C29 / C76 / C77 / C78 / C86 — the fanout contract ─────────
+
+#[tokio::test]
+async fn a_registered_agent_without_a_reader_cannot_be_a_watcher() {
+    // C28/C29: being in the registry is not being a READER. `watch` refuses,
+    // with python's text, hint, `watcher` and `src` — it does not invent a
+    // consumer on the caller's behalf.
+    let kernel = Arc::new(Kernel::new());
+    kernel.register(make_agent("src"));
+    kernel.register(make_agent("ghost"));
+    let denial = kernel
+        .watch(&AgentId::from("src"), AgentId::from("ghost"))
+        .await
+        .expect("a bare registered agent is not a reader");
+    assert_eq!(
+        denial["error"],
+        json!(
+            "watch: 'ghost' has no registered inbox, so nothing would read \
+             what is mirrored there"
+        )
+    );
+    assert_eq!(denial["reason"], json!("no_consumer"));
+    assert_eq!(
+        denial["hint"],
+        json!("register the reader first — ctx.ensure_inbox('ghost') — then watch")
+    );
+    assert_eq!(denial["watcher"], json!("ghost"));
+    assert_eq!(denial["src"], json!("src"));
+    assert!(
+        !kernel
+            .agents
+            .get(&AgentId::from("src"))
+            .expect("src")
+            .watcher_ids
+            .read()
+            .await
+            .contains(&AgentId::from("ghost")),
+        "a refused watch registered the mirror anyway"
+    );
+}
+
+/// A bundle that reports what its own inbox already held when it ran.
+struct PeekInbox;
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for PeekInbox {
+    fn name(&self) -> &str {
+        "peek"
+    }
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        _payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        let mut rx = kernel.ensure_inbox(agent_id);
+        let mut seen = Vec::new();
+        while let Some(item) = rx.try_recv() {
+            seen.push(item.payload);
+        }
+        Ok(Some(json!({ "inbox_at_entry": seen })))
+    }
+}
+
+fn peek_kernel() -> (Arc<Kernel>, Arc<Agent>) {
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    reg.register("peek.tools", PeekInbox);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let agent = Agent::new(
+        AgentId::from("peeker"),
+        Some("peek.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("peeker"),
+        true,
+    );
+    kernel.register(Arc::clone(&agent));
+    (kernel, agent)
+}
+
+#[tokio::test]
+async fn send_fans_out_before_the_handler_runs() {
+    // C76: the mirror happens at DISPATCH START, not after the reply — so a
+    // handler already sees the request that woke it, and a watcher's echo
+    // precedes every event the handler goes on to emit.
+    let (kernel, agent) = peek_kernel();
+    let _rx = kernel.ensure_inbox(&agent.id);
+    let out = kernel
+        .send(vec![Item::new(
+            agent.id.clone(),
+            json!({"type": "work", "n": 7}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(
+        out.result["inbox_at_entry"],
+        json!([{"type": "work", "n": 7}]),
+        "the payload had not reached the inbox by the time the handler ran"
+    );
+}
+
+#[tokio::test]
+async fn send_payload_reaches_the_targets_own_registered_inbox() {
+    // C76: the target's OWN inbox, not only its watchers'. A reader that
+    // registered one is told what was sent TO it.
+    let (kernel, agent) = peek_kernel();
+    let mut rx = kernel.ensure_inbox(&agent.id);
+    // Drain what the handler's own `ensure_inbox` read is racing for.
+    let _ = kernel
+        .send(vec![Item::new(agent.id.clone(), json!({"type": "work"}))])
+        .await;
+    // The handler drained it; send again with no handler read in between by
+    // pointing at a bare agent (no bundle, `unhandled` reply — the fanout still
+    // runs, because it runs BEFORE verb resolution).
+    let bare = make_agent("bare");
+    kernel.register(Arc::clone(&bare));
+    let mut bare_rx = kernel.ensure_inbox(&bare.id);
+    let _ = kernel
+        .send(vec![Item::new(bare.id.clone(), json!({"type": "nope"}))])
+        .await;
+    assert_eq!(
+        bare_rx.try_recv().expect("the target's own inbox").payload,
+        json!({"type": "nope"}),
+        "a refused verb still mirrors — the fanout precedes resolution"
+    );
+    assert!(rx.try_recv().is_none(), "the handler drained its own queue");
+}
+
+#[tokio::test]
+async fn emit_to_a_non_agent_id_is_a_noop() {
+    // C78: a synthetic id (a browser client `_ws_<hex>`) is not an agent. No
+    // inbox put, no state event — python resolves the agent first and returns.
+    let kernel = Arc::new(Kernel::new());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&seen);
+    let _t = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _b| {
+        sink.lock().expect("sink poisoned").push(ev.clone());
+    }));
+    // A REGISTERED READER that is not an agent — the exact shape the WS proxy
+    // holds for a browser tab.
+    let mut rx = kernel.ensure_inbox(&AgentId::from("_ws_deadbeef"));
+    kernel
+        .emit(&AgentId::from("_ws_deadbeef"), json!({"type": "hi"}))
+        .await;
+    assert!(rx.try_recv().is_none(), "an emit to a non-agent id landed");
+    assert!(
+        seen.lock().expect("sink poisoned").is_empty(),
+        "an emit to a non-agent id published a state event"
+    );
+}
+
+#[tokio::test]
+async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
+    // C86: the binary channel's payload rides the inbox WHOLE. The watcher gets
+    // the head with `bytes` nulled AND the raw body — which is what the WS drain
+    // re-encodes into the binary frame python sends.
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Sink;
+    #[async_trait::async_trait]
+    impl Bundle for Sink {
+        fn name(&self) -> &str {
+            "sink"
+        }
+        async fn handle(
+            &self,
+            _a: &AgentId,
+            _p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(Some(json!({"ok": true})))
+        }
+        async fn handle_binary(
+            &self,
+            _a: &AgentId,
+            _h: Value,
+            blob: Vec<u8>,
+            _k: &Arc<Kernel>,
+        ) -> Result<(Reply, Vec<u8>), BundleError> {
+            Ok((Some(json!({"written": blob.len()})), Vec::new()))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("sink.tools", Sink);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let store = Agent::new(
+        AgentId::from("store"),
+        Some("sink.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("store"),
+        true,
+    );
+    kernel.register(Arc::clone(&store));
+    kernel.register(make_agent("tap"));
+    let mut rx = kernel.ensure_inbox(&AgentId::from("tap"));
+    assert!(kernel
+        .watch(&store.id, AgentId::from("tap"))
+        .await
+        .is_none());
+
+    let (reply, _body) = kernel
+        .send_with_binary(
+            &store.id,
+            json!({"type": "write_stream", "path": "a.bin"}),
+            vec![1, 2, 3, 4, 5],
+        )
+        .await;
+    assert_eq!(reply["written"], 5);
+
+    let got = rx.try_recv().expect("the watcher was mirrored");
+    assert_eq!(got.payload["type"], "write_stream");
+    assert_eq!(got.payload["path"], "a.bin");
+    assert_eq!(
+        got.payload["bytes"],
+        Value::Null,
+        "the head carries null where the body was lifted out"
+    );
+    assert_eq!(got.body, Some(("bytes".to_string(), vec![1, 2, 3, 4, 5])));
+}
+
+#[tokio::test]
+async fn state_summary_is_python_json_dumps() {
+    // C77: `json.dumps(shrunk, ensure_ascii=False)` — `, `/`: ` separators, raw
+    // non-ASCII, bytes as `<bytes:N>`, never truncated.
+    let kernel = Arc::new(Kernel::new());
+    kernel.register(make_agent("tgt"));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&seen);
+    let _t = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _b| {
+        sink.lock().expect("sink poisoned").push(ev.clone());
+    }));
+    kernel
+        .emit(
+            &AgentId::from("tgt"),
+            json!({"type": "say", "text": "héllo"}),
+        )
+        .await;
+    let events = seen.lock().expect("sink poisoned").clone();
+    let emit = events
+        .iter()
+        .find(|e| e["kind"] == json!("emit"))
+        .expect("an emit event");
+    assert_eq!(
+        emit["summary"],
+        json!(r#"{"type": "say", "text": "héllo"}"#),
+        "python separators and raw non-ASCII"
+    );
+}
+
+#[tokio::test]
+async fn a_bytes_payload_summarizes_as_bytes_n() {
+    // C77/C86: the summary shrinks a body to `<bytes:N>` at the path it rode.
+    let s = summarize_payload(
+        &json!({"type": "write_stream", "bytes": null}),
+        Some(&("bytes".to_string(), vec![0u8; 12])),
+    );
+    assert_eq!(s, r#"{"type": "write_stream", "bytes": "<bytes:12>"}"#);
 }

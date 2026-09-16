@@ -23,14 +23,16 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use fantastic_ai_core::retrieval;
 use fantastic_ai_core::think::ThinkWrap;
-use fantastic_ai_core::{agent_loop::BackendConfig, events::CallerRoute, helpers, state, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
+use fantastic_bundle::{py_float, py_int, py_repr_value, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// `handler_module` key under which this bundle registers.
@@ -40,7 +42,7 @@ pub const HANDLER_MODULE: &str = "ollama_backend.tools";
 pub const README: &str = include_str!("readme.md");
 
 /// Hard ceiling per `send` (mirrors Python's `SEND_TIMEOUT`).
-pub const SEND_TIMEOUT_SECS: u64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
+pub const SEND_TIMEOUT_SECS: f64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
 
 /// Default `client_id` for callers that don't supply one.
 pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
@@ -53,6 +55,10 @@ pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 /// path fails loud when the model is unset/sentinel.
 pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
 
+/// What `reflect` says this agent IS — python `ollama_backend/tools.py`'s
+/// `sentence`, verbatim.
+pub const SENTENCE: &str = "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).";
+
 /// Default sampling temperature sent to ollama (overridable via the record's
 /// `temperature` field). ollama's own default is 0.8 (creative) — wrong for an
 /// agentic backend whose output is tool-calls + code. Mirrors the python
@@ -62,8 +68,8 @@ pub const DEFAULT_TEMPERATURE: f64 = 0.3;
 
 /// Per-backend config: cli round-trip routing, parallel tool dispatch.
 const CFG: BackendConfig = BackendConfig {
-    route: CallerRoute::CliRoundTrip,
     name: "ollama_backend",
+    provider_missing_error: None,
 };
 
 // ── ollama provider (NDJSON transport) ──────────────────────────────
@@ -104,12 +110,13 @@ impl Provider for OllamaProvider {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
         // NO guessy default: fail loud before the wire if no model is named.
         if self.model.is_empty() || self.model == DEFAULT_MODEL {
-            return Err("ollama_backend: no `model` set — this connector does not \
-                guess one. Name a model on the agent record (model=...)."
-                .to_string());
+            return Err(ProviderError::raised(
+                "ollama_backend: no `model` set — this connector does not \
+                 guess one. Name a model on the agent record (model=...).",
+            ));
         }
         let mut options = serde_json::Map::new();
         options.insert("temperature".to_string(), json!(self.temperature));
@@ -137,53 +144,100 @@ impl Provider for OllamaProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("ollama: request failed: {e}"))?;
+            .map_err(|e| ProviderError::raised(format!("ollama: request failed: {e}")))?;
         if !resp.status().is_success() {
-            return Err(format!("ollama: HTTP {}", resp.status()));
+            return Err(ProviderError::raised(format!(
+                "ollama: HTTP {}",
+                resp.status()
+            )));
         }
 
-        // Decode the whole NDJSON body into a Vec of events, then return
-        // them as a stream. Mirrors the prior Vec-based consumption.
-        let mut byte_stream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
-        // ONE wrapper for the whole pass — the reasoning span is per TURN.
-        let mut wrap = ThinkWrap::new();
-        while let Some(chunk) = byte_stream.next().await {
-            let bytes = match chunk {
-                Ok(b) => b,
-                Err(e) => {
-                    // A span left open here stays unterminated on purpose: the
-                    // stream was cut mid-thought, and `without_thinking` drops
-                    // an unterminated tail rather than persisting a fragment.
-                    out.push(Err(format!("ollama: stream error: {e}")));
-                    return Ok(Box::pin(futures_util::stream::iter(out)));
+        Ok(consume_ndjson(resp))
+    }
+}
+
+/// The NDJSON body as a LIVE stream of content tokens.
+///
+/// PER LINE, NOT PER BODY. This used to drain the whole response into a `Vec`
+/// and hand it over only once the stream had ENDED — so nothing reached
+/// `text_so_far`, the `token` events or the `streaming` phase until the
+/// completion was already finished, and a long turn was indistinguishable from
+/// a stalled request. Python's provider is an async generator over the response
+/// lines; this yields on the same boundary.
+fn consume_ndjson(resp: reqwest::Response) -> ProviderStream {
+    let inner = resp.bytes_stream();
+    // `pending` holds the events decoded from ONE chunk: a chunk can carry
+    // several lines, and each line several tokens.
+    let init = (inner, NdjsonState::new(), VecDeque::new(), false);
+    Box::pin(futures_util::stream::unfold(
+        init,
+        |(mut inner, mut st, mut pending, mut finished)| async move {
+            loop {
+                if let Some(ev) = pending.pop_front() {
+                    return Some((ev, (inner, st, pending, finished)));
                 }
-            };
-            buf.extend_from_slice(&bytes);
-            while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = buf.drain(..=pos).collect();
-                let trimmed = &line[..line.len().saturating_sub(1)];
-                if trimmed.is_empty() {
-                    continue;
+                if finished {
+                    return None;
                 }
-                let Ok(parsed) = serde_json::from_slice::<Value>(trimmed) else {
+                let Some(chunk_res) = inner.next().await else {
+                    finished = true;
+                    // A trailing line with no newline is still a chunk.
+                    if !st.buf.is_empty() {
+                        if let Ok(parsed) = serde_json::from_slice::<Value>(&st.buf) {
+                            decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
+                        }
+                        st.buf.clear();
+                    }
+                    // The turn ended while still reasoning (content never
+                    // started) — close the span exactly once so the
+                    // deliberation is strippable.
+                    if let Some(m) = st.wrap.close_marker() {
+                        pending.push_back(Ok(ProviderEvent::Token(m.to_string())));
+                    }
                     continue;
                 };
-                decode_chunk_into(&parsed, &mut wrap, &mut out);
+                match chunk_res {
+                    Ok(bytes) => st.buf.extend_from_slice(&bytes),
+                    Err(e) => {
+                        // A span left open here stays unterminated on purpose:
+                        // the stream was cut mid-thought, and `without_thinking`
+                        // drops an unterminated tail rather than persisting a
+                        // fragment.
+                        finished = true;
+                        pending.push_back(Err(ProviderError::raised(format!(
+                            "ollama: stream error: {e}"
+                        ))));
+                        continue;
+                    }
+                }
+                while let Some(pos) = st.buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = st.buf.drain(..=pos).collect();
+                    let trimmed = &line[..line.len().saturating_sub(1)];
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let Ok(parsed) = serde_json::from_slice::<Value>(trimmed) else {
+                        continue;
+                    };
+                    decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
+                }
             }
+        },
+    ))
+}
+
+/// Per-line NDJSON decode state — the buffer plus the per-TURN reasoning span.
+struct NdjsonState {
+    buf: Vec<u8>,
+    wrap: ThinkWrap,
+}
+
+impl NdjsonState {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            wrap: ThinkWrap::new(),
         }
-        if !buf.is_empty() {
-            if let Ok(parsed) = serde_json::from_slice::<Value>(&buf) {
-                decode_chunk_into(&parsed, &mut wrap, &mut out);
-            }
-        }
-        // The turn ended while still reasoning (content never started) — close
-        // the span exactly once so the deliberation is strippable.
-        if let Some(m) = wrap.close_marker() {
-            out.push(Ok(ProviderEvent::Token(m.to_string())));
-        }
-        Ok(Box::pin(futures_util::stream::iter(out)))
     }
 }
 
@@ -209,7 +263,7 @@ impl Provider for OllamaProvider {
 fn decode_chunk_into(
     parsed: &Value,
     wrap: &mut ThinkWrap,
-    out: &mut Vec<Result<ProviderEvent, String>>,
+    out: &mut VecDeque<Result<ProviderEvent, ProviderError>>,
 ) {
     let Some(msg) = parsed.get("message") else {
         return;
@@ -217,17 +271,17 @@ fn decode_chunk_into(
     let think = msg.get("thinking").and_then(Value::as_str).unwrap_or("");
     if !think.is_empty() {
         if let Some(m) = wrap.open_marker() {
-            out.push(Ok(ProviderEvent::Token(m.to_string())));
+            out.push_back(Ok(ProviderEvent::Token(m.to_string())));
         }
-        out.push(Ok(ProviderEvent::Token(think.to_string())));
+        out.push_back(Ok(ProviderEvent::Token(think.to_string())));
     }
     // RAW: text only. ai-core parses any `<call name=…>` envelope out of it.
     let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
     if !content.is_empty() {
         if let Some(m) = wrap.close_marker() {
-            out.push(Ok(ProviderEvent::Token(m.to_string())));
+            out.push_back(Ok(ProviderEvent::Token(m.to_string())));
         }
-        out.push(Ok(ProviderEvent::Token(content.to_string())));
+        out.push_back(Ok(ProviderEvent::Token(content.to_string())));
     }
 }
 
@@ -254,11 +308,15 @@ impl Bundle for OllamaBackendBundle {
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel),
+            "reflect" => reflect_reply(agent_id, kernel)?,
             // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`: an
             // agent hydrated with a history rebuilds its view before its first
             // turn, so a rebooted process sees the same head the last one saw.
             "boot" => {
+                // A BOOT IS A NEW INCARNATION (python `_make_boot`): a reply
+                // answering a call the PREVIOUS one made is recorded as a row
+                // and wakes no turn.
+                state::bump_incarnation(agent_id);
                 if fantastic_ai_core::history::load_history(
                     agent_id,
                     kernel,
@@ -275,16 +333,14 @@ impl Bundle for OllamaBackendBundle {
             }
             // A LIFECYCLE NO-OP, as in python's `ollama_backend` (`return None`):
             // process state drops in `on_delete`, never behind a verb.
-            "shutdown" => Value::Null,
-            "send" => send_reply(agent_id, payload, kernel).await,
+            "send" => send_reply(agent_id, payload, kernel).await?,
             // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
             // record, this agent answers it by THINKING, and the asker writes
             // the same call either way.
             "inquiry" => match verbs::inquiry_open(payload) {
                 Err(refusal) => refusal,
-                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await, payload),
+                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await?, payload),
             },
-            "list_models" => list_models_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
@@ -297,7 +353,14 @@ impl Bundle for OllamaBackendBundle {
             }
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
-            other => json!({"error": format!("ollama: unknown type {other:?}")}),
+            // python's VERBS map has no `shutdown` — it is an unknown type like
+            // any other, and the value is rendered with python's `repr`.
+            _ => json!({
+                "error": format!(
+                    "ollama_backend: unknown type {}",
+                    py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
+                )
+            }),
         };
         Ok(Some(reply))
     }
@@ -320,7 +383,7 @@ impl Bundle for OllamaBackendBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
         Ok(())
     }
 }
@@ -344,9 +407,13 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
     })
 }
 
-async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+async fn send_reply(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Result<Value, BundleError> {
     verbs::send(
-        build_provider(agent_id, kernel),
+        Some(build_provider(agent_id, kernel)),
         agent_id,
         payload,
         kernel,
@@ -355,110 +422,42 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     .await
 }
 
-/// `list_models` — model autocomplete + reachability probe. Resolves the endpoint
-/// from `payload["endpoint"]` FIRST (so a caller can probe an ARBITRARY endpoint
-/// with no configured record), else the record's `endpoint` meta, else
-/// [`DEFAULT_ENDPOINT`]. Does `GET {endpoint}/api/tags`, parses ollama's
-/// `{"models":[{"name":…}, …]}` shape, and returns `{"models":[name, …]}` in
-/// order. ANY failure (connection refused, DNS, timeout, non-2xx, bad JSON)
-/// returns `{"error": "<human-readable message including the endpoint>"}` — this
-/// doubles as the TUI's reachability probe, so the message must name the URL.
-async fn list_models_reply(agent_id: &AgentId, payload: &Value, kernel: &Kernel) -> Value {
-    // Endpoint precedence: explicit payload override → record meta → DEFAULT.
-    let endpoint = payload
-        .get("endpoint")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT));
-    let url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
-    // Reuse reqwest (the same client type used for /api/chat) — no new http dep.
-    let client = reqwest::Client::new();
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => return json!({"error": format!("ollama: can't reach {url} ({e})")}),
-    };
-    if !resp.status().is_success() {
-        return json!({"error": format!("ollama: {url} returned HTTP {}", resp.status())});
-    }
-    let body: Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => return json!({"error": format!("ollama: bad response from {url} ({e})")}),
-    };
-    json!({ "models": parse_tag_names(&body) })
-}
-
-/// Extract model names from ollama's `/api/tags` body
-/// (`{"models":[{"name":"gemma3:12b", …}, …]}`) → `["gemma3:12b", …]`, in order.
-/// Missing / oddly-shaped entries are skipped (never a panic).
-fn parse_tag_names(body: &Value) -> Vec<String> {
-    body.get("models")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m.get("name").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let model = helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL);
-    let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
-    let file_bridge_id = helpers::meta_string(agent_id, kernel, "file_bridge_id");
-    let generating = state::is_generating(agent_id);
+/// `reflect` — python `_make_reflect` + `ollama_backend/tools.py`'s
+/// `_reflect_extra`: the shared base body, then the sampling knobs. The rust-only
+/// `file_bridge_id` key is gone; a model that read it learned a binding python's
+/// ollama agent does not report.
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, DEFAULT_MODEL, DEFAULT_ENDPOINT);
     let meta = helpers::agent_meta(agent_id, kernel);
-    let context_window = fantastic_ai_core::context::resolve_context_window(&meta);
-    let context_strategy = meta
-        .get("context_strategy")
-        .and_then(Value::as_str)
-        .unwrap_or("compact")
-        .to_string();
-    let temperature = meta
-        .get("temperature")
-        .and_then(Value::as_f64)
-        .unwrap_or(DEFAULT_TEMPERATURE);
-    let num_ctx = meta.get("num_ctx").and_then(Value::as_u64);
-    let num_predict = meta.get("num_predict").and_then(Value::as_u64);
-    let think = meta.get("think").and_then(Value::as_bool);
-    json!({
-        "id": agent_id.as_str(),
-        "sentence": "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
-        "model": model,
-        "endpoint": endpoint,
-        "temperature": temperature,
-        "num_ctx": num_ctx,
-        "num_predict": num_predict,
-        "think": think,
-        "file_bridge_id": file_bridge_id,
-        "generating": generating,
-        "context_window": context_window,
-        "context_strategy": context_strategy,
-        "verbs": {
-            "reflect": "Identity + model + endpoint + generating flag + file_bridge_id binding. No args.",
-            "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. Per-backend FIFO lock. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Returns {response, final, client_id}.",
-            "list_models": "args: endpoint:str? (default the record's endpoint, else http://localhost:11434). GET {endpoint}/api/tags. Returns {models:[name,...]} in order on success, or {error:'<msg naming the endpoint>'} on any failure — doubles as the reachability probe.",
-            "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id} — that client's persisted chat.",
-            "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
-            "pull": "args: pid:int (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with offset: next_offset until eof.",
-            "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int?, width:int? (chars of each matched line, default 200). Finds the LINE that mentions something, wherever it is. Returns {matches:[{id, line, text}], total, truncated}.",
-            "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuilds this agent's VIEW from its store: fits the head to the budget at digest resolution, asks the model which rows it wants in full, persists the id list, logs the decision as a row. Returns {kept, expanded, dropped, budget, why, degraded}.",
-            "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
-            "status": "args: client_id:str?. Returns the in-flight/queue snapshot (text redacted for other clients).",
+    out.insert(
+        "temperature".to_string(),
+        match meta.get("temperature").filter(|v| !v.is_null()) {
+            Some(v) => json!(py_float(v)?),
+            None => json!(DEFAULT_TEMPERATURE),
         },
-        "cancel": fantastic_ai_core::CANCEL_DOC,
-        "emits": {
-            "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...}} — phase transitions.",
-            "token": "{type:'token', text, source, client_id} — one per streaming chunk.",
-            "say": "{type:'say', text:'[tool target → reply]', source, client_id} — one per tool-call summary.",
-            "done": "{type:'done', source, client_id} — final event after streaming completes (or a cancel).",
-            "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called — a failfast). Pull counterpart: the context_status verb.",
+    );
+    out.insert(
+        "num_ctx".to_string(),
+        match meta.get("num_ctx").filter(|v| py_truthy(v)) {
+            Some(v) => json!(py_int(v)?),
+            None => Value::Null,
         },
-        "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait + receive a queued status event. reflect/history/status skip the lock.",
-    })
+    );
+    out.insert(
+        "num_predict".to_string(),
+        match meta.get("num_predict").filter(|v| py_truthy(v)) {
+            Some(v) => json!(py_int(v)?),
+            None => Value::Null,
+        },
+    );
+    out.insert(
+        "think".to_string(),
+        match meta.get("think").filter(|v| !v.is_null()) {
+            Some(v) => json!(py_truthy(v)),
+            None => Value::Null,
+        },
+    );
+    Ok(Value::Object(out))
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ pub mod strip;
 
 use crate::context::{estimate_one, NOTICE_ENVELOPE_RESERVE};
 use crate::provider::{Provider, ProviderEvent};
+use fantastic_bundle::{py_str, py_strip};
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -41,7 +42,7 @@ pub struct Projection {
     /// `strip`: reply blocks reduced to their stub this projection.
     pub stripped: usize,
     /// `strip`: bytes that left the view with those stubs.
-    pub stripped_bytes: usize,
+    pub stripped_bytes: i64,
     /// `fold`: fold rows written this projection.
     pub folded: usize,
 }
@@ -112,46 +113,58 @@ pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>)
     (body[..start].to_vec(), body[start..].to_vec())
 }
 
-/// Summarize a span of turns via the backend provider (tool-free completion);
-/// degrade to a stub on ANY failure. The full transcript stays whole in the
-/// durable store, so a degraded summary is acceptable (not a fallback chain).
-pub async fn safe_summary(provider: &Arc<dyn Provider>, overflow: &[Value]) -> String {
-    let rendered: String = overflow
+/// THE ONE SUMMARIZER — python `_make_summarizer`.
+///
+/// A plain text completion (no tools; providers stream raw text) over the span
+/// rendered as `role: content` lines, wrapped in the summarizer system block.
+/// Every side call in this crate goes through it, `fold` included: fold used to
+/// build its own bare prompt, so the fold path ran a DIFFERENT system block from
+/// the compaction path and its output was shaped by a prompt python never sends.
+///
+/// NO INPUT CUT. Rust truncated the rendered span at 20 000 chars, which python
+/// does not; a long span therefore summarized only its head.
+///
+/// A REASONING MODEL THINKS OUT LOUD HERE TOO. Measured 2026-09-06 (python),
+/// across two e2e runs: 172 of 172 model-written folds carried a title beginning
+/// `<think>The user wants me to summarize…`. Side calls strip like the main turn.
+pub async fn summarize(provider: &Arc<dyn Provider>, msgs: &[Value]) -> String {
+    let rendered: String = msgs
         .iter()
         .map(|m| {
-            let role = m.get("role").and_then(Value::as_str).unwrap_or("?");
-            let content = m
-                .get("content")
-                .map(|c| match c.as_str() {
-                    Some(s) => s.to_string(),
-                    None => serde_json::to_string(c).unwrap_or_default(),
-                })
-                .unwrap_or_default();
+            let role = match m.get("role") {
+                Some(r) => py_str(r),
+                None => "?".to_string(),
+            };
+            let content = m.get("content").map_or_else(String::new, py_str);
             format!("{role}: {content}")
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let rendered: String = rendered.chars().take(20000).collect();
     let prompt = vec![
         json!({"role": "system", "content":
             "Summarize the conversation excerpt below concisely, PRESERVING names, \
              decisions, facts, preferences, and unresolved tasks. Output ONLY the summary."}),
         json!({"role": "user", "content": rendered}),
     ];
-    let stream = match provider.chat(&prompt).await {
-        Ok(s) => s,
-        Err(_) => return STUB_SUMMARY.to_string(),
+    let Ok(mut stream) = provider.chat(&prompt).await else {
+        return String::new();
     };
     let mut parts: Vec<String> = Vec::new();
-    let mut stream = stream;
     while let Some(ev) = stream.next().await {
         match ev {
             Ok(ProviderEvent::Token(t)) => parts.push(t),
-            Err(_) => return STUB_SUMMARY.to_string(),
+            Err(_) => return String::new(),
         }
     }
-    let s = parts.join("");
-    let s = s.trim();
+    crate::think::without_thinking(&parts.join(""))
+}
+
+/// Summarize the overflow via [`summarize`]; degrade to a stub on ANY failure (a
+/// degraded artifact — the full transcript is whole in the durable store, so this
+/// is not a fallback chain). Python `safe_summary`.
+pub async fn safe_summary(provider: &Arc<dyn Provider>, overflow: &[Value]) -> String {
+    let s = summarize(provider, overflow).await;
+    let s = py_strip(&s);
     if s.is_empty() {
         STUB_SUMMARY.to_string()
     } else {
@@ -250,7 +263,17 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
     }
 }
 
+/// The strategy an agent gets when its record names none — python
+/// `ai_core.strategies.DEFAULT_STRATEGY`. It applies ONLY to an ABSENT key: a
+/// `context_strategy` written on the record is read raw, and an unknown value
+/// (including `null`) is a config refusal, never a silent fall-through here.
+pub const DEFAULT_STRATEGY: &str = "compact";
+
+/// The registry's names in insertion order — python `strategy_names()`, whose
+/// `str(list)` is what the unknown-strategy refusal prints.
+pub const STRATEGY_NAMES: [&str; 4] = ["compact", "truncate", "strip", "fold"];
+
 /// The known strategy names (config validity check; unknown ⇒ caller errors).
 pub fn is_known_strategy(name: &str) -> bool {
-    matches!(name, "compact" | "truncate" | "strip" | "fold")
+    STRATEGY_NAMES.contains(&name)
 }

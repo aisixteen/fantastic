@@ -21,10 +21,11 @@
 // (2026-09-09, qwen3.8-27b: JSON 3/12 correct on shapes that carry a document,
 // bare child tags 12/12).
 //
-// SWIFT-SPECIFIC: the scan indexes over `Array(text)` (`[Character]`) rather
-// than juggling `String.Index`, so its arithmetic matches python's string
+// SWIFT-SPECIFIC: the scan indexes over `Array(text.unicodeScalars)` rather than
+// juggling `String.Index`, so its arithmetic matches python's CODE-POINT string
 // indices exactly — the step-over-the-OPENER-only rule is where a hand-port with
-// two index spaces silently drifts. The primitives live in `Scanning.swift`.
+// two index spaces silently drifts, and a `[Character]` array is itself a second
+// index space. The primitives live in `Scanning.swift`.
 
 import FantasticJSON
 import Foundation
@@ -46,14 +47,14 @@ struct ScanHit {
 
 /// Every envelope found, in document order.
 func scanToolEnvelopes(_ text: String) -> [ScanHit] {
-    let chars = Array(text)
+    let chars = Array(text.unicodeScalars)
     var out: [ScanHit] = []
     for env in envelopes(chars) {
         // UNTERMINATED (`end == nil`) is not a truncation guess: the envelope is
         // the LAST thing in the completion, so there is nothing after it to
         // misread.
         let hi = env.end ?? chars.count
-        let block = String(chars[env.body..<hi])
+        let block = scalarText(chars, env.body, hi)
         do {
             guard let call = try parseCall(chars, lo: env.body, hi: hi) else { continue }
             out.append(ScanHit(block: block, call: call, fault: nil))
@@ -77,12 +78,12 @@ func extractToolCalls(_ text: String) -> [ToolCall] {
 /// and neither is a complete envelope that does not parse — a broken call is
 /// reasoning too.
 func callSpans(_ text: String) -> [String] {
-    let chars = Array(text)
+    let chars = Array(text.unicodeScalars)
     var out: [String] = []
     for env in envelopes(chars) {
         guard let end = env.end else { break }
         if let call = try? parseCall(chars, lo: env.body, hi: end), call != nil {
-            out.append(String(chars[env.start..<(end + CLOSE.count)]))
+            out.append(scalarText(chars, env.start, end + CLOSE.count))
         }
     }
     return out
