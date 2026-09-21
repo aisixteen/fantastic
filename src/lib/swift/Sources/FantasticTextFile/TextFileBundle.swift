@@ -17,7 +17,7 @@
 // what the confused-deputy rule forbids escalating.
 //
 // Checkpoint ids ARE the dispatch's kernel task pid — an INT, one id space with
-// `ps`, the trace and the chat turn that caused the mutation.
+// `ps`, the trace and the chat message that caused the mutation.
 
 import CryptoKit
 import FantasticJSON

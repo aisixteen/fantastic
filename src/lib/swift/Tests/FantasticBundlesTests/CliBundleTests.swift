@@ -156,7 +156,7 @@ struct CliBundleTests {
         #expect(
             try CliBundle.renderContext([
                 "type": "context", "source": "ai", "phase": "compacted",
-                "detail": ["strategy": "fold", "dropped_turns": .integer(4)],
+                "detail": ["strategy": "fold", "dropped_messages": .integer(4)],
             ]) == "  [ai] ⟲ context compacted (fold, 4 dropped; recall to page back)")
         #expect(
             try CliBundle.renderContext([
@@ -245,7 +245,7 @@ struct CliBundleTests {
         #expect(
             try CliBundle.renderContext([
                 "type": "context", "phase": "compacted",
-                "detail": ["strategy": .null, "dropped_turns": .bool(true)],
+                "detail": ["strategy": .null, "dropped_messages": .bool(true)],
             ]) == "  ⟲ context compacted (None, True dropped; recall to page back)")
         #expect(
             try CliBundle.renderContext([

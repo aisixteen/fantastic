@@ -682,7 +682,7 @@ async def _reflect(id, payload, kernel):
         "inbox": (
             "Any verb NOT listed in `verbs` is MAIL for the running program, delivered "
             "to its on_message and ACKed {queued:true}. With no live job it is an "
-            "error — a script that only defines something exits before its first turn "
+            "error — a script that only defines something exits before its first message "
             "arrives."
         ),
         "tasks": (

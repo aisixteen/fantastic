@@ -6,7 +6,7 @@ compiled before the run and the run owns it.
 
 Here authority is table rows, not compiled topology: `update_agent` rewrites
 `can_call` on a live agent between two of its steps, the very next step is
-refused, and the refusal returns INTO the agent's own turn as a typed outcome
+refused, and the refusal returns INTO the agent's own message as a typed outcome
 it can react to. No restart, no recompile, no new process.
 """
 
@@ -48,7 +48,7 @@ async def _worker_handler(id, payload, kernel):
         out = (
             await kernel.send([{"target": "adv3_desk", "payload": {"type": "use"}}])
         )[0]
-        _steps.append(out)  # what the WORKER saw, inside its own turn
+        _steps.append(out)  # what the WORKER saw, inside its own message
         return out
     return {"error": f"unknown verb {verb!r}"}
 
@@ -109,7 +109,7 @@ async def test_revoking_a_tool_mid_run_is_immediate_and_model_visible(kernel):
     s2 = (await kernel.send([{"target": "adv3_worker", "payload": {"type": "step"}}]))[
         0
     ]
-    assert s2["status"] == "completed"  # the worker's turn ran — and SAW the refusal
+    assert s2["status"] == "completed"  # the worker's message ran — and SAW the refusal
     refusal = s2["result"]
     assert refusal["status"] == "failed"
     assert refusal["result"]["reason"] == "unauthorized"
@@ -117,7 +117,7 @@ async def test_revoking_a_tool_mid_run_is_immediate_and_model_visible(kernel):
     assert "adv3_worker" in refusal["result"]["error"]
     assert "adv3_desk" in refusal["result"]["error"]
 
-    # ...and the refusal arrived INSIDE the worker's turn (reactable), not
+    # ...and the refusal arrived INSIDE the worker's message (reactable), not
     # swallowed by the substrate
     assert len(_steps) == 2
     assert _steps[1]["result"]["reason"] == "unauthorized"

@@ -77,7 +77,7 @@ anywhere, call an AI, or spawn more jobs — tools compose into tools.
 
 ## Mail — `{queued:true}`
 
-Send a running program a turn by sending THIS agent any verb the bundle does not own; it is
+Send a running program a message by sending THIS agent any verb the bundle does not own; it is
 delivered to the program's `on_message` and ACKed `{queued:true}`. With no live job it is an
 ERROR, not a queue — a program that exited already has no inbox. Results come back as whatever
 the program emits on this agent's id (tag `say`/`done` with the caller's `client_id` and

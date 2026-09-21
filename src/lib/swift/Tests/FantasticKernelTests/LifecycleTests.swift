@@ -82,7 +82,7 @@ private struct ShutProbe: AgentBundle {
             ])
         case "shutdown":
             log.append(agentId.value)
-            // The shutdown turn may still use its tools: a nested send passes
+            // The shutdown pass may still use its tools: a nested send passes
             // the drain.
             let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])[
                 0]

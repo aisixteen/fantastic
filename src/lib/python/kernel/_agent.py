@@ -156,7 +156,7 @@ _SYSTEM_VERB_DOCS = {
     # reaches `detail:"full"` callers only — and these are the facts a caller needs
     # BEFORE firing the verb, not after. Measured 2026-08-24: `create_agent` read
     # as `args: handler_module:str, id:str?, **meta` with "spawn a child agent"
-    # cut, and a model spent 16 turns unable to work out what the target meant,
+    # cut, and a model spent 16 messages unable to work out what the target meant,
     # finishing with `agents_created: []`.
     "create_agent": (
         "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
@@ -715,13 +715,13 @@ class Agent:
             return bad_retries
         # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
         # subtree before it aborts anything, because `on_cancel` hooks await —
-        # so a doomed handler gets scheduling turns on its way out, and what it
+        # so a doomed handler gets scheduling passes on its way out, and what it
         # sent there used to start fresh dispatches that outlived the cancel.
         cur = _current_task.get()
         if cur is not None and (self.ctx.tasks.get(cur) or {}).get("_killed"):
             return outcome(None, CANCELLED, {"cancelled": True})
         # WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent task
-        # in the table — including an agent's own `shutdown` turn using its tools)
+        # in the table — including an agent's own `shutdown` dispatch using its tools)
         # passes; the kernel's own shutdown traffic passes; everything else is a
         # new root and is refused before it costs an id.
         # The root's own control surface stays open while draining: kernel verbs
@@ -1139,7 +1139,7 @@ class Agent:
         The call row is appended at LAUNCH and the stamp MUTATES that dict in
         place; the loader's pump renders rows on a 0.15 s debounce, so
         `messages.xml` carried an outcome only for calls that happened to
-        settle inside that window. Everything slower — every AI turn, every
+        settle inside that window. Everything slower — every AI reply, every
         job, every stream — was written down as a launch with no ending, and a
         cold read could not tell "never settled" from "settled late". A row is
         append-only by contract (`Kernel.rows_put`), so the ending has to be
@@ -1165,7 +1165,7 @@ class Agent:
         # bookkeeping by an enumerated set of kinds, hardcoded independently in
         # five places, so a new kind on an agent's list is conversation to
         # whichever reader has not been told about it. Measured 2026-09-11:
-        # `settle` reached a model's prompt as a turn reading `null`, and
+        # `settle` reached a model's prompt as a message reading `null`, and
         # `thread_fork` copied settles as conversation and lost its arithmetic.
         # The root's list is already nobody's conversation; `agent` stays a
         # FIELD so the ending still names what it ended.
@@ -1444,9 +1444,9 @@ class Agent:
                             return {
                                 "error": (
                                     f"{sender_id} cannot delegate {v!r} on {key}: "
-                                    "no such agent — calls of one turn run "
+                                    "no such agent — calls of one batch run "
                                     "concurrently, so an agent created in this "
-                                    "batch does not exist yet; create in one turn, "
+                                    "batch does not exist yet; create in one batch, "
                                     "grant in the next"
                                 ),
                                 "reason": "unauthorized",
@@ -1457,7 +1457,7 @@ class Agent:
                         # The target exists but the granter does not hold it. Say
                         # WHY in one line — the usual cause is a specialist created
                         # under the root instead of under the granter, and "you
-                        # don't hold it" hid that for twenty turns (2026-09-02).
+                        # don't hold it" hid that for twenty messages (2026-09-02).
                         held_parent = self.ctx.agents[key].parent
                         pid = held_parent.id if held_parent is not None else None
                         return {
@@ -1560,7 +1560,7 @@ class Agent:
         Same nesting as `_tree` (ownership is real information, and every caller
         already walks it that way); the swap is the FIELDS. `_tree` gives
         `handler_module` + posture — an operator's view, asked once. This gives
-        `sentence` + `mode` — the router's view, asked every turn. Two agents of
+        `sentence` + `mode` — the router's view, asked on every message. Two agents of
         the same bundle are indistinguishable in the former and obvious here.
 
         The sentence is ASKED FROM THE AGENT ITSELF (its own reflect), never
@@ -1609,11 +1609,11 @@ class Agent:
         uniformly to bare-agent and bundle reflects alike:
 
         - `detail=distilled|full` (default distilled). DISTILLED answers the
-          question a caller actually has most turns — *who do I send to?* — with
+          question a caller actually has most messages — *who do I send to?* — with
           a roster of `{id, sentence, mode?}` and nothing else. FULL is the
           orientation document: wiring/posture on every node, verb docstrings,
           and the inlined doc frame. The default is distilled because selection
-          happens every turn while orientation happens once, and because the
+          happens on every message while orientation happens once, and because the
           full view is NOT a superset: it carries `handler_module` and
           `file_bridge_id` but no `sentence`, so two agents of the same bundle
           are indistinguishable in it at any price. Escalation rides in the
@@ -2049,7 +2049,7 @@ class Agent:
                 # performs it, X is created under something, or X is the parent —
                 # and only the last was true. Measured 2026-08-24 (`live_subai`,
                 # the model): the model asked "But how do I invoke create_agent?
-                # Which target?", never resolved it, and finished 16 turns with
+                # Which target?", never resolved it, and finished 16 messages with
                 # `agents_created: []`.
                 #
                 # Refused HERE, in the handler, not in the call gate — the gate
@@ -2435,7 +2435,7 @@ class Agent:
                 # TODO(ledger digest): this is the FULL result body of every execution,
                 # with no default `limit` (page(): absent ⇒ everything) and a docstring
                 # that says "No args." — so one call returns more than the caller's
-                # whole window and the turn dies on `too_small`. Measured 2026-09-05:
+                # whole window and the message dies on `too_small`. Measured 2026-09-05:
                 # 34k–127k tokens against a 12k window, 5 of 6 e2e arms killed. Fix:
                 # digest rows {id, target, verb, status, attempts, bytes, head, title}
                 # here, full body only via {type:'ledger', id}. Same in rust and swift.
@@ -2527,7 +2527,7 @@ class Agent:
         # the arm that opened with `reflect` received `self_extension` and attempted
         # `create_agent` 10 times; the arm that opened with `list_agents` got these
         # bare records, never learned that authoring a script agent was the mechanism,
-        # spent 8 turns reasoning "it doesn't explicitly say how to call send from
+        # spent 8 messages reasoning "it doesn't explicitly say how to call send from
         # inside the script" — which `self_extension` states outright — and made 0
         # authoring attempts. Same model, same task; the whole divergence was the
         # FIRST call. This verb is advertised in every reflect's `system_verbs`, so
@@ -2940,7 +2940,7 @@ class Agent:
     # discover it by trying. Measured 2026-08-24 (`live_subai`, the model): the
     # model wrote "the key question is: what are MY (ai's) can_call grants? The
     # full reflect didn't include can_call/callable_by", and across the day it
-    # spent whole turns probing empirically — a throwaway `_probe_script` agent, a
+    # spent entire messages probing empirically — a throwaway `_probe_script` agent, a
     # `selfchild` "test create_agent on self", a `_probe_ai` scratch write — to
     # learn by experiment what one field states. This is not a secrecy boundary:
     # the gate ENFORCES, it does not hide, and everything surfaced here is already
@@ -2956,7 +2956,7 @@ class Agent:
     )
     # PURPOSE, not wiring. Posture answers "how is this plumbed" (an operator
     # question, asked once); purpose answers "what is this for" (a routing
-    # question, asked every turn). The roster carries purpose.
+    # question, asked on every message). The roster carries purpose.
     _PURPOSE_KEYS = ("mode",)
 
     def _node_summary(self, *, details: bool) -> dict:

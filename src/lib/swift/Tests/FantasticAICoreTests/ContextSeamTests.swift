@@ -206,7 +206,7 @@ struct ContextSeamTests {
         #expect(got[1]["role"].asString == "user" && (got[1]["content"].asString ?? "").contains("[context-notice]"))
         let proj = backend.getProjection(AI)
         #expect(proj["fired"].asBool == true && proj["strategy"].asString == "compact")
-        #expect(proj["summarized"].asBool == true && (proj["dropped_turns"].asInt ?? 0) > 0)
+        #expect(proj["summarized"].asBool == true && (proj["dropped_messages"].asInt ?? 0) > 0)
         // public projection record stays a clean summary — no internal scan bookkeeping
         #expect(proj.asObject?["fired_at_index"] == nil && proj.asObject?["client_id"] == nil)
         // the private reaction cursor holds the bookkeeping instead
@@ -217,7 +217,7 @@ struct ContextSeamTests {
         #expect(events.count == 1)
         let ev = events[0]
         #expect(ev["phase"].asString == "compacted" && ev["detail"]["strategy"].asString == "compact")
-        #expect((ev["detail"]["dropped_turns"].asInt ?? 0) > 0)
+        #expect((ev["detail"]["dropped_messages"].asInt ?? 0) > 0)
     }
 
     @Test func seamNoticeIsNotInTheInputHistory() async throws {
@@ -253,8 +253,8 @@ struct ContextSeamTests {
         #expect(ev.count == 1 && ev[0]["phase"].asString == "too_small")
         #expect(ev[0]["detail"]["hint"].asString != nil)
         // NAME THE KILLER — python's detail: the size and the head of the turn that did not fit.
-        #expect(ev[0]["detail"]["last_turn_tokens"].asInt == AIContext.estimateOne(m[1]))
-        #expect(ev[0]["detail"]["last_turn_head"].asString == "hi")
+        #expect(ev[0]["detail"]["last_message_tokens"].asInt == AIContext.estimateOne(m[1]))
+        #expect(ev[0]["detail"]["last_message_head"].asString == "hi")
     }
 
     @Test func seamUnknownStrategyErrorsWithoutEvent() async throws {

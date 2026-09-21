@@ -90,6 +90,34 @@ struct SpawnTests {
         #expect(text.contains("env hello"))
     }
 
+    /// `close_fds=True`: the child holds 0/1/2/3 and nothing else. A stray descriptor
+    /// of the kernel — another job's control socket above all — must not cross the
+    /// spawn, or that job's child never sees EOF and never self-reaps.
+    @Test func childInheritsNoStrayDescriptor() async throws {
+        guard let py = python3() else { print("skipping: no python3"); return }
+        var low: [Int32] = [0, 0]
+        #expect(pipe(&low) == 0)  // NOT close-on-exec, like a socket mid-`socketpair`
+        // Moved HIGH: a low number is one the child legitimately reuses (3 is its
+        // control socket, and the interpreter opens its own low descriptors).
+        let stray = low.map { fcntl($0, F_DUPFD, 200) }
+        low.forEach { close($0) }
+        #expect(stray.allSatisfy { $0 >= 200 })
+        defer { stray.forEach { close($0) } }
+        let code = """
+            import os
+            def held(fd):
+                try: os.fstat(fd); return True
+                except OSError: return False
+            print("stray", held(\(stray[0])), held(\(stray[1])), "stdin", held(0), "ctrl", held(3))
+            """
+        let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "owner_agent", envExtra: [:], cwd: nil)
+        let data = s.stdout.readDataToEndOfFile()
+        _ = await s.child.wait()
+        close(s.ctrlFd)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        #expect(text.contains("stray False False stdin True ctrl True"), "got: \(text)")
+    }
+
     /// The lifeline: drop the parent's socket and the child reaps ITSELF, even parked
     /// forever. This is what stops a dying kernel leaving orphans — and it only works
     /// because `Spawn.job` closes its copy of the child end.

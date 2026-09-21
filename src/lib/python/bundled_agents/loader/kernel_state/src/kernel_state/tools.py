@@ -61,7 +61,7 @@ def read_messages(root_dir: Path) -> tuple[list[dict], int]:
     """COLD HYDRATION of the kernel's message store — `(rows, next_id)`.
 
     The message log is `.fantastic/messages.xml`: ONE XML document whose root is
-    never closed, one `<row>` element per row the kernel ever made (a turn, a
+    never closed, one `<row>` element per row the kernel ever made (a message, a
     delivered reply, a fold, a recall, a `body` — the text merged in — a `view`, a
     `call`, a `task`), in id order, exactly as the pump appended it (format:
     `messages_xml`). Read through `fs` (clamped), before any agent exists, like
@@ -98,7 +98,7 @@ def hydrate_messages(kernel, root_dir: Path) -> int:
     # back off disk as it was WRITTEN — at launch, with no outcome. Stamping it
     # here rebuilds the state a live kernel had, and it is the only reason the
     # log can answer "how did this end" for a call that settled after the
-    # pump's debounce (which is most of them: every AI turn, every job).
+    # pump's debounce (which is most of them: every AI reply, every job).
     for r in rows:
         if r.get("kind") != "settle":
             continue

@@ -47,7 +47,7 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_core::KernelStateBundle::default(),
     );
     reg.register("file_bridge.tools", fantastic_file::FileBundle);
-    // The render sink AI backends stream their turn to. Without it that
+    // The render sink AI backends stream their reply to. Without it that
     // stream had nowhere to land on rust.
     reg.register(
         fantastic_cli_bundle::HANDLER_MODULE,

@@ -361,7 +361,7 @@ async def test_every_reflect_advertises_the_kernel_verbs(seeded_kernel):
     While every agent answered them, "send create_agent to X" could mean X performs
     it, X is created under something, or X is the parent — and only the last was
     true. A model asked "But how do I invoke create_agent? Which target?", never
-    resolved it, and finished 16 turns with `agents_created: []`.
+    resolved it, and finished 16 messages with `agents_created: []`.
 
     So the two properties are deliberately different, and the `_` line is what
     reconciles them for a reader who only ever reflects one leaf."""

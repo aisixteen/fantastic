@@ -147,7 +147,7 @@ struct BlobChannelTests {
     }
 
     @Test func aCancelNeverDestroysAWriteTheKernelAlreadyCommitted() async {
-        // MEASURED 2026-08-27. The AI backend commits the user turn, then
+        // MEASURED 2026-08-27. The AI backend commits the user message, then
         // streams; cancelling mid-stream marked the whole subtree killed, and
         // dispatch is INERT to a killed task — so the persist that had already
         // been decided was swallowed and the chat read back EMPTY. The user's

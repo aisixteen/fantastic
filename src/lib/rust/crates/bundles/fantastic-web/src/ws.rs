@@ -312,7 +312,7 @@ pub(crate) async fn ws_loop(
     // puts it on the wire FIRST (the drain task was made runnable at the fanout,
     // long before `_on_call` resumed). Rust's drain is a PARALLEL task, so the
     // reply overtook the event it must follow (measured in the r3 capture at
-    // three AI turns). The lock below makes flush-then-reply ONE step: every
+    // three AI replies). The lock below makes flush-then-reply ONE step: every
     // payload queued when the handler settled reaches `out_tx` before the reply
     // does, with no sleep and no yield.
     let inbox_rx = Arc::new(tokio::sync::Mutex::new(

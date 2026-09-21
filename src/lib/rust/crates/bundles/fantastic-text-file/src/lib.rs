@@ -20,7 +20,7 @@
 //! checkpointed mutate commits the pre-image BEFORE touching the target; a
 //! patch verifies every hunk before writing anything. Checkpoint ids ARE the
 //! dispatch's kernel task pid (an int — one id space with `ps`, the trace and
-//! the chat turn that caused the mutation). Mirrors the canonical Python
+//! the chat message that caused the mutation). Mirrors the canonical Python
 //! `text_file` bundle (python is the immutable reference).
 
 use async_trait::async_trait;

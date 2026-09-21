@@ -78,7 +78,7 @@ public func hydrateMessages(_ kernel: Kernel, rootDir: URL) throws -> Int {
     // append-only and the settle is its own append. Stamping here rebuilds the
     // state a live kernel had, and it is the only reason a cold read can
     // answer "how did this end" for a call that settled after the pump's
-    // debounce (which is most of them: every AI turn, every job).
+    // debounce (which is most of them: every AI pass, every job).
     for (parent, out) in settles {
         kernel.rows.stamp(parent, ["outcome": out])
     }

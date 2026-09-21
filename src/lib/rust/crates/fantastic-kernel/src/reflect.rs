@@ -611,7 +611,7 @@ pub fn tree_node(target: &Agent) -> Value {
             "file_bridge_id",
             // THE CALL GATE, made readable. Without these an agent cannot read
             // its own authority — only discover it by trying, which cost whole
-            // turns of empirical probing every run. They also make the
+            // passes of empirical probing every run. They also make the
             // replace-not-merge warning on `update_agent` actionable: you must
             // send the map WHOLE, so you must be able to read it.
             "can_call",

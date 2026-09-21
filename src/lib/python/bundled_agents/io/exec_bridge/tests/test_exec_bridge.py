@@ -334,7 +334,7 @@ async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
 
 async def test_connector_verb_hands_over_the_reference_client(seeded_kernel):
     """A model pastes the client instead of re-deriving the socket framing
-    (measured 2026-09-01, E30: ten turns lost to int(fd)/buffering/not-seekable).
+    (measured 2026-09-01, E30: ten messages lost to int(fd)/buffering/not-seekable).
     Ungated like reflect — discovery works on a sealed leg."""
     await _mk(seeded_kernel, "runner_c", allowed=["x"])
     r = (
@@ -375,7 +375,7 @@ async def test_a_stream_chunk_crosses_the_wire_raw(
     """`write_stream`/`read_stream` from a program: the bytes ride the fd as the
     io_bridge binary frame (kind B), never base64 — and never None. A `read_stream`
     reply was unserializable on this wire and reached the program as None
-    (measured 2026-09-02, E30 subai:python: 50 turns lost to a correct worker)."""
+    (measured 2026-09-02, E30 subai:python: 50 messages lost to a correct worker)."""
     from exec_bridge._connector import CONNECTOR_SRC
 
     monkeypatch.chdir(tmp_path)

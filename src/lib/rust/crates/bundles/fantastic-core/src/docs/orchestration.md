@@ -7,7 +7,7 @@ Every routine reaches every agent by id through its connector — a host
 send/emit/reflect/watch/on_message) and a browser view-agent's JS (its
 injected `fantastic`) alike. So from EITHER kernel a routine can: read
 memory from anywhere (send the file agent `<type>read</type>`), run an inference
-turn (send the AI `<type>send</type> <text>…</text>`), and/or spawn a compute job
+pass (send the AI `<type>send</type> <text>…</text>`), and/or spawn a compute job
 (send the runner `<type>start</type> <command>…</command>`) — by id, regardless of
 which kernel owns the target.
 

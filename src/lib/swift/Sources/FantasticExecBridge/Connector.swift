@@ -188,7 +188,7 @@ try:
             if "error" in m:
                 # The RELAY could not deliver the reply (as opposed to the target
                 # answering with its own {error} — that is data, returned as-is).
-                # A silent None here cost a builder 50 turns (measured 2026-09-02).
+                # A silent None here cost a builder 50 messages (measured 2026-09-02).
                 raise RuntimeError(
                     "fantastic: send(%r) failed in transit: %s" % (target, m["error"])
                 )

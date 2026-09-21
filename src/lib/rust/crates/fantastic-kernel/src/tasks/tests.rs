@@ -657,7 +657,7 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
     // registers it with `kernel.spawn_task`, so `ps` sees it; when the dispatch
     // that forked it dies, the job is RE-PARENTED to that dispatch's parent
     // (init-adoption, exactly like Linux) — which is what makes "cancel the
-    // turn" also kill the jobs the turn spawned.
+    // message" also kill the jobs that message spawned.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": "*"})).await;
@@ -899,7 +899,7 @@ async fn shutdown_agents_is_the_roots_control_surface_only() {
 #[tokio::test]
 async fn a_keepalive_loop_is_neither_waited_for_nor_cancelled() {
     // THE PERSISTER MUST OUTLIVE THE STOP. It is the thing that writes what the
-    // `shutdown` turns just produced; waiting for it would never return, and
+    // `shutdown` dispatches just produced; waiting for it would never return, and
     // cancelling it would drop the very rows the shutdown was for.
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let live = kernel.spawn_keepalive_task(

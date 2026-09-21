@@ -49,7 +49,7 @@ struct ContractU1Tests {
     @Test func aKernelVerbAtANonRootAgentSaysWhereToSendIt() async {
         // The verb acts on the TREE, so the agent named is the OPERAND, not the
         // actor. Answered everywhere, "send create_agent to X" read three ways
-        // and a model spent 16 turns unable to resolve which.
+        // and a model spent 16 passes unable to resolve which.
         let k = makeKernel()
         _ = await mk(k, "victim")
         let r = await k.send([Item(AgentId("victim"), .object(["type": .string("list_agents")]))])[0].result
@@ -87,7 +87,7 @@ struct ContractU1Tests {
 
     @Test func anAgentCanReadItsOwnAuthority() async {
         // The gate used to be INVISIBLE: an agent could only discover its
-        // authority by trying, which cost whole turns of empirical probing.
+        // authority by trying, which cost whole passes of empirical probing.
         let k = makeKernel()
         _ = await mk(
             k, "worker",

@@ -104,7 +104,7 @@ anywhere — across kernels.** Read it on the two-kernel example (host Python +
 browser JS, peers over one WS):
 
 - **Three unit kinds, one calling convention.** `exec_bridge` (a background
-  compute job), an AI backend (one inference turn), and `text_file` (durable
+  compute job), an AI backend (one inference pass), and `text_file` (durable
   memory as plain files) are all reached the same way: one item in a `send([...])` batch. A workflow step
   written as code and the same step written as an LLM call are **substitutable** —
   swap an `exec_bridge.start` for an `ai.send` and the wiring is unchanged. This
@@ -141,13 +141,13 @@ browser JS, peers over one WS):
 
 - **Validated — emergent memory with judgment.** Told ONLY that a memory agent
   exists, an AI saves salient facts, withholds trivia (no excess writes),
-  recalls them on a FRESH history-less turn, updates them, and prunes precisely
+  recalls them on a FRESH history-less message, updates them, and prunes precisely
   — managing durable memory through `send` alone; the which-verb/when is
   derived, not coded. (Originally proven on the deleted KV store,
   `integration_tests/memory/test_ai_memory_judgment.py`; memory is now plain
   FILES via `text_file`, and the judgment claim re-validates against the file
   face in e2e.) NOTE: today only the Swift FM backend auto-injects memory each
-  turn; the Python backends reach it on demand by id.
+  message; the Python backends reach it on demand by id.
 
 ## Run
 
@@ -257,7 +257,7 @@ the frontend's `proxy_loader`. See "Two kernels" in the root readme.
 | `terminal_backend` | PTY shell backend (at `bundled_agents/terminal/`). VSCode-ported terminal robustness: streaming flow control (reader pauses past 100K unacked chars, resumes on the `ack` verb), incremental UTF-8 decode (no split-char `<?>` litter across `os.read` chunks), serialized full-buffer writes (bracketed-paste-safe), image-paste bridge (browser-clipboard image → `paste_image` → file saved + path typed into the PTY for a CLI like `claude`). The xterm view (`terminal_view`) lives in the TS frontend kernel (`ts/`). |
 | `ai/ollama/ollama_backend` | local LLM agent (ollama); per-client chat threads, FIFO lock, menu cache; RAW prompt-and-parse tool-calling — the `<call name=…>` TAG grammar with one child tag per argument and a verbatim `<bytes>` body, NO JSON on the model path (see `ai_core.tool_parse`) |
 | `ai/nvidia/nvidia_nim_backend` | NVIDIA NIM LLM agent (OpenAI-compatible); api_key sidecar via `file_bridge_id`; rate-limit retry; same surface as ollama_backend |
-| `ai/llamacpp/llamacpp_backend` | LOCAL LLM agent via a `llama-server` (llama.cpp) OpenAI surface — default endpoint `http://127.0.0.1:8080/v1`, keyless unless the server was started with `--api-key`. Kept SEPARATE from `nvidia_nim_backend` despite the shared wire so `reflect` never describes a local model as an NVIDIA agent. The ollama backend CANNOT serve this role: llama-server 404s every `/api/*` route and the ollama SDK posts to `/api/chat`. Reads BOTH stream channels — with the server on `--reasoning-format deepseek` the thought arrives as `reasoning_content` and only the conclusion as `content`, so reading `content` alone drops whole turns. `think` on the record rides as per-request `chat_template_kwargs:{enable_thinking}` (gemma-4 gates its thought channel there, default FALSE), so toggling thinking is a record edit, not a server restart. No `num_ctx` — the window is fixed at server start (`-c N`) and this agent does not pretend to own one. |
+| `ai/llamacpp/llamacpp_backend` | LOCAL LLM agent via a `llama-server` (llama.cpp) OpenAI surface — default endpoint `http://127.0.0.1:8080/v1`, keyless unless the server was started with `--api-key`. Kept SEPARATE from `nvidia_nim_backend` despite the shared wire so `reflect` never describes a local model as an NVIDIA agent. The ollama backend CANNOT serve this role: llama-server 404s every `/api/*` route and the ollama SDK posts to `/api/chat`. Reads BOTH stream channels — with the server on `--reasoning-format deepseek` the thought arrives as `reasoning_content` and only the conclusion as `content`, so reading `content` alone drops whole replies. `think` on the record rides as per-request `chat_template_kwargs:{enable_thinking}` (gemma-4 gates its thought channel there, default FALSE), so toggling thinking is a record edit, not a server restart. No `num_ctx` — the window is fixed at server start (`-c N`) and this agent does not pretend to own one. |
 | `ai/anthropic/anthropic_backend` (`anthropic_backend.tools`) | Claude LLM agent — Anthropic Messages API (default model `claude-opus-4-8`); key from `ANTHROPIC_KEY`/`ANTHROPIC_API_KEY` (env / `.env`); per-client chat threads, FIFO lock, menu cache; same surface as ollama_backend |
 | `io/io_bridge` | the **IO base — pure shared library, NOT a registered bundle/agent** (no entry point, never instantiated; the merge of the former `io_core` + `bridge_core` libs). Holds the channel model (`direction · modality · transport · rule · extractor`), the `ingress_rules`/`egress_rules` registries, the transport-agnostic bridge engine (read loop, the 6 verbs, lifecycle, `make_verbs` factory), the unified `gate_inbound`/`stamp_egress` choke point, and the in-process `MemoryTransport`. Every derivation (`ws_bridge`/`relay_connector`/`web_ws`/`web_rest`/`file_bridge`) **imports** from it and reuses `rule.authorize`. IO legs are **SEALED BY DEFAULT** (`resolve_ingress({})` ⇒ `DenyInbound`); the open interior is unaffected. A denied client is taught by the denial's `hint` (the inline recipe — `update_agent <id> ingress_rule=allow_all_ingress`) and `reflect readme=true` on the **sealed agent itself** (each derivation ships its own short readme). |
 | `io/ws_bridge` | cross-kernel comms — a thin **WS-only, asymmetric** transport **derivation of `io_bridge`** (was `kernel_bridge`). A bridge agent opens a WS to the remote's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws / ssh+ws. Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event"}` back, re-emitted on the bridge's own inbox). All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. **Authorization**: two symmetric typed per-leg rules (enforced on the receiver) — `ingress_rule` (inbound FILTER, gated at the shared `gate_inbound` choke point) + `egress_rule` (outbound DECORATOR, stamps a credential on the frame envelope); `auth` is a shorthand for both. **SEALED BY DEFAULT** — absent rule ⇒ `deny_inbound` (reply `{reason:"unauthorized"}`); open consciously with `ingress_rule=allow_all_ingress`/`password` (kernel-GROUP shared secret from an env var). Resolved by name from the `io_bridge.ingress_rules` / `egress_rules` registries; shared with relay_connector. |
@@ -396,9 +396,9 @@ the next process start.
   runs (same discovery + optionality as `on_delete`). Two things live there:
   - releasing a REAL resource — `exec_bridge.on_cancel` SIGKILLs the job's
     child process, so an aborted task cannot orphan it.
-  - closing a turn out for a CLIENT — the AI backends (ollama / nvidia_nim /
+  - closing a message out for a CLIENT — the AI backends (ollama / nvidia_nim /
     anthropic) all re-export `ai_core`'s shared `on_cancel`: it clears the
-    in-flight generation (else `status`/`reflect` report a phantom turn forever)
+    in-flight generation (else `status`/`reflect` report a phantom reply forever)
     and emits `status(phase='done', reason='cancelled')` + `done`. The abort
     itself already drops the provider's HTTP stream and the FIFO lock.
   There is NO bundle-private `interrupt` verb anywhere: an in-flight AI `send`

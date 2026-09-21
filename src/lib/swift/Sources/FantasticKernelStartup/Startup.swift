@@ -66,7 +66,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
         r.registerUnlisted(ORACLE_MODULE, OracleProbe())
     #endif
     r.register("text_file.tools", TextFileBundle())
-    // The render sink the AI backends stream their turn to (python `cli`).
+    // The render sink the AI backends stream their output to (python `cli`).
     r.register(CliBundle.handlerModule, CliBundle())
     r.register("scheduler.tools", SchedulerBundle())
     r.register(StaticLoaderBundle.handlerModule, StaticLoaderBundle())

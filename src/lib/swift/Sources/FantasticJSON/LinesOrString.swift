@@ -4,7 +4,7 @@
 /// emits: every newline is an escape and every inner quote another, so one
 /// missed `\"` swallows the rest of the object and the call is lost entirely.
 /// Measured on gemma-4-12B, and again on the `subai_graph` probe, which burned
-/// three consecutive turns on it.
+/// three consecutive passes on it.
 ///
 /// A list removes the failure rather than softening it: newlines become the
 /// array structure instead of escapes, and each element is short enough that a

@@ -7,7 +7,7 @@ interrupts will rerun after only one resume"; blog.raed.dev/posts/langgraph-hitl
 duplicate tickets, invisible in message history). Their fix is developer
 discipline: "make your side effects idempotent."
 
-Here suspension is not a checkpoint-replay — it is simply a turn that ended.
+Here suspension is not a checkpoint-replay — it is simply a message that ended.
 Resume is a NEW message, and even a resume path that NAIVELY replays every
 recorded action (exactly what LangGraph's runtime does) cannot double-fire:
 the action ids are ledger executions, a replay JOINS the recorded outcome.
@@ -60,7 +60,7 @@ async def _orc_handler(id, payload, kernel):
                 [{"target": "adv1_desk", "payload": {"type": "ticket"}, "id": "tkt-1"}]
             )
         )[0]
-        # ...then "interrupt": return a question and END THE TURN
+        # ...then "interrupt": return a question and END THE MESSAGE
         return {
             "ticket": t["result"],
             "question": {

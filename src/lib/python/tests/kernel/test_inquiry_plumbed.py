@@ -3,18 +3,18 @@
 An AI agent cannot proceed without a decision that is not its to make, so it
 `send`s an `inquiry` to the `user` agent — the human, first-class, with an id, a
 record, a gate and a ledger row like anyone else. The answer comes back as that
-call's REPLY in the model's next turn. Nothing suspends and nothing is scraped.
+call's REPLY in the model's next message. Nothing suspends and nothing is scraped.
 
 WHAT THIS FILE REPLACES, and why. `test_mind_plumbed.py` drove a backend as a
 PROSE ORACLE: an authored program sent text, read the completion's `response`
 as data, and parsed `CALL x y` / `FINAL: …` out of it. Two things ended that.
-Tool calls became mandatory — a turn that emits no `<call>` is told to try
+Tool calls became mandatory — a message that emits no `<call>` is told to try
 again, so a prose reply is never an ending — and the inquiry stopped being a
 text convention. The old file asserted on the SHAPE OF PROSE, which is exactly
 what a model can produce without doing anything.
 
 So the score here is the human's own count. `user.inquiries` is the number of
-inquiries that agent ACTUALLY RECEIVED, incremented inside its handler; a turn
+inquiries that agent ACTUALLY RECEIVED, incremented inside its handler; a message
 that merely talks about asking leaves it at zero. Same for `proposals`: an
 `action` a sender may not perform itself is HELD by the human, read back off
 the call it really received. Mirrors `e2e/probes/user_probe` (the live twin) so
@@ -130,18 +130,18 @@ sys.modules["user_agent.tools"] = _user_mod
 
 class _Script:
     """One scripted completion per `chat()` call. `requests` keeps every pass's
-    messages, so a test can prove the human's answer became the NEXT turn."""
+    messages, so a test can prove the human's answer became the NEXT message."""
 
-    def __init__(self, turns: list[str]):
-        self._turns = list(turns)
+    def __init__(self, messages: list[str]):
+        self._messages = list(messages)
         self.requests: list = []
         self.calls = 0
 
     async def chat(self, messages):
         self.requests.append(messages)
         self.calls += 1
-        if self._turns:
-            yield self._turns.pop(0)
+        if self._messages:
+            yield self._messages.pop(0)
 
     def incoming(self, n: int) -> str:
         """The user-role text the model READ on pass `n` (0-based)."""
@@ -213,7 +213,7 @@ async def _tally(kernel, uid: str = "user") -> dict:
 
 
 async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(seeded_kernel):
-    """THE WHOLE CONTRACT IN ONE TURN PAIR. The model asks; the human's answer
+    """THE WHOLE CONTRACT IN ONE MESSAGE PAIR. The model asks; the human's answer
     comes back as that call's reply, tagged like any other; the model reads it
     and finishes. Scored on the human's own count, which only its handler can
     raise."""
@@ -228,7 +228,7 @@ async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(seeded_kernel):
         tally = await _tally(seeded_kernel)
         assert tally["inquiries"] == 1, f"the human was never asked: {tally}"
 
-        assert script.calls == 2, f"the answer did not become a turn: {script.calls}"
+        assert script.calls == 2, f"the answer did not become a message: {script.calls}"
         second = script.incoming(1)
         assert second.startswith("[reply to "), second
         assert " user inquiry" in second, second
@@ -237,12 +237,12 @@ async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(seeded_kernel):
         ot._providers.pop(aid, None)
 
 
-async def test_a_turn_that_only_talks_about_asking_never_reaches_the_human(
+async def test_a_message_that_only_talks_about_asking_never_reaches_the_human(
     seeded_kernel,
 ):
     """THE REASON THE SCORE IS THE HUMAN'S TALLY AND NOT THE PROSE. A model can
     say it asked. The desk's count is the only thing it cannot fake — and the
-    call-less turn earns a `try again` rather than ending the chain."""
+    call-less message earns a `try again` rather than ending the chain."""
     script = _Script(
         ["I should ask the user whether to proceed.", "asking now " + DONE]
     )
@@ -254,7 +254,7 @@ async def test_a_turn_that_only_talks_about_asking_never_reaches_the_human(
         await asyncio.sleep(0.5)
 
         assert (await _tally(seeded_kernel))["inquiries"] == 0, "prose reached the desk"
-        assert script.calls == 2, "a call-less turn must be told to try again"
+        assert script.calls == 2, "a call-less message must be told to try again"
         assert "[no call was dispatched]" in script.incoming(1)
     finally:
         ot._providers.pop(aid, None)

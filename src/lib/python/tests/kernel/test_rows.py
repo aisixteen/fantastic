@@ -150,11 +150,13 @@ async def test_messages_refuses_a_bad_ids_arg(root):
 
 async def test_rows_read_returns_whole_rows_oldest_first_and_pages(root):
     k = root.ctx
-    ids = [k.rows_put("ai", {"role": "user", "content": f"turn {i}"}) for i in range(4)]
+    ids = [
+        k.rows_put("ai", {"role": "user", "content": f"message {i}"}) for i in range(4)
+    ]
     got = await _send(root, root.id, {"type": "rows_read", "agent": "ai"})
     assert [r["id"] for r in got["rows"]] == ids
     # WHOLE, not a digest: `messages` hides bodies on purpose, this one does not.
-    assert got["rows"][0]["content"] == "turn 0"
+    assert got["rows"][0]["content"] == "message 0"
     assert got["next"] is None
 
     page = await _send(root, root.id, {"type": "rows_read", "agent": "ai", "limit": 2})

@@ -118,8 +118,8 @@ async fn wire_store(kernel: &Arc<Kernel>, store_root: &Path) {
         .await;
 }
 
-fn turn(role: &str, content: &str) -> fantastic_kernel::Row {
-    json!({"kind": "turn", "role": role, "content": content})
+fn message(role: &str, content: &str) -> fantastic_kernel::Row {
+    json!({"kind": "message", "role": role, "content": content})
         .as_object()
         .unwrap()
         .clone()
@@ -151,10 +151,12 @@ async fn rows_survive_a_restart_and_the_counter_continues() {
     fantastic_kernel::messages_log::install_message_pump(&k1, 0);
 
     let ai = AgentId::from("ai");
-    k1.rows.put(&ai, turn("user", "what is the code?")).unwrap();
+    k1.rows
+        .put(&ai, message("user", "what is the code?"))
+        .unwrap();
     let pid = k1.rows.mint_id();
     k1.rows
-        .put(&ai, turn("assistant", "reading it now"))
+        .put(&ai, message("assistant", "reading it now"))
         .unwrap();
     k1.rows.body_put(&ai, pid, "the long reply body").unwrap();
     k1.rows
@@ -228,8 +230,8 @@ async fn a_cut_log_refuses_to_boot_rather_than_hydrating_half_a_conversation() {
     wire_store(&k1, &store).await;
     fantastic_kernel::messages_log::install_message_pump(&k1, 0);
     let ai = AgentId::from("ai");
-    k1.rows.put(&ai, turn("user", "first")).unwrap();
-    k1.rows.put(&ai, turn("assistant", "second")).unwrap();
+    k1.rows.put(&ai, message("user", "first")).unwrap();
+    k1.rows.put(&ai, message("assistant", "second")).unwrap();
     let text = until_rows(&log, 2).await;
 
     // A crash mid-append: the last row opened and never closed.
@@ -252,7 +254,7 @@ async fn no_store_wired_keeps_the_log_in_ram_and_says_so_once() {
     let k = kernel_at(&store);
     fantastic_kernel::messages_log::install_message_pump(&k, 0);
     let ai = AgentId::from("ai");
-    k.rows.put(&ai, turn("user", "into the void")).unwrap();
+    k.rows.put(&ai, message("user", "into the void")).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     assert!(
         !store.join("messages.xml").exists(),
@@ -368,7 +370,7 @@ async fn the_pump_appends_every_row_but_its_own_calls() {
         .await;
     }
     let ai = AgentId::from("ai");
-    let rid = k.rows.put(&ai, turn("user", "planted")).unwrap();
+    let rid = k.rows.put(&ai, message("user", "planted")).unwrap();
     k.rows.body_put(&ai, rid, &"a body ".repeat(100)).unwrap();
 
     let rows = until_row(&log, |r| {
@@ -596,14 +598,14 @@ async fn refused_append_prints_python_str_and_requeues() {
     fantastic_kernel::messages_log::install_message_pump(&kernel, 0);
 
     let ai = AgentId::from("ai");
-    kernel.rows.put(&ai, turn("user", "one")).unwrap();
+    kernel.rows.put(&ai, message("user", "one")).unwrap();
     // Sealed: the append is refused, so NOTHING is on disk and nothing is lost.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(!log.exists(), "a refused append must not half-write");
 
     // Open the store: the SAME rows are retried on the next flush.
     sealed.store(false, Ordering::SeqCst);
-    kernel.rows.put(&ai, turn("user", "two")).unwrap();
+    kernel.rows.put(&ai, message("user", "two")).unwrap();
     let text = until_rows(&log, 2).await;
     assert!(text.contains("one"), "the refused row was dropped: {text}");
     assert!(text.contains("two"), "{text}");

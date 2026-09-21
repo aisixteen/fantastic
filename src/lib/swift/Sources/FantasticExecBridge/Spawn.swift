@@ -20,8 +20,9 @@
     /// between the spawn and the command.
     ///
     /// `posix_spawnp` takes the file actions directly: the control socket is dup'd to
-    /// fd 3, the two pipes to 1/2, and stdin is left alone — python's
-    /// `create_subprocess_exec(..., pass_fds=(fd,))` behaviour, argv untouched.
+    /// fd 3, the two pipes to 1/2, stdin is inherited by name, and every other
+    /// descriptor is closed — python's `create_subprocess_exec(..., pass_fds=(fd,))`
+    /// behaviour (`close_fds=True`), argv untouched.
     enum Spawn {
 
         /// A spawn that never reached `exec`. `description` is python's `str(OSError)`
@@ -86,6 +87,9 @@
                 posix_spawn_file_actions_adddup2(&actions, from, to)
                 posix_spawn_file_actions_addclose(&actions, from)
             }
+            // `POSIX_SPAWN_CLOEXEC_DEFAULT` (below) closes everything a file action
+            // does not name. stdin is named so it stays INHERITED, as python leaves it.
+            posix_spawn_file_actions_addinherit_np(&actions, 0)
             if let cwd, !cwd.isEmpty {
                 // `_np`, not the 26.0-only spelling: this package deploys to macOS 14.
                 posix_spawn_file_actions_addchdir_np(&actions, cwd)
@@ -103,8 +107,15 @@
             sigemptyset(&noSignals)
             posix_spawnattr_setsigdefault(&attrs, &allSignals)
             posix_spawnattr_setsigmask(&attrs, &noSignals)
+            // `close_fds=True`, python's default with `pass_fds`: the child gets 0/1/2/3
+            // and NOTHING else. Without it a child inherited every descriptor of the
+            // kernel that was not yet FD_CLOEXEC — including ANOTHER job's parent socket
+            // in the window between its `socketpair()` and its `fcntl`, which kept that
+            // job's lifeline open after the kernel closed it: the child never saw EOF
+            // and never self-reaped (an orphan, measured 2026-09-22).
             posix_spawnattr_setflags(
-                &attrs, Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+                &attrs,
+                Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
 
             var env = ProcessInfo.processInfo.environment
             for (k, v) in envExtra { env[k] = v }

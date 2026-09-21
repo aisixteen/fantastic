@@ -106,7 +106,7 @@ async def _context(id, payload, kernel):
     prefix = f"  [{src}]" if src else " "
     if phase == "compacted":
         strat = detail.get("strategy", "?")
-        dropped = detail.get("dropped_turns", 0)
+        dropped = detail.get("dropped_messages", 0)
         print(
             f"{prefix} ⟲ context compacted ({strat}, {dropped} dropped; recall to page back)"
         )

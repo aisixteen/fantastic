@@ -6,10 +6,10 @@
 // There is deliberately NO single-call form — one shape prevents single/batch
 // drift. A single call is `(await kernel.send([Item(t, p)]))[0].result`.
 //
-// Why a batch at all: a model turn that fans out N calls used to get its answers
-// spread over the next N turns and re-asked in between (measured 2026-08-25:
+// Why a batch at all: a model batch that fans out N calls used to get its answers
+// spread over the next N messages and re-asked in between (measured 2026-08-25:
 // 7 calls → replies `1 of 7`…`7 of 7`, `list_agents` re-asked five times,
-// nothing built). The industry shape is the same — all results of one turn
+// nothing built). The industry shape is the same — all results of one batch
 // return together.
 
 import FantasticJSON
@@ -103,7 +103,7 @@ extension Kernel {
 
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks
         // the whole subtree before it aborts anything, because `onCancel`
-        // hooks await — so a doomed handler gets scheduling turns on its way
+        // hooks await — so a doomed handler gets scheduling passes on its way
         // out, and what it sent there used to start fresh dispatches that
         // outlived the cancel. Settled here, before an id is minted: a
         // refused send costs nothing.
@@ -113,7 +113,7 @@ extension Kernel {
         }
         // 8. draining — WHILE DRAINING, NO NEW ROOTS. A send from inside live
         // work (a parent task in the table — including an agent's own
-        // `shutdown` turn using its tools) passes; the kernel's own shutdown
+        // `shutdown` pass using its tools) passes; the kernel's own shutdown
         // traffic passes; everything else is a new root and is refused
         // before it costs an id. The root's own control surface stays open
         // while draining: kernel verbs (`shutdown_agents` again, `shutdown_
@@ -172,7 +172,7 @@ extension Kernel {
         // READ. Python answers it without a task-table row, and for an UNNAMED
         // item without a ledger row and WITHOUT MINTING AN ID at all
         // (`Agent._launch`: the check sits before the mint, `_Dispatched(pid=
-        // None)`). Swift dispatched it like any other verb, so every AI turn's
+        // None)`). Swift dispatched it like any other verb, so every AI pass's
         // primer reflect minted a `call · reflect · <root> ← ai` row plus a
         // settle python never writes — 55 extra rows, measured 2026-09-21.
         let kernelReflect = item.target.value == "kernel" && verb == "reflect"

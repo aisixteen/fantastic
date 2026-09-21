@@ -248,7 +248,7 @@ async def test_to_fans_out_one_copy_per_recipient_carrying_the_list_and_msg():
             "payload": {"type": "send", "text": "CANDIDATE 586"},
         },
     )
-    await _route_reply("ai", k, call, "cli", None, None, 42.0, "", turn_id=412)
+    await _route_reply("ai", k, call, "cli", None, None, 42.0, "", message_id=412)
     peers = [i for i in k.items if i["target"] in ("solver_2", "solver_3")]
     assert [i["target"] for i in peers] == ["solver_2", "solver_3"]
     for i in peers:

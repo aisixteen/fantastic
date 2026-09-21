@@ -250,7 +250,7 @@ public struct UserProbe: AgentBundle {
         ),
     ]
     /// HOW MANY INQUIRIES EACH AGENT ACTUALLY RECEIVED, and the PROPOSALS it was
-    /// handed. The scorer reads THIS, never the model's prose: a turn that only
+    /// handed. The scorer reads THIS, never the model's prose: a pass that only
     /// talks about it leaves the tally at zero, exactly as the other fixtures
     /// count their own side effects. Both are keyed by agent id — python's
     /// `_RECEIVED` / `_PROPOSALS` are dicts, so two humans keep two ledgers.

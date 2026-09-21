@@ -2,7 +2,7 @@
 
 `cancel_task` is two-phase: every bundle's `on_cancel` hook runs first (real
 teardown — an OS child, a PTY, a socket), then the asyncio.Tasks are aborted.
-Phase ① AWAITS, so a handler inside the doomed subtree gets scheduling turns
+Phase ① AWAITS, so a handler inside the doomed subtree gets scheduling passes
 between the decision to kill it and its abort.
 
 Measured 2026-09-02: work it sent in that window started fresh dispatches — new

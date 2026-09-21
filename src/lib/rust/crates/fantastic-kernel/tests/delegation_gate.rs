@@ -2,7 +2,7 @@
 //!
 //! THE BATCH TRAP: `[create X, grant peer→X]` in ONE send. Items launch
 //! concurrently, so X is not an agent yet when the grant's gate runs. The refusal
-//! must say "no such agent" and point at the next turn — "you don't hold X" is
+//! must say "no such agent" and point at the next batch — "you don't hold X" is
 //! false and sent a builder into a 382-second deliberation (measured 2026-09-02,
 //! E30 subai:python). The same grant in the NEXT send passes.
 
@@ -88,7 +88,7 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
             ])
             .await;
         let no = batch[1].result.clone();
-        // Next turn: kid exists and is the granter's child → the grant passes.
+        // Next batch: kid exists and is the granter's child → the grant passes.
         let ok = kernel
             .send(vec![Item::new(
                 AgentId::from("kernel"),

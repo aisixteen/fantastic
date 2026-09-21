@@ -383,11 +383,11 @@ impl Kernel {
     /// Nothing propagates out of `send`: a handler panic settles as `failed`
     /// with `raised: true`, a cancel settles as `cancelled`.
     ///
-    /// Why a batch at all: a model turn that fans out N calls used to get its
-    /// answers spread over the next N turns and re-asked in between (measured
+    /// Why a batch at all: a model reply that fans out N calls used to get its
+    /// answers spread over the next N replies and re-asked in between (measured
     /// 2026-08-25: 7 calls → replies `1 of 7`…`7 of 7`, `list_agents` re-asked
     /// five times, nothing built). The industry shape is the same — all results
-    /// of one turn return together.
+    /// of one batch return together.
     pub async fn send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
         // SYNCHRONOUS launch: resolve, gate and register EVERY item before the
         // first await, so `ps` shows the whole batch rather than it appearing
@@ -523,7 +523,7 @@ impl Kernel {
         };
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks
         // the whole subtree before it aborts anything, because `on_cancel`
-        // hooks await — so a doomed handler gets scheduling turns on its way
+        // hooks await — so a doomed handler gets scheduling passes on its way
         // out, and what it sent there used to start fresh dispatches that
         // outlived the cancel.
         if current_killed() {
@@ -536,7 +536,7 @@ impl Kernel {
         // 8. draining — WHILE DRAINING, NO NEW ROOTS, checked BEFORE the
         // target is even resolved (rust used to resolve first). A send from
         // inside live work (a parent task in the table — including an
-        // agent's own `shutdown` turn using its tools) passes; everything
+        // agent's own `shutdown` dispatch using its tools) passes; everything
         // else is a new root and is refused BEFORE it costs an id. The
         // root's own control surface stays open: kernel verbs
         // (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`,
@@ -1505,7 +1505,7 @@ fn dispatch(
             // table, so the agent named is the OPERAND, not the actor. Answered
             // everywhere, "send create_agent to X" could mean X performs it, X
             // is created under something, or X is the parent — only the last was
-            // ever true, and a model asked "which target?" for 16 turns and
+            // ever true, and a model asked "which target?" for 16 messages and
             // finished with nothing created.
             //
             // Refused HERE, in the handler — not at the call gate — so probes

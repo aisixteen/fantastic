@@ -38,7 +38,7 @@ async def _handler(id, payload, kernel):
         }
     if verb == "shutdown":
         _shut_calls.append(id)
-        # the shutdown turn may still use its tools: a nested send passes the drain
+        # the shutdown dispatch may still use its tools: a nested send passes the drain
         r = (await kernel.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]
         return {"wrapped": True, "tools_ok": r["status"] == "completed"}
     if verb == "slow":
@@ -102,7 +102,7 @@ async def test_rows_stream_replays_after_then_tails_without_duplicates(seeded_ke
 
 
 async def test_rows_stream_keeps_a_pre_minted_row_that_lands_late(seeded_kernel):
-    """An AI turn's id is minted at turn start; its row lands after later calls."""
+    """An AI message's id is minted at message start; its row lands after later calls."""
     k = seeded_kernel.ctx
     base = k.rows_put("ai", {"role": "user", "content": "root"})
     got: list[int] = []
@@ -115,12 +115,14 @@ async def test_rows_stream_keeps_a_pre_minted_row_that_lands_late(seeded_kernel)
 
     t = asyncio.create_task(consume())
     await asyncio.sleep(0.01)
-    turn = k.mint_id()  # reserved now, written later
+    message = k.mint_id()  # reserved now, written later
     later = k.rows_put("notes", {"kind": "call", "verb": "read"})
     later2 = k.rows_put("notes", {"kind": "call", "verb": "read"})
-    k.rows_put("ai", {"id": turn, "role": "assistant", "content": "the turn"})
+    k.rows_put("ai", {"id": message, "role": "assistant", "content": "the message"})
     await asyncio.wait_for(t, timeout=2)
-    assert got == [later, later2, turn], "arrival order, the late pre-minted row kept"
+    assert got == [later, later2, message], (
+        "arrival order, the late pre-minted row kept"
+    )
 
 
 # ── the drain and the agents half of a stop ─────────────────────────────
@@ -420,7 +422,7 @@ async def test_a_slow_settle_still_reaches_the_log(seeded_kernel, store_agent):
     """THE BUG THE SETTLE ROW EXISTS FOR. The call row is appended at LAUNCH and
     the outcome used to be stamped onto that same dict in place; the pump renders
     rows on a 0.15 s debounce, so a call that settled after its launch row had
-    already been written left NO ending on disk. Everything slow — every AI turn,
+    already been written left NO ending on disk. Everything slow — every AI reply,
     every job, every stream — was recorded as a beginning with no end, and a cold
     read could not tell "never settled" from "settled late".
 

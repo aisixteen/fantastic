@@ -120,8 +120,8 @@ extension AIBackend {
                         // 131k window): this fired needing a single >126k-token turn and
                         // recorded nothing about it — the run's tempdir was gone before
                         // anyone could ask WHICH message was that big.
-                        "last_turn_tokens": .integer(lastCost),
-                        "last_turn_head": .string(
+                        "last_message_tokens": .integer(lastCost),
+                        "last_message_head": .string(
                             String(pyStr(body[body.count - 1]["content"]).unicodeScalars.prefix(200))),
                         "hint": .string(hint),
                     ]),
@@ -202,8 +202,8 @@ extension AIBackend {
             agentKey,
             .object([
                 "fired": .bool(true), "strategy": .string(stratName),
-                "kept_turns": .integer(Int64(outBody.count)),
-                "dropped_turns": .integer(Int64(droppedN)),
+                "kept_messages": .integer(Int64(outBody.count)),
+                "dropped_messages": .integer(Int64(droppedN)),
                 "summarized": .bool(summarized),
                 "pinned_facts": .integer(Int64(proj.pinned.count)),
                 "stripped": .integer(Int64(proj.stripped)),
@@ -245,8 +245,8 @@ extension AIBackend {
                 "ts": .double(nowSecs()), "phase": .string("compacted"),
                 "detail": .object([
                     "strategy": .string(stratName),
-                    "dropped_turns": .integer(Int64(droppedN)),
-                    "kept_turns": .integer(Int64(outBody.count)),
+                    "dropped_messages": .integer(Int64(droppedN)),
+                    "kept_messages": .integer(Int64(outBody.count)),
                     "summarized": .bool(summarized),
                     "pinned_facts": .integer(Int64(proj.pinned.count)),
                     "stripped": .integer(Int64(proj.stripped)),

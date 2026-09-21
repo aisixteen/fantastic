@@ -457,7 +457,7 @@ struct TaskTableCancelTests {
         // pump). The bundle registers it with `kernel.spawnTask`, so `ps` sees it;
         // when the dispatch that forked it dies, the job is RE-PARENTED to that
         // dispatch's parent (init-adoption, exactly like Linux) — which is what
-        // makes "cancel the turn" also kill the work the turn spawned.
+        // makes "cancel the pass" also kill the work the pass spawned.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])

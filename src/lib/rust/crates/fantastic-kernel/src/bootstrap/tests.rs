@@ -296,7 +296,7 @@ fn hydration_and_rehydrate_print_nothing_on_success() {
     std::fs::write(
         fdir.join("messages.xml"),
         format!(
-            "{}<row id=\"1\" agent=\"kernel_state\" kind=\"turn\" />\n",
+            "{}<row id=\"1\" agent=\"kernel_state\" kind=\"message\" />\n",
             crate::messages_xml::HEADER
         ),
     )

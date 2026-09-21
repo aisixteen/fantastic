@@ -38,7 +38,7 @@ fn hydration_sets_the_counter_above_every_id_it_read() {
         &log_of(&[
             json!({"id": 3, "agent": "ai", "role": "user", "content": "one"}),
             json!({"id": 5, "agent": "ai", "role": "assistant", "content": "two"}),
-            json!({"id": 9, "agent": "other", "kind": "turn", "content": "three"}),
+            json!({"id": 9, "agent": "other", "kind": "message", "content": "three"}),
         ]),
     );
     let kernel = crate::Kernel::new();
@@ -116,7 +116,7 @@ fn every_shape_survives_the_file() {
     write(
         tmp.path(),
         &log_of(&[
-            json!({"id": 1, "agent": "ai", "kind": "turn", "role": "user",
+            json!({"id": 1, "agent": "ai", "kind": "message", "role": "user",
                    "content": "a call: <call name=\"send\"></call> & more\nline two\n"}),
             json!({"id": 2, "agent": "ai", "kind": "fold", "level": 1,
                    "refs": [1], "title": "the survey", "summary": "what it said"}),

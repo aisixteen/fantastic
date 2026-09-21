@@ -206,7 +206,7 @@ public struct FileBundle: AgentBundle {
         // tag grammar delivers it as utf-8 bytes to the same handler; a chunk
         // read back renders utf-8 in the reply. Swift refused both here with
         // "raw bytes on the binary channel" — the `subai_graph` routine's
-        // program write failed on it every turn (measured 2026-09-13, the same
+        // program write failed on it every pass (measured 2026-09-13, the same
         // refusal rust carried in 43 e2e logs). The binary channel stays for
         // real blobs.
         case "read_stream":

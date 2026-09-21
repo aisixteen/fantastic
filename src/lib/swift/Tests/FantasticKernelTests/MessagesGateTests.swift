@@ -357,7 +357,7 @@ struct MessagesGateTests {
     @Test func limitCoercesLikePythonInt() async {
         let k = bootKernel()
         let all = (0..<8).map { i in
-            put(k, "ai", ["role": .string("user"), "content": .string("turn \(i)")])
+            put(k, "ai", ["role": .string("user"), "content": .string("message \(i)")])
         }
         let idsJ: JSON = .array(all.map { .integer($0) })
         let twos: [JSON] = [
@@ -491,10 +491,10 @@ struct MessagesGateTests {
 
     @Test func rowsReadReturnsWholeRowsOldestFirstAndPages() async {
         let k = bootKernel()
-        let all = (0..<4).map { i in put(k, "ai", ["role": .string("user"), "content": .string("turn \(i)")]) }
+        let all = (0..<4).map { i in put(k, "ai", ["role": .string("user"), "content": .string("message \(i)")]) }
         let got = await send(k, "kernel_state", .object(["type": .string("rows_read"), "agent": .string("ai")]))
         #expect(ids(got) == all)
-        #expect(got["rows"].asArray?[0]["content"].asString == "turn 0", "WHOLE, not a digest")
+        #expect(got["rows"].asArray?[0]["content"].asString == "message 0", "WHOLE, not a digest")
         #expect(got["next"].isNull)
         let page = await send(k, "kernel_state", .object(["type": .string("rows_read"), "agent": .string("ai"), "limit": .integer(2)]))
         #expect(ids(page) == Array(all[..<2]) && page["next"].asInt == all[1])

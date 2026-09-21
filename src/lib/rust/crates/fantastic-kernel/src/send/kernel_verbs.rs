@@ -50,7 +50,7 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
 /// after the dash reaches `detail:"full"` callers only — and these are the facts
 /// a caller needs BEFORE firing the verb, not after. Measured 2026-08-24:
 /// `create_agent` read as `args: handler_module:str, id:str?, **meta` with
-/// "spawn a child agent" cut, and a model spent 16 turns unable to work out what
+/// "spawn a child agent" cut, and a model spent 16 messages unable to work out what
 /// the target meant, finishing with `agents_created: []`.
 pub fn kernel_verb_docs() -> Value {
     // PYTHON DECLARATION ORDER (`_SYSTEM_VERB_DOCS`): `detail:"full"` renders the

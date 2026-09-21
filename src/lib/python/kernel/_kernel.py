@@ -419,7 +419,7 @@ class Kernel:
 
     # THE MESSAGE STORE — every message the kernel ever made, id-addressed by the
     # one counter, append-only: a row is never edited or removed by this API. An
-    # agent's CONVERSATION (a turn, a delivered reply, a fold mark, a recall
+    # agent's CONVERSATION (a message, a delivered reply, a fold mark, a recall
     # decision) and the kernel's own bookkeeping — a `call` row per batch item, a
     # `task` row per forked job — live in the same table; readers filter by `kind`.
     # A dehydrated reply BODY is a `body` row whose `parent` is the call's id; an
@@ -447,7 +447,7 @@ class Kernel:
         task, a conversation row, a reply body all take their id here, so one
         number names one thing everywhere (`ps`, `cancel`, `messages`, a reply
         tag). Minting reserves the id; the row may be written later (`rows_put`
-        accepts a pre-minted id) — an AI turn names its own id in the reply tags
+        accepts a pre-minted id) — an AI message names its own id in the reply tags
         it sends before its row exists."""
         n = self.next_id
         self.next_id = n + 1
@@ -492,10 +492,10 @@ class Kernel:
         task, no row. The queue holds references to rows already in RAM."""
         q: asyncio.Queue = asyncio.Queue()
         self._tails.append(q)  # registered BEFORE the snapshot: nothing slips between
-        # IDS DO NOT ARRIVE IN ORDER. An AI turn's id is minted when the turn starts
-        # and its row lands when the turn ends, after calls minted in between — so
+        # IDS DO NOT ARRIVE IN ORDER. An AI message's id is minted when the message starts
+        # and its row lands when the message ends, after calls minted in between — so
         # "newer than the last yielded" would drop it (measured 2026-09-08: every
-        # conversation turn missing from the log). Dedupe only against the replay.
+        # conversation message missing from the log). Dedupe only against the replay.
         replayed = sorted(i for i in self.rows if i > after)
         try:
             for rid in replayed:
@@ -761,7 +761,7 @@ class Kernel:
             return {"cancelled": False, "killed": []}
         ids = self.task_subtree(task_id)
         # MARK FIRST, kill second. `on_cancel` runs real teardown and can await,
-        # so a handler in the doomed subtree gets scheduling turns between the
+        # so a handler in the doomed subtree gets scheduling passes between the
         # mark and the abort. Anything it sends in that window belongs to work
         # that is already dead: without the mark it started fresh dispatches —
         # new `ps` rows, new OS children — that outlived the cancel (measured
@@ -866,7 +866,7 @@ class Kernel:
             return {"error": f"cannot delete root agent {agent_id!r}"}
         return await agent.parent.delete(agent_id)
 
-    SHUTDOWN_VERB_TIMEOUT = 30.0  # one bound for every agent's `shutdown` turn
+    SHUTDOWN_VERB_TIMEOUT = 30.0  # one bound for every agent's `shutdown` dispatch
     QUIET_TIMEOUT = 10.0  # how long in-flight work may take to settle before cancel
 
     async def shutdown_agents(self) -> dict:
@@ -874,7 +874,7 @@ class Kernel:
 
         1. DRAIN: new roots are refused; sends with a live parent task still pass.
         2. `shutdown` VERB: every agent whose bundle advertises it is told, all at
-           once, under `shutdown_context()`, bounded. For an AI it is a turn ("the
+           once, under `shutdown_context()`, bounded. For an AI it is a message ("the
            kernel is stopping; persist what matters, then done"); its tools work.
         3. QUIET: wait for the in-flight DISPATCHES to settle (persister loops
            marked `keepalive` and `spawn_task` service loops excepted), bounded;

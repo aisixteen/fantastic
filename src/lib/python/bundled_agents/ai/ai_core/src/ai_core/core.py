@@ -116,7 +116,7 @@ _queue: dict[str, list[dict]] = {}
 _current: dict[str, dict] = {}
 
 # Last context-overflow projection per agent — the PUBLIC summary surfaced by the
-# `context_status` verb. {fired:bool, strategy?, kept_turns?, dropped_turns?, summarized?,
+# `context_status` verb. {fired:bool, strategy?, kept_messages?, dropped_messages?, summarized?,
 # too_small?}. Kept free of internal bookkeeping (see `_compaction_mark`).
 _projection: dict[str, dict] = {}
 
@@ -399,16 +399,16 @@ def _row_ids_for_incoming(self_id: str, text: str, kernel) -> tuple[int, int | N
     return rid, (_as_id(m.group(1)) if m else None)
 
 
-def _reply_tag(pid, target, verb, title, turn_id, n, m_total, batch) -> str:
+def _reply_tag(pid, target, verb, title, message_id, n, m_total, batch) -> str:
     """The one line a reply is known by, forever — in the durable store, in `recall`
     pages, and as the stub a stripped body leaves behind:
-        [reply to <pid> · <target> <verb> · "<title>" · ↑<turn> · N of M in batch <b>]
+        [reply to <pid> · <target> <verb> · "<title>" · ↑<message> · N of M in batch <b>]
     Optional segments are appended in that order; `_REPLY_TAG` absorbs them all."""
     tag = f"[reply to {pid} · {target} {verb}"
     if title:
         tag += f' · "{title}"'
-    if turn_id:
-        tag += f" · ↑{turn_id}"
+    if message_id:
+        tag += f" · ↑{message_id}"
     if m_total > 1:
         tag += f" · {n} of {m_total} in batch {batch}"
     return tag + "]"
@@ -1189,7 +1189,7 @@ async def _route_reply(
     send_timeout,
     incoming,
     *,
-    turn_id: str | None = None,
+    message_id: str | None = None,
 ):
     """Honour where this pass's output goes. Runs DETACHED, after the lock is
     released.
@@ -1256,7 +1256,7 @@ async def _route_reply(
             for r in recipients:
                 payload = dict(a.get("payload") or {})
                 payload["to"] = recipients
-                payload["msg"] = turn_id
+                payload["msg"] = message_id
                 if "re" in a:
                     payload["re"] = a["re"]
                 expanded.append(
@@ -1269,7 +1269,7 @@ async def _route_reply(
                 and a["payload"].get("type") == "send"
             ):
                 payload = dict(a["payload"])
-                payload.setdefault("msg", turn_id)
+                payload.setdefault("msg", message_id)
                 if "re" in a:
                     payload["re"] = a["re"]
                 call = {
@@ -1412,11 +1412,11 @@ async def _route_reply(
         # glance (measured 2026-08-24: bare "1 of 3" labels collided across
         # turns and the model re-read one file forever). The PID still
         # identifies the individual call and is the `ps`/`cancel` handle.
-        # The batch token IS the assistant row's hex, so `in batch <b>` and `↑<turn>`
+        # The batch token IS the assistant row's hex, so `in batch <b>` and `↑<message>`
         # name the same thing and the model can see the row every reply points at.
-        # The batch token IS the assistant row's id, so `in batch <b>` and `↑<turn>`
+        # The batch token IS the assistant row's id, so `in batch <b>` and `↑<message>`
         # name the same thing.
-        batch = turn_id if turn_id else secrets.token_hex(2)
+        batch = message_id if message_id else secrets.token_hex(2)
         groups: dict[str, list[str]] = {}
         order: list[str] = []
         for dest, target, verb, idx, body, *_ in units:
@@ -1465,7 +1465,7 @@ async def _route_reply(
                 pid = "-"
             n = counts[dest] = counts[dest] + 1
             m_total = sum(1 for u in units if u[0] == dest)
-            tag = _reply_tag(pid, target, verb, title, turn_id, n, m_total, batch)
+            tag = _reply_tag(pid, target, verb, title, message_id, n, m_total, batch)
             groups[dest][n - 1] = tag + "\n" + body
         for dest in order:
             _deliver_soon(
@@ -1833,8 +1833,8 @@ async def _project_context(
                     # 131k window): this fired needing a single >126k-token turn
                     # and recorded nothing about it — the run's tempdir was gone
                     # before anyone could ask WHICH message was that big.
-                    "last_turn_tokens": estimate_one(body[-1]),
-                    "last_turn_head": str(body[-1].get("content"))[:200],
+                    "last_message_tokens": estimate_one(body[-1]),
+                    "last_message_head": str(body[-1].get("content"))[:200],
                     "hint": hint,
                 },
             },
@@ -1907,8 +1907,8 @@ async def _project_context(
     _projection[self_id] = {
         "fired": True,
         "strategy": strat_name,
-        "kept_turns": len(out_body),
-        "dropped_turns": dropped_n,
+        "kept_messages": len(out_body),
+        "dropped_messages": dropped_n,
         "summarized": proj.summary is not None,
         "pinned_facts": len(proj.pinned),
         "stripped": proj.stripped,
@@ -1958,8 +1958,8 @@ async def _project_context(
             "phase": "compacted",
             "detail": {
                 "strategy": strat_name,
-                "dropped_turns": dropped_n,
-                "kept_turns": len(out_body),
+                "dropped_messages": dropped_n,
+                "kept_messages": len(out_body),
                 "summarized": proj.summary is not None,
                 "pinned_facts": len(proj.pinned),
                 "stripped": proj.stripped,
@@ -1998,7 +1998,7 @@ async def _run(
     # token on this turn's reply tags is the assistant row's own hex, so `↑` on every
     # reply points at something the model can see.
     in_id, in_parent = _row_ids_for_incoming(self_id, user_text, kernel)
-    turn_id = _mint_row_id(self_id, kernel)
+    message_id = _mint_row_id(self_id, kernel)
     # Context-overflow projection: shape what the MODEL sees this turn to fit the
     # window via the agent's `context_strategy` (default compact). Skipped when the
     # caller supplies its own `messages` (stateless — it owns the context). Done ONCE
@@ -2069,7 +2069,7 @@ async def _run(
             {
                 "role": "assistant",
                 "content": without_thinking(last_text),
-                "id": turn_id,
+                "id": message_id,
                 "parent": in_id,
             },
         ]
@@ -2078,7 +2078,7 @@ async def _run(
         "response": last_text,
         "final": last_text,
         "client_id": client_id,
-        "turn_id": turn_id,
+        "message_id": message_id,
     }
 
 
@@ -2107,7 +2107,7 @@ def _make_reflect(cfg: Backend):
             "emits": {
                 "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
                 "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued.",
-                "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
+                "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
             },
             "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`status` skip the lock and stay snappy.",
         }
@@ -2380,7 +2380,7 @@ def _make_send(cfg: Backend):
                 # The text this turn ANSWERED — what tells routing whether
                 # this was a chain turn (a delivered reply) or a chat turn.
                 text,
-                turn_id=reply.get("turn_id"),
+                message_id=reply.get("message_id"),
             )
             kernel.ctx.spawn_task(id, "route_reply", coro)
         return reply
@@ -3053,7 +3053,7 @@ async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
 async def _context_status(id, payload, kernel):
     """No args. The context-budget posture + the last overflow projection + the model's
     derived reaction to it. Returns {context_window, output_reserve, budget, strategy,
-    last_projection:{fired, strategy?, kept_turns?, dropped_turns?, summarized?,
+    last_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,
     too_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}."""
     rec = kernel.get(id) or {}
     return {

@@ -315,7 +315,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     /// python `PB/web/host/src/web/readme.md`, byte for byte.
     static let readmeText = """
         # web — uvicorn HTTP host
-        Serves rendering only: `/` (tree), `/<id>/file/<path>` (static file proxy), favicon. No server-side `/<id>/` render route — frontend panels live in the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest) that mount routes via the duck-typed `get_routes` verb. `port` field on the record is where it binds.
+        Serves rendering only: `/` (tree), `/<id>/file/<path>` (static file proxy), favicon. No server-side `/<id>/` render route — frontend panels live in the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest): they DECLARE routes via the duck-typed `get_routes` verb (pure data — `{kind, method?, path}`) and hand the live endpoint for each path to this host through the duck-typed `route_endpoints(agent)` module hook. A leg declaring a route without that hook fails web boot. `port` field on the record is where it binds.
 
         """
 }

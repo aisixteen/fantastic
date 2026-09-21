@@ -711,7 +711,7 @@
         }
 
         /// `connector` hands over the reference wire client — a model pastes it instead
-        /// of re-deriving the socket framing (measured 2026-09-01: ten turns lost).
+        /// of re-deriving the socket framing (measured 2026-09-01: ten passes lost).
         @Test func theConnectorVerbHandsOverTheReferenceClient() async {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "dur_conn")
@@ -978,7 +978,7 @@
                 ), "\(wire)")
             #expect(
                 r["inbox"].asString
-                    == "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first turn arrives.",
+                    == "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
                 "\(r["inbox"].serialize())")
         }
 

@@ -233,7 +233,7 @@ let inFlightTurns = InFlightTurns()
 /// the list buys is that each copy carries the WHOLE list, so a recipient can
 /// see who else heard it and reply to the same group instead of forking a
 /// private conversation the others never see.
-func fanOut(_ calls: [ToolCall], turnId: Int64? = nil) -> [ToolCall] {
+func fanOut(_ calls: [ToolCall], messageId: Int64? = nil) -> [ToolCall] {
     var out: [ToolCall] = []
     for call in calls {
         guard case .object(let args) = call.arguments else {
@@ -247,10 +247,10 @@ func fanOut(_ calls: [ToolCall], turnId: Int64? = nil) -> [ToolCall] {
         if call.name != "send" || recipients.isEmpty {
             // A single `send` of a turn still carries `msg` — the row that sent
             // it — unless the model named one itself. Python `_route_reply`.
-            if call.name == "send", let turnId, case .some(.object(var payload)) = args["payload"],
+            if call.name == "send", let messageId, case .some(.object(var payload)) = args["payload"],
                 payload["type"]?.asString == "send"
             {
-                if payload["msg"] == nil { payload["msg"] = .integer(turnId) }
+                if payload["msg"] == nil { payload["msg"] = .integer(messageId) }
                 if let re = args["re"] { payload["re"] = re }
                 var copy = args
                 copy["payload"] = .object(payload)
@@ -269,7 +269,7 @@ func fanOut(_ calls: [ToolCall], turnId: Int64? = nil) -> [ToolCall] {
             // The WHOLE list, in every copy — that is what makes it one message.
             payload["to"] = .array(recipients.map { JSON.string($0) })
             // `msg` is the sending row's id: what a reply's `re` names.
-            if let turnId { payload["msg"] = .integer(turnId) }
+            if let messageId { payload["msg"] = .integer(messageId) }
             if let re { payload["re"] = re }
             var copy: OrderedDictionary<String, JSON> = [:]
             for (k, v) in args
@@ -314,7 +314,7 @@ private struct RouteBlock {
     /// The assistant turn that MADE these calls, once the row store exists to
     /// number turns. It rides as `\u{2191}<turn>` so a delivered reply names its
     /// own parent and a chain stays attributable across interleaved work.
-    var turnId: Int? = nil
+    var messageId: Int? = nil
     let body: String
 }
 
@@ -346,9 +346,9 @@ func routeReply(
     incoming: String,
     sendTimeout: Double,
     runState: AIAgentRunState? = nil,
-    turnId: Int64? = nil
+    messageId: Int64? = nil
 ) async {
-    let calls = fanOut(extractToolCalls(text), turnId: turnId)
+    let calls = fanOut(extractToolCalls(text), messageId: messageId)
     let doneCalled = calls.contains { $0.name == "done" }
     let awaitCalled = calls.contains { $0.name == "await" }
     let anyCalls = !calls.isEmpty
@@ -644,7 +644,7 @@ func routeReply(
     let nudging = !anyCalls && !anyBlocks
     if anyBlocks {
         await deliverGrouped(
-            kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt, turnId: turnId)
+            kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt, messageId: messageId)
     }
     if doneCalled {
         // Explicitly finished — nothing more runs, nothing reminds. A caller's
@@ -726,7 +726,7 @@ func routeReply(
 /// could not tell "still running" from "answered the wrong one".
 private func deliverGrouped(
     kernel: Kernel, blocks: [RouteBlock], clientId: String, systemPrompt: String?,
-    turnId: Int64? = nil
+    messageId: Int64? = nil
 ) async {
     guard !blocks.isEmpty else { return }
     // Destination order = first appearance, so the model reads them in the order
@@ -740,7 +740,7 @@ private func deliverGrouped(
     // The batch token IS the assistant row's id, so `in batch <b>` and `↑<turn>`
     // name the same thing and the model can see the row every reply points at.
     // (A fresh random token only when no turn made these calls.)
-    let token = turnId.map { String($0) } ?? String(format: "%04x", UInt16.random(in: .min ... .max))
+    let token = messageId.map { String($0) } ?? String(format: "%04x", UInt16.random(in: .min ... .max))
     for dest in order {
         let parts = byDest[dest] ?? []
         let m = parts.count
@@ -752,7 +752,7 @@ private func deliverGrouped(
             //     [reply to <pid> · <target> <verb> · "<title>" · ↑<turn> · N of M in batch <b>]
             var tag = "[reply to \(b.pid) \u{b7} \(b.target) \(b.verb)"
             if let t = b.title { tag += " \u{b7} \"\(t)\"" }
-            if let turnId { tag += " \u{b7} \u{2191}\(turnId)" }
+            if let messageId { tag += " \u{b7} \u{2191}\(messageId)" }
             tag += m > 1 ? " \u{b7} \(i + 1) of \(m) in batch \(token)]" : "]"
             return tag + "\n" + b.body
         }.joined(separator: "\n\n")

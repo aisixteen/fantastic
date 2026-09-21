@@ -59,7 +59,7 @@ fn plant(k: &Arc<Kernel>, owner: &str, content: &str) -> i64 {
     k.rows
         .put(
             &AgentId::from(owner),
-            json!({"kind": "turn", "role": "user", "content": content})
+            json!({"kind": "message", "role": "user", "content": content})
                 .as_object()
                 .unwrap()
                 .clone(),
@@ -91,8 +91,8 @@ async fn an_agent_reads_its_own_rows_and_is_refused_anothers() {
     let k = kernel();
     agent(&k, "peer", json!({}));
     agent(&k, "ai", json!({}));
-    let mine = plant(&k, "peer", "my own turn");
-    let theirs = plant(&k, "ai", "somebody else's turn");
+    let mine = plant(&k, "peer", "my own message");
+    let theirs = plant(&k, "ai", "somebody else's message");
 
     let out = fantastic_kernel::send::with_sender(AgentId::from("peer"), async {
         ask(&k, json!({"type": "messages", "ids": [mine, theirs]})).await
@@ -228,7 +228,7 @@ async fn rows_pair_agent_strips_like_python() {
 async fn the_digest_pages_by_limit_and_after() {
     let k = kernel();
     let ids: Vec<i64> = (0..5)
-        .map(|i| plant(&k, "ai", &format!("turn {i}")))
+        .map(|i| plant(&k, "ai", &format!("message {i}")))
         .collect();
     let page = ask(&k, json!({"type": "messages", "ids": ids, "limit": 2})).await;
     assert_eq!(page["rows"].as_array().unwrap().len(), 2);
@@ -268,7 +268,7 @@ async fn a_view_row_says_how_much_it_holds_never_the_array() {
 async fn rows_read_returns_whole_rows_oldest_first_and_pages() {
     let k = kernel();
     let ids: Vec<i64> = (0..4)
-        .map(|i| plant(&k, "ai", &format!("turn {i}")))
+        .map(|i| plant(&k, "ai", &format!("message {i}")))
         .collect();
     let got = ask(&k, json!({"type": "rows_read", "agent": "ai"})).await;
     let rows = got["rows"].as_array().expect("rows");
@@ -279,7 +279,7 @@ async fn rows_read_returns_whole_rows_oldest_first_and_pages() {
         ids
     );
     // WHOLE, not a digest: `messages` hides bodies on purpose, this one does not.
-    assert_eq!(rows[0]["content"], "turn 0");
+    assert_eq!(rows[0]["content"], "message 0");
     assert!(got["next"].is_null());
 
     let page = ask(&k, json!({"type": "rows_read", "agent": "ai", "limit": 2})).await;
@@ -460,17 +460,17 @@ async fn digest_of(k: &Arc<Kernel>, id: i64) -> Value {
 #[tokio::test]
 async fn digest_head_and_bytes_count_code_points() {
     // C63. `bytes` used to be `content.len()` — UTF-8 bytes — so a cyrillic or
-    // CJK turn read as two or three times its length, and `head` cut on chars
+    // CJK message read as two or three times its length, and `head` cut on chars
     // while `bytes` counted bytes.
     let k = kernel();
     let jp = plant_row(
         &k,
         "ai",
-        json!({"kind": "turn", "content": "日本語".repeat(4) + "x"}),
+        json!({"kind": "message", "content": "日本語".repeat(4) + "x"}),
     );
     assert_eq!(digest_of(&k, jp).await["bytes"], json!(13));
 
-    let crlf = plant_row(&k, "ai", json!({"kind": "turn", "content": "a\r\nb"}));
+    let crlf = plant_row(&k, "ai", json!({"kind": "message", "content": "a\r\nb"}));
     let d = digest_of(&k, crlf).await;
     assert_eq!(d["bytes"], json!(4), "\\r survives, \\n becomes a space");
     assert_eq!(d["head"], json!("a\r b"));
@@ -479,7 +479,7 @@ async fn digest_head_and_bytes_count_code_points() {
     let long = plant_row(
         &k,
         "ai",
-        json!({"kind": "turn", "content": "\r\n".repeat(100)}),
+        json!({"kind": "message", "content": "\r\n".repeat(100)}),
     );
     let d = digest_of(&k, long).await;
     assert_eq!(d["head"].as_str().unwrap().chars().count(), 120);
@@ -502,14 +502,14 @@ async fn non_string_content_digests_like_python_str() {
         let id = plant_row(
             &k,
             "ai",
-            json!({"kind": "turn", "content": content.clone()}),
+            json!({"kind": "message", "content": content.clone()}),
         );
         let d = digest_of(&k, id).await;
         assert_eq!(d["head"], json!(head), "content {content}");
         assert_eq!(d["bytes"], json!(bytes), "content {content}");
     }
     // An ABSENT key is "" — not "None".
-    let id = plant_row(&k, "ai", json!({"kind": "turn"}));
+    let id = plant_row(&k, "ai", json!({"kind": "message"}));
     let d = digest_of(&k, id).await;
     assert_eq!(d["head"], json!(""));
     assert_eq!(d["bytes"], json!(0));
@@ -721,7 +721,7 @@ async fn digest_cap_counts_python_json_dumps_length() {
             plant_row(
                 &k,
                 "ai",
-                json!({"kind": "turn", "role": "user", "content": "日本語".repeat(100)}),
+                json!({"kind": "message", "role": "user", "content": "日本語".repeat(100)}),
             )
         })
         .collect();
