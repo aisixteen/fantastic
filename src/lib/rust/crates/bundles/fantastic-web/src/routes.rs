@@ -44,8 +44,9 @@ pub(crate) enum Handler {
     RestReflectRoot(AgentId),
     /// `GET /<rest_id>/_reflect/{target_id}`.
     RestReflectTarget(AgentId),
-    /// `WS /{host_id}/ws`.
-    Ws,
+    /// `WS /{host_id}/ws`, carrying the web_ws LEG that declared it — the
+    /// record the frame gate reads and the identity every frame runs as (C40).
+    Ws(AgentId),
 }
 
 /// One mounted route, in mount order.
@@ -527,7 +528,7 @@ pub(crate) fn routes_from_spec(child: &AgentId, reply: &serde_json::Value) -> Ve
             continue;
         }
         if kind == "websocket" {
-            out.push(Route::websocket(path, Handler::Ws));
+            out.push(Route::websocket(path, Handler::Ws(child.clone())));
             continue;
         }
         let method = spec

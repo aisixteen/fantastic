@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 /// asyncio's `StreamReader` default buffer bound. python reads every pipe through
 /// one, so a line longer than this is not truncated — `readline` RAISES, and the
 /// pump reports the raise as the job's stderr (A4.14).
-const LINE_LIMIT: usize = 65536;
+const LINE_LIMIT: usize = 16 * 1024 * 1024; // python raised asyncio's 64 KiB default (2026-09-20)
 
 /// The text `asyncio.StreamReader.readline` raises past [`LINE_LIMIT`], verbatim.
 const LINE_LIMIT_ERROR: &str = "Separator is not found, and chunk exceed the limit";

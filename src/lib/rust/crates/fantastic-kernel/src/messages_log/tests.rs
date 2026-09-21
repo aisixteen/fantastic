@@ -76,7 +76,13 @@ fn an_unknown_log_version_refuses() {
         "<messages v=\"9\">\n<row id=\"1\" agent=\"ai\" />\n",
     );
     let err = read_messages(tmp.path()).expect_err("a foreign version must refuse");
-    assert!(err.contains("unknown log version"), "{err}");
+    // C55: python `f"{head!r}"` — python repr quoting (single quotes), not
+    // rust's Debug `{:?}`.
+    assert_eq!(
+        err,
+        "messages.xml: unknown log version — first line is '<messages v=\"9\">', \
+         this loader writes '<messages v=\"1\">'"
+    );
 }
 
 #[test]

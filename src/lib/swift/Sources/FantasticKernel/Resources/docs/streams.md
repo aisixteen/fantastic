@@ -30,7 +30,7 @@ read_stream-only.
 
 ## The kernel's tail
 
-`Kernel.rows_stream(after)` is a SOURCE inside the process: every message with
+The kernel's row stream (every row after a cursor) is a SOURCE inside the process: every message with
 `id > after`, then every message as it lands. Yielding is not a message — no send, no
 task, no row. The loader's message pump is its first consumer; a UI or a relay can be
 the next, at no cost to the agents.

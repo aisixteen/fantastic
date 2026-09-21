@@ -60,7 +60,7 @@ impl Bundle for FakeStore {
         header: Value,
         blob: Vec<u8>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
         let target = self.root.join(path);
         match header.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -69,19 +69,22 @@ impl Bundle for FakeStore {
                     std::fs::create_dir_all(p).ok();
                 }
                 std::fs::write(&target, &blob).ok();
-                Ok((Some(json!({"written": blob.len()})), Vec::new()))
+                Ok((Some(json!({"written": blob.len()})), None))
             }
             "read_stream" => match std::fs::read(&target) {
                 // One whole file, `eof: true` — the pump stops on the first pass.
-                Ok(b) => Ok((Some(json!({"path": path, "eof": true, "size": b.len()})), b)),
+                Ok(b) => Ok((
+                    Some(json!({"path": path, "eof": true, "size": b.len()})),
+                    Some(b),
+                )),
                 Err(_) => Ok((
                     Some(json!({"error": format!("no such path {path:?}")})),
-                    Vec::new(),
+                    None,
                 )),
             },
             other => Ok((
                 Some(json!({"error": format!("FakeStore: {other:?}")})),
-                Vec::new(),
+                None,
             )),
         }
     }
@@ -97,11 +100,12 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
             root: store_root.to_path_buf(),
         },
     );
+    fantastic_kernel::test_support::register_root_loader(&mut reg);
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
-        None,
+        AgentId::from("kernel_state"),
+        Some("kernel_state.tools".to_string()),
         None,
         Map::new(),
         store_root.to_path_buf(),

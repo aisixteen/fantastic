@@ -56,26 +56,10 @@ public struct AIBackendConfig: Sendable {
     /// retry-once-on-a-pre-stream-429, which needs to EMIT while it waits, so it
     /// is handed the backend's own status emitter rather than the run state.
     public var streamWrapper:
-        (@Sendable (any AIProvider, [JSON], AIStatusEmitter) -> AsyncThrowingStream<AIChunk, Error>)?
-
-    /// Extra system-prompt text appended AFTER the shared assembly
-    /// (primer + self-reflect + context how-to). The Apple-FM
-    /// backend uses this for its always-inject durable memory (each
-    /// memory documents' content + any custom
-    /// `instructions` meta). Receives the agent + kernel so it can read
-    /// state on demand; runs every turn. Default empty (ollama / NIM).
-    public var systemPromptExtra: @Sendable (Agent, Kernel) async -> String
-
-    /// A HARD, SMALL window: assemble the SHORT how-to instead of the full one,
-    /// and skip the context/compaction block entirely.
-    ///
-    /// Set by the on-device Apple FM backend alone. Its window is a hard 4096
-    /// tokens and the canonical `SEND_TO_HOWTO` is ~2100 of them, so the full
-    /// block plus the primer reflect exceeded the window before the user's text
-    /// was added — the session refused with `exceededContextWindowSize` and every
-    /// send failed. The compaction block is dropped too: at 4096 tokens it costs
-    /// more of the window than the discipline it teaches saves.
-    public var compactPrompt: Bool
+        (
+            @Sendable (any AIProvider, [JSON], AIStatusEmitter) ->
+                AsyncThrowingStream<AIChunk, Error>
+        )?
 
     /// Extra fields merged into the `reflect` reply AFTER the shared base, in
     /// the order the backend lists them — python `cfg.reflect_extra`, whose
@@ -96,7 +80,6 @@ public struct AIBackendConfig: Sendable {
         sentence: String,
         defaultModel: String,
         defaultEndpoint: String,
-        compactPrompt: Bool = false,
         sendTimeout: Double = AIBackend.envSendTimeout,
         errorMapper: (@Sendable (Error) -> String?)? = nil,
         streamWrapper: (
@@ -106,7 +89,6 @@ public struct AIBackendConfig: Sendable {
         reflectExtra: @escaping @Sendable (Agent) -> OrderedDictionary<String, JSON> = {
             _ in [:]
         },
-        systemPromptExtra: @escaping @Sendable (Agent, Kernel) async -> String = { _, _ in "" },
         makeProvider:
             @escaping @Sendable (Agent, String, Kernel) async -> ProviderResult
     ) {
@@ -114,12 +96,10 @@ public struct AIBackendConfig: Sendable {
         self.sentence = sentence
         self.defaultModel = defaultModel
         self.defaultEndpoint = defaultEndpoint
-        self.compactPrompt = compactPrompt
         self.sendTimeout = sendTimeout
         self.errorMapper = errorMapper
         self.streamWrapper = streamWrapper
         self.reflectExtra = reflectExtra
-        self.systemPromptExtra = systemPromptExtra
         self.makeProvider = makeProvider
     }
 }

@@ -31,7 +31,7 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     kernel.bundles.register(HANDLER_MODULE, LlamaCppBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -43,7 +43,7 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     let id = agent_id_for(tmp);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
@@ -107,7 +107,7 @@ async fn temperature_is_always_on_the_wire() {
     let (kernel, agent) = mk_kernel(&tmp).await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(),
                    "endpoint": format!("{}/v1", server.uri())}),
         )])
@@ -125,7 +125,7 @@ async fn temperature_is_always_on_the_wire() {
     // …and the record still overrides it.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(),
                    "endpoint": format!("{}/v1", server.uri()), "temperature": 0.9}),
         )])
@@ -199,7 +199,7 @@ async fn reflect_extras_match_python() {
     // Set the knobs: python's conversions apply.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(),
                    "temperature": 0.7, "num_predict": 0, "think": false,
                    "api_key": "k"}),

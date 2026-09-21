@@ -76,7 +76,7 @@ pub struct AgentRecord {
 /// std::sync::RwLock to keep them sync). Lifecycle methods land with
 /// sub-phase B (`send.rs`, `lifecycle.rs`).
 pub struct Agent {
-    /// Identifier (e.g. `"core"`, `"file_abc123"`).
+    /// Identifier (e.g. `"kernel_state"`, `"file_abc123"`).
     pub id: AgentId,
     /// Bundle handler key, if any.
     pub handler_module: Option<String>,

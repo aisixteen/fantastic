@@ -225,13 +225,15 @@ impl Bundle for TerminalBackendBundle {
         header: Value,
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), BundleError> {
+    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
         if header.get("type").and_then(Value::as_str) == Some("paste_image") {
             let mime = header.get("mime").cloned().unwrap_or(Value::Null);
-            return Ok((Some(paste_image(agent_id, blob, &mime).await?), Vec::new()));
+            // `paste_image` CONSUMES a blob and answers a status — no chunk
+            // comes back, so `None`, not an empty body (C37).
+            return Ok((Some(paste_image(agent_id, blob, &mime).await?), None));
         }
         let reply = self.handle(agent_id, &header, kernel).await?;
-        Ok((reply, Vec::new()))
+        Ok((reply, None))
     }
 
     /// python `on_delete` — the PTY must not outlive its agent record.
@@ -745,11 +747,11 @@ fn attach_reader(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &Arc<PtyState>
     let holder_agent = agent_id.clone();
     let holder_kernel = Arc::clone(kernel);
     let holder_state = Arc::clone(state);
-    // The holder task OWNS the attachment: it reads while attached and then,
-    // like python's `_hold`, lives until it is cancelled.
+    // The holder task OWNS the attachment and ENDS with it: python cancels its
+    // holder on detach (2026-09-20), so `pty_reader` rows no longer pile up
+    // across pause/resume.
     kernel.spawn_task(agent_id, "pty_reader", async move {
         read_loop(&holder_agent, &holder_kernel, &holder_state).await;
-        std::future::pending::<()>().await;
     });
 }
 
@@ -851,7 +853,28 @@ async fn read_ready(fd: libc::c_int) -> Readable {
         let mut buf = vec![0u8; READ_CHUNK_BYTES];
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n > 0 {
-            buf.truncate(usize::try_from(n).unwrap_or(0));
+            let mut got = usize::try_from(n).unwrap_or(0);
+            // DRAIN WHAT IS ALREADY BUFFERED, into ONE event. Python's fd
+            // callback only runs when the event loop reaches its selector, so a
+            // burst the child wrote (`echo x` → echo + output + prompt) is one
+            // `os.read(fd, 4096)` and one `output` event. This poll has a ZERO
+            // timeout — it adds no delay and reads only bytes already in the PTY
+            // buffer — and stops at python's read size, so a bigger burst splits
+            // exactly where python's 4096-byte read splits it.
+            while got < READ_CHUNK_BYTES {
+                pfd.revents = 0;
+                if unsafe { libc::poll(&mut pfd, 1, 0) } <= 0 || pfd.revents & libc::POLLIN == 0 {
+                    break;
+                }
+                let m = unsafe {
+                    libc::read(fd, buf.as_mut_ptr().add(got).cast(), READ_CHUNK_BYTES - got)
+                };
+                if m <= 0 {
+                    break;
+                }
+                got += usize::try_from(m).unwrap_or(0);
+            }
+            buf.truncate(got);
             return Readable::Data(buf);
         }
         if n == 0 {
@@ -1232,21 +1255,14 @@ fn mkdtemp(prefix: &str) -> Result<PathBuf, i32> {
     ))
 }
 
-/// python `secrets.token_hex(n)` — 2n hex chars.
+/// python `secrets.token_hex(n)` — 2n hex chars from the OS CSPRNG.
+/// A failure is FATAL — there is no second source (the clock/pid mixer that
+/// stood here was not random at all).
 fn token_hex(n: usize) -> String {
     let mut buf = vec![0u8; n];
     // SAFETY: `buf` is a valid writable buffer of `n` bytes.
     let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), n) };
-    if rc != 0 {
-        // Never a security primitive here — the file name only has to be unique.
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos())
-            ^ std::process::id();
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = u8::try_from((seed >> (i % 4 * 8)) & 0xff).unwrap_or(0);
-        }
-    }
+    assert!(rc == 0, "getentropy failed: no randomness source");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 

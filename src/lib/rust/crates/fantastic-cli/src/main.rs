@@ -39,6 +39,13 @@ fn register_default_bundles() -> BundleRegistry {
     // so they all compile + run on iOS. The Bundle trait is the only
     // dependency the kernel cares about; everything below is pure-Rust
     // async over axum/tokio.
+    // THE ROOT LOADER. `kernel_state.tools` is the root's own handler_module —
+    // without it the tree root has a bundle that is not installed, so its boot
+    // (ledger rehydrate + flusher, message pump, record writer) never runs.
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     reg.register("file_bridge.tools", fantastic_file::FileBundle);
     // The render sink AI backends stream their turn to. Without it that
     // stream had nowhere to land on rust.
@@ -51,18 +58,20 @@ fn register_default_bundles() -> BundleRegistry {
     // in process. A compiled kernel can only run what is compiled in, and the
     // e2e driver reaches this binary over REST, so without these three the
     // scenarios naming them are SKIPPED. Behind a feature: a default build has
-    // none of it.
+    // none of it. UNLISTED: python imports these from `e2e/probes` with no
+    // `fantastic.bundles` entry point, so they dispatch but never appear in the
+    // `bundles` catalog.
     #[cfg(feature = "scenario-probes")]
     {
         use fantastic_scenario_probes as probes;
-        reg.register(probes::DISPENSER_MODULE, probes::DispenserProbe::default());
-        reg.register(probes::PLANT_MODULE, probes::PlantProbe::default());
-        reg.register(probes::PURCHASE_MODULE, probes::PurchaseProbe::default());
+        reg.register_unlisted(probes::DISPENSER_MODULE, probes::DispenserProbe::default());
+        reg.register_unlisted(probes::PLANT_MODULE, probes::PlantProbe::default());
+        reg.register_unlisted(probes::PURCHASE_MODULE, probes::PurchaseProbe::default());
         // THE HUMAN, as an agent. Every AI probe tasks its model through this
         // one, so the task is a gated `user -> ai` send with a ledger row
         // instead of an operator injection from outside the kernel.
-        reg.register(probes::USER_MODULE, probes::UserProbe::default());
-        reg.register(probes::ORACLE_MODULE, probes::OracleProbe::default());
+        reg.register_unlisted(probes::USER_MODULE, probes::UserProbe::default());
+        reg.register_unlisted(probes::ORACLE_MODULE, probes::OracleProbe::default());
     }
     reg.register(
         fantastic_text_file::HANDLER_MODULE,
@@ -151,7 +160,16 @@ async fn main() -> ExitCode {
     match dispatch(args, cap).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("fantastic_kernel: {e}");
+            // C81 — a daemon lock conflict prints python's own `[kernel] {e}`
+            // line (its 3-line text lives on `KernelError::LockHeld`'s
+            // Display), never the generic wrapper every other error takes.
+            if e.downcast_ref::<fantastic_kernel::KernelError>()
+                .is_some_and(|k| matches!(k, fantastic_kernel::KernelError::LockHeld { .. }))
+            {
+                eprintln!("[kernel] {e}");
+            } else {
+                eprintln!("fantastic_kernel: {e}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -309,13 +327,23 @@ async fn dispatch(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let workdir = std::env::current_dir()?;
 
-    // Seed `.fantastic/readme.md` if missing, regardless of which mode
-    // we're about to run. Python's bootstrap does this universally —
-    // an LLM that walks into a workdir's `.fantastic/` always finds
-    // the root readme.md next to `agent.json`/`lock.json`. Idempotent
-    // (preserves user-edited content). Best-effort: if the workdir
-    // can't be written to, the verb may still work.
-    let _ = fantastic_core::seed_root_readme(&workdir);
+    // Seed `.fantastic/readme.md` + the `docs/` tree, in EVERY mode, but ONLY
+    // when the root record is being seeded too. python hangs the cold seed off
+    // `write_record` (`main._bootstrap`: `if seeded: write_record(...)` →
+    // `_seed_readme`), so a workdir that already carries a parseable
+    // `.fantastic/agent.json` gets NOTHING — rust used to write the readme and
+    // the whole docs tree on every invocation (measured 2026-09-20). A missing
+    // OR unparseable record reseeds, as `bootstrap`'s own `seeded` does.
+    // Best-effort: if the workdir can't be written to, the verb may still work.
+    if fantastic_kernel::persistence::read_record_at(
+        &workdir.join(fantastic_kernel::persistence::ROOT_RECORD_PATH),
+    )
+    .ok()
+    .flatten()
+    .is_none()
+    {
+        let _ = fantastic_core::seed_root_readme(&workdir);
+    }
 
     // Mode 1: `help` / `-h` / `--help` as the FIRST word — later words are
     // IGNORED (`P/kernel/modes/dispatch.py:19-21`). python has already built the
@@ -330,6 +358,10 @@ async fn dispatch(
         apply_ledger_cap(&booted, cap);
         // python `print(src.read_text(...).rstrip())` — rstripped, one newline.
         println!("{}", py_rstrip(fantastic_cli_bundle::HELP));
+        // A14.18 — every non-daemon mode ends with an idempotent kernel
+        // shutdown (python's atexit → `Kernel.shutdown`), even here where no
+        // lock was ever taken.
+        booted.kernel.shutdown().await;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -365,6 +397,80 @@ async fn dispatch(
         // A14.9 — python `json.dumps(reply, indent=2, default=str)`: ensure_ascii
         // and python's float repr, not serde's pretty printer.
         println!("{}", py_json_dumps(&reply, true, Some(2)));
+        // A14.18 — every non-daemon mode ends with an idempotent kernel shutdown.
+        booted.kernel.shutdown().await;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Mode 2.5 (A14.3): `init <loader_bundle> <manifest>` — seed a
+    // declarative loader. python `kernel/modes/dispatch.py:90-149`.
+    if args.first().map(String::as_str) == Some("init") {
+        let rest = &args[1..];
+        if rest.len() < 2 {
+            // python builds the kernel in `main` BEFORE `dispatch_argv` runs, so
+            // even the usage error leaves the seeded root record behind — the
+            // readme seed above writes `readme.md` + `docs/` but never
+            // `.fantastic/agent.json` (measured: 19 created paths vs rust's 18).
+            let opts = BootstrapOptions::one_shot(&workdir);
+            let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
+            apply_ledger_cap(&booted, cap);
+            eprintln!(
+                "usage: fantastic init <loader_bundle> <manifest>\n   \
+                 e.g. fantastic init static_loader ./fantastic.yaml"
+            );
+            booted.kernel.shutdown().await;
+            return Ok(ExitCode::from(2));
+        }
+        // The lock is probed BEFORE the bootstrap that would take it — same
+        // shape as A14.7's `call` probe, `[init]`-prefixed.
+        if let Some(pid) = lock::current_holder(&workdir).ok().flatten() {
+            if lock::pid_alive(pid) {
+                eprintln!(
+                    "[init] another fantastic owns this dir (pid={pid}). \
+                     Stop it first."
+                );
+                return Ok(ExitCode::from(1));
+            }
+        }
+        let loader_name = rest[0].clone();
+        let manifest = rest[1].clone();
+        let opts = BootstrapOptions::daemon(&workdir);
+        let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
+        apply_ledger_cap(&booted, cap);
+        let root_id = booted.kernel.root().expect("root").id.clone();
+        // Boot the root loader so the new record subscribes + persists.
+        let _ = booted
+            .kernel
+            .send(vec![Item::new(root_id.clone(), json!({"type": "boot"}))])
+            .await;
+        // `create_agent` boots the loader child → its own boot reads the
+        // manifest and hydrates the roster. The kernel never parses YAML;
+        // the loader does. No duplicate-init guard: a store-less kernel
+        // creates again on every run; only a persisted record makes
+        // `create_agent` refuse (the same id twice).
+        let reply = booted
+            .kernel
+            .send(vec![Item::new(
+                root_id.clone(),
+                json!({
+                    "type": "create_agent",
+                    // python `"parent_id": kernel.root.id` — the ROOT'S OWN
+                    // id, not the `kernel` alias.
+                    "parent_id": root_id.as_str(),
+                    "handler_module": format!("{loader_name}.tools"),
+                    "id": loader_name,
+                    "manifest": manifest,
+                }),
+            )])
+            .await
+            .remove(0)
+            .result;
+        println!("{}", py_json_dumps(&reply, true, Some(2)));
+        booted.kernel.flush_records().await;
+        // A14.7's lock release, THEN A14.18's kernel shutdown — see the same
+        // note on Mode 3 below.
+        bootstrap::shutdown(&workdir)?;
+        booted.kernel.shutdown().await;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -397,6 +503,17 @@ async fn dispatch(
         let opts = BootstrapOptions::daemon(&workdir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
+        // BOOT THE ROOT LOADER so this call's mutations (create/update/delete)
+        // subscribe and persist. The debounce never ticks before we exit, so
+        // the writer is drained synchronously after the call — python's `call`
+        // mode does exactly this (`modes/dispatch.py`).
+        let _ = booted
+            .kernel
+            .send(vec![Item::new(
+                booted.kernel.root().expect("root").id.clone(),
+                json!({"type": "boot"}),
+            )])
+            .await;
         let reply = booted
             .kernel
             .send(vec![Item::new(
@@ -407,7 +524,13 @@ async fn dispatch(
             .remove(0)
             .result;
         println!("{}", py_json_dumps(&reply, true, Some(2)));
+        booted.kernel.flush_records().await;
+        // A14.7's lock release, THEN A14.18's kernel shutdown — python's own
+        // order: the `with FantasticLock()` block's `__exit__` releases the
+        // lock synchronously inside `call()`/`init()`, and `Kernel.shutdown()`
+        // runs LAST, from the process's atexit handler.
         bootstrap::shutdown(&workdir)?;
+        booted.kernel.shutdown().await;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -419,68 +542,63 @@ async fn dispatch(
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
         eprintln!("{USAGE}");
+        // A14.18 — python's `sys.exit(2)` still runs the atexit shutdown chain.
+        booted.kernel.shutdown().await;
         return Ok(ExitCode::from(2));
     }
 
-    // Mode 5: daemon.
-    let opts = BootstrapOptions::daemon(&workdir);
+    // Mode 5: daemon. python `_default` (`kernel/modes/longrun.py:18-129`).
+    //
+    // NO LOCK YET — hydration only, so the "nothing to serve" decision below
+    // can be made the way python makes it: BEFORE the lock and before any
+    // boot (A14.13). D17's tty REPL (A14.14) is NOT ported: this binary
+    // stays headless on a tty, exactly as its own doc comment declares —
+    // the `has_repl` half of python's composition decision has no rust
+    // counterpart here, only the web-daemon half.
+    let opts = BootstrapOptions::one_shot(&workdir);
     let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
-    // Seed the root readme if missing.
-    let _ = fantastic_core::seed_root_readme(&workdir);
+    apply_ledger_cap(&booted, cap);
     let kernel = Arc::clone(&booted.kernel);
 
-    // Headless host — the kernel binary carries NO interactive CLI/renderer
-    // logic anymore (the `fantastic` PRODUCT owns the TUI/REPL). It just boots,
-    // serves, and blocks. `boot` every loaded agent (web binds its listener
-    // here); failures are logged + skipped — boot must never abort the daemon.
-    for id in booted.loaded.iter() {
-        let _ = kernel
-            .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
-            .await
-            .remove(0)
-            .result;
-        // A refusal REPLY is silent, as it is on python: `_boot_all_agents`
-        // prints only for a RAISED boot, and that line
-        // (`  [kernel] boot '<id>' raised: <e>`) lands with A14.13 / C14. The
-        // old rust `tracing::warn!` here printed for every refusal, through a
-        // subscriber python does not have (A15.3).
-    }
-
-    // THE DURABLE LEDGER. After the roster is up (so the store agent exists and
-    // `find_store` can see it) and before anything is served: rehydrate settled
-    // executions, then install the write-through. Order matters — hydrating
-    // after the flusher were installed would rewrite what it just read.
-    fantastic_kernel::persistence::install_ledger_persistence(&kernel).await;
-
-    // THE DURABLE MESSAGE LOG, on the same seam and for the same reason. It
-    // subscribes at the id HYDRATION saw, not at "now": everything the roster
-    // minted while booting is above that cursor and gets replayed to the pump,
-    // so the window between reading the log and installing the writer loses
-    // nothing. Python has to subscribe before any child exists to get that;
-    // here the replay covers it.
-    fantastic_kernel::messages_log::install_message_pump(&kernel, booted.messages_after);
-
-    // Composition decision: a headless host only blocks when it's actually
-    // serving something (a web daemon). With nothing to serve there's no point
-    // holding the process — boot, report, exit. (The interactive front-end that
-    // used to keep a bare kernel alive on a tty now lives in the `fantastic`
-    // PRODUCT, not here.)
     let has_web = kernel
         .agents
         .iter()
         .any(|e| e.value().handler_module.as_deref() == Some("web.tools"));
     if !has_web {
-        bootstrap::shutdown(&workdir)?;
+        // python: `if not web_agents and not has_repl: return` — silent,
+        // exit 0, no lock ever taken.
         return Ok(ExitCode::SUCCESS);
     }
 
-    eprintln!(
-        "fantastic_kernel: headless host up. {} agent(s) loaded. Ctrl-C to stop.",
-        booted.loaded.len()
-    );
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = sigterm() => {},
+    // LOCK-FIRST, before booting — python: "so port binds don't happen on
+    // conflict." `?` surfaces `KernelError::LockHeld` through main()'s
+    // `[kernel] {e}` printer (C81).
+    lock::acquire(&workdir)?;
+
+    // THE ROOT BOOTS FIRST, then every agent in REGISTRATION ORDER (python
+    // `_boot_all_agents` walks `kernel.agents.values()`, and the root is the
+    // first entry). The root's boot is what rehydrates the ledger, installs its
+    // flusher, starts the message pump and subscribes the record writer — so
+    // nothing a child's boot mints is lost, and nothing is installed twice.
+    // Failures are skipped; boot must never abort the daemon. A refusal REPLY is
+    // silent, as on python (`_boot_all_agents` prints only for a RAISED boot).
+    for id in kernel.agent_ids() {
+        let _ = kernel
+            .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
+            .await
+            .remove(0)
+            .result;
+    }
+
+    // A14.13 — python `print("[kernel] up", flush=True)`. The tty half
+    // (`cli` intro/booted verbs) has no rust counterpart (A14.14, above).
+    println!("[kernel] up");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let sig = tokio::select! {
+        _ = tokio::signal::ctrl_c() => "SIGINT",
+        _ = sigterm() => "SIGTERM",
+        _ = sighup() => "SIGHUP",
         // A root-only `shutdown_kernel` verb fired (over web_rest / web_ws).
         // The verb already DEFERRED this signal ~100ms (see send.rs) so the
         // ack was enqueued + flushed over the web surface (WS frame across
@@ -488,24 +606,48 @@ async fn dispatch(
         // handler returned) before we got here. This extra short grace is
         // belt-and-suspenders before we drain the listeners below.
         // Backend-agnostic stop: this exit stops the container (PID 1) or
-        // kills the bare process, identically.
+        // kills the bare process, identically. python's `shutdown_kernel`
+        // verb sets the SAME `stop` event `_request_stop` does, but does NOT
+        // go through `_request_stop` — no per-signal line for this branch.
         _ = kernel.shutdown_requested() => {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            "shutdown_kernel"
         },
+    };
+    // A14.13 — python's exact per-OS-signal line (`_request_stop`): a
+    // leading blank line, the signal's name, stderr, flushed.
+    if sig != "shutdown_kernel" {
+        eprintln!("\n[kernel] {sig} — shutting down...");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
     }
-    eprintln!("fantastic_kernel: shutting down...");
-    // Issue shutdown on every loaded agent (LIFO so children stop
-    // before parents).
-    for id in booted.loaded.iter().rev() {
-        let _ = kernel
-            .send(vec![Item::new(id.clone(), json!({"type": "shutdown"}))])
-            .await
-            .remove(0)
-            .result;
-    }
+    // ALWAYS-RUN CLEANUP (python's `finally:`): depth-first call each
+    // agent's `on_shutdown`/`on_delete` hook. Idempotent — `Kernel::
+    // shutdown`'s own completion flag makes a second call a no-op.
+    eprintln!("[kernel] tearing down agents...");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    kernel.shutdown().await;
+    eprintln!("[kernel] down");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    // Lock release LAST — python's `with FantasticLock():` wraps the whole
+    // boot-through-teardown body, so `release_lock()` runs as that block
+    // exits, AFTER the teardown prints above.
     bootstrap::shutdown(&workdir)?;
-    eprintln!("fantastic_kernel: done.");
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(unix)]
+async fn sighup() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut s = match signal(SignalKind::hangup()) {
+        Ok(s) => s,
+        Err(_) => return std::future::pending::<()>().await,
+    };
+    s.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn sighup() {
+    std::future::pending::<()>().await
 }
 
 #[cfg(unix)]
@@ -575,6 +717,35 @@ mod parse_kv_tests {
         assert_eq!(parse_kv("hello"), json!("hello"));
         assert_eq!(parse_kv("a{b"), json!("a{b"));
         assert_eq!(parse_kv("web.tools"), json!("web.tools"));
+    }
+}
+
+/// C10 — the `bundles` catalog lists INSTALLABLE bundles only. python imports the
+/// e2e probes from `e2e/probes` with no `fantastic.bundles` entry point, so they
+/// dispatch but never reach `reflect bundles=ids`.
+#[cfg(all(test, feature = "scenario-probes"))]
+mod catalog_tests {
+    use super::register_default_bundles;
+    use fantastic_scenario_probes as probes;
+
+    #[test]
+    fn scenario_probes_dispatch_but_are_not_in_the_catalog() {
+        let reg = register_default_bundles();
+        let listed: Vec<&str> = reg.catalog().map(|(hm, _)| hm).collect();
+        for hm in [
+            probes::DISPENSER_MODULE,
+            probes::PLANT_MODULE,
+            probes::PURCHASE_MODULE,
+            probes::USER_MODULE,
+            probes::ORACLE_MODULE,
+        ] {
+            assert!(reg.get(hm).is_some(), "{hm} must still dispatch");
+            assert!(
+                !listed.contains(&hm),
+                "{hm} is a fixture, not a bundle: {listed:?}"
+            );
+        }
+        assert!(listed.contains(&"file_bridge.tools"), "{listed:?}");
     }
 }
 

@@ -75,17 +75,20 @@ extension AgentRecord: Codable {
         self.meta = meta
     }
 
+    /// `parent_id` is declared AFTER the flattened meta — python's `record`
+    /// writes `id`, `handler_module`, the meta, and `parent_id` LAST, so a
+    /// `parent_id` that leaked into meta cannot shadow the tree's answer.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: AnyKey.self)
         try container.encode(id, forKey: AnyKey(stringValue: "id"))
         if let handlerModule {
             try container.encode(handlerModule, forKey: AnyKey(stringValue: "handler_module"))
         }
-        if let parentId {
-            try container.encode(parentId, forKey: AnyKey(stringValue: "parent_id"))
-        }
         for (k, v) in meta where !AgentRecord.reservedKeys.contains(k) {
             try container.encode(v, forKey: AnyKey(stringValue: k))
+        }
+        if let parentId {
+            try container.encode(parentId, forKey: AnyKey(stringValue: "parent_id"))
         }
     }
 
@@ -96,6 +99,54 @@ extension AgentRecord: Codable {
         var intValue: Int? { nil }
         init(stringValue: String) { self.stringValue = stringValue }
         init?(intValue: Int) { nil }
+    }
+}
+
+extension AgentRecord {
+    /// The record as ORDERED json — python `Agent.record`:
+    ///
+    ///     rec = {"id": self.id}
+    ///     if handler_module is not None: rec["handler_module"] = ...
+    ///     rec.update(self._meta)
+    ///     rec["parent_id"] = parent.id      # or popped, for the root
+    ///
+    /// so the keys come out `id, handler_module?, <meta in order>, parent_id`.
+    /// Never route this through `JSONEncoder`: Foundation reorders a keyed
+    /// container per process, which scrambled every `list_agents` row, every
+    /// `create_agent`/`update_agent` reply and every nested grant map.
+    public var ordered: OrderedDictionary<String, JSON> {
+        var rec: OrderedDictionary<String, JSON> = ["id": .string(id)]
+        if let handlerModule { rec["handler_module"] = .string(handlerModule) }
+        // `dict.update` semantics: a meta key that shadows a structural one
+        // overwrites IN PLACE, keeping the position it already had.
+        for (k, v) in meta { rec[k] = v }
+        if let parentId {
+            rec["parent_id"] = .string(parentId)
+        } else {
+            // The root has no parent, whatever meta says.
+            rec.removeValue(forKey: "parent_id")
+        }
+        return rec
+    }
+
+    /// `ordered` as a JSON object.
+    public var json: JSON { .object(ordered) }
+
+    /// Build a record from an on-disk `agent.json` object PRESERVING ITS KEY
+    /// ORDER. `Codable`'s keyed container hands its keys over in hash order, so
+    /// hydrating through it scrambled every record's meta (and every nested
+    /// grant map) on each boot. `JSON.parse` keeps the file's own order.
+    public init(json: JSON) throws {
+        guard case .object(let obj) = json, let id = obj["id"]?.asString else {
+            throw KernelError.invalidPayload("agent.json: missing required field `id`")
+        }
+        var meta: OrderedDictionary<String, JSON> = [:]
+        for (k, v) in obj where !AgentRecord.reservedKeys.contains(k) { meta[k] = v }
+        self.init(
+            id: id,
+            handlerModule: obj["handler_module"]?.asString,
+            parentId: obj["parent_id"]?.asString,
+            meta: meta)
     }
 }
 

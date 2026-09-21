@@ -32,10 +32,25 @@ public func page<T>(
 ) -> (page: [T], next: String?) {
     var items = items
 
-    // A cursor is the id of the last row handed over — an int for kernel rows
-    // now, a string for records. Both read as the ident string.
-    let cursor = payload["after"].asString ?? payload["after"].asInt.map(String.init)
-    if let after = cursor, !after.isEmpty {
+    // C17 (R2-RFL-2): the cursor is python `str(after)` for ANY value that is
+    // not `None`, not a bool (either one — python's `isinstance(after, bool)`
+    // check fires before the stringify, so `true`/`false` are NO cursor, the
+    // same as absent) and not `""` — an int's digits, a float's python repr
+    // (`2.0`, never truncated to `2`), a list/dict's python container repr.
+    // This used to read `.asString ?? .asInt.map(String.init)`, which left a
+    // float/array/object cursor silently absent (→ the WHOLE list) instead of
+    // python's `[]` (a cursor that stringifies to something no item's id
+    // matches — measured: `after=1.5` py `[]` / this used to be `full`;
+    // `after=["c1"]` py `[]` / this used to be `full`; `after=2.0` py `[]`
+    // via the literal string `"2.0"`, not by luckily truncating to an int
+    // that happened to match nothing).
+    let cursor: String?
+    switch payload["after"] {
+    case .null, .bool: cursor = nil
+    case .string(let s): cursor = s.isEmpty ? nil : s
+    case let other: cursor = pyStr(other)
+    }
+    if let after = cursor {
         if let i = items.firstIndex(where: { ident($0) == after }) {
             items = Array(items[(i + 1)...])
         } else {

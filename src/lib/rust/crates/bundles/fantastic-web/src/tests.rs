@@ -19,7 +19,7 @@ fn free_port() -> u16 {
 }
 
 /// Build a kernel with web (+ optionally child surface bundles)
-/// registered, with a root agent set as `core`.
+/// registered, with a root agent set as `kernel_state`.
 fn mk_kernel(tmp: &TempDir, register_ws: bool, register_rest: bool) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
@@ -33,9 +33,13 @@ fn mk_kernel(tmp: &TempDir, register_ws: bool, register_rest: bool) -> Arc<Kerne
             .bundles
             .register("web_rest.tools", fantastic_web_rest::WebRestBundle);
     }
+    // The file proxy and the stream verbs need a real SOURCE to talk to.
+    kernel
+        .bundles
+        .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -72,7 +76,7 @@ async fn web_alone_has_no_ws_endpoint() {
     // create + boot web
     let create_reply = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
@@ -135,7 +139,7 @@ async fn web_with_ws_child_serves_ws() {
 
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
@@ -153,6 +157,12 @@ async fn web_with_ws_child_serves_ws() {
                 "type": "create_agent", "parent_id": web_id,
                 "handler_module": "web_ws.tools",
                 "id": "wws_child",
+                // C40 — a WS frame runs as the LEG, and a leg with no
+                // `ingress_rule` is SEALED. An open face says so.
+                "ingress_rule": "allow_all_ingress",
+                // A grant map is keyed by a LITERAL id or a `$token` — `"*"` is
+                // never a key, only a verb wildcard.
+                "can_call": {"kernel_state": "*"},
             }),
         )])
         .await
@@ -214,7 +224,7 @@ async fn web_with_rest_child_serves_rest() {
 
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
@@ -235,11 +245,11 @@ async fn web_with_rest_child_serves_rest() {
                 "id": rest_id,
                 // Deny-all: an inbound relay dispatches browser calls into the
                 // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
-                // says WHERE into the kernel it lands. This test POSTs to `core`.
+                // says WHERE into the kernel it lands. This test POSTs to `kernel_state`.
                 // The leg SEALS without an explicit rule (403 before dispatch),
                 // so open it here as a browser-facing dev leg would be.
                 "ingress_rule": "allow_all_ingress",
-                "can_call": { "core": "*" },
+                "can_call": { "kernel_state": "*" },
             }),
         )])
         .await
@@ -250,8 +260,8 @@ async fn web_with_rest_child_serves_rest() {
     // root's ingress for the relay (merged with the structural baseline).
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({"type": "update_agent", "id": "core", "callable_by": {
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
                 "$self": "*", "$parent": "*", "$children": "*", rest_id: "*",
             }}),
         )])
@@ -269,7 +279,7 @@ async fn web_with_rest_child_serves_rest() {
     assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
     wait_until_port_accepts(port).await;
 
-    let url = format!("http://127.0.0.1:{port}/{rest_id}/core");
+    let url = format!("http://127.0.0.1:{port}/{rest_id}/kernel_state");
     let resp = reqwest::Client::new()
         .post(&url)
         .header("Content-Type", "application/json")
@@ -291,24 +301,32 @@ async fn web_with_rest_child_serves_rest() {
         .result;
 }
 
-// ── Binary frame chunking ───────────────────────────────────────────
+// ── The WS frame loop (C40 + A11.7/8/9/19) ─────────────────────────
 //
-// These tests drive the chunked-upload protocol over a real WS
-// connection. Wire shape per chunk:
+// One wire shape for both directions:
 //
-//     [4B BE hdr_len][header JSON {target, type, upload_id, chunk_index,
-//                                  total_chunks, final, id?}][raw blob]
+//     text   : the JSON envelope
+//     binary : [4B BE hdr_len][header JSON + `_binary_path`][raw blob]
 //
-// Single-frame uploads (no `upload_id` in the header) take the existing
-// fast path and stay byte-compatible with Python's wire.
+// There is NO chunked-upload protocol any more (A11.19): python has none, and
+// the `upload_id`/`chunk_index`/`total_chunks` frames rust invented were a
+// second, incompatible dialect nothing else on the wire spoke. A big upload is
+// a big binary frame, or a `write_stream` per offset.
 
-/// Stage a web + web_ws on `port`. Returns the booted kernel + the
-/// web agent id. Caller is responsible for stop.
-async fn stage_web_with_ws(tmp: &TempDir, port: u16, web_id: &str) -> Arc<Kernel> {
+/// Stage a web + web_ws on `port`. `open_leg` writes
+/// `ingress_rule: allow_all_ingress` onto the web_ws child — WITHOUT it the leg
+/// is SEALED (C40) and every frame is denied or dropped, which is what a bare
+/// leg means everywhere else in this kernel.
+async fn stage_web_with_ws_leg(
+    tmp: &TempDir,
+    port: u16,
+    web_id: &str,
+    open_leg: bool,
+) -> Arc<Kernel> {
     let kernel = mk_kernel(tmp, true, false);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
@@ -319,16 +337,22 @@ async fn stage_web_with_ws(tmp: &TempDir, port: u16, web_id: &str) -> Arc<Kernel
         .await
         .remove(0)
         .result;
+    let mut ws_rec = json!({
+        "type": "create_agent",
+        "parent_id": web_id,
+        "handler_module": "web_ws.tools",
+        "id": format!("{web_id}_ws"),
+    });
+    if open_leg {
+        ws_rec["ingress_rule"] = json!("allow_all_ingress");
+        // The leg is the SENDER of every frame now (C40), so it needs an egress
+        // grant as well as an open ingress rule — the two gates are independent
+        // and both have to be wired by an operator. A grant map is keyed by a
+        // LITERAL id, never `"*"`.
+        ws_rec["can_call"] = json!({"kernel_state": "*"});
+    }
     let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({
-                "type": "create_agent",
-                "parent_id": web_id,
-                "handler_module": "web_ws.tools",
-                "id": format!("{web_id}_ws"),
-            }),
-        )])
+        .send(vec![Item::new(AgentId::from("kernel"), ws_rec)])
         .await
         .remove(0)
         .result;
@@ -345,6 +369,11 @@ async fn stage_web_with_ws(tmp: &TempDir, port: u16, web_id: &str) -> Arc<Kernel
     kernel
 }
 
+/// The common case: an OPEN leg.
+async fn stage_web_with_ws(tmp: &TempDir, port: u16, web_id: &str) -> Arc<Kernel> {
+    stage_web_with_ws_leg(tmp, port, web_id, true).await
+}
+
 /// Build a binary WS frame: 4B big-endian header_len + JSON header + blob.
 fn build_binary_frame(header: &Value, blob: &[u8]) -> Vec<u8> {
     let hdr_bytes = serde_json::to_vec(header).expect("serialize header");
@@ -355,403 +384,415 @@ fn build_binary_frame(header: &Value, blob: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Send a chunk + collect every text frame the server emits during a
-/// short window. Returns parsed JSON of each frame.
-async fn send_binary_and_drain(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    frame: Vec<u8>,
-) -> Vec<Value> {
-    use futures_util::{SinkExt, StreamExt};
+type TestWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Collect every frame the server emits during a short window, text and binary.
+async fn drain_frames(ws: &mut TestWs, window_ms: u64) -> (Vec<Value>, Vec<Vec<u8>>) {
+    use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message as TMessage;
-    ws.send(TMessage::Binary(frame)).await.expect("send binary");
-    let mut out = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+    let (mut text, mut binary) = (Vec::new(), Vec::new());
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(window_ms);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(100), ws.next()).await {
             Ok(Some(Ok(TMessage::Text(t)))) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    out.push(v);
+                    text.push(v);
                 }
             }
+            Ok(Some(Ok(TMessage::Binary(b)))) => binary.push(b),
             Ok(Some(_)) | Err(_) => {}
             Ok(None) => break,
         }
     }
-    out
+    (text, binary)
 }
 
+/// Send a raw WS message and drain what comes back.
+async fn round_trip(
+    ws: &mut TestWs,
+    msg: tokio_tungstenite::tungstenite::Message,
+) -> (Vec<Value>, Vec<Vec<u8>>) {
+    use futures_util::SinkExt;
+    ws.send(msg).await.expect("send");
+    drain_frames(ws, 800).await
+}
+
+/// Create a file_bridge child of the root, open for reads and writes, and wire
+/// BOTH gate ends between it and the WS leg — the leg is the sender of every
+/// frame now (C40), so `callable_by` on the bridge and `can_call` on the leg are
+/// what make a browser fetch reach disk at all.
+async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path, leg: &str) {
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent",
+                "parent_id": "kernel",
+                "handler_module": "file_bridge.tools",
+                "id": id,
+                "root": root.to_string_lossy(),
+                "ingress_rule": "allow_all_ingress",
+                "callable_by": {leg: "*"},
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "create file_bridge: {r}");
+    let g = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": leg, "can_call": {"kernel_state": "*", id: "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(g.get("error").is_none(), "grant the leg: {g}");
+}
+
+/// A11.19: a binary frame is an ordinary envelope plus a body at
+/// A TEXT `call` carrying `write_stream` rides the binary channel for the reply
+/// shape, but its `bytes` key is the CLIENT'S JSON value — python only
+/// overwrites it with `payload[field] = body` on a binary frame. So a string
+/// there is `missing_arg` and an absent key is an empty chunk. Rust stripped the
+/// key on both, so `{"bytes": "xyz"}` wrote 0 bytes and answered success.
 #[tokio::test]
-async fn single_frame_upload_dispatches_immediately() {
+async fn a_text_write_stream_keeps_the_clients_bytes_value() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
     let tmp = TempDir::new().unwrap();
     let port = free_port();
-    let web_id = "web_single_bin";
+    let web_id = "web_ws_text_bytes";
     let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    let files = tmp.path().join("files");
+    std::fs::create_dir_all(&files).unwrap();
+    make_file_bridge(&kernel, "fb_txt", &files, "web_ws_text_bytes_ws").await;
 
     let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
     let (mut ws, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("ws connect");
 
-    // No upload_id → single-frame fast path. Target a non-existent agent;
-    // assertion is on the wire shape, not on dispatch success.
-    let header = json!({"target": "nonexistent_xyz", "type": "noop", "id": "s1"});
-    let frame = build_binary_frame(&header, &[1, 2, 3, 4]);
-    let frames = send_binary_and_drain(&mut ws, frame).await;
-    let reply = frames
+    // A JSON STRING where raw bytes belong — refused, nothing written.
+    let frame = json!({
+        "type": "call", "target": "fb_txt", "id": "s1",
+        "payload": {"type": "write_stream", "path": "t.txt", "offset": 0, "bytes": "xyz"},
+    });
+    let (text, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
+    let reply = text
         .iter()
         .find(|f| f["id"] == "s1")
-        .expect("expected a reply frame for id=s1");
-    // Wire shape: WS replies are always `type:"reply"` with verb-level
-    // errors inside `data.error` (Python parity — see web/lib.rs).
-    // `type:"error"` is reserved for out-of-band frame-decode failures.
-    assert_eq!(reply["type"], "reply", "single-frame got: {reply}");
-    let err = reply["data"]["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("no agent"),
-        "expected `no agent` in data.error, got: {reply}"
+        .unwrap_or_else(|| panic!("no reply for s1: {text:?}"));
+    assert_eq!(
+        reply["data"]["error"], "write_stream: bytes (one raw chunk) required",
+        "{reply}"
     );
+    assert_eq!(reply["data"]["reason"], "missing_arg", "{reply}");
+    assert_eq!(reply["data"]["arg"], "bytes (one raw chunk)", "{reply}");
+    assert!(!files.join("t.txt").exists(), "the refusal still wrote");
 
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn chunked_upload_reassembles_in_order() {
-    let tmp = TempDir::new().unwrap();
-    let port = free_port();
-    let web_id = "web_chunked_inorder";
-    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
-
-    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .expect("ws connect");
-
-    let upload_id = "u_ord1";
-    // 3 chunks, 4 bytes each. Final dispatch is to a non-existent agent
-    // → reply carries the kernel's `no agent` error, but the chunking
-    // path is what we're asserting reached dispatch.
-    for (idx, blob) in [
-        (0u32, &[1u8, 1, 1, 1] as &[u8]),
-        (1, &[2, 2, 2, 2]),
-        (2, &[3, 3, 3, 3]),
-    ] {
-        let is_final = idx == 2;
-        let header = json!({
-            "target": "nonexistent",
-            "type": "noop",
-            "id": "c1",
-            "upload_id": upload_id,
-            "chunk_index": idx,
-            "total_chunks": 3,
-            "final": is_final,
-        });
-        let frame = build_binary_frame(&header, blob);
-        let frames = send_binary_and_drain(&mut ws, frame).await;
-        if is_final {
-            let reply = frames
-                .iter()
-                .find(|f| f["id"] == "c1")
-                .expect("final chunk should yield a reply");
-            // Python wire shape: reply frame, verb-level error in data.
-            assert_eq!(reply["type"], "reply");
-            let err = reply["data"]["error"].as_str().unwrap_or("");
-            assert!(
-                err.contains("no agent"),
-                "expected `no agent`, got: {reply}"
-            );
-        } else {
-            let ack = frames
-                .iter()
-                .find(|f| f["type"] == "chunk_ack")
-                .expect("non-final chunk must produce a chunk_ack");
-            assert_eq!(ack["upload_id"], upload_id);
-            assert_eq!(ack["chunk_index"], idx);
-        }
-    }
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn chunked_upload_handles_out_of_order_chunks() {
-    let tmp = TempDir::new().unwrap();
-    let port = free_port();
-    let web_id = "web_chunked_ooo";
-    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
-
-    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .expect("ws connect");
-
-    let upload_id = "u_ooo1";
-    // Out-of-order with the `final`-flagged chunk arriving FIRST.
-    // Regression (fixed): the server must HOLD the early `final` and
-    // assemble once all chunks are present — it must NOT error+drop.
-    // Assembly triggers on count == total_chunks, so order is irrelevant.
-    let chunks = [
-        (2u32, &[3u8; 4] as &[u8], true), // final flag, arrives first
-        (0, &[1u8; 4], false),
-        (1, &[2u8; 4], false),
-    ];
-    let mut saw_error = false;
-    let mut reply: Option<Value> = None;
-    for (idx, blob, is_final) in chunks {
-        let header = json!({
-            "target": "nonexistent",
-            "type": "noop",
-            "id": "ooo1",
-            "upload_id": upload_id,
-            "chunk_index": idx,
-            "total_chunks": 3,
-            "final": is_final,
-        });
-        let frame = build_binary_frame(&header, blob);
-        for f in send_binary_and_drain(&mut ws, frame).await {
-            if f["id"] == "ooo1" {
-                match f["type"].as_str() {
-                    Some("error") => saw_error = true,
-                    Some("reply") => reply = Some(f.clone()),
-                    _ => {}
-                }
-            }
-        }
-    }
-    assert!(
-        !saw_error,
-        "early `final` must be held, not error+drop (out-of-order regression)"
-    );
-    let reply = reply.expect("dispatch reply once all 3 chunks assembled");
-    // Reassembled (12-byte) blob dispatched to a nonexistent agent →
-    // reply.data carries the kernel's `no agent` error.
-    assert!(
-        reply["data"]["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("no agent"),
-        "expected 'no agent' in dispatch reply, got {reply}"
-    );
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn oversized_chunk_rejected() {
-    let tmp = TempDir::new().unwrap();
-    let port = free_port();
-    let web_id = "web_oversize";
-    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
-
-    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .expect("ws connect");
-
-    // Past MAX_CHUNK_SIZE, which is 4 KB under test (see the consts in `lib.rs`).
-    let big_blob = vec![0u8; 2 * crate::ws::MAX_CHUNK_SIZE];
-    let header = json!({"target": "nonexistent", "type": "noop", "id": "big1"});
-    let frame = build_binary_frame(&header, &big_blob);
-    let frames = send_binary_and_drain(&mut ws, frame).await;
-    let err = frames
-        .iter()
-        .find(|f| f["id"] == "big1")
-        .expect("expected error reply for oversized chunk");
-    assert_eq!(err["type"], "error");
-    assert!(err["error"]
-        .as_str()
-        .unwrap_or("")
-        .contains("exceeds chunk cap"));
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn oversized_total_rejected() {
-    let tmp = TempDir::new().unwrap();
-    let port = free_port();
-    let web_id = "web_oversize_total";
-    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
-
-    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .expect("ws connect");
-
-    // Chunks AT the per-chunk cap, enough of them that the cumulative sum trips
-    // the total cap one chunk before the last. Both caps are tiny under test, so
-    // this is a few KB rather than the 101 MB it used to push across the socket.
-    let upload_id = "u_huge";
-    let chunk_size = crate::ws::MAX_CHUNK_SIZE;
-    let total_chunks: u32 = (crate::ws::MAX_UPLOAD_SIZE / chunk_size) as u32 + 1;
-    let one_mb = vec![0u8; chunk_size];
-
-    let mut saw_total_error = false;
-    for idx in 0..total_chunks {
-        let header = json!({
-            "target": "nonexistent",
-            "type": "noop",
-            "id": "huge1",
-            "upload_id": upload_id,
-            "chunk_index": idx,
-            "total_chunks": total_chunks,
-            "final": false,
-        });
-        let frame = build_binary_frame(&header, &one_mb);
-        let frames = send_binary_and_drain(&mut ws, frame).await;
-        if frames.iter().any(|f| {
-            f["type"] == "error" && f["error"].as_str().unwrap_or("").contains("total cap")
-        }) {
-            saw_total_error = true;
-            break;
-        }
-    }
-    assert!(
-        saw_total_error,
-        "expected total-size cap to fire before chunk 101"
-    );
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn chunk_ack_emitted_after_each_non_final_chunk() {
-    let tmp = TempDir::new().unwrap();
-    let port = free_port();
-    let web_id = "web_chunk_ack";
-    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
-
-    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .expect("ws connect");
-
-    let upload_id = "u_ack";
-    // Send 2 non-final chunks — each must produce a chunk_ack.
-    for idx in [0u32, 1] {
-        let header = json!({
-            "target": "nonexistent",
-            "type": "noop",
-            "id": "ack1",
-            "upload_id": upload_id,
-            "chunk_index": idx,
-            "total_chunks": 3,
-            "final": false,
-        });
-        let frame = build_binary_frame(&header, &[idx as u8; 4]);
-        let frames = send_binary_and_drain(&mut ws, frame).await;
-        let ack = frames
-            .iter()
-            .find(|f| f["type"] == "chunk_ack")
-            .unwrap_or_else(|| panic!("no chunk_ack after chunk {idx}: {frames:?}"));
-        assert_eq!(ack["upload_id"], upload_id);
-        assert_eq!(ack["chunk_index"], idx);
-    }
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-}
-
-#[tokio::test]
-async fn pending_uploads_drop_on_ws_disconnect() {
-    // Per-WS state means a dropped connection cleans up automatically —
-    // no GC task needed. This test verifies that semantics by opening
-    // a WS, sending a partial chunk, dropping the connection, then
-    // opening a fresh WS and reusing the same upload_id from scratch
-    // (which should work because the prior buffer is gone).
-    let tmp = TempDir::new().unwrap();
-    let port = free_port();
-    let web_id = "web_disconn";
-    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
-
-    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
-
-    {
-        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("ws1");
-        let header = json!({
-            "target": "nonexistent",
-            "type": "noop",
-            "upload_id": "u_disco",
-            "chunk_index": 0,
-            "total_chunks": 2,
-            "final": false,
-        });
-        let frame = build_binary_frame(&header, &[42u8; 4]);
-        let frames = send_binary_and_drain(&mut ws, frame).await;
-        assert!(frames.iter().any(|f| f["type"] == "chunk_ack"));
-        // Drop the WS without sending the second chunk.
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Fresh WS — same upload_id should be a clean slate (per-WS state
-    // means the prior WS's pending map dropped). Sending chunk 0 again
-    // should succeed without a "total_chunks mismatch" or similar.
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("ws2");
-    let header = json!({
-        "target": "nonexistent",
-        "type": "noop",
-        "upload_id": "u_disco",
-        "chunk_index": 0,
-        "total_chunks": 2,
-        "final": false,
+    // NO key at all — python's `payload.get("bytes", b"")`: an empty chunk.
+    let frame = json!({
+        "type": "call", "target": "fb_txt", "id": "s2",
+        "payload": {"type": "write_stream", "path": "t2.txt", "offset": 0},
     });
-    let frame = build_binary_frame(&header, &[42u8; 4]);
-    let frames = send_binary_and_drain(&mut ws, frame).await;
-    assert!(
-        frames.iter().any(|f| f["type"] == "chunk_ack"),
-        "fresh WS should treat upload_id as new — got {frames:?}",
+    let (text, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
+    let reply = text
+        .iter()
+        .find(|f| f["id"] == "s2")
+        .unwrap_or_else(|| panic!("no reply for s2: {text:?}"));
+    assert_eq!(reply["data"]["written"], 0, "{reply}");
+    assert_eq!(reply["data"]["size"], 0, "{reply}");
+
+    stop(&kernel, web_id).await;
+}
+
+/// `_binary_path` — routed by `type` exactly like a text frame, with the frame
+/// `id` naming the execution (A11.8) and the blob reaching the target's binary
+/// channel (C37).
+#[tokio::test]
+async fn binary_ws_frame_routes_like_a_text_call() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_bin_route";
+    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    let files = tmp.path().join("files");
+    std::fs::create_dir_all(&files).unwrap();
+    make_file_bridge(&kernel, "fb_bin", &files, "web_bin_route_ws").await;
+
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    let blob = vec![7u8; 10_240];
+    let header = json!({
+        "type": "call", "target": "fb_bin", "id": "w1",
+        "payload": {"type": "write_stream", "path": "x.bin", "truncate": true},
+        "_binary_path": "payload.bytes",
+    });
+    let (text, _) = round_trip(
+        &mut ws,
+        TMessage::Binary(build_binary_frame(&header, &blob)),
+    )
+    .await;
+    let reply = text
+        .iter()
+        .find(|f| f["id"] == "w1")
+        .unwrap_or_else(|| panic!("no reply for w1: {text:?}"));
+    assert_eq!(reply["type"], "reply", "{reply}");
+    assert_eq!(reply["data"]["written"], 10_240, "{reply}");
+    assert_eq!(
+        std::fs::read(files.join("x.bin")).expect("the blob landed"),
+        blob
     );
 
-    let _ = kernel
+    // A11.9: a TEXT `read_stream` call answers a BINARY frame whose head keeps
+    // `bytes: null` in its python position and names it last.
+    let frame = json!({
+        "type": "call", "target": "fb_bin", "id": "r1",
+        "payload": {"type": "read_stream", "path": "x.bin", "offset": 0, "length": 4096},
+    });
+    let (_, bins) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
+    let wire = bins.first().expect("a binary reply frame");
+    let (head, body) = fantastic_io_bridge::codec::decode_binary_frame(wire).expect("well-formed");
+    assert_eq!(head["type"], "reply");
+    assert_eq!(head["id"], "r1");
+    assert_eq!(head["_binary_path"], "data.bytes");
+    assert_eq!(head["data"]["bytes"], Value::Null);
+    let keys: Vec<&str> = head["data"]
+        .as_object()
+        .expect("data is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["path", "offset", "bytes", "next_offset", "eof", "size"],
+        "python's key order, `bytes` nulled IN PLACE"
+    );
+    assert_eq!(body, vec![7u8; 4096]);
+
+    stop(&kernel, web_id).await;
+}
+
+/// A11.7 (r2): every undecodable frame gets the ONE frame error and the socket
+/// SURVIVES — a 3-byte binary frame, a header length past the end, JSON that is
+/// not an object, and a `_binary_path` python's `set_path` cannot place.
+#[tokio::test]
+async fn malformed_frames_answer_the_frame_error_and_keep_the_socket() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_bad_frames";
+    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    let expect_error = |frames: &[Value], what: &str| {
+        let f = frames
+            .iter()
+            .find(|f| f["type"] == "error")
+            .unwrap_or_else(|| panic!("{what}: no error frame in {frames:?}"));
+        assert_eq!(
+            *f,
+            json!({
+                "type": "error",
+                "error": "frame: frame must be a well-formed call/emit/watch envelope",
+                "reason": "bad_arg",
+                "arg": "frame",
+            }),
+            "{what}"
+        );
+    };
+
+    let (t, _) = round_trip(&mut ws, TMessage::Text(String::new())).await;
+    expect_error(&t, "empty text");
+    let (t, _) = round_trip(&mut ws, TMessage::Text("[1]".into())).await;
+    expect_error(&t, "a JSON array");
+    let (t, _) = round_trip(&mut ws, TMessage::Text("\"call\"".into())).await;
+    expect_error(&t, "a JSON string");
+    let (t, _) = round_trip(&mut ws, TMessage::Binary(vec![0, 1, 2])).await;
+    expect_error(&t, "a 3-byte binary frame");
+    let (t, _) = round_trip(&mut ws, TMessage::Binary(vec![0xFF, 0xFF, 0xFF, 0xFF, 1])).await;
+    expect_error(&t, "a header length past the end");
+    let bad_path = json!({
+        "type": "call", "target": "kernel", "id": "bp",
+        "payload": {}, "_binary_path": "payload.nope.deep",
+    });
+    let (t, _) = round_trip(
+        &mut ws,
+        TMessage::Binary(build_binary_frame(&bad_path, b"x")),
+    )
+    .await;
+    expect_error(&t, "an unplaceable _binary_path");
+
+    // THE SOCKET SURVIVED all six: an ordinary call still answers.
+    let good =
+        json!({"type": "call", "target": "kernel", "id": "ok", "payload": {"type": "reflect"}});
+    let (t, _) = round_trip(&mut ws, TMessage::Text(good.to_string())).await;
+    assert!(
+        t.iter().any(|f| f["id"] == "ok" && f["type"] == "reply"),
+        "the socket died on a bad frame: {t:?}"
+    );
+
+    stop(&kernel, web_id).await;
+}
+
+/// C40: a SEALED leg (no `ingress_rule`) denies a `call` AND TEACHES, skips the
+/// connect-time auto-watch entirely, and drops `emit`/`watch`/`state_subscribe`
+/// in silence. Measured 2026-09-16: rust ran every frame as the operator and the
+/// sealed socket still received the host's term events.
+#[tokio::test]
+async fn sealed_leg_denies_the_call_and_leaks_no_telemetry() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_sealed_ws";
+    let kernel = stage_web_with_ws_leg(&tmp, port, web_id, false).await;
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    let frame =
+        json!({"type": "call", "target": "kernel", "id": "c1", "payload": {"type": "reflect"}});
+    let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
+    let reply = t
+        .iter()
+        .find(|f| f["id"] == "c1")
+        .unwrap_or_else(|| panic!("no reply: {t:?}"));
+    assert_eq!(reply["type"], "reply");
+    assert_eq!(reply["data"]["reason"], "unauthorized", "{reply}");
+    assert!(
+        reply["data"]["hint"].is_string() || reply["data"]["see"].is_string(),
+        "a denial must teach how to open the edge: {reply}"
+    );
+    assert!(reply["data"]["tree"].is_null(), "the reflect must NOT run");
+
+    // NO AUTO-WATCH: an event on the host reaches nobody.
+    kernel
+        .emit(
+            &AgentId::from(web_id),
+            json!({"type": "output", "data": "x"}),
+        )
+        .await;
+    let (t, b) = drain_frames(&mut ws, 400).await;
+    assert!(
+        !t.iter().any(|f| f["type"] == "event") && b.is_empty(),
+        "a sealed leg auto-watched and leaked: {t:?}"
+    );
+
+    // `state_subscribe` is dropped, snapshot included.
+    let sub = json!({"type": "state_subscribe", "id": "s1"});
+    let (t, _) = round_trip(&mut ws, TMessage::Text(sub.to_string())).await;
+    assert!(
+        !t.iter().any(|f| f["type"] == "state_snapshot"),
+        "a sealed leg answered a state snapshot: {t:?}"
+    );
+
+    stop(&kernel, web_id).await;
+}
+
+/// C40: an open leg DOES auto-watch the host, and every frame runs as the LEG,
+/// not as the operator — so an agent that does not accept the leg is refused
+/// over the socket even though the leg's own ingress rule is open.
+#[tokio::test]
+async fn open_leg_autowatches_and_calls_run_as_the_leg() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_open_ws";
+    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    // A private agent: nothing may call it.
+    let r = kernel
         .send(vec![Item::new(
-            AgentId::from(web_id),
-            json!({"type": "stop"}),
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": "web_ws.tools", "id": "private_one",
+                "callable_by": {},
+            }),
         )])
         .await
         .remove(0)
         .result;
+    assert!(r.get("error").is_none(), "{r}");
+
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    kernel
+        .emit(
+            &AgentId::from(web_id),
+            json!({"type": "output", "data": "hi"}),
+        )
+        .await;
+    let (t, _) = drain_frames(&mut ws, 600).await;
+    assert!(
+        t.iter().any(|f| f["type"] == "event"),
+        "an open leg must auto-watch the host: {t:?}"
+    );
+
+    let frame = json!({"type": "call", "target": "private_one", "id": "p1", "payload": {"type": "reflect"}});
+    let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
+    let reply = t
+        .iter()
+        .find(|f| f["id"] == "p1")
+        .unwrap_or_else(|| panic!("no reply: {t:?}"));
+    assert_eq!(
+        reply["data"]["reason"], "unauthorized",
+        "a WS call ran with more authority than the leg: {reply}"
+    );
+
+    stop(&kernel, web_id).await;
+}
+
+/// A11.7/A11.8: `target` defaults to `""` (never the URL host), `payload` to
+/// `{}`, and the frame `id` is echoed RAW — an int id comes back an int.
+#[tokio::test]
+async fn call_frame_without_id_or_payload_replies_like_python() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_frame_defaults";
+    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    // No target at all: python sends `""`, which the kernel refuses — the URL
+    // host is NEVER substituted.
+    let (t, _) = round_trip(&mut ws, TMessage::Text(json!({"type": "call"}).to_string())).await;
+    let reply = t
+        .iter()
+        .find(|f| f["type"] == "reply")
+        .unwrap_or_else(|| panic!("no reply: {t:?}"));
+    assert_eq!(reply["id"], "", "an absent id echoes as the empty string");
+    assert_eq!(reply["data"]["error"], "send: target required", "{reply}");
+
+    // A non-string id is echoed VERBATIM and names no execution.
+    let frame =
+        json!({"type": "call", "target": "kernel", "id": 7, "payload": {"type": "reflect"}});
+    let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
+    let reply = t
+        .iter()
+        .find(|f| f["id"] == 7)
+        .unwrap_or_else(|| panic!("the raw id was not echoed: {t:?}"));
+    assert_eq!(reply["type"], "reply", "{reply}");
+    assert!(
+        reply["data"].is_object(),
+        "a non-string id must still dispatch: {reply}"
+    );
+
+    stop(&kernel, web_id).await;
 }
 
 // ── /_assets/* — vendored third-party web deps ─────────────────────
@@ -760,60 +801,6 @@ async fn pending_uploads_drop_on_ws_disconnect() {
 // URLs so canvas/terminal WebView surfaces don't need CDN access.
 // These tests boot the HTTP layer + hit each asset URL with reqwest
 // and verify content-type + non-empty body + immutable cache header.
-
-// ── ingest_chunk unit tests (pure assembly, no WS) ──────────────────
-
-#[test]
-fn ingest_chunk_assembles_out_of_order() {
-    // Regression: a `final`/last-index chunk arriving BEFORE its peers
-    // must be held + assembled once all are present — not dropped with
-    // "final received but N missing". Chunks concatenate in index order
-    // (BTreeMap) regardless of arrival order.
-    let mut map = std::collections::HashMap::new();
-    let hdr = json!({"target": "x", "type": "upload"});
-    // Arrive last-index first, then 0, then 1.
-    assert!(
-        crate::ws::ingest_chunk(&mut map, "u", 2, 3, b"C".to_vec(), &hdr)
-            .expect("early last chunk acks, not errors")
-            .is_none()
-    );
-    assert!(
-        crate::ws::ingest_chunk(&mut map, "u", 0, 3, b"A".to_vec(), &hdr)
-            .unwrap()
-            .is_none()
-    );
-    let (header, blob) = crate::ws::ingest_chunk(&mut map, "u", 1, 3, b"B".to_vec(), &hdr)
-        .unwrap()
-        .expect("assembled once all 3 present");
-    assert_eq!(blob, b"ABC", "index-ordered concat regardless of arrival");
-    assert_eq!(header, json!({"target": "x", "type": "upload"}));
-    assert!(map.is_empty(), "entry removed on completion");
-}
-
-#[test]
-fn ingest_chunk_total_mismatch_errors_and_drops() {
-    let mut map = std::collections::HashMap::new();
-    let hdr = json!({"type": "upload"});
-    assert!(
-        crate::ws::ingest_chunk(&mut map, "u", 0, 2, b"A".to_vec(), &hdr)
-            .unwrap()
-            .is_none()
-    );
-    let err = crate::ws::ingest_chunk(&mut map, "u", 1, 3, b"B".to_vec(), &hdr)
-        .expect_err("total_chunks mismatch must error");
-    assert!(err.contains("total_chunks mismatch"), "{err}");
-    assert!(map.is_empty(), "mismatched entry dropped");
-}
-
-#[test]
-fn ingest_chunk_single_chunk_completes_immediately() {
-    let mut map = std::collections::HashMap::new();
-    let hdr = json!({"type": "upload"});
-    let (_h, blob) = crate::ws::ingest_chunk(&mut map, "u", 0, 1, b"solo".to_vec(), &hdr)
-        .unwrap()
-        .expect("a 1-chunk upload assembles on the first frame");
-    assert_eq!(blob, b"solo");
-}
 
 /// The BINARY leg of the REST surface (octet-stream body) — mirror of the
 /// Python `web_rest` binary leg. An octet POST of a `text_file.patch` carries
@@ -839,7 +826,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -864,7 +851,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     // web host.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE, "id": web_id, "port": port,
@@ -877,9 +864,9 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     // caller (two-sided call gate: ingress side).
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "file_bridge.tools", "id": fb_id,
                 "root": "served",
                 "ingress_rule": "allow_all_ingress",
@@ -893,9 +880,9 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     // and reaches disk only through gated sends to the file leg.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "text_file.tools", "id": "ed_octet",
                 "target_id": fb_id,
                 "can_call": { fb_id: "*" },
@@ -1035,7 +1022,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
 
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         )])
@@ -1049,15 +1036,15 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": web_id,
                    "handler_module": "web_rest.tools", "id": rest_id,
-                   "can_call": {"core": "*"}}),
+                   "can_call": {"kernel_state": "*"}}),
         )])
         .await
         .remove(0)
         .result;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({"type": "update_agent", "id": "core", "callable_by": {
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
                 "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
         )])
         .await
@@ -1077,7 +1064,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
     let client = reqwest::Client::new();
     // POST — the dispatch route.
     let resp = client
-        .post(format!("http://127.0.0.1:{port}/{rest_id}/core"))
+        .post(format!("http://127.0.0.1:{port}/{rest_id}/kernel_state"))
         .header("Content-Type", "application/json")
         .body(r#"{"type": "list_agents"}"#)
         .send()
@@ -1101,7 +1088,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
     // GET /_reflect and GET /_reflect/<target> — the same seal.
     for path in [
         format!("http://127.0.0.1:{port}/{rest_id}/_reflect"),
-        format!("http://127.0.0.1:{port}/{rest_id}/_reflect/core"),
+        format!("http://127.0.0.1:{port}/{rest_id}/_reflect/kernel_state"),
     ] {
         let r = client.get(&path).send().await.expect("http get");
         assert_eq!(r.status().as_u16(), 403, "{path} served past the seal");
@@ -1131,7 +1118,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
 
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         )])
@@ -1144,15 +1131,15 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
             json!({"type": "create_agent", "parent_id": web_id,
                    "handler_module": "web_rest.tools", "id": rest_id,
                    "ingress_rule": "allow_all_ingress",
-                   "can_call": {"core": "*", "kernel": "*"}}),
+                   "can_call": {"kernel_state": "*", "kernel": "*"}}),
         )])
         .await
         .remove(0)
         .result;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({"type": "update_agent", "id": "core", "callable_by": {
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
                 "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
         )])
         .await
@@ -1181,10 +1168,12 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         "an open leg must serve reflect"
     );
     let body: Value = resp.json().await.expect("body json");
-    assert_eq!(body["id"], "core", "reflect body: {body}");
+    assert_eq!(body["id"], "kernel_state", "reflect body: {body}");
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/{rest_id}/_reflect/core"))
+        .get(format!(
+            "http://127.0.0.1:{port}/{rest_id}/_reflect/kernel_state"
+        ))
         .send()
         .await
         .expect("http get");
@@ -1260,7 +1249,7 @@ async fn stage_host(
         .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -1280,7 +1269,7 @@ async fn stage_host(
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
-        json!({"type": "create_agent", "parent_id": "core",
+        json!({"type": "create_agent", "parent_id": "kernel_state",
                "handler_module": "file_bridge.tools", "id": fb_id, "root": "served",
                "ingress_rule": "allow_all_ingress",
                "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
@@ -1288,14 +1277,14 @@ async fn stage_host(
         json!({"type": "create_agent", "parent_id": web_id,
                "handler_module": "web_rest.tools", "id": rest_id,
                "ingress_rule": "allow_all_ingress",
-               "can_call": {"core": "*", "kernel": "*", fb_id: "*"}}),
-        json!({"type": "update_agent", "id": "core", "callable_by": {
+               "can_call": {"kernel_state": "*", "kernel": "*", fb_id: "*"}}),
+        json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
                "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
         json!({"type": "update_agent", "id": web_id, "can_call": {
                "$self": "*", "$parent": "*", "$children": "*", fb_id: "*"}}),
     ] {
         let reply = kernel
-            .send(vec![Item::new(AgentId::from("core"), item)])
+            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
@@ -1395,6 +1384,73 @@ fn server_pings_and_closes_1011_without_pong() {
     );
 }
 
+/// `GET /` runs as the WEB HOST, not as the operator — so the distilled
+/// roster's per-node gate denies a LATERAL sibling and never dispatches
+/// `reflect` on it.
+///
+/// python creates the uvicorn serve task inside the `boot` dispatch, so the
+/// request inherits `_current_sender = <web id>`. Measured 2026-09-21 on
+/// python: sender `web`, the sibling's watcher saw 0 events. Rust ran the
+/// index with no sender scope (operator = ungated), fanned `reflect` out over
+/// the whole tree, and the acceptance capture's `wsx` leg — auto-watching a
+/// sibling web host — saw one `{"type":"event","payload":{"type":"reflect"}}`
+/// python never sends.
+#[tokio::test]
+async fn index_page_reflects_as_the_web_host_not_the_operator() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    let port = free_port();
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": HANDLER_MODULE, "id": "web_gate", "port": port}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // A SIBLING under the root — no `callable_by` for the web host, so
+    // `web_gate -> sib_gate reflect` is lateral and the gate denies it.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": "file_bridge.tools", "id": "sib_gate"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let watcher = AgentId::from("sib_tap");
+    let mut rx = kernel.ensure_inbox(&watcher);
+    assert!(kernel
+        .watch(&AgentId::from("sib_gate"), watcher)
+        .await
+        .is_none());
+
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_gate"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    wait_until_port_accepts(port).await;
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/"))
+        .await
+        .expect("get /");
+    assert_eq!(resp.status().as_u16(), 200);
+    let page = resp.text().await.unwrap();
+    // The SHAPE stays public (`tree=ids`): the node is in the page.
+    assert!(page.contains("<code>sib_gate</code>"), "{page}");
+    // What the node SAYS about itself is not: it was never dispatched.
+    assert!(
+        rx.try_recv().is_none(),
+        "the index roster must not reflect a lateral sibling"
+    );
+    stop(&kernel, "web_gate").await;
+}
+
 /// A11.3 (D11) — the route table is python's FOUR baked routes. The rust-only
 /// extras are gone: no `/<id>/` server-side render, no `/transport.js`, no
 /// `/_assets/*` vendored JS, no `/favicon.ico`.
@@ -1440,7 +1496,7 @@ async fn render_route_is_absent() {
     assert!(!page.contains("transport.js"), "no transport tag");
     assert!(
         page.contains(
-            r#"<li><span class="id">core</span> <code>core</code> <span class="hm">(root)</span>"#
+            r#"<li><span class="id">kernel_state</span> <code>kernel_state</code> <span class="hm">(root)</span>"#
         ),
         "python's node markup: {page}"
     );
@@ -1489,7 +1545,10 @@ async fn unmatched_paths_and_methods_answer_fastapi_json() {
         reqwest::Method::OPTIONS,
     ] {
         let resp = client
-            .request(method.clone(), format!("http://127.0.0.1:{port}/rest/core"))
+            .request(
+                method.clone(),
+                format!("http://127.0.0.1:{port}/rest/kernel_state"),
+            )
             .send()
             .await
             .expect("req");
@@ -1508,7 +1567,7 @@ async fn unmatched_paths_and_methods_answer_fastapi_json() {
     let resp = client
         .request(
             reqwest::Method::HEAD,
-            format!("http://127.0.0.1:{port}/rest/_reflect/core"),
+            format!("http://127.0.0.1:{port}/rest/_reflect/kernel_state"),
         )
         .send()
         .await
@@ -1557,7 +1616,7 @@ async fn post_to_reflect_literal_dispatches_to_that_target() {
     stop(&kernel, "web_ord").await;
 }
 
-/// A13.9 — `GET /rest/_reflect/core/` toggles to a matching route, so python
+/// A13.9 — `GET /rest/_reflect/kernel_state/` toggles to a matching route, so python
 /// answers `307` with an absolute `location` built from the `Host` header and
 /// the query string carried through. `content-length: 0`.
 #[tokio::test]
@@ -1571,7 +1630,7 @@ async fn trailing_slash_answers_307_with_location() {
         .unwrap();
     let resp = client
         .get(format!(
-            "http://127.0.0.1:{port}/rest/_reflect/core/?tree=none"
+            "http://127.0.0.1:{port}/rest/_reflect/kernel_state/?tree=none"
         ))
         .send()
         .await
@@ -1579,7 +1638,7 @@ async fn trailing_slash_answers_307_with_location() {
     assert_eq!(resp.status().as_u16(), 307);
     assert_eq!(
         resp.headers()["location"],
-        format!("http://127.0.0.1:{port}/rest/_reflect/core?tree=none")
+        format!("http://127.0.0.1:{port}/rest/_reflect/kernel_state?tree=none")
     );
     assert_eq!(resp.headers()["content-length"], "0");
     stop(&kernel, "web_307").await;
@@ -1665,7 +1724,7 @@ async fn rest_response_header_order_matches_python() {
     let (status, names) = header_names(
         port,
         &format!(
-            "POST /rest/core HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\ncontent-type: application/json\r\ncontent-length: 22\r\n\r\n{{\"type\":\"list_agents\"}}"
+            "POST /rest/kernel_state HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\ncontent-type: application/json\r\ncontent-length: 22\r\n\r\n{{\"type\":\"list_agents\"}}"
         ),
     )
     .await;
@@ -1675,7 +1734,7 @@ async fn rest_response_header_order_matches_python() {
     // 405: date, server, allow, content-length, content-type.
     let (status, names) = header_names(
         port,
-        &format!("GET /rest/core HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        &format!("GET /rest/kernel_state HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 405"), "{status}");
@@ -2022,7 +2081,7 @@ async fn boot_and_stop_replies_match_python() {
     // A record with no `port` RAISES — no default, no fallback.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": "web_noport"}),
         )])
@@ -2108,7 +2167,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
                "handler_module": HANDLER_MODULE, "id": web_id, "port": port})]
     {
         let _ = kernel
-            .send(vec![Item::new(AgentId::from("core"), item)])
+            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
@@ -2146,7 +2205,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     // A child created AFTER boot is not routed until it is mounted.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": web_id,
                    "handler_module": "web_ws.tools", "id": "ws_hot",
                    "ingress_rule": "allow_all_ingress"}),
@@ -2213,7 +2272,7 @@ async fn boot_announces_say_to_cli() {
     kernel.bundles.register("cli_probe.tools", SayProbe);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -2232,7 +2291,7 @@ async fn boot_announces_say_to_cli() {
                "can_call": {"$self": "*", "$parent": "*", "$children": "*", "cli": "*"}}),
     ] {
         let reply = kernel
-            .send(vec![Item::new(AgentId::from("core"), item)])
+            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
@@ -2349,7 +2408,7 @@ async fn client_close_is_echoed_with_its_code() {
                "ingress_rule": "allow_all_ingress"}),
     ] {
         let _ = kernel
-            .send(vec![Item::new(AgentId::from("core"), item)])
+            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
@@ -2467,4 +2526,456 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
     assert_eq!(body, blob, "the raw body rides beside the head, not base64");
 
     stop(&kernel, web_id).await;
+}
+
+// ─── A13.1 / A13.3 — the REST legs ride the batch ───────────────────
+
+/// A13.1 — a reply that HOLDS a chunk is octet on the JSON leg too, a 0-byte
+/// chunk included. Rust answered `application/json` with the bytes as a JSON
+/// string, and gated octet on `!body.is_empty()`, so an empty file came back as
+/// JSON and a caller could not tell it from a refusal.
+#[tokio::test]
+async fn json_leg_read_stream_answers_octet_including_empty_chunk() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_jsonoct", "rest", "fb_jsonoct").await;
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/rest/fb_jsonoct");
+
+    let resp = client
+        .post(&url)
+        .json(&json!({"type": "read_stream", "path": "hello.txt"}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/octet-stream");
+    assert_eq!(resp.headers()["x-fantastic-bytes-field"], "bytes");
+    assert_eq!(
+        resp.headers()["x-fantastic-payload"],
+        r#"{"path": "hello.txt", "offset": 0, "next_offset": 12, "eof": true, "size": 12}"#
+    );
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), b"hello world\n");
+
+    // AN EMPTY FILE IS STILL A FILE: octet, content-length 0.
+    let resp = client
+        .post(&url)
+        .json(&json!({"type": "read_stream", "path": "empty.txt"}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/octet-stream");
+    assert_eq!(resp.headers()["content-length"], "0");
+    assert!(resp.bytes().await.unwrap().is_empty());
+
+    // A REFUSAL stays JSON — it carries no chunk.
+    let resp = client
+        .post(&url)
+        .json(&json!({"type": "read_stream", "path": "nope.txt"}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/json");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reason"], "not_found", "{body}");
+
+    stop(&kernel, "web_jsonoct").await;
+}
+
+/// A13.1/A13.19 — a JSON `write_stream` naming `bytes` as a JSON string is
+/// `missing_arg`, and NOTHING is written: JSON has no bytes type, so the only
+/// raw chunk on this leg is the octet body.
+#[tokio::test]
+async fn json_leg_write_stream_string_bytes_is_missing_arg() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_jsonwr", "rest", "fb_jsonwr").await;
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/rest/fb_jsonwr");
+
+    let resp = client
+        .post(&url)
+        .json(&json!({"type": "write_stream", "path": "ws_text.txt", "bytes": "abc"}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reason"], "missing_arg", "{body}");
+    assert_eq!(
+        body["error"], "write_stream: bytes (one raw chunk) required",
+        "{body}"
+    );
+    assert!(
+        !tmp.path().join("served").join("ws_text.txt").exists(),
+        "the refused write landed anyway"
+    );
+
+    stop(&kernel, "web_jsonwr").await;
+}
+
+/// A13.3 + A11.20 — the octet leg dispatches THROUGH THE BATCH, so
+/// `X-Fantastic-Execution-Id` NAMES the execution (a repeat REPLAYS instead of
+/// re-running, and rebinding the id to another target is refused) and the call
+/// leaves a row like any other send. `send_with_binary` named nothing and minted
+/// no row, so an HTTP caller could not express a safe repeat at all.
+#[tokio::test]
+async fn octet_leg_names_executions_and_validates_type() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_octid", "rest", "fb_octid").await;
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/rest/fb_octid");
+    let post = |payload: &str, id: &str, body: &'static [u8]| {
+        client
+            .post(&url)
+            .header("content-type", "application/octet-stream")
+            .header("x-fantastic-payload", payload.to_string())
+            .header("x-fantastic-execution-id", id.to_string())
+            .body(body)
+            .send()
+    };
+
+    let first = post(
+        r#"{"type":"write_stream","path":"oe1.bin","truncate":true}"#,
+        "oe-1",
+        b"one",
+    )
+    .await
+    .expect("post");
+    assert_eq!(first.status().as_u16(), 200);
+    // THE SAME ID REPLAYS the recorded outcome: the file keeps `one`.
+    let again = post(
+        r#"{"type":"write_stream","path":"oe1.bin","truncate":true}"#,
+        "oe-1",
+        b"two",
+    )
+    .await
+    .expect("post");
+    assert_eq!(again.status().as_u16(), 200);
+    assert_eq!(
+        std::fs::read(tmp.path().join("served").join("oe1.bin")).unwrap(),
+        b"one",
+        "a repeated execution id re-ran the write"
+    );
+
+    // The execution's own row exists on the target, attributed to the leg.
+    let rows = kernel.rows.for_agent(&AgentId::from("fb_octid"));
+    assert!(
+        rows.iter().any(|r| r["kind"] == json!("call")
+            && r["verb"] == json!("write_stream")
+            && r["origin"] == json!("rest")),
+        "the octet dispatch left no call row: {rows:?}"
+    );
+
+    // Rebinding a settled id to ANOTHER target is the kernel's refusal, not a
+    // second dispatch.
+    let other = client
+        .post(format!("http://127.0.0.1:{port}/rest/kernel"))
+        .header("content-type", "application/octet-stream")
+        .header("x-fantastic-payload", r#"{"type":"reflect"}"#)
+        .header("x-fantastic-execution-id", "oe-1")
+        .body(b"".as_ref())
+        .send()
+        .await
+        .expect("post");
+    let body: Value = other.json().await.unwrap();
+    assert!(
+        body.get("error").is_some(),
+        "an id bound to another target dispatched: {body}"
+    );
+
+    stop(&kernel, "web_octid").await;
+}
+
+// ─── C40 — the file proxy ───────────────────────────────────────────
+
+/// C40 (r2 byte shapes) — a GATE denial is a 404 carrying EXACTLY
+/// `error, reason, side, hint` in that order (a missing key as `null`), while a
+/// missing file is a bare 404 with no body at all. Rust served the denied file
+/// 200 and answered a missing file with text/plain.
+#[tokio::test]
+async fn gate_denial_404_carries_the_hint_but_a_missing_file_does_not() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_fp", "rest", "fb_fp").await;
+    let client = reqwest::Client::new();
+
+    // A served file streams.
+    let ok = client
+        .get(format!("http://127.0.0.1:{port}/fb_fp/file/hello.txt"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(ok.status().as_u16(), 200);
+    assert_eq!(ok.headers()["content-length"], "12");
+    assert_eq!(ok.bytes().await.unwrap().as_ref(), b"hello world\n");
+
+    // AN EMPTY FILE: 200, NO content-length (python sends the header only when
+    // the size is truthy), empty body.
+    let empty = client
+        .get(format!("http://127.0.0.1:{port}/fb_fp/file/empty.txt"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(empty.status().as_u16(), 200);
+    assert!(
+        empty.headers().get("content-length").is_none(),
+        "an empty file must stream chunked: {:?}",
+        empty.headers()
+    );
+    assert!(empty.bytes().await.unwrap().is_empty());
+
+    // A MISSING FILE: bare 404, no body, no content-type.
+    let missing = client
+        .get(format!("http://127.0.0.1:{port}/fb_fp/file/nope.txt"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(missing.status().as_u16(), 404);
+    assert!(missing.headers().get("content-type").is_none());
+    assert_eq!(missing.headers()["content-length"], "0");
+
+    // SEAL the leg — now the same request is a 404 that TEACHES.
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "fb_fp", "ingress_rule": "deny_ingress"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
+    let denied = client
+        .get(format!("http://127.0.0.1:{port}/fb_fp/file/hello.txt"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(denied.status().as_u16(), 404);
+    assert_eq!(denied.headers()["content-type"], "application/json");
+    let text = denied.text().await.unwrap();
+    let parsed: Value = serde_json::from_str(&text).expect("json body");
+    let keys: Vec<&str> = parsed
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["error", "reason", "side", "hint"],
+        "exactly four keys, in python's file-proxy order: {text}"
+    );
+    assert_eq!(parsed["reason"], "unauthorized");
+    assert_eq!(
+        parsed["side"],
+        Value::Null,
+        "a sealed io gate names no side"
+    );
+    assert!(parsed["hint"].is_string(), "{text}");
+
+    stop(&kernel, "web_fp").await;
+}
+
+/// C40 — an agent that is not there at all is a bare 404, before any dispatch.
+#[tokio::test]
+async fn file_proxy_404_for_missing_agent() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_fpm", "rest", "fb_fpm").await;
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/no_such_agent/file/x.txt"))
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+    assert!(resp.headers().get("content-type").is_none());
+    assert_eq!(resp.headers()["content-length"], "0");
+    stop(&kernel, "web_fpm").await;
+}
+
+/// A13.11 (partial) — the JSON BODY goes through CPython's
+/// `json.loads(bytes)`: the encoding is DETECTED from the BOM / null-byte
+/// pattern, so UTF-8-with-BOM, UTF-16 and UTF-32 bodies all parse. Rust read
+/// UTF-8 only and answered 400 for every one of them. A body that will not
+/// decode at all raises out of python's handler as a 500.
+///
+/// The `NaN`/`Infinity` constants and lone-surrogate escapes are NOT covered:
+/// both need a number/string carrier that cannot represent them yet (C74, D13).
+#[tokio::test]
+async fn json_body_decodes_like_cpython_json_loads() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_jsonenc", "rest", "fb_jsonenc").await;
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/rest/fb_jsonenc");
+    let doc = r#"{"type":"list","path":""}"#;
+
+    let post = |body: Vec<u8>| {
+        client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+    };
+
+    // UTF-8 with a BOM.
+    let mut bom = vec![0xEF, 0xBB, 0xBF];
+    bom.extend_from_slice(doc.as_bytes());
+    let r = post(bom).await.expect("post");
+    assert_eq!(r.status().as_u16(), 200, "a BOM'd body was refused");
+    let body: Value = r.json().await.unwrap();
+    assert!(
+        body.get("error").is_none(),
+        "the decoded body did not dispatch: {body}"
+    );
+
+    // UTF-16-LE with a BOM, and UTF-16-BE without one (the null-byte pattern).
+    let mut u16le: Vec<u8> = vec![0xFF, 0xFE];
+    for u in doc.encode_utf16() {
+        u16le.extend_from_slice(&u.to_le_bytes());
+    }
+    let r = post(u16le).await.expect("post");
+    assert_eq!(r.status().as_u16(), 200, "a UTF-16-LE body was refused");
+
+    let u16be: Vec<u8> = doc.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+    let r = post(u16be).await.expect("post");
+    assert_eq!(r.status().as_u16(), 200, "a UTF-16-BE body was refused");
+
+    // UTF-32-LE without a BOM (`XX 00 00 00`).
+    let u32le: Vec<u8> = doc.chars().flat_map(|c| (c as u32).to_le_bytes()).collect();
+    let r = post(u32le).await.expect("post");
+    assert_eq!(r.status().as_u16(), 200, "a UTF-32-LE body was refused");
+
+    // `ff fe 7b` reads as a truncated UTF-16 body: python's decode RAISES out of
+    // the handler, which uvicorn answers 500 text/plain.
+    let r = post(vec![0xFF, 0xFE, 0x7B]).await.expect("post");
+    assert_eq!(r.status().as_u16(), 500);
+    assert_eq!(r.text().await.unwrap(), "Internal Server Error");
+
+    // Still-malformed JSON is still a 400 with python's text.
+    let r = post(b"{not json".to_vec()).await.expect("post");
+    assert_eq!(r.status().as_u16(), 400);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"],
+        "web_rest: request body is not valid JSON"
+    );
+
+    stop(&kernel, "web_jsonenc").await;
+}
+
+/// A11.7 — an open socket is WORK, and work is in `ps`: python spawns the
+/// outbound pump as the kernel task `ws_drain` on the HOST, and each `call`
+/// frame as `ws_call`. Rust ran the drain as a bare `tokio::spawn`, so a live
+/// browser connection was invisible to `ps` and to `cancel`.
+#[tokio::test]
+async fn open_ws_shows_ws_drain_in_ps() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_psrows";
+    let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let drains = kernel
+        .tasks
+        .rows()
+        .into_iter()
+        .filter(|r| r["verb"] == json!("ws_drain") && r["agent"] == json!(web_id))
+        .count();
+    assert_eq!(
+        drains, 1,
+        "an open socket must show one `ws_drain` on the host"
+    );
+
+    // A `call` frame is its own registered task under the HOST, not the leg.
+    let frame =
+        json!({"type": "call", "target": "kernel", "id": "psr", "payload": {"type": "reflect"}});
+    let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
+    assert!(t.iter().any(|f| f["id"] == "psr"), "no reply: {t:?}");
+
+    drop(ws);
+    stop(&kernel, web_id).await;
+}
+
+/// C40 (r5) — THE EVENT PRECEDES ITS REPLY. Python's kernel fans a payload into
+/// every watcher inbox BEFORE the handler runs, and python's cooperative loop
+/// puts that `event` frame on the wire before `_on_call` composes the `reply`.
+/// Rust drained the inbox on a PARALLEL task, so the reply overtook the event —
+/// three times in the r3 capture (`wire/frames.jsonl[141]`, `[185]`, `[186]`).
+/// A UI sits on this socket, so the order is the contract. 60 iterations, one
+/// socket, because it was a RACE.
+#[tokio::test]
+async fn the_watch_event_always_precedes_its_reply() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().expect("tmp");
+    let port = free_port();
+    let web_id = "web_order";
+    let _kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    let url = format!("ws://127.0.0.1:{port}/{web_id}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+    // The connect-time auto-watch already mirrors the HOST's inbox here, so a
+    // `call` at the host is both the fanned event and the reply.
+    for n in 0..60 {
+        let id = format!("ord-{n}");
+        ws.send(TMessage::Text(
+            json!({"type": "call", "target": web_id,
+                   "payload": {"type": "reflect"}, "id": id})
+            .to_string(),
+        ))
+        .await
+        .expect("send");
+        let mut seen_event = false;
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("frame in time")
+                .expect("stream open")
+                .expect("frame ok");
+            let TMessage::Text(t) = msg else { continue };
+            let v: Value = serde_json::from_str(&t).expect("json frame");
+            match v["type"].as_str() {
+                Some("event") if v["payload"]["type"] == json!("reflect") => seen_event = true,
+                Some("reply") if v["id"] == json!(id) => {
+                    assert!(
+                        seen_event,
+                        "iteration {n}: the reply overtook the watch event"
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+// ── C?: the ws client id is python's, not a counter ────────────────────
+
+/// python `web_ws._proxy._make_client_id` — `f"_ws_{secrets.token_hex(3)}"`.
+/// Rust minted `_ws_{n:06x}` off a process-global `AtomicU64`, so every capture
+/// read the ASCENDING `_ws_000000`/`_ws_000001` family python never produces.
+#[test]
+fn ws_client_ids_are_pythons_token_hex_3_and_random() {
+    let ids: Vec<String> = (0..64).map(|_| crate::ws::make_client_id()).collect();
+    for id in &ids {
+        let hex = id.strip_prefix("_ws_").unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(hex.len(), 6, "{id}");
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{id}"
+        );
+    }
+    let uniq: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(uniq.len(), ids.len(), "client ids repeated: {ids:?}");
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_ne!(sorted, ids, "client ids ascend like a counter: {ids:?}");
 }

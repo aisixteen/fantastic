@@ -66,7 +66,9 @@ struct ProviderPolicyTests {
     /// `send: provider HTTP 400` and dropped the one sentence naming the cause.
     @Test func anthropicStatusErrorNamesTheCodeAndTheBody() async {
         let stub = StubHTTP([
-            .init(status: 400, headers: [("Content-Type", "application/json")], body: #"{"error":"bad model"}"#)
+            .init(
+                status: 400, headers: [("Content-Type", "application/json")],
+                body: #"{"error":"bad model"}"#)
         ])
         defer { stub.stop() }
         let (_, error) = await drain(anthropic(port: stub.port).chat(messages: oneUser))
@@ -82,7 +84,9 @@ struct ProviderPolicyTests {
     /// a `thinking` phase that never ends.
     @Test func anthropicNeverRetriesA429() async {
         let stub = StubHTTP([
-            .init(status: 429, headers: [("Content-Type", "application/json"), ("retry-after", "1")], body: "slow down"),
+            .init(
+                status: 429, headers: [("Content-Type", "application/json"), ("retry-after", "1")],
+                body: "slow down"),
             .sse(goodTurn),
         ])
         defer { stub.stop() }
@@ -95,21 +99,33 @@ struct ProviderPolicyTests {
     /// never reached anything that could judge it, so it is retried.
     @Test func aTransportCodeWithANonJsonBodyIsRetried() async {
         let stub = StubHTTP([
-            .init(status: 503, headers: [("Content-Type", "text/html")], body: "<html>gateway</html>"),
+            .init(
+                status: 503, headers: [("Content-Type", "text/html")], body: "<html>gateway</html>"),
             .sse(goodTurn),
         ])
         defer { stub.stop() }
-        let (tokens, error) = await drain(anthropic(port: stub.port).chat(messages: oneUser))
+        var tokens: [String] = []
+        var error: Error?
+        // A15.4: before each transport retry, python prints
+        // `[anthropic] {code} ({ctype}) — transport error, retry n/2` on
+        // stdout — neither port did.
+        let lines = await RuntimeLog.captureOut {
+            (tokens, error) = await drain(anthropic(port: stub.port).chat(messages: oneUser))
+        }
         #expect(error == nil)
         #expect(tokens.joined() == "hi")
         #expect(stub.requests.count == 2)
+        #expect(
+            lines.contains("[anthropic] 503 (text/html) — transport error, retry 1/2"), "\(lines)")
     }
 
     /// The SAME code with a JSON body is the API speaking: re-sending a real
     /// refusal until the budget ran out is worse than failing loudly.
     @Test func aTransportCodeWithAJsonBodyIsNotRetried() async {
         let stub = StubHTTP([
-            .init(status: 503, headers: [("Content-Type", "application/json")], body: #"{"error":"overloaded"}"#),
+            .init(
+                status: 503, headers: [("Content-Type", "application/json")],
+                body: #"{"error":"overloaded"}"#),
             .sse(goodTurn),
         ])
         defer { stub.stop() }
@@ -206,7 +222,8 @@ struct ProviderPolicyTests {
     /// `/v1/chat/completions`, so one runtime's working record 404'd on the other.
     @Test func nimRecordEndpointBuildsChatCompletionsUrl() async {
         let stub = StubHTTP([
-            .sse("""
+            .sse(
+                """
                 data: {"choices":[{"delta":{"content":"ok"}}]}
 
                 data: [DONE]
@@ -224,7 +241,8 @@ struct ProviderPolicyTests {
             stub.requests.first?.hasPrefix("POST /v1/chat/completions HTTP") == true,
             Comment(rawValue: stub.requests.first ?? "no request"))
         // The default endpoint is the API's own base — and reflect says so.
-        #expect(NvidiaNimBundle().core.config.defaultEndpoint == "https://integrate.api.nvidia.com/v1")
+        #expect(
+            NvidiaNimBundle().core.config.defaultEndpoint == "https://integrate.api.nvidia.com/v1")
     }
 
     // ── B4.8: the nvidia 429 retry ───────────────────────────────────────
@@ -234,7 +252,8 @@ struct ProviderPolicyTests {
     @Test func nimRetriesOnceOnAPreStreamRateLimit() async {
         let stub = StubHTTP([
             .init(status: 429, headers: [("retry-after", "1")], body: "slow down"),
-            .sse("""
+            .sse(
+                """
                 data: {"choices":[{"delta":{"content":"second try"}}]}
 
                 data: [DONE]
@@ -306,7 +325,8 @@ struct ProviderPolicyTests {
     /// reported 0.3.
     @Test func llamacppAlwaysSendsTemperature() async {
         let stub = StubHTTP([
-            .sse("""
+            .sse(
+                """
                 data: {"choices":[{"delta":{"content":"ok"}}]}
 
                 data: [DONE]
@@ -320,14 +340,16 @@ struct ProviderPolicyTests {
             id: AgentId("llm"), handlerModule: nil, parentId: nil,
             meta: ["endpoint": .string("http://127.0.0.1:\(stub.port)/v1")])
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-        guard case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
+        guard
+            case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
         else {
             Issue.record("llamacpp never refuses a provider")
             return
         }
         _ = await drain(provider.chat(messages: oneUser))
         let body = stub.requests.first?.components(separatedBy: "\r\n\r\n").last ?? ""
-        #expect(body.contains("\"temperature\":0.3"), Comment(rawValue: body))
+        #expect(
+            body.contains("\"temperature\":0.3"), Comment(rawValue: stub.requests.first ?? "none"))
     }
 
     // ── B4.6: the ollama model and endpoint ──────────────────────────────
@@ -338,7 +360,8 @@ struct ProviderPolicyTests {
         let bundle = OllamaBackendBundle()
         let agent = Agent(id: AgentId("ol"), handlerModule: nil, parentId: nil)
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-        guard case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
+        guard
+            case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
         else {
             Issue.record("an unset model is no longer a refusal before the turn")
             return
@@ -361,7 +384,8 @@ struct ProviderPolicyTests {
             id: AgentId("ol"), handlerModule: nil, parentId: nil,
             meta: ["model": .string("m"), "endpoint": .string("http://127.0.0.1:\(stub.port)")])
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-        guard case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
+        guard
+            case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
         else {
             Issue.record("unexpected refusal")
             return

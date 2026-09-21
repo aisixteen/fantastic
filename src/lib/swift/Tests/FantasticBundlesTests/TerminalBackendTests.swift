@@ -14,14 +14,14 @@
         /// Boot a `command` session under `id`, watching its inbox for output.
         private func boot(_ kernel: Kernel, id: String, command: String, args: [String] = [])
             async throws
-            -> (pid: Int32, inbox: AsyncStream<JSON>)
+            -> (pid: Int32, inbox: Inbox)
         {
             _ = await kernel.send([
                 Item(
-                    AgentId("core"),
+                    AgentId("kernel_state"),
                     .object([
                         "type": .string("create_agent"),
-                        "parent_id": .string("core"),
+                        "parent_id": .string("kernel_state"),
                         "handler_module": .string("terminal_backend.tools"),
                         "id": .string(id),
                         "command": .string(command),
@@ -49,13 +49,13 @@
 
         /// Collect `output` chunks (python's field is `data`) until `needle` appears.
         private func awaitOutput(
-            _ inbox: AsyncStream<JSON>, containing needle: String, seconds: Double = 3
+            _ inbox: Inbox, containing needle: String, seconds: Double = 3
         ) async -> String {
             var got = ""
             let deadline = Date().addingTimeInterval(seconds)
             var iter = inbox.makeAsyncIterator()
             while Date() < deadline {
-                guard let event = await iter.next() else { break }
+                guard let event = await iter.next()?.payload else { break }
                 if event["type"].asString == "output", let chunk = event["data"].asString {
                     got += chunk
                     if got.contains(needle) { break }
@@ -204,7 +204,7 @@
             var closed = false
             let deadline = Date().addingTimeInterval(3)
             var iter = inbox.makeAsyncIterator()
-            while Date() < deadline, let ev = await iter.next() {
+            while Date() < deadline, let ev = await iter.next()?.payload {
                 if ev["type"].asString == "closed" {
                     closed = true
                     break
@@ -262,7 +262,7 @@
                 AgentId("term_paste"),
                 .object(["type": .string("paste_image"), "mime": .string("image/png")]),
                 blob)
-            #expect(body.isEmpty)
+            #expect(body == nil, "paste_image returns no chunk")
             #expect(reply["bytes"].asInt == Int64(blob.count), "reply: \(reply.serialize())")
             let path = try #require(
                 reply["path"].asString, "reply carries no path: \(reply.serialize())")
@@ -322,10 +322,10 @@
             let kernel = try await startKernelInMemory(portHint: 0)
             _ = await kernel.send([
                 Item(
-                    AgentId("core"),
+                    AgentId("kernel_state"),
                     .object([
                         "type": .string("create_agent"),
-                        "parent_id": .string("core"),
+                        "parent_id": .string("kernel_state"),
                         "handler_module": .string("terminal_backend.tools"),
                         "id": .string("term_noexec"),
                         "command": .string("/no/such/shell"),
@@ -343,7 +343,7 @@
             var closed = false
             let deadline = Date().addingTimeInterval(4)
             var iter = inbox.makeAsyncIterator()
-            while Date() < deadline, let ev = await iter.next() {
+            while Date() < deadline, let ev = await iter.next()?.payload {
                 if ev["type"].asString == "output" { text += ev["data"].asString ?? "" }
                 if ev["type"].asString == "closed" {
                     closed = true
@@ -370,7 +370,7 @@
             var joined = ""
             let deadline = Date().addingTimeInterval(4)
             var iter = inbox.makeAsyncIterator()
-            while Date() < deadline, let ev = await iter.next() {
+            while Date() < deadline, let ev = await iter.next()?.payload {
                 guard ev["type"].asString == "output" else { continue }
                 let chunk = ev["data"].asString ?? "<none>"
                 if chunk.isEmpty { sawEmpty = true }
@@ -474,6 +474,13 @@
                 rows.contains {
                     $0["agent"].asString == "term_ps" && $0["verb"].asString == "pty_reader"
                 }, "no pty_reader row: \(ps.serialize())")
+            // C36 — the attachment is a `task` ROW too, under the same id, so
+            // the reader survives in the message log and not only in `ps`.
+            let stored = kernel.rows.forAgent(AgentId("term_ps"))
+            #expect(
+                stored.contains {
+                    $0["kind"]?.asString == "task" && $0["verb"]?.asString == "pty_reader"
+                }, "no pty_reader task row: \(stored.map { JSON.object($0).serialize() })")
             _ = await kernel.send([Item(AgentId("term_ps"), .object(["type": .string("stop")]))])[0]
                 .result
         }
@@ -503,6 +510,22 @@
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
             #expect(whole.contains("abcdefgh"), "\(whole.debugDescription)")
+            // WAIT FOR THE BUFFER TO SETTLE before comparing three reads of it:
+            // the login shell's own banner can still be arriving, and a read
+            // that landed between `whole` and `zero` made them differ for a
+            // reason that has nothing to do with `max_bytes` (measured under
+            // the full parallel run, 2026-09-20). Two equal reads in a row = no
+            // more output in flight.
+            let settleBy = Date().addingTimeInterval(3)
+            while Date() < settleBy {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                let again =
+                    await kernel.send([
+                        Item(AgentId("term_slice"), .object(["type": .string("output")]))
+                    ])[0].result["output"].asString ?? ""
+                if again == whole { break }
+                whole = again
+            }
             let zero = await kernel.send([
                 Item(
                     AgentId("term_slice"),
@@ -533,10 +556,10 @@
             let kernel = try await startKernelInMemory(portHint: 0)
             _ = await kernel.send([
                 Item(
-                    AgentId("core"),
+                    AgentId("kernel_state"),
                     .object([
                         "type": .string("create_agent"),
-                        "parent_id": .string("core"),
+                        "parent_id": .string("kernel_state"),
                         "handler_module": .string("terminal_backend.tools"),
                         "id": .string("term_falsy"),
                         "command": .string(""),
@@ -580,7 +603,7 @@
             var closed = false
             let deadline = Date().addingTimeInterval(8)
             var iter = inbox.makeAsyncIterator()
-            while Date() < deadline, let ev = await iter.next() {
+            while Date() < deadline, let ev = await iter.next()?.payload {
                 if ev["type"].asString == "closed" {
                     closed = true
                     break
@@ -608,6 +631,47 @@
             _ = await kernel.send([Item(AgentId("term_mime"), .object(["type": .string("stop")]))])[
                 0
             ].result
+        }
+
+        /// EIGHT PTYs FORKED AT ONCE, each one its own. Darwin's `forkpty` names
+        /// the slave through `ptsname()`'s STATIC buffer, so two threads forking
+        /// together could interleave there and one child would open the OTHER
+        /// pair's slave: that master saw instant EOF, the session was cleaned up
+        /// and `reflect` answered `running:false, pid:null` (measured: ~10 issues
+        /// in one full `swift test` run in four). Python forks from a single
+        /// thread; `PtySession.start` now serializes.
+        @Test func concurrentSpawnsEachGetTheirOwnPty() async throws {
+            let kernel = try await startKernelInMemory(portHint: 0)
+            let ids = (0..<8).map { "term_par_\($0)" }
+            for id in ids {
+                _ = await kernel.send([
+                    Item(
+                        AgentId("kernel_state"),
+                        .object([
+                            "type": .string("create_agent"),
+                            "parent_id": .string("kernel_state"),
+                            "handler_module": .string("terminal_backend.tools"),
+                            "id": .string(id),
+                            "command": .string("/bin/cat"),
+                        ]))
+                ])[0].result
+            }
+            // `create_agent` boots inside its own dispatch, one at a time. Stop
+            // them and re-boot in ONE batch: eight DIFFERENT targets dispatch
+            // concurrently, so eight `forkpty` calls run at once.
+            _ = await kernel.send(ids.map { Item(AgentId($0), .object(["type": .string("stop")])) })
+            let booted = await kernel.send(
+                ids.map { Item(AgentId($0), .object(["type": .string("boot")])) })
+            for (id, o) in zip(ids, booted) {
+                #expect(o.result == .object(["running": .bool(true)]), "\(id): \(o.result.serialize())")
+            }
+            let rs = await kernel.send(
+                ids.map { Item(AgentId($0), .object(["type": .string("reflect")])) })
+            for (id, o) in zip(ids, rs) {
+                #expect(o.result["running"].asBool == true, "\(id): \(o.result.serialize())")
+                #expect((o.result["pid"].asInt ?? 0) > 0, "\(id): \(o.result.serialize())")
+            }
+            _ = await kernel.send(ids.map { Item(AgentId($0), .object(["type": .string("stop")])) })
         }
     }
 

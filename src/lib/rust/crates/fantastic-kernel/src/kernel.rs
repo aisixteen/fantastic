@@ -12,7 +12,11 @@ use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::state::{KernelState, CURRENT_VERSION};
 use crate::storage::StorageMode;
-use crate::tasks::TaskTable;
+use crate::tasks::{TaskId, TaskTable};
+
+/// The loader's durable write-through, kicked on every settle with that
+/// execution's CALL ROW id (python passes `d.pid`).
+pub type LedgerFlusher = Box<dyn Fn(Option<TaskId>) + Send + Sync>;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use serde_json::{json, Value};
@@ -63,6 +67,13 @@ pub struct Kernel {
     /// `DashMap` has none, so the port sorted by id at each reader and answered
     /// a registry python never answers.
     agent_order: RwLock<Vec<AgentId>>,
+    /// Stable name → agent id, wired from an agent's `alias` meta at
+    /// `register` (and dropped at `unregister`) — python `Kernel.well_known`.
+    /// `send` targets, `create_agent`'s `parent_id` and the gate's operand
+    /// resolution all resolve a non-"kernel" id through this AFTER the
+    /// `kernel`→root special case (C35), so a caller can address a well-known
+    /// agent (e.g. `web_loader`) by that stable name instead of its minted id.
+    pub well_known: DashMap<String, AgentId>,
     /// Per-id inbox (agents + synthetic browser client ids).
     pub inboxes: DashMap<AgentId, crate::inbox::InboxSender>,
     /// Active state-event taps (telemetry, debugging). Keyed by token
@@ -72,7 +83,7 @@ pub struct Kernel {
     next_subscriber: AtomicU64,
     /// Compile-time bundle registry — caller fills before bootstrap.
     pub bundles: BundleRegistry,
-    /// The root agent (`id="core"` by convention). Set during bootstrap.
+    /// The root agent (`id="kernel_state"` by convention). Set during bootstrap.
     pub root: ArcSwapOption<Agent>,
     /// Per-inbox bound; same value applied to every channel.
     pub inbox_bound: usize,
@@ -94,6 +105,13 @@ pub struct Kernel {
     /// stopping — a send with a live parent task still passes, because that is
     /// work already in flight finishing itself.
     draining: std::sync::atomic::AtomicBool,
+    /// The ROOT LOADER's record writer, once its `boot` installed one. Held so
+    /// a one-shot can drain it synchronously before the process exits, exactly
+    /// as python's `call` mode awaits `root._fs_flush_loop.aflush()`.
+    record_writer: std::sync::Mutex<Option<crate::persistence::PersistWriter>>,
+    /// Has [`Self::shutdown`] already run? The SIGTERM handler and any atexit
+    /// safety net must not double-walk the tree.
+    shutdown_complete: std::sync::atomic::AtomicBool,
     /// The TASK TABLE — every in-flight dispatch, a tree through the send
     /// chain. The `ps` system verb reads it; `cancel` kills a task and its
     /// subtree. See [`crate::tasks`].
@@ -114,7 +132,7 @@ pub struct Kernel {
     /// Installed by the ROOT LOADER at boot. `None` = no persistence (no store
     /// wired, or a test kernel): settled outcomes live and die with the process,
     /// exactly like the tree's own auto-flush law. Called at every settle.
-    ledger_flusher: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    ledger_flusher: Mutex<Option<LedgerFlusher>>,
 }
 
 /// One bound for every agent's `shutdown` turn. Python
@@ -158,6 +176,7 @@ impl Kernel {
         Self {
             agents: DashMap::new(),
             agent_order: RwLock::new(Vec::new()),
+            well_known: DashMap::new(),
             inboxes: DashMap::new(),
             state_subscribers: RwLock::new(Vec::new()),
             next_subscriber: AtomicU64::new(1),
@@ -167,6 +186,8 @@ impl Kernel {
             storage,
             shutdown: Notify::new(),
             draining: std::sync::atomic::AtomicBool::new(false),
+            record_writer: std::sync::Mutex::new(None),
+            shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             tasks: TaskTable::new(),
             ledger: crate::ledger::Ledger::default(),
             rows: crate::rows::RowStore::new(),
@@ -197,6 +218,125 @@ impl Kernel {
         self.draining.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Remember the record writer the root loader's `boot` installed.
+    pub fn set_record_writer(&self, w: crate::persistence::PersistWriter) {
+        *self.record_writer.lock().expect("writer poisoned") = Some(w);
+    }
+
+    /// Forget it (the writer stopped).
+    pub fn clear_record_writer(&self) {
+        *self.record_writer.lock().expect("writer poisoned") = None;
+    }
+
+    /// Drain the record writer's dirty set NOW — python's `aflush`. A no-op
+    /// when no loader has booted (nothing is queued and nothing would land).
+    pub async fn flush_records(self: &Arc<Self>) {
+        let w = self.record_writer.lock().expect("writer poisoned").clone();
+        if let Some(w) = w {
+            w.flush(self).await;
+        }
+    }
+
+    /// GRACEFUL TREE-WIDE PROCESS SHUTDOWN — python `Kernel.shutdown`.
+    ///
+    /// [`Self::shutdown_agents`] (drain, the `shutdown` verb, quiet), then the
+    /// ROOT bundle's `flush_pending` — awaited BEFORE the teardown walk, so the
+    /// persister can write its last window while its provider child is still
+    /// alive — then the DEPTH-FIRST `on_shutdown` walk that frees OS resources
+    /// (PTYs, subprocesses, sockets) without touching records or disk. The tree
+    /// survives, so the next boot rehydrates cleanly.
+    ///
+    /// IDEMPOTENT: a second call does nothing. Nothing used to call
+    /// `Bundle::on_shutdown` at all — the daemon sent `{type:shutdown}` LIFO to
+    /// every agent, which most bundles answer "unknown type".
+    pub async fn shutdown(self: &Arc<Self>) {
+        if self
+            .shutdown_complete
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let Some(root) = self.root() else { return };
+        self.shutdown_agents().await;
+        if let Some(bundle) = root
+            .handler_module
+            .as_deref()
+            .and_then(|hm| self.bundles.get(hm))
+        {
+            // Its writes are the kernel's own traffic (python wraps the hook in
+            // `shutdown_context()`): probed or written while draining, the
+            // store would answer "draining" — read as "no log" — and the header
+            // was never written.
+            if let Err(e) = crate::send::with_shutdown(bundle.flush_pending(&root.id, self)).await {
+                eprintln!("  [shutdown] flush_pending raised: {e}");
+            }
+        }
+        self.shutdown_walk(&root).await;
+    }
+
+    /// Does this agent's bundle DECLARE `verb` — python's
+    /// `Agent.advertises(verb)` (`_agent.py:1160`), which reads the module's
+    /// `VERBS` table and dispatches nothing.
+    ///
+    /// Rust keeps its verb table inside the bundle's own reflect reply, so the
+    /// read calls `Bundle::handle({"type":"reflect"})` DIRECTLY — never through
+    /// `send`. A dispatch would mint a message id and write a call row, a task
+    /// row, a ledger execution and a watcher echo for a question python answers
+    /// with an attribute lookup.
+    ///
+    /// False for a bare agent, for a handler_module no registry holds (python's
+    /// unimportable bundle advertises nothing) and for a bundle that raised.
+    pub(crate) async fn advertises(self: &Arc<Self>, id: &AgentId, verb: &str) -> bool {
+        let Some(agent) = self.agents.get(id).map(|e| Arc::clone(&e)) else {
+            return false;
+        };
+        let Some(bundle) = agent
+            .handler_module
+            .as_deref()
+            .and_then(|hm| self.bundles.get(hm))
+        else {
+            return false;
+        };
+        let reply = bundle
+            .handle(id, &json!({"type": "reflect"}), self)
+            .await
+            .unwrap_or(None)
+            .unwrap_or(Value::Null);
+        reply
+            .get("verbs")
+            .and_then(Value::as_object)
+            .is_some_and(|v| v.contains_key(verb))
+    }
+
+    /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that
+    /// errors is printed and the walk continues — teardown is not refusable.
+    fn shutdown_walk<'a>(
+        self: &'a Arc<Self>,
+        agent: &'a Arc<Agent>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            for cid in agent.child_ids() {
+                if let Some(child) = self.agents.get(&cid).map(|e| Arc::clone(&e)) {
+                    self.shutdown_walk(&child).await;
+                }
+            }
+            if let Some(bundle) = agent
+                .handler_module
+                .as_deref()
+                .and_then(|hm| self.bundles.get(hm))
+            {
+                // C87: python's exact text is "hook raised", not "on_shutdown
+                // raised" (`_agent.py:2900-2906`, `print(f"  [shutdown]
+                // {self.id} hook raised: {e}", file=sys.stderr)`) — the same
+                // wording whether the hook resolved to `on_shutdown` or the
+                // `on_delete` fallback.
+                if let Err(e) = bundle.on_shutdown(&agent.id, self).await {
+                    eprintln!("  [shutdown] {} hook raised: {e}", agent.id.0);
+                }
+            }
+        })
+    }
+
     /// THE AGENT HALF OF A GRACEFUL STOP — also the `shutdown_agents` kernel
     /// verb.
     ///
@@ -212,38 +352,30 @@ impl Kernel {
     /// The kernel keeps serving afterwards — reads, `messages`, the persister —
     /// until the process exits.
     ///
-    /// WHO GETS TOLD differs from python by one step and only one. Python asks
-    /// each agent's bundle whether its `VERBS` table carries `shutdown`, because
-    /// a python bundle may fail to import and then advertises nothing. A rust
-    /// bundle is compiled in and every one answers `shutdown` (a no-op, or real
-    /// teardown), so the set is every live agent and there is no import to fail.
+    /// WHO GETS TOLD is python's `advertises("shutdown")`: does this agent's
+    /// bundle DECLARE the verb. Python reads the module's `VERBS` table — a
+    /// pure attribute read that dispatches nothing. Rust's declaration lives in
+    /// the bundle's own reflect map, so the read is [`Self::advertises`]: the
+    /// handler is called DIRECTLY, with no message id, no call row, no task
+    /// table entry, no ledger execution and no watcher fanout.
+    ///
+    /// It used to go through `send`, and that wrote one `call`/`reflect` row per
+    /// agent per shutdown — plus, through `apply_reflect_flags`, an `internal`
+    /// roster row on every node of the tree — where python writes nothing at
+    /// all. Measured against the python baseline: 3 extra rows per agent on
+    /// every reboot (`e2e/parity` `ctx/reboot/*_rows_read.json`).
     pub async fn shutdown_agents(self: &Arc<Self>) -> Value {
         self.draining
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        // WHO GETS TOLD: every agent whose bundle ADVERTISES `shutdown` — the
-        // verb in its reflect map — exactly python's `advertises("shutdown")`
-        // over the bundle's VERBS table. Not every agent: a bundle that merely
-        // ACCEPTS the verb as a lifecycle no-op is not asking to be told, and a
-        // face that treats it as a teardown must never be told by the stop it
-        // is carrying (the web listener, 2026-09-12). Reflect is read under the
-        // shutdown scope so the drain gate lets the kernel's own reads through.
+        // Not every agent: a bundle that merely ACCEPTS the verb as a lifecycle
+        // no-op is not asking to be told, and a face that treats it as a
+        // teardown must never be told by the stop it is carrying (the web
+        // listener, 2026-09-12).
         let all: Vec<AgentId> = self.agent_ids();
         let mut targets: Vec<AgentId> = Vec::new();
-        if !all.is_empty() {
-            let asks: Vec<crate::Item> = all
-                .iter()
-                .map(|id| crate::Item::new(id.clone(), json!({"type": "reflect"})))
-                .collect();
-            let seen = crate::send::with_shutdown(self.send(asks)).await;
-            for (id, o) in all.iter().zip(seen.iter()) {
-                let advertises = o
-                    .result
-                    .get("verbs")
-                    .and_then(Value::as_object)
-                    .is_some_and(|v| v.contains_key("shutdown"));
-                if advertises {
-                    targets.push(id.clone());
-                }
+        for id in &all {
+            if self.advertises(id, "shutdown").await {
+                targets.push(id.clone());
             }
         }
         let mut shut: Vec<String> = Vec::new();
@@ -269,7 +401,9 @@ impl Kernel {
         // pending work.
         let me = crate::tasks::current_task();
         let deadline = std::time::Instant::now() + QUIET_TIMEOUT;
-        while std::time::Instant::now() < deadline && !self.tasks.pending(me).is_empty() {
+        // QUIET WAITS ON DISPATCHES ONLY — a forked service loop never settles.
+        while std::time::Instant::now() < deadline && !self.tasks.pending_dispatches(me).is_empty()
+        {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let mut cancelled: Vec<Value> = Vec::new();
@@ -290,17 +424,20 @@ impl Kernel {
     /// Install the durable-ledger write-through. The kernel calls it after every
     /// settle and knows NOTHING about what it does — the loader owns the disk,
     /// exactly as it owns the `.fantastic` layout.
-    pub fn set_ledger_flusher(&self, f: Box<dyn Fn() + Send + Sync>) {
+    pub fn set_ledger_flusher(&self, f: LedgerFlusher) {
         *self.ledger_flusher.lock().expect("flusher poisoned") = Some(f);
     }
 
     /// Fire the durable write-through, if one is installed. No flusher = no
     /// persistence: settled outcomes live and die with the process. That is the
     /// auto-flush law, not a fallback.
-    pub fn ledger_settled(&self) {
+    /// `pid` is the settled execution's CALL ROW id — python passes `d.pid`.
+    /// The loader's kick reads that row to tell its OWN persistence traffic from
+    /// real work; the kernel still knows nothing about what persistence is.
+    pub fn ledger_settled(&self, pid: Option<TaskId>) {
         let g = self.ledger_flusher.lock().expect("flusher poisoned");
         if let Some(f) = g.as_ref() {
-            f();
+            f(pid);
         }
     }
 
@@ -319,7 +456,50 @@ impl Kernel {
                 order.push(agent.id.clone());
             }
         }
+        // C35: a declared `alias` meta becomes a stable, resolvable NAME —
+        // `send` targets, `create_agent`'s `parent_id` and the gate's operand
+        // resolution all go through `well_known` after the `kernel` special
+        // case. Declared config the substrate makes FUNCTIONAL, not
+        // autonomous behaviour. Python `Kernel.register`.
+        if let Some(alias) = agent
+            .meta
+            .read()
+            .expect("meta lock poisoned")
+            .get("alias")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            self.well_known.insert(alias.to_string(), agent.id.clone());
+        }
         self.agents.insert(agent.id.clone(), agent);
+    }
+
+    /// Resolve a `send`-style operand THROUGH `well_known`: a declared
+    /// `alias` meta resolves to its agent id, a literal id resolves to
+    /// itself — python `self.ctx.agents.get(self.ctx.well_known.get(x, x))`.
+    /// Callers special-case the `"kernel"` alias to the root BEFORE calling
+    /// this (C35 lands it after that check, never instead of it).
+    #[must_use]
+    pub fn resolve_well_known(&self, id: &str) -> AgentId {
+        self.well_known
+            .get(id)
+            .map(|e| e.value().clone())
+            .unwrap_or_else(|| AgentId::from(id))
+    }
+
+    /// Resolve a `send`-style operand end to end (C35): `"kernel"` aliases the
+    /// root; otherwise a declared `alias` meta resolves through `well_known`,
+    /// then a literal id. `None` when it names no live agent. The ONE place
+    /// `send`'s target, `send_with_binary`'s target, `create_agent`'s
+    /// `parent_id` and the gate's operand resolution all go through, so the
+    /// four cannot drift on what "the same id" resolves to.
+    #[must_use]
+    pub fn resolve_target(&self, raw_id: &str) -> Option<Arc<Agent>> {
+        if raw_id == "kernel" {
+            return self.root();
+        }
+        let resolved = self.resolve_well_known(raw_id);
+        self.agents.get(&resolved).map(|e| Arc::clone(&e))
     }
 
     /// Register `id` as a READER and hand back its queue — python's
@@ -369,6 +549,8 @@ impl Kernel {
             .write()
             .expect("agent order poisoned")
             .retain(|a| a != id);
+        // Drop any alias pointing at the agent being removed (C35).
+        self.well_known.retain(|_, target| target != id);
     }
 
     /// Cheap clone of the current root pointer (`None` until
@@ -404,7 +586,7 @@ impl Kernel {
             Value::Object(m) => m.clone(),
             other => {
                 for (_token, cb) in subs.iter() {
-                    cb(other, body);
+                    Self::call_state_subscriber(cb, other, body);
                 }
                 return;
             }
@@ -415,7 +597,27 @@ impl Kernel {
         stamped.insert("ts".to_string(), json!(ts));
         let stamped = Value::Object(stamped);
         for (_token, cb) in subs.iter() {
-            cb(&stamped, body);
+            Self::call_state_subscriber(cb, &stamped, body);
+        }
+    }
+
+    /// One subscriber call, ISOLATED (C87) — python: `try: cb(event) except
+    /// Exception as e: print(f"  [kernel] state subscriber raised: {e}",
+    /// file=sys.stderr)`, and the loop moves on to the next subscriber. A
+    /// rust callback has no `Result` to fail with — the equivalent of
+    /// "raised" is a panic, caught here so one broken tap never silences
+    /// every other subscriber for the rest of the process.
+    fn call_state_subscriber(
+        cb: &StateSubscriber,
+        event: &Value,
+        body: Option<&(String, Vec<u8>)>,
+    ) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(event, body)));
+        if let Err(payload) = outcome {
+            eprintln!(
+                "  [kernel] state subscriber raised: {}",
+                crate::send::panic_message(&payload)
+            );
         }
     }
 

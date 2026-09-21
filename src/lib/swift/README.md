@@ -75,7 +75,6 @@ kernel modules.
 | web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE (thin over `FantasticAICore`) |
 | nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry (thin over `FantasticAICore`) |
-| foundation_models_backend | `FantasticFoundationModelsBackend` | both | Apple on-device Foundation Models LLM backend (`foundation_models_backend.tools`; gated by `canImport(FoundationModels)`; thin over `FantasticAICore`) |
 | exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the ONE executor: spawns an allowlisted interpreter as a background job (`start` → `{job_id}`); `shim:'python'` prepends the kernel connector; sealed by default |
 | terminal_backend | `FantasticTerminalBackend` | Pro | macOS-only — `forkpty` + DispatchIO |
 
@@ -117,7 +116,6 @@ swift/
                                        verb dispatch); AI backends are thin over this
     FantasticOllamaBackend/            local LLM SSE
     FantasticNvidiaNimBackend/         hosted LLM SSE
-    FantasticFoundationModelsBackend/  Apple on-device LLM
     FantasticRunnerCore/               shared runner lifecycle (reflect/boot/start/stop);
                                        runner bundles are thin over this
     Fantastic{File,TextFile,Scheduler,

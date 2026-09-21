@@ -25,6 +25,7 @@ public let HANDLER_MODULE = "web.tools"
 
 public final class WebBundle: AgentBundle, @unchecked Sendable {
     public let name = "web"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
     public init() {}
 
     /// Live `WebServer` instances keyed by agent id — python's `_servers`.

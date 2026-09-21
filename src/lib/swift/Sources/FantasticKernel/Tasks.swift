@@ -202,6 +202,12 @@ private struct TaskEntry {
     /// neither waits for it nor cancels it; it dies with the process. Python
     /// `_keepalive`.
     let keepalive: Bool
+    /// A `spawnTask` FORK — a service loop (scheduler tick, bridge read loop,
+    /// ws drain, job pump, pty reader), not a dispatch. It is work that
+    /// outlives its dispatch BY CONSTRUCTION, so it never settles:
+    /// `shutdownAgents` cancels it instead of waiting for it. Python
+    /// `_forked`.
+    let forked: Bool
 }
 
 /// The live table of in-flight work. Lives on the `Kernel`; `ps` reads it,
@@ -215,6 +221,17 @@ private struct TaskEntry {
 public final class TaskIdBox: @unchecked Sendable {
     public var value: TaskId?
     public init() {}
+}
+
+/// The BINARY REPLY BODY of one dispatch, handed back out of the spawned task
+/// (C37). Written inside the task before it resolves its `DispatchBox` and read
+/// only after that box has been awaited, so the box's own lock orders the two.
+///
+/// `nil` after a dispatch means the verb returned NO chunk; `.some(d)` means it
+/// returned one, `d` possibly empty.
+final class BodyBox: @unchecked Sendable {
+    var value: Data?
+    init() {}
 }
 
 public final class TaskTable: @unchecked Sendable {
@@ -236,21 +253,27 @@ public final class TaskTable: @unchecked Sendable {
 
     /// Put one in-flight task in the table.
     ///
-    /// A `parent` that is no longer in the table is dropped to `nil` — the task
-    /// is a root, adopted by init. Not defensive slack: a bundle's long-lived
-    /// work outlives the dispatch that forked it, and a `send` it issues later
-    /// must not claim a dead parent or the `ps` tree would lie.
+    /// THE PARENT IS STORED VERBATIM. There used to be a `parent` → `nil` drop
+    /// here for the case where `currentTask` named a task that had already
+    /// ended, defended as init-adoption. Python removed exactly that
+    /// (`_kernel.py::register_task`): it was the fingerprint of a bug, not a
+    /// rule — converting a dead parent to `nil` puts the work OUTSIDE every
+    /// subtree, where `cancel` on its caller can never reach it, and
+    /// `forget`'s re-parenting is what should have handled it. It also made
+    /// every REST-originated `ps` row claim `parent: null` where python names
+    /// the web boot pid (A11.31: the boot dispatch has already settled by the
+    /// time a request lands, so the pid it hands down is dangling by design).
     func register(
         id: TaskId, agent: AgentId, verb: String, parent: TaskId?, handle: TaskHandle,
-        keepalive: Bool = false
+        keepalive: Bool = false, forked: Bool = false
     ) {
         lock.lock()
         defer { lock.unlock() }
-        let parent = parent.flatMap { tasks[$0] != nil ? $0 : nil }
         order += 1
         tasks[id] = TaskEntry(
             agent: agent, parent: parent, verb: verb,
-            startedAt: nowSecs(), order: order, handle: handle, keepalive: keepalive)
+            startedAt: nowSecs(), order: order, handle: handle, keepalive: keepalive,
+            forked: forked)
     }
 
     /// Every live task that is NOT a keepalive loop and not `except` — what
@@ -259,6 +282,18 @@ public final class TaskTable: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return tasks.filter { !$0.value.keepalive && $0.key != except }.map { $0.key }
+    }
+
+    /// The pending DISPATCHES — work that can finish on its own. A `spawnTask`
+    /// FORK (scheduler tick, bridge read loop, ws drain, job pump, pty reader)
+    /// is a service loop that never settles by construction, so waiting on one
+    /// burned the WHOLE quiet timeout on every daemon that ran one. Forks are
+    /// CANCELLED by `shutdownAgents`, never awaited. Python `settling()`.
+    public func settling(except: TaskId?) -> [TaskId] {
+        lock.lock()
+        defer { lock.unlock() }
+        return tasks.filter { !$0.value.keepalive && !$0.value.forked && $0.key != except }
+            .map { $0.key }
     }
 
     /// `true` iff `id` is a live ROOT task — the only tasks `shutdown_agents`
@@ -416,11 +451,15 @@ extension Kernel {
         let parent = KernelTaskLocals.currentTask
         var row: Row = ["kind": .string("task"), "verb": .string(verb)]
         row["parent"] = parent.map { JSON.integer($0.value) } ?? .null
-        let taskId = TaskId((try? rows.put(agent, row)) ?? rows.mintId())
+        // `put` refuses ONE thing — a caller-supplied id — and this row carries
+        // none, so the fork's id IS its row id, the way python's `spawn_task`
+        // returns what `rows_put` minted. Minting a second id on a failure that
+        // cannot happen would name a task no row describes.
+        let taskId = TaskId(try! rows.put(agent, row))
         let handle = TaskHandle()
         tasks.register(
             id: taskId, agent: agent, verb: verb,
-            parent: parent, handle: handle, keepalive: keepalive)
+            parent: parent, handle: handle, keepalive: keepalive, forked: true)
 
         let table = tasks
         let t = Task {
@@ -465,8 +504,15 @@ extension Kernel {
                 let bundle = bundles.get(hm)
             else { continue }
             // A hook that fails is ignored and the kill still happens: cancel is
-            // not refusable.
-            try? await bundle.onCancel(agentId: agentId, taskId: tid, kernel: self)
+            // not refusable — but python still SAYS so (C87), stdout, no
+            // `flush=True` on its own print either:
+            // `print(f"  [cancel] {self.id} bundle on_cancel raised: {e}")`.
+            do {
+                try await bundle.onCancel(agentId: agentId, taskId: tid, kernel: self)
+            } catch {
+                RuntimeLog.out(
+                    "  [cancel] \(agentId.value) bundle on_cancel raised: \(pyErrorText(error))")
+            }
         }
         // ② SIGKILL — leaves-up.
         let killed = tasks.abortSubtree(ids)

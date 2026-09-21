@@ -142,9 +142,9 @@ struct WebBundleTests {
     @Test func webWsReflectKeysMatchPython() async {
         let kernel = makeKernelWithAll()
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
-                "type": .string("create_agent"), "parent_id": .string("core"),
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("web_ws.tools"), "id": .string("ws"),
             ]))
         let r = await call(kernel, "ws", .object(["type": .string("reflect")]))
@@ -166,9 +166,9 @@ struct WebBundleTests {
     @Test func webRestReflectKeysMatchPython() async {
         let kernel = makeKernelWithAll()
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
-                "type": .string("create_agent"), "parent_id": .string("core"),
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("web_rest.tools"), "id": .string("rest"),
             ]))
         let r = await call(kernel, "rest", .object(["type": .string("reflect")]))
@@ -202,9 +202,9 @@ struct WebBundleTests {
             ("ws", "web_ws.tools", "web_ws"), ("rest", "web_rest.tools", "web_rest"),
         ] {
             _ = await call(
-                kernel, "core",
+                kernel, "kernel_state",
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string(module), "id": .string(id),
                     "ingress_rule": .string("allow_all_ingress"),
                 ]))
@@ -291,7 +291,7 @@ struct WebBundleTests {
         let kernel = try await startWebKernel()
         defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
         _ = await call(kernel, "web", .object(["type": .string("boot")]))
-        let listed = await call(kernel, "core", .object(["type": .string("list_agents")]))
+        let listed = await call(kernel, "kernel_state", .object(["type": .string("list_agents")]))
         let web = try #require(
             (listed["agents"].asArray ?? []).first { $0["id"].asString == "web" })
         #expect(web["running"].isNull, "\(web)")
@@ -330,9 +330,9 @@ struct WebBundleTests {
         let probe = SayProbe()
         kernel.bundles.register("say_probe.tools", probe)
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
-                "type": .string("create_agent"), "parent_id": .string("core"),
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("say_probe.tools"), "id": .string("cli"),
                 "callable_by": .object([
                     "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
@@ -340,7 +340,7 @@ struct WebBundleTests {
                 ]),
             ]))
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
                 "type": .string("update_agent"), "id": .string("web"),
                 "can_call": .object(["cli": .string("*")]),
@@ -369,9 +369,9 @@ struct WebBundleTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
-                "type": .string("create_agent"), "parent_id": .string("core"),
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("file_bridge.tools"), "id": .string("files"),
                 "root": .string(rel),
             ]))
@@ -381,14 +381,14 @@ struct WebBundleTests {
                 .asArray?.isEmpty == true)
         // Open the leg AND both halves of the call gate.
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
                 "type": .string("update_agent"), "id": .string("files"),
                 "ingress_rule": .string("allow_all_ingress"),
                 "callable_by": .object(["web": .string("*")]),
             ]))
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
                 "type": .string("update_agent"), "id": .string("web"),
                 "can_call": .object(["files": .string("*")]),
@@ -399,7 +399,7 @@ struct WebBundleTests {
             "\(opened["browser_reachable"])")
         // Closing ANY one of the three takes it back out.
         _ = await call(
-            kernel, "core",
+            kernel, "kernel_state",
             .object([
                 "type": .string("update_agent"), "id": .string("files"),
                 "ingress_rule": .string("deny_ingress"),

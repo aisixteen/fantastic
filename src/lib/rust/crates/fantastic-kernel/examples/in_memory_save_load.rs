@@ -83,7 +83,7 @@ async fn main() {
     banner("Step 2: create three agents (alpha, beta, gamma)");
     for id in ["alpha", "beta", "gamma"] {
         let r = kernel
-            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}))])
+            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}))])
             .await.remove(0).result;
         println!("  create_agent {id} → ok={}", r["ok"]);
     }
@@ -120,7 +120,7 @@ async fn main() {
         "  fresh kernel agents after load:  {:?}",
         agent_ids(&kernel2)
     );
-    for id in ["core", "alpha", "beta", "gamma"] {
+    for id in ["kernel_state", "alpha", "beta", "gamma"] {
         assert_or_die(
             kernel2.agents.contains_key(&AgentId::from(id)),
             &format!("{id} present in restored kernel"),
@@ -134,7 +134,7 @@ async fn main() {
     banner("Step 6: mutate the restored kernel + show the snapshot diff");
     let _ = kernel2
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type":"update_agent","id":"alpha","note":"tutor pipeline"}),
         )])
         .await
@@ -142,7 +142,7 @@ async fn main() {
         .result;
     let _ = kernel2
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type":"delete_agent","id":"gamma"}),
         )])
         .await

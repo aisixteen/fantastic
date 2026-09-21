@@ -27,6 +27,10 @@ use serde_json::Value;
 ///
 /// Returns `(page, next_cursor)`. `next_cursor` is `Some` only when a further
 /// page exists, so a caller loops until it is `None`.
+///
+/// `ident` must already answer the item's identity AS PYTHON'S `str()` WOULD
+/// (`fantastic_bundle::py_str` on a numeric id) — `page` compares it against
+/// `after` verbatim, exactly as python's `str(ident(item)) == after`.
 #[must_use]
 pub fn page<T, F>(items: Vec<T>, payload: &Value, ident: F) -> (Vec<T>, Option<String>)
 where
@@ -34,19 +38,30 @@ where
 {
     let mut items = items;
 
-    if let Some(after) = payload.get("after").and_then(Value::as_str) {
-        if !after.is_empty() {
-            match items.iter().position(|it| ident(it) == after) {
-                Some(i) => {
-                    items.drain(..=i);
-                }
-                None => {
-                    // A cursor naming something that is gone: the caller is
-                    // walking a tree that moved under it. Give it the TAIL
-                    // rather than silently the WHOLE list, which would look like
-                    // a successful restart from the top.
-                    return (Vec::new(), None);
-                }
+    // PYTHON: `after = payload.get("after")`; a bool is never a cursor
+    // (`isinstance(after, bool): after = None`); absent, `None` or `""` means
+    // "from the start"; any OTHER value compares as `str(after)` — an int id
+    // and its decimal string ARE the same cursor (C17). Rust used to accept
+    // only an already-string `after` (`.and_then(Value::as_str)`), so an
+    // int/float/array/object cursor was silently IGNORED and paged the WHOLE
+    // list instead of resuming past it.
+    let after = match payload.get("after") {
+        None | Some(Value::Null) | Some(Value::Bool(_)) => None,
+        Some(Value::String(s)) if s.is_empty() => None,
+        Some(v) => Some(fantastic_bundle::py_str(v)),
+    };
+
+    if let Some(after) = after {
+        match items.iter().position(|it| ident(it) == after) {
+            Some(i) => {
+                items.drain(..=i);
+            }
+            None => {
+                // A cursor naming something that is gone: the caller is
+                // walking a tree that moved under it. Give it the TAIL
+                // rather than silently the WHOLE list, which would look like
+                // a successful restart from the top.
+                return (Vec::new(), None);
             }
         }
     }

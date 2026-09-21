@@ -89,10 +89,9 @@ async fn reflect_verbs_are_pythons_first_docstring_lines() {
         verbs["status"],
         json!("args: phase:str, source:str?, detail:dict?. Renders one-line phase markers for queued / thinking / tool_calling (entry+exit). `streaming` and `done` produce no output (token + done handlers cover them). Returns None.")
     );
-    // Cut mid-sentence on python — `_context`'s docstring wraps after "Renders a".
     assert_eq!(
         verbs["context"],
-        json!("args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a")
+        json!("args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a one-line context-protocol notice.")
     );
     assert_eq!(
         verbs["intro_booting"],
@@ -101,7 +100,7 @@ async fn reflect_verbs_are_pythons_first_docstring_lines() {
     // …and so is `_booted`'s, quotes included.
     assert_eq!(
         verbs["booted"],
-        json!("Final PTY push — the kernel's \"all booted\" signal, sent AFTER the boot")
+        json!("Final PTY push — the kernel's \"all booted\" signal, sent AFTER the boot loop.")
     );
 }
 
@@ -163,7 +162,7 @@ async fn intro_booting_prints_the_control_plane_map() {
     assert_eq!(
         lines[0],
         format!(
-            "[fantastic] rust · env=host · root=core · pid {} — booting…",
+            "[fantastic] rust · env=host · root=kernel_state · pid {} — booting…",
             std::process::id()
         )
     );

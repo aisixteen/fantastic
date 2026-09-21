@@ -308,6 +308,9 @@ impl Provider for AnthropicProvider {
             body.insert(k.clone(), v.clone());
         }
         let body = Value::Object(body);
+        if wire_on() {
+            println!("{}", wire_request_line(&body, anthropic_messages.len()));
+        }
 
         // NO RATE-LIMIT POLICY. A 429 is the endpoint answering, and it is
         // returned as `anthropic 429: <body>` exactly like every other status
@@ -350,6 +353,17 @@ impl Provider for AnthropicProvider {
                 return Err(ProviderError::raised(format!("anthropic {code}: {detail}")));
             }
             attempt += 1;
+            // A15.4 — python's exact stdout line before each transport retry
+            // (`provider.py:182-187`, `print(..., flush=True)`).
+            let ctype_shown = if ctype.is_empty() {
+                "no content-type"
+            } else {
+                ctype.as_str()
+            };
+            println!(
+                "[anthropic] {code} ({ctype_shown}) — transport error, retry {attempt}/{RETRIES}"
+            );
+            let _ = std::io::Write::flush(&mut std::io::stdout());
             tokio::time::sleep(Duration::from_secs_f64(BACKOFF * f64::from(attempt))).await;
         };
 
@@ -525,6 +539,40 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
     Ok(out)
 }
 
+/// WIRE TRACE. `FANTASTIC_AI_WIRE=1` prints what actually left and what came
+/// back — the outgoing `max_tokens` (the CONFIG is not evidence that the value
+/// arrives) and each completion's `stop_reason` with its block types. The
+/// stop_reason is the fact that separates "the model chose to stop" from
+/// "something bounded the output", and nothing logged it before. Python
+/// `provider.py` prints these two lines on STDOUT and nothing else — the api
+/// key and the headers never appear on the trace.
+fn wire_on() -> bool {
+    std::env::var("FANTASTIC_AI_WIRE").as_deref() == Ok("1")
+}
+
+/// python `f"[wire] -> max_tokens={body['max_tokens']} tools={len(body.get('tools', []))} msgs={len(anth_messages)}"`.
+fn wire_request_line(body: &Value, msgs: usize) -> String {
+    format!(
+        "[wire] -> max_tokens={} tools={} msgs={}",
+        body["max_tokens"],
+        body["tools"].as_array().map_or(0, Vec::len),
+        msgs
+    )
+}
+
+/// python `f"[wire] <- stop_reason={stop_reason!r} blocks={blocks!r}"`.
+fn wire_reply_line(st: &SseState) -> String {
+    format!(
+        "[wire] <- stop_reason={} blocks={}",
+        py_repr_value(
+            &st.stop_reason
+                .as_ref()
+                .map_or(Value::Null, |s| json!(s.clone()))
+        ),
+        py_repr_value(&Value::Array(st.blocks.clone()))
+    )
+}
+
 /// The SSE body as a LIVE stream of events.
 ///
 /// This used to drain the whole body into a `Vec` and hand it over only when the
@@ -555,6 +603,9 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                 // a finished turn.
                 let Some(chunk_res) = inner.next().await else {
                     finished = true;
+                    if wire_on() {
+                        println!("{}", wire_reply_line(&st));
+                    }
                     if let Some(why) = st.terminality() {
                         pending.push_back(Err(ProviderError::raised(why)));
                     }
@@ -586,6 +637,9 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                     }
                     if st.stop {
                         finished = true;
+                        if wire_on() {
+                            println!("{}", wire_reply_line(&st));
+                        }
                         if let Some(why) = st.terminality() {
                             pending.push_back(Err(ProviderError::raised(why)));
                         }

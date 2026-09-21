@@ -104,10 +104,9 @@ exercise:
 | File | Scopes | Requires |
 |---|---|---|
 | [`selftest/feature_gates.md`](selftest/feature_gates.md) | build, packaging | `cargo` |
-| [`selftest/binary_frame_chunking.md`](selftest/binary_frame_chunking.md) | WS, transport, multi-modal | Rust `fantastic_kernel` binary, websocket client |
 | [`selftest/cross_runtime_workdir.md`](selftest/cross_runtime_workdir.md) | persistence, cross-runtime | Both Python `uv sync` and Rust binary |
 
-These four specs run only against the Rust runtime — they assert
-things the Python kernel doesn't expose (the `FANTASTIC_PYTHON` env,
-the chunked WS binary frame protocol, the feature-gate compile
-matrix, and round-trip workdir loading across both kernels).
+These specs run only against the Rust runtime — they assert things
+the Python kernel doesn't expose (the `FANTASTIC_PYTHON` env, the
+feature-gate compile matrix, and round-trip workdir loading across
+both kernels).

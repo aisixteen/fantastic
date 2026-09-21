@@ -389,7 +389,15 @@ func parseCall(_ chars: [Unicode.Scalar], lo: Int, hi: Int) throws -> ToolCall? 
     }
     let rawTarget = fields.removeValue(forKey: "target_id")
     let to = normalizeTo(fields.removeValue(forKey: "to"))
-    let target = rawTarget.flatMap(\.asString).map(pyStrip).flatMap { $0.isEmpty ? nil : $0 }
+    // A NUMERIC-SHAPED target_id is not a string target — python's
+    // `coerce_scalar` types it as an (unbounded) `int`, so `isinstance(target,
+    // str)` fails even for a value too wide for this carrier's `Int64`, which
+    // `coerceScalar` otherwise has to keep as `.string` text (C74, D13). Check
+    // the raw text's shape, not just the JSON case, so a huge id still refuses
+    // like python instead of dispatching to a literal numeral agent id.
+    let target = rawTarget.flatMap(\.asString).map(pyStrip).flatMap {
+        $0.isEmpty || coerceScalarIsIntegerShaped($0) ? nil : $0
+    }
     // REFUSED ONLY WHEN THERE IS NO STRING TARGET **AND** `to` IS PYTHON-FALSY.
     // A truthy non-list `to` (`<to>42</to>`) is a CALL python dispatches — the
     // no-target reply comes from routing, not from the parser.

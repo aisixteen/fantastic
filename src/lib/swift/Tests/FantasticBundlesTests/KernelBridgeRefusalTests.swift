@@ -20,11 +20,11 @@ struct KernelBridgeRefusalTests {
         let registry = BundleRegistry()
         registry.register("relay_connector.tools", KernelBridgeBundle(family: .relay))
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
-        _ = await kernel.send([Item("core", [
-                "type": "create_agent", "parent_id": "core",
+        _ = await kernel.send([Item("kernel_state", [
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "relay_connector.tools", "id": "leg",
                 "transport": "relay",
             ])])[0].result

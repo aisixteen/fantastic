@@ -205,11 +205,18 @@ def _attach_reader(agent_id: str, kernel) -> None:
         try:
             await asyncio.Event().wait()  # lives until cancelled
         finally:
-            _detach_reader(agent_id)
+            # ONLY the attachment this holder owns. A stale holder cancelled
+            # late used to detach a LATER session's reader (measured
+            # 2026-09-16); the holder id is compared before touching the fd.
+            cur = _procs.get(agent_id)
+            if cur is not None and cur.get("reader_task") == my_tid:
+                _detach_reader(agent_id)
 
     loop.add_reader(fd, _on_readable, agent_id, kernel)
     state["reader_attached"] = True
-    state["reader_task"] = kernel.ctx.spawn_task(agent_id, "pty_reader", _hold())
+    state["ctx"] = kernel.ctx
+    my_tid = kernel.ctx.spawn_task(agent_id, "pty_reader", _hold())
+    state["reader_task"] = my_tid
 
 
 def _detach_reader(agent_id: str) -> None:
@@ -222,6 +229,15 @@ def _detach_reader(agent_id: str) -> None:
     except (RuntimeError, OSError, ValueError):
         pass
     state["reader_attached"] = False
+    # The holder row goes with the attachment: `pty_reader` rows used to pile up
+    # across pause/resume because nothing cancelled them (measured 2026-09-16).
+    tid = state.pop("reader_task", None)
+    ctx = state.get("ctx")
+    if tid is not None and ctx is not None:
+        entry = ctx.tasks.get(tid)
+        task = entry.get("_task") if isinstance(entry, dict) else None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
 
 
 def _clear_flow_control(agent_id: str, kernel) -> None:

@@ -2,7 +2,7 @@
 
 > scopes: substrate, persistence, save/load, storage, lock
 > requires: `cargo build --release --bin fantastic_kernel`
-> out-of-scope: HTTP, WS, bundles other than core/file
+> out-of-scope: HTTP, WS, bundles other than kernel_state/file
 
 Substrate-level — Agent + Kernel + send/emit/watch + persistence +
 storage modes + save/load + lock + reflect + weak-load. No HTTP, no
@@ -24,10 +24,10 @@ FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 ```bash
 $FANTASTIC reflect >/tmp/fk_test/reflect1.json
 test -f .fantastic/agent.json
-jq -e '.id == "core"' .fantastic/agent.json
+jq -e '.id == "kernel_state"' .fantastic/agent.json
 ```
 
-Expect: `.fantastic/agent.json` exists with `id=core` after first
+Expect: `.fantastic/agent.json` exists with `id=kernel_state` after first
 invocation. Reflect returns the uniform identity + tree (default
 `tree=all`); `reflect bundles=all` lists the installable catalog and
 `reflect readme=true` attaches the root readme. Transport/wire docs
@@ -36,14 +36,14 @@ live in the readme, not the reflect JSON.
 ### Test 2: persistence round-trip — merge-only
 
 ```bash
-$FANTASTIC core create_agent handler_module=file_bridge.tools id=foo root=/tmp/fk_root
+$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=foo root=/tmp/fk_root
 test -f .fantastic/agents/foo/agent.json
 jq -e '.handler_module == "file_bridge.tools"' .fantastic/agents/foo/agent.json
 # Plant a custom field the kernel doesn't know:
 jq '. + {user_note: "preserve me"}' .fantastic/agents/foo/agent.json \
   > /tmp/foo.json && mv /tmp/foo.json .fantastic/agents/foo/agent.json
 # Mutate a kernel-managed field:
-$FANTASTIC core update_agent id=foo root=/tmp/fk_root_v2
+$FANTASTIC kernel_state update_agent id=foo root=/tmp/fk_root_v2
 # The custom field must survive the merge:
 jq -e '.user_note == "preserve me" and .root == "/tmp/fk_root_v2"' .fantastic/agents/foo/agent.json
 ```
@@ -55,9 +55,9 @@ the kernel doesn't manage (the dirty-binding contract).
 ### Test 3: cascade delete removes subtree
 
 ```bash
-$FANTASTIC core create_agent handler_module=file_bridge.tools id=tmp_a
+$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=tmp_a
 $FANTASTIC tmp_a create_agent handler_module=file_bridge.tools id=tmp_b
-$FANTASTIC core delete_agent id=tmp_a
+$FANTASTIC kernel_state delete_agent id=tmp_a
 test ! -e .fantastic/agents/tmp_a
 test ! -e .fantastic/agents/tmp_a/agents/tmp_b
 ```
@@ -69,7 +69,7 @@ Expect: both agent directories are removed on cascade delete.
 
 ```bash
 mkdir -p .fantastic/agents/ghost_1
-echo '{"id":"ghost_1","handler_module":"nonexistent.tools","parent_id":"core"}' \
+echo '{"id":"ghost_1","handler_module":"nonexistent.tools","parent_id":"kernel_state"}' \
   > .fantastic/agents/ghost_1/agent.json
 $FANTASTIC reflect 2>&1 | tee /tmp/fk_test/boot.log
 grep -q '\[kernel\] skipping agent ghost_1: bundle nonexistent.tools not installed in this runtime' \
@@ -84,7 +84,7 @@ record `agent.json` is left untouched on disk for the next runtime.
 ### Test 5: lock.json + PID liveness
 
 ```bash
-$FANTASTIC core create_agent handler_module=web.tools port=18181
+$FANTASTIC kernel_state create_agent handler_module=web.tools port=18181
 $FANTASTIC &
 DAEMON_PID=$!
 sleep 1

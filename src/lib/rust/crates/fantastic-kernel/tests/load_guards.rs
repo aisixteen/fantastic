@@ -20,7 +20,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
     kernel.bundles = BundleRegistry::new();
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),

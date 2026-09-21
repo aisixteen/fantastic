@@ -78,4 +78,46 @@ struct PagingTests {
         let (p, _) = page(ids(["a", "b"]), .object(["after": .string("")]), ident: me)
         #expect(p == ["a", "b"])
     }
+
+    // ─── C17 (R2-RFL-2): after is python `str(after)` for ANY value ────
+
+    @Test func anIntAfterMatchesItsDecimalString() {
+        let (p, _) = page(ids(["1", "2", "3"]), .object(["after": .integer(2)]), ident: me)
+        #expect(p == ["3"], "\(p)")
+    }
+
+    @Test func aFloatAfterStringifiesAsPythonRepr() {
+        // `str(2.0)` is `"2.0"`, never truncated to `"2"` — it matches NOTHING
+        // here even though an item id `"2"` exists.
+        let (p, next) = page(ids(["1", "2", "3"]), .object(["after": .double(2.0)]), ident: me)
+        #expect(p.isEmpty, "\(p)")
+        #expect(next == nil)
+    }
+
+    @Test func aNonWholeFloatAfterAlsoStringifies() {
+        let (p, next) = page(ids(["1", "2", "3"]), .object(["after": .double(1.5)]), ident: me)
+        #expect(p.isEmpty, "\(p)")
+        #expect(next == nil)
+    }
+
+    @Test func anArrayOrObjectAfterStringifiesAsPythonRepr() {
+        for bad: JSON in [.array([.string("c1")]), .object(["k": .string("v")])] {
+            let (p, next) = page(ids(["1", "2", "3"]), .object(["after": bad]), ident: me)
+            #expect(p.isEmpty, "\(bad): \(p)")
+            #expect(next == nil)
+        }
+    }
+
+    @Test func aBoolAfterIsNoCursorEitherWay() {
+        for b: JSON in [.bool(true), .bool(false)] {
+            let (p, next) = page(ids(["1", "2", "3"]), .object(["after": b]), ident: me)
+            #expect(p == ["1", "2", "3"], "\(b): \(p)")
+            #expect(next == nil)
+        }
+    }
+
+    @Test func aNullAfterIsNoCursor() {
+        let (p, _) = page(ids(["1", "2", "3"]), .object(["after": .null]), ident: me)
+        #expect(p == ["1", "2", "3"])
+    }
 }

@@ -47,7 +47,7 @@ fn mk_kernel() -> Arc<Kernel> {
     kernel.bundles.register(HANDLER_MODULE, StaticLoaderBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -94,7 +94,7 @@ async fn boot_with_manifest(text: &str) -> (Arc<Kernel>, tempfile::TempDir) {
     // which hydrates the roster.
     let rec = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
@@ -147,7 +147,7 @@ async fn roster_is_closed_a_child_cannot_create_more() {
     let r = with_sender(
         AgentId::from("worker"),
         kernel.send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "mock.tools"}),
         )]),
     )
@@ -524,7 +524,7 @@ async fn a_spec_type_key_overrides_the_create_verb() {
         .remove(0)
         .result;
     assert_eq!(r["booted"], json!(true), "{r}");
-    assert_eq!(r["created"], json!(["core"]), "{r}");
+    assert_eq!(r["created"], json!(["kernel_state"]), "{r}");
     assert!(!kernel.agents.contains_key(&AgentId::from("a")), "{r}");
 }
 

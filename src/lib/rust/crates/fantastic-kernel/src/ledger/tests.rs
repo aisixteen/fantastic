@@ -22,7 +22,15 @@ fn open(l: &Ledger, name: &str, target: &str, retries: u32) -> (i64, Opened) {
     let id = l
         .resolve_name(name)
         .unwrap_or_else(|| NEXT.fetch_add(1, Ordering::Relaxed));
-    let opened = l.open(id, &tid(target), "probe", retries, Some(name), None);
+    let opened = l.open(
+        id,
+        &json!(name),
+        &tid(target),
+        &json!({"type": "probe"}),
+        retries,
+        Some(name),
+        None,
+    );
     (id, opened)
 }
 
@@ -75,12 +83,60 @@ async fn a_second_caller_joins_instead_of_running_twice() {
 fn an_id_is_bound_to_its_first_target() {
     // The same id aimed elsewhere is a different intent wearing the same name.
     // Returning the other execution's outcome would be silently wrong.
+    //
+    // PYTHON'S PROSE, verbatim (C31 r2 correction): the CALLER's raw id
+    // (`py_repr`-quoted for a string name), never the minted exec_id; both
+    // target names via `py_repr`; no `bound_to` key.
     let l = Ledger::default();
     let _ = open(&l, "job-3", "desk", 0).1;
     match open(&l, "job-3", "elsewhere", 0).1 {
         Opened::Refused(r) => {
             assert_eq!(r["reason"], "bad_arg");
-            assert_eq!(r["bound_to"], "desk");
+            assert_eq!(r["arg"], "id");
+            assert_eq!(
+                r["error"],
+                "send: id 'job-3' already names an execution on 'desk', not \
+                 'elsewhere' — an id is bound to its first execution; a \
+                 retry aimed elsewhere needs a new id"
+            );
+            assert!(r.get("bound_to").is_none());
+        }
+        _ => panic!("a re-aimed id must refuse"),
+    }
+}
+
+#[test]
+fn an_int_id_rebind_renders_bare_digits() {
+    // The r2 correction's other half: an INT caller id renders as bare
+    // digits (python `{exec_id!r}` on an int has no quotes), not as a
+    // string. Exercises the `caller_id` parameter directly, since the int
+    // JOIN path itself is wired at `send::Kernel::resolve_exec_id` (C38).
+    let l = Ledger::default();
+    let _ = l.open(
+        301,
+        &json!(301),
+        &tid("desk"),
+        &json!({"type": "probe"}),
+        0,
+        None,
+        None,
+    );
+    match l.open(
+        301,
+        &json!(301),
+        &tid("elsewhere"),
+        &json!({"type": "probe"}),
+        0,
+        None,
+        None,
+    ) {
+        Opened::Refused(r) => {
+            assert_eq!(
+                r["error"],
+                "send: id 301 already names an execution on 'desk', not \
+                 'elsewhere' — an id is bound to its first execution; a \
+                 retry aimed elsewhere needs a new id"
+            );
         }
         _ => panic!("a re-aimed id must refuse"),
     }
@@ -111,16 +167,18 @@ fn the_view_is_origin_scoped() {
     let l = Ledger::default();
     let _ = l.open(
         101,
+        &json!("mine"),
         &tid("desk"),
-        "probe",
+        &json!({"type": "probe"}),
         0,
         Some("mine"),
         Some(tid("alice")),
     );
     let _ = l.open(
         102,
+        &json!("yours"),
         &tid("desk"),
-        "probe",
+        &json!({"type": "probe"}),
         0,
         Some("yours"),
         Some(tid("bob")),
@@ -157,7 +215,15 @@ fn the_ring_evicts_settled_unnamed_before_named_and_never_in_flight() {
     let mut unnamed = Vec::new();
     for i in 0..3 {
         let id = 1000 + i;
-        let _ = l.open(id, &tid("d"), "probe", 0, None, None);
+        let _ = l.open(
+            id,
+            &Value::Null,
+            &tid("d"),
+            &json!({"type": "probe"}),
+            0,
+            None,
+            None,
+        );
         l.attempt(id);
         l.settle(id, done("u"));
         unnamed.push(id);
@@ -211,8 +277,9 @@ fn only_settled_rows_persist_and_they_round_trip() {
     let l = Ledger::default();
     let _ = l.open(
         201,
+        &json!("done-1"),
         &tid("desk"),
-        "probe",
+        &json!({"type": "probe"}),
         1,
         Some("done-1"),
         Some(tid("alice")),
@@ -223,13 +290,25 @@ fn only_settled_rows_persist_and_they_round_trip() {
 
     let live = id_of(&l, "live-1");
     let snap = l.settled_snapshot();
-    assert_eq!(snap["v"], 1);
-    // The sidecar keys rows by the KERNEL id (as a decimal string — JSON object
-    // keys are strings) and carries the caller's name as a field, which is what
-    // lets a name still join its execution after a reboot.
-    assert_eq!(snap["rows"]["201"]["name"], "done-1");
+    assert_eq!(snap["v"], 2);
+    // v2: rows are an ARRAY carrying the kernel's int64 id (an object key would
+    // stringify it), and the caller's name as a field — which is what lets a
+    // name still join its execution after a reboot. NO `verb`.
+    let rows = snap["rows"].as_array().expect("v2 rows are an array");
+    let settled = rows.iter().find(|r| r["id"] == 201).expect("settled row");
+    assert_eq!(settled["name"], "done-1");
+    assert_eq!(
+        settled
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["id", "target", "retries", "attempts", "named", "name", "origin", "outcome"],
+        "python key order, no `verb`"
+    );
     assert!(
-        snap["rows"].get(live.to_string()).is_none(),
+        rows.iter().all(|r| r["id"] != live),
         "in-flight work must not persist"
     );
 
@@ -282,4 +361,52 @@ fn a_rehydrate_of_garbage_keeps_the_kernel_alive() {
     assert_eq!(l.rehydrate(&json!({"rows": []})), 0);
     assert_eq!(l.rehydrate(&json!({})), 0);
     assert!(l.rows_for(None).is_empty());
+}
+
+/// D10 — a reply with a BINARY BODY stays RAM-ONLY.
+///
+/// Python's strict filter is `json.dumps(outcome)` raising on a `bytes` value
+/// (`kernel_state/tools.py:891-895`), and every `read_stream` reply it drops is
+/// one this kernel carries at `Outcome::body` with `"bytes": null` where the
+/// bytes sit. Checking only the JSON text let 88 read_stream rows per store run
+/// onto disk that python keeps in RAM — each one rehydrating a reply whose body
+/// is gone.
+#[test]
+fn a_reply_with_a_binary_body_is_not_persisted() {
+    let l = Ledger::default();
+    let (streamed, _) = open(&l, "read-1", "store", 0);
+    l.attempt(streamed);
+    l.settle(
+        streamed,
+        Outcome::new(
+            None,
+            Status::Completed,
+            json!({"path": "agent.json", "offset": 0, "bytes": null,
+                   "next_offset": 326, "eof": true, "size": 326}),
+        )
+        .with_body(Some(b"{\"id\": \"kernel_state\"}".to_vec())),
+    );
+    let (plain, _) = open(&l, "read-2", "store", 0);
+    l.attempt(plain);
+    l.settle(plain, done("no body"));
+
+    // The row is LIVE — a joiner still gets the outcome, body included.
+    match open(&l, "read-1", "store", 0).1 {
+        Opened::Settled(o, _) => {
+            assert_eq!(o.body.as_deref(), Some(&b"{\"id\": \"kernel_state\"}"[..]))
+        }
+        _ => panic!("expected the settled outcome"),
+    }
+    let snap = l.settled_snapshot();
+    let ids: Vec<i64> = snap["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|r| r["id"].as_i64())
+        .collect();
+    assert!(
+        !ids.contains(&streamed),
+        "the streamed row must stay RAM-only"
+    );
+    assert!(ids.contains(&plain), "a body-less reply still persists");
 }

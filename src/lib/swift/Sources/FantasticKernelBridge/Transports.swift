@@ -181,8 +181,9 @@ public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
             await remote.sendWithBinary(target, header["payload"], body)
         }
         var out: JSON = .object(["type": .string("reply"), "id": header["id"], "data": reply])
-        if !replyBody.isEmpty { out["_binary_path"] = .string("data.bytes") }
-        push((out, replyBody, true))
+        // THE CARRIER, not the length: a 0-byte chunk is still a chunk (C37).
+        if replyBody != nil { out["_binary_path"] = .string("data.bytes") }
+        push((out, replyBody ?? Data(), true))
     }
 
     public func recv() async throws -> (frame: JSON, body: Data, isBinary: Bool) {
@@ -243,9 +244,24 @@ public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
             remote.watch(src: target, watcher: watcherId)
         }
         let drain = Task { [weak self] in
-            for await event in stream {
+            for await item in stream {
                 if Task.isCancelled { return }
-                self?.push((.object(["type": .string("event"), "payload": event]), Data(), false))
+                // THE ONE CODEC: a payload that carried bytes crosses as a binary
+                // frame, `_binary_path` naming where they belong under `payload`.
+                // A header with a hole where the body was is not the event python
+                // mirrors to a watcher.
+                var frame: JSON = .object([
+                    "type": .string("event"), "payload": item.payload,
+                ])
+                guard let body = item.body else {
+                    self?.push((frame, Data(), false))
+                    continue
+                }
+                if case .object(var o) = frame {
+                    o["_binary_path"] = .string("payload.\(body.path)")
+                    frame = .object(o)
+                }
+                self?.push((frame, body.data, true))
             }
         }
         withLock { watchers[target] = (watcherId, drain) }

@@ -26,7 +26,7 @@ async fn mk_with(tmp: &TempDir, store_extra: &[(&str, Value)]) -> (Arc<Kernel>, 
     kernel.bundles.register(HANDLER_MODULE, TextFileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -45,7 +45,7 @@ async fn mk_with(tmp: &TempDir, store_extra: &[(&str, Value)]) -> (Arc<Kernel>, 
     let store = Agent::new(
         AgentId::from("store"),
         Some("file_bridge.tools".to_string()),
-        Some(AgentId::from("core")),
+        Some(AgentId::from("kernel_state")),
         store_meta,
         store_root.clone(),
         false,
@@ -57,7 +57,7 @@ async fn mk_with(tmp: &TempDir, store_extra: &[(&str, Value)]) -> (Arc<Kernel>, 
     let ed = Agent::new(
         AgentId::from("ed"),
         Some(HANDLER_MODULE.to_string()),
-        Some(AgentId::from("core")),
+        Some(AgentId::from("kernel_state")),
         meta,
         tmp.path().join("ed"),
         false,
@@ -482,7 +482,7 @@ async fn unwired_editor_fails_loud_on_every_verb() {
     kernel.bundles.register(HANDLER_MODULE, TextFileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -494,7 +494,7 @@ async fn unwired_editor_fails_loud_on_every_verb() {
     let ed = Agent::new(
         AgentId::from("bare"),
         Some(HANDLER_MODULE.to_string()),
-        Some(AgentId::from("core")),
+        Some(AgentId::from("kernel_state")),
         Map::new(),
         tmp.path().join("bare"),
         false,
@@ -1115,8 +1115,8 @@ async fn validate_meta_refuses_an_empty_target_id() {
     let (k, _ed) = mk(&tmp).await;
     let r = call(
         &k,
-        &AgentId::from("core"),
-        json!({"type": "create_agent", "parent_id": "core", "id": "ed2",
+        &AgentId::from("kernel_state"),
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "ed2",
                "handler_module": HANDLER_MODULE, "target_id": ""}),
     )
     .await;
@@ -1321,3 +1321,68 @@ const PY_TOOLS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../../python/bundled_agents/text_file/src/text_file/tools.py"
 );
+
+/// C37: THE LEG IO SEAM RIDES THE BATCH. Every chunk this agent moves is an
+/// ordinary execution on the leg — a `call` row with the editor as its origin,
+/// a ledger id, a settle. `send_with_binary` minted none of that, so the bytes
+/// a model wrote left no record of who asked or of how it ended, and a
+/// checkpoint id named a task that was never in the table.
+#[tokio::test]
+async fn leg_calls_are_batch_rows() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "doc.md", "one\n").await;
+    let r = call(&k, &ed, json!({"type": "read", "path": "doc.md"})).await;
+    assert_eq!(r["lines"][0]["text"], "one", "{r}");
+
+    let rows = k.rows.for_agent(&AgentId::from("store"));
+    let stream_calls: Vec<_> = rows
+        .iter()
+        .filter(|r| {
+            r["kind"] == json!("call")
+                && matches!(
+                    r["verb"].as_str(),
+                    Some("read_stream") | Some("write_stream") | Some("rename")
+                )
+        })
+        .collect();
+    assert!(
+        !stream_calls.is_empty(),
+        "no leg call rows at all: {rows:?}"
+    );
+    for row in &stream_calls {
+        assert_eq!(
+            row["origin"],
+            json!("ed"),
+            "a leg call must be attributed to the editor: {row:?}"
+        );
+    }
+    // Every one of them ENDED — a settle row on the root names its id.
+    let settles: Vec<i64> = k
+        .rows
+        .for_agent(&AgentId::from("kernel_state"))
+        .iter()
+        .filter(|r| r["kind"] == json!("settle"))
+        .filter_map(|r| r["parent"].as_i64())
+        .collect();
+    for row in &stream_calls {
+        let id = row["id"].as_i64().expect("a call row is named by its id");
+        assert!(settles.contains(&id), "leg call {id} never settled");
+    }
+}
+
+/// C37, the other half: the reply BODY comes back through the batch, so an
+/// EMPTY file reads as an empty document rather than as a failure. The carrier
+/// is `Some(vec![])`, not "no body" — testing the length instead made a 0-byte
+/// read indistinguishable from a refusal.
+#[tokio::test]
+async fn an_empty_document_reads_back_empty() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    let w = call_bin(&k, &ed, json!({"type": "write", "path": "empty.md"}), b"").await;
+    assert_eq!(w["size"], 0, "{w}");
+    let r = call(&k, &ed, json!({"type": "read", "path": "empty.md"})).await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["total"], 0, "{r}");
+    assert_eq!(r["lines"], json!([]), "{r}");
+}

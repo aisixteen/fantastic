@@ -25,7 +25,7 @@ struct SendValidationTests {
         let registry = BundleRegistry()
         registry.register("noop.tools", Noop())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         return kernel
@@ -37,7 +37,7 @@ struct SendValidationTests {
             Item(
                 AgentId("kernel"),
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "id": .string(id), "handler_module": .string("noop.tools"),
                 ]))
         ])[0].result
@@ -86,5 +86,102 @@ struct SendValidationTests {
         #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
         #expect(r["arg"].asString == "id")
         #expect(kernel.allAgents().count == before, "no agent minted for \"\"")
+    }
+
+    /// C30: an empty (or absent, by construction — `AgentId` is never
+    /// optional here, so an empty string is the only way to reach it) target
+    /// is `missing_arg`, checked FIRST — before payload/timeout/verb.
+    @Test func emptyTargetIsMissingArg() async {
+        let kernel = freshKernel()
+        let out = await kernel.send([Item(AgentId(""), .object(["type": .string("poke")]))])[0]
+        #expect(out.pid == nil)
+        #expect(out.result["reason"].asString == "missing_arg", "\(out.result.serialize())")
+        #expect(out.result["arg"].asString == "target")
+    }
+
+    /// C30/C38: `id` type-checks with python's exact "got <repr>" tail; a
+    /// bool is refused the same as any other non-str/non-int (python: bool
+    /// is an int SUBCLASS, but this kernel's `JSON` keeps the cases distinct,
+    /// so a raw `true`/`false` id still lands here, matching python's
+    /// explicit `isinstance(x, bool)` carve-out).
+    @Test func rawIdWrongShapeIsBadArgWithGotRepr() async {
+        let kernel = freshKernel()
+        await create(kernel, "a")
+        var item = Item(AgentId("a"), .object(["type": .string("poke")]))
+        item.rawId = .bool(true)
+        let out = await kernel.send([item])[0]
+        #expect(out.result["reason"].asString == "bad_arg", "\(out.result.serialize())")
+        #expect(out.result["arg"].asString == "id")
+        #expect(
+            out.result["error"].asString
+                == "send: id must be a name (non-empty string) or a message id (int), got True",
+            "\(out.result.serialize())")
+    }
+
+    /// C38: an int `exec_id` that names no open execution is `bad_arg`, not a
+    /// silent no-op — ids are minted by the kernel and only ever JOINED.
+    @Test func intExecIdNamingNoExecutionIsBadArg() async {
+        let kernel = freshKernel()
+        await create(kernel, "a")
+        var item = Item(AgentId("a"), .object(["type": .string("poke")]))
+        item.rawId = .integer(999_999)
+        let out = await kernel.send([item])[0]
+        #expect(out.pid == nil)
+        #expect(out.result["reason"].asString == "bad_arg", "\(out.result.serialize())")
+        #expect(out.result["arg"].asString == "id")
+        #expect(
+            out.result["error"].asString
+                == "send: id 999999 names no known execution — ids are minted by the kernel "
+                    + "and can be joined, never created",
+            "\(out.result.serialize())")
+    }
+
+    /// C38: an int `exec_id` that DOES name an open execution joins it — the
+    /// same execution, not a second one.
+    @Test func intExecIdJoinsAnOpenExecution() async {
+        let kernel = freshKernel()
+        await create(kernel, "a")
+        var opener = Item(AgentId("a"), .object(["type": .string("poke")]), id: "job-9")
+        opener.timeout = 5
+        let first = await kernel.send([opener])[0]
+        var joiner = Item(AgentId("a"), .object(["type": .string("poke")]))
+        joiner.rawId = .integer(first.pid!.value)
+        let second = await kernel.send([joiner])[0]
+        #expect(second.pid == first.pid, "\(second.result.serialize())")
+    }
+
+    /// C30/C38: `retries` must be a non-negative int; python's exact "got
+    /// <repr>" tail.
+    @Test func retriesMustBeANonNegativeInt() async {
+        let kernel = freshKernel()
+        await create(kernel, "a")
+        for bad: JSON in [.integer(-1), .string("soon"), .bool(true), .double(1.5)] {
+            var item = Item(AgentId("a"), .object(["type": .string("poke")]))
+            item.rawRetries = bad
+            let out = await kernel.send([item])[0]
+            #expect(out.result["reason"].asString == "bad_arg", "\(bad): \(out.result.serialize())")
+            #expect(out.result["arg"].asString == "retries")
+            #expect(
+                out.result["error"].asString == "send: retries must be a non-negative int, got \(pyRepr(bad))",
+                "\(bad): \(out.result.serialize())")
+        }
+    }
+
+    /// C30/C38: a raw (tag-typed) `timeout` that is not a positive number
+    /// refuses with python's exact "got <repr>" tail — a caller relaying an
+    /// untyped value (a malformed model arg) is REFUSED, not silently
+    /// defaulted to "wait forever".
+    @Test func rawTimeoutMustBePositiveWithGotRepr() async {
+        let kernel = freshKernel()
+        await create(kernel, "a")
+        var item = Item(AgentId("a"), .object(["type": .string("poke")]))
+        item.rawTimeout = .string("soon")
+        let out = await kernel.send([item])[0]
+        #expect(out.result["reason"].asString == "bad_arg", "\(out.result.serialize())")
+        #expect(out.result["arg"].asString == "timeout")
+        #expect(
+            out.result["error"].asString
+                == "send: timeout must be a positive number of seconds, got 'soon'",
+            "\(out.result.serialize())")
     }
 }

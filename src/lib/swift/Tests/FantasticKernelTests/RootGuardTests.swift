@@ -14,6 +14,7 @@
 import FantasticJSON
 import Foundation
 import OrderedCollections
+import FantasticKernelState
 import Testing
 
 @testable import FantasticKernel
@@ -32,7 +33,7 @@ struct RootGuardTests {
         let registry = BundleRegistry()
         registry.register("noop.tools", Noop())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         return kernel
@@ -49,7 +50,7 @@ struct RootGuardTests {
         _ extra: OrderedDictionary<String, JSON> = [:]
     ) async -> JSON {
         var p: OrderedDictionary<String, JSON> = [
-            "type": .string("create_agent"), "parent_id": .string("core"),
+            "type": .string("create_agent"), "parent_id": .string("kernel_state"),
             "id": .string(id), "handler_module": .string(hm),
         ]
         for (k, v) in extra { p[k] = v }
@@ -61,11 +62,11 @@ struct RootGuardTests {
         await create(kernel, "child")
         let r = await call(
             kernel, "kernel",
-            .object(["type": .string("delete_agent"), "id": .string("core")]))
+            .object(["type": .string("delete_agent"), "id": .string("kernel_state")]))
         #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
         #expect(r["arg"].asString == "id", "\(r.serialize())")
         #expect(r["deleted"].asBool == false, "\(r.serialize())")
-        #expect(kernel.agent(AgentId("core")) != nil)
+        #expect(kernel.agent(AgentId("kernel_state")) != nil)
         #expect(kernel.agent(AgentId("child")) != nil)
     }
 
@@ -119,5 +120,43 @@ struct RootGuardTests {
         for decoration in ["kernel_verbs", "tree", "more"] {
             #expect(r[decoration] == .null, "\(decoration) in \(r.serialize())")
         }
+    }
+
+    /// C13 — the blob verbs are the LOADER's, not the substrate's, so they pass
+    /// ROOT INGRESS like any bundle verb. A grandchild granted
+    /// `$root:[persist_blob]` is still refused by the root's own `callable_by`
+    /// (`reason: unauthorized, side: ingress`) — the shape
+    /// `contract/agentic/specs/namespacing.yaml` pins on every runtime.
+    @Test func testBlobVerbsPassRootIngress() async {
+        let registry = BundleRegistry()
+        registry.register("noop.tools", Noop())
+        registry.register(ROOT_HANDLER_MODULE, KernelStateBundle())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(
+            id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        await create(kernel, "mid")
+        _ = await call(
+            kernel, "kernel",
+            .object([
+                "type": .string("create_agent"), "parent_id": .string("mid"),
+                "id": .string("leaf"), "handler_module": .string("noop.tools"),
+                "can_call": .object([
+                    ROOT_ID: .array([.string("persist_blob")])
+                ]),
+            ]))
+        let denied = await KernelTaskLocals.$currentSender.withValue(AgentId("leaf")) {
+            await kernel.send([
+                Item(
+                    AgentId(ROOT_ID),
+                    .object([
+                        "type": .string("persist_blob"), "agent_id": .string("leaf"),
+                        "name": .string("s.yaml"), "content": .string("x"),
+                    ]))
+            ])[0].result
+        }
+        #expect(denied["reason"].asString == "unauthorized", "\(denied)")
+        #expect(denied["side"].asString == "ingress", "\(denied)")
     }
 }

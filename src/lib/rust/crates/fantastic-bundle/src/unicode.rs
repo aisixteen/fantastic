@@ -106,3 +106,26 @@ pub fn is_alnum(c: char) -> bool {
         })
         .is_ok()
 }
+
+/// CPython `_PyUnicode_TransformDecimalAndSpaceToASCII`: the FIRST step of both
+/// `int(s)` and `float(s)` on a string — every Unicode space becomes ASCII ` `,
+/// every Unicode `Nd` digit ([`decimal_value`]) its ASCII digit, and mixed
+/// scripts are allowed in one literal (`int('1١')` == 11). Anything else
+/// (a letter, a non-decimal digit form) passes through unchanged, so the
+/// ASCII-only grammar that runs next refuses it exactly as CPython does.
+#[must_use]
+pub fn transform_decimal_and_space_to_ascii(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                c
+            } else if is_space(c) {
+                ' '
+            } else if let Some(d) = decimal_value(c) {
+                char::from_digit(d, 10).expect("decimal_value is 0..=9")
+            } else {
+                c
+            }
+        })
+        .collect()
+}

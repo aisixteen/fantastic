@@ -166,9 +166,16 @@ public actor NIOWebSocketClient {
     public func close() async {
         // A clean close frame, then drop the channel. `inbox` is failed by the
         // handler's channelInactive so any pending `receive()` unblocks.
-        let empty = channel.allocator.buffer(capacity: 0)
+        //
+        // WITH THE 1000 STATUS CODE, as python's `websockets.close()` sends by
+        // default (`_ws.py::close` passes nothing). An EMPTY close payload is
+        // "no status code" — the peer records 1005, which is not one of
+        // `websockets`' OK_CLOSE_CODES, so the same orderly shutdown read as an
+        // error on one runtime and a clean close on the other.
+        var payload = channel.allocator.buffer(capacity: 2)
+        payload.write(webSocketErrorCode: .normalClosure)
         let close = WebSocketFrame(
-            fin: true, opcode: .connectionClose, maskKey: wsRandomMaskKey(), data: empty)
+            fin: true, opcode: .connectionClose, maskKey: wsRandomMaskKey(), data: payload)
         _ = try? await channel.writeAndFlush(close)
         try? await channel.close().get()
     }
@@ -315,11 +322,13 @@ final class WSUpgradeSignal: @unchecked Sendable {
 
 /// Post-upgrade frame handler: aggregated text/binary → the inbox; ping → pong;
 /// close / inactive / error → fail the inbox so `receive()` throws.
-private final class WSClientHandler: ChannelInboundHandler, @unchecked Sendable {
+final class WSClientHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = WebSocketFrame
     typealias OutboundOut = WebSocketFrame
 
     private let inbox: WSClientInbox
+    /// One echo per connection — a close we answered is never answered twice.
+    private var closeEchoed = false
 
     init(inbox: WSClientInbox) {
         self.inbox = inbox
@@ -341,8 +350,30 @@ private final class WSClientHandler: ChannelInboundHandler, @unchecked Sendable 
                 fin: true, opcode: .pong, maskKey: wsRandomMaskKey(), data: frame.unmaskedData)
             context.writeAndFlush(wrapOutboundOut(pong), promise: nil)
         case .connectionClose:
+            // ECHO IT BACK, then drop the connection — RFC 6455 §5.5.1: the
+            // endpoint MUST answer a Close with a Close, reusing the peer's
+            // status code. Without the echo the peer's closing handshake never
+            // completes: `websockets` decides between `ConnectionClosedOK` and
+            // `ConnectionClosedError` on `close_rcvd is not None and
+            // close_sent is not None and close_rcvd.code in OK_CLOSE_CODES`
+            // (`protocol.py`), so a peer that closed with 1001 read swift's
+            // silent TCP drop as an ERROR and logged one — python echoes (its
+            // `websockets` client does it for free) and the same close is
+            // clean. Measured on `bridges/peer_frames.json`: swift left an
+            // extra `read_end` frame python does not have.
             inbox.fail(NIOWebSocketClient.Closed(reason: "websocket: peer closed"))
-            context.close(promise: nil)
+            if closeEchoed {
+                context.close(promise: nil)
+                return
+            }
+            closeEchoed = true
+            let echo = WebSocketFrame(
+                fin: true, opcode: .connectionClose, maskKey: wsRandomMaskKey(),
+                data: frame.unmaskedData)
+            let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+            context.writeAndFlush(wrapOutboundOut(echo)).whenComplete { _ in
+                bound.value.close(promise: nil)
+            }
         default:
             break  // pong / continuation (aggregated away) — ignore.
         }

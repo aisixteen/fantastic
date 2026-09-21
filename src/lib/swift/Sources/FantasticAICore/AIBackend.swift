@@ -7,7 +7,7 @@
 // shared layer owns: per-(agent, client_id) chat history, the
 // epoch-bump cancellation state, the verb bodies (reflect / boot /
 // send / history / status / recall / …), the spawned
-// streaming task, the token / done event emission, and — since the
+// streaming task, the token / status event emission, and — since the
 // dispatch phase — READING THE MODEL'S TOOL CALLS OUT OF ITS OWN TEXT
 // AND DISPATCHING THEM (`ToolParse` + `Routing`). The providers own
 // only the upstream wire (NDJSON, SSE+429+Bearer, on-device session).
@@ -22,26 +22,24 @@
 // Tool-calling is RAW prompt-and-parse throughout — no provider's native tool
 // API is ever used (see `AIProvider`).
 //
-// Wire contract (byte-identical to the Python reference, enforced by
-// FantasticParityTests):
+// Wire contract (python `ai_core/core.py`):
 //
-//   send → {response, final, client_id}   (py/rust parity; the pass runs
-//                                          INLINE. `{error, client_id}`
-//                                          when it does not finish.)
-//   token event → {type:token, stream_id, message_id, delta,
-//                  accumulated, client_id}
-//   done  event → {type:done, stream_id, message_id, accumulated?,
-//                  client_id, error?}
+//   send → {response, final, client_id, turn_id}   (the pass runs INLINE;
+//          `{error, client_id}` for a mapped provider failure or a timeout, the
+//          projection's own refusal body verbatim, and a RAISE — settled as
+//          `{error:"<Type>: <msg>", raised:true}` — for anything unmapped)
+//   token event  → {type:'token', text, source, client_id}
+//   status event → {type:'status', source, phase, detail, ts, client_id}
 //   history → {rows, next, total}
-//   interrupt → {interrupted:true}
 //
-// `accumulated` on both the token and done events is the RAW completion — the
-// exact concatenation of the deltas already streamed, `<think>…</think>` markers
-// included. The DURABLE assistant turn is the STRIPPED text (see
-// `Thinking.swift`): one stream, two uses, and the event field stays equal to
-// what the client received.
+// There is no `done` event: `status(phase:'done')` is the completion. Events go
+// to the caller only (`toCaller`): a `send` to the `cli` agent for client `cli`,
+// an emit on this agent's inbox for anyone else.
 //
-// This module MUST NOT import FoundationModels (or any provider SDK).
+// The token `text`s are the RAW completion, `<think>…</think>` markers included;
+// the DURABLE assistant turn is the STRIPPED text (see `Thinking.swift`).
+//
+// This module MUST NOT import any provider SDK.
 
 import FantasticJSON
 import FantasticKernel
@@ -52,7 +50,11 @@ import OrderedCollections
 /// `AIBackend` the bundle's `handle` delegates straight to. Mirrors
 /// Rust's `buildAIBackend` / the Python `ai_core` factory.
 public func buildAIBackend(_ config: AIBackendConfig) -> AIBackend {
-    AIBackend(config: config)
+    // The AI core keeps two process-wide tables keyed by kernel identity; this
+    // is where their cleanup registers, once, so a kernel that shuts down takes
+    // its rows with it.
+    AISideTables.installTeardownHook()
+    return AIBackend(config: config)
 }
 
 /// What every backend advertises INSTEAD of an `interrupt` verb — the reflect
@@ -132,9 +134,9 @@ public final class AIBackend: @unchecked Sendable {
         self.config = config
     }
 
-    /// The coordination state for an agent — PROCESS-GLOBAL (see `AIRunStates`),
-    /// because python's `_queue`/`_current` are module dicts every backend and
-    /// the router share.
+    /// The coordination state for an agent of `kernel` — shared by every backend
+    /// and the router (see `AIRunStates`), because python's `_queue`/`_current`
+    /// are module dicts they all read.
     func runState(_ kernel: Kernel, _ id: String) -> AIAgentRunState {
         AIRunStates.of(kernel, id)
     }
@@ -301,7 +303,7 @@ public final class AIBackend: @unchecked Sendable {
             "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id)."
         ),
         "status": .string(
-            "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.tool={call_id,target,verb,args,reply_preview?} for tool_calling (entry has no reply_preview, exit re-emits same call_id with it). detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued."
+            "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued."
         ),
         "context": .string(
             "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb."
@@ -325,26 +327,30 @@ public final class AIBackend: @unchecked Sendable {
         "boot": .string("On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`. A fresh"),
     ]
 
-/// The outcome of ONE provider pass.
-///
-/// `send` answers with the finished text on every runtime, so the reason a pass
-/// did NOT finish has to travel back with it rather than being flattened to a
-/// missing value.
-enum AIPassOutcome {
-    /// The RAW completion — what routing parses — and the assistant row's id,
-    /// the batch token every reply tag of this turn names (`↑<turn>`).
-    case ok(String, Int64)
-    /// Terminal failure (a MAPPED provider error). The string is the message
-    /// `send` reports as `{error, client_id}`.
-    case failed(String)
-    /// The projection REFUSED the turn (too_small failsafe, unknown strategy).
-    /// Its body is returned to the caller VERBATIM — no `client_id` bolted on,
-    /// and no `status(done)`, because the model was never called.
-    case refused(JSON)
-    /// The KERNEL killed the task. The turn was already closed out for the
-    /// client by `onCancel`; nothing more should be emitted or routed.
-    case cancelled
-}
+    /// `VERBS.keys` — what every ai_core bundle advertises statically (python
+    /// `VERBS` of `_build()`), the same table reflect renders.
+    public static let verbNames: [String] = Array(VERBS.keys)
+
+    /// The outcome of ONE provider pass.
+    ///
+    /// `send` answers with the finished text on every runtime, so the reason a pass
+    /// did NOT finish has to travel back with it rather than being flattened to a
+    /// missing value.
+    enum AIPassOutcome {
+        /// The RAW completion — what routing parses — and the assistant row's id,
+        /// the batch token every reply tag of this turn names (`↑<turn>`).
+        case ok(String, Int64)
+        /// Terminal failure (a MAPPED provider error). The string is the message
+        /// `send` reports as `{error, client_id}`.
+        case failed(String)
+        /// The projection REFUSED the turn (too_small failsafe, unknown strategy).
+        /// Its body is returned to the caller VERBATIM — no `client_id` bolted on,
+        /// and no `status(done)`, because the model was never called.
+        case refused(JSON)
+        /// The KERNEL killed the task. The turn was already closed out for the
+        /// client by `onCancel`; nothing more should be emitted or routed.
+        case cancelled
+    }
 
     // MARK: - send
 
@@ -444,7 +450,8 @@ enum AIPassOutcome {
         // lock until the send ceiling expired). `_call_stack` is the caller's
         // reserved key; nothing on the reply-routing path carries one, so a
         // `reply_to:'self'` chain is not a cycle. Python `core.py:2197-2218`.
-        let guardClientId = safeClient(payload["client_id"].asString ?? "cli")
+        // `str(client_id)` for a truthy non-string (python `_safe_client`, 2026-09-20).
+        let guardClientId = safeClient(pyTruthy(payload["client_id"]) ? pyStr(payload["client_id"]) : "")
         let callStack = payload["_call_stack"].asArray ?? []
         if callStack.contains(where: { $0.asString == agent.id.value }) {
             return .object([
@@ -480,7 +487,7 @@ enum AIPassOutcome {
         // the RAW id while `statusVerb` compared against `safeClient(requesting)`, so
         // a browser client `tab 1/x` asking after its OWN work was told `is_mine:false,
         // mine_pending:[], others_pending:1`.
-        let clientId = safeClient(payload["client_id"].asString ?? "cli")
+        let clientId = safeClient(pyTruthy(payload["client_id"]) ? pyStr(payload["client_id"]) : "")
         // A caller-supplied `system_prompt` REPLACES the default system block
         // (the caller teaches its own role/context there). Mirrors py/rust.
         let systemPrompt = payload["system_prompt"].asString
@@ -917,15 +924,15 @@ enum AIPassOutcome {
         // caller: it is ECHOED as `client_id: ""` and the snapshot takes the
         // redacted branch. Swift ran `safeClient("")`, which answers `"cli"`, so
         // a probe asking with `''` was told about cli's work.
-        let raw = payload["client_id"].asString
-        let requesting: String? = (raw?.isEmpty == false) ? safeClient(raw!) : raw
+        let rawJ = payload["client_id"]
+        let requesting: String? = pyTruthy(rawJ) ? safeClient(pyStr(rawJ)) : rawJ.asString
         let asked = requesting?.isEmpty == false
         let st = runState(kernel, agentId.value)
         let cur = st.currentSnapshot()
         let queue = st.queueSnapshot()
 
-        let currentOut: JSON = cur.map { entry(for: $0, requesting: asked ? requesting : nil) }
-            ?? .null
+        let currentOut: JSON =
+            cur.map { entry(for: $0, requesting: asked ? requesting : nil) } ?? .null
 
         var minePending: [JSON] = []
         var othersPending = 0
@@ -1031,11 +1038,9 @@ enum AIPassOutcome {
             blocks = [
                 renderReflect(primer),
                 "You are `\(selfId.value)`. " + renderReflect(me),
-                config.compactPrompt ? SEND_TO_HOWTO_COMPACT : SEND_TO_HOWTO,
+                SEND_TO_HOWTO,
+                CONTEXT_HOWTO,
             ]
-            // The SMALL-window backend skips the context block: it costs more of
-            // the window than it saves (see `compactPrompt`).
-            if !config.compactPrompt { blocks.append(CONTEXT_HOWTO) }
             // OPT-IN, on the record. Both verbs exist on every AI, but teaching
             // them costs every agent prompt tokens for a discipline most runs
             // never need — and a block like this changes behavior just by being
@@ -1050,8 +1055,6 @@ enum AIPassOutcome {
             if flag("context_titles") { blocks.append(TITLES_HOWTO) }
             if flag("context_async") { blocks.append(ASYNC_HOWTO) }
         }
-        let extra = await config.systemPromptExtra(agent, kernel)
-        if !extra.isEmpty { blocks.append(extra) }
         return blocks.joined(separator: "\n\n")
     }
 

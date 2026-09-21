@@ -18,14 +18,59 @@ struct MessageLogRestartTests {
         return url
     }
 
+    /// ONE FLUSH PER BURST, not one per settle. The flusher is kicked by a
+    /// SETTLE; a flush pass is itself a kernel task, so its `ledger_flush` task
+    /// row is logged, the pump appends it, and that append settles on the store.
+    /// Kicking there re-arms the flusher forever — measured 2026-09-21: 35
+    /// `ledger_flush` task rows for four CLI commands where python writes 4, and
+    /// `ledger.json` 84 rows against 18. The loader's own persistence traffic
+    /// (an operator-context call on the discovered store) therefore does not
+    /// dirty the ledger, exactly as `MessagePump.skips` keeps it out of the log.
+    ///
+    /// The MECHANISM is pinned, not a number: the count must STOP GROWING once
+    /// nothing but persistence traffic is left.
+    @Test func persistenceTrafficDoesNotReArmTheLedgerFlusher() async throws {
+        let wd = try workdir()
+        let k = try await startKernel(workdir: wd.path, portHint: 0)
+        let made = await k.send([Item(AgentId("kernel_state"), .object([
+            "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+            "handler_module": .string("file_bridge.tools"), "id": .string("store"),
+            "root": .string(wd.appendingPathComponent(".fantastic").path),
+            "ingress_rule": .string("allow_all_ingress"),
+        ]))])[0].result
+        #expect(made["error"].isNull, "\(made.serialize())")
+        k.installMessagePump(after: k.rows.nextId - 1)
+        await k.installLedgerPersistence()
+        func flushRows() -> Int {
+            k.rows.forAgent(k.root!.id).filter {
+                $0["kind"]?.asString == "task" && $0["verb"]?.asString == "ledger_flush"
+            }.count
+        }
+        // ONE BURST of real work.
+        for _ in 0..<3 {
+            _ = await k.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])
+        }
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        let afterBurst = flushRows()
+        #expect(afterBurst >= 1, "the burst minted no `ledger_flush` task row")
+        // NOTHING BUT PERSISTENCE TRAFFIC IS LEFT — the pump keeps appending, the
+        // flusher must not follow it round.
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        let afterQuiet = flushRows()
+        #expect(
+            afterQuiet == afterBurst,
+            "the flusher re-armed itself on its own persistence traffic: \(afterBurst) → \(afterQuiet)")
+        await k.flushPendingMessages()
+    }
+
     @Test func rowsSurviveARestartThroughTheDiscoveredStore() async throws {
         let wd = try workdir()
         let k1 = try await startKernel(workdir: wd.path, portHint: 0)
         try hydrateMessages(k1, rootDir: wd.appendingPathComponent(".fantastic"))
         // THE STORE: a file_bridge rooted at `.fantastic` — what the loader
         // discovers as its provider (E78 wires exactly this).
-        let made = await k1.send([Item(AgentId("core"), .object([
-            "type": .string("create_agent"), "parent_id": .string("core"),
+        let made = await k1.send([Item(AgentId("kernel_state"), .object([
+            "type": .string("create_agent"), "parent_id": .string("kernel_state"),
             "handler_module": .string("file_bridge.tools"), "id": .string("store"),
             "root": .string(wd.appendingPathComponent(".fantastic").path),
             // SEALED BY DEFAULT: an io leg with no rule denies every inbound

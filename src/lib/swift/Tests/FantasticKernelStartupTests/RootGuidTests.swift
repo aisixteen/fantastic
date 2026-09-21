@@ -1,7 +1,9 @@
 // Kernel instance `guid` contract (mirrors the py/rust contract):
-// the ROOT agent owns a stable 32-hex guid, minted ONCE at boot,
-// persisted to `.fantastic/agent.json`, read back verbatim on every
-// later boot, and surfaced as a top-level `guid` on root reflect.
+// the ROOT agent owns a stable 32-hex guid, minted ONCE by the ROOT LOADER'S
+// `boot` (python `kernel_state._boot`, C14) — not by the bootstrap — read back
+// verbatim on every later boot, and surfaced as a top-level `guid` on root
+// reflect. It is minted AFTER the record writer subscribes, so the `updated`
+// event it publishes is what carries the new record to a wired store.
 
 import FantasticJSON
 import FantasticKernel
@@ -21,11 +23,20 @@ struct RootGuidTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let kernel = try await startKernel(workdir: tmp.path)
-        let r = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result
+        // NOTHING MINTED YET — no boot has run (python's own assertion).
+        #expect(kernel.root?.metaValue(forKey: "guid") == nil)
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        let r = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result
         let guid = r["guid"].asString
         #expect(isThirtyTwoHex(guid), "root reflect guid not 32-hex: \(guid ?? "nil")")
+        // A second boot is idempotent — the guid is NOT regenerated.
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        #expect(kernel.root?.metaValue(forKey: "guid")?.asString == guid)
 
-        // Persisted to the root record file as a top-level key, matching reflect.
+        // Materialize (python's `persist(k)`) and confirm the on-disk root
+        // record carries it — with no store wired the writer keeps it in RAM,
+        // which is the auto-flush law, not a gap.
+        try Persistence.persist(agent: kernel.root!, storage: .disk(tmp))
         let recFile = tmp.appendingPathComponent(".fantastic/agent.json")
         let parsed = try JSON.parse(try Data(contentsOf: recFile))
         #expect(parsed["guid"].asString == guid)
@@ -36,12 +47,14 @@ struct RootGuidTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let k1 = try await startKernel(workdir: tmp.path)
-        let g1 = await k1.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
+        _ = await k1.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        let g1 = await k1.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
+        try Persistence.persist(agent: k1.root!, storage: .disk(tmp))
 
         // Second boot of the SAME dir must read the guid back verbatim.
         let k2 = try await startKernel(workdir: tmp.path)
-        let g2 = await k2.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
+        let g2 = await k2.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
 
         #expect(isThirtyTwoHex(g1))
@@ -57,16 +70,19 @@ struct RootGuidTests {
         try FileManager.default.createDirectory(at: dot, withIntermediateDirectories: true)
         let recFile = dot.appendingPathComponent("agent.json")
         let legacy: JSON = .object([
-            "id": .string("core"), "handler_module": .null, "parent_id": .null,
+            "id": .string("kernel_state"), "handler_module": .string("kernel_state.tools"),
+            "parent_id": .null,
         ])
         try legacy.serializePretty(indent: 2).write(to: recFile, atomically: true, encoding: .utf8)
 
         let kernel = try await startKernel(workdir: tmp.path)
-        let guid = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        let guid = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
         #expect(isThirtyTwoHex(guid))
 
-        // And it landed on disk for the next boot.
+        // And it lands on disk for the next boot.
+        try Persistence.persist(agent: kernel.root!, storage: .disk(tmp))
         let reparsed = try JSON.parse(try Data(contentsOf: recFile))
         #expect(reparsed["guid"].asString == guid)
     }
@@ -80,20 +96,25 @@ struct RootGuidTests {
         let recFile = dot.appendingPathComponent("agent.json")
         let explicit = "deadbeefdeadbeefdeadbeefdeadbeef"
         let rec: JSON = .object([
-            "id": .string("core"), "handler_module": .null, "parent_id": .null,
+            "id": .string("kernel_state"), "handler_module": .null, "parent_id": .null,
             "guid": .string(explicit),
         ])
         try rec.serializePretty(indent: 2).write(to: recFile, atomically: true, encoding: .utf8)
 
         let kernel = try await startKernel(workdir: tmp.path)
-        let guid = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
+        let guid = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
         #expect(guid == explicit, "explicit guid was not preserved")
     }
 
-    @Test func inMemoryBootHasEphemeralGuid() async throws {
+    @Test func inMemoryBootMintsTheGuidToo() async throws {
+        // An in-memory kernel mints through the SAME path (the root loader's
+        // boot) — just with nothing to persist it to. There is no second,
+        // "ephemeral" mint at bootstrap; two mints meant two identities.
         let kernel = try await startKernelInMemory(portHint: 0)
-        let guid = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
+        #expect(kernel.root?.metaValue(forKey: "guid") == nil)
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        let guid = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
         #expect(isThirtyTwoHex(guid), "in-memory root reflect guid not 32-hex: \(guid ?? "nil")")
     }

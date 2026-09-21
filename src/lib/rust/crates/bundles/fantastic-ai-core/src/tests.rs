@@ -273,7 +273,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
         .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -307,7 +307,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
 async fn add_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path, owner: &str) {
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
@@ -349,7 +349,7 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
         let ff = format!("ff_{holder}");
         let _ = kernel
             .send(vec![Item::new(
-                AgentId::from("core"),
+                AgentId::from("kernel_state"),
                 json!({
                     "type": "update_agent",
                     "id": holder.as_str(),
@@ -383,7 +383,7 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
 async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
@@ -1206,7 +1206,7 @@ async fn chat_persists_with_no_loader_provider_wired() {
         .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -1412,7 +1412,11 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
     let s = script(
         &backend,
         vec![
-            pass(call_envelope("core", json!({"type": "list_agents"}), None)),
+            pass(call_envelope(
+                "kernel_state",
+                json!({"type": "list_agents"}),
+                None,
+            )),
             pass(r#"done looking <call name="done"></call>"#),
         ],
         Duration::ZERO,
@@ -1441,7 +1445,8 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
     // ...then `↑<turn>`, the assistant row this reply answers — python's tag,
     // the link the fold machinery derives chains from (ported 2026-09-12).
     assert!(
-        turn2.contains(" \u{b7} core list_agents \u{b7} \u{2191}") && turn2.contains("[reply to "),
+        turn2.contains(" \u{b7} kernel_state list_agents \u{b7} \u{2191}")
+            && turn2.contains("[reply to "),
         "untagged reply: {turn2}"
     );
     assert!(
@@ -1458,7 +1463,7 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
 async fn a_self_chain_does_not_deadlock() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_chain").await;
-    let hop = call_envelope("core", json!({"type": "list_agents"}), Some("self"));
+    let hop = call_envelope("kernel_state", json!({"type": "list_agents"}), Some("self"));
     let s = script(
         &backend,
         vec![
@@ -1506,7 +1511,7 @@ async fn the_self_chain_carries_no_call_stack() {
         &backend,
         vec![
             pass(call_envelope(
-                "core",
+                "kernel_state",
                 json!({"type": "list_agents"}),
                 Some("self"),
             )),
@@ -1783,7 +1788,7 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_both").await;
     let text = format!(
         "{}{}",
-        call_envelope("core", json!({"type": "list_agents"}), Some("null")),
+        call_envelope("kernel_state", json!({"type": "list_agents"}), Some("null")),
         r#"<call name="send"><target_id>n</target_id><code>oops"#
     );
     let s = script(&backend, vec![pass(text), pass("ok")], Duration::ZERO);
@@ -1893,7 +1898,11 @@ async fn an_error_reply_does_not_route() {
         &backend,
         vec![
             vec![ScriptEvent::Fail("provider exploded".into())],
-            pass(call_envelope("core", json!({"type": "list_agents"}), None)),
+            pass(call_envelope(
+                "kernel_state",
+                json!({"type": "list_agents"}),
+                None,
+            )),
         ],
         Duration::ZERO,
     );
@@ -1966,7 +1975,7 @@ async fn a_projection_refusal_is_returned_verbatim_and_does_not_raise() {
     // failsafe, which refuses BEFORE the model is called.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(), "context_window": 300}),
         )])
         .await;
@@ -2053,7 +2062,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     kernel.bundles.register("raiser.tools", Raiser);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -2077,12 +2086,12 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     // are the agent's calls), so the backend needs egress to the raiser and
     // the raiser must accept the backend.
     let _ = kernel
-            .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "raiser.tools", "id": raiser, "callable_by": {backend_id.as_str(): "*"}}))])
+            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "raiser.tools", "id": raiser, "callable_by": {backend_id.as_str(): "*"}}))])
             .await
             .remove(0)
             .result;
     let _ = kernel
-            .send(vec![Item::new(AgentId::from("core"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$children": "*", file_id.as_str(): "*", "cli": "*", raiser.as_str(): "*"}}))])
+            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$children": "*", file_id.as_str(): "*", "cli": "*", raiser.as_str(): "*"}}))])
             .await
             .remove(0)
             .result;
@@ -2407,10 +2416,65 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         "the timed-out call produced no block at all — the batch hung"
     );
     let turn = sa.request(0);
+    // C31: python's prose, verbatim — target id raw, verb `py_repr`-quoted,
+    // plus `task_id`.
     assert!(
-        turn.contains("timed out after 0.2s"),
-        "the block must REPORT the timeout: {turn}"
+        turn.contains("exceeded its 0.2s timeout; task cancelled"),
+        "the block must REPORT the timeout in python's own words: {turn}"
     );
+    assert!(
+        turn.contains("'send'"),
+        "the verb must be py_repr-quoted: {turn}"
+    );
+    assert!(turn.contains("<task_id>"), "must carry task_id: {turn}");
+}
+
+/// C38: routing forwards `timeout` RAW (not `.and_then(Value::as_f64)`), so a
+/// non-numeric value reaches the kernel's own `bad_arg` refusal instead of
+/// being silently DROPPED at the route.rs coercion site — which used to
+/// default the call to the layer's `send_timeout` as if the model had never
+/// written the arg at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_badtimeout").await;
+    let b = add_peer(&kernel, &tmp, &a).await;
+    let sa = script(
+        &a,
+        vec![pass("read it <call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let mut args = Map::new();
+    args.insert("target_id".into(), json!(b.as_str()));
+    args.insert("reply_to".into(), json!("self"));
+    args.insert("timeout".into(), json!("soon"));
+    args.insert(
+        "payload".into(),
+        json!({"type": "send", "text": "hi", "client_id": "probe"}),
+    );
+    let call = crate::tool_parse::render_call("send", &args);
+    crate::route::route_reply(
+        a.clone(),
+        Arc::clone(&kernel),
+        call,
+        "probe".to_string(),
+        None,
+        None,
+        String::new(),
+        0.2,
+        None,
+    )
+    .await;
+    assert!(
+        until_passes(&sa, 1).await,
+        "the kernel's refusal must reach the model as a block"
+    );
+    let turn = sa.request(0);
+    assert!(
+        turn.contains("timeout must be a positive number of seconds"),
+        "must carry the kernel's refusal verbatim: {turn}"
+    );
+    assert!(turn.contains("'soon'"), "must echo the raw value: {turn}");
 }
 
 /// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
@@ -2428,8 +2492,8 @@ async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
         vec![
             pass(format!(
                 "{}\n{}",
-                call_envelope("core", json!({"type": "list_agents"}), Some("null")),
-                call_envelope("core", json!({"type": "list_agents"}), Some("null")),
+                call_envelope("kernel_state", json!({"type": "list_agents"}), Some("null")),
+                call_envelope("kernel_state", json!({"type": "list_agents"}), Some("null")),
             )),
             pass("the nudge would land here"),
         ],
@@ -2481,8 +2545,8 @@ async fn the_batch_stamp_lives_inside_the_reply_tag() {
         vec![
             pass(format!(
                 "{}\n{}",
-                call_envelope("core", json!({"type": "list_agents"}), Some("self")),
-                call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+                call_envelope("kernel_state", json!({"type": "list_agents"}), Some("self")),
+                call_envelope("kernel_state", json!({"type": "list_agents"}), Some("self")),
             )),
             pass("both back <call name=\"done\"></call>"),
         ],
@@ -2531,8 +2595,8 @@ async fn two_identical_turns_get_different_batch_tokens() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_tok").await;
     let twice = format!(
         "{}\n{}",
-        call_envelope("core", json!({"type": "list_agents"}), Some("self")),
-        call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+        call_envelope("kernel_state", json!({"type": "list_agents"}), Some("self")),
+        call_envelope("kernel_state", json!({"type": "list_agents"}), Some("self")),
     );
     let s = script(
         &backend,
@@ -2574,11 +2638,11 @@ async fn reflect_replies_carry_the_distillation_nudge() {
             pass(format!(
                 "{}\n{}",
                 call_envelope(
-                    "core",
+                    "kernel_state",
                     json!({"type": "reflect", "tree": "none"}),
                     Some("self")
                 ),
-                call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+                call_envelope("kernel_state", json!({"type": "list_agents"}), Some("self")),
             )),
             pass("SEEN core <call name=\"done\"></call>"),
         ],
@@ -2621,7 +2685,7 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
     let s = script(
         &backend,
         vec![pass(call_envelope(
-            "core",
+            "kernel_state",
             json!({"type": "list_agents"}),
             Some(leg.as_str()),
         ))],
@@ -2676,7 +2740,7 @@ async fn delivery_is_a_deliver_reply_task_not_awaited() {
     let _s = script(
         &backend,
         vec![pass(call_envelope(
-            "core",
+            "kernel_state",
             json!({"type": "list_agents"}),
             Some(peer.as_str()),
         ))],
@@ -3391,7 +3455,7 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
         .register("cli.sink", CliSink(Arc::clone(&seen)));
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -3773,7 +3837,7 @@ async fn a_fold_projection_over_budget_writes_folds() {
     let (kernel, backend) = mk_kernel(&tmp, "foldproj").await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
                    "context_strategy": "fold", "context_window": 2600,
                    "output_reserve": 200, "context_titles": true, "context_async": true}),
@@ -3860,7 +3924,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
     // other turn. This pins the python shape: depth stays flat.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "folddepth").await;
-    let _ = kernel.send(vec![Item::new(AgentId::from("core"), json!({"type": "update_agent", "id": backend.as_str(),
+    let _ = kernel.send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend.as_str(),
         "context_strategy": "fold", "context_window": 2600, "output_reserve": 200, "context_titles": true, "context_async": true}))]).await;
     put_row(
         &kernel,
@@ -4332,9 +4396,9 @@ async fn pull_pid_zero_string_is_not_found_like_python() {
 }
 
 #[tokio::test]
-async fn pull_fold_negative_length_slices_like_python() {
-    // `text[:length]` with python slice semantics: -3 counts from the END, and
-    // `next_offset`/`eof` stay signed. Rust clamped to 0 and returned '' / 0.
+async fn pull_fold_negative_length_is_refused() {
+    // python refuses a negative `length` (2026-09-20) — it used to slice from
+    // the END and hand back a negative `next_offset`.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "foldneg").await;
     let fid = put_row(
@@ -4350,10 +4414,8 @@ async fn pull_fold_negative_length_slices_like_python() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["text"], "abcdefg", "{r:#?}");
-    assert_eq!(r["next_offset"], -3);
-    assert_eq!(r["eof"], false);
-    assert_eq!(r["refs"], json!([]), "`r.get('refs') or []`");
+    assert_eq!(r["error"], "pull: length must not be negative", "{r:#?}");
+    assert_eq!(r["reason"], "bad_arg");
 }
 
 #[tokio::test]
@@ -4472,7 +4534,7 @@ async fn a_null_context_strategy_is_reported_raw_and_refused() {
     let (kernel, backend) = mk_kernel(&tmp, "ctxnull").await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(), "context_strategy": null}),
         )])
         .await;
@@ -4497,7 +4559,7 @@ async fn context_titles_flag_is_python_truthy() {
     let (kernel, backend) = mk_kernel(&tmp, "ctxtitles").await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(), "context_titles": 1}),
         )])
         .await;
@@ -4573,15 +4635,15 @@ async fn send_to_is_kept_raw_and_dropped_only_when_blank() {
         )])
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // READ THE CALL ROWS, not the ledger sidecar. The v2 sidecar is an ARRAY and
+    // carries NO `verb` (C46), and the same peer is also the persistence store,
+    // so target alone no longer identifies a hand-off. A `call` row names both.
     let handed = |kernel: &Arc<Kernel>, peer: &str| -> bool {
-        let log = kernel.ledger.settled_snapshot();
-        log["rows"]
-            .as_object()
-            .map(|rows| {
-                rows.values()
-                    .any(|r| r["target"] == json!(peer) && r["verb"] == json!("send"))
-            })
-            .unwrap_or(false)
+        kernel
+            .rows
+            .for_agent(&AgentId::from(peer))
+            .iter()
+            .any(|r| r["kind"] == json!("call") && r["verb"] == json!("send"))
     };
     assert!(
         !handed(&kernel, &peer),
@@ -4797,9 +4859,9 @@ async fn a_numeric_why_is_its_python_str() {
 }
 
 #[tokio::test]
-async fn a_scalar_expand_raises_like_python() {
-    // A truthy int/float/bool `expand` is NOT iterable: python raises BEFORE the
-    // view and the recall row are written. Rust used to write both.
+async fn a_scalar_expand_is_wrapped_like_python() {
+    // `_as_list` (python 2026-09-20): a truthy int/float/bool `expand` is ONE
+    // candidate — the recall completes and its row is written.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "expscalar").await;
     script(
@@ -4821,17 +4883,14 @@ async fn a_scalar_expand_raises_like_python() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        r["error"], "TypeError: 'int' object is not iterable",
-        "{r:#?}"
-    );
-    assert_eq!(r["raised"], true);
+    assert!(r.get("error").is_none(), "{r:#?}");
+    assert_eq!(r["degraded"], false, "{r:#?}");
     assert_eq!(
         conversation(&kernel, &backend).len(),
-        before,
-        "nothing is written when python would have raised"
+        before + 1,
+        "the recall row is written"
     );
-    // A STRING expand iterates its CHARACTERS (each one an `_as_id` candidate).
+    // A STRING expand is one `_as_id` candidate.
     let (kernel, backend) = mk_kernel(&tmp, "expstr").await;
     script(
         &backend,
@@ -4848,7 +4907,10 @@ async fn a_scalar_expand_raises_like_python() {
         .await
         .remove(0)
         .result;
-    assert!(r.get("error").is_none(), "a string IS iterable: {r:#?}");
+    assert!(
+        r.get("error").is_none(),
+        "a string is one candidate: {r:#?}"
+    );
 }
 
 #[tokio::test]
@@ -4898,7 +4960,7 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
             let (kernel, backend) = mk_kernel(&tmp, &format!("seam_{strategy}_{window}")).await;
             let _ = kernel
                 .send(vec![Item::new(
-                    AgentId::from("core"),
+                    AgentId::from("kernel_state"),
                     json!({"type": "update_agent", "id": backend.as_str(),
                            "context_window": window, "output_reserve": 0,
                            "context_strategy": strategy}),
@@ -4985,5 +5047,118 @@ async fn history_hides_call_and_task_rows() {
         rows.iter()
             .any(|r| r.get("content").and_then(Value::as_str) == Some("hello")),
         "the real turn is still there"
+    );
+}
+
+/// B2.6 (r5) — the id must be RANDOM, not a counter. The capture read
+/// `AAAAAVnE3yQ` (base64 of a big-endian int64) where python had `cijoBiyMnnw`:
+/// the mint was `nanos ^ stack ^ pid ^ seq`, not `secrets`.
+#[test]
+fn two_send_ids_differ_and_do_not_ascend() {
+    let ids: Vec<String> = (0..64).map(|_| crate::helpers::mint_send_id()).collect();
+    let uniq: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(uniq.len(), ids.len(), "send ids repeated: {ids:?}");
+    // A counter in big-endian base64 sorts ascending; 64 CSPRNG draws do not.
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_ne!(sorted, ids, "send ids ascend like a counter: {ids:?}");
+}
+
+/// python `secrets.token_hex(2)` — 4 hex characters, drawn fresh per turn.
+#[test]
+fn two_batch_tokens_differ_and_are_four_hex() {
+    let a: Vec<String> = (0..64)
+        .map(|_| crate::helpers::mint_batch_token())
+        .collect();
+    for t in &a {
+        assert_eq!(t.len(), 4, "{t}");
+        assert!(
+            t.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{t}"
+        );
+    }
+    assert!(a.iter().collect::<std::collections::HashSet<_>>().len() > 1);
+}
+
+/// The peer payload's KEY ORDER is python's. python lifts the send's inline
+/// tags into `payload` with `fields.pop("target_id")`, which keeps the
+/// survivors in source order (`type`, `text`), then `setdefault("msg", …)`
+/// appends. `serde_json::Map::remove` is `swap_remove` under `preserve_order`
+/// — it dragged `text` into the hole and the r3 capture read
+/// `["text","type","msg"]` where python had `["type","text","msg"]`.
+#[test]
+fn a_peer_sends_payload_keeps_pythons_key_order() {
+    let calls = crate::tool_parse::extract_tool_calls(
+        "<call name=\"send\"><target_id>ai2</target_id><type>send</type>\
+         <text>CASE=noop#1 hello from ai</text></call>",
+    );
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let payload = calls[0]
+        .arguments
+        .get("payload")
+        .and_then(Value::as_object)
+        .expect("a send lifts its inline tags into `payload`");
+    assert_eq!(
+        payload.keys().collect::<Vec<_>>(),
+        vec!["type", "text"],
+        "source order survives the `target_id` lift"
+    );
+    // `msg` is stamped LAST, as python's `setdefault` appends it.
+    let stamped = crate::route::fan_out(calls, Some(732));
+    let payload = stamped[0]
+        .arguments
+        .get("payload")
+        .and_then(Value::as_object)
+        .expect("payload");
+    assert_eq!(
+        payload.keys().collect::<Vec<_>>(),
+        vec!["type", "text", "msg"]
+    );
+}
+
+/// THE TURN'S ROW IDS ARE MINTED AFTER ASSEMBLY. python `_run` calls
+/// `_assemble` first — and the system block it builds dispatches two
+/// `reflect`s, which take their call-row ids there — and only then
+/// `_row_ids_for_incoming` + `_mint_row_id`. Rust minted them at turn entry,
+/// so every turn's user/assistant rows sat two ids BELOW python's and every
+/// `<turn_id>` in the r3 capture was off by two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_order").await;
+    let _s = script(
+        &backend,
+        vec![pass("ack <call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let turn_id = r["turn_id"].as_i64().expect("turn_id is a row id");
+    let rows = kernel.rows.for_agent(&backend);
+    let reflect = rows
+        .iter()
+        .filter(|row| {
+            row.get("kind") == Some(&json!("call")) && row.get("verb") == Some(&json!("reflect"))
+        })
+        .filter_map(|row| row.get("id").and_then(Value::as_i64))
+        .min()
+        .expect("assembly reflects this agent every turn");
+    let user = rows
+        .iter()
+        .filter(|row| row.get("role") == Some(&json!("user")))
+        .filter_map(|row| row.get("id").and_then(Value::as_i64))
+        .min()
+        .expect("the incoming row");
+    assert!(
+        reflect < user && user < turn_id,
+        "assembly's reflect ({reflect}) must precede the user row ({user}) \
+         and the assistant row ({turn_id})"
     );
 }

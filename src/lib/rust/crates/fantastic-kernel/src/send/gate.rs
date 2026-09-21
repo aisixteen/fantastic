@@ -34,14 +34,12 @@ fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>, H
 }
 
 impl Kernel {
-    /// Resolve an id the way `send` does — the `kernel` alias or a literal id.
+    /// Resolve an id the way `send` does — the `kernel` alias, then a
+    /// declared `alias` meta through `well_known` (C35), then a literal id.
     /// `None` when it names no live agent.
     fn resolve_agent(self: &Arc<Self>, id: Option<&Value>) -> Option<Arc<Agent>> {
         let id = id.and_then(Value::as_str).filter(|s| !s.is_empty())?;
-        if id == "kernel" {
-            return self.root();
-        }
-        self.agents.get(&AgentId::from(id)).map(|e| Arc::clone(&e))
+        self.resolve_target(id)
     }
 
     /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
@@ -112,24 +110,40 @@ impl Kernel {
     /// [`crate::authz::authorize_call`] engine, then the authority-conferral rules
     /// (no self-raise; delegate only a subset). A holder with no record → empty
     /// grant → deny-all (never a hole).
-    /// May `origin` receive the outcome of an execution that ran `verb` on
-    /// `target`? Returns a denial, or None.
+    /// May `origin` receive the outcome of the execution the ledger opened with
+    /// `payload` on `target`? Returns a denial, or None.
     ///
     /// Joining hands back ANOTHER caller's result verbatim, so it is equivalent
     /// to having made that call. Asking the gate about the joiner's own payload
     /// instead — a different verb, whose reply it never gets — authorizes the
-    /// wrong operation. An OPERATOR joiner (no origin) is ungated, as everywhere.
+    /// wrong operation.
+    ///
+    /// THE WHOLE PAYLOAD, not just the verb: `create_agent`'s placement check
+    /// reads `parent_id` and the conferral check reads the grant maps, so a
+    /// join gated on a synthesised `{"type": verb}` asked a different question
+    /// than the call did. A REHYDRATED row carries no payload (nothing is left
+    /// to re-run), so it gates as python's `entry.get("payload") or {}` — an
+    /// empty object with no verb. An OPERATOR joiner (no origin) is ungated.
     pub(super) fn join_denial(
         self: &Arc<Self>,
         origin: &Option<AgentId>,
-        verb: &str,
+        payload: &Value,
         target: &Arc<Agent>,
     ) -> Option<Value> {
         let joiner = origin.as_ref()?;
-        self.gate(joiner, verb, target, &serde_json::json!({"type": verb}))
+        let payload = match payload {
+            Value::Object(_) => payload.clone(),
+            _ => serde_json::json!({}),
+        };
+        let verb = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        self.gate(joiner, &verb, target, &payload)
     }
 
-    pub(super) fn gate(
+    pub(crate) fn gate(
         self: &Arc<Self>,
         sender_id: &AgentId,
         verb: &str,
@@ -323,8 +337,16 @@ impl Kernel {
                 };
                 // Conferring `"*"` (or a list with it) requires the granter to hold
                 // `"*"` on that target; a concrete list requires each verb.
+                //
+                // python: `probe = need if (need and "*" not in need) else ["*"]` —
+                // an EMPTY list is falsy, so it probes `*` too. A bare `Value::Array`
+                // emptiness check used to be missing here: `can_call:{"x":[]}` built
+                // an empty `probe` vec, the `for v in probe` loop ran zero times, and
+                // the conferral silently PASSED (C21).
                 let probe: Vec<&str> = match verbs {
-                    Value::Array(vs) if !vs.iter().any(|v| v.as_str() == Some("*")) => {
+                    Value::Array(vs)
+                        if !vs.is_empty() && !vs.iter().any(|v| v.as_str() == Some("*")) =>
+                    {
                         vs.iter().filter_map(Value::as_str).collect()
                     }
                     _ => vec!["*"],

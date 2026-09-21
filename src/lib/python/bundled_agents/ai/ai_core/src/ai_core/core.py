@@ -339,10 +339,22 @@ def _render_for_model(messages: list[dict]) -> list[dict]:
 # ─── persistence (the KERNEL ROW STORE — this bundle owns no files) ─────────
 
 
+def _as_list(v) -> list:
+    """A model-written field as a list: a list as is, a scalar wrapped, falsy empty."""
+    if not v:
+        return []
+    return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
 def _safe_client(client_id: str) -> str:
     """Trim and sanitize a client id so it's safe as a filename suffix.
     Spaces / slashes / weirdness collapse to underscores."""
-    s = (client_id or DEFAULT_CLIENT_ID).strip() or DEFAULT_CLIENT_ID
+    raw = (
+        client_id
+        if isinstance(client_id, str)
+        else (str(client_id) if client_id else "")
+    )
+    s = (raw or DEFAULT_CLIENT_ID).strip() or DEFAULT_CLIENT_ID
     return "".join(c if (c.isalnum() or c in "._-") else "_" for c in s)
 
 
@@ -2094,7 +2106,7 @@ def _make_reflect(cfg: Backend):
             "cancel": CANCEL_DOC,
             "emits": {
                 "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
-                "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.tool={call_id,target,verb,args,reply_preview?} for tool_calling (entry has no reply_preview, exit re-emits same call_id with it). detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued.",
+                "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued.",
                 "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
             },
             "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`status` skip the lock and stay snappy.",
@@ -2640,6 +2652,8 @@ async def _pull(id, payload, kernel):
         length = int(payload.get("length") or cap)
     except (TypeError, ValueError):
         return {"error": "pull: offset/length must be integers", "reason": "bad_arg"}
+    if length < 0:
+        return {"error": "pull: length must not be negative", "reason": "bad_arg"}
     if length > cap:
         return {
             "error": f"pull: length {length} exceeds the {cap}-char page cap — a page must "
@@ -2710,14 +2724,19 @@ async def _grep(id, payload, kernel):
             "reason": "bad_arg",
             "arg": "query",
         }
+    # Each knob falls back on its own: one bad `limit` used to leave `width`
+    # unbound and raise on the first match (measured 2026-09-16).
     try:
         limit = max(1, min(int(payload.get("limit") or 100), 100))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
         # The per-line cut. A bare default (200) that the model can raise: a rule
         # written as one long line lost its tail at 200 and the model concluded grep
         # could not reach it (measured 2026-09-08, fold_long).
         width = max(20, min(int(payload.get("width") or 200), 20_000))
     except (TypeError, ValueError):
-        limit = 100
+        width = 200
     raw_ids = payload.get("ids")
     ids = [_as_id(x) for x in raw_ids] if isinstance(raw_ids, list) else None
     if raw_ids is not None and (ids is None or any(x is None for x in ids)):
@@ -2946,7 +2965,7 @@ async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
             head_ids = {view[i]["id"] for i in head}
             want = [
                 x
-                for x in (_as_id(v) for v in (ans.get("expand") or []))
+                for x in (_as_id(v) for v in _as_list(ans.get("expand")))
                 if x is not None and x in head_ids
             ]
             why = str(ans.get("why") or "")[:300] or "chosen"

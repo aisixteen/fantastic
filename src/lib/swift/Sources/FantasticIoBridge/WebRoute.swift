@@ -9,6 +9,7 @@
 // any more (A11.28): it made every request a second, PARENT row on the leg.
 
 import FantasticJSON
+import Foundation
 import FantasticKernel
 
 /// A bundle that serves the HTTP routes it declared through `get_routes`.
@@ -17,7 +18,13 @@ public protocol WebRouteOwner {
     ///
     /// `request` carries `{method, path, params, query, headers, body}` (headers
     /// lowercased, latin-1 decoded as python's ASGI layer hands them over). The
-    /// reply is `{status, content_type?, headers?, body?}` — a missing
+    /// reply is `({status, content_type?, headers?, body?}, chunk?)` — a missing
     /// `content_type` means the response carries no body at all (204).
-    func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> JSON
+    ///
+    /// The second half is THE BINARY REPLY BODY (C37/A13.1): `nil` = the verb
+    /// returned no chunk, `.some(d)` = it returned one, `d` possibly EMPTY (an
+    /// empty file read). The host turns that — never the body's length — into
+    /// `application/octet-stream`, because a `{status, content_type, body:String}`
+    /// JSON reply cannot carry raw bytes or response headers.
+    func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> (JSON, Data?)
 }

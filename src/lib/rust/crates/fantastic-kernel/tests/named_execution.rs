@@ -45,7 +45,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -61,7 +61,7 @@ async fn seed(kernel: &Arc<Kernel>, id: &str) {
     kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "create_agent", "parent_id": "core", "id": id,
+            json!({"type": "create_agent", "parent_id": "kernel_state", "id": id,
                    "handler_module": "slow.tools"}),
         )])
         .await;

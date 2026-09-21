@@ -7,6 +7,7 @@
 // `@`-command grammar and the CLI's `k=v` value coercion.
 
 import FantasticJSON
+import FantasticKernel
 import Foundation
 import Testing
 
@@ -26,7 +27,7 @@ struct REPLParseTests {
         #expect(cmd?.target == "chat")
         #expect(cmd?.payload["type"].asString == "reflect")
         // No extra keys beyond type.
-        if case let .object(obj) = cmd!.payload {
+        if case .object(let obj) = cmd!.payload {
             #expect(obj.count == 1)
         } else {
             Issue.record("payload not an object")
@@ -77,10 +78,206 @@ struct REPLParseTests {
         #expect(cmd?.payload["n"].asInt == 42)
         #expect(cmd?.payload["s"].asString == "hello")
     }
+
+    /// A14.16: leading whitespace between `@` and the target must not
+    /// misalign the reconstructed chat text — python's `rest = line[1:]
+    /// .strip()` drops it before `target` is even found, so the trailing
+    /// slice (`rest[len(target):]`) starts right after `target`, not after
+    /// wherever `target` happened to appear in the UNSTRIPPED line.
+    @Test func leadingWhitespaceAfterAtDoesNotMisalignChatText() {
+        let cmd = REPLMode.parseAtCommand("@  chat  hello there")
+        #expect(cmd?.target == "chat")
+        #expect(cmd?.payload["type"].asString == "send")
+        #expect(cmd?.payload["text"].asString == "hello there")
+    }
+}
+
+// A14.16: `_print_result` — python `kernel/modes/print.py`.
+@Suite("REPL _print_result")
+struct REPLPrintResultTests {
+    @Test func printResultMatchesPython() {
+        // `None` → nothing printed.
+        #expect(REPLMode.printResultLine(.null) == nil)
+
+        // `error` triggers on KEY PRESENCE, never truthiness — a falsy
+        // `error` (0, "", []) still renders, and the value renders via
+        // python's bare `str()`, not a repr (no quotes on a string).
+        #expect(
+            REPLMode.printResultLine(.object(["error": .string("boom")])) == "  error: boom")
+        #expect(REPLMode.printResultLine(.object(["error": .integer(0)])) == "  error: 0")
+        #expect(
+            REPLMode.printResultLine(.object(["error": .array([.string("a")])]))
+                == "  error: ['a']")
+
+        // BOTH `id` and `handler_module` keys present → `created <id>`,
+        // checked BEFORE the generic JSON fallback and independent of
+        // `error` (which wins when both are present, since python checks
+        // `error` first).
+        #expect(
+            REPLMode.printResultLine(
+                .object(["id": .string("web_ab12cd"), "handler_module": .string("web.tools")]))
+                == "  created web_ab12cd")
+        #expect(
+            REPLMode.printResultLine(
+                .object([
+                    "error": .string("exists"), "id": .string("x"),
+                    "handler_module": .string("x.tools"),
+                ])) == "  error: exists")
+
+        // Only ONE of `id`/`handler_module` present → the generic fallback,
+        // `  ` + ensure_ascii indent-2 JSON.
+        #expect(
+            REPLMode.printResultLine(.object(["id": .string("x")]))
+                == "  {\n  \"id\": \"x\"\n}")
+
+        // Neither `error` nor `id`+`handler_module` → the same fallback —
+        // e.g. a bare `{ok:true}` reply, or a scalar/array result.
+        #expect(
+            REPLMode.printResultLine(.object(["ok": .bool(true)])) == "  {\n  \"ok\": true\n}")
+        #expect(
+            REPLMode.printResultLine(.array([.integer(1), .integer(2)])) == "  [\n  1,\n  2\n]")
+    }
+
+    /// A14.16: python's `unknown command` line uses `{line!r}` — python
+    /// `repr`, single-quoted, never Swift's own `debugDescription`
+    /// (double-quoted, different escapes).
+    @Test func unknownCommandUsesPythonRepr() {
+        #expect(
+            REPLMode.unknownCommandLine("bogus")
+                == "  unknown command: 'bogus'  (try: list, add <bundle>, delete <id>, @<id> ...)")
+        // A string containing a single quote flips python's repr to double
+        // quotes — the exact case Swift's `debugDescription` would get
+        // wrong (it always uses double quotes and different escaping).
+        #expect(
+            REPLMode.unknownCommandLine("it's broken")
+                == #"  unknown command: "it's broken"  (try: list, add <bundle>, delete <id>, @<id> ...)"#
+        )
+    }
+}
+
+private struct REPLTestNoop: AgentBundle {
+    let name = "noop"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { .null }
+}
+
+/// A14.16: `list` / `add` / `delete` end to end — a real (in-memory) kernel,
+/// asserting on the STDOUT lines each command produces. `.serialized`:
+/// `RuntimeLog`'s capture sinks are a shared array every ACTIVE capture
+/// appends to (`RuntimeLog.swift`'s own doc: "two suites can be capturing at
+/// the same time"), so two of these tests racing would each see the OTHER's
+/// lines too.
+@Suite("REPL list/add/delete", .serialized)
+struct REPLCommandTests {
+    private func makeReplKernel() -> Kernel {
+        let reg = BundleRegistry()
+        reg.register("noop.tools", REPLTestNoop())
+        let kernel = Kernel(storage: .inMemory, bundles: reg)
+        let root = Agent(id: AgentId(ROOT_ID), handlerModule: "noop.tools", parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        return kernel
+    }
+
+    @Test func listShowsEveryAgentInRegistrationOrderWithSingletonTag() async {
+        let kernel = makeReplKernel()
+        _ = kernel.composeEphemeralChild(
+            id: AgentId("cli"), handlerModule: "noop.tools", parent: kernel.root!,
+            meta: ["singleton": .bool(true)])
+        let lines = await RuntimeLog.captureOut {
+            REPLMode.handleList(kernel: kernel)
+        }
+        #expect(
+            lines == [
+                "  \(ROOT_ID)  →  noop.tools",
+                "  cli (singleton)  →  noop.tools",
+            ], "\(lines)")
+    }
+
+    @Test func addRefusesAnUnknownBundle() async {
+        let kernel = makeReplKernel()
+        let lines = await RuntimeLog.captureOut {
+            await REPLMode.handleAdd(args: "no_such_bundle", kernel: kernel)
+        }
+        #expect(lines == ["  unknown bundle 'no_such_bundle'"], "\(lines)")
+        #expect(kernel.allAgents().count == 1, "nothing created")
+    }
+
+    @Test func addCreatesAndPrintsTheCreatedLine() async {
+        let kernel = makeReplKernel()
+        let lines = await RuntimeLog.captureOut {
+            await REPLMode.handleAdd(args: "noop id=extra", kernel: kernel)
+        }
+        #expect(lines == ["  created extra"], "\(lines)")
+        #expect(kernel.agent(AgentId("extra")) != nil)
+    }
+
+    @Test func deleteRemovesTheAgent() async {
+        let kernel = makeReplKernel()
+        await REPLMode.handleAdd(args: "noop id=doomed", kernel: kernel)
+        #expect(kernel.agent(AgentId("doomed")) != nil)
+        _ = await RuntimeLog.captureOut {
+            await REPLMode.handleDelete(id: "doomed", kernel: kernel)
+        }
+        #expect(kernel.agent(AgentId("doomed")) == nil)
+    }
+
+    /// No usage guard for an empty id — python has none either; an empty
+    /// string is just an unknown agent id, refused like any other.
+    @Test func deleteUnknownIdPrintsAnErrorLine() async {
+        let kernel = makeReplKernel()
+        let lines = await RuntimeLog.captureOut {
+            await REPLMode.handleDelete(id: "ghost", kernel: kernel)
+        }
+        #expect(lines.count == 1)
+        #expect(lines[0].hasPrefix("  error: "), "\(lines)")
+    }
 }
 
 // A14.10 — ONE `k=v` rule for every CLI surface (one-shot, `reflect`, the
 // REPL's `@id verb k=v` and `add k=v`): python `kernel/modes/parse.py:_coerce`.
+@Suite("REPL stdin cancellation")
+struct REPLCancelTests {
+
+    /// The daemon races the REPL leg against the stop signal in a task group,
+    /// and a task group AWAITS every child before it returns. `readLine()` is
+    /// an uninterruptible blocking read, so a SIGTERM under a PTY cancelled a
+    /// child that never came back: `kernel.shutdown()` never ran, the teardown
+    /// lines never printed, and the e2e driver had to SIGKILL the daemon
+    /// (measured 2026-09-21 — `cli/noargs_pty_fresh` and `cli/noargs_pty_web`
+    /// exit `-9` where python exits `0`; reproduced standalone at 15.6 s to
+    /// SIGKILL, 0.6 s after the fix).
+    ///
+    /// Python's `input()` blocks a thread the interpreter abandons at exit, so
+    /// the leg has to be abandonable here too: the blocking read is parked on a
+    /// global-queue thread and only the AWAIT is cancellable.
+    @Test func cancelledReadReturnsWithoutWaitingForStdin() async {
+        let t = Task { await REPLMode.readLineAsync() }
+        t.cancel()
+        // The whole point: this `await` completes. Before the fix it waited on
+        // a `readLine()` no cancellation could reach.
+        let line = await t.value
+        #expect(line == nil)
+        #expect(t.isCancelled)
+    }
+
+    /// The daemon's shape, reduced: a task group holding the REPL leg plus a
+    /// stop leg that wins. `withTaskGroup` does not return until the REPL leg
+    /// does, so this test HANGS on the old code and passes on the new.
+    @Test func groupHoldingTheReplLegCompletesWhenTheStopLegWins() async {
+        let done = await withTaskGroup(of: String?.self) { group -> String? in
+            group.addTask {
+                _ = await REPLMode.readLineAsync()
+                return nil
+            }
+            group.addTask { "SIGTERM" }
+            let first = await group.next()
+            group.cancelAll()
+            return first ?? nil
+        }
+        #expect(done == "SIGTERM")
+    }
+}
+
 @Suite("CLI k=v coercion")
 struct ParseKVTests {
     @Test func coercesScalarTypes() {

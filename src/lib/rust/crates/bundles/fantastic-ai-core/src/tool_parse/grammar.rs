@@ -404,8 +404,11 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
     if name != "send" {
         return Ok(Some(ToolCall::new(name, fields)));
     }
-    let target = fields.remove("target_id");
-    let to = normalize_to(fields.remove("to"));
+    // python `fields.pop(...)` keeps the SURVIVORS in insertion order. serde_json
+    // `Map::remove` is `swap_remove` under `preserve_order` — it drags the LAST key
+    // into the hole, so `{target_id, type, pid, offset}` became `{offset, type, pid}`.
+    let target = fields.shift_remove("target_id");
+    let to = normalize_to(fields.shift_remove("to"));
     let target = target
         .as_ref()
         .and_then(Value::as_str)
@@ -426,7 +429,7 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
         args.insert("to".to_string(), list);
     }
     for key in &ROUTING[2..] {
-        if let Some(v) = fields.remove(*key) {
+        if let Some(v) = fields.shift_remove(*key) {
             args.insert((*key).to_string(), v);
         }
     }

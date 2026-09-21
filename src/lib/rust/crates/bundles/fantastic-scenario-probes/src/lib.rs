@@ -70,20 +70,11 @@ impl Counter {
 /// ask for different widths (the plant's serial is 3 bytes, the receipts 4), and
 /// a scenario that pins a serial's shape pins the width too.
 fn token_hex(bytes: u32) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = u64::from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-            .wrapping_mul(2_654_435_761),
-    );
-    let width = (bytes * 2) as usize;
-    format!(
-        "{:0width$x}",
-        n & ((1u64 << (bytes * 8)) - 1),
-        width = width
-    )
+    let mut buf = vec![0u8; bytes as usize];
+    // SAFETY: `buf` is a valid writable buffer of exactly `bytes` bytes.
+    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
+    assert!(rc == 0, "getentropy failed: no randomness source");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ── dispenser ───────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ pub mod bundle;
 pub mod call_guard;
 pub mod errors;
 pub mod inbox;
+pub(crate) mod jsonsafe;
 pub mod kernel;
 pub mod ledger;
 pub mod lifecycle;

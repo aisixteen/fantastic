@@ -26,7 +26,7 @@
         let registry = BundleRegistry()
         registry.register("exec_bridge.tools", ExecBridgeBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         return kernel
@@ -40,14 +40,14 @@
     ) async -> AgentId {
         var payload: OrderedDictionary<String, JSON> = [
             "type": .string("create_agent"),
-            "parent_id": .string("core"),
+            "parent_id": .string("kernel_state"),
             "handler_module": .string("exec_bridge.tools"),
             "id": .string(id),
             "ingress_rule": .string("allow_all_ingress"),
             "allowed": .array([.string(".*")]),
         ]
         for (k, v) in meta { payload[k] = v }
-        let r = await kernel.send([Item(AgentId("core"), .object(payload))])[0].result
+        let r = await kernel.send([Item(AgentId("kernel_state"), .object(payload))])[0].result
         return AgentId(r["id"].asString ?? id)
     }
 
@@ -183,12 +183,12 @@
             _ kernel: Kernel, id: String, allowed: [String]?
         ) async -> AgentId {
             var payload: OrderedDictionary<String, JSON> = [
-                "type": .string("create_agent"), "parent_id": .string("core"),
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("exec_bridge.tools"), "id": .string(id),
                 "ingress_rule": .string("allow_all_ingress"),
             ]
             if let allowed { payload["allowed"] = .array(allowed.map(JSON.string)) }
-            let r = await kernel.send([Item(AgentId("core"), .object(payload))])[0].result
+            let r = await kernel.send([Item(AgentId("kernel_state"), .object(payload))])[0].result
             return AgentId(r["id"].asString ?? id)
         }
 
@@ -271,8 +271,8 @@
 
             // SEALED BY DEFAULT — a fresh leg (no ingress_rule) denies every owned verb
             // except reflect, and the denial teaches the fix.
-            let sealedR = await kernel.send([Item(AgentId("core"), .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+            let sealedR = await kernel.send([Item(AgentId("kernel_state"), .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("exec_bridge.tools"), "id": .string("sealed"),
                 ]))])[0].result
             let sealed = AgentId(sealedR["id"].asString ?? "sealed")
@@ -293,11 +293,11 @@
         @Test func aTypelessRuleObjectSealsLikePython() async {
             let kernel = freshKernel()
             let create: JSON = .object([
-                "type": .string("create_agent"), "parent_id": .string("core"),
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("exec_bridge.tools"), "id": .string("typeless"),
                 "ingress_rule": .object(["env": .string("X")]),
             ])
-            let made = await kernel.send([Item(AgentId("core"), create)])[0].result
+            let made = await kernel.send([Item(AgentId("kernel_state"), create)])[0].result
             #expect(made["id"].asString == "typeless", "the write is accepted: \(made.serialize())")
             let a = AgentId("typeless")
             let start: JSON = .object(["type": .string("start"), "command": .string("ls")])
@@ -411,7 +411,7 @@
             let pid = try await waitForPid(file)
             _ = try await waitForRow(kernel, agent: a.value, verb: "start")
 
-            _ = await kernel.send([Item(AgentId("core"), .object(["type": .string("delete_agent"), "id": .string(a.value)]))])[0].result
+            _ = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("delete_agent"), "id": .string(a.value)]))])[0].result
             #expect(await waitProcessGone(pid), "pid \(pid) survived delete — ORPHANED")
         }
     }
@@ -611,8 +611,8 @@
         private func create(
             _ kernel: Kernel, id: String, allowed: [String]
         ) async -> AgentId {
-            let r = await kernel.send([Item(AgentId("core"), .object([
-                "type": .string("create_agent"), "parent_id": .string("core"),
+            let r = await kernel.send([Item(AgentId("kernel_state"), .object([
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("exec_bridge.tools"), "id": .string(id),
                 "ingress_rule": .string("allow_all_ingress"),
                 "allowed": .array(allowed.map(JSON.string)),
@@ -652,7 +652,7 @@
     // ─── durable jobs, end to end ───────────────────────────────────
 
     private func drainUntil(
-        _ stream: AsyncStream<JSON>, timeout: Double = 25,
+        _ stream: Inbox, timeout: Double = 25,
         where pred: @escaping @Sendable (JSON) -> Bool
     ) async -> [JSON] {
         final class Sink: @unchecked Sendable {
@@ -663,7 +663,7 @@
             func all() -> [JSON] { lock.withLock { events } }
         }
         let sink = Sink()
-        let consumer = Task { for await ev in stream { sink.add(ev) } }
+        let consumer = Task { for await ev in stream { sink.add(ev.payload) } }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if sink.hit(pred) { break }
@@ -701,12 +701,12 @@
             let a = await createPy(kernel, id: "dur_send")
             let stream = kernel.ensureInbox(a)
             _ = await kernel.send([Item(a, pyStart(
-                py, "r = kernel.send('core', {'type': 'reflect'})\nprint('GOT', r.get('id'))",
+                py, "r = kernel.send('kernel_state', {'type': 'reflect'})\nprint('GOT', r.get('id'))",
                 connector: true))])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let done = events.first { $0["type"].asString == "job_done" }
             #expect(
-                done?["stdout"].asString?.contains("GOT core") == true,
+                done?["stdout"].asString?.contains("GOT kernel_state") == true,
                 "connector send did not round-trip: \(done?.serialize() ?? "none")")
         }
 
@@ -735,12 +735,12 @@
             _ = await kernel.send([Item(a, pyStart(
                 py,
                 "r = kernel.send('sib', {'type': 'reflect'})\nprint('SIB', r.get('reason'))\n"
-                    + "r2 = kernel.send('core', {'type': 'reflect'})\nprint('CORE', r2.get('id'))",
+                    + "r2 = kernel.send('kernel_state', {'type': 'reflect'})\nprint('CORE', r2.get('id'))",
                 connector: true))])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
             #expect(out.contains("SIB unauthorized"), "the sibling must refuse: \(out)")
-            #expect(out.contains("CORE core"), "the parent (baseline edge) still answers: \(out)")
+            #expect(out.contains("CORE kernel_state"), "the parent (baseline edge) still answers: \(out)")
         }
 
         /// PROGRESS IS LIVE. The pump used to buffer both pipes to EOF and emit every
@@ -848,16 +848,16 @@
         }
         func handleBinary(
             agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-        ) async throws -> (JSON?, Data) {
+        ) async throws -> (JSON?, Data?) {
             switch header["type"].asString ?? "" {
             case "write_stream":
                 lock.withLock { self.blob = blob }
-                return (.object(["written": .integer(Int64(blob.count))]), Data())
+                return (.object(["written": .integer(Int64(blob.count))]), nil)
             case "read_stream":
                 let b = lock.withLock { self.blob }
                 return (.object(["eof": .bool(true), "size": .integer(Int64(b.count))]), b)
             default:
-                return (.object(["error": .string(header["type"].asString ?? "")]), Data())
+                return (.object(["error": .string(header["type"].asString ?? "")]), nil)
             }
         }
     }
@@ -875,13 +875,13 @@
             registry.register("exec_bridge.tools", ExecBridgeBundle())
             registry.register("blob.tools", BlobStore())
             let kernel = Kernel(storage: .inMemory, bundles: registry)
-            let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+            let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
             kernel.register(root)
             kernel.setRoot(root)
             let a = await createPy(
                 kernel, id: "dur_bytes", meta: ["can_call": .object(["blob": .string("*")])])
-            _ = await kernel.send([Item(AgentId("core"), .object([
-                "type": .string("create_agent"), "parent_id": .string("core"),
+            _ = await kernel.send([Item(AgentId("kernel_state"), .object([
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "id": .string("blob"), "handler_module": .string("blob.tools"),
                 "callable_by": .object([a.value: .string("*")]),
             ]))])[0].result
@@ -932,7 +932,7 @@
         registry.register("exec_bridge.tools", ExecBridgeBundle())
         registry.register("echo.tools", EchoBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         return kernel
@@ -1023,9 +1023,9 @@
             // …and it is UNGATED: a sealed leg answers the same, not `unauthorized`.
             let sealedId = await kernel.send([
                 Item(
-                    AgentId("core"),
+                    AgentId("kernel_state"),
                     .object([
-                        "type": .string("create_agent"), "parent_id": .string("core"),
+                        "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                         "handler_module": .string("exec_bridge.tools"),
                         "id": .string("sd_sealed"),
                     ]))
@@ -1279,9 +1279,37 @@
             #expect(done?["ok"].asBool == false, "\(done?.serialize() ?? "none")")
         }
 
-        /// A4.14 — a line past the 64 KiB reader limit is a PUMP fault, python's
-        /// `ValueError` text and its shape: stdout `''`, the message on stderr.
-        @Test func anOverlongLineIsAPumpError() async throws {
+        /// A4.8, the other half of the `no job` guard — a job_id naming a job that
+        /// DOES exist must fall THROUGH it. `known ? nil : noJob(want)` unified
+        /// both branches at `JSON` (which is `ExpressibleByNilLiteral`), so the
+        /// guard handed back `.some(.null)` for every LIVE job: `stop {job_id}`
+        /// answered `null`, signalled nothing, and the process ran to completion
+        /// with `job_done exit_code: 0`. Python answers `{killed: 1}` and the job
+        /// dies with -9. The unnamed `stop` was unaffected, which is why this
+        /// needs its own twin.
+        @Test func aNamedLiveJobIsStoppedNotAnsweredNull() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "named_stop")
+            let stream = kernel.ensureInbox(a)
+            let started = await kernel.send([
+                Item(a, pyStart(py, "import time; time.sleep(60)"))
+            ])[0].result
+            let jid = try #require(started["job_id"].asString)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let stopped = await kernel.send([
+                Item(a, .object(["type": .string("stop"), "job_id": .string(jid)]))
+            ])[0].result
+            #expect(stopped["killed"].asInt == 1, "\(stopped.serialize())")
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let done = events.first { $0["type"].asString == "job_done" }
+            #expect(done?["exit_code"].asInt == -9, "\(done?.serialize() ?? "no job_done")")
+            #expect(done?["job_id"].asString == jid, "\(done?.serialize() ?? "none")")
+        }
+
+        /// A4.14 — a line past 64 KiB is read whole: python's reader limit is
+        /// 16 MiB (2026-09-20), where it used to end the pipe with `[pump error]`.
+        @Test func anOverlongLineIsReadWhole() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "overlong")
@@ -1291,11 +1319,10 @@
             ])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let done = events.first { $0["type"].asString == "job_done" }
-            #expect(done?["stdout"].asString == "", "\(done?.serialize().prefix(200) ?? "none")")
             #expect(
-                done?["stderr"].asString
-                    == "[pump error] Separator is not found, and chunk exceed the limit",
-                "\(done?["stderr"].serialize() ?? "none")")
+                done?["stdout"].asString?.hasPrefix(String(repeating: "x", count: 150000)) == true,
+                "\(done?.serialize().prefix(200) ?? "none")")
+            #expect(done?["stderr"].asString == "", "\(done?["stderr"].serialize() ?? "none")")
         }
 
         /// A4.15 — the counter lives on the PUMP: python's `_read_stream` closes
@@ -1412,9 +1439,9 @@
                 meta: ["can_call": .object(["echo1": .string("*")])])
             _ = await kernel.send([
                 Item(
-                    AgentId("core"),
+                    AgentId("kernel_state"),
                     .object([
-                        "type": .string("create_agent"), "parent_id": .string("core"),
+                        "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                         "id": .string("echo1"), "handler_module": .string("echo.tools"),
                         "callable_by": .object([a.value: .string("*")]),
                     ]))
@@ -1481,6 +1508,15 @@
             let inboxRow = try await waitForRow(kernel, agent: a.value, verb: "inbox_drain")
             #expect(watchRow["parent"].asInt == relayRow["id"].asInt, "\(watchRow.serialize())")
             #expect(inboxRow["parent"].asInt == relayRow["id"].asInt, "\(inboxRow.serialize())")
+            // C36 — and each fork is a `task` ROW under the same id, so a cold
+            // read of the message log says what the job held, not just `ps`.
+            let stored = kernel.rows.forAgent(a).filter { $0["kind"]?.asString == "task" }
+            let forked = stored.map { ($0["id"]?.asInt, $0["verb"]?.asString) }
+            for row in [relayRow, watchRow, inboxRow] {
+                #expect(
+                    forked.contains { $0 == row["id"].asInt && $1 == row["verb"].asString },
+                    "no task row for \(row["verb"].serialize()): \(forked)")
+            }
         }
 
         /// A4.34 — a real job holds a `relay` row for as long as its control socket

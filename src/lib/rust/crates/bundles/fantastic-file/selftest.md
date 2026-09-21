@@ -17,7 +17,7 @@ rm -rf /tmp/ff_test /tmp/ff_root
 mkdir -p /tmp/ff_test /tmp/ff_root
 cd /tmp/ff_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
-$FANTASTIC core create_agent handler_module=file_bridge.tools id=ff root=/tmp/ff_root
+$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=ff root=/tmp/ff_root
 ```
 
 ## Tests
@@ -58,7 +58,7 @@ $FANTASTIC ff list path=. | jq -e '[.files[].name] | inside(["sub"])'
 ### Test 5: readonly=true blocks writes
 
 ```bash
-$FANTASTIC core update_agent id=ff readonly=true
+$FANTASTIC kernel_state update_agent id=ff readonly=true
 ! $FANTASTIC ff write path=blocked.txt content="x"
 $FANTASTIC ff write path=blocked.txt content="x" | jq -e '.error | contains("readonly")'
 test ! -f /tmp/ff_root/blocked.txt

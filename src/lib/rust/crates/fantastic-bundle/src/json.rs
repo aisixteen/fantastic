@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use crate::repr::number_repr;
+use crate::repr::number_json;
 
 /// `json.dumps(v, ensure_ascii=…, indent=…)` with CPython's defaults for
 /// everything else: `, ` and `: ` separators (`,` + newline under `indent`),
@@ -27,7 +27,7 @@ fn dump(v: &Value, ensure_ascii: bool, indent: Option<usize>, level: usize, out:
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(n) => out.push_str(&number_repr(n)),
+        Value::Number(n) => out.push_str(&number_json(n)),
         Value::String(s) => encode_str(s, ensure_ascii, out),
         Value::Array(items) => {
             if items.is_empty() {

@@ -122,14 +122,46 @@ pub fn py_truthy(v: &Value) -> bool {
 }
 
 /// A JSON number the way python writes it: an integer's digits, a float's repr.
-pub(crate) fn number_repr(n: &serde_json::Number) -> String {
+///
+/// `non_finite` is the spelling the caller's serializer uses for a float JSON
+/// has no grammar for — `("inf", "-inf", "nan")` for `repr()`, `("Infinity",
+/// "-Infinity", "NaN")` for `json.dumps(allow_nan=True)`.
+fn number_text(n: &serde_json::Number, non_finite: [&str; 3]) -> String {
     if let Some(i) = n.as_i64() {
-        i.to_string()
-    } else if let Some(u) = n.as_u64() {
-        u.to_string()
-    } else {
-        py_float_repr(n.as_f64().unwrap_or(0.0))
+        return i.to_string();
     }
+    if let Some(u) = n.as_u64() {
+        return u.to_string();
+    }
+    // ARBITRARY PRECISION (C74): the number is kept as the text it was built
+    // from, and `as_f64` answers `None` for the two shapes that text can hold
+    // and an `f64` cannot — a non-finite float, and an integer wider than 64
+    // bits. Routing either through `unwrap_or(0.0)` printed `0.0` for
+    // `Infinity` and `1.2345678901234568e+29` for a 30-digit int, where python
+    // prints the token and the exact digits.
+    let raw = n.as_str();
+    match raw {
+        "NaN" => return non_finite[2].to_string(),
+        "Infinity" => return non_finite[0].to_string(),
+        "-Infinity" => return non_finite[1].to_string(),
+        _ => {}
+    }
+    if !raw.contains(['.', 'e', 'E']) {
+        return raw.to_string();
+    }
+    py_float_repr(n.as_f64().unwrap_or(0.0))
+}
+
+/// A number inside `repr()` / `str()` — python spells a non-finite float
+/// `inf` / `-inf` / `nan` there.
+pub(crate) fn number_repr(n: &serde_json::Number) -> String {
+    number_text(n, ["inf", "-inf", "nan"])
+}
+
+/// A number inside `json.dumps(..., allow_nan=True)` — the kernel's default,
+/// which writes the bare `Infinity` / `-Infinity` / `NaN` tokens.
+pub(crate) fn number_json(n: &serde_json::Number) -> String {
+    number_text(n, ["Infinity", "-Infinity", "NaN"])
 }
 
 /// `repr(f)` for a python float: the shortest round-tripping digits, positional

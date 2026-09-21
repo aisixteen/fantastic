@@ -23,7 +23,12 @@ agents under the same `web` parent don't collide.
 Verbs:
   reflect       -> identity + URL patterns
   boot          -> no-op (web mounts the route by pulling get_routes)
-  get_routes    -> the duck-typed call surface used by `web._boot`
+  get_routes    -> the duck-typed call surface used by `web._boot`; PURE DATA
+                   ({kind, method, path}), so the reply renders over this very
+                   leg and persists into the ledger like any other. The live
+                   endpoint callables are handed to the parent in-process
+                   through the module hook `route_endpoints(agent)` below —
+                   never through a reply.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from kernel import sender_context
 
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
-from kernel._refusal import UNHANDLED, refusal
+from kernel._refusal import TRANSPORT_ERROR, UNHANDLED, refusal
 
 
 # ─── auth gate (the io_bridge ingress rule on THIS leg) ─────────
@@ -80,6 +85,34 @@ _PAYLOAD_HEADER = "x-fantastic-payload"
 _BYTES_FIELD_HEADER = "x-fantastic-bytes-field"
 
 
+def _json_reply(reply) -> Response:
+    """The ONE place a kernel reply becomes this leg's JSON body.
+
+    A reply carrying something with no JSON form (an in-process object, an
+    out-of-range float) makes `JSONResponse` raise while it renders, i.e. INSIDE
+    the ASGI app: uvicorn then answered a bare text/plain 500 and logged
+    `Exception in ASGI application` with a full traceback (measured, parity
+    capture 20260921b). Naming it here keeps that a stated transport refusal in
+    the shape every other answer on this leg uses. (`get_routes` is no longer
+    such a reply — it is pure data now; the live endpoints reach `web` through
+    the `route_endpoints(agent)` module hook.)
+    """
+    try:
+        return JSONResponse(reply)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            refusal(
+                TRANSPORT_ERROR,
+                "web_rest: the reply has no JSON representation on this leg",
+                hint=(
+                    "this verb answers with in-process objects; call it "
+                    "in-process, not over HTTP"
+                ),
+            ),
+            status_code=500,
+        )
+
+
 def _first_bytes_field(d: dict) -> tuple[str | None, bytes | None]:
     """The ONE field whose value is raw bytes — how a binary envelope carries its
     blob. Returns `(name, blob)` or `(None, None)`."""
@@ -115,7 +148,14 @@ def _make_post_endpoint(self_id: str, kernel):
         else:
             try:
                 payload = json.loads(body) if body else {}
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # RFC 8259 §8.1 — a JSON body IS UTF-8. Bytes that do not decode
+                # are a MALFORMED BODY, the same client error as `{not json`:
+                # `json.loads` sniffs the encoding first, so it raises
+                # UnicodeDecodeError (not JSONDecodeError) before it ever parses.
+                # Uncaught, that raised inside the ASGI app and uvicorn answered a
+                # bare text/plain 500 with a traceback in the kernel log (measured,
+                # parity capture 20260921b, case `invalid_utf8_body`).
                 # Don't echo the parser exception back — generic message
                 # only (CodeQL: information exposure through an exception).
                 return JSONResponse(
@@ -161,7 +201,7 @@ def _make_post_endpoint(self_id: str, kernel):
                         _BYTES_FIELD_HEADER: field,
                     },
                 )
-        return JSONResponse(reply)
+        return _json_reply(reply)
 
     return _rest_call
 
@@ -199,7 +239,7 @@ def _make_reflect_get(self_id: str, kernel):
             ]
         if reply is None:
             return Response(status_code=404)
-        return JSONResponse(reply)
+        return _json_reply(reply)
 
     return _reflect_target
 
@@ -216,9 +256,24 @@ def _make_reflect_root(self_id: str, kernel):
             ]
         if reply is None:
             return Response(status_code=404)
-        return JSONResponse(reply)
+        return _json_reply(reply)
 
     return _reflect_kernel
+
+
+def route_endpoints(agent):
+    """Duck-typed module hook the parent `web` host calls at mount time
+    (discovered exactly like `on_delete` / `reflect_root_extra`): `{path: live
+    endpoint}` for every path `get_routes` declared. Each endpoint is the
+    `(request, target_id) -> Response` shape FastAPI expects for
+    `app.add_api_route`. Callables are in-process objects — they travel this
+    way, NOT inside a verb reply, so the reply stays JSON."""
+    id = agent.id
+    return {
+        f"/{id}/{{target_id}}": _make_post_endpoint(id, agent),
+        f"/{id}/_reflect": _make_reflect_root(id, agent),
+        f"/{id}/_reflect/{{target_id}}": _make_reflect_get(id, agent),
+    }
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -258,32 +313,19 @@ async def _boot(id, payload, kernel):
 
 
 async def _get_routes(id, payload, kernel):
-    """Declares this surface's HTTP routes. Returns
-    {routes:[…]}. Each spec is `(request, target_id) -> Response` shape
-    that FastAPI expects for `app.add_api_route` / `add_api_websocket_route`."""
+    """Declares this surface's HTTP routes. No args. Returns
+    {routes:[{kind:'http', method, path}]} — pure data. The parent `web` host
+    gets the live endpoint for each path from this module's
+    `route_endpoints(agent)` hook, in-process."""
     return {
         "routes": [
-            {
-                "kind": "http",
-                "method": "POST",
-                "path": f"/{id}/{{target_id}}",
-                "endpoint": _make_post_endpoint(id, kernel),
-            },
+            # Generic POST verb channel.
+            {"kind": "http", "method": "POST", "path": f"/{id}/{{target_id}}"},
             # GET shortcut: reflect kernel (substrate primer). No target
             # in URL — default. Browser-pastable.
-            {
-                "kind": "http",
-                "method": "GET",
-                "path": f"/{id}/_reflect",
-                "endpoint": _make_reflect_root(id, kernel),
-            },
+            {"kind": "http", "method": "GET", "path": f"/{id}/_reflect"},
             # GET shortcut: reflect a specific agent. Browser-pastable.
-            {
-                "kind": "http",
-                "method": "GET",
-                "path": f"/{id}/_reflect/{{target_id}}",
-                "endpoint": _make_reflect_get(id, kernel),
-            },
+            {"kind": "http", "method": "GET", "path": f"/{id}/_reflect/{{target_id}}"},
         ]
     }
 

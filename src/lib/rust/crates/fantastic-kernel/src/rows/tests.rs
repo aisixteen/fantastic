@@ -100,6 +100,34 @@ fn a_body_pages_by_characters_not_bytes() {
 }
 
 #[test]
+fn body_get_never_clamps_the_offset_back_into_range() {
+    // python: b = "a\r\nb" (4 code points); body_get(pid, 50, 10) == ("", 50, True, 4).
+    let s = RowStore::new();
+    let pid = s.mint_id();
+    s.body_put(&aid("ai"), pid, "a\r\nb").unwrap();
+    assert_eq!(s.body_get(pid, 50, 10), Some((String::new(), 50, true, 4)));
+    // A page inside range still counts code points, not bytes.
+    assert_eq!(
+        s.body_get(pid, 0, 2),
+        Some(("a\r".to_string(), 2, false, 4))
+    );
+}
+
+#[test]
+fn body_get_stringifies_a_non_string_body_like_python_str() {
+    let s = RowStore::new();
+    let pid = s.mint_id();
+    // A body row built by hand with a non-string `content` — python's
+    // `str(row.get("content", ""))` still renders it, it never treats it as empty.
+    let body_row = json!({"kind": "body", "parent": pid, "content": 42})
+        .as_object()
+        .unwrap()
+        .clone();
+    s.put(&aid("ai"), body_row).unwrap();
+    assert_eq!(s.body_get(pid, 0, 10), Some(("42".to_string(), 2, true, 2)));
+}
+
+#[test]
 fn the_newest_view_is_current_and_strips_its_own_bookkeeping() {
     let s = RowStore::new();
     let first = json!({"ids": [1, 2]}).as_object().unwrap().clone();

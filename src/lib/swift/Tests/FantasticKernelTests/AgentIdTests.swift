@@ -6,6 +6,27 @@ import Testing
 
 @Suite("AgentId")
 struct AgentIdTests {
+    /// PYTHON'S MINT, BRANCH FOR BRANCH (`_agent.py::create`):
+    /// `handler_module.split(".")[-2] if "." in handler_module else
+    /// handler_module`, then `f"{bundle}_{secrets.token_hex(3)}"`. A DOTLESS
+    /// module is not an error — it is the prefix itself; a trailing dot still
+    /// takes the second-to-last component, which is the empty-tail case python
+    /// produces too.
+    @Test func mintIdTakesPythonsBundleComponent() {
+        for (module, prefix) in [
+            ("terminal_backend.tools", "terminal_backend"),
+            ("a.b.c", "b"),
+            ("noop", "noop"),
+            ("a.", "a"),
+        ] {
+            let id = mintId(module)
+            #expect(id.hasPrefix(prefix + "_"), "\(module) → \(id)")
+            let hex = id.dropFirst(prefix.count + 1)
+            #expect(hex.count == 6)
+            #expect(hex.allSatisfy { $0.isHexDigit && !$0.isUppercase })
+        }
+    }
+
     @Test func stringLiteralConstructor() {
         let a: AgentId = "weather"
         #expect(a.value == "weather")

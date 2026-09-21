@@ -52,52 +52,74 @@ extension Kernel {
     }
 
     /// One item's SYNCHRONOUS half: validate, resolve, gate, claim the row.
+    /// Python `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check
+    /// order: target → payload dict → timeout → payload.type → id → retries
+    /// → killed → draining → resolve → gate.
     func launch(_ item: Item) -> Launched {
-        if let t = item.timeout, !(t.isFinite && t > 0) {
-            return .settled(
-                Outcome.refused(Refusal.bad("send", "timeout", "a positive number of seconds")))
+        // 1. target — python: `if not isinstance(target_id, str) or not
+        // target_id: missing("send", "target")`.
+        if item.target.value.isEmpty {
+            return .settled(Outcome.refused(Refusal.missing("send", "target")))
         }
-
-        // The item's OWN fields are validated before anything is resolved, gated
-        // or minted (python order). `type` is the verb; there is no send without
-        // one — a typeless payload is a coded refusal for EVERY sender, never an
-        // `unhandled` from the target (measured 2026-09-02).
+        // 2. payload dict.
         guard case .object(let obj) = item.payload else {
             return .settled(Outcome.refused(Refusal.missing("send", "payload")))
         }
+        // 3. timeout — `item.rawTimeout` (C38) supersedes the typed `item.
+        // timeout` when a caller is forwarding a value it did not itself
+        // parse.
+        let timeout: Double?
+        switch resolveTimeout(item) {
+        case .ok(let t): timeout = t
+        case .refused(let r): return .settled(Outcome.refused(r))
+        }
+        // 4. payload.type — `type` is the verb; there is no send without one.
+        // Validated for EVERY sender (operator included) BEFORE the gate, so
+        // a typeless payload is a coded refusal, never an `unhandled` from
+        // the target (measured 2026-09-02).
         guard let typeV = obj["type"] else {
             return .settled(Outcome.refused(Refusal.missing("send", "payload.type")))
         }
         guard let verb = typeV.asString, !verb.isEmpty else {
             return .settled(
-                Outcome.refused(Refusal.bad("send", "payload.type", "a non-empty string")))
+                Outcome.refused(
+                    Refusal.badGot("send", "payload.type", "a non-empty string", got: typeV)))
         }
-        if let id = item.id {
-            // ONE ID SPACE: a caller id may not be empty and may not sit in the
-            // kernel-minted `<agent>:<hex>` namespace unless it NAMES an existing
-            // execution — minted ids are referenced, never created.
-            if id.isEmpty {
-                return .settled(Outcome.refused(Refusal.bad("send", "id", "a non-empty string")))
-            }
+        // 5. id — a NAME (non-empty string) opens-or-joins by name; an int
+        // JOINS an existing execution or refuses; anything else is `bad_arg`.
+        let joinId: Int64?
+        let name: String?
+        let callerId: JSON
+        switch resolveExecId(item) {
+        case .ok(let v): (joinId, name, callerId) = v
+        case .refused(let r): return .settled(Outcome.refused(r))
+        }
+        // 6. retries — a non-negative int, never defaulted otherwise.
+        let retries: UInt32
+        switch resolveRetries(item) {
+        case .ok(let r): retries = r
+        case .refused(let r): return .settled(Outcome.refused(r))
         }
 
-        // A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks the whole
-        // subtree before it aborts anything, because `onCancel` hooks await —
-        // so a doomed handler gets scheduling turns on its way out, and what it
-        // sent there used to start fresh dispatches that outlived the cancel.
-        // Settled here, before an id is minted: a refused send costs nothing.
+        // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks
+        // the whole subtree before it aborts anything, because `onCancel`
+        // hooks await — so a doomed handler gets scheduling turns on its way
+        // out, and what it sent there used to start fresh dispatches that
+        // outlived the cancel. Settled here, before an id is minted: a
+        // refused send costs nothing.
         if KernelTaskLocals.currentKilled?.isKilled == true {
             return .settled(
                 Outcome(pid: nil, status: .cancelled, result: .object(["cancelled": .bool(true)])))
         }
-        // WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent
-        // task in the table — including an agent's own `shutdown` turn using its
-        // tools) passes; the kernel's own shutdown traffic passes; everything
-        // else is a new root and is refused before it costs an id.
-        // The root's own control surface stays open while draining: kernel verbs
-        // (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`,
-        // `ledger`) and `reflect` are how an operator watches and finishes the
-        // stop. Python `Agent._launch` (`kernel/_agent.py`).
+        // 8. draining — WHILE DRAINING, NO NEW ROOTS. A send from inside live
+        // work (a parent task in the table — including an agent's own
+        // `shutdown` turn using its tools) passes; the kernel's own shutdown
+        // traffic passes; everything else is a new root and is refused
+        // before it costs an id. The root's own control surface stays open
+        // while draining: kernel verbs (`shutdown_agents` again, `shutdown_
+        // kernel`, `ps`, `messages`, `ledger`) and `reflect` are how an
+        // operator watches and finishes the stop. Python `Agent._launch`
+        // (`kernel/_agent.py`).
         if draining && !KernelTaskLocals.inShutdown {
             let toRoot = item.target.value == "kernel" || root?.id == item.target
             let control = toRoot && (Kernel.isSystemVerb(verb) || verb == "reflect")
@@ -113,15 +135,15 @@ extension Kernel {
             }
         }
 
-        // Resolve target. Special id "kernel" aliases to the root.
-        let resolved: Agent? = item.target.value == "kernel" ? root : agent(item.target)
-        guard let target = resolved else {
+        // 9. resolve — `"kernel"` aliases to the root, else through a
+        // declared `alias` (`well_known`, C35), else a literal id.
+        guard let target = resolveAgent(item.target.value) else {
             return .settled(
                 Outcome.refused(
                     Refusal.unknown(item.target.value, live: allAgents().map { $0.id.value })))
         }
 
-        // ── CALL GATE — fully-gated, two-sided, from-above ──────────────
+        // 10. ── CALL GATE — fully-gated, two-sided, from-above ────────────
         // An operator send (`currentSender` is nil) is the origin root of trust
         // and never reaches here. Every AGENT send — ANY verb, `reflect`
         // included — needs BOTH ends to grant the edge.
@@ -140,41 +162,54 @@ extension Kernel {
         // handle. Minting a second, private pid for a named item meant the
         // caller could not cancel or find its own execution (measured
         // 2026-09-02). An unnamed item still mints, synchronously.
-        // ONE ID SPACE. A caller-named execution JOINS the id its name opened;
-        // an unnamed one takes the next int — the same allocator that mints
-        // every row, so a pid, a reply tag and a ledger row agree.
-        let name = item.id
-        let execId: Int64 = name.flatMap { ledger.resolveName($0) } ?? rows.mintId()
+        // ONE ID SPACE. A caller-named/joined execution reuses the id it
+        // already opened; an unnamed one takes the next int — the same
+        // allocator that mints every row, so a pid, a reply tag and a
+        // ledger row agree.
+        // ── KERNEL-REFLECT FAST PATH ──────────────────────────────────────
+        // `reflect` on the `kernel` ALIAS (the literal target, not the root's
+        // own id — python keys on `target_id == "kernel"`) is a PURE IDENTITY
+        // READ. Python answers it without a task-table row, and for an UNNAMED
+        // item without a ledger row and WITHOUT MINTING AN ID at all
+        // (`Agent._launch`: the check sits before the mint, `_Dispatched(pid=
+        // None)`). Swift dispatched it like any other verb, so every AI turn's
+        // primer reflect minted a `call · reflect · <root> ← ai` row plus a
+        // settle python never writes — 55 extra rows, measured 2026-09-21.
+        let kernelReflect = item.target.value == "kernel" && verb == "reflect"
+        if kernelReflect, joinId == nil, name == nil {
+            return .reflectFast(
+                ReflectFast(target: target, payload: item.payload, execId: nil))
+        }
+        let execId: Int64 = joinId ?? rows.mintId()
         let taskId = TaskId(execId)
-        let retries = item.retries ?? 0
         let origin = KernelTaskLocals.currentSender
 
         switch ledger.open(
-            execId, target: target.id, verb: verb, retries: retries, name: name,
-            origin: origin)
+            execId, target: target.id, payload: item.payload, retries: retries, name: name,
+            origin: origin, callerId: callerId)
         {
         case .refused(let r):
             return .settled(Outcome.refused(r))
         // ALREADY SETTLED — the recorded outcome IS the answer, and the handler
         // must not run a second time. Idempotency and once-only in one field.
-        case .settled(let o, let origVerb, _):
+        case .settled(let o, let origPayload, _):
             // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded outcome
             // belongs to whoever ran it, so handing it back is equivalent to
             // having made THAT call — the gate must be asked that question, not
             // about the verb this caller happened to send. Measured in python
             // 2026-08-28: a caller granted only a harmless verb reused another's
             // id and received its secret verbatim.
-            if let d = joinDenial(origin: origin, verb: origVerb, target: target) {
+            if let d = joinDenial(origin: origin, payload: origPayload, target: target) {
                 return .settled(Outcome.refused(d))
             }
             return .settled(o)
         // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS wait: it
         // does not own the execution and must not kill it.
-        case .join(let origVerb, let jid):
-            if let d = joinDenial(origin: origin, verb: origVerb, target: target) {
+        case .join(let origPayload, let jid):
+            if let d = joinDenial(origin: origin, payload: origPayload, target: target) {
                 return .settled(Outcome.refused(d))
             }
-            return .joining(jid, item.timeout)
+            return .joining(jid, timeout)
         case .fresh:
             // THE CALL ROW, on the TARGET, under the pre-minted id — the trace of
             // who was asked what, parented to the dispatch that asked. Python
@@ -190,11 +225,100 @@ extension Kernel {
             _ = try? rows.put(target.id, callRow)
         }
 
+        // A CALLER-NAMED kernel reflect: the ledger applies (dedup, join, the
+        // recorded outcome) but there is still no task row — nothing to cancel
+        // in a pure read. Python `Agent._launch`, the named branch.
+        if kernelReflect {
+            return .reflectFast(
+                ReflectFast(target: target, payload: item.payload, execId: execId))
+        }
+
         return .dispatch(
             Dispatch(
                 target: target, payload: item.payload, verb: verb,
-                timeout: item.timeout, execId: execId, taskId: taskId,
+                timeout: timeout, execId: execId, taskId: taskId,
                 binary: item.binary))
+    }
+
+    /// `timeout` validation (C30/C38): `item.rawTimeout`, when forwarded by a
+    /// caller relaying an untyped value, SUPERSEDES the typed `item.timeout`.
+    /// Python: `if timeout is not None and (isinstance(timeout, bool) or not
+    /// isinstance(timeout, (int, float)) or timeout <= 0): refuse`.
+    private func resolveTimeout(_ item: Item) -> LaunchField<Double?> {
+        if let raw = item.rawTimeout, raw != .null {
+            let value: Double?
+            switch raw {
+            case .integer(let n): value = Double(n)
+            case .double(let d): value = d
+            default: value = nil
+            }
+            guard let v = value, v.isFinite, v > 0 else {
+                return .refused(
+                    Refusal.badGot("send", "timeout", "a positive number of seconds", got: raw))
+            }
+            return .ok(v)
+        }
+        if let t = item.timeout {
+            guard t.isFinite, t > 0 else {
+                return .refused(
+                    Refusal.badGot(
+                        "send", "timeout", "a positive number of seconds", got: .double(t)))
+            }
+            return .ok(t)
+        }
+        return .ok(nil)
+    }
+
+    /// `retries` validation (C30/C38): `item.rawRetries` SUPERSEDES the typed
+    /// `item.retries` (which is always valid by construction — a `UInt32`
+    /// cannot be negative or a bool). Python: `retries = item.get("retries",
+    /// 0); if isinstance(retries, bool) or not isinstance(retries, int) or
+    /// retries < 0: refuse`.
+    private func resolveRetries(_ item: Item) -> LaunchField<UInt32> {
+        guard let raw = item.rawRetries, raw != .null else {
+            return .ok(item.retries ?? 0)
+        }
+        guard case .integer(let n) = raw, n >= 0 else {
+            return .refused(Refusal.badGot("send", "retries", "a non-negative int", got: raw))
+        }
+        return .ok(UInt32(truncatingIfNeeded: n))
+    }
+
+    /// `id` validation (C30/C38): `item.rawId`, when forwarded by a caller
+    /// relaying an untyped value (a model's `<exec_id>` argument, a wire
+    /// frame's `id`), SUPERSEDES the typed `item.id`. An int NAMES an
+    /// execution to JOIN — refused if none exists under it; a non-empty
+    /// string NAMES one to open-or-join; anything else (bool included — a
+    /// python bool is an int subclass, but this kernel's `JSON` keeps the
+    /// cases distinct so no special test is needed) is `bad_arg`.
+    ///
+    /// Returns `(joinId, name, callerId)`: `joinId` is set when the caller
+    /// named an EXISTING execution; `name` is set only for the string case
+    /// (the dedup handle); `callerId` is the raw value AS GIVEN, carried
+    /// through for [`ExecutionLedger/open`]'s C31 rebind text.
+    private func resolveExecId(_ item: Item) -> LaunchField<(Int64?, String?, JSON)> {
+        let raw: JSON? = item.rawId ?? item.id.map { JSON.string($0) }
+        guard let raw, raw != .null else { return .ok((nil, nil, .null)) }
+        switch raw {
+        case .integer(let n):
+            guard ledger.has(n) else {
+                return .refused(
+                    Refusal.make(
+                        Refusal.badArg,
+                        "send: id \(n) names no known execution — ids are minted by the "
+                            + "kernel and can be joined, never created",
+                        extra: [("arg", .string("id"))]))
+            }
+            return .ok((n, nil, raw))
+        case .string(let s) where !s.isEmpty:
+            return .ok((ledger.resolveName(s), s, raw))
+        case .string:
+            return .refused(Refusal.bad("send", "id", "a non-empty name"))
+        default:
+            return .refused(
+                Refusal.badGot(
+                    "send", "id", "a name (non-empty string) or a message id (int)", got: raw))
+        }
     }
 
     /// One item's ASYNC half.
@@ -214,14 +338,21 @@ extension Kernel {
             var pid: TaskId? = nil
             var reply: JSON = .null
             var status: Status = .completed
+            // THE BINARY REPLY BODY, carried out of the batch (C37). It is the
+            // carrier for the `bytes` value python's reply dict holds natively,
+            // so a leg read/write is an ordinary execution — call row, ledger
+            // id, `ps` row, timeout, settle row — instead of a `sendWithBinary`
+            // that minted none of them.
+            var body: Data? = nil
             while true {
                 ledger.attempt(d.execId)
                 let box = TaskIdBox()
-                let (r, s) = await runDispatchOutcome(
+                let (r, s, b) = await runDispatchOutcome(
                     target: d.target, payload: d.payload, verb: d.verb,
                     taskOut: box, timeout: d.timeout, taskId: nextPid, binary: d.binary)
                 reply = r
                 status = s
+                body = b
                 pid = box.value
                 if !ledger.shouldRetry(d.execId, s) { break }
                 // Same exec id across attempts; a fresh task row per attempt,
@@ -234,46 +365,95 @@ extension Kernel {
             }
 
             if d.verb == "reflect" && status == .completed {
-                applyReflectFlags(d.target, d.payload, &reply)
-            }
-            // State event + watcher fanout (synchronous; cheap subscribers).
-            publishState(
-                .object([
-                    "type": .string("send"),
-                    "sender": .string(
-                        (KernelTaskLocals.currentSender ?? d.target.id).value),
-                    "target": .string(d.target.id.value),
-                    "verb": .string(d.verb),
-                    "summary": .string(summarize(d.payload)),
-                ]))
-            fanoutToWatchers(d.target, d.payload)
-
-            let out = ledger.settle(d.execId, Outcome(pid: pid, status: status, result: reply))
-            // THE OUTCOME IS A ROW TOO: the call row learns how it ended, and a
-            // `settle` row lands on the ROOT — never on the target's own list,
-            // which readers treat as the CONVERSATION. Python `_stamp_call`.
-            // The stamp is python's `{status, error?, reason?}` — an error's first
-            // 200 characters, so a cold read of the log can say how a call ended.
-            var stamp: Row = ["status": .string(status.rawValue)]
-            if let err = reply["error"].asString, !err.isEmpty {
-                stamp["error"] = .string(String(err.prefix(200)))
-                if let reason = reply["reason"].asString, !reason.isEmpty {
-                    stamp["reason"] = .string(reason)
+                // A ROSTER NODE THAT RAISED FAILS THE WHOLE REFLECT: python's
+                // exception propagates out of `_roster` into the item's own
+                // settle, so the reflect answers that body with `failed`.
+                if let raised = await applyReflectFlags(d.target, d.payload, &reply) {
+                    reply = raised
+                    status = .failed
                 }
             }
-            rows.stamp(d.execId, ["outcome": .object(stamp)])
-            if let r = root {
-                let settleRow: Row = [
-                    "kind": .string("settle"), "parent": .integer(d.execId),
-                    "settled": .string(d.target.id.value), "outcome": .object(stamp),
-                ]
-                _ = try? rows.put(r.id, settleRow)
+            // NO FANOUT HERE. Python fans out at DISPATCH START, before the verb
+            // is resolved (`_dispatch`), so a watcher sees the traffic while the
+            // handler is still running and a retry fans out once per attempt.
+            // Publishing after the settle reversed the measured order — rust and
+            // swift echoed `job_started` before `start`, and `status(done)` before
+            // the send that caused it. `runDispatch` now owns it.
+            return recordSettle(
+                execId: d.execId, target: d.target.id, pid: pid, status: status,
+                reply: reply, body: body)
+
+        case .reflectFast(let f):
+            // The identity read itself — python `target._reflect_identity()`
+            // wrapped in `_apply_reflect_flags`, run as its own task there and
+            // inline here: no dispatch, no task row, no fanout.
+            var reply = reflectIdentity(f.target)
+            var status: Status = .completed
+            if let raised = await applyReflectFlags(f.target, f.payload, &reply) {
+                reply = raised
+                status = .failed
             }
-            // The DURABLE half, if a store was wired. The kernel does not know
-            // what this writes or where.
-            ledgerSettled()
-            return out
+            // UNNAMED: nothing was opened, so nothing settles — python returns
+            // `outcome(None, COMPLETED, reply)` straight out of `_settle`.
+            guard let execId = f.execId else {
+                return Outcome(pid: nil, status: status, result: reply)
+            }
+            // NAMED: the row exists, so it is stamped and settled like any other
+            // execution — the pid IS the execution id python records.
+            return recordSettle(
+                execId: execId, target: f.target.id, pid: TaskId(execId),
+                status: status == .completed && pyTruthy(reply["error"]) ? .errored : status,
+                reply: reply, body: nil)
         }
+    }
+
+    /// Settle one execution's ledger row and write what the LOG keeps of it:
+    /// the outcome stamp on the call row, the `settle` row on the root, and the
+    /// persistence kick. Python `Agent._record` + `_stamp_call`.
+    private func recordSettle(
+        execId: Int64, target: AgentId, pid: TaskId?, status: Status, reply: JSON, body: Data?
+    ) -> Outcome {
+        let out = ledger.settle(
+            execId, Outcome(pid: pid, status: status, result: reply, body: body))
+        // THE OUTCOME IS A ROW TOO: the call row learns how it ended, and a
+        // `settle` row lands on the ROOT — never on the target's own list,
+        // which readers treat as the CONVERSATION. Python `_stamp_call`.
+        // The stamp is python's `{status, error?, reason?}` — an error's first
+        // 200 CODE POINTS, so a cold read of the log can say how a call ended.
+        // An `error` of ANY python-truthy type stamps (a refusal body whose
+        // error is a dict is still an error), rendered with `str()`; `reason`
+        // is copied RAW, whatever type it is. Reading only a non-empty string
+        // dropped every non-string error from the log.
+        var stamp: Row = ["status": .string(status.rawValue)]
+        let err = reply["error"]
+        if pyTruthy(err) {
+            stamp["error"] = .string(
+                String(String.UnicodeScalarView(pyStr(err).unicodeScalars.prefix(200))))
+            let reason = reply["reason"]
+            if pyTruthy(reason) { stamp["reason"] = reason }
+        }
+        rows.stamp(execId, ["outcome": .object(stamp)])
+        if let r = root {
+            let settleRow: Row = [
+                "kind": .string("settle"), "parent": .integer(execId),
+                "settled": .string(target.value), "outcome": .object(stamp),
+            ]
+            _ = try? rows.put(r.id, settleRow)
+        }
+        // The DURABLE half, if a store was wired. The kernel does not know
+        // what this writes or where.
+        //
+        // THE LOADER'S OWN PERSISTENCE TRAFFIC NEVER DIRTIES THE LEDGER —
+        // the same rule `MessagePump.skips` applies to the log, for the same
+        // reason: persisting a row must not mint a row to persist. A flush
+        // pass is a kernel task, its task row IS logged, the pump appends it,
+        // that append settles — and kicking there re-arms the flusher
+        // forever. Measured 2026-09-21 on four CLI commands: 35 `ledger_flush`
+        // task rows against python's 4, `ledger.json` 84 rows against 18.
+        if !isOwnPersistence(target: target, execId: execId) {
+            ledgerSettled()
+        }
+        return out
     }
 
     /// Wait for an execution someone else owns.
@@ -286,25 +466,55 @@ extension Kernel {
         while true {
             if let o = ledger.settledOutcome(execId) { return o }
             if let d = deadline, Date() >= d {
+                // Python `_agent.py`: `pid` is the JOINED execution's id (not
+                // nil — the caller can still `cancel`/`ps` it), the text names
+                // it via `{d.pid!r}` (a bare int repr, no quotes) and carries
+                // `task_id=d.pid`. The execution ITSELF keeps running — a
+                // joiner does not own it.
                 return Outcome(
-                    pid: nil, status: .timedOut,
+                    pid: TaskId(execId), status: .timedOut,
                     result: Refusal.make(
                         Refusal.timeout,
-                        "joined execution did not settle within \(timeout!)s"))
+                        "send: joined execution \(execId) did not settle within this "
+                            + "caller's \(pyFloatRepr(timeout!))s wait; the execution itself "
+                            + "keeps running",
+                        extra: [("task_id", .integer(execId))]))
             }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
     }
 }
 
+/// One `launch()` field check's outcome: the validated value, or the
+/// refusal to settle the item with. `JSON`, not `Error` — a refusal is DATA
+/// (the wire reply), not a swift error — so this stands in for `Result`,
+/// which requires an `Error`-conforming failure type.
+enum LaunchField<T> {
+    case ok(T)
+    case refused(JSON)
+}
+
 /// A launched batch item.
 enum Launched {
     /// Nothing entered the task table — `pid` stays nil.
     case settled(Outcome)
+    /// The kernel-reflect fast path: a pure identity read that never reaches
+    /// the task table (python `_Dispatched(pid=None)`).
+    case reflectFast(ReflectFast)
     /// Already in flight under this id: wait for ITS outcome, run nothing.
     case joining(Int64, Double?)
     /// Passed the gate and claimed its row.
     case dispatch(Dispatch)
+}
+
+/// A `reflect` on the `kernel` alias: answered from the substrate identity,
+/// with no dispatch and no task row. `execId` is nil for an UNNAMED item —
+/// python does not even mint an id for one — and set when the caller NAMED the
+/// execution, whose ledger row is already open.
+struct ReflectFast {
+    let target: Agent
+    let payload: JSON
+    let execId: Int64?
 }
 
 /// One item on its way to a handler.

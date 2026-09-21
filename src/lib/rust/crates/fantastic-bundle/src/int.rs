@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use crate::repr::{py_repr, py_truthy};
-use crate::unicode::{decimal_value, is_space};
+use crate::unicode::{is_space, transform_decimal_and_space_to_ascii};
 
 /// A python exception a helper would have raised: its class and its `str(e)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,19 +107,9 @@ fn parse_int_literal(s: &str) -> Result<i64, PyError> {
         let shown: String = py_repr(s).chars().take(200).collect();
         PyError::ValueError(format!("invalid literal for int() with base 10: {shown}"))
     };
-    let ascii: Vec<u8> = s
+    let ascii: Vec<u8> = transform_decimal_and_space_to_ascii(s)
         .chars()
-        .map(|c| {
-            if c.is_ascii() {
-                c as u8
-            } else if is_space(c) {
-                b' '
-            } else if let Some(d) = decimal_value(c) {
-                b'0' + u8::try_from(d).expect("a decimal digit is 0..=9")
-            } else {
-                b'?'
-            }
-        })
+        .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
         .collect();
     let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r');
     let mut i = 0;
@@ -192,9 +182,12 @@ pub fn py_float(v: &Value) -> Result<f64, PyError> {
 fn parse_float_literal(s: &str) -> Result<f64, PyError> {
     let invalid =
         || PyError::ValueError(format!("could not convert string to float: {}", py_repr(s)));
-    // python strips its own whitespace set, then `_` is allowed only between
-    // digits — a leading, trailing or doubled one is a ValueError.
-    let body: String = s.trim_matches(is_space).to_string();
+    // Unicode `Nd` digits and spaces to ASCII FIRST — the same first step
+    // `int()` takes (`transform_decimal_and_space_to_ascii`) — then python
+    // strips its own whitespace set, then `_` is allowed only between digits —
+    // a leading, trailing or doubled one is a ValueError.
+    let transformed = transform_decimal_and_space_to_ascii(s);
+    let body: String = transformed.trim_matches(is_space).to_string();
     if body.is_empty() {
         return Err(invalid());
     }

@@ -34,17 +34,25 @@ import OrderedCollections
 /// a long-lived kernel cannot grow without limit.
 public let defaultLedgerCap = 1_000_000
 
+/// The `ledger.json` sidecar format. v2 (2026-09-08): ids are the kernel's int64
+/// message ids, so rows are an ARRAY — a JSON object key would stringify them —
+/// and a named row carries `name`. An unknown version starts empty LOUDLY; there
+/// is no migration.
+public let ledgerSidecarVersion = 2
+
 /// What ``ExecutionLedger/open(_:target:retries:named:origin:)`` decided.
 public enum Opened {
     /// A new execution: dispatch it, then settle it.
     case fresh
     /// Someone else is running this id — await their outcome, run nothing.
-    /// Carries the VERB that execution ran: a joiner is handed its outcome
-    /// verbatim, so it must be authorized for THAT verb, not for whatever it
-    /// happened to send.
-    case join(verb: String, id: Int64)
+    /// Carries the execution's ORIGINAL PAYLOAD: a joiner is handed that
+    /// execution's outcome verbatim, so the gate must be asked about the call
+    /// that was actually made — its verb AND its arguments (a `create_agent`'s
+    /// `parent_id` is the placement the gate reads). `nil` after a rehydrate,
+    /// where python's row carries `payload: None`.
+    case join(payload: JSON?, id: Int64)
     /// Already settled: this IS the answer; the handler must not run again.
-    case settled(Outcome, verb: String, id: Int64)
+    case settled(Outcome, payload: JSON?, id: Int64)
     /// The id is unusable — the refusal to hand back verbatim.
     case refused(JSON)
 }
@@ -52,9 +60,11 @@ public enum Opened {
 /// One execution and what it became.
 private struct LedgerRow {
     var target: AgentId
-    /// The verb this execution ran — the question the gate must be asked when
-    /// somebody joins it.
-    var verb: String
+    /// The PAYLOAD this execution ran — the question the gate must be asked when
+    /// somebody joins it, arguments included. `nil` on a rehydrated row: a
+    /// settled execution has nothing left to re-run, and python stores
+    /// `payload: None` for exactly that reason.
+    var payload: JSON?
     var retries: UInt32
     var attempts: UInt32
     /// The caller's NAME for this execution, when it gave one — the dedup /
@@ -91,9 +101,13 @@ public final class ExecutionLedger: @unchecked Sendable {
         return names[name]
     }
 
+    /// `callerId` is the CALLER's raw id AS GIVEN — a string name or an int
+    /// (C38) — used ONLY to render the rebind refusal in python's exact words
+    /// (`.string`s pyRepr'd, `.integer`s bare digits); `name` is `Some` only
+    /// for the string-name case.
     public func open(
-        _ execId: Int64, target: AgentId, verb: String, retries: UInt32, name: String?,
-        origin: AgentId?
+        _ execId: Int64, target: AgentId, payload: JSON, retries: UInt32, name: String?,
+        origin: AgentId?, callerId: JSON
     ) -> Opened {
         lock.lock()
         defer { lock.unlock() }
@@ -107,18 +121,23 @@ public final class ExecutionLedger: @unchecked Sendable {
             // AN ID IS BOUND TO ITS FIRST TARGET. The same id aimed elsewhere is
             // a different intent wearing the same name — returning the other
             // execution's outcome would be silently wrong.
+            //
+            // PYTHON'S PROSE, verbatim (C31 r2 correction): BOTH the error text
+            // and the extras render the CALLER's RAW id, never the minted
+            // `execId` — `pyRepr` for a string, bare digits for an int; the
+            // target names via `pyRepr` too. NO `bound_to`.
             if row.target != target {
                 return .refused(
                     Refusal.make(
                         Refusal.badArg,
-                        "send: id \(execId) is bound to \(row.target.value) — a named "
-                            + "execution cannot be re-aimed",
-                        extra: [
-                            ("arg", .string("id")), ("bound_to", .string(row.target.value)),
-                        ]))
+                        "send: id \(pyRepr(callerId)) already names an execution on "
+                            + "\(pyRepr(row.target.value)), not \(pyRepr(target.value)) — an id "
+                            + "is bound to its first execution; a retry aimed elsewhere needs a "
+                            + "new id",
+                        extra: [("arg", .string("id"))]))
             }
-            if let o = row.outcome { return .settled(o, verb: row.verb, id: execId) }
-            return .join(verb: row.verb, id: execId)
+            if let o = row.outcome { return .settled(o, payload: row.payload, id: execId) }
+            return .join(payload: row.payload, id: execId)
         }
 
         // A COLON ID REFERENCES an existing minted execution; it never creates
@@ -126,7 +145,7 @@ public final class ExecutionLedger: @unchecked Sendable {
         // colon id is a dangling reference, not a new job.
         if let n = name { names[n] = execId }
         rows[execId] = LedgerRow(
-            target: target, verb: verb, retries: retries, attempts: 0, name: name,
+            target: target, payload: payload, retries: retries, attempts: 0, name: name,
             origin: origin,
             outcome: nil)
         order.append(execId)
@@ -193,60 +212,95 @@ public final class ExecutionLedger: @unchecked Sendable {
         return order.compactMap { id -> JSON? in
             guard let r = rows[id] else { return nil }
             if let v = viewer, r.origin != v { return nil }
-            // NO `verb` KEY. Python's row is exactly {id, target, status,
-            // attempts, retries, named, outcome?} and the ports carried an eighth
-            // key, so the same wiring answered a 7-key row here and an 8-key row
-            // there. The verb is not lost — it is what the SIDECAR stores
-            // (`settledSnapshot`), where it authorizes a joiner after a reboot;
-            // the read verb never needed it.
+            // NO `verb` KEY. Python's row is exactly {id, target, attempts,
+            // retries, named, name?, status, outcome?} and the ports carried an
+            // eighth key, so the same wiring answered a 7-key row here and an
+            // 8-key row there. The verb is not lost — a live row keeps the whole
+            // ORIGINAL PAYLOAD, which is what authorizes a joiner; the read verb
+            // never needed it. C16: `status`/`outcome` land AFTER `name`, not
+            // right after `target` — python builds the base dict, then
+            // optionally `name`, then `status` (+`outcome` only when settled).
             var o: OrderedDictionary<String, JSON> = [
                 "id": .integer(id),
                 "target": .string(r.target.value),
-                "status": .string(r.outcome?.status.rawValue ?? "in_flight"),
                 "attempts": .integer(Int64(r.attempts)),
                 "retries": .integer(Int64(r.retries)),
                 "named": .bool(r.named),
             ]
             if let n = r.name { o["name"] = .string(n) }
-            if let out = r.outcome { o["outcome"] = out.asJSON }
+            if let out = r.outcome {
+                o["status"] = .string(out.status.rawValue)
+                o["outcome"] = out.asJSON
+            } else {
+                o["status"] = .string("in_flight")
+            }
             return .object(o)
         }
     }
 
-    /// Every SETTLED row, as the durable sidecar stores them. In-flight rows are
-    /// deliberately absent: work that never completed did not complete, and a
-    /// post-reboot re-send re-running it is the truth, not a loss.
+    /// Every SETTLED row, as the durable sidecar stores them — python's v2
+    /// document `{"v": 2, "rows": [...]}`.
+    ///
+    /// AN ARRAY, not an object: the ids are the kernel's int64 message ids and a
+    /// JSON object key would stringify every one of them. Each row carries
+    /// python's key order `{id, target, retries, attempts, named, name, origin,
+    /// outcome}` — and NO `verb`: the joiner's gate question is sourced from the
+    /// ORIGINAL PAYLOAD a live row holds, and a rehydrated row has none.
+    ///
+    /// In-flight rows are deliberately absent: work that never completed did not
+    /// complete, and a post-reboot re-send re-running it is the truth, not a
+    /// loss.
+    ///
+    /// AND SO IS A ROW WHOSE OUTCOME CARRIED RAW BYTES. Python's
+    /// `_ledger_dump` is a STRICT round-trip filter: an outcome that
+    /// `json.dumps` cannot encode — "bytes in a read_stream result" is the
+    /// case it names — stays RAM-only rather than persisting a `default=str`
+    /// repr that rehydrates as a confidently wrong recorded outcome. Swift
+    /// carries those bytes on the outcome's own binary channel instead of
+    /// inside `result`, so the JSON always encodes and this port kept every
+    /// such row: measured on `store_files_*/disk_raw/ledger.json`, swift
+    /// persisted `{path, offset, size, next_offset, eof}` rows python has
+    /// none of. The channel is the difference, not the rule — a settled
+    /// outcome with a `body` is exactly python's unencodable one.
     public func settledSnapshot() -> JSON {
         lock.lock()
         defer { lock.unlock() }
-        var out: OrderedDictionary<String, JSON> = [:]
+        var out: [JSON] = []
         for id in order {
             guard let r = rows[id], let outcome = r.outcome else { continue }
-            out[String(id)] = .object([
-                "target": .string(r.target.value),
-                "name": r.name.map { JSON.string($0) } ?? .null,
-                "retries": .integer(Int64(r.retries)),
-                "attempts": .integer(Int64(r.attempts)),
-                "named": .bool(r.named),
-                "verb": .string(r.verb),
-                "origin": r.origin.map { JSON.string($0.value) } ?? .null,
-                "outcome": outcome.asJSON,
-            ])
+            guard outcome.body == nil else { continue }
+            out.append(
+                .object([
+                    "id": .integer(id),
+                    "target": .string(r.target.value),
+                    "retries": .integer(Int64(r.retries)),
+                    "attempts": .integer(Int64(r.attempts)),
+                    "named": .bool(r.named),
+                    "name": r.name.map { JSON.string($0) } ?? .null,
+                    "origin": r.origin.map { JSON.string($0.value) } ?? .null,
+                    "outcome": outcome.asJSON,
+                ]))
         }
-        return .object(["v": .integer(1), "rows": .object(out)])
+        return .object(["v": .integer(Int64(ledgerSidecarVersion)), "rows": .array(out)])
     }
 
-    /// Restore SETTLED rows from a sidecar, DONE, so dedup holds across a
+    /// Restore SETTLED rows from a v2 sidecar, DONE, so dedup holds across a
     /// reboot: a completed step is never re-executed by a fresh process and a
     /// parked dead letter stays dead.
+    ///
+    /// EVERY terminal status comes back, `errored` included — a row read as
+    /// something else would re-arm the side effect the ledger exists to prevent.
+    /// A rehydrated row carries NO payload: it is settled, so there is nothing
+    /// left to re-run and a joiner is gated on an empty call (python's
+    /// `entry["payload"] = None`).
     @discardableResult
     public func rehydrate(_ doc: JSON) -> Int {
-        guard let src = doc["rows"].asObject else { return 0 }
+        guard let src = doc["rows"].asArray else { return 0 }
         lock.lock()
         defer { lock.unlock() }
         var n = 0
-        for (key, r) in src {
-            guard let id = Int64(key), let target = r["target"].asString,
+        for r in src {
+            guard let id = r["id"].asInt, let target = r["target"].asString,
                 let statusText = r["outcome"]["status"].asString,
                 let status = Status(rawValue: statusText)
             else { continue }
@@ -257,7 +311,7 @@ public final class ExecutionLedger: @unchecked Sendable {
                 attempts: UInt32(r["outcome"]["attempts"].asInt ?? 1))
             rows[id] = LedgerRow(
                 target: AgentId(target),
-                verb: r["verb"].asString ?? "",
+                payload: nil,
                 retries: UInt32(r["retries"].asInt ?? 0),
                 attempts: UInt32(r["attempts"].asInt ?? 1),
                 name: r["name"].asString,
@@ -269,6 +323,20 @@ public final class ExecutionLedger: @unchecked Sendable {
         }
         evict()
         return n
+    }
+
+    /// Set the ring's cap and immediately re-run eviction against it (C80).
+    /// Python sets its `ledger_cap` attribute directly — a lazy change that
+    /// only bites on the NEXT insert — but the CLI always sets a cap BEFORE
+    /// any execution exists, so the two are equivalent at that one call
+    /// site; evicting here too costs nothing and also covers a cap lowered
+    /// with rows already live, which python's plain attribute set would
+    /// otherwise leave overshooting until the next `open`. `nil` = unbounded.
+    public func setCap(_ newCap: Int?) {
+        lock.lock()
+        defer { lock.unlock() }
+        cap = newCap
+        evict()
     }
 
     /// The highest execution id the ledger holds — what hydration raises the
@@ -312,6 +380,17 @@ extension Kernel {
     /// Fire the durable write-through, if one is installed. No flusher = no
     /// persistence: settled outcomes live and die with the process. That is the
     /// auto-flush law, not a fallback.
+    /// Is this settling dispatch the loader persisting ITSELF — an
+    /// operator-context call on the discovered store (no `origin`, because
+    /// nobody sent it)? Those are the flush's own `ledger.json` write and the
+    /// pump's `messages.xml` append; `MessagePump.skips` keeps them out of the
+    /// log and they stay out of the ledger's dirty set for the same reason.
+    func isOwnPersistence(target: AgentId, execId: Int64) -> Bool {
+        guard let store = findStore(), store == target else { return false }
+        guard let row = rows.getOne(execId) else { return false }
+        return (row["origin"] ?? .null) == .null
+    }
+
     public func ledgerSettled() {
         ledgerFlusherLock.lock()
         let f = _ledgerFlusher

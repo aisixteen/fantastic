@@ -73,3 +73,13 @@ pub fn py_splitlines(s: &str) -> Vec<&str> {
 pub fn py_isdigit(s: &str) -> bool {
     !s.is_empty() && s.chars().all(is_digit)
 }
+
+/// `str.isdecimal()` — non-empty, and EVERY character is a decimal digit
+/// (`Numeric_Type=Decimal`, the set `int()` accepts). `'²'.isdecimal()` is
+/// False where `isdigit()` is True.
+#[must_use]
+pub fn py_isdecimal(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| crate::unicode::decimal_value(c).is_some())
+}

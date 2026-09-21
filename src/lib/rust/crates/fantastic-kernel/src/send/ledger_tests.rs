@@ -112,6 +112,56 @@ async fn an_unnamed_execution_is_ledgered_under_its_pid() {
 }
 
 #[tokio::test]
+async fn ledger_row_key_order_matches_python() {
+    // C16: python's row is exactly `{id, target, attempts, retries, named,
+    // name?, status, outcome?}` — `name` OMITTED (not `null`) when the
+    // execution is unnamed. Measured: rust used to carry `name:null` on
+    // every row.
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let a = mk_agent(&kernel, "l_key_order").await;
+
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "count"}))])
+        .await
+        .remove(0);
+    // `mk_agent` itself issues a `create_agent` (+ its `boot` side effect),
+    // each its own ledger row — find OUR unnamed "count" dispatch by target
+    // + status among them, not by position.
+    let unnamed = ledger_rows(&kernel)
+        .await
+        .into_iter()
+        .find(|r| r["target"] == json!("l_key_order") && r["status"] == "completed")
+        .expect("the unnamed count dispatch's row");
+    assert_eq!(
+        unnamed.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["id", "target", "attempts", "retries", "named", "status", "outcome"],
+        "{unnamed}"
+    );
+    assert!(
+        !unnamed.as_object().unwrap().contains_key("name"),
+        "unnamed rows must OMIT `name`, not carry it as null: {unnamed}"
+    );
+
+    let _ = kernel
+        .send(vec![
+            Item::new(a.clone(), json!({"type": "count"})).with_id("named-1")
+        ])
+        .await
+        .remove(0);
+    let named = ledger_rows(&kernel)
+        .await
+        .into_iter()
+        .find(|r| r["name"] == json!("named-1"))
+        .expect("the named row");
+    assert_eq!(
+        named.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["id", "target", "attempts", "retries", "named", "name", "status", "outcome"],
+        "{named}"
+    );
+}
+
+#[tokio::test]
 async fn a_retry_budget_re_dispatches_under_the_same_id() {
     // The engine retries a terminal failure while budget lasts, and only the
     // FINAL outcome settles — a joiner never sees an attempt that was retried
@@ -206,6 +256,18 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
         .await
         .remove(0);
     assert_eq!(joined.status, Status::TimedOut);
+    // C31: python's prose, verbatim — the JOINED execution's id (bare
+    // digits, not this joiner's own pid-less dispatch), plus `task_id`.
+    let exec_id = joined.result["task_id"]
+        .as_i64()
+        .expect("a joiner timeout must carry task_id");
+    assert_eq!(
+        joined.result["error"],
+        json!(format!(
+            "send: joined execution {exec_id} did not settle within this \
+             caller's 0.2s wait; the execution itself keeps running"
+        ))
+    );
 
     // The OWNER is still running — the joiner's timeout did not reach it.
     let rows = ledger_rows(&kernel).await;
@@ -355,7 +417,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
     for (who, grant) in [("alice", "work"), ("bob", "ping")] {
         let _ = kernel
             .send(vec![Item::new(
-                AgentId::from("core"),
+                AgentId::from("kernel_state"),
                 json!({
                     "type": "create_agent", "parent_id": "kernel",
                     "handler_module": "slow.tools", "id": who,
@@ -366,7 +428,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
     }
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "slow.tools", "id": "vault",
@@ -384,6 +446,9 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             timeout: None,
             retries: None,
             binary: None,
+            raw_id: None,
+            raw_timeout: None,
+            raw_retries: None,
         }])
         .await
         .remove(0)
@@ -403,6 +468,9 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             timeout: None,
             retries: None,
             binary: None,
+            raw_id: None,
+            raw_timeout: None,
+            raw_retries: None,
         }])
         .await
         .remove(0)
@@ -423,6 +491,9 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             timeout: None,
             retries: None,
             binary: None,
+            raw_id: None,
+            raw_timeout: None,
+            raw_retries: None,
         }])
         .await
         .remove(0)
@@ -552,5 +623,89 @@ async fn the_ledger_view_is_origin_scoped() {
     assert!(
         mine(kernel.ledger.rows_for(Some(&a))),
         "the originator lost its own row"
+    );
+}
+
+/// C22: the ledger row stores the execution's ORIGINAL PAYLOAD, and the join
+/// denial runs the gate with it — not with a synthesised `{"type": verb}`.
+///
+/// `create_agent` is the case that proves it: its gate reads `parent_id` for the
+/// PLACEMENT check and the grant maps for CONFERRAL. Asked about a payload with
+/// neither, the gate answers a different question than the call did — and the
+/// joiner would receive a record for a subtree it may not plant in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_joiner_is_gated_with_the_executions_original_payload() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    // `alice` may create under the root; `bob` may only create under itself
+    // (the structural baseline every agent has), which is exactly what the
+    // placement check reads out of the ORIGINAL `parent_id`.
+    for (who, grant) in [
+        ("alice", json!({"kernel_state": ["create_agent"]})),
+        ("bob", json!({})),
+    ] {
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({
+                    "type": "create_agent", "parent_id": "kernel",
+                    "handler_module": "slow.tools", "id": who,
+                    "can_call": grant,
+                }),
+            )])
+            .await;
+    }
+    let payload = json!({
+        "type": "create_agent", "parent_id": "kernel_state",
+        "handler_module": "slow.tools", "id": "planted",
+    });
+    let k = Arc::clone(&kernel);
+    let p = payload.clone();
+    let made = with_sender(AgentId::from("alice"), async move {
+        k.send(vec![Item {
+            target: AgentId::from("kernel_state"),
+            payload: p,
+            id: Some("plant-1".into()),
+            timeout: None,
+            retries: None,
+            binary: None,
+            raw_id: None,
+            raw_timeout: None,
+            raw_retries: None,
+        }])
+        .await
+        .remove(0)
+    })
+    .await;
+    assert_eq!(made.status, Status::Completed, "{made:?}");
+
+    // bob joins the SAME id. The gate is asked about the create it would be
+    // handed — placement on `kernel_state` — and refuses.
+    let k = Arc::clone(&kernel);
+    let joined = with_sender(AgentId::from("bob"), async move {
+        k.send(vec![Item {
+            target: AgentId::from("kernel_state"),
+            payload: json!({"type": "create_agent", "parent_id": "bob",
+                            "handler_module": "slow.tools", "id": "mine"}),
+            id: Some("plant-1".into()),
+            timeout: None,
+            retries: None,
+            binary: None,
+            raw_id: None,
+            raw_timeout: None,
+            raw_retries: None,
+        }])
+        .await
+        .remove(0)
+    })
+    .await;
+    assert_eq!(joined.status, Status::Failed, "{joined:?}");
+    assert_eq!(joined.result["reason"], json!("unauthorized"), "{joined:?}");
+    assert!(
+        joined.result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("kernel_state"),
+        "the denial must name the ORIGINAL placement: {joined:?}"
     );
 }

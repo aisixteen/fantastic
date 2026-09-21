@@ -13,8 +13,9 @@ agent) and relays the bus. See `ts/SERVE.md`.
 
 Call-surface routes (WS, REST) are NOT baked in. They live in
 sub-agent bundles (`web_ws`, `web_rest`) that declare their routes
-via the duck-typed `get_routes` verb; `web.tools._mount_surfaces`
-mounts them onto this app at runtime.
+via the duck-typed `get_routes` verb (pure data) and hand over the live
+endpoints via the duck-typed `route_endpoints(agent)` module hook;
+`web.tools._mount_surfaces` mounts both halves onto this app at runtime.
 """
 
 from __future__ import annotations

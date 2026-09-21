@@ -10,7 +10,11 @@ import OrderedCollections
 extension Kernel {
     /// Dispatch a substrate verb. Caller has already established
     /// the `currentSender` task-local scope.
-    func handleSystemVerb(target: Agent, verb: String, payload: JSON) async -> JSON {
+    /// A python RAISE inside one of these is a RESULT, not a crash: the
+    /// caller's settle carries `{error:"<Type>: <msg>", raised:true}`, exactly
+    /// as a bundle handler's throw does (python wraps every handler, kernel
+    /// verbs included, in the one `except`).
+    func handleSystemVerb(target: Agent, verb: String, payload: JSON) async throws(PyError) -> JSON {
         // ROOT ONLY. These verbs act on the TREE and the kernel-wide task table,
         // so the agent named is the OPERAND, not the actor. Answered everywhere,
         // "send create_agent to X" could mean X performs it, X is created under
@@ -21,21 +25,21 @@ extension Kernel {
         // Refused HERE, in the handler — not at the call gate — so probes
         // asserting a denial `side` for a non-root privileged send stay valid.
         if target.parentId != nil {
-            // The two stop verbs answer with python's own text, not the
-            // generic `not_here`: a non-root agent is not a control surface.
-            if verb == "shutdown_agents" || verb == "shutdown_kernel" {
-                return .object([
-                    "error": .string(
-                        "\(verb): root control surface only; address the kernel root (alias 'kernel')")
-                ])
-            }
+            // C32: EVERY system verb on a non-root — `shutdown_agents` and
+            // `shutdown_kernel` included — answers the SAME generic
+            // `Refusal.notHere`. Python has no special case here: `if self.
+            // parent is not None: return refusal(NOT_HERE, ...)` covers all
+            // seven verbs uniformly ("shutdown_kernel already refused this
+            // way; this generalises it to all seven" — `_agent.py:2036-2044`).
+            // The two-stop-verbs special case this used to carry answered a
+            // DIFFERENT, uncoded `{error}` with no `reason`/`hint`/`verb`.
             return Refusal.notHere(verb, target.id.value)
         }
         switch verb {
         case "list_agents":
             return listAgentsReply(payload)
         case "create_agent":
-            return await createFromPayload(parent: target, payload: payload)
+            return await createFromPayload(payload: payload)
         case "delete_agent":
             return await deleteFromPayload(caller: target, payload: payload)
         case "update_agent":
@@ -47,10 +51,6 @@ extension Kernel {
         // originated, the operator sees all. Unscoped this would be a
         // side-channel around `callable_by` — reading other agents' result
         // bodies without ever being granted an edge to them.
-        case "persist_blob":
-            return await persistBlob(payload)
-        case "load_blob":
-            return await loadBlob(payload)
         case "ledger":
             let rows = ledger.rows(for: KernelTaskLocals.currentOrigin)
             let (paged, next) = page(rows, payload) { $0["id"].asInt.map(String.init) ?? ($0["id"].asString ?? "") }
@@ -59,11 +59,11 @@ extension Kernel {
                 "next": next.map { JSON.string($0) } ?? .null,
             ])
         case "messages":
-            return messagesReply(payload)
+            return try messagesReply(payload)
         case "rows_read":
-            return rowsReadReply(payload)
+            return try rowsReadReply(payload)
         case "rows_write":
-            return rowsWriteReply(payload)
+            return try rowsWriteReply(payload)
         case "ps":
             // PAGED like `list_agents` — same cursor law: the id of the last row
             // handed over. Over a LIVE table a cursor may miss a row that
@@ -81,17 +81,28 @@ extension Kernel {
             // CODED. `{error: "cancel: task_id (str) required"}` could only be
             // branched on by matching prose, so the shared corpus' `reason`
             // matcher could never be satisfied here.
-            // An int, its decimal string (a model quotes what it copied out of
-            // a tag), or a caller's own execution NAME. Absent/empty/other types
-            // are MISSING; a name nobody holds is an unknown id — `{cancelled:
-            // false}`, not an error (python `_verb_cancel`).
-            let resolved: Int64?
-            switch payload["task_id"] {
-            case .integer(let n): resolved = n
-            case .string(let s) where !s.isEmpty:
-                resolved = Int64(s) ?? ledger.resolveName(s)
-            default:
-                return Refusal.missing("cancel", "task_id")
+            // C18: python `_verb_cancel` — missing iff `raw` is absent/null, a
+            // bool (either one), `""`, or anything but an int/str (a double,
+            // list, object). Otherwise resolved through the SAME `_as_id` path
+            // every other id argument uses (`asMessageId` — a positive int, or
+            // an all-Unicode-decimal-digit string, ASCII `Int64.init?` rejected:
+            // it also accepts a leading `+`, which python's `str.isdigit()`
+            // does not); a string that is not a digit-shaped id falls back to
+            // the caller's own execution NAME. Nothing resolved is an honest
+            // `{cancelled:false}`, never a refusal — the same answer a stale id
+            // gets.
+            let rawTaskId = payload["task_id"]
+            let taskIdMissing: Bool
+            switch rawTaskId {
+            case .null, .bool: taskIdMissing = true
+            case .string(let s): taskIdMissing = s.isEmpty
+            case .integer: taskIdMissing = false
+            default: taskIdMissing = true  // double, array, object
+            }
+            if taskIdMissing { return Refusal.missing("cancel", "task_id") }
+            var resolved = try asMessageId(rawTaskId)
+            if resolved == nil, case .string(let s) = rawTaskId {
+                resolved = ledger.resolveName(s)
             }
             guard let tid = resolved else {
                 return .object(["cancelled": .bool(false), "killed": .array([])])
@@ -119,7 +130,7 @@ extension Kernel {
             return .object(["type": .string("shutdown_kernel"), "ok": .bool(true)])
         default:
             return Refusal.make(
-                Refusal.unhandled, "unhandled system verb '\(verb)'",
+                Refusal.unhandled, "unhandled system verb \(pyRepr(verb))",
                 extra: [("verb", .string(verb))])
         }
     }
@@ -146,7 +157,7 @@ extension Kernel {
             "create_agent": .string(
                 "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
                     + "Creates a CHILD OF `parent_id` — your own id grows your own subtree "
-                    + "(no grant needed); 'core' for top-level. No default parent."),
+                    + "(no grant needed); 'kernel_state' for top-level. No default parent."),
             "update_agent": .string(
                 "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
                     + "(a field you do not name is untouched), so a dict field must be sent "
@@ -161,15 +172,6 @@ extension Kernel {
             "ps": .string(
                 "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
                     + "verb, started_at}]}, one row per in-flight dispatch. Paged."),
-            "persist_blob": .string(
-                "args: agent_id:str, name:str, content:str. Persist one of YOUR OWN "
-                    + "sidecars through the kernel's store — a whole-file write at "
-                    + "agents/<agent_id>/<name>. You never compute a path or wire a "
-                    + "provider. An agent may only name ITSELF."),
-            "load_blob": .string(
-                "args: agent_id:str, name:str. Read one of YOUR OWN sidecars back — "
-                    + "{name, content:str|null}; null means never written. An agent may "
-                    + "only name ITSELF."),
             // EVERY execution, not just the named ones. Python's line said
             // NAMED-only while the verb iterated the whole table, so a model
             // reading the reflect expected its own handful of jobs and received
@@ -189,7 +191,7 @@ extension Kernel {
                     + "agent's only if its callable_by names you for `messages`. Bodies are behind "
                     + "that agent's `pull`."),
             "rows_read": .string(
-                "args: agent:str (req), after:int?, limit:int?. PRIVILEGED (a wildcard does "
+                "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a wildcard does "
                     + "not carry it). That agent's "
                     + "rows WHOLE (content included), oldest first — {rows:[…], next?}. The "
                     + "hydration read; agents read digests through `messages` instead."),
@@ -228,11 +230,15 @@ extension Kernel {
     /// Read-only verbs used to render as `""` (name only), on the ground that
     /// their reply teaches the rest — but a name with no signature is exactly
     /// what left `ps` and `list_agents` unusable without a `full` reflect.
+    ///
+    /// ORDER IS PYTHON'S: `full` iterates `_SYSTEM_VERB_DOCS` in DECLARATION
+    /// order (the map is spread whole); only the distilled view sorts, because
+    /// it is built by a comprehension over `sorted(_SYSTEM_VERB_DOCS)`.
     static func kernelVerbsView(full: Bool) -> JSON {
         var out: OrderedDictionary<String, JSON> = [:]
         out["_"] = .string(kernelVerbsPreamble)
         guard let docs = kernelVerbDocs().asObject else { return .object(out) }
-        for name in docs.keys.sorted() {
+        for name in full ? Array(docs.keys) : docs.keys.sorted() {
             let doc = docs[name]?.asString ?? ""
             out[name] =
                 .string(
@@ -247,18 +253,10 @@ extension Kernel {
     // ── list_agents ─────────────────────────────────────────────
 
     private func listAgentsReply(_ payload: JSON = .object([:])) -> JSON {
-        var rows: [JSON] = []
-        for a in allAgents() {
-            do {
-                let data = try JSONEncoder().encode(a.record())
-                rows.append(try JSON.parse(data))
-            } catch {
-                continue
-            }
-        }
-        rows.sort {
-            ($0["id"].asString ?? "") < ($1["id"].asString ?? "")
-        }
+        // REGISTRATION ORDER, not sorted: python pages
+        // `[a.record for a in self.ctx.agents.values()]` straight off the
+        // registry dict, so the walk reads the order the agents were made in.
+        let rows: [JSON] = allAgents().map { recordToJSON($0.record()) }
         // `more` is not decoration (py-canonical, measured 2026-08-07): a model that
         // opened with `list_agents` got bare records and never learned authoring was
         // the mechanism; the arm that opened with `reflect` got `self_extension` and
@@ -273,7 +271,7 @@ extension Kernel {
             "next": next.map { JSON.string($0) } ?? .null,
             "more": .string(
                 "Raw records — how agents are WIRED, not what they are FOR, and no "
-                    + "manual. {type:'reflect'} on the root is the briefing: each agent's "
+                    + "manual. <type>reflect</type> on the root is the briefing: each agent's "
                     + "purpose, plus `self_extension` (how to author your own durable tools "
                     + "in THIS kernel — which executor, and the fields without which the "
                     + "agent is created and never runs) and `readmes` (the manual index). "
@@ -292,7 +290,7 @@ extension Kernel {
             guard let g = meta[field] else { continue }
             guard case .object(let map) = g else {
                 return "\(field) must be a grant MAP {\"<id|$token>\": \"*\" | "
-                    + "[\"<verb>\", …]} — to open wide, grant per key "
+                    + "[\"<verb>\", …]} — got \(pyTypeName(g)). To open wide, grant per key "
                     + "(e.g. {\"$self\": \"*\", \"ai\": \"*\"}), never a bare value"
             }
             for (k, v) in map {
@@ -302,14 +300,14 @@ extension Kernel {
                 case .array(let items): ok = items.allSatisfy { $0.asString != nil }
                 default: ok = false
                 }
-                if !ok { return "\(field)[\"\(k)\"] must be \"*\" or a list of verb strings" }
+                if !ok { return "\(field)[\(pyRepr(k))] must be \"*\" or a list of verb strings" }
             }
         }
         return nil
     }
 
-    func createFromPayload(parent root: Agent, payload: JSON) async -> JSON {
-        guard let hm = payload["handler_module"].asString else {
+    func createFromPayload(payload: JSON) async -> JSON {
+        guard let hm = payload["handler_module"].asString, !hm.isEmpty else {
             return Refusal.missing("create_agent", "handler_module")
         }
 
@@ -324,36 +322,28 @@ extension Kernel {
         guard let pid = payload["parent_id"].asString, !pid.isEmpty else {
             return Refusal.make(
                 Refusal.missingArg, "create_agent: parent_id required",
-                hint: "name the OWNER of the new agent — your own id grows your own "
-                    + "subtree (no grant needed); the root id for top-level.",
+                hint: "name the agent that will OWN the new one — your own id for a "
+                    + "tool you keep, or the root ('kernel_state') for a top-level agent",
                 extra: [("arg", .string("parent_id"))])
         }
-        let parent: Agent
-        if pid == "kernel" {
-            parent = root
-        } else if let found = agent(AgentId(pid)) {
-            parent = found
-        } else {
+        // Resolved the SAME way `send` does (C35): the `kernel` alias, then a
+        // declared `alias` meta, then a literal id — so `parent_id` accepts
+        // anything a caller could have addressed.
+        guard let parent = resolveAgent(pid) else {
             return Refusal.unknown(pid, live: allAgents().map { $0.id.value })
         }
-        // Mint an id if caller didn't supply one. Convention from
-        // Rust: <bundle>_<6 hex chars>.
-        // A supplied id — even "" — is the caller's choice and is validated as
-        // one by `guardAgentId`; only an ABSENT id is minted (python parity).
-        let id: String
-        if case .object(let o) = payload, let supplied = o["id"], supplied != .null {
-            id = supplied.asString ?? ""
-        } else {
-            id = mintId(hm)
-        }
-        // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
-        // the mint, so every consumer inherits it rather than each remembering.
-        if let badId = Refusal.guardAgentId("create_agent", id) { return badId }
-        let newId = AgentId(id)
-        if agent(newId) != nil {
-            return Refusal.make(
-                Refusal.exists, "agent \"\(id)\" already exists",
-                extra: [("id", .string(id))])
+
+        // Reserved keys name substrate wiring; a record may not carry them (the
+        // loader refuses such a record on the next boot). Checked in SORTED
+        // key order (python `sorted(RESERVED_RECORD_KEYS)`), against the raw
+        // payload — before meta is even built.
+        if case .object(let dict) = payload {
+            for k in reservedRecordKeys.sorted() where dict[k] != nil {
+                return Refusal.bad(
+                    "create_agent", k,
+                    "absent — root_path/ctx/parent name substrate wiring the "
+                        + "record may not carry")
+            }
         }
 
         // Compose meta from extra payload fields.
@@ -362,14 +352,6 @@ extension Kernel {
             for (k, v) in dict {
                 if k == "type" || k == "id" || k == "handler_module" || k == "parent_id" {
                     continue
-                }
-                // Reserved keys name substrate wiring; a record may not carry
-                // them (the loader refuses such a record on the next boot).
-                if reservedRecordKeys.contains(k) {
-                    return Refusal.bad(
-                        "create_agent", k,
-                        "absent — root_path/ctx/parent name substrate wiring the "
-                            + "record may not carry")
                 }
                 meta[k] = v
             }
@@ -393,7 +375,28 @@ extension Kernel {
             return Refusal.make(Refusal.invalidMeta, why)
         }
 
-        let rootPath = parent.childrenDir.appendingPathComponent(id)
+        // Mint an id if caller didn't supply one. Convention from
+        // Rust: <bundle>_<6 hex chars>.
+        // A supplied id — even "" — is the caller's choice and is validated as
+        // one by `guardAgentId`; only an ABSENT id is minted (python parity).
+        let id: String
+        if case .object(let o) = payload, let supplied = o["id"], supplied != .null {
+            id = supplied.asString ?? ""
+        } else {
+            id = mintId(hm)
+        }
+        // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
+        // the mint, so every consumer inherits it rather than each remembering.
+        if let badId = Refusal.guardAgentId("create_agent", id) { return badId }
+        let newId = AgentId(id)
+        if agent(newId) != nil {
+            return Refusal.make(
+                Refusal.exists, "agent \(pyRepr(id)) exists",
+                hint: "pick another id, or update the existing agent",
+                extra: [("id", .string(id))])
+        }
+
+        let rootPath = parent.childrenDir(childrenDir).appendingPathComponent(id)
         let newAgent = Agent(
             id: newId,
             handlerModule: hm,
@@ -402,23 +405,24 @@ extension Kernel {
             rootPath: rootPath
         )
 
-        // Wire into the kernel + parent FIRST, then persist. Order matters now
-        // that persistence routes THROUGH a discovered file_bridge provider (a
-        // child of root): a freshly-created store must already be a registered
-        // child so it can persist its OWN record through itself (findStore sees
-        // it). No-op in InMemory mode or when no provider is wired (RAM).
+        // Wire into the kernel + parent. NO INLINE PERSIST: the `added` event
+        // below is what makes the record dirty, and the ROOT LOADER's debounced
+        // `persist_writer` writes it — with its readme + docs — when it drains.
+        // Persisting here as well wrote the record twice and, worse, wrote it
+        // even when no writer was installed, which is the one case python keeps
+        // in RAM.
         register(newAgent)
         parent.insertChild(newAgent)
-        await persistRecord(newAgent)
-        if let bundle = bundles.get(hm), let readme = bundle.readme {
-            await seedReadmeViaStore(newAgent, content: readme)
-        }
 
+        // LIFECYCLE SHAPE, python's: `{agent_id, kind, …}` like every other state
+        // event, so one subscriber reads one shape. `created` with a
+        // `handler_module` was a swift/rust-only kind nothing else answers;
+        // `name` is what a view renders.
         let event: JSON = .object([
-            "type": .string("created"),
-            "id": .string(newAgent.id.value),
+            "agent_id": .string(newAgent.id.value),
+            "kind": .string("added"),
+            "name": .string(displayNameOrId(newAgent)),
             "parent_id": .string(parent.id.value),
-            "handler_module": .string(hm),
         ])
         publishState(event)
 
@@ -429,12 +433,18 @@ extension Kernel {
         // Operator authority: booting the child is a side effect of the already-
         // authorized create_agent, not the parent reaching out — so it never runs
         // against the parent's grant.
-        let bootReply = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await send([Item(newAgent.id, .object(["type": .string("boot")]))])[0].result
+        let bootOutcome = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await send([Item(newAgent.id, .object(["type": .string("boot")]))])[0]
         }
-        if let err = bootReply["error"].asString {
-            // Telemetry-only — boot errors don't cancel the create.
-            _ = err
+        // BRANCH ON THE OUTCOME STATUS, not on the presence of an `error`: a
+        // handler that RAISED (`failed`) is a bug the operator must see; one
+        // that deliberately answered `{error}` (`errored`) is a refusal the
+        // create does not undo and does not narrate. Python
+        // `_agent.py:2663-2670` prints for the raise alone.
+        if bootOutcome.status == .failed {
+            printFlushed(
+                "  [create_agent] \(newAgent.id.value) boot failed: "
+                    + pyStr(bootOutcome.result))
         }
 
         // agent_created lifecycle event on the parent's inbox.
@@ -487,12 +497,12 @@ extension Kernel {
             // flag #27 declared dropped was never actually removed anywhere.
             return Refusal.make(
                 Refusal.locked,
-                "delete_agent: \(id.value) blocked by delete_lock on descendant "
-                    + "\(blocker.value)",
+                "delete_agent: \(pyRepr(id.value)) blocked by delete_lock on "
+                    + "\(pyRepr(blocker.value)); clear it via update_agent before deleting",
                 hint: "clear the lock with update_agent, then delete again",
                 extra: [
-                    ("id", .string(id.value)),
                     ("blocked_by", .string(blocker.value)),
+                    ("id", .string(id.value)),
                 ])
         }
         await cascadeDelete(target: target)
@@ -536,14 +546,16 @@ extension Kernel {
         if let parentId = target.parentId, let parent = agent(parentId) {
             parent.removeChild(target.id)
         }
-        // Unregister from kernel + disk cleanup THROUGH the discovered provider
-        // (its recursive `delete`) — the substrate owns no `fs` surface here.
+        // Unregister from the kernel. DISK CLEANUP IS THE WRITER'S: the
+        // `removed` event below queues the dir it cached for this agent, and
+        // the root loader's `persist_writer` removes it through the discovered
+        // provider when it drains.
         unregister(target.id)
-        await forgetRecord(target)
 
         let event: JSON = .object([
-            "type": .string("removed"),
-            "id": .string(target.id.value),
+            "agent_id": .string(target.id.value),
+            "kind": .string("removed"),
+            "name": .string(displayNameOrId(target)),
         ])
         publishState(event)
     }
@@ -551,39 +563,44 @@ extension Kernel {
     // ── update_agent ────────────────────────────────────────────
 
     func updateFromPayload(caller: Agent, payload: JSON) async -> JSON {
-        guard let idStr = payload["id"].asString else {
+        guard let idStr = payload["id"].asString, !idStr.isEmpty else {
             return Refusal.missing("update_agent", "id")
         }
         let id = AgentId(idStr)
-        guard let target = agent(id) else {
-            return Refusal.unknown(idStr, live: allAgents().map { $0.id.value })
+        // `parent_id` is STRUCTURAL — where the agent actually sits, which
+        // only the tree knows. Letting it into meta lets a record LIE about
+        // its own parent: `$parent` then resolves differently on the two
+        // halves of the gate, and a reboot silently corrects it from the
+        // agent's position on disk. Reserved keys are refused for the same
+        // reason — they name substrate wiring, not agent meta.
+        //
+        // REFUSED, not silently skipped. `handler_module` is fixed at create —
+        // swapping it would leave a live agent whose in-process state belongs
+        // to the OLD bundle. Reserved keys used to be dropped without a word,
+        // so the caller believed a change had landed that never did
+        // (2026-09-02). Checked BEFORE the target is even resolved, `handler_
+        // module` first then sorted reserved keys (python `("handler_module",
+        // *sorted(RESERVED_RECORD_KEYS))`).
+        if case .object(let dict) = payload {
+            for k in ["handler_module"] + reservedRecordKeys.sorted() where dict[k] != nil {
+                return Refusal.bad(
+                    "update_agent", k,
+                    "absent — handler_module is fixed at create_agent, and "
+                        + "root_path/ctx/parent name substrate wiring the record "
+                        + "may not carry")
+            }
         }
-        // Patch = every field except type + id.
+        // Patch = every field except type + id + parent_id.
         var patch: OrderedDictionary<String, JSON> = [:]
         var changed: [String] = []
         if case .object(let dict) = payload {
-            // `parent_id` is STRUCTURAL — where the agent actually sits, which
-            // only the tree knows. Letting it into meta lets a record LIE about
-            // its own parent: `$parent` then resolves differently on the two
-            // halves of the gate, and a reboot silently corrects it from the
-            // agent's position on disk. Reserved keys are refused for the same
-            // reason — they name substrate wiring, not agent meta.
             for (k, v) in dict where k != "type" && k != "id" && k != "parent_id" {
-                // REFUSED, not silently skipped. `handler_module` is fixed at
-                // create — swapping it would leave a live agent whose
-                // in-process state belongs to the OLD bundle. Reserved keys
-                // used to be dropped without a word, so the caller believed a
-                // change had landed that never did (2026-09-02).
-                if k == "handler_module" || reservedRecordKeys.contains(k) {
-                    return Refusal.bad(
-                        "update_agent", k,
-                        "absent — handler_module is fixed at create_agent, and "
-                            + "root_path/ctx/parent name substrate wiring the record "
-                            + "may not carry")
-                }
                 patch[k] = v
                 changed.append(k)
             }
+        }
+        guard let target = agent(id) else {
+            return Refusal.unknown(idStr, live: allAgents().map { $0.id.value })
         }
         // Grant-map SHAPE, judged here at write time — the gate only judges
         // edges (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare
@@ -604,15 +621,19 @@ extension Kernel {
             return Refusal.make(
                 Refusal.invalidMeta, why, extra: [("id", .string(idStr))])
         }
+        // NO INLINE PERSIST: the `updated` event below is what makes the record
+        // dirty for the root loader's `persist_writer`.
         let rec = target.updateMeta(patch)
-        await persistRecord(target)
         let recJson = recordToJSON(rec)
 
+        // Python's shape: `{agent_id, kind:"updated", changed}` — the CHANGED
+        // KEYS, nothing more. The full record rode along as `agent` in the port;
+        // a state event is a notification that something moved, and a subscriber
+        // that wants the record reads it.
         let event: JSON = .object([
-            "type": .string("updated"),
-            "id": .string(target.id.value),
+            "agent_id": .string(target.id.value),
+            "kind": .string("updated"),
             "changed": .array(changed.map { .string($0) }),
-            "agent": recJson,
         ])
         publishState(event)
 
@@ -640,18 +661,19 @@ extension Kernel {
 
 // ── Helpers ───────────────────────────────────────────────────────
 
-func recordToJSON(_ rec: AgentRecord) -> JSON {
-    guard let data = try? JSONEncoder().encode(rec),
-        let json = try? JSON.parse(data)
-    else {
-        return .null
-    }
-    return json
-}
+/// A record as the wire sees it — `id, handler_module?, <meta>, parent_id`.
+/// Built as an OrderedDictionary, never through `JSONEncoder` (C15).
+func recordToJSON(_ rec: AgentRecord) -> JSON { rec.json }
 
-/// Mint an id like `<bundle>_<6 hex>`. Mirrors Rust's `mint_id`.
-private func mintId(_ bundle: String) -> String {
-    let prefix = bundle.replacingOccurrences(of: ".tools", with: "")
+/// Mint an id like `<bundle>_<6 hex>` — python `f"{bundle}_{secrets.token_hex(3)}"`
+/// where `bundle` is the SECOND-TO-LAST dotted component of the handler module
+/// (`terminal_backend.tools` → `terminal_backend`), the WHOLE STRING when there
+/// is no dot — python's own branch (`_agent.py::create`:
+/// `handler_module.split(".")[-2] if "." in handler_module else handler_module`),
+/// not an `IndexError`.
+func mintId(_ bundle: String) -> String {
+    let parts = bundle.components(separatedBy: ".")
+    let prefix = parts.count > 1 ? parts[parts.count - 2] : bundle
     let hex = String(format: "%06x", Int.random(in: 0..<0x100_0000))
     return "\(prefix)_\(hex)"
 }
@@ -678,13 +700,21 @@ extension Kernel {
         "can_call", "callable_by",
     ]
 
+    /// `display_name or id` — PYTHON TRUTHINESS, so an EMPTY name is no name.
+    /// `?? id` alone only covered an absent one, and a record written with
+    /// `display_name: ""` reflected a blank identity.
+    func displayNameOrId(_ agent: Agent) -> String {
+        guard let n = agent.displayName, !n.isEmpty else { return agent.id.value }
+        return n
+    }
+
     func reflectIdentity(_ agent: Agent) -> JSON {
         var obj: OrderedDictionary<String, JSON> = [:]
         obj["id"] = .string(agent.id.value)
         obj["sentence"] = .string(sentenceFor(agent))
         obj["parent_id"] = agent.parentId.map { .string($0.value) } ?? .null
         obj["handler_module"] = agent.handlerModule.map { .string($0) } ?? .null
-        obj["display_name"] = .string(agent.displayName ?? agent.id.value)
+        obj["display_name"] = .string(displayNameOrId(agent))
         if let d = agent.descriptionMeta {
             obj["description"] = .string(d)
         }
@@ -709,7 +739,7 @@ extension Kernel {
         obj["id"] = .string(agent.id.value)
         obj["parent_id"] = agent.parentId.map { .string($0.value) } ?? .null
         obj["handler_module"] = agent.handlerModule.map { .string($0) } ?? .null
-        obj["display_name"] = .string(agent.displayName ?? agent.id.value)
+        obj["display_name"] = .string(displayNameOrId(agent))
         if let d = agent.descriptionMeta {
             obj["description"] = .string(d)
         }
@@ -721,28 +751,26 @@ extension Kernel {
                 obj[key] = v
             }
         }
-        let kids = agent.childIds()
-            .compactMap { self.agent($0) }
-            .sorted { $0.id.value < $1.id.value }
+        let kids = agent.childIds().compactMap { self.agent($0) }
         obj["children"] = .array(kids.map { treeNode($0) })
         return .object(obj)
     }
 
     /// Flat id index of an agent + all descendants (DFS, self first,
-    /// children sorted by id). The cheap `tree=ids` tier.
+    /// children in creation order). The cheap `tree=ids` tier.
     func descendantIds(_ agent: Agent) -> [String] {
         var out = [agent.id.value]
-        let kids = agent.childIds()
-            .compactMap { self.agent($0) }
-            .sorted { $0.id.value < $1.id.value }
+        let kids = agent.childIds().compactMap { self.agent($0) }
         for c in kids { out.append(contentsOf: descendantIds(c)) }
         return out
     }
 
-    /// The installable-bundle catalog as `(name, handlerModule)` pairs,
-    /// sorted by name. The `bundles=all`/`bundles=ids` source.
+    /// The INSTALLABLE-bundle catalog as `(name, handlerModule)` pairs, sorted
+    /// by name — python's entry-point scan. The `bundles=all`/`bundles=ids`
+    /// source; a test-registered fixture (`registerUnlisted`) is not in it,
+    /// exactly as an importable module with no entry point is not in python's.
     func availableBundles() -> [(name: String, handlerModule: String)] {
-        bundles.snapshot()
+        bundles.catalog()
             .map { (handlerModule, bundle) in (bundle.name, handlerModule) }
             .sorted { $0.name < $1.name }
     }
@@ -751,14 +779,58 @@ extension Kernel {
 
 // MARK: - THE ROW STORE's verbs (python `_verb_messages`/`_verb_rows_read`/`_verb_rows_write`)
 
-/// A message id as an int: an int, or its decimal string (a model may quote
-/// what it copied out of a tag). Anything else is not an id. Python `_as_id`.
-public func asMessageId(_ v: JSON?) -> Int64? {
+/// `len(x)` for a sized value, `1` for a scalar — a digest counts, it never
+/// raises on a row a caller wrote by hand (python, 2026-09-20).
+private func sizedLen(_ v: JSON) -> Int { (try? pyLen(v)) ?? 1 }
+
+/// A message id as an int: an int, or its digit string (a model may quote what
+/// it copied out of a tag). Anything else is not an id. Python `_as_id`.
+///
+/// `isdecimal`, not `isdigit` (python, 2026-09-20): `'²'` is not an id, where
+/// the wider guard let it through to raise inside `int()`. `'٢'` is a decimal
+/// digit and reads as 2.
+public func asMessageId(_ v: JSON?) throws(PyError) -> Int64? {
     switch v {
     case .integer(let n)?: return n > 0 ? n : nil
-    case .string(let s)? where !s.isEmpty && s.allSatisfy(\.isNumber):
-        return Int64(s)
+    case .string(let s)? where pyIsDecimalString(s):
+        return Int64(try pyInt(.string(s)))
     default: return nil
+    }
+}
+
+/// Python's `int(x or 0)` for a page limit, with python's own `except
+/// (TypeError, ValueError): limit = 0`. A magnitude python holds and `Int`
+/// cannot SATURATES with its sign, because that is what the comparisons below
+/// mean against an unbounded int: a huge positive limit caps nothing, a huge
+/// negative one keeps nothing.
+func pyLimit(_ v: JSON) -> Int {
+    do {
+        return try pyIntOr(v, 0)
+    } catch {
+        guard error.type == "OverflowError" else { return 0 }
+        return pyLimitIsNegative(v) ? Int.min : Int.max
+    }
+}
+
+/// `content[:120].replace("\n", " ")` — python slices and substitutes CODE
+/// POINTS. Both halves are walked scalar by scalar because swift's own
+/// `prefix`/`replacingOccurrences` work on GRAPHEMES, where `\r\n` is one
+/// character: the prefix would hand back 240 scalars and the substitution
+/// would not find the `\n` inside a CRLF at all.
+func pyHead(_ content: String) -> String {
+    var head = ""
+    for u in content.unicodeScalars.prefix(120) {
+        head.unicodeScalars.append(u == "\n" ? " " : u)
+    }
+    return head
+}
+
+private func pyLimitIsNegative(_ v: JSON) -> Bool {
+    switch v {
+    case .integer(let n): return n < 0
+    case .double(let d): return d < 0
+    case .string(let s): return s.unicodeScalars.drop(while: pyIsSpace).first == "-"
+    default: return false
     }
 }
 
@@ -769,9 +841,12 @@ extension Kernel {
     /// here against the OWNER because a root verb skips ingress); the operator
     /// sees all. Refused ids are LISTED, never silently dropped. Bodies stay
     /// behind the owner's `pull`.
-    func messagesReply(_ payload: JSON) -> JSON {
+    func messagesReply(_ payload: JSON) throws(PyError) -> JSON {
         let raw = payload["ids"].asArray ?? []
-        let parsed = raw.map { asMessageId($0) }
+        // The parse runs over the WHOLE list before the shape guard, like
+        // python's comprehension: a `'²'` in position 3 raises, it does not
+        // reach the `bad_arg`.
+        let parsed = try raw.map { (x) throws(PyError) in try asMessageId(x) }
         guard !parsed.isEmpty, !parsed.contains(where: { $0 == nil }) else {
             return Refusal.make(
                 Refusal.badArg, "messages: `ids` must be a non-empty list of message ids (ints)",
@@ -797,7 +872,7 @@ extension Kernel {
             decided[ownerId] = d.allowed
             return d.allowed
         }
-        if let after = asMessageId(payload["after"]), let i = ids.firstIndex(of: after) {
+        if let after = try asMessageId(payload["after"]), let i = ids.firstIndex(of: after) {
             ids = Array(ids[(i + 1)...])
         }
         var out: [JSON] = []
@@ -812,40 +887,60 @@ extension Kernel {
                 refused.append(.integer(rid))
                 continue
             }
-            let content = row["content"]?.asString ?? ""
+            // `str(content)` — a row's content is whatever was written there, and
+            // a digest of a number, a list or `None` is python's rendering of it,
+            // not an empty head. CODE POINTS throughout: python slices and counts
+            // a str, so an emoji is one, not four bytes and not one grapheme.
+            let content = pyStr(row["content"] ?? .string(""))
             let kind = row["kind"]?.asString
+            let kindRaw = row["kind"] ?? .null
             var d: OrderedDictionary<String, JSON> = [
                 "id": .integer(rid),
                 "agent": row["agent"] ?? .null,
                 "parent": row["parent"] ?? .null,
-                "kind": kind.map(JSON.string) ?? (row["role"] ?? .null),
+                "kind": pyTruthy(kindRaw) ? kindRaw : (row["role"] ?? .null),
                 "role": row["role"] ?? .null,
-                "head": .string(String(content.prefix(120)).replacingOccurrences(of: "\n", with: " ")),
-                "bytes": .integer(Int64(content.count)),
+                "head": .string(pyHead(content)),
+                "bytes": .integer(Int64(content.unicodeScalars.count)),
             ]
-            if let t = row["title"]?.asString, !t.isEmpty { d["title"] = .string(t) }
-            if let l = row["level"], l != .null, l != .integer(0), l != .string("") { d["level"] = l }
-            if let refs = row["refs"]?.asArray, !refs.isEmpty { d["refs"] = .integer(Int64(refs.count)) }
+            // PYTHON TRUTHINESS decides every optional key, and the value copied
+            // is the RAW one — a `level` of `false` or `[]` is absent, a `level`
+            // of `2.5` is `2.5`.
+            if let t = row["title"], pyTruthy(t) { d["title"] = t }
+            if let l = row["level"], pyTruthy(l) { d["level"] = l }
+            if let refs = row["refs"], pyTruthy(refs) { d["refs"] = .integer(Int64(sizedLen(refs))) }
             if kind == "call" || kind == "task" {
                 d["verb"] = row["verb"] ?? .null
-                if let n = row["name"]?.asString, !n.isEmpty { d["name"] = .string(n) }
-                if let o = row["outcome"], case .object = o { d["status"] = o["status"] }
+                if let n = row["name"], pyTruthy(n) { d["name"] = n }
+                // The status is the SETTLE's, read off the nested stamp — a
+                // top-level `status` is not one, and an empty stamp is no status
+                // at all. A non-dict stamp is no status either (python guards
+                // `.get` since 2026-09-20; it used to raise off the wire).
+                if let o = row["outcome"], pyTruthy(o) {
+                    if case .object = o { d["status"] = o["status"] ?? .null } else { d["status"] = .null }
+                }
             } else if kind == "view" {
                 // a view digest says how much it holds, never the array itself
-                d["ids"] = .integer(Int64(row["ids"]?.asArray?.count ?? 0))
+                let viewIds = row["ids"] ?? .null
+                d["ids"] = .integer(Int64(pyTruthy(viewIds) ? sizedLen(viewIds) : 0))
                 d["budget"] = row["budget"] ?? .null
+                // LAST, and an assignment: a view that already carried a truthy
+                // `title` keeps that key's position and takes `why` as its value.
                 d["title"] = row["why"] ?? .null
             }
             out.append(.object(d))
         }
         // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
-        let limit = Int(payload["limit"].asInt ?? 0)
+        // The cap measures `len(json.dumps(d))` — python's separators, its
+        // `ensure_ascii` escapes and its float repr, counted in CODE POINTS, so
+        // the page boundary lands on the same row python's does.
+        let limit = pyLimit(payload["limit"])
         let capBytes = 32 * 1024
         var kept: [JSON] = []
         var used = 0
         for d in out {
-            if limit > 0 && kept.count >= limit { break }
-            let n = d.serialize().utf8.count
+            if limit != 0 && kept.count >= limit { break }
+            let n = pyJsonDumps(d).unicodeScalars.count
             if used + n > capBytes { break }
             kept.append(d)
             used += n
@@ -857,25 +952,35 @@ extension Kernel {
     /// That agent's rows WHOLE — content included, oldest first —
     /// {rows:[…], next:int|None}. PRIVILEGED: a wildcard grant never carries
     /// it; this is hydration's read, the one `messages` deliberately is not.
-    func rowsReadReply(_ payload: JSON) -> JSON {
+    func rowsReadReply(_ payload: JSON) throws(PyError) -> JSON {
         guard let agentArg = payload["agent"].asString,
-            !agentArg.trimmingCharacters(in: .whitespaces).isEmpty
+            !pyStrip(agentArg).isEmpty
         else {
             return Refusal.make(
                 Refusal.badArg, "rows_read: `agent` must be an agent id",
                 extra: [("arg", .string("agent"))])
         }
-        var list = rows.forAgent(AgentId(agentArg.trimmingCharacters(in: .whitespaces)))
-        if let after = asMessageId(payload["after"]) {
+        var list = rows.forAgent(AgentId(pyStrip(agentArg)))
+        if let after = try asMessageId(payload["after"]) {
             if let i = list.firstIndex(where: { $0["id"]?.asInt == after }) {
                 list = Array(list[(i + 1)...])
             } else {
                 list = []
             }
         }
-        let limit = Int(payload["limit"].asInt ?? 0)
-        let truncated = limit > 0 && list.count > limit
-        let kept = truncated ? Array(list.prefix(limit)) : list
+        // `rows[:limit]` is a PYTHON SLICE: any non-zero limit truncates, and a
+        // negative one drops that many from the END instead of capping the head.
+        let limit = pyLimit(payload["limit"])
+        let truncated = limit != 0 && list.count > limit
+        let end: Int
+        if limit >= 0 {
+            end = min(limit, list.count)
+        } else if limit < -list.count {
+            end = 0
+        } else {
+            end = list.count + limit
+        }
+        let kept = truncated ? Array(list.prefix(end)) : list
         return .object([
             "rows": .array(kept.map { JSON.object($0) }),
             "next": truncated ? (kept.last?["id"] ?? .null) : .null,
@@ -885,9 +990,9 @@ extension Kernel {
     /// Append rows to that agent's conversation, each under a FRESH id —
     /// {ids:[int]}, in the order given. A row may not carry its own `id`: the
     /// store is the only allocator; re-ids are the CALLER's to remap.
-    func rowsWriteReply(_ payload: JSON) -> JSON {
+    func rowsWriteReply(_ payload: JSON) throws(PyError) -> JSON {
         guard let agentArg = payload["agent"].asString,
-            !agentArg.trimmingCharacters(in: .whitespaces).isEmpty
+            !pyStrip(agentArg).isEmpty
         else {
             return Refusal.make(
                 Refusal.badArg, "rows_write: `agent` must be an agent id",
@@ -907,13 +1012,21 @@ extension Kernel {
                     + "id, and a copy is a NEW row",
                 extra: [("arg", .string("rows"))])
         }
-        let aid = AgentId(agentArg.trimmingCharacters(in: .whitespaces))
+        let aid = AgentId(pyStrip(agentArg))
         var ids: [JSON] = []
         for r in list {
             var row = r.asObject ?? [:]
             row.removeValue(forKey: "id")
             // `put` refuses only a present id; a null one was stripped above.
-            ids.append(.integer((try? rows.put(aid, row)) ?? 0))
+            // NO FALLBACK: a refused put used to report `0` as a minted id, so
+            // the caller learned nothing and kept a row number that names no row.
+            // Python's `rows_put` RAISES here, and the one dispatch `except`
+            // turns that into `{error, raised}` — the refusal IS the answer.
+            do {
+                ids.append(.integer(try rows.put(aid, row)))
+            } catch {
+                throw PyError("ValueError", "\(error)")
+            }
         }
         return .object(["ids": .array(ids)])
     }

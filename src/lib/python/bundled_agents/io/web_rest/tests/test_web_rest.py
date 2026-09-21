@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -11,6 +13,7 @@ from web_rest.tools import (
     _make_reflect_get,
     _make_reflect_root,
     _reflect,
+    route_endpoints,
 )
 
 
@@ -25,19 +28,29 @@ async def test_reflect_describes_surface(seeded_kernel):
 
 
 async def test_get_routes_returns_post_plus_two_reflect_gets(seeded_kernel):
+    """DECLARATIVE — pure JSON data, byte-shaped like rust/swift (kind, method,
+    path, in that order). No callable rides the reply."""
     r = await _get_routes("rest_xyz", {}, seeded_kernel)
-    routes = r["routes"]
-    assert len(routes) == 3
-    by_path = {(spec["method"], spec["path"]): spec for spec in routes}
-    # Generic POST verb channel.
-    assert ("POST", "/rest_xyz/{target_id}") in by_path
-    # GET shortcut — default reflect (kernel/primer).
-    assert ("GET", "/rest_xyz/_reflect") in by_path
-    # GET shortcut — reflect any agent.
-    assert ("GET", "/rest_xyz/_reflect/{target_id}") in by_path
-    for spec in routes:
-        assert spec["kind"] == "http"
-        assert callable(spec["endpoint"])
+    assert r == {
+        "routes": [
+            {"kind": "http", "method": "POST", "path": "/rest_xyz/{target_id}"},
+            {"kind": "http", "method": "GET", "path": "/rest_xyz/_reflect"},
+            {"kind": "http", "method": "GET", "path": "/rest_xyz/_reflect/{target_id}"},
+        ]
+    }
+    assert json.loads(json.dumps(r)) == r
+
+
+async def test_route_endpoints_covers_every_declared_path(seeded_kernel):
+    """The other half: `web` gets the callables in-process, keyed by the paths
+    `get_routes` declared — one endpoint per declared route, no more."""
+    seeded_kernel.create("web_rest.tools", id="rest_hook")
+    declared = {
+        s["path"] for s in (await _get_routes("rest_hook", {}, seeded_kernel))["routes"]
+    }
+    eps = route_endpoints(seeded_kernel.ctx.agents["rest_hook"])
+    assert set(eps) == declared
+    assert all(callable(fn) for fn in eps.values())
 
 
 def test_post_endpoint_mountable_on_fastapi(seeded_kernel):

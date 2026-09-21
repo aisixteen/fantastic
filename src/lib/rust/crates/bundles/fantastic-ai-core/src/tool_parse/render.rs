@@ -27,7 +27,7 @@ use super::grammar::ROUTING;
 pub fn render_call(name: &str, arguments: &Map<String, Value>) -> String {
     let mut args = arguments.clone();
     if name == "send" {
-        let payload = match args.remove("payload") {
+        let payload = match args.shift_remove("payload") {
             Some(Value::Object(p)) => p,
             _ => Map::new(),
         };

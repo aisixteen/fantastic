@@ -118,7 +118,7 @@ impl OnceLockScheduleCache {
         self.0
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
-            .expect("SCHEDULE_CACHE poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -179,11 +179,14 @@ impl Bundle for SchedulerBundle {
         Ok(Some(reply))
     }
 
-    /// The tick loop dies with the agent. The SCHEDULE CACHE deliberately does NOT
+    /// The tick loop and the SCHEDULE CACHE die with the agent.
     /// (A5.14 / D6): python's `_cache` is a module global keyed by agent id and
     /// nothing evicts it, so an agent recreated under the same id in the same
     /// process sees its predecessor's schedules.
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        // The cache goes with the agent: a re-created scheduler with the same id
+        // used to list and fire the old schedules (python fixed 2026-09-20).
+        SCHEDULE_CACHE.lock().remove(agent_id);
         shutdown_tick(agent_id, kernel).await;
         Ok(())
     }
@@ -558,16 +561,15 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// python `scheduler.tools`' `f"sch_{secrets.token_hex(3)}"` — 3 bytes from
+/// the OS CSPRNG as 6 lowercase hex. A failure is FATAL — no second source.
 fn mint_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let mut stack: u64 = 0;
-    let stack_ptr = &mut stack as *mut u64 as u64;
-    let mix = nanos ^ stack_ptr ^ std::process::id() as u64;
-    format!("sch_{:06x}", (mix as u32) & 0xff_ffff)
+    let mut buf = [0u8; 3];
+    // SAFETY: `buf` is a valid writable buffer of exactly 3 bytes.
+    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
+    assert!(rc == 0, "getentropy failed: no randomness source");
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    format!("sch_{hex}")
 }
 
 // ── verb implementations ────────────────────────────────────────────
@@ -591,7 +593,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // truncated mid-sentence; that is the python text.
         "verbs": {
             "reflect": "Identity + tick state. No args.",
-            "boot": "Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write",
+            "boot": "Idempotent. Starts the tick loop; persistence is THROUGH the loader.",
             "schedule": "args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
             "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
             "list": "No args. Returns {schedules: [<schedule record>, ...]}.",

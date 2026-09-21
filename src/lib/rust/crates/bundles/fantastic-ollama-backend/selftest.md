@@ -34,10 +34,10 @@ FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18911
 MODEL=<your tool-calling model>
 
-$FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
+$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_ws.tools id=wws
-$FANTASTIC core create_agent handler_module=file_bridge.tools id=fa root=/tmp/ob_test/root
-$FANTASTIC core create_agent handler_module=ollama_backend.tools id=ob \
+$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=fa root=/tmp/ob_test/root
+$FANTASTIC kernel_state create_agent handler_module=ollama_backend.tools id=ob \
   file_agent_id=fa model=$MODEL endpoint=http://localhost:11434
 $FANTASTIC &
 DAEMON_PID=$!

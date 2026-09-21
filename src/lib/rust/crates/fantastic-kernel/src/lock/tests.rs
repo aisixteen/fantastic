@@ -11,11 +11,17 @@ fn pid_alive_self_returns_true() {
 
 #[test]
 fn pid_alive_clearly_dead_returns_false() {
-    // PID 0 is reserved on unix; kill(0, 0) signals the process
-    // group and isn't a clean "is this PID alive" check. Pick a
-    // very high pid unlikely to exist.
+    // A very high pid unlikely to exist.
     let probably_dead = u32::MAX - 1;
     assert!(!pid_alive(probably_dead));
+}
+
+#[test]
+fn pid_zero_is_not_alive() {
+    // C83: python `_pid_alive`: `pid <= 0` is dead, no syscall at all — unlike
+    // unix `kill(0, 0)`, which signals the CALLER'S OWN process group and
+    // would read back as "alive" without the explicit `pid == 0` guard.
+    assert!(!pid_alive(0));
 }
 
 #[test]
@@ -67,6 +73,43 @@ fn release_removes_file() {
 fn release_when_missing_is_noop() {
     let tmp = TempDir::new().unwrap();
     release(tmp.path()).unwrap();
+}
+
+#[test]
+fn release_keeps_a_malformed_lock() {
+    // C83: python `release_lock`'s `_read_lock()` returns `None` on ANY parse
+    // failure, so `cur and cur.get("pid") == os.getpid()` is false and the
+    // file is left ALONE — release must never blindly `remove_file` a lock it
+    // could not verify it owns.
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join(crate::persistence::LOCK_PATH);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    std::fs::write(&lock_path, "{NOT_JSON").unwrap();
+    release(tmp.path()).unwrap();
+    assert!(lock_path.exists(), "a malformed lock survives release()");
+}
+
+#[test]
+fn lock_held_text_is_python_verbatim() {
+    // C81: python `_lock.py:52-64`'s exact 3 lines — `RCLI/src/main.rs`
+    // prints this as `[kernel] {e}`, never the generic error wrapper.
+    let err = KernelError::LockHeld { pid: 4242 };
+    assert_eq!(
+        err.to_string(),
+        "another fantastic owns this dir: pid=4242\n  \
+         -> kill it:  kill 4242\n  \
+         -> or, if stale, remove the lock:  rm .fantastic/lock.json"
+    );
+}
+
+#[test]
+fn lock_bytes_are_python_json_dumps() {
+    // C50: python `json.dumps({"pid": os.getpid()})` uses the DEFAULT
+    // separators — `: ` after the key — not serde_json's compact `:`.
+    let tmp = TempDir::new().unwrap();
+    let path = acquire(tmp.path()).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(raw, format!("{{\"pid\": {}}}", std::process::id()));
 }
 
 #[test]

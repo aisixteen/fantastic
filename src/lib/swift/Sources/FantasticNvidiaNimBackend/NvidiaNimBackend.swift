@@ -58,6 +58,7 @@ func parseRetryAfter(_ value: String?) -> Int {
 
 public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     public let name = "nvidia_nim_backend"
+    public var verbs: [String] { AIBackend.verbNames }
 
     let core: AIBackend
 

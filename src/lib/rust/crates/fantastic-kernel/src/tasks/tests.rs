@@ -36,6 +36,11 @@ pub(crate) struct Shared {
     held: Mutex<HashSet<i64>>,
     /// How many times a counting handler actually RAN.
     runs: Mutex<usize>,
+    /// C87: when set, `on_cancel` answers `Err` instead of releasing the
+    /// resource — exercises the "a hook that fails is logged and the kill
+    /// still happens" path (`tasks.rs`'s `  [cancel] <id> bundle on_cancel
+    /// raised: <e>` line).
+    fail_on_cancel: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -47,6 +52,10 @@ impl Shared {
     }
     pub(crate) fn held_ids(&self) -> HashSet<i64> {
         self.held.lock().expect("held poisoned").clone()
+    }
+    pub(crate) fn set_fail_on_cancel(&self, fail: bool) {
+        self.fail_on_cancel
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -114,8 +123,14 @@ impl Bundle for SlowBundle {
                 if let Some(t) = current_task() {
                     self.sh.held.lock().expect("held poisoned").insert(t.0);
                 }
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                json!({"finished": true}) // never reached in these tests
+                // `hold_ms` — a dispatch that really does settle, for the
+                // shutdown quiet-phase twin. Default: outlives the test.
+                let ms = payload
+                    .get("hold_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(30_000);
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                json!({"finished": true}) // never reached in most of these tests
             }
             // A nested send — the callee's dispatch becomes a CHILD task of this one.
             "chain" => {
@@ -210,6 +225,13 @@ impl Bundle for SlowBundle {
             .lock()
             .expect("held poisoned")
             .remove(&task_id.0);
+        if self
+            .sh
+            .fail_on_cancel
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("boom".into());
+        }
         Ok(())
     }
 }
@@ -221,7 +243,7 @@ pub(crate) fn mk_kernel(sh: Arc<Shared>) -> Arc<Kernel> {
     kernel.bundles.register("slow.tools", SlowBundle { sh });
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -245,7 +267,7 @@ pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Val
         payload["can_call"] = can_call;
     }
     let r = kernel
-        .send(vec![Item::new(AgentId::from("core"), payload)])
+        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -261,7 +283,7 @@ async fn mk_agent_accept(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> 
         "callable_by": callable_by,
     });
     let r = kernel
-        .send(vec![Item::new(AgentId::from("core"), payload)])
+        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -587,6 +609,46 @@ async fn on_cancel_hook_runs_and_releases_its_resource() {
     let _ = tokio::time::timeout(Duration::from_secs(2), caller).await;
 }
 
+#[tokio::test]
+async fn on_cancel_failure_prints_python_line() {
+    // C87: python `print(f"  [cancel] {self.id} bundle on_cancel raised:
+    // {e}")` (`_agent.py:2858-2859`) — STDOUT, and cancel is not refusable:
+    // the abort still happens even though the hook errored. (The line
+    // itself is reviewed by inspection — see the note on the state-
+    // subscriber twin about capturing process stdout under parallel tests.)
+    let sh = Arc::new(Shared::default());
+    sh.set_fail_on_cancel(true);
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let a = mk_agent(&kernel, "slow_a").await;
+
+    let caller = tokio::spawn({
+        let k = Arc::clone(&kernel);
+        let a = a.clone();
+        async move {
+            k.send(vec![Item::new(a, json!({"type": "slow"}))])
+                .await
+                .remove(0)
+                .result
+        }
+    });
+    let task_id = wait_for_task(&kernel, &a, "slow").await;
+    wait_until("the resource to be held", || {
+        sh.held_ids().contains(&task_id)
+    })
+    .await;
+
+    let r = cancel(&kernel, task_id).await;
+    assert_eq!(
+        r["cancelled"],
+        json!(true),
+        "a raising hook does not block the abort"
+    );
+    // The hook DID run (it clears `held` before returning its Err) — the
+    // failure is in its RETURN, not in whether it ran.
+    assert!(sh.held_ids().is_empty());
+    let _ = tokio::time::timeout(Duration::from_secs(2), caller).await;
+}
+
 // ─── long-lived work: init-adoption + reachable by cancel ──────
 
 #[tokio::test]
@@ -768,7 +830,7 @@ async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {
     // is watched and finished, so it is never what the drain closes.
     let peer = mk_agent(&kernel, "sd_peer").await;
     let out = crate::send::with_sender(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         kernel.send(vec![Item::new(peer, json!({"type": "chain"}))]),
     )
     .await
@@ -807,9 +869,9 @@ async fn shutdown_agents_is_the_roots_control_surface_only() {
     let child = AgentId::from("sd_child");
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "slow.tools", "id": child.as_str(),
             }),
         )])
@@ -841,7 +903,7 @@ async fn a_keepalive_loop_is_neither_waited_for_nor_cancelled() {
     // cancelling it would drop the very rows the shutdown was for.
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let live = kernel.spawn_keepalive_task(
-        &AgentId::from("core"),
+        &AgentId::from("kernel_state"),
         "persist_writer",
         std::future::pending::<()>(),
     );
@@ -859,6 +921,85 @@ async fn a_keepalive_loop_is_neither_waited_for_nor_cancelled() {
         "the keepalive loop must survive the stop: {out}"
     );
     assert!(kernel.tasks.contains(&live), "and still be running");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forked_service_loop_is_not_waited_for_but_is_cancelled() {
+    // python `Kernel.shutdown_agents`: the quiet wait ignores `_keepalive` AND
+    // `_forked`. A forked service loop (a PTY reader, a subprocess pump) never
+    // ends, so waiting for one spent the WHOLE `QUIET_TIMEOUT` on every stop
+    // and then cancelled it anyway. The cancel step still takes it — unlike a
+    // keepalive, a fork does not outlive the stop.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let live = kernel.spawn_task(
+        &AgentId::from("kernel_state"),
+        "pty_reader",
+        std::future::pending::<()>(),
+    );
+    assert!(
+        kernel
+            .tasks
+            .pending_dispatches(None)
+            .iter()
+            .all(|t| *t != live),
+        "a forked loop is not a pending DISPATCH"
+    );
+    assert!(
+        kernel.tasks.pending(None).contains(&live),
+        "but it IS pending work the cancel step reaches"
+    );
+    let t0 = std::time::Instant::now();
+    let out = kernel.shutdown_agents().await;
+    let took = t0.elapsed();
+    assert!(
+        took < Duration::from_secs(1),
+        "the quiet phase must not wait on a forked loop (QUIET_TIMEOUT is 10 s), took {took:?}"
+    );
+    assert!(
+        out["cancelled"]
+            .as_array()
+            .expect("cancelled is a list")
+            .iter()
+            .any(|v| v.as_i64() == Some(live.0)),
+        "the cancel step still takes it: {out}"
+    );
+    assert!(!kernel.tasks.contains(&live), "and it is gone");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_quiet_phase_still_waits_for_a_real_in_flight_dispatch() {
+    // THE OTHER HALF. Ignoring forks must not turn the graceful stop into a
+    // kill: a dispatch actually running is waited for, and settles rather than
+    // appearing in `cancelled`.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let a = mk_agent(&kernel, "sd_hold").await;
+    let k = Arc::clone(&kernel);
+    let running = tokio::spawn(async move {
+        k.send(vec![Item::new(a, json!({"type": "slow", "hold_ms": 400}))])
+            .await
+            .remove(0)
+    });
+    while kernel.tasks.pending_dispatches(None).is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let t0 = std::time::Instant::now();
+    let out = kernel.shutdown_agents().await;
+    let took = t0.elapsed();
+    assert!(
+        took >= Duration::from_millis(300),
+        "the quiet phase waits for in-flight work, took only {took:?}"
+    );
+    assert!(
+        took < Duration::from_secs(9),
+        "and it stops waiting once the work settles, well inside QUIET_TIMEOUT: {took:?}"
+    );
+    assert_eq!(
+        out["cancelled"].as_array().map(Vec::len),
+        Some(0),
+        "a dispatch that settled is not cancelled: {out}"
+    );
+    let done = running.await.expect("the dispatch task joined");
+    assert_eq!(done.status, crate::outcome::Status::Completed, "{done:?}");
 }
 
 // ── C36: a fork is a message ───────────────────────────────────────────
@@ -897,4 +1038,46 @@ async fn spawn_task_writes_a_task_row() {
         .collect();
     // `boot` (the child's own first dispatch), the `fork` call, then the fork.
     assert_eq!(kinds, vec!["call", "call", "task"]);
+}
+
+/// D5 — a task whose parent has already ended keeps NAMING it.
+///
+/// `register` used to drop such a parent to `None` ("adopted by init"). Python
+/// removed exactly that line (`_kernel.py:602-616`): a task put outside every
+/// subtree cannot be reached by `cancel` on the caller that forked it.
+/// Measured: rust's `kernel ps` answered `parent: null` for the scheduler tick
+/// loop, the pty readers and `ps` itself, where python names the dispatch that
+/// spawned them.
+#[tokio::test]
+async fn a_task_keeps_a_parent_that_has_already_ended() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let agent = mk_agent_grant(&kernel, "forker", json!({})).await;
+    let handle = crate::tasks::TaskHandle::new();
+
+    let dead = crate::tasks::TaskId(kernel.rows.mint_id());
+    // The forking dispatch ended before the work it forked registered itself —
+    // the shape a bundle's long-lived loop has (the scheduler tick, a pty
+    // reader): the parent id is real, the parent task is gone.
+    assert!(!kernel.tasks.contains(&dead), "never registered");
+
+    let forked = crate::tasks::TaskId(kernel.rows.mint_id());
+    kernel
+        .tasks
+        .register(&forked, &agent, "tick_loop", Some(dead), handle);
+
+    let row = kernel
+        .tasks
+        .rows()
+        .into_iter()
+        .find(|r| r["id"] == json!(forked.get()))
+        .expect("the forked task is in ps");
+    assert_eq!(
+        row["parent"],
+        json!(dead.get()),
+        "the id survives the parent — `null` would put it outside every subtree"
+    );
+    // And it is therefore NOT a root, so the shutdown sweep leaves it to the
+    // subtree it belongs to (python's `roots only` skip).
+    assert!(!kernel.tasks.is_root(&forked));
 }

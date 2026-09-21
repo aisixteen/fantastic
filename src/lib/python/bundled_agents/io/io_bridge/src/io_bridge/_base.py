@@ -87,10 +87,11 @@ def rule_name(spec, default: str) -> str:
 
 
 def _scoped(name: str, suffix: str, was_scoped: bool) -> str:
-    """Report the SCOPED rule name whichever field it came from. `auth` carries a bare
-    stem; each manifold appends its own suffix, so `reflect` never shows a name that
-    would not resolve if written straight back into `ingress_rule`/`egress_rule`."""
-    if was_scoped or name.endswith(suffix):
+    """Report the SCOPED rule name whichever field it came from. A per-direction
+    field is taken as written; an `auth` stem gets this manifold's suffix — the
+    GATE's exact rule (`ingress_rules/__init__.py`), so `reflect` never shows a
+    name that resolves differently when written back into `ingress_rule`."""
+    if was_scoped:
         return name
     return (
         "silent_egress"
@@ -104,19 +105,19 @@ def describe(record: dict) -> dict:
     leg is sealed: `{ingress_rule, egress_rule, sealed}`. Keyed by the field you SET
     (read-key == write-key), so a readme-only LLM reads `ingress_rule: deny_ingress`
     and opens with `ingress_rule: allow_all_ingress` — a direct mirror, no translation."""
-    ing_spec = (
-        record["ingress_rule"] if "ingress_rule" in record else record.get("auth")
-    )
-    egr_spec = record["egress_rule"] if "egress_rule" in record else record.get("auth")
-    # The name a caller READS is the name it must WRITE, so both are scoped and
-    # an `auth` stem is reported as the manifold rule it actually resolved to.
-    ingress = _scoped(
-        rule_name(ing_spec, "deny_ingress"), "_ingress", "ingress_rule" in record
-    )
+    ing_scoped = "ingress_rule" in record
+    egr_scoped = "egress_rule" in record
+    ing_spec = record["ingress_rule"] if ing_scoped else record.get("auth")
+    egr_spec = record["egress_rule"] if egr_scoped else record.get("auth")
+    # The name a caller READS is the name it must WRITE: a present stem is scoped
+    # the way the gate scopes it; an ABSENT spec is the manifold's default, which
+    # already carries its suffix (it used to be suffixed twice, 2026-09-16).
+    ing_name = rule_name(ing_spec, "")
+    egr_name = rule_name(egr_spec, "")
+    ingress = _scoped(ing_name, "_ingress", ing_scoped) if ing_name else "deny_ingress"
+    egress = _scoped(egr_name, "_egress", egr_scoped) if egr_name else "silent_egress"
     return {
         "ingress_rule": ingress,
-        "egress_rule": _scoped(
-            rule_name(egr_spec, "silent_egress"), "_egress", "egress_rule" in record
-        ),
+        "egress_rule": egress,
         "sealed": ingress != "allow_all_ingress",
     }

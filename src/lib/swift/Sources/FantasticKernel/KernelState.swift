@@ -160,6 +160,13 @@ extension Kernel {
                     + "\"\(rootId)\" (a cycle or an orphaned parent chain): \(orphans)")
         }
 
+        // THE ROOT RECORD DECLARES THIS TREE'S CHILDREN-DIR NAME (declared
+        // config, default `agents`). Set BEFORE the build, since every agent
+        // derives its address from it. Python `_kernel.py` `load`.
+        let declared = state.agents.first { $0.parentId == nil }?
+            .meta["children_dir"]?.asString
+        childrenDir = (declared?.isEmpty == false) ? declared! : "agents"
+
         // Wipe existing state.
         for a in allAgents() {
             unregister(a.id)
@@ -184,17 +191,22 @@ extension Kernel {
         var registry: [AgentId: Agent] = [:]
 
         func construct(_ rec: AgentRecord, parentRootPath: URL?) {
-            // Weak-load: skip if handler_module is set but unknown.
-            // The agent shell still registers so children can wire,
-            // but verbs targeting it return "no bundle" until the
-            // bundle lands. Mirrors Python's weak-load policy.
+            // WEAK LOAD. A record whose bundle is not installed in THIS runtime
+            // (the browser's `*.ts` agents persist into the same tree) is
+            // skipped along with its whole subtree, and says so on stderr in
+            // python's exact words — CI and the selftests grep this line.
+            // Registering the shell instead put an agent in the tree that could
+            // answer nothing and still handed its children a live parent.
             if let hm = rec.handlerModule, bundles.get(hm) == nil {
-                _ = hm
+                RuntimeLog.warn(
+                    "[kernel] skipping agent \(rec.id): bundle \(hm) not installed in "
+                        + "this runtime")
+                return
             }
             let rootPath: URL
             if let pr = parentRootPath {
                 rootPath = pr
-                    .appendingPathComponent("agents")
+                    .appendingPathComponent(childrenDir)
                     .appendingPathComponent(rec.id)
             } else {
                 rootPath = baseRoot

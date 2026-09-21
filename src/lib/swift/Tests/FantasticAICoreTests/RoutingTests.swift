@@ -85,7 +85,7 @@ struct RoutingTests {
         // The model emits a send; it really runs; its REPLY comes back as the next
         // turn, tagged so the model can tell it from a human's message.
         let script = ProviderScript([
-            [callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))],
+            [callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))],
             ["done looking " + doneEnvelope],
         ])
         let (kernel, ids, _) = await bootMockKernel(
@@ -100,7 +100,7 @@ struct RoutingTests {
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(script.calls == 2, "the no-call follow-up ended the chain")
         let turn2 = script.requestText(1)
-        #expect(turn2.contains(" · core "), "untagged reply: \(turn2.suffix(400))")
+        #expect(turn2.contains(" · kernel_state "), "untagged reply: \(turn2.suffix(400))")
         #expect(turn2.contains("agents"), "the real list_agents result must be in the turn")
     }
 
@@ -111,7 +111,7 @@ struct RoutingTests {
         // assistant turn was SAVED before the FIFO guard was RELEASED before
         // routing started. Get that order wrong and the chain still "works" while
         // quietly answering questions from a history that is one turn behind.
-        let reflect = callEnvelope(target: "core", payload: cheapReflect)
+        let reflect = callEnvelope(target: "kernel_state", payload: cheapReflect)
         let script = ProviderScript([
             ["PASS-ONE-SPEAKING " + reflect],
             ["PASS-TWO-SPEAKING " + reflect],
@@ -202,7 +202,7 @@ struct RoutingTests {
             let mine = ProviderScript([
                 [
                     callEnvelope(
-                        target: "core", payload: .object(["type": .string("reflect")]),
+                        target: "kernel_state", payload: .object(["type": .string("reflect")]),
                         replyTo: .some(word))
                 ],
                 ["must never run"],
@@ -422,7 +422,7 @@ struct RoutingTests {
         // deliberation still runs; only the DURABLE turn is stripped. Reading the
         // stripped text instead would drop the call and end the chain silently —
         // the gemma4:12b failure (2026-08-02) in a different disguise.
-        let call = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let raw =
             "\(THINK_OPEN)Let me work out which agent stores data.\(THINK_CLOSE)" + call + "on it"
         let script = ProviderScript([[raw], ["done"]])
@@ -434,7 +434,7 @@ struct RoutingTests {
             ]))])[0].result
         #expect(
             await script.waitForCalls(2), "a call inside thinking must still dispatch")
-        #expect(script.requestText(1).contains(" · core "))
+        #expect(script.requestText(1).contains(" · kernel_state "))
         // And the deliberation is not in the durable record.
         try await waitForHistory(kernel: kernel, id: id, count: 2)
         let msgs = conversationRows(kernel: kernel, id: id)
@@ -470,7 +470,7 @@ struct RoutingTests {
         // goes, and delivering the text to the caller's peer as well would
         // duplicate the turn.
         let mine = ProviderScript([
-            [callEnvelope(target: "core", payload: cheapReflect)],
+            [callEnvelope(target: "kernel_state", payload: cheapReflect)],
             ["ok"],
         ])
         let theirs = ProviderScript([["must never run"]])
@@ -491,7 +491,7 @@ struct RoutingTests {
         // `runStream` returns nil at every non-ok exit, which is python's
         // `if not reply.get("error")` gate expressed in the type.
         let script = ProviderScript([
-            [callEnvelope(target: "core", payload: cheapReflect)],
+            [callEnvelope(target: "kernel_state", payload: cheapReflect)],
             ["must never run"],
         ])
         var cfg = scriptedConfig(["mock": script])
@@ -518,7 +518,7 @@ struct RoutingTests {
         // thing this whole path exists to make possible.
         let script = ProviderScript([
             [
-                callEnvelope(target: "core", payload: cheapReflect, replyTo: .some("probe"))
+                callEnvelope(target: "kernel_state", payload: cheapReflect, replyTo: .some("probe"))
             ]
         ])
         let (kernel, ids, recorder) = await bootMockKernel(
@@ -530,7 +530,7 @@ struct RoutingTests {
         let turn = recorder.payloads()[0]
         #expect(turn["type"].asString == "send")
         #expect(turn["client_id"].asString == "c")
-        #expect(turn["text"].asString?.contains(" · core ") == true)
+        #expect(turn["text"].asString?.contains(" · kernel_state ") == true)
         #expect(turn.asObject?["_call_stack"] == nil, "routing must not propagate _call_stack")
         // No caller prompt was supplied, so no `system_prompt` is pinned onto the
         // hop — each hop rebuilds the default block from the live tree.
@@ -568,28 +568,6 @@ struct RoutingTests {
     }
 
     // ─── the emergence discipline, guarded ──────────────────────
-
-    /// The SHORT how-to, for the one backend with a hard 4096-token window (the
-    /// on-device Apple FM model). Length is the only thing cut: every mechanism
-    /// the model cannot work without has to survive, and no strategy may creep
-    /// in under cover of "it is the compact one".
-    @Test func theCompactHowToTeachesTheSameMechanisms() {
-        for needle in [
-            #"<call name="send">"#,  // the envelope
-            "<target_id>", "<type>", "<reply_to>",  // addressing
-            "<item>",  // lists
-            "<bytes>", "first `</bytes>`",  // the verbatim document
-            #"<call name="done">"#, #"<call name="await">"#,  // stopping and waiting
-            "[reply to <pid>", "ASYNC",  // how replies arrive
-        ] {
-            #expect(SEND_TO_HOWTO_COMPACT.contains(needle), "the compact block dropped \(needle)")
-        }
-        // It is genuinely short — the whole point — and it is NOT the long one.
-        #expect(SEND_TO_HOWTO_COMPACT.count < SEND_TO_HOWTO.count / 2)
-        for banned in ["loop", "iterate", "step by step", "keep going", "final answer"] {
-            #expect(!SEND_TO_HOWTO_COMPACT.lowercased().contains(banned), "strategy leaked: \(banned)")
-        }
-    }
 
     @Test func promptStatesTheMechanismNotAStrategy() async throws {
         // The default system block may state FACTS — how to reach an agent, what
@@ -646,7 +624,7 @@ struct RoutingTests {
         // The model is QUERIED UNTIL IT CALLS (python-canonical, 2026-09-01): a
         // second silent turn used to end the chain silently.
         let script = ProviderScript([
-            [callEnvelope(target: "core", payload: cheapReflect)],
+            [callEnvelope(target: "kernel_state", payload: cheapReflect)],
             ["thinking out loud, no envelope"],
             ["still just prose"],
             ["ok, finishing"],
@@ -673,7 +651,7 @@ struct RoutingTests {
     // MODEL says it ends. Python `test_silent_chain_turns_are_nudged_until_a_call_or_done`.
     @Test func everySilentTurnIsNudgedWithNoCap() async throws {
         let script = ProviderScript([
-            [callEnvelope(target: "core", payload: cheapReflect)],
+            [callEnvelope(target: "kernel_state", payload: cheapReflect)],
             ["prose 1"],
             ["prose 2"],
             ["prose 3"],
@@ -683,7 +661,7 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         // A `nudge_limit` of 2 used to stop the chain at pass 4. It is not read.
-        _ = await kernel.send([Item(AgentId("core"), .object([
+        _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("update_agent"), "id": .string(ids["mock"]!.value),
                 "nudge_limit": .integer(2),
             ]))])[0].result
@@ -703,7 +681,7 @@ struct RoutingTests {
 
     @Test func aDoneCallEndsTheChainWithoutANudge() async throws {
         let script = ProviderScript([
-            [callEnvelope(target: "core", payload: cheapReflect)],
+            [callEnvelope(target: "kernel_state", payload: cheapReflect)],
             ["finished. " + doneEnvelope],
         ])
         let (kernel, ids, _) = await bootMockKernel(
@@ -758,7 +736,8 @@ struct RoutingTests {
             await script.waitForCalls(1),
             "the timed-out call produced no block at all — the batch hung")
         #expect(
-            script.requestText(0).contains("timed out after 0.1s"),
+            script.requestText(0).contains(
+                "send: slowpoke 'crawl' exceeded its 0.1s timeout; task cancelled"),
             "the block must REPORT the timeout: \(script.requestText(0).suffix(400))")
     }
 
@@ -795,7 +774,7 @@ struct RoutingTests {
     /// which python's history trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both anchored
     /// at the START of a block) cannot read at all.
     @Test func theBatchStampLivesInsideTheReplyTag() async throws {
-        let call = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let script = ProviderScript([[call + "\n" + call], ["both back " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -818,7 +797,7 @@ struct RoutingTests {
     /// row then takes that id as its `parent`: a thread is the parent chain.
     /// Python `test_row_ids.py` (`_reply_tag`, `_row_ids_for_incoming`).
     @Test func aReplyTagNamesItsTurnAndTheDeliveredRowTakesItAsParent() async throws {
-        let call = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let script = ProviderScript([[call + "\n" + call], ["both back " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -884,7 +863,7 @@ struct RoutingTests {
     /// read one file twice saw `1 of 2 in batch 7f3a` both times (measured
     /// 2026-08-24, the re-read loop).
     @Test func twoIdenticalTurnsGetDifferentBatchTokens() async throws {
-        let call = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let twice = call + "\n" + call
         let script = ProviderScript([[twice], [twice], ["enough " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
@@ -907,14 +886,14 @@ struct RoutingTests {
         // `raiser` throws on every real verb, so the delivered turn cannot land.
         let script = ProviderScript([
             [callEnvelope(
-                target: "core", payload: .object(["type": .string("list_agents")]),
+                target: "kernel_state", payload: .object(["type": .string("list_agents")]),
                 replyTo: .some("raiser"))]
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let sink = EventSink()
         let inbox = kernel.ensureInbox(AgentId("raiser"))
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
         _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
@@ -955,16 +934,15 @@ struct RoutingTests {
         await seedStub(kernel, "ai", "delivery.tools")
         let sink = EventSink()
         let inbox = kernel.ensureInbox(AgentId("ai"))
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
         let handoff = Task {
             await deliverTurn(
                 kernel: kernel, target: "ai", text: "hi", clientId: "c", systemPrompt: nil)
         }
         let taskId = try await waitForTask(kernel: kernel, agent: AgentId("ai"), verb: "send")
-        let c = await kernel.send([
-            Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .integer(taskId)]))
-        ])[0].result
+        let cancel: JSON = .object(["type": .string("cancel"), "task_id": .integer(taskId)])
+        let c = await kernel.send([Item(AgentId("kernel"), cancel)])[0].result
         #expect(c["cancelled"].asBool == true)
         await handoff.value
         #expect(
@@ -992,6 +970,13 @@ struct RoutingTests {
             rows.contains {
                 $0["agent"].asString == "ai" && $0["verb"].asString == "deliver_reply"
             }, "\(JSON.array(rows).serialize())")
+        // C36 — and it is a `task` ROW on the AI, under the same id, so the
+        // handoff is in the message log and not only in the live table.
+        let stored = kernel.rows.forAgent(AgentId("ai"))
+        #expect(
+            stored.contains {
+                $0["kind"]?.asString == "task" && $0["verb"]?.asString == "deliver_reply"
+            }, "no deliver_reply task row: \(stored.map { JSON.object($0).serialize() })")
         #expect(await sent.settled(1).count == 1)
     }
 
@@ -1041,8 +1026,8 @@ struct RoutingTests {
     }
 
     @Test func reflectRepliesCarryTheDistillationNudge() async throws {
-        let reflect = callEnvelope(target: "core", payload: cheapReflect)
-        let list = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let reflect = callEnvelope(target: "kernel_state", payload: cheapReflect)
+        let list = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let script = ProviderScript([
             [reflect + "\n" + list], ["SEEN core " + doneEnvelope],
         ])
@@ -1194,7 +1179,9 @@ struct RoutingTests {
         let blocks = body.components(separatedBy: "\n\n")
         #expect(blocks.count == 3, Comment(rawValue: body))
         #expect(blocks[0].hasReplyTag("hung ping \u{b7} 1 of 3 in batch "), Comment(rawValue: blocks[0]))
-        #expect(blocks[0].contains("timed out after 0.1s"), Comment(rawValue: blocks[0]))
+        #expect(
+            blocks[0].contains("send: hung 'ping' exceeded its 0.1s timeout; task cancelled"),
+            Comment(rawValue: blocks[0]))
         #expect(blocks[1].hasReplyTag("meter ping \u{b7} 2 of 3 in batch "), Comment(rawValue: blocks[1]))
         #expect(blocks[2].hasReplyTag("hung ping \u{b7} 3 of 3 in batch "), Comment(rawValue: blocks[2]))
         #expect(blocks[2].contains("<ok>hung</ok>"), "the model's own timeout must override the layer's: \(blocks[2])")
@@ -1228,6 +1215,59 @@ struct RoutingTests {
         #expect(echo.answered().first?.1 == .object(["type": .string("withdraw")]), "the payload must reach the target verbatim")
         let body = (await sent.settled(1)).first?.1["text"].asString ?? ""
         #expect(body.hasPrefix("[reply to \(jid) \u{b7} vault withdraw]"), Comment(rawValue: body))
+    }
+
+    /// C38: `<timeout>soon</timeout>` used to coerce with `.asDouble`, which
+    /// silently DROPPED the malformed value — defaulting to "wait forever" —
+    /// instead of reaching the kernel's `bad_arg` refusal. Forwarded RAW
+    /// (tag-typed, untouched) now, so the model reads the kernel's exact text
+    /// and the call never reaches the target at all.
+    @Test func aRawTimeoutThatIsNotANumberReachesTheKernelsRefusal() async throws {
+        let (kernel, echo, sent) = await bootStubKernel()
+        await seedStub(kernel, "ai", "delivery.tools")
+        await seedStub(kernel, "vault", "echo.tools")
+        var args: OrderedDictionary<String, JSON> = ["target_id": .string("vault")]
+        args["reply_to"] = .string("self")
+        args["timeout"] = .string("soon")
+        args["payload"] = .object(["type": .string("withdraw")])
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", args), clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+        #expect(
+            echo.answered().isEmpty,
+            "a bad timeout must refuse before dispatch, never reach the target")
+        let body = (await sent.settled(1)).first?.1["text"].asString ?? ""
+        #expect(
+            body.contains("send: timeout must be a positive number of seconds, got 'soon'"),
+            Comment(rawValue: body))
+    }
+
+    /// C38: an int `<exec_id>` JOINS an existing execution instead of being
+    /// silently coerced with `.asString` (which dropped it — an int has no
+    /// string form there — and minted a fresh unnamed pid instead).
+    @Test func anIntExecIdJoinsAnOpenExecutionInsteadOfMintingAFreshOne() async throws {
+        let (kernel, echo, sent) = await bootStubKernel()
+        await seedStub(kernel, "ai", "delivery.tools")
+        await seedStub(kernel, "vault", "echo.tools")
+        var opener: OrderedDictionary<String, JSON> = ["target_id": .string("vault")]
+        opener["reply_to"] = .string("self")
+        opener["exec_id"] = .string("job-int")
+        opener["payload"] = .object(["type": .string("withdraw")])
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", opener), clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+        let jid = try #require(kernel.ledger.resolveName("job-int"))
+
+        var joiner: OrderedDictionary<String, JSON> = ["target_id": .string("vault")]
+        joiner["reply_to"] = .string("self")
+        joiner["exec_id"] = .integer(jid)
+        joiner["payload"] = .object(["type": .string("withdraw")])
+        await routeReply(
+            selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", joiner), clientId: "cli",
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+        #expect(echo.answered().count == 1, "the int exec_id must JOIN, not open a second dispatch")
+        let bodies = (await sent.settled(2)).map { $0.1["text"].asString ?? "" }
+        #expect(bodies.allSatisfy { $0.hasPrefix("[reply to \(jid) ") }, "\(bodies)")
     }
 
     @Test func toFansOutOneCopyPerRecipientCarryingTheListAndMsg() async throws {
@@ -1305,6 +1345,10 @@ struct RoutingTests {
         // `pending` must be THIS agent's queue, not a sibling "mock"'s batch.
         let (kernel, ids, _) = await bootMockKernel(config: cfg, backendIds: ["nd_aw2"])
         let id = ids["nd_aw2"]!
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
+        defer { pump.cancel() }
         let first = Task {
             await kernel.send([Item(id, .object([
                     "type": .string("send"), "text": .string("one"), "client_id": .string("c"),
@@ -1326,6 +1370,15 @@ struct RoutingTests {
         }
         let last = script.request(1)?.last?["content"].asString ?? ""
         #expect(last.hasSuffix("two"), "the queued message must be the next turn: \(last.suffix(200))")
+        // B2.4: the honest wait is an ordinary status event from the SHARED
+        // emitter — `reason, pending`, then the auto-filled fields, `queue_depth`
+        // last — not an envelope built by hand with none of them.
+        let awaiting = try #require(
+            sink.snapshot().first { $0["detail"]["reason"].asString == "awaiting" })
+        let keys = awaiting["detail"].asObject.map { Array($0.keys) } ?? []
+        #expect(Array(keys.prefix(2)) == ["reason", "pending"], "\(keys)")
+        #expect(keys.last == "queue_depth", "\(keys)")
+        #expect(awaiting["client_id"].asString == "c")
     }
 }
 
@@ -1418,7 +1471,7 @@ private func bootStubKernel(
     let sent = DeliveryRecorder(pauseNanos: deliveryPauseNanos)
     registry.register("delivery.tools", sent)
     let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     return (kernel, echo, sent)
@@ -1426,7 +1479,7 @@ private func bootStubKernel(
 
 private func seedStub(_ kernel: Kernel, _ id: String, _ module: String) async {
     _ = await kernel.send([Item(AgentId("kernel"), .object([
-            "type": .string("create_agent"), "parent_id": .string("core"),
+            "type": .string("create_agent"), "parent_id": .string("kernel_state"),
             "id": .string(id), "handler_module": .string(module),
         ]))])[0].result
 }

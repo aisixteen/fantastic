@@ -72,6 +72,21 @@ func rawSegments(_ path: String) -> [String] {
     path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
 }
 
+/// uvicorn's ASGI `path` (`h11_impl.py:201`): the raw target MINUS its query,
+/// percent-decoded ONCE. Routing, the route params and the file proxy all read
+/// that decoded string, so `POST /rest/fi%6Ces` names the `files` agent and
+/// `GET /files/file/sp%20ace.txt?v=1` names `sp ace.txt` (A13.10). Swift matched
+/// the RAW target, so both answered 404 and a query string became part of the
+/// filename.
+///
+/// `removingPercentEncoding` is `nil` only for a byte sequence that is not
+/// UTF-8; python's `unquote` replaces those with U+FFFD rather than failing, and
+/// keeping the raw text here is the closest non-lossy stand-in.
+func decodePath(_ target: String) -> String {
+    let pathOnly = splitQuery(target).0
+    return pathOnly.removingPercentEncoding ?? pathOnly
+}
+
 func parseTemplate(_ path: String) -> [PathSegment] {
     rawSegments(path).map { s in
         guard s.hasPrefix("{"), s.hasSuffix("}") else { return .literal(s) }
@@ -134,7 +149,6 @@ public final class WebServer: @unchecked Sendable {
     /// The task the `boot` verb ran under. Every request runs as its CHILD, so
     /// a REST-originated dispatch has the web boot pid as its parent (python
     /// serves under `CURRENT_TASK.scope`).
-    private var bootTask: TaskId?
 
     /// Process-shared event loop group — never shut down (mirrors the
     /// kernel_bridge's static-shared convention + NIO best practice).
@@ -232,7 +246,6 @@ public final class WebServer: @unchecked Sendable {
     public func start() throws {
         lock.lock()
         let alreadyServing = channel != nil
-        if !alreadyServing { bootTask = KernelTaskLocals.currentTask }
         lock.unlock()
         if alreadyServing { return }
         let bootstrap = ServerBootstrap(group: WebServer.group)
@@ -259,7 +272,15 @@ public final class WebServer: @unchecked Sendable {
         let ch = channel
         channel = nil
         lock.unlock()
-        ch?.close(promise: nil)
+        // DRAINS, like python's `_stop_uvicorn`: it sets `should_exit` and then
+        // `await`s the serve task, so when the `stop` verb answers the port no
+        // longer accepts. A fire-and-forget `close(promise: nil)` only QUEUES
+        // the close on an event loop, and the next `boot` then mounted its
+        // child surfaces against a socket that was still accepting — the
+        // listener the caller was told had stopped (A11.30, flaky).
+        // `.wait()` blocks the calling thread, never an event-loop thread, for
+        // the same reason `start()`'s bind may block it.
+        try? ch?.close().wait()
         kernel.setHttpPort(0)
     }
 
@@ -276,7 +297,7 @@ public final class WebServer: @unchecked Sendable {
                 guard let self = self else {
                     return channel.eventLoop.makeSucceededFuture(nil)
                 }
-                let segs = rawSegments(splitQuery(head.uri).0)
+                let segs = rawSegments(decodePath(head.uri))
                 if let (_, params) = self.matchWebSocket(segments: segs),
                     params["host_id"] != nil
                 {
@@ -292,14 +313,18 @@ public final class WebServer: @unchecked Sendable {
             },
             upgradePipelineHandler: { [weak self] channel, head in
                 guard let self = self,
-                    case let segs = rawSegments(splitQuery(head.uri).0),
+                    case let segs = rawSegments(decodePath(head.uri)),
                     let (spec, params) = self.matchWebSocket(segments: segs),
                     let hostId = params["host_id"]
                 else {
                     return channel.eventLoop.makeSucceededVoidFuture()
                 }
                 return channel.pipeline.addHandler(
-                    WebSocketProxyHandler(hostId: hostId, legId: spec.ownerId, kernel: kernel))
+                    WebSocketProxyHandler(
+                        hostId: hostId, legId: spec.ownerId, kernel: kernel,
+                        // The same boot pid an HTTP request task is parented to:
+                        // python serves BOTH under `CURRENT_TASK.scope` (A11.31).
+                        bootParent: self.requestParent))
             })
         let httpHandler = HTTPDispatchHandler(server: self)
         let upgradeConfig: NIOHTTPServerUpgradeConfiguration = (
@@ -322,15 +347,15 @@ public final class WebServer: @unchecked Sendable {
 
     // MARK: - Request handling (HTTP; WS is handled by the upgrader above)
 
-    /// The web boot pid, so a request task is its child.
-    var requestParent: TaskId? {
-        lock.lock()
-        defer { lock.unlock() }
-        return bootTask
-    }
+    /// NO parent: python clears `_current_task` for a REST task (2026-09-20) —
+    /// the web boot dispatch has ended, so a pid parented to it was dangling.
+    var requestParent: TaskId? { nil }
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
-        let (pathOnly, query) = splitQuery(request.path)
+        // THE QUERY IS STRIPPED AND THE PATH PERCENT-DECODED ONCE, BEFORE
+        // MATCHING (A13.10) — uvicorn hands the app a decoded, query-less path.
+        let (_, query) = splitQuery(request.path)
+        let pathOnly = decodePath(request.path)
         let segments = rawSegments(pathOnly)
         let table = routeTable()
 
@@ -396,10 +421,22 @@ public final class WebServer: @unchecked Sendable {
 
     /// python `_index_page` — the substrate tree rendered into
     /// `templates/index.html`.
+    ///
+    /// AS THE WEB AGENT, like every other route on this host. Python starts
+    /// uvicorn INSIDE the `boot` dispatch, so the `_current_sender` ContextVar
+    /// the request handlers inherit is already the web agent's id and the
+    /// roster walk is gated per node. Swift's listener is a NIO channel with no
+    /// task-local to inherit, so this send carried NO sender, i.e. OPERATOR
+    /// authority — the walk reached a sibling host with no `callable_by` and
+    /// that sibling's watcher saw an event python's browser never produces (one
+    /// extra `wsx` frame in the acceptance capture).
     private func serveIndex() async -> HTTPResponse {
-        let primer = await kernel.send([
-            Item(AgentId("kernel"), .object(["type": .string("reflect")]))
-        ])[0].result
+        let web = self.agentId
+        let primer = await KernelTaskLocals.$currentSender.withValue(web) {
+            await kernel.send([
+                Item(AgentId("kernel"), .object(["type": .string("reflect")]))
+            ])[0].result
+        }
         let tree = primer["tree"]
         let body = pyTruthy(tree) ? Self.renderNode(tree) : "<li><em>empty tree</em></li>"
         let html = Self.indexTemplate.replacingOccurrences(of: "{{tree_body}}", with: body)
@@ -433,22 +470,41 @@ public final class WebServer: @unchecked Sendable {
     }
 
     /// python `agent_file` — pipe the agent's `read_stream` SOURCE.
+    ///
+    /// THROUGH THE BATCH, AS THE WEB AGENT (C41/C37). Python dispatches under
+    /// `sender_context(web_agent_id)`, so the target's `callable_by` decides
+    /// whether this route may read it at all; swift sent with NO sender, i.e. as
+    /// the OPERATOR, and `sendWithBinary` left no execution behind either.
     private func serveFileProxy(agentId: String, path: String) async -> HTTPResponse {
         guard kernel.agent(AgentId(agentId)) != nil else { return Self.emptyNotFound }
-        func readChunk(_ offset: Int) async -> (JSON, Data) {
-            await kernel.sendWithBinary(
-                AgentId(agentId),
-                .object([
-                    "type": .string("read_stream"), "path": .string(path),
-                    "offset": .integer(Int64(offset)), "length": .integer(262144),
-                ]), Data())
+        let web = self.agentId
+        func readChunk(_ offset: Int) async -> (JSON, Data?) {
+            let out = await KernelTaskLocals.$currentSender.withValue(web) {
+                await kernel.send([
+                    Item(
+                        AgentId(agentId),
+                        .object([
+                            "type": .string("read_stream"), "path": .string(path),
+                            "offset": .integer(Int64(offset)), "length": .integer(262144),
+                        ]), binary: Data())
+                ])[0]
+            }
+            return (out.result, out.body)
         }
         var (meta, body) = await readChunk(0)
-        // Not a SOURCE: 404. A GATE denial carries its reason in the body —
-        // this kernel teaches through denials. A MISSING FILE stays a bare
-        // 404: no body, no existence leak, no path probing.
-        guard case .object = meta, meta["error"].isNull else {
+        // THE SOURCE TEST IS THE CARRIER, python's `isinstance(first["bytes"],
+        // bytes)`: anything that did not answer with a CHUNK is a 404 — a denied
+        // gate, a path escape, a missing file, a non-server. An EMPTY chunk is
+        // still a chunk.
+        //
+        // A GATE denial carries its reason in the body — this kernel teaches
+        // through denials, and this route used to be the one surface that threw
+        // that away. A MISSING FILE stays a bare 404: no body, no existence
+        // leak, no path probing.
+        guard var buf = body else {
             if meta["reason"].asString == "unauthorized" {
+                // python `{k: detail.get(k) for k in (...)}` — all FOUR keys, a
+                // key the denial lacks present as JSON null.
                 var detail: OrderedDictionary<String, JSON> = [:]
                 for k in ["error", "reason", "side", "hint"] { detail[k] = meta[k] }
                 return HTTPResponse(
@@ -457,18 +513,22 @@ public final class WebServer: @unchecked Sendable {
             }
             return Self.emptyNotFound
         }
-        var buf = body
+        // python reads `size` off the FIRST chunk and, when truthy, declares it
+        // as `content-length`; a falsy size leaves the StreamingResponse
+        // CHUNKED.
+        let size = meta["size"].asInt ?? 0
         while !(meta["eof"].asBool ?? true) {
             let next = Int(meta["next_offset"].asInt ?? 0)
             (meta, body) = await readChunk(next)
-            guard case .object = meta, meta["error"].isNull else { break }
-            buf.append(body)
+            guard let chunk = body else { break }
+            buf.append(chunk)
         }
         // python types the proxy with `mimetypes.guess_type(path)` and falls
         // back to octet-stream; starlette appends the charset to a `text/*`.
         var mime = Mimetypes.guessType(path) ?? "application/octet-stream"
         if mime.hasPrefix("text/") && !mime.contains("charset=") { mime += "; charset=utf-8" }
-        return HTTPResponse(status: 200, contentType: mime, body: buf)
+        return HTTPResponse(
+            status: 200, contentType: mime, body: buf, chunked: size == 0)
     }
 
     /// python `Response(status_code=404)` — no body, no content-type.
@@ -476,9 +536,9 @@ public final class WebServer: @unchecked Sendable {
 
     // MARK: - leg routes
 
-    private static let octetType = "application/octet-stream"
-    private static let payloadHeader = "x-fantastic-payload"
-    private static let bytesFieldHeader = "x-fantastic-bytes-field"
+    static let octetType = "application/octet-stream"
+    static let payloadHeader = "x-fantastic-payload"
+    static let bytesFieldHeader = "x-fantastic-bytes-field"
 
     /// Serve a matched leg route. The JSON leg is the leg bundle's own
     /// `serveRoute` (python's mounted callable); the octet leg is the host's,
@@ -500,6 +560,21 @@ public final class WebServer: @unchecked Sendable {
                 owner: owner, params: params, request: request, headers: lowerHeaders)
         }
 
+        // THE BODY DECODES LIKE `json.loads(bytes)` (A13.11): CPython detects the
+        // encoding from the BOM / the null-byte pattern of the first four bytes,
+        // so a UTF-8-BOM, UTF-16 or UTF-32 body is ordinary JSON to python.
+        // Bytes that will not decode raise `UnicodeDecodeError` OUT of the
+        // endpoint (`web_rest/tools.py:117` catches only `JSONDecodeError`), so
+        // starlette answers 500 text/plain — mirrored, not pinned.
+        let bodyText: String
+        switch Self.decodeJSONBody(request.body ?? Data()) {
+        case .some(let t): bodyText = t
+        case .none:
+            return HTTPResponse(
+                status: 500, contentType: "text/plain; charset=utf-8",
+                body: Data("Internal Server Error".utf8))
+        }
+
         var paramsObj: OrderedDictionary<String, JSON> = [:]
         for (k, v) in params.sorted(by: { $0.key < $1.key }) { paramsObj[k] = .string(v) }
         var queryObj: OrderedDictionary<String, JSON> = [:]
@@ -512,7 +587,7 @@ public final class WebServer: @unchecked Sendable {
             "params": .object(paramsObj),
             "query": .object(queryObj),
             "headers": .object(headerObj),
-            "body": .string(request.body.flatMap { String(data: $0, encoding: .utf8) } ?? ""),
+            "body": .string(bodyText),
         ])
         guard let agent = kernel.agent(owner), let hm = agent.handlerModule,
             let bundle = kernel.bundles.get(hm), let routeOwner = bundle as? WebRouteOwner
@@ -520,14 +595,31 @@ public final class WebServer: @unchecked Sendable {
             return jsonHTTP(
                 500, .object(["error": .string("no route owner \(owner.value)")]))
         }
-        let reply = await routeOwner.serveRoute(legId: owner, request: routeRequest, kernel: kernel)
+        let (reply, chunk) = await routeOwner.serveRoute(
+            legId: owner, request: routeRequest, kernel: kernel)
         let status = Int(reply["status"].asInt ?? 200)
+        // ONE DECISION, shared with the octet leg: a reply that HOLDS a chunk is
+        // octet, whatever its length (A13.1).
+        if let chunk {
+            return Self.octetReply(chunk, payloadHeader: reply["payload_header"].asString ?? "{}")
+        }
         guard let contentType = reply["content_type"].asString else {
             return HTTPResponse(status: status, contentType: nil, body: Data())
         }
         return HTTPResponse(
             status: status, contentType: contentType,
             body: Data((reply["body"].asString ?? "").utf8))
+    }
+
+    /// python's octet response: the chunk as the body, the REST of the reply
+    /// dict on `X-Fantastic-Payload` (python `json.dumps(rest)` — DEFAULT
+    /// separators, not the compact ones the JSON body uses), and the field it
+    /// came out of on `X-Fantastic-Bytes-Field`. An EMPTY chunk is still octet —
+    /// content-length 0, not a JSON body.
+    static func octetReply(_ chunk: Data, payloadHeader header: String) -> HTTPResponse {
+        HTTPResponse(
+            status: 200, contentType: octetType, body: chunk,
+            extraHeaders: [(payloadHeader, header), (bytesFieldHeader, "bytes")])
     }
 
     /// The BINARY leg of a `.http` (web_rest) route — python's octet branch of
@@ -571,34 +663,89 @@ public final class WebServer: @unchecked Sendable {
         // GATE — same io_bridge inbound gate as the JSON path; credential on
         // X-Fantastic-Auth. The web_rest leg is the route's owner.
         if let denied = gateWebLeg(
-            kernel: kernel, legId: owner, target: target,
+            kernel: kernel, legId: owner, kind: "call", target: target,
             verb: payload["type"]?.asString ?? "", token: headers["x-fantastic-auth"])
         {
             return jsonHTTP(403, denied)
         }
 
-        // NAMING an execution — dispatch metadata on its own header, not in the
-        // verb payload; carried on the binary envelope as `id`.
-        var header = JSON.object(payload)
+        // THROUGH THE BATCH (A13.3/C37): ONE binary item, so the octet leg
+        // NAMES its execution like the JSON leg — a repeated
+        // `X-Fantastic-Execution-Id` on the same target REPLAYS the recorded
+        // outcome instead of re-running the write, and the kernel produces
+        // python's own refusals for a missing `payload.type` or a rebinding id.
+        // `sendWithBinary` validated none of that: swift answered
+        // `file_bridge: unknown type ""` where python answers
+        // `send: payload.type required`, and stuffed the header's `id` into the
+        // verb payload the target reads.
+        var item = Item(AgentId(target), .object(payload), binary: blob)
         if let execId = headers["x-fantastic-execution-id"], !execId.isEmpty {
-            header["id"] = .string(execId)
+            item.id = execId
         }
-        let (reply, outBody): (JSON, Data) = await KernelTaskLocals.$currentSender.withValue(owner)
-        {
-            await kernel.sendWithBinary(AgentId(target), header, blob)
+        let out = await KernelTaskLocals.$currentSender.withValue(owner) {
+            await kernel.send([item])[0]
         }
         // python answers 204 for a null reply BEFORE it looks for bytes.
-        if reply.isNull { return HTTPResponse(status: 204, contentType: nil, body: Data()) }
-        if !outBody.isEmpty {
-            return HTTPResponse(
-                status: 200, contentType: Self.octetType, body: outBody,
-                extraHeaders: [
-                    // python `json.dumps(rest)` — default separators, ensure_ascii.
-                    ("x-fantastic-payload", pyJsonDumps(reply)),
-                    ("x-fantastic-bytes-field", "bytes"),
-                ])
+        if out.result.isNull { return HTTPResponse(status: 204, contentType: nil, body: Data()) }
+        // THE SAME ONE DECISION as the JSON leg: octet iff the verb returned a
+        // CHUNK. `!outBody.isEmpty` served an empty file as JSON.
+        if let chunk = out.body {
+            return Self.octetReply(chunk, payloadHeader: pyJsonDumps(out.result))
         }
-        return jsonHTTP(200, reply)
+        return jsonHTTP(200, out.result)
+    }
+
+    /// CPython `json.detect_encoding` + `bytes.decode(enc, "surrogatepass")`
+    /// (A13.11). `nil` = the bytes do not decode, which python raises on.
+    ///
+    /// RESIDUAL (D13): `surrogatepass` admits lone surrogates and CPython's
+    /// scanner admits `NaN`/`Infinity`/`-Infinity`; `FantasticJSON` can
+    /// represent neither, so those bodies still answer 400 where python answers
+    /// 204. The ENCODING half below is exact.
+    static func decodeJSONBody(_ b: Data) -> String? {
+        if b.isEmpty { return "" }
+        let n = b.count
+        func at(_ i: Int) -> UInt8 { b[b.startIndex + i] }
+        // BOMs first, widest first — `ff fe 00 00` is UTF-32-LE, and `ff fe`
+        // alone is UTF-16-LE.
+        // Foundation's decoders are LENIENT — they drop a trailing odd byte
+        // instead of failing, which is the difference between python's 500 and a
+        // silent 204 (measured `ff fe 7b`). The unit width is checked here.
+        func wide(_ body: Data, _ enc: String.Encoding, _ unit: Int) -> String? {
+            guard body.count % unit == 0 else { return nil }
+            return String(data: body, encoding: enc)
+        }
+        if n >= 4, at(0) == 0x00, at(1) == 0x00, at(2) == 0xFE, at(3) == 0xFF {
+            return wide(b.dropFirst(4), .utf32BigEndian, 4)
+        }
+        if n >= 4, at(0) == 0xFF, at(1) == 0xFE, at(2) == 0x00, at(3) == 0x00 {
+            return wide(b.dropFirst(4), .utf32LittleEndian, 4)
+        }
+        if n >= 2, at(0) == 0xFE, at(1) == 0xFF {
+            return wide(b.dropFirst(2), .utf16BigEndian, 2)
+        }
+        if n >= 2, at(0) == 0xFF, at(1) == 0xFE {
+            return wide(b.dropFirst(2), .utf16LittleEndian, 2)
+        }
+        if n >= 3, at(0) == 0xEF, at(1) == 0xBB, at(2) == 0xBF {
+            return String(data: b.dropFirst(3), encoding: .utf8)
+        }
+        if n >= 4 {
+            if at(0) == 0 {
+                // `00 00 -- --` is UTF-32-BE; `00 XX -- --` is UTF-16-BE.
+                return at(1) != 0 ? wide(b, .utf16BigEndian, 2) : wide(b, .utf32BigEndian, 4)
+            }
+            if at(1) == 0 {
+                // `XX 00 00 00` is UTF-32-LE; anything else with a null second
+                // byte is UTF-16-LE.
+                return (at(2) != 0 || at(3) != 0)
+                    ? wide(b, .utf16LittleEndian, 2) : wide(b, .utf32LittleEndian, 4)
+            }
+        } else if n == 2 {
+            if at(0) == 0 { return wide(b, .utf16BigEndian, 2) }
+            if at(1) == 0 { return wide(b, .utf16LittleEndian, 2) }
+        }
+        return String(data: b, encoding: .utf8)
     }
 
     private func jsonHTTP(_ status: Int, _ body: JSON) -> HTTPResponse {
@@ -627,8 +774,9 @@ public final class WebServer: @unchecked Sendable {
 
 /// Collects one request (head + body + end), dispatches it to the
 /// `WebServer`'s async router, and writes the response. The connection is KEPT
-/// (python never sends `Connection: close`; measured 46/46 responses keep the
-/// channel open). The async hop into `kernel.send` is the project's established
+/// unless the peer asked otherwise (python never sends `Connection: close` on a
+/// keep-alive cycle — measured 46/46; h11 appends it, and closes, exactly when
+/// the request carried a `close` token or spoke HTTP/1.0). The async hop into `kernel.send` is the project's established
 /// bridge idiom; the context is carried into the completion via `NIOLoopBound`.
 final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable
 {
@@ -667,7 +815,17 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
             let server = self.server
             let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
             let eventLoop = context.eventLoop
-            let keepAlive = h.isKeepAlive
+            // h11 `_keep_alive`, which uvicorn serves behind: a `Connection:
+            // close` token closes, and an HTTP/1.0 peer ALWAYS closes (h11
+            // deliberately does not support 1.0 keep-alive, where NIO's
+            // `isKeepAlive` honours `Connection: keep-alive` on 1.0).
+            let closeToken = h.headers["connection"].contains {
+                $0.split(separator: ",").contains { t in
+                    t.trimmingCharacters(in: .whitespaces).lowercased() == "close"
+                }
+            }
+            let keepAlive =
+                !closeToken && (h.version.major, h.version.minor) >= (1, 1)
             // The web boot pid parents every request task: python serves under
             // `CURRENT_TASK.scope`, so a REST-originated dispatch is a CHILD of
             // the boot task, not a root.
@@ -696,11 +854,19 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
         // starlette omits both on a 204/304 (and on a 1xx).
         let bodyless = response.status == 204 || response.status == 304 || response.status < 200
         if !bodyless {
-            headers.add(name: "content-length", value: String(response.body.count))
+            if response.chunked {
+                headers.add(name: "transfer-encoding", value: "chunked")
+            } else {
+                headers.add(name: "content-length", value: String(response.body.count))
+            }
         }
         if let ct = response.contentType, !bodyless {
             headers.add(name: "content-type", value: ct)
         }
+        // h11 `_clean_up_response_headers_for_sending`: when the cycle will not
+        // be kept alive it APPENDS `connection: close` — last, after the framing
+        // headers — and uvicorn writes it lowercase like the rest.
+        if !keepAlive { headers.add(name: "connection", value: "close") }
         let respHead = HTTPResponseHead(
             version: .http1_1,
             status: HTTPResponseStatus(
@@ -733,14 +899,21 @@ public struct HTTPResponse: Sendable {
     /// Extra response headers, IN ORDER (python emits a list of pairs; a Swift
     /// Dictionary reordered them).
     let extraHeaders: [(String, String)]
+    /// No `content-length`, `transfer-encoding: chunked` instead — starlette's
+    /// `StreamingResponse` without a declared length. The file proxy hands the
+    /// length it learned from the first chunk, and a SIZE-0 file has none, so it
+    /// streams chunked exactly as python does.
+    let chunked: Bool
 
     init(
-        status: Int, contentType: String?, body: Data, extraHeaders: [(String, String)] = []
+        status: Int, contentType: String?, body: Data, extraHeaders: [(String, String)] = [],
+        chunked: Bool = false
     ) {
         self.status = status
         self.contentType = contentType
         self.body = body
         self.extraHeaders = extraHeaders
+        self.chunked = chunked
     }
 }
 

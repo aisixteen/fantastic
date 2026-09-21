@@ -127,6 +127,7 @@ impl From<SendFail> for TransportError {
 /// python's `spawn=lambda name, coro: kernel.ctx.spawn_task(rec["id"], name, coro)`
 /// — the heartbeat is the connector's OWN registered work, so it has a `ps` row
 /// and a `cancel` that reaches it.
+#[derive(Clone)]
 pub struct RelaySpawn {
     kernel: Arc<Kernel>,
     agent_id: AgentId,
@@ -218,6 +219,7 @@ impl RelayTransport {
         let connected = Arc::new(AtomicBool::new(false));
         let relay_pending: RelayPending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let identity: SharedIdentity = Arc::new(std::sync::Mutex::new(identity));
+        let stop = Arc::new(tokio::sync::Notify::new());
 
         // Eager first dial. On success seed the initial source; on failure with
         // reconnect off, fail the boot; otherwise heal in the background.
@@ -235,8 +237,12 @@ impl RelayTransport {
                 None
             }
         };
-        // Advertise our directory identity on the eager socket (no-op if not
-        // connected / plain peer). Each later reconnect re-announces (in supervise).
+        // python's `_on_socket_open`: the beat, then the announce — BOTH only
+        // where a socket came up. Each later reconnect repeats the pair (in
+        // supervise).
+        if initial.is_some() {
+            start_heartbeat(&spawn, &sink, &closed, &connected, &stop, heartbeat_secs);
+        }
         send_announce(&sink, &connected, &identity).await;
 
         let supervisor = tokio::spawn(supervise(
@@ -251,21 +257,10 @@ impl RelayTransport {
             Arc::clone(&identity),
             reconnect_secs,
             initial,
+            spawn.clone(),
+            Arc::clone(&stop),
+            heartbeat_secs,
         ));
-        // python `_start_heartbeat`: `heartbeat <= 0` means OFF.
-        let stop = Arc::new(tokio::sync::Notify::new());
-        if heartbeat_secs > 0.0 {
-            spawn.spawn(
-                "relay_heartbeat",
-                heartbeat_loop(
-                    Arc::clone(&sink),
-                    Arc::clone(&closed),
-                    Arc::clone(&connected),
-                    Arc::clone(&stop),
-                    heartbeat_secs,
-                ),
-            );
-        }
 
         Ok(Arc::new(Self {
             partner,
@@ -422,6 +417,9 @@ async fn supervise(
     identity: SharedIdentity,
     reconnect_secs: f64,
     mut initial: Option<SplitStream<WsStream>>,
+    spawn: RelaySpawn,
+    stop: Arc<tokio::sync::Notify>,
+    heartbeat_secs: f64,
 ) {
     let backoff = Duration::from_secs_f64(reconnect_secs.max(0.0));
     loop {
@@ -440,7 +438,9 @@ async fn supervise(
                     let (s, source) = stream.split();
                     *sink.lock().await = Some(s);
                     connected.store(true, Ordering::SeqCst);
-                    // Re-advertise: the relay drops our state on disconnect.
+                    // python `_on_socket_open` again: re-beat, then re-advertise
+                    // (the relay drops our state on disconnect).
+                    start_heartbeat(&spawn, &sink, &closed, &connected, &stop, heartbeat_secs);
                     send_announce(&sink, &connected, &identity).await;
                     source
                 }
@@ -486,6 +486,36 @@ async fn send_announce(sink: &SharedSink, connected: &AtomicBool, identity: &Sha
 
 /// Send the relay's no-reply `keepalive` verb every `HEARTBEAT_SECS` while
 /// connected, refreshing the peer's `last_seen` so it stays `green`.
+/// python `_start_heartbeat`: cancel whatever beat is running, then spawn a new
+/// one — and `heartbeat <= 0` means OFF. Called from the socket-open path ONLY:
+/// python starts it in `_on_socket_open`, so a leg whose dial failed carries no
+/// heartbeat task and no `relay_heartbeat` row in `ps`. Rust used to spawn it at
+/// construction, so an unreachable relay showed a row python never has.
+fn start_heartbeat(
+    spawn: &RelaySpawn,
+    sink: &SharedSink,
+    closed: &Arc<AtomicBool>,
+    connected: &Arc<AtomicBool>,
+    stop: &Arc<tokio::sync::Notify>,
+    every_secs: f64,
+) {
+    if every_secs <= 0.0 {
+        return;
+    }
+    // python cancels `_hb_task` before replacing it — one beat per transport.
+    stop.notify_waiters();
+    spawn.spawn(
+        "relay_heartbeat",
+        heartbeat_loop(
+            Arc::clone(sink),
+            Arc::clone(closed),
+            Arc::clone(connected),
+            Arc::clone(stop),
+            every_secs,
+        ),
+    );
+}
+
 async fn heartbeat_loop(
     sink: SharedSink,
     closed: Arc<AtomicBool>,
@@ -566,7 +596,7 @@ impl BridgeTransport for RelayTransport {
             .to_string();
         let mut inner = header;
         if let Value::Object(m) = &mut inner {
-            m.remove("_binary_path");
+            m.shift_remove("_binary_path");
         }
         let mut env = json!({"type":"send","target":self.partner,"payload":inner});
         if !inner_path.is_empty() {
@@ -665,6 +695,33 @@ impl BridgeTransport for RelayTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// python starts the beat in `_on_socket_open`, so a leg whose eager dial
+    /// FAILED has no `relay_heartbeat` task at all — and no `ps` row for one.
+    /// Rust spawned it at construction, so an unreachable relay carried a row
+    /// python never shows (caught by the `kernel ps` wire probe).
+    #[tokio::test]
+    async fn a_failed_dial_starts_no_heartbeat() {
+        let kernel = Arc::new(Kernel::new());
+        let t = RelayTransport::connect(
+            "ws://127.0.0.1:1",
+            "A",
+            "",
+            "B",
+            60.0,
+            1.0,
+            json!({}),
+            RelaySpawn::new(&kernel, &AgentId::from("relay")),
+        )
+        .await
+        .expect("reconnect > 0 swallows the first dial failure");
+        let rows = kernel.tasks.rows();
+        assert!(
+            rows.iter().all(|r| r["verb"] != "relay_heartbeat"),
+            "a beat was spawned with no socket: {rows:?}"
+        );
+        assert!(!t.is_live());
+    }
 
     #[test]
     fn classify_text_routes_partner_directory_and_replies() {

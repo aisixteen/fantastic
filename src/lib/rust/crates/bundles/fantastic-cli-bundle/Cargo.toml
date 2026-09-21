@@ -13,4 +13,7 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# The ROOT LOADER bundle — tests need it registered so the root answers the
+# verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
+fantastic-core = { path = "../fantastic-core" }
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -105,9 +105,8 @@
         binary: URL, workdir: URL, agentId: String = "kernel_state",
         args: [String: String] = [:]
     ) throws -> JSON {
-        // Python's root id is `kernel_state` (Swift/Rust use `core`) — the
-        // root-id asymmetry is BY DESIGN, so the default targets python's
-        // actual root rather than a hardcoded `core`.
+        // Every runtime's root is `kernel_state` since C12 — the asymmetry is
+        // gone, so one default targets all of them.
         let proc = Process()
         proc.executableURL = binary
         proc.currentDirectoryURL = workdir
@@ -181,13 +180,17 @@
 
             // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result
+            let swReply = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result
 
-            // Both must answer with an `id` field. Root ids differ BY
-            // DESIGN (python=kernel_state, swift=core), so assert each runtime's
-            // own root id rather than cross-runtime equality.
-            #expect(pyReply["id"].asString == "kernel_state", "python root id != kernel_state")
-            #expect(swReply["id"].asString == "core", "swift root id != core")
+            // ONE ROOT ID ACROSS RUNTIMES (C12): the asymmetry that forced a
+            // per-runtime assertion is gone, so this is a cross-runtime equality
+            // check now — the same id AND the same handler_module.
+            #expect(pyReply["id"].asString == swReply["id"].asString, "root ids diverged")
+            #expect(swReply["id"].asString == "kernel_state", "swift root id != kernel_state")
+            #expect(
+                pyReply["handler_module"].asString == swReply["handler_module"].asString,
+                "root handler_module diverged")
+            #expect(swReply["handler_module"].asString == "kernel_state.tools")
         }
 
         @Test func listAgentsShape() async throws {
@@ -202,7 +205,7 @@
 
             // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
+            let swReply = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("list_agents")]))])[0].result
 
             // Top-level shape: both must have an `agents` array.
             #expect(pyReply["agents"].asArray != nil, "python list_agents lacks 'agents'")
@@ -229,7 +232,7 @@
 
             let pyReply = try pythonReflect(binary: binary, workdir: tmp)
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result
+            let swReply = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result
 
             let gone = [
                 "transports", "primitive", "envelope", "universal_verb",
@@ -238,7 +241,7 @@
             ]
             for (label, r, root, runtime) in [
                 ("python", pyReply, "kernel_state", "python"),
-                ("swift", swReply, "core", "swift"),
+                ("swift", swReply, "kernel_state", "swift"),
             ] {
                 #expect(r["id"].asString == root, "\(label) reflect id != \(root)")
                 #expect(r["sentence"].asString != nil, "\(label) reflect lacks sentence")
@@ -297,9 +300,9 @@
             // Swift: `startKernel(workdir:)` mints+persists on first boot; a
             // second boot of the same dir rehydrates the same guid from disk.
             let sw1 = try await startKernel(workdir: swDir.path)
-            let swGuid1 = await sw1.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"].asString
+            let swGuid1 = await sw1.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"].asString
             let sw2 = try await startKernel(workdir: swDir.path)
-            let swGuid2 = await sw2.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"].asString
+            let swGuid2 = await sw2.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"].asString
 
             // Shape: 32 lowercase-hex on every runtime.
             for (label, g) in [("python", pyGuid1), ("swift", swGuid1)] {
@@ -336,8 +339,8 @@
             let pyIds = try pythonReflect(
                 binary: binary, workdir: tmp, args: ["tree": "ids"])
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swIds = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect"), "tree": .string("ids")]))])[0].result
-            for (label, r, root) in [("python", pyIds, "kernel_state"), ("swift", swIds, "core")] {
+            let swIds = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect"), "tree": .string("ids")]))])[0].result
+            for (label, r, root) in [("python", pyIds, "kernel_state"), ("swift", swIds, "kernel_state")] {
                 let arr = r["tree"].asArray
                 #expect(arr != nil, "\(label) tree=ids not an array")
                 #expect(arr?.first?.asString == root, "\(label) tree=ids root not first")
@@ -345,7 +348,7 @@
 
             let pyB = try pythonReflect(
                 binary: binary, workdir: tmp, args: ["bundles": "all"])
-            let swB = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect"), "bundles": .string("all")]))])[0].result
+            let swB = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect"), "bundles": .string("all")]))])[0].result
             for (label, r) in [("python", pyB), ("swift", swB)] {
                 let arr = r["bundles"].asArray
                 #expect(arr != nil && !(arr!.isEmpty), "\(label) bundles=all empty")
@@ -379,7 +382,7 @@
 
             // And Swift's reflect readme=true returns the same bytes.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect"), "readme": .bool(true)]))])[0].result
+            let swReply = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect"), "readme": .bool(true)]))])[0].result
             #expect(
                 swReply["readme"].asString == pyReadme,
                 "Swift reflect readme=true diverged from Python")

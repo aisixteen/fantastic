@@ -501,15 +501,36 @@ func routeReply(
         // (dedup/join across retries) and declare a retry budget; the kernel
         // validates all three and a bad value settles that one call as a refusal
         // the model can read.
-        var item = Item(AgentId(target), .object(payload))
+        // THE `bytes` ARGUMENT IS RAW BYTES, NOT A JSON STRING (A13.19/D15).
+        // Python's parser returns `raw.encode("utf-8")` for the one argument
+        // named `bytes`, so the value that reaches a handler is TYPED — which is
+        // why `file_bridge.write_stream` can refuse `bytes: "abc"` from a wire
+        // client while a model's `<bytes>` document still writes. Swift's `JSON`
+        // has no bytes case, so the item's BINARY CHANNEL is that type: the key
+        // leaves the JSON header and the document rides beside it, raw. Carrying
+        // it as a JSON string made the two indistinguishable, and swift wrote
+        // `abc` where python refused.
+        var document: Data? = nil
+        if case .string(let text)? = payload["bytes"] {
+            document = Data(text.utf8)
+            payload.removeValue(forKey: "bytes")
+        }
+        var item = Item(AgentId(target), .object(payload), binary: document)
         item.timeout = sendTimeout
         // `exec_id`, not `id`: arguments are INLINE now, so a bare `<id>` would
         // collide with the many verbs whose payload has one (`delete_agent`,
         // `update_agent`, …). The parser keeps the name at the call level; here
-        // it becomes the item's execution name.
-        if let execId = args["exec_id"]?.asString, !execId.isEmpty { item.id = execId }
-        if let t = args["timeout"]?.asDouble { item.timeout = t }
-        if let r = args["retries"]?.asInt { item.retries = UInt32(r) }
+        // it becomes the item's execution name — forwarded RAW (C38), tag-typed
+        // and untouched, so the KERNEL validates it: an int `exec_id` reaches
+        // python's join-by-int semantics, and a malformed `timeout`/`retries`
+        // reaches the kernel's exact `bad_arg` refusal. This used to coerce with
+        // `.asString`/`.asDouble`/`.asInt`, which silently DROPPED a value of
+        // the wrong shape (never attempting the join python performs for an int
+        // exec_id; defaulting a bad timeout to "wait forever" instead of
+        // refusing) — a caller's mistake vanished instead of being reported.
+        if let execId = args["exec_id"] { item.rawId = execId }
+        if let t = args["timeout"] { item.rawTimeout = t }
+        if let r = args["retries"] { item.rawRetries = r }
         items.append(item)
         // Fire-and-forget: it acted, nobody awaits the answer. Deliberately NOT
         // counted in M — the model is owed a count of what it will receive.

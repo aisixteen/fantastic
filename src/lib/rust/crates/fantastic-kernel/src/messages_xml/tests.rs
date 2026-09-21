@@ -93,6 +93,27 @@ fn a_float_is_written_the_way_python_repr_writes_it() {
 }
 
 #[test]
+fn small_floats_use_a_two_digit_exponent() {
+    // C51: python `repr(1e-05)` == "1e-05" — rust `format!("{f:e}")` writes
+    // "1e-5" (one digit); only the SIGN was ever patched, not the width.
+    assert!(row_to_xml(&row(json!({"ts": 1e-5}))).contains("ts=\"1e-05\""));
+    assert!(row_to_xml(&row(json!({"ts": 1.5e-7}))).contains("ts=\"1.5e-07\""));
+    // The positive side already had two digits at this magnitude; pin it too.
+    assert!(row_to_xml(&row(json!({"ts": 1.5e17}))).contains("ts=\"1.5e+17\""));
+}
+
+#[test]
+fn a_wide_integer_writes_its_exact_digits_not_a_float() {
+    // C74/C51: an arbitrary-precision integer (wider than i64/u64) is still
+    // an int on the python side — `str(v)`, exact digits, never routed
+    // through f64 (which would lose precision and misclassify it as a float).
+    let big =
+        serde_json::Number::from_string_unchecked("123456789012345678901234567890".to_string());
+    assert!(row_to_xml(&row(json!({"count": Value::Number(big)})))
+        .contains("count=\"123456789012345678901234567890\""));
+}
+
+#[test]
 fn many_rows_read_back_in_order() {
     let mut doc = String::from(HEADER);
     for i in 1..=5 {

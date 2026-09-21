@@ -119,6 +119,102 @@ struct CLIModeTests {
                 }
                 """)
     }
+
+    // C80: `--ledger-cap` is stripped from argv only when a value follows (a
+    // trailing bare flag stays, python's `i + 1 < len(argv)` guard); absent
+    // ⇒ `FANTASTIC_LEDGER_CAP`; `"inf"` ⇒ unbounded.
+    @Test func ledgerCapFlagIsStripped() {
+        let (argv, cap, wasSet) = FantasticCLI.ledgerCapFrom(
+            ["kernel", "--ledger-cap", "42", "reflect"], env: [:])
+        #expect(argv == ["kernel", "reflect"])
+        #expect(cap == 42)
+        #expect(wasSet)
+
+        let (argv2, cap2, wasSet2) = FantasticCLI.ledgerCapFrom(["kernel", "reflect"], env: [:])
+        #expect(argv2 == ["kernel", "reflect"])
+        #expect(cap2 == nil)
+        #expect(!wasSet2)
+
+        let (argv3, cap3, wasSet3) = FantasticCLI.ledgerCapFrom(
+            ["kernel", "--ledger-cap", "inf"], env: [:])
+        #expect(argv3 == ["kernel"])
+        #expect(cap3 == nil)
+        #expect(wasSet3)
+
+        // A trailing bare flag (no value follows) is left untouched — python
+        // requires `i + 1 < len(argv)` before it treats it as the flag.
+        let (argv4, _, wasSet4) = FantasticCLI.ledgerCapFrom(["kernel", "--ledger-cap"], env: [:])
+        #expect(argv4 == ["kernel", "--ledger-cap"])
+        #expect(!wasSet4)
+
+        // The env fallback, only consulted when the flag is absent.
+        let (_, cap5, wasSet5) = FantasticCLI.ledgerCapFrom(
+            ["kernel"], env: ["FANTASTIC_LEDGER_CAP": "7"])
+        #expect(cap5 == 7)
+        #expect(wasSet5)
+    }
+
+    // A14.3 — `init` is matched by NAME, like `reflect`, before the generic
+    // `len>=2` one-shot case; a single-word `init` still routes here.
+    @Test func initRoutesLikeReflect() {
+        #expect(
+            FantasticCLI.mode(for: ["init", "static_loader", "./fantastic.yaml"])
+                == .initCmd(["static_loader", "./fantastic.yaml"]))
+        #expect(FantasticCLI.mode(for: ["init"]) == .initCmd([]))
+        #expect(
+            FantasticCLI.initUsageText
+                == "usage: fantastic init <loader_bundle> <manifest>\n"
+                + "   e.g. fantastic init static_loader ./fantastic.yaml")
+        #expect(
+            FantasticCLI.initLockRefusal(pid: 55)
+                == "[init] another fantastic owns this dir (pid=55). Stop it first.")
+    }
+
+    // A14.13 — the daemon lifecycle banner texts, pinned as python spells
+    // them (`longrun.py:62,79-83,124,129,207`).
+    @Test func daemonBannersArePythonText() {
+        #expect(DaemonMode.upLine == "[kernel] up")
+        #expect(DaemonMode.tearingDownLine == "[kernel] tearing down agents...")
+        #expect(DaemonMode.downLine == "[kernel] down")
+        #expect(DaemonMode.stopSignalLine("SIGTERM") == "\n[kernel] SIGTERM — shutting down...")
+        #expect(DaemonMode.stopSignalLine("SIGINT") == "\n[kernel] SIGINT — shutting down...")
+        #expect(
+            DaemonMode.bootRaisedLine(id: AgentId("np"), error: .string("No module named 'nope'"))
+                == "  [kernel] boot 'np' raised: No module named 'nope'")
+    }
+
+    // A14.15 — web composes by `handler_module == "web.tools"`, never by the
+    // literal id `"web"`: a renamed web agent still composes, and an
+    // unrelated agent id'd `web` does not.
+    @Test func webDetectedByHandlerModule() {
+        let reg = BundleRegistry()
+        reg.register("web.tools", DaemonTestNoop())
+        reg.register("noop.tools", DaemonTestNoop())
+        let k = Kernel(storage: .inMemory, bundles: reg)
+        let root = Agent(id: AgentId(ROOT_ID), handlerModule: nil, parentId: nil)
+        k.register(root)
+        k.setRoot(root)
+        #expect(!DaemonMode.hasWebAgent(k), "no web agent yet")
+
+        let renamed = Agent(
+            id: AgentId("myweb"), handlerModule: "web.tools", parentId: root.id)
+        k.register(renamed)
+        #expect(DaemonMode.hasWebAgent(k), "a renamed web agent still composes")
+
+        let k2 = Kernel(storage: .inMemory, bundles: reg)
+        let root2 = Agent(id: AgentId(ROOT_ID), handlerModule: nil, parentId: nil)
+        k2.register(root2)
+        k2.setRoot(root2)
+        let impostor = Agent(
+            id: AgentId("web"), handlerModule: "noop.tools", parentId: root2.id)
+        k2.register(impostor)
+        #expect(!DaemonMode.hasWebAgent(k2), "an id merely SPELLED web is not the web bundle")
+    }
+}
+
+private struct DaemonTestNoop: AgentBundle {
+    let name = "noop"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { .null }
 }
 
 @Suite("CLI .env autoload")
@@ -203,10 +299,11 @@ struct CLIBootstrapTests {
         try FileManager.default.createDirectory(at: memo, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        try #"{"id": "core", "handler_module": null, "parent_id": null, "guid": "deadbeef"}"#
+        try
+            #"{"id": "kernel_state", "handler_module": null, "parent_id": null, "guid": "deadbeef"}"#
             .write(
                 to: dot.appendingPathComponent("agent.json"), atomically: true, encoding: .utf8)
-        try #"{"id": "memo", "handler_module": "cli.tools", "parent_id": "core"}"#
+        try #"{"id": "memo", "handler_module": "cli.tools", "parent_id": "kernel_state"}"#
             .write(
                 to: memo.appendingPathComponent("agent.json"), atomically: true, encoding: .utf8)
 
@@ -225,5 +322,82 @@ struct CLIBootstrapTests {
         #expect(
             FileManager.default.fileExists(
                 atPath: dir.appendingPathComponent(".fantastic/agent.json").path))
+    }
+
+    // A14.6: a one-shot boots the ROOT LOADER before the call — the
+    // observable effect is the debounced record writer existing afterward
+    // (installed only by the root's OWN `boot` verb, `kernel_state.tools`).
+    // Before this fix, rust/swift never sent that boot at all: no pump, no
+    // ledger, no record writer for a bare one-shot RPC.
+    @Test func oneShotBootsTheRootBeforeTheCall() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fantastic-oneshot-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let kernel = try await FantasticCLI.bootDiskBacked(cwd: dir.path)
+        #expect(kernel.recordWriter == nil, "not installed before the one-shot's own boot send")
+        let reply = await FantasticCLI.dispatchOneShot(
+            kernel: kernel, target: "kernel", verb: "reflect", rest: [])
+        #expect(reply["id"].asString == "kernel_state")
+        #expect(kernel.recordWriter != nil, "the root's boot verb installs it")
+    }
+
+    /// A14.18: every non-daemon mode ends with an idempotent kernel shutdown
+    /// (python's `atexit` → `Kernel.shutdown`) — after `dispatchOneShot`'s
+    /// own root boot, calling `shutdown()` (what `runOneShotRPC` does once
+    /// the lock is released) must complete cleanly and mark it done, exactly
+    /// as it would from the real process-exit path.
+    @Test func oneShotRunsKernelShutdownAtExit() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fantastic-oneshot-shutdown-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let kernel = try await FantasticCLI.bootDiskBacked(cwd: dir.path)
+        _ = await FantasticCLI.dispatchOneShot(
+            kernel: kernel, target: "kernel", verb: "reflect", rest: [])
+        #expect(!kernel.shutdownComplete)
+        await kernel.shutdown()
+        #expect(kernel.shutdownComplete)
+        // Idempotent — a second call (the atexit safety net, if the in-loop
+        // path already ran) is a no-op, never a crash or a double walk.
+        await kernel.shutdown()
+        #expect(kernel.shutdownComplete)
+    }
+
+    // A14.3: `init <loader_bundle> <manifest>` creates the loader agent
+    // under the root and boots it (its own boot reads the manifest — the
+    // kernel never parses YAML).
+    //
+    // The manifest read obeys the running-dir law (`file_bridge`'s cold
+    // bootstrap clamp is the PROCESS's real cwd, independent of the `cwd`
+    // `bootDiskBacked` passes to `startKernel` for the kernel's OWN
+    // `.fantastic` root — measured, not assumed). Sibling suites share this
+    // process and cannot `chdir`, so the fixture comes to the real cwd under
+    // a unique name, exactly as `FantasticBundlesTests/StaticLoaderTests`
+    // already does for the same bundle.
+    @Test func initCreatesTheLoaderUnderTheRoot() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fantastic-init-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fixtureName = ".init_fixture_\(UUID().uuidString.prefix(8))"
+        let fixtureDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(fixtureName)
+        try FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+        let manifestPath = "\(fixtureName)/fantastic.yaml"
+        try "agents: []\n".write(
+            to: fixtureDir.appendingPathComponent("fantastic.yaml"), atomically: true,
+            encoding: .utf8)
+
+        let kernel = try await FantasticCLI.bootDiskBacked(cwd: dir.path)
+        let reply = await FantasticCLI.dispatchInit(
+            kernel: kernel, loaderName: "static_loader", manifest: manifestPath)
+        #expect(reply["id"].asString == "static_loader", "\(reply.serialize())")
+        #expect(reply["handler_module"].asString == "static_loader.tools")
+        #expect(kernel.agent(AgentId("static_loader")) != nil)
     }
 }

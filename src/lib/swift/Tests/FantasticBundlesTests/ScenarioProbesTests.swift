@@ -21,7 +21,7 @@ private func probeKernel(_ agents: [JSON] = []) async -> Kernel {
     r.register(PURCHASE_MODULE, PurchaseProbe())
     r.register(USER_MODULE, UserProbe())
     let kernel = Kernel(storage: .inMemory, bundles: r)
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     for spec in [
@@ -31,8 +31,8 @@ private func probeKernel(_ agents: [JSON] = []) async -> Kernel {
     ] + agents {
         var rec = spec
         rec["type"] = "create_agent"
-        rec["parent_id"] = "core"
-        let out = await kernel.send([Item("core", rec)])[0].result
+        rec["parent_id"] = "kernel_state"
+        let out = await kernel.send([Item("kernel_state", rec)])[0].result
         #expect(out["error"].isNull, "\(out.serialize())")
     }
     return kernel

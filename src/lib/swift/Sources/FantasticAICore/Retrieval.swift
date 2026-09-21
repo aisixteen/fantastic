@@ -38,15 +38,6 @@ func aiAsId(_ v: JSON) -> Int64? {
     }
 }
 
-/// Python's `text[:length]` for a scalar array — a NEGATIVE length counts from
-/// the end (`abcdefghij`[: -3] is `abcdefg`), where a clamp to 0 returned
-/// nothing.
-private func pySlicePrefix(_ a: [Unicode.Scalar], _ length: Int) -> [Unicode.Scalar] {
-    if length >= 0 { return Array(a.prefix(length)) }
-    let end = a.count + length
-    return end <= 0 ? [] : Array(a.prefix(end))
-}
-
 /// `needle` as a CODE-POINT subsequence of `hay`.
 ///
 /// `String.contains` compares Characters under canonical equivalence: it cannot
@@ -168,6 +159,12 @@ extension AIBackend {
             ])
         }
         let offset = max(0, rawOffset)
+        if length < 0 {
+            return .object([
+                "error": .string("pull: length must not be negative"),
+                "reason": .string("bad_arg"),
+            ])
+        }
         if length > cap {
             return badArg(
                 "pull: length \(length) exceeds the \(cap)-char page cap — a page must "
@@ -180,12 +177,10 @@ extension AIBackend {
         else {
             // A fold id: its body is on the row itself.
             for r in loadHistory(agent: agent, kernel: kernel) where isFold(r) && rowId(r) == pid {
-                // UNCLAMPED AND ON CODE POINTS, as python's slice is: a negative
-                // `length` counts from the END of the body and `next_offset`
-                // carries that negative number back, where a `max(0, …)` answered
-                // an empty page. `str(r.get("body") or "")` is the text.
+                // ON CODE POINTS, as python's slice is (a negative `length` is
+                // refused above). `str(r.get("body") or "")` is the text.
                 let text = Array((pyTruthy(r["body"]) ? pyStr(r["body"]) : "").unicodeScalars)
-                let page = pySlicePrefix(text, length)
+                let page = Array(text.prefix(length))
                 return .object([
                     "pid": .integer(pid),
                     "offset": .integer(0),

@@ -32,8 +32,8 @@ pub const CURRENT_VERSION: u32 = 1;
 /// {
 ///   "version": 1,
 ///   "agents": [
-///     { "id": "core", "parent_id": null, "handler_module": null, "meta": {} },
-///     { "id": "web_8888", "parent_id": "core", "handler_module": "web.tools",
+///     { "id": "kernel_state", "parent_id": null, "handler_module": null, "meta": {} },
+///     { "id": "web_8888", "parent_id": "kernel_state", "handler_module": "web.tools",
 ///       "meta": { "port": 8888 } },
 ///     ...
 ///   ]
@@ -93,16 +93,16 @@ mod tests {
     fn root_finds_orphan_entry() {
         let s = KernelState {
             version: 1,
-            agents: vec![rec("core", None), rec("web", Some("core"))],
+            agents: vec![rec("kernel_state", None), rec("web", Some("kernel_state"))],
         };
-        assert_eq!(s.root().map(|r| r.id.as_str()), Some("core"));
+        assert_eq!(s.root().map(|r| r.id.as_str()), Some("kernel_state"));
     }
 
     #[test]
     fn round_trips_through_json() {
         let s = KernelState {
             version: 1,
-            agents: vec![rec("core", None), rec("a", Some("core"))],
+            agents: vec![rec("kernel_state", None), rec("a", Some("kernel_state"))],
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: KernelState = serde_json::from_str(&json).unwrap();

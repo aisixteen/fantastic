@@ -223,6 +223,9 @@ async def _write_atomic(kernel, fb: str, path: str, data: bytes):
         )
     )[0]["result"]
     if not isinstance(r, dict) or r.get("error"):
+        # The tmp sibling is debris now (a refused rename left it on disk,
+        # measured 2026-09-16); best-effort, the refusal is what is answered.
+        await kernel.send([{"target": fb, "payload": {"type": "delete", "path": tmp}}])
         return r if isinstance(r, dict) else {"error": str(r)}
     return None
 
@@ -230,7 +233,7 @@ async def _write_atomic(kernel, fb: str, path: str, data: bytes):
 def _ckpt_path(path: str, ckpt_id: int | str) -> str:
     # `/` in the document path would nest under .ckpt; flatten it so every
     # pre-image of one document lives in ONE listable dir.
-    return f"{CKPT_DIR}/{path.replace('/', '__')}/{ckpt_id}"
+    return f"{CKPT_DIR}/{str(path).replace('/', '__')}/{ckpt_id}"
 
 
 async def _if_match_guard(kernel, fb: str, path: str, want: str | None):

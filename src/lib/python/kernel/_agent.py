@@ -200,7 +200,7 @@ _SYSTEM_VERB_DOCS = {
         "that agent's `pull`."
     ),
     "rows_read": (
-        "args: agent:str (req), after:int?, limit:int?. PRIVILEGED (a wildcard does "
+        "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a wildcard does "
         "not carry it). That agent's "
         "rows WHOLE (content included), oldest first — {rows:[…], next?}. The "
         "hydration read; agents read digests through `messages` instead."
@@ -227,6 +227,19 @@ _SYSTEM_VERB_DOCS = {
 }
 
 
+def _json_safe(o):
+    """A reply body a JSON wire can carry: bytes become `<bytes:N>` (the telemetry
+    rule), everything else passes through. `kernel ledger` over REST answered HTTP
+    500 on the first `read_stream` outcome it held (measured 2026-09-16)."""
+    if isinstance(o, (bytes, bytearray)):
+        return f"<bytes:{len(o)}>"
+    if isinstance(o, dict):
+        return {k: _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v) for v in o]
+    return o
+
+
 def _as_id(x) -> int | None:
     """A message id as an int: an int, or its decimal string (a model may quote
     what it copied out of a tag). Anything else is not an id."""
@@ -234,7 +247,7 @@ def _as_id(x) -> int | None:
         return None
     if isinstance(x, int):
         return x if x > 0 else None
-    if isinstance(x, str) and x.isdigit():
+    if isinstance(x, str) and x.isdecimal():
         return int(x)
     return None
 
@@ -480,6 +493,15 @@ class Agent:
             return {"index": self._readme_index()}
         d = self._docs_dir
         safe = sel.strip("/").replace("\\", "/")
+        # LEXICAL clamp, then EXACT key membership — never the filesystem's
+        # opinion: `a/../b` used to be `no doc` only because the OS could not
+        # traverse a missing `a`, and a case-insensitive disk served `TOPIC`
+        # for `topic` (measured 2026-09-16).
+        parts = safe.split("/")
+        if not safe or any(p in ("", ".", "..") for p in parts):
+            return {"error": f"bad key {sel!r}", "keys": self._readme_keys()}
+        if safe not in self._readme_keys():
+            return {"error": f"no doc {sel!r}", "keys": self._readme_keys()}
         f = d / (safe + ".md")
         try:
             f.resolve().relative_to(d.resolve())  # clamp inside docs/
@@ -1064,7 +1086,7 @@ class Agent:
                     out = outcome(d.pid, CANCELLED, {"cancelled": True})
                     d.exec_fut.set_result(out)
                     self._stamp_call(d.pid, out)
-                    self.ctx.ledger_settled()
+                    self.ctx.ledger_settled(d.pid)
                 raise
             if d.task.cancelled():
                 return self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
@@ -1107,7 +1129,7 @@ class Agent:
                 out["attempts"] = row["attempts"]
             d.exec_fut.set_result(out)
             self._stamp_call(d.pid, out)
-            self.ctx.ledger_settled()
+            self.ctx.ledger_settled(d.pid)
         return out
 
     def _stamp_call(self, pid: int | None, out: dict) -> None:
@@ -2199,7 +2221,7 @@ class Agent:
         return {"tasks": tasks, "next": nxt}
 
     def _verb_messages(self, payload: dict) -> dict:
-        """args: ids:list[int] (req), limit:int?, after:int?. Rows by id at DIGEST
+        """args: ids:list[int|str] (req), limit:int?, after:int|str?. Rows by id at DIGEST
         resolution, gated INSIDE: the caller's own rows always; another agent's only
         when that owner's `callable_by` names the caller for `messages` (the same
         ingress check `_gate` runs, re-run here against the OWNER because a root verb
@@ -2265,17 +2287,25 @@ class Agent:
                 d["title"] = row["title"]
             if row.get("level"):
                 d["level"] = row["level"]
-            if row.get("refs"):
-                d["refs"] = len(row["refs"])
+            refs = row.get("refs")
+            if refs:
+                # A caller-written row may hold anything; a digest never raises.
+                d["refs"] = (
+                    len(refs) if isinstance(refs, (list, tuple, dict, str)) else 1
+                )
             if row.get("kind") in ("call", "task"):
                 d["verb"] = row.get("verb")
                 if row.get("name"):
                     d["name"] = row["name"]
-                if row.get("outcome"):
-                    d["status"] = row["outcome"].get("status")
+                outcome = row.get("outcome")
+                if outcome:
+                    d["status"] = (
+                        outcome.get("status") if isinstance(outcome, dict) else None
+                    )
             elif row.get("kind") == "view":
                 # a view digest says how much it holds, never the array itself
-                d["ids"] = len(row.get("ids") or [])
+                ids = row.get("ids") or []
+                d["ids"] = len(ids) if isinstance(ids, (list, tuple, dict, str)) else 1
                 d["budget"] = row.get("budget")
                 d["title"] = row.get("why")
             out.append(d)
@@ -2299,7 +2329,7 @@ class Agent:
         return {"rows": kept, "refused": refused, "next": nxt}
 
     def _verb_rows_read(self, payload: dict) -> dict:
-        """args: agent:str (req), after:int?, limit:int?. That agent's rows WHOLE —
+        """args: agent:str (req), after:int|str?, limit:int?. That agent's rows WHOLE —
         content included, oldest first — {rows:[…], next:int|None}.
 
         PRIVILEGED: a wildcard grant never carries it, so reaching it takes a
@@ -2410,7 +2440,7 @@ class Agent:
                 # digest rows {id, target, verb, status, attempts, bytes, head, title}
                 # here, full body only via {type:'ledger', id}. Same in rust and swift.
                 # Kernel change — waiting on explicit approval, python first.
-                entry["outcome"] = out
+                entry["outcome"] = _json_safe(out)
             else:
                 entry["status"] = "in_flight"
             rows.append(entry)
@@ -2446,13 +2476,6 @@ class Agent:
         """No args. The agent half of a graceful stop: drain, the `shutdown` verb
         to every agent that advertises it, quiet, cancel the rest. The kernel keeps
         serving; the persister catches up. Root control surface only."""
-        if self.parent is not None:
-            return {
-                "error": (
-                    "shutdown_agents: root control surface only; address "
-                    "the kernel root (alias 'kernel')"
-                )
-            }
         return await self.ctx.shutdown_agents()
 
     async def _verb_shutdown_kernel(self, payload: dict) -> dict:
@@ -2478,13 +2501,6 @@ class Agent:
         a racing SIGTERM collapses to one shutdown; a second call lands on
         a dead port. In non-daemon contexts (one-shot CLI / REPL-only with
         no serve loop) there is nothing to stop — it still acks."""
-        if self.parent is not None:
-            return {
-                "error": (
-                    "shutdown_kernel: root control surface only; address "
-                    "the kernel root (alias 'kernel')"
-                )
-            }
         ev = self.ctx.shutdown_event
         if ev is not None and not ev.is_set():
             # Defer the trigger so the ack reply is fully flushed to the

@@ -218,3 +218,24 @@ async def test_grep_width_is_the_models_to_raise():
     )
     r = await _grep("ai", {"query": "rule:", "width": 400}, k)
     assert "cafebabe" in r["matches"][0]["text"]
+
+
+async def test_grep_falls_back_per_knob_and_pull_refuses_a_negative_length():
+    """2026-09-16: a bad `limit` left `width` unbound (NameError on the first
+    match); a negative `length` sliced from the end with a negative next_offset."""
+    from ai_core.core import _grep, _pull, _store_reply
+
+    k = _Leg()
+    pid = k.mint_id()
+    k.rows_put(
+        "ai",
+        {
+            "role": "user",
+            "content": f"[reply to {pid} · notes read]\n(settled — NOT inlined)",
+        },
+    )
+    await _store_reply("ai", k, pid, "rule: " + "x" * 300 + " VALUE=cafebabe")
+    r = await _grep("ai", {"query": "rule:", "limit": "nope"}, k)
+    assert r["matches"] and len(r["matches"][0]["text"]) == 200
+    r = await _pull("ai", {"pid": pid, "length": -5}, k)
+    assert r.get("reason") == "bad_arg" and "negative" in r["error"]

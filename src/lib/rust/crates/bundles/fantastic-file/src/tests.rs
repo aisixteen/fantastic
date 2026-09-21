@@ -65,7 +65,7 @@ fn write_stream_then_read_stream_round_trips_raw_bytes() {
     let w = write_stream_reply(
         &root,
         &json!({"path": "blob.bin", "truncate": true}),
-        &payload,
+        Some(&payload),
         false,
     );
     assert_eq!(w["written"], payload.len());
@@ -74,7 +74,11 @@ fn write_stream_then_read_stream_round_trips_raw_bytes() {
     // SOURCE: read it all back off the binary channel.
     let (meta, body) = read_stream_reply(&root, &json!({"path": "blob.bin"}), false);
     assert!(meta.get("error").is_none(), "{meta}");
-    assert_eq!(body, payload, "bytes must round-trip verbatim");
+    assert_eq!(
+        body,
+        Some(payload.clone()),
+        "bytes must round-trip verbatim"
+    );
     assert_eq!(meta["eof"], true);
     assert_eq!(meta["size"], payload.len());
     assert_eq!(meta["next_offset"], payload.len());
@@ -88,7 +92,7 @@ fn read_stream_chunks_with_offset_and_eof() {
     write_stream_reply(
         &root,
         &json!({"path": "big.bin", "truncate": true}),
-        &payload,
+        Some(&payload),
         false,
     );
     // First 100 bytes.
@@ -97,6 +101,7 @@ fn read_stream_chunks_with_offset_and_eof() {
         &json!({"path": "big.bin", "offset": 0, "length": 100}),
         false,
     );
+    let b1 = b1.expect("a chunk came back");
     assert_eq!(b1.len(), 100);
     assert_eq!(m1["eof"], false);
     assert_eq!(m1["next_offset"], 100);
@@ -106,6 +111,7 @@ fn read_stream_chunks_with_offset_and_eof() {
         &json!({"path": "big.bin", "offset": 100, "length": 1000}),
         false,
     );
+    let b2 = b2.expect("a chunk came back");
     assert_eq!(b2.len(), 156);
     assert_eq!(m2["eof"], true);
     let mut joined = b1;
@@ -120,14 +126,14 @@ fn write_stream_appends_when_offset_omitted() {
     write_stream_reply(
         &root,
         &json!({"path": "a.bin", "truncate": true}),
-        b"AAAA",
+        Some(b"AAAA"),
         false,
     );
-    let w = write_stream_reply(&root, &json!({"path": "a.bin"}), b"BBBB", false);
+    let w = write_stream_reply(&root, &json!({"path": "a.bin"}), Some(b"BBBB"), false);
     assert_eq!(w["offset"], 4); // appended at end
     assert_eq!(w["size"], 8);
     let (_m, body) = read_stream_reply(&root, &json!({"path": "a.bin"}), false);
-    assert_eq!(body, b"AAAABBBB");
+    assert_eq!(body, Some(b"AAAABBBB".to_vec()));
 }
 
 #[test]
@@ -140,7 +146,7 @@ fn write_stream_without_bytes_writes_an_empty_chunk() {
     let w = write_stream_reply(
         &root,
         &json!({"path": "e.txt", "truncate": true}),
-        b"",
+        Some(b""),
         false,
     );
     assert_eq!(
@@ -227,7 +233,7 @@ async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
     kernel.bundles.register(HANDLER_MODULE, FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         JsonMap::new(),
@@ -245,7 +251,7 @@ async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
         create[k] = v.clone();
     }
     let r = kernel
-        .send(vec![Item::new(AgentId::from("core"), create)])
+        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -283,7 +289,7 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
         let r = if verb == "read_stream" {
             read_stream_reply(&root, &header, true).0
         } else {
-            write_stream_reply(&root, &header, b"z", false)
+            write_stream_reply(&root, &header, Some(b"z"), false)
         };
         assert_eq!(r["reason"], "bad_arg", "{header} → {r}");
         assert!(header.get(r["arg"].as_str().unwrap()).is_some(), "{r}");
@@ -294,7 +300,7 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
         &json!({"path": "a.txt", "offset": 1, "length": 1}),
         false,
     );
-    assert_eq!(b, b"b");
+    assert_eq!(b, Some(b"b".to_vec()));
     assert_eq!(m["next_offset"], 2);
 }
 
@@ -312,9 +318,19 @@ fn text_read_stream_reply_key_order() {
         ["path", "offset", "bytes", "next_offset", "eof", "size"]
     );
     assert_eq!(m["bytes"], "abc");
-    let (m, _) = read_stream_reply(&root, &json!({"path": "a.txt"}), false);
+    // A11.9 — the BINARY channel keeps the same dict, `bytes` nulled IN PLACE:
+    // python's codec lifts the value onto the wire and leaves a `null` behind,
+    // so the two channels hand a reader the same shape. Omitting the key gave
+    // the browser a different dict per channel, and the WS layer had nothing to
+    // pick the frame kind from.
+    let (m, body) = read_stream_reply(&root, &json!({"path": "a.txt"}), false);
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(keys, ["path", "offset", "next_offset", "eof", "size"]);
+    assert_eq!(
+        keys,
+        ["path", "offset", "bytes", "next_offset", "eof", "size"]
+    );
+    assert_eq!(m["bytes"], Value::Null);
+    assert_eq!(body, Some(b"abc".to_vec()));
 }
 
 #[test]
@@ -328,10 +344,10 @@ fn huge_length_reads_only_what_exists() {
         &json!({"path": "a.txt", "length": 1_000_000_000_000_000u64}),
         false,
     );
-    assert_eq!(b, b"abc", "{m}");
+    assert_eq!(b, Some(b"abc".to_vec()), "{m}");
     assert_eq!(m["eof"], true);
     let (m, b) = read_stream_reply(&root, &json!({"path": "a.txt", "length": i64::MAX}), false);
-    assert_eq!(b, b"abc", "{m}");
+    assert_eq!(b, Some(b"abc".to_vec()), "{m}");
 }
 
 #[test]
@@ -347,10 +363,10 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     let (m, b) = read_stream_reply(&r, &json!({"path": "docs/secret.txt"}), false);
     assert_eq!(m["reason"], "transport_error", "{m}");
     assert_eq!(m["error"], "fs: path 'docs/secret.txt' escapes root");
-    assert!(b.is_empty());
+    assert_eq!(b, None);
     let l = list_reply(&r, &json!({"path": "docs"}), &[]);
     assert_eq!(l["reason"], "transport_error", "{l}");
-    let w = write_stream_reply(&r, &json!({"path": "docs/new.txt"}), b"x", false);
+    let w = write_stream_reply(&r, &json!({"path": "docs/new.txt"}), Some(b"x"), false);
     assert_eq!(w["reason"], "transport_error", "{w}");
     assert!(!outside.join("new.txt").exists());
     // An in-root symlink still serves.
@@ -358,7 +374,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     std::os::unix::fs::symlink(root.join("real.txt"), root.join("alias.txt")).unwrap();
     let (m, b) = read_stream_reply(&r, &json!({"path": "alias.txt"}), false);
     assert!(m.get("error").is_none(), "{m}");
-    assert_eq!(b, b"r");
+    assert_eq!(b, Some(b"r".to_vec()));
 }
 
 #[test]
@@ -372,7 +388,7 @@ fn dangling_symlink_pointing_outside_root_refuses() {
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(outside.join("gone.txt"), root.join("dangling")).unwrap();
     let r = at(&root);
-    let w = write_stream_reply(&r, &json!({"path": "dangling"}), b"x", false);
+    let w = write_stream_reply(&r, &json!({"path": "dangling"}), Some(b"x"), false);
     assert_eq!(w["reason"], "transport_error", "{w}");
     assert_eq!(w["error"], "fs: path 'dangling' escapes root");
     assert!(!outside.join("gone.txt").exists());
@@ -539,7 +555,7 @@ fn absolute_path_is_refused_with_bad_arg() {
     let r = at(&root);
     let replies = [
         read_stream_reply(&r, &json!({"path": "/README.md"}), true).0,
-        write_stream_reply(&r, &json!({"path": "/x"}), b"b", false),
+        write_stream_reply(&r, &json!({"path": "/x"}), Some(b"b"), false),
         list_reply(&r, &json!({"path": "/"}), &[]),
         delete_reply(&r, &json!({"path": "/README.md"}), false),
         mkdir_reply(&r, &json!({"path": "/x"}), false),
@@ -627,17 +643,27 @@ fn truncate_and_recursive_use_python_truthiness() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = served(&tmp);
     let r = at(&root);
-    write_stream_reply(&root_ok(&root), &json!({"path": "t.txt"}), b"AAAA", false);
+    write_stream_reply(
+        &root_ok(&root),
+        &json!({"path": "t.txt"}),
+        Some(b"AAAA"),
+        false,
+    );
     // a truthy non-bool truncates
     let w = write_stream_reply(
         &r,
         &json!({"path": "t.txt", "truncate": "yes"}),
-        b"B",
+        Some(b"B"),
         false,
     );
     assert_eq!(w["size"], 1, "{w}");
     // a falsy non-bool does not
-    let w = write_stream_reply(&r, &json!({"path": "t.txt", "truncate": 0}), b"C", false);
+    let w = write_stream_reply(
+        &r,
+        &json!({"path": "t.txt", "truncate": 0}),
+        Some(b"C"),
+        false,
+    );
     assert_eq!(w["size"], 2, "{w}");
     std::fs::create_dir_all(root.join("d")).unwrap();
     std::fs::write(root.join("d/x"), b"x").unwrap();
@@ -811,7 +837,7 @@ fn reflect_verbs_are_python_docstring_first_lines() {
     );
     assert_eq!(
         verbs["read_stream"],
-        "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns"
+        "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns ONE chunk {path, offset, bytes, next_offset, eof, size}."
     );
 }
 
@@ -953,43 +979,54 @@ async fn readonly_wins_over_root_escape() {
 }
 
 #[tokio::test]
-async fn the_stream_verbs_serve_a_document_on_the_text_channel() {
-    // PYTHON'S SHAPE. A model writes a document VERBATIM between `<bytes>` and
-    // `</bytes>`; python's parser hands that to `write_stream` as utf-8 bytes on
-    // the ordinary channel, and `read_stream` answers the chunk in `bytes`.
+async fn text_write_stream_with_string_bytes_is_missing_arg() {
+    // A13.19 — `bytes` IS RAW BYTES, and JSON has none. Python types the
+    // argument (`isinstance(data, (bytes, bytearray))`), so a wire client's
+    // JSON string or number is `missing_arg` and NOTHING IS WRITTEN; rust used
+    // to accept both and write the text. A model's `<bytes>` document still
+    // works because ai_core lifts it onto the item's binary channel, which is
+    // the bytes-typed carrier — the case below.
     let tmp = tempfile::TempDir::new().unwrap();
-    served(&tmp);
+    let dir = served(&tmp);
     let kernel = mk_kernel(&tmp).await;
-    let w = call(
-        &kernel,
-        json!({"type": "write_stream", "path": "a.txt", "truncate": true,
-        "bytes": "line one\nline two, with \"quotes\"\n"}),
-    )
-    .await;
-    assert!(w.get("error").is_none(), "{w}");
-    assert_eq!(w["written"], 33, "{w}");
-    let r = call(
-        &kernel,
-        json!({"type": "read_stream", "path": "a.txt", "offset": 0}),
-    )
-    .await;
-    assert_eq!(r["bytes"], "line one\nline two, with \"quotes\"\n", "{r}");
-    assert_eq!(r["eof"], true, "{r}");
-    // A number is a document too (the tag grammar types a bare number).
-    let n = call(
-        &kernel,
-        json!({"type": "write_stream", "path": "n.txt", "truncate": true, "bytes": 76}),
-    )
-    .await;
-    assert!(n.get("error").is_none(), "{n}");
-    // An explicit `null` document is a coded refusal, naming the argument.
-    let m = call(
-        &kernel,
-        json!({"type": "write_stream", "path": "b.txt", "bytes": null}),
-    )
-    .await;
-    assert_eq!(m["reason"], "missing_arg", "{m}");
-    assert_eq!(m["arg"], "bytes (one raw chunk)", "{m}");
+    for doc in [json!("line one\n"), json!(76), json!(null), json!(["a"])] {
+        let m = call(
+            &kernel,
+            json!({"type": "write_stream", "path": "a.txt", "truncate": true, "bytes": doc}),
+        )
+        .await;
+        assert_eq!(m["reason"], "missing_arg", "{doc} → {m}");
+        assert_eq!(m["arg"], "bytes (one raw chunk)", "{doc} → {m}");
+        assert_eq!(m["error"], "write_stream: bytes (one raw chunk) required");
+        assert!(!dir.join("a.txt").exists(), "{doc} wrote anyway");
+    }
+    // THE RAW CHUNK, on the binary channel: this is the path a model's
+    // `<bytes>` document takes, and it writes.
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("fb"),
+            json!({"type": "write_stream", "path": "a.txt", "truncate": true}),
+        )
+        .with_binary(b"line one\n".to_vec())])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out["written"], 9, "{out}");
+    assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"line one\n");
+
+    // …and it comes back as a CHUNK, in the reply body, with the reply's own
+    // `bytes` key nulled in place (A11.9).
+    let back = kernel
+        .send(vec![Item::new(
+            AgentId::from("fb"),
+            json!({"type": "read_stream", "path": "a.txt", "offset": 0}),
+        )
+        .with_binary(Vec::new())])
+        .await
+        .remove(0);
+    assert_eq!(back.result["bytes"], Value::Null, "{}", back.result);
+    assert_eq!(back.result["eof"], true, "{}", back.result);
+    assert_eq!(back.body, Some(b"line one\n".to_vec()));
 }
 
 #[tokio::test]

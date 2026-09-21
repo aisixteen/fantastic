@@ -15,13 +15,33 @@
 //! `json.dumps(envelope, default=str)`, `, `/`: ` separators and
 //! `ensure_ascii` — so a `·` or a `↑` in a reply is `·` / `↑` on the
 //! wire exactly as python sends it (A13.14).
+//!
+//! **IDENTITY (C40).** Every frame runs as the web_ws LEG (`leg_agent_id`), the
+//! child agent whose record carries the `ingress_rule` this face is gated by —
+//! never as the URL host and never as the operator. The rust loop used to
+//! dispatch `call` with no sender at all on the binary path and as the HOST on
+//! the text path, so a browser inherited the origin root of trust: measured
+//! 2026-09-16, a private agent, an outsider, and a SEALED leg all answered a
+//! `call` over the socket. The two tasks the loop registers still belong to the
+//! HOST (`ws_drain`, `ws_call`), which is what python's `spawn_task(host_id, …)`
+//! does.
+//!
+//! **THE LEG GATE.** Python resolves the leg's ingress rule PER FRAME, so
+//! opening the edge (`update_agent ingress_rule=allow_all_ingress`) takes effect
+//! without a reconnect, and an ABSENT rule is SEALED. A denied `call` is
+//! answered (`{error, reason:'unauthorized', hint?, see?}` inside the reply's
+//! `data`) because discovery-through-denial is the point; every other kind is
+//! dropped silently, the connect-time auto-watch included — a sealed leg that
+//! auto-watched leaked the host's whole event stream to anyone who completed the
+//! handshake.
 
 use crate::AppState;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use fantastic_io_bridge::codec::encode_frame;
+use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision, Denial};
+use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame, set_path};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,25 +57,25 @@ pub(crate) const CLOSE_INTERNAL_ERROR: u16 = 1011;
 /// The close reason websockets sends with it.
 pub(crate) const KEEPALIVE_TIMEOUT_REASON: &str = "keepalive ping timeout";
 
-/// Maximum size of a single binary WS frame's blob payload.
-#[cfg(not(test))]
-pub(crate) const MAX_CHUNK_SIZE: usize = 1_048_576; // 1 MB
+/// The verbs a TEXT `call` frame must route down the BINARY channel, chosen
+/// STATICALLY by verb (A11.9/A13.1).
+///
+/// Python needs no such list: its payload dict simply holds a `bytes` value and
+/// `encode_outbound` finds it. A `serde_json::Value` cannot, so the carrier is
+/// the item's binary channel and the decision has to be made from the verb —
+/// the same pair on both wire legs, so a browser and a curl client get the same
+/// answer for the same request.
+pub(crate) const BINARY_EDGE_VERBS: [&str; 2] = ["read_stream", "write_stream"];
 
-/// Maximum total size of a reassembled chunked upload.
-#[cfg(not(test))]
-pub(crate) const MAX_UPLOAD_SIZE: usize = 100 * 1_048_576; // 100 MB
+/// Where a binary reply's chunk sits in the reply ENVELOPE — python's
+/// `find_bytes_path` walks `{type:reply, id, data:{…bytes…}}` and finds exactly
+/// this.
+const REPLY_BINARY_PATH: &str = "data.bytes";
 
-// UNDER TEST THE CAPS ARE TINY. The cap check counts REAL bytes, so proving the
-// total cap fires meant actually pushing 101 MB across a websocket — 83 s of
-// the rust suite's 123 for ONE test. What is under test is the ENFORCEMENT,
-// never the constant's value, which no assertion reads.
-#[cfg(test)]
-pub(crate) const MAX_CHUNK_SIZE: usize = 4 * 1024; // 4 KB
-#[cfg(test)]
-pub(crate) const MAX_UPLOAD_SIZE: usize = 16 * 1024; // 16 KB
-
-/// Maximum concurrent in-flight chunked uploads per WS connection.
-const MAX_CONCURRENT_UPLOADS: usize = 16;
+/// The path an inbound binary frame must name for its body to reach the target:
+/// the payload's own `bytes` field, which is where python's `set_path` puts it
+/// before `kernel.send`.
+const INBOUND_BINARY_PATH: &str = "payload.bytes";
 
 /// One frame leaving the socket. Text and binary share one single-consumer
 /// sink, and the control frames (keepalive ping, the close echo) ride the same
@@ -83,23 +103,201 @@ pub(crate) fn track_call(
     p.push(id);
 }
 
+/// python `_gate` — the leg's INGRESS rule, resolved off the LEG's record on
+/// every frame. A missing record, or a record with no rule, is SEALED.
+///
+/// `kind` ∈ call|emit|watch|state_subscribe; for `call` the verb is the
+/// payload's `type`, otherwise the verb IS the kind (python `gate_inbound`).
+/// The credential rides the frame ENVELOPE (`auth_token`), never the payload.
+fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, frame: &Value) -> Decision {
+    let (primary, auth) = match kernel.agents.get(leg).map(|e| Arc::clone(&e)) {
+        Some(a) => {
+            let meta = a.meta.read().expect("meta poisoned");
+            (meta.get("ingress_rule").cloned(), meta.get("auth").cloned())
+        }
+        None => (None, None),
+    };
+    let inner = frame.get("payload").filter(|v| v.is_object());
+    let verb = if kind == "call" {
+        inner
+            .and_then(|p| p.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    } else {
+        kind
+    };
+    // python `frame.get("target") or frame.get("src") or ""` — a falsy target
+    // falls through to `src`, which is what a watch frame carries.
+    let addr = frame
+        .get("target")
+        .filter(|v| fantastic_bundle::py_truthy(v))
+        .or_else(|| frame.get("src"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
+    match ingress::resolve(spec.as_ref()) {
+        Ok(rule) => rule.authorize(&Action {
+            kind,
+            target: addr,
+            verb,
+            token: frame.get("auth_token").and_then(Value::as_str),
+        }),
+        // A spec that will not parse is not an authorization.
+        Err(e) => Decision::Deny(Denial::new(format!("web_ws: bad ingress rule: {e}"))),
+    }
+}
+
+/// python `bad("frame", "frame", "a well-formed call/emit/watch envelope")`
+/// under a `type: error` head — the ONE answer to every undecodable frame, sent
+/// BEFORE any gate (a sealed leg answers it too) and with the socket KEPT.
+fn frame_error() -> Value {
+    let mut out = Map::new();
+    out.insert("type".to_string(), json!("error"));
+    let bad =
+        fantastic_kernel::refusal::bad("frame", "frame", "a well-formed call/emit/watch envelope");
+    if let Value::Object(m) = bad {
+        for (k, v) in m {
+            out.insert(k, v);
+        }
+    }
+    Value::Object(out)
+}
+
+/// A decoded inbound frame: the envelope, plus the raw body when the frame
+/// carried one at [`INBOUND_BINARY_PATH`].
+struct Inbound {
+    envelope: Value,
+    /// `Some` only when `_binary_path` named the payload's own `bytes` field —
+    /// the one path this runtime's carrier (`Item::with_binary`) can place.
+    body: Option<Vec<u8>>,
+}
+
+/// python `decode_inbound` + `isinstance(frame, dict)`: parse a text frame as
+/// JSON or a binary frame as `[4B len | header | body]`, pop `_binary_path` and
+/// place the body there. `Err` is the ONE malformed-frame answer.
+fn decode_inbound(msg: InboundRaw) -> Result<Inbound, ()> {
+    let (mut envelope, body) = match msg {
+        InboundRaw::Text(t) => (serde_json::from_str::<Value>(&t).map_err(|_| ())?, None),
+        InboundRaw::Binary(b) => {
+            let (h, body) = decode_binary_frame(&b).map_err(|_| ())?;
+            (h, Some(body))
+        }
+    };
+    if !envelope.is_object() {
+        return Err(());
+    }
+    // `head.pop("_binary_path", None)`: JSON null is python's "absent".
+    let path = envelope
+        .as_object_mut()
+        .expect("checked above")
+        .shift_remove("_binary_path")
+        .filter(|v| !v.is_null());
+    let Some(path) = path else {
+        // No path ⇒ a plain envelope; a body that came with one is dropped,
+        // exactly as python drops it (nothing names where it would go).
+        return Ok(Inbound {
+            envelope,
+            body: None,
+        });
+    };
+    // A non-string path raises out of python's `path.split(".")`.
+    let Some(path) = path.as_str() else {
+        return Err(());
+    };
+    // VALIDATE THE PLACEMENT — python actually performs `set_path(head, path,
+    // body)` and a `KeyError`/`IndexError`/`TypeError` becomes the frame error.
+    // Rust cannot store the bytes in the `Value`, so it places a `null` in the
+    // same slot and keeps the body beside the envelope.
+    if set_path(&mut envelope, path, Value::Null).is_err() {
+        return Err(());
+    }
+    Ok(Inbound {
+        envelope,
+        // Only the payload's own `bytes` field reaches a handler here: that is
+        // the slot `Item::with_binary` fills. Any other placeable path keeps its
+        // `null` and the body is dropped.
+        body: (path == INBOUND_BINARY_PATH).then(|| body.unwrap_or_default()),
+    })
+}
+
+/// A raw inbound WS message, before decoding.
+enum InboundRaw {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+/// Send one server→client envelope, picking the frame kind from the CARRIER:
+/// a reply that holds a chunk is a binary frame whose head keeps `bytes: null`
+/// in its python position and names it in `_binary_path`.
+async fn send_envelope(
+    out_tx: &tokio::sync::mpsc::Sender<Out>,
+    envelope: Value,
+    body: Option<Vec<u8>>,
+    path: &str,
+) {
+    let out = match body {
+        None => Out::Text(encode_frame(&envelope)),
+        Some(body) => {
+            let mut head = envelope;
+            head["_binary_path"] = json!(path);
+            Out::Binary(fantastic_io_bridge::codec::encode_binary_frame(
+                &head, &body,
+            ))
+        }
+    };
+    let _ = out_tx.send(out).await;
+}
+
+/// One queued payload → one `{type:"event", payload}` frame on the OUTBOUND
+/// sink — python's `drain_outbound` body. `false` once the sink is gone.
+///
+/// A QUEUED PAYLOAD HOLDING BYTES IS A BINARY FRAME — python's `encode_outbound`
+/// finds the bytes inside the payload dict and sends `[4B len | head with
+/// _binary_path | body]`. The rust carrier keeps the body beside the payload, so
+/// the path is the item's own path nested under this envelope's `payload`.
+async fn forward_event(
+    out_tx: &tokio::sync::mpsc::Sender<Out>,
+    item: fantastic_kernel::inbox::InboxItem,
+) -> bool {
+    let frame = json!({"type": "event", "payload": item.payload});
+    match item.body {
+        None => out_tx.send(Out::Text(encode_frame(&frame))).await.is_ok(),
+        Some((path, body)) => {
+            let p = format!("payload.{path}");
+            send_envelope(out_tx, frame, Some(body), &p).await;
+            true
+        }
+    }
+}
+
+/// python `web_ws._proxy._make_client_id` — `f"_ws_{secrets.token_hex(3)}"`:
+/// 3 bytes from the OS CSPRNG as 6 lowercase hex. The process-global counter
+/// this replaced minted an ASCENDING `_ws_000000` family, a shape no python
+/// consumer (or capture diff) expects. A failure is FATAL — no second source.
+pub(crate) fn make_client_id() -> String {
+    let mut buf = [0u8; 3];
+    // SAFETY: `buf` is a valid writable buffer of exactly 3 bytes.
+    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
+    assert!(rc == 0, "getentropy failed: no randomness source");
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    format!("_ws_{hex}")
+}
+
 /// WebSocket proxy loop.
 ///
 /// `host_agent_id` is the URL the browser connected to
-/// (`ws://host/<host_id>/ws`). It is auto-watched on connect so events emitted
-/// on its inbox reach the page without an explicit `watch` frame, and it is the
-/// identity browser-driven calls run as.
-pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
+/// (`ws://host/<host_id>/ws`) — auto-watched on connect when the leg admits an
+/// unauthenticated watch, and the agent both kernel tasks are registered under.
+/// `leg_agent_id` is THIS web_ws surface's own id: the record the gate reads and
+/// the sender every frame dispatches as.
+pub(crate) async fn ws_loop(
+    state: AppState,
+    socket: WebSocket,
+    host_agent_id: AgentId,
+    leg_agent_id: AgentId,
+) {
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_CLIENT_HEX: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT_CLIENT_HEX.fetch_add(1, Ordering::SeqCst);
-    let client_id = AgentId::from(format!("_ws_{n:06x}").as_str());
-
-    // Per-WS chunked-upload reassembly state. Lives in this scope so it drops
-    // on disconnect — no GC task needed for the "dead client" case.
-    let pending_uploads: Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let client_id = AgentId::from(make_client_id().as_str());
 
     let (mut sink, mut stream) = socket.split();
 
@@ -107,15 +305,43 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
     // Hook the synthetic client inbox into the kernel. THE READER REGISTERS
     // FIRST, and the queue drops the OLDEST at the bound — a browser that
     // stalls catches up on the freshest frames rather than freezing on stale.
-    let mut inbox_rx = state.kernel.ensure_inbox(&client_id);
+    //
+    // ONE OUTBOUND ORDER, PYTHON'S. Both python and rust fan a payload into this
+    // client's queue BEFORE the target's handler runs, so at the moment a reply
+    // exists the watch event is already queued — and python's cooperative loop
+    // puts it on the wire FIRST (the drain task was made runnable at the fanout,
+    // long before `_on_call` resumed). Rust's drain is a PARALLEL task, so the
+    // reply overtook the event it must follow (measured in the r3 capture at
+    // three AI turns). The lock below makes flush-then-reply ONE step: every
+    // payload queued when the handler settled reaches `out_tx` before the reply
+    // does, with no sleep and no yield.
+    let inbox_rx = Arc::new(tokio::sync::Mutex::new(
+        state.kernel.ensure_inbox(&client_id),
+    ));
+    // A second read half on the SAME queue, used ONLY to WAIT: a drainer that
+    // held the lock across its wait would block every flush forever.
+    let inbox_ready = state.kernel.ensure_inbox(&client_id);
 
-    // Auto-watch the host agent (python parity). Track every watch so cleanup
-    // can unwatch them all on disconnect.
+    // THE CONNECT-TIME AUTO-WATCH IS GATED. Only mirror the host's inbox when
+    // THIS leg's rule admits an inbound `watch` with NO credential (an open
+    // `allow_all` leg). On a sealed or credentialed leg a client that merely
+    // completed the handshake would otherwise receive every event the host sees
+    // without ever passing the gate.
+    let admits_autowatch = matches!(
+        gate_leg(
+            &state.kernel,
+            &leg_agent_id,
+            "watch",
+            &json!({"src": host_agent_id.0}),
+        ),
+        Decision::Allow
+    );
     let watching: Arc<tokio::sync::Mutex<HashSet<AgentId>>> =
-        Arc::new(tokio::sync::Mutex::new(HashSet::from_iter([
-            host_agent_id.clone()
-        ])));
-    state.kernel.watch(&host_agent_id, client_id.clone()).await;
+        Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    if admits_autowatch {
+        state.kernel.watch(&host_agent_id, client_id.clone()).await;
+        watching.lock().await.insert(host_agent_id.clone());
+    }
 
     // Pending `call` tasks — cancelled on disconnect so long-lived sends
     // release their locks immediately.
@@ -126,30 +352,34 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
     let state_unsubs: Arc<std::sync::Mutex<Vec<fantastic_kernel::SubscriberToken>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    let drain_task = tokio::spawn({
-        let out_tx = out_tx.clone();
-        async move {
-            while let Some(item) = inbox_rx.recv().await {
-                let frame = json!({"type": "event", "payload": item.payload});
-                // A QUEUED PAYLOAD HOLDING BYTES IS A BINARY FRAME — python's
-                // `encode_outbound` finds the bytes inside the payload dict and
-                // sends `[4B len | head with _binary_path | body]`. The rust
-                // carrier keeps the body beside the payload, so the path is the
-                // item's own path nested under this envelope's `payload`.
-                let out = match &item.body {
-                    None => Out::Text(encode_frame(&frame)),
-                    Some((path, body)) => {
-                        let mut head = frame;
-                        head["_binary_path"] = json!(format!("payload.{path}"));
-                        Out::Binary(fantastic_io_bridge::codec::encode_binary_frame(&head, body))
+    // REGISTERED, under the HOST: python spawns the drain as the kernel task
+    // `ws_drain` on `host_agent_id`, so an open socket is visible in `ps` and
+    // its pump is cancellable like any other work.
+    let drain_task = state
+        .kernel
+        .clone()
+        .spawn_task(&host_agent_id, "ws_drain", {
+            let out_tx = out_tx.clone();
+            let inbox_rx = Arc::clone(&inbox_rx);
+            async move {
+                loop {
+                    let mut gone = false;
+                    {
+                        let mut rx = inbox_rx.lock().await;
+                        while let Some(item) = rx.try_recv() {
+                            if !forward_event(&out_tx, item).await {
+                                gone = true;
+                                break;
+                            }
+                        }
                     }
-                };
-                if out_tx.send(out).await.is_err() {
-                    break;
+                    if gone {
+                        break;
+                    }
+                    inbox_ready.ready().await;
                 }
             }
-        }
-    });
+        });
 
     // Outbound forwarder: one single-consumer sink for every frame kind.
     let send_task = tokio::spawn(async move {
@@ -200,12 +430,9 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
             }
         };
         let Some(msg) = msg else { break };
-        let text = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Binary(bytes)) => {
-                handle_binary_frame(&state, &client_id, &out_tx, &pending_uploads, bytes).await;
-                continue;
-            }
+        let raw = match msg {
+            Ok(Message::Text(t)) => InboundRaw::Text(t),
+            Ok(Message::Binary(b)) => InboundRaw::Binary(b),
             Ok(Message::Pong(_)) => {
                 awaiting_pong = None;
                 continue;
@@ -217,63 +444,140 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
             Err(_) => break,
             _ => continue,
         };
-        let Ok(env): Result<Value, _> = serde_json::from_str(&text) else {
+        // A FRAME IS AN INPUT, NOT A CONTRACT. A 3-byte binary frame, a text
+        // frame that parses to `[1]`, a `_binary_path` naming a slot that is not
+        // there — each is answered and the SOCKET IS KEPT, with every in-flight
+        // call on it.
+        let Ok(inbound) = decode_inbound(raw) else {
+            let _ = out_tx.send(Out::Text(encode_frame(&frame_error()))).await;
             continue;
         };
-        let ty = env.get("type").and_then(Value::as_str).unwrap_or("");
-        let target = env.get("target").and_then(Value::as_str).map(AgentId::from);
-        let payload = env.get("payload").cloned().unwrap_or(Value::Null);
-        let id = env.get("id").and_then(Value::as_str).map(str::to_string);
+        let frame = inbound.envelope;
+        let ty = frame.get("type").and_then(Value::as_str).unwrap_or("");
+        // python `frame.get("target", "")` — the URL host is NEVER the default.
+        let target = AgentId::from(
+            frame
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        // python `frame.get("payload", {})`.
+        let payload = match frame.get("payload") {
+            Some(v) => v.clone(),
+            None => json!({}),
+        };
+        // python `frame.get("id", "")` — kept RAW (any JSON type) and always
+        // echoed; only a non-empty STRING names the execution.
+        let fid = frame.get("id").cloned().unwrap_or_else(|| json!(""));
         let kernel = Arc::clone(&state.kernel);
-        let sender_for_scope = host_agent_id.clone();
+        let leg = leg_agent_id.clone();
         let out = out_tx.clone();
         match ty {
             "call" => {
-                let Some(target) = target else {
-                    if let Some(id) = id {
-                        let frame = json!({"type":"error","id":id,"error":"call requires target"});
-                        let _ = out.send(Out::Text(encode_frame(&frame))).await;
-                    }
-                    continue;
+                let denial = match gate_leg(&kernel, &leg, "call", &frame) {
+                    Decision::Allow => None,
+                    // TEACHING DENIAL: the caller's promise resolves with the
+                    // reason plus the pointer to the readme that says how to
+                    // open the edge.
+                    Decision::Deny(d) => Some(d.to_refusal()),
                 };
-                let frame_id = id.clone();
-                // REGISTERED: a frame handler DISPATCHES, so it is real work —
-                // a `ps` row, reachable by `cancel`, and its send parented to
-                // it instead of becoming a root.
+                if let Some(data) = denial {
+                    let f = json!({"type": "reply", "id": fid, "data": data});
+                    let _ = out.send(Out::Text(encode_frame(&f))).await;
+                    continue;
+                }
+                let body = inbound.body;
+                // REGISTERED UNDER THE HOST: a frame handler DISPATCHES, so it
+                // is real work — a `ps` row, reachable by `cancel`, and its send
+                // parented to it instead of becoming a root.
                 let spawner = Arc::clone(&state.kernel);
-                let handle = spawner.spawn_task(&sender_for_scope, "ws_call", async move {
+                let flush_rx = Arc::clone(&inbox_rx);
+                let handle = spawner.spawn_task(&host_agent_id, "ws_call", async move {
                     // THE FRAME ID IS THE EXECUTION ID. One id space: the same
                     // id arriving twice — a double-click, a second tab, a
                     // reconnect replaying its queue — is ONE intent, deduped
                     // and joined by the ledger instead of running twice.
-                    let reply = kernel
-                        .send(vec![Item::from_frame(
-                            target.clone(),
-                            payload,
-                            frame_id.as_deref(),
-                        )])
-                        .await
-                        .remove(0)
-                        .result;
-                    if let Some(id) = id {
-                        // Verb-level errors travel inside `data.error` (python's
-                        // wire shape); a `type:"error"` frame is reserved for
-                        // out-of-band failures.
-                        let frame = json!({"type": "reply", "id": id, "data": reply});
-                        let _ = out.send(Out::Text(encode_frame(&frame))).await;
+                    let mut item = Item::new(target, payload);
+                    if let Some(s) = fid.as_str().filter(|s| !s.is_empty()) {
+                        item = item.with_id(s);
                     }
+                    // A binary-edge verb rides the BINARY channel even when the
+                    // client sent a text frame: that is the only way the bundle
+                    // returns (or receives) a raw chunk (A11.9/A13.1).
+                    let verb = item
+                        .payload
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if body.is_some() || BINARY_EDGE_VERBS.contains(&verb) {
+                        // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
+                        // `payload[field] = body` runs where a body EXISTS; a
+                        // TEXT frame's `bytes` reaches the target as the JSON
+                        // value the client sent, and `write_stream` answers
+                        // `missing_arg` for it (an ABSENT key stays an empty
+                        // chunk). Stripping it unconditionally wrote 0 bytes and
+                        // reported success where python refused.
+                        match body {
+                            Some(b) => {
+                                if let Some(m) = item.payload.as_object_mut() {
+                                    m.shift_remove("bytes");
+                                }
+                                item = item.with_binary(b);
+                            }
+                            None => item = item.with_binary(Vec::new()),
+                        }
+                    }
+                    let out_item = fantastic_kernel::send::with_sender(leg, async {
+                        kernel.send(vec![item]).await.remove(0)
+                    })
+                    .await;
+                    // Verb-level errors travel inside `data.error` (python's
+                    // wire shape); a `type:"error"` frame is reserved for
+                    // out-of-band failures.
+                    // PYTHON'S ORDER, ENFORCED: the watch events this dispatch
+                    // produced are already on the queue (the kernel fans out
+                    // BEFORE the handler), so flush them here — under the drain's
+                    // own lock, so the drain cannot be mid-forward — and only then
+                    // enqueue the reply. One sink, one order.
+                    let mut rx = flush_rx.lock().await;
+                    while let Some(item) = rx.try_recv() {
+                        forward_event(&out, item).await;
+                    }
+                    let f = json!({"type": "reply", "id": fid, "data": out_item.result});
+                    send_envelope(&out, f, out_item.body, REPLY_BINARY_PATH).await;
+                    drop(rx);
                 });
                 track_call(&state.kernel, &pending_calls, handle);
             }
             "emit" => {
-                let Some(target) = target else { continue };
-                fantastic_kernel::send::with_sender(sender_for_scope, async {
-                    kernel.emit(&target, payload).await
+                if !matches!(gate_leg(&kernel, &leg, "emit", &frame), Decision::Allow) {
+                    continue;
+                }
+                let item = match inbound.body {
+                    None => fantastic_kernel::inbox::InboxItem::text(payload),
+                    Some(b) => {
+                        let mut head = payload;
+                        if let Some(m) = head.as_object_mut() {
+                            m.insert("bytes".to_string(), Value::Null);
+                        }
+                        fantastic_kernel::inbox::InboxItem::binary(head, "bytes", b)
+                    }
+                };
+                fantastic_kernel::send::with_sender(leg, async {
+                    kernel.emit_item(&target, item).await;
                 })
                 .await;
             }
             "watch" => {
-                let Some(src) = env.get("src").and_then(Value::as_str).map(AgentId::from) else {
+                if !matches!(gate_leg(&kernel, &leg, "watch", &frame), Decision::Allow) {
+                    continue;
+                }
+                let Some(src) = frame
+                    .get("src")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(AgentId::from)
+                else {
                     continue;
                 };
                 let mut w = watching.lock().await;
@@ -282,21 +586,31 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
                     // real caller. Without it the kernel reads the frame as an
                     // OPERATOR watch and the two-sided gate never runs.
                     let denial = fantastic_kernel::send::with_sender(
-                        host_agent_id.clone(),
+                        leg,
                         kernel.watch(&src, client_id.clone()),
                     )
                     .await;
                     if let Some(d) = denial {
-                        let id = env.get("id").cloned().unwrap_or(Value::Null);
-                        let frame = json!({"type": "error", "id": id, "data": d});
-                        let _ = out.send(Out::Text(encode_frame(&frame))).await;
+                        // python `{"type":"error", "id":…, **denial}` — the
+                        // denial's keys are FLATTENED onto the frame, not
+                        // wrapped in `data`.
+                        let _ = out
+                            .send(Out::Text(encode_frame(&error_frame(&fid, &d))))
+                            .await;
                         continue;
                     }
                     w.insert(src);
                 }
             }
             "unwatch" => {
-                let Some(src) = env.get("src").and_then(Value::as_str).map(AgentId::from) else {
+                // NO GATE — python gates the four inbound actions and leaves
+                // `unwatch` (a client giving something up) ungated.
+                let Some(src) = frame
+                    .get("src")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(AgentId::from)
+                else {
                     continue;
                 };
                 let mut w = watching.lock().await;
@@ -305,18 +619,25 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
                 }
             }
             "state_subscribe" => {
+                // A SEALED LEG LEAKS NO TELEMETRY, not merely no dispatch.
+                if !matches!(
+                    gate_leg(&kernel, &leg, "state_subscribe", &frame),
+                    Decision::Allow
+                ) {
+                    continue;
+                }
                 // The state stream is a KERNEL-WIDE read: every send's sender,
                 // target, verb and payload summary, for every agent in the
                 // tree. So it is gated on the ROOT — an ingress rule answers
                 // "may this client reach this leg", never "what may it READ".
-                let denial = fantastic_kernel::send::with_sender(host_agent_id.clone(), async {
-                    kernel.authorize_state_subscribe(&host_agent_id)
+                let denial = fantastic_kernel::send::with_sender(leg.clone(), async {
+                    kernel.authorize_state_subscribe(&leg)
                 })
                 .await;
                 if let Some(d) = denial {
-                    let id = env.get("id").cloned().unwrap_or(Value::Null);
-                    let frame = json!({"type": "error", "id": id, "data": d});
-                    let _ = out.send(Out::Text(encode_frame(&frame))).await;
+                    let _ = out
+                        .send(Out::Text(encode_frame(&error_frame(&fid, &d))))
+                        .await;
                     continue;
                 }
                 // python parity: first a `state_snapshot` carrying every
@@ -383,6 +704,7 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
                     kernel.remove_state_subscriber(t);
                 }
             }
+            // Unknown frame types are silently dropped (forward-compat).
             _ => {}
         }
     }
@@ -419,274 +741,21 @@ pub(crate) async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: A
     }
     // 4. Drop the synthetic inbox, then let the sink drain its queued close.
     state.kernel.remove_inbox(&client_id);
-    drain_task.abort();
+    state.kernel.cancel_task(&drain_task).await;
     drop(out_tx);
     let _ = send_task.await;
 }
 
-// ─── binary frames ──────────────────────────────────────────────────
-//
-// A11.19 (the codec-envelope binary frame + deleting the chunked-upload
-// protocol) co-lands with C40's ws_loop change; until then the single-frame and
-// chunked paths below are unchanged.
-
-/// Per-upload reassembly buffer, keyed by `upload_id` in a per-WS map.
-pub(crate) struct ChunkBuffer {
-    /// Chunks indexed by `chunk_index`; a BTreeMap concatenates in order
-    /// regardless of arrival order.
-    chunks: std::collections::BTreeMap<u32, Vec<u8>>,
-    /// Declared total chunk count (must match across every chunk).
-    total: u32,
-    /// Cumulative byte count across all chunks received so far.
-    cumulative_bytes: usize,
-    /// First chunk's header, chunking fields stripped.
-    base_header: Value,
-}
-
-/// Send a binary-dispatch reply on the correct WS channel. An empty `body` is a
-/// plain `{type:reply, id, data}` TEXT frame; a non-empty body is a BINARY
-/// frame `[4B len|header|body]` — raw bytes, never base64.
-async fn send_binary_reply(
-    out_tx: &tokio::sync::mpsc::Sender<Out>,
-    id: Option<Value>,
-    reply: Value,
-    body: Vec<u8>,
-) {
-    if body.is_empty() {
-        let frame = json!({"type": "reply", "id": id, "data": reply});
-        let _ = out_tx.send(Out::Text(encode_frame(&frame))).await;
-        return;
-    }
-    let mut header = json!({"type": "reply", "id": id, "data": reply});
-    header["_binary_path"] = json!("data.bytes");
-    let wire = fantastic_io_bridge::codec::encode_binary_frame(&header, &body);
-    let _ = out_tx.send(Out::Binary(wire)).await;
-}
-
-/// Decode a binary WS frame `[4-byte BE header_len | JSON header | blob]` and
-/// dispatch it through [`Kernel::send_with_binary`].
-async fn handle_binary_frame(
-    state: &AppState,
-    client_id: &AgentId,
-    out_tx: &tokio::sync::mpsc::Sender<Out>,
-    pending_uploads: &Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>>,
-    bytes: Vec<u8>,
-) {
-    // Every malformed-frame branch below DROPS the frame silently, as python's
-    // web_ws proxy does — nothing rides a rust-only log line (A15.3).
-    if bytes.len() < 4 {
-        return;
-    }
-    let hdr_len = u32::from_be_bytes(match bytes[0..4].try_into() {
-        Ok(arr) => arr,
-        Err(_) => return,
-    }) as usize;
-    if 4usize.saturating_add(hdr_len) > bytes.len() {
-        return;
-    }
-    let header: Value = match serde_json::from_slice(&bytes[4..4 + hdr_len]) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let blob = bytes[4 + hdr_len..].to_vec();
-    let id = header.get("id").cloned();
-
-    if blob.len() > MAX_CHUNK_SIZE {
-        let frame = json!({
-            "type": "error",
-            "id": id,
-            "error": format!(
-                "binary frame: blob {} bytes exceeds chunk cap {}",
-                blob.len(),
-                MAX_CHUNK_SIZE,
-            ),
-        });
-        let _ = out_tx.send(Out::Text(encode_frame(&frame))).await;
-        return;
-    }
-
-    let upload_id = header
-        .get("upload_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    if let Some(upload_id) = upload_id {
-        handle_chunked_frame(
-            state,
-            client_id,
-            out_tx,
-            pending_uploads,
-            upload_id,
-            header,
-            id.unwrap_or(Value::Null),
-            blob,
-        )
-        .await;
-        return;
-    }
-
-    let Some(target_str) = header.get("target").and_then(Value::as_str) else {
-        return;
-    };
-    let target = AgentId::from(target_str);
-    let kernel = Arc::clone(&state.kernel);
-    let sender_for_scope = client_id.clone();
-    let out = out_tx.clone();
-    tokio::spawn(async move {
-        let (reply, body) = fantastic_kernel::send::with_sender(sender_for_scope, async {
-            kernel.send_with_binary(&target, header, blob).await
-        })
-        .await;
-        send_binary_reply(&out, id, reply, body).await;
-    });
-}
-
-/// Pure (no-I/O) chunk-ingest step. Returns `Ok(None)` to ack-and-wait,
-/// `Ok(Some(..))` when the upload is complete, or `Err` on a
-/// concurrent-cap / total-mismatch / size-cap violation.
-pub(crate) fn ingest_chunk(
-    map: &mut std::collections::HashMap<String, ChunkBuffer>,
-    upload_id: &str,
-    chunk_index: u32,
-    total_chunks: u32,
-    blob: Vec<u8>,
-    base_header: &Value,
-) -> Result<Option<(Value, Vec<u8>)>, String> {
-    if !map.contains_key(upload_id) && map.len() >= MAX_CONCURRENT_UPLOADS {
-        return Err(format!(
-            "chunked upload: concurrent upload cap {MAX_CONCURRENT_UPLOADS} reached",
-        ));
-    }
-    let entry_existed = map.contains_key(upload_id);
-    let buf = map
-        .entry(upload_id.to_string())
-        .or_insert_with(|| ChunkBuffer {
-            chunks: std::collections::BTreeMap::new(),
-            total: total_chunks,
-            cumulative_bytes: 0,
-            base_header: base_header.clone(),
-        });
-    if entry_existed && buf.total != total_chunks {
-        let prior = buf.total;
-        map.remove(upload_id);
-        return Err(format!(
-            "chunked upload: total_chunks mismatch (saw {prior}, now {total_chunks})",
-        ));
-    }
-    let projected = buf.cumulative_bytes.saturating_add(blob.len());
-    if projected > MAX_UPLOAD_SIZE {
-        map.remove(upload_id);
-        return Err(format!(
-            "chunked upload: projected {projected} bytes exceeds total cap {MAX_UPLOAD_SIZE}",
-        ));
-    }
-    buf.cumulative_bytes = projected;
-    buf.chunks.insert(chunk_index, blob);
-    if buf.chunks.len() as u32 == buf.total {
-        let removed = map.remove(upload_id).expect("entry just inserted");
-        let mut full = Vec::with_capacity(removed.cumulative_bytes);
-        for (_, chunk) in removed.chunks {
-            full.extend_from_slice(&chunk);
-        }
-        Ok(Some((removed.base_header, full)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Handle one chunk of a chunked upload: validate, delegate assembly to
-/// [`ingest_chunk`], ack non-final chunks, dispatch once complete.
-#[allow(clippy::too_many_arguments)]
-async fn handle_chunked_frame(
-    state: &AppState,
-    client_id: &AgentId,
-    out_tx: &tokio::sync::mpsc::Sender<Out>,
-    pending_uploads: &Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>>,
-    upload_id: String,
-    mut header: Value,
-    id: Value,
-    blob: Vec<u8>,
-) {
-    let err_frame = |msg: String| json!({"type": "error", "id": id, "error": msg});
-    let chunk_index = match header.get("chunk_index").and_then(Value::as_u64) {
-        Some(n) if n <= u32::MAX as u64 => n as u32,
-        _ => {
-            let f = err_frame("chunked upload: chunk_index required (u32)".to_string());
-            let _ = out_tx.send(Out::Text(encode_frame(&f))).await;
-            return;
-        }
-    };
-    let total_chunks = match header.get("total_chunks").and_then(Value::as_u64) {
-        Some(n) if n >= 1 && n <= u32::MAX as u64 => n as u32,
-        _ => {
-            let f = err_frame("chunked upload: total_chunks required (u32 ≥ 1)".to_string());
-            let _ = out_tx.send(Out::Text(encode_frame(&f))).await;
-            return;
-        }
-    };
-    if chunk_index >= total_chunks {
-        let f = err_frame(format!(
-            "chunked upload: chunk_index {chunk_index} >= total_chunks {total_chunks}",
-        ));
-        let _ = out_tx.send(Out::Text(encode_frame(&f))).await;
-        return;
-    }
-    // The header `final` flag is informational — assembly is triggered by the
-    // chunk count against `total_chunks` (the contract), so an early `final` is
-    // held until the remaining chunks arrive.
-    if let Some(obj) = header.as_object_mut() {
-        obj.remove("upload_id");
-        obj.remove("chunk_index");
-        obj.remove("total_chunks");
-        obj.remove("final");
-    }
-    let outcome: Result<Option<(Value, Vec<u8>)>, String> = {
-        let mut map = pending_uploads.lock().expect("pending_uploads poisoned");
-        ingest_chunk(
-            &mut map,
-            &upload_id,
-            chunk_index,
-            total_chunks,
-            blob,
-            &header,
-        )
-    };
-    let assembled = match outcome {
-        Ok(v) => v,
-        Err(msg) => {
-            let f = err_frame(msg);
-            let _ = out_tx.send(Out::Text(encode_frame(&f))).await;
-            return;
-        }
-    };
-    match assembled {
-        Some((base_header, full_blob)) => {
-            let Some(target_str) = base_header.get("target").and_then(Value::as_str) else {
-                let f = err_frame("chunked upload: assembled header missing target".to_string());
-                let _ = out_tx.send(Out::Text(encode_frame(&f))).await;
-                return;
-            };
-            let target = AgentId::from(target_str);
-            let kernel = Arc::clone(&state.kernel);
-            let sender_for_scope = client_id.clone();
-            let out = out_tx.clone();
-            tokio::spawn(async move {
-                let (reply, body) = fantastic_kernel::send::with_sender(sender_for_scope, async {
-                    kernel
-                        .send_with_binary(&target, base_header, full_blob)
-                        .await
-                })
-                .await;
-                send_binary_reply(&out, Some(id), reply, body).await;
-            });
-        }
-        None => {
-            // Non-final chunk — ack so the client can flow-control its pipeline.
-            let f = json!({
-                "type": "chunk_ack",
-                "upload_id": upload_id,
-                "chunk_index": chunk_index,
-            });
-            let _ = out_tx.send(Out::Text(encode_frame(&f))).await;
+/// python `{"type": "error", "id": <id or "">, **denial}` — the denial's own
+/// keys are flattened onto the frame.
+fn error_frame(fid: &Value, denial: &Value) -> Value {
+    let mut out = Map::new();
+    out.insert("type".to_string(), json!("error"));
+    out.insert("id".to_string(), fid.clone());
+    if let Value::Object(m) = denial {
+        for (k, v) in m {
+            out.insert(k.clone(), v.clone());
         }
     }
+    Value::Object(out)
 }

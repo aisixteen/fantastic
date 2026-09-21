@@ -15,7 +15,7 @@ mkdir -p /tmp/fwr_test
 cd /tmp/fwr_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
-$FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
+$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_rest.tools id=wr
 $FANTASTIC &
 DAEMON_PID=$!
@@ -31,7 +31,7 @@ sleep 2
 curl -sf -X POST -H "Content-Type: application/json" \
   -d '{"type":"reflect"}' \
   http://localhost:$PORT/wr/kernel \
-  | jq -e '.id == "core" and .tree.id == "core"'
+  | jq -e '.id == "kernel_state" and .tree.id == "kernel_state"'
 ```
 
 ### Test 2: error on unknown target
@@ -46,8 +46,8 @@ curl -s -X POST -H "Content-Type: application/json" \
 ### Test 3: GET _reflect shortcut
 
 ```bash
-curl -sf http://localhost:$PORT/wr/_reflect | jq -e '.tree.id == "core"'
-curl -sf http://localhost:$PORT/wr/_reflect/core | jq -e '.id == "core"'
+curl -sf http://localhost:$PORT/wr/_reflect | jq -e '.tree.id == "kernel_state"'
+curl -sf http://localhost:$PORT/wr/_reflect/core | jq -e '.id == "kernel_state"'
 ```
 
 ### Test 4: GET _reflect?readme=1 includes readme
@@ -65,8 +65,8 @@ kill $DAEMON_PID; sleep 1
 $FANTASTIC &
 DAEMON_PID=$!
 sleep 2
-curl -sf http://localhost:$PORT/wr/_reflect  | jq -e '.tree.id == "core"'
-curl -sf http://localhost:$PORT/wr2/_reflect | jq -e '.tree.id == "core"'
+curl -sf http://localhost:$PORT/wr/_reflect  | jq -e '.tree.id == "kernel_state"'
+curl -sf http://localhost:$PORT/wr2/_reflect | jq -e '.tree.id == "kernel_state"'
 ```
 
 ## Summary table

@@ -106,33 +106,52 @@ final class StubHTTP: @unchecked Sendable {
     }
 
     private func serve(_ client: Int32) {
-        var request = ""
+        // BYTES, not a String: `\r\n` is ONE Character to swift, so a string
+        // scan for the header terminator across two reads is a trap.
+        var raw: [UInt8] = []
         var buf = [UInt8](repeating: 0, count: 4096)
+        let terminator: [UInt8] = [13, 10, 13, 10]
+        func readMore() -> Bool {
+            while true {
+                let n = read(client, &buf, buf.count)
+                if n > 0 {
+                    raw += buf[0..<n]
+                    return true
+                }
+                if n < 0 && errno == EINTR { continue }
+                return false
+            }
+        }
+        func headerEnd() -> Int? {
+            guard raw.count >= 4 else { return nil }
+            for i in 0...(raw.count - 4) where Array(raw[i..<i + 4]) == terminator {
+                return i + 4
+            }
+            return nil
+        }
         // Headers first; then whatever body the Content-Length announces (the
         // provider always sends one, and reading it keeps the peer from seeing a
         // reset before it finishes writing).
-        while !request.contains("\r\n\r\n") {
-            let n = read(client, &buf, buf.count)
-            if n <= 0 { break }
-            request += String(decoding: buf[0..<n], as: UTF8.self)
-        }
-        if let range = request.range(of: "Content-Length:", options: .caseInsensitive) {
-            let tail = request[range.upperBound...]
-            let value = tail.prefix { $0 != "\r" && $0 != "\n" }.trimmingCharacters(in: .whitespaces)
-            let want = Int(value) ?? 0
-            var have = request.components(separatedBy: "\r\n\r\n").dropFirst()
-                .joined(separator: "\r\n\r\n").utf8.count
-            while have < want {
-                let n = read(client, &buf, buf.count)
-                if n <= 0 { break }
-                request += String(decoding: buf[0..<n], as: UTF8.self)
-                have += n
+        var end = headerEnd()
+        while end == nil, readMore() { end = headerEnd() }
+        if let end {
+            let head = String(decoding: raw[0..<end], as: UTF8.self).lowercased()
+            var want = 0
+            for line in head.components(separatedBy: "\r\n")
+            where line.hasPrefix("content-length:") {
+                want =
+                    Int(
+                        line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
+                    ) ?? 0
             }
+            while raw.count - end < want, readMore() {}
         }
+        let request = String(decoding: raw, as: UTF8.self)
 
         lock.lock()
         seen.append(request)
-        let reply = pending.isEmpty ? Reply(status: 500, body: "no scripted reply") : pending.removeFirst()
+        let reply =
+            pending.isEmpty ? Reply(status: 500, body: "no scripted reply") : pending.removeFirst()
         lock.unlock()
 
         var head = "HTTP/1.1 \(reply.status) \(Self.reason(reply.status))\r\n"

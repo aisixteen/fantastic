@@ -212,26 +212,34 @@ fn version_mismatch_at(path: &str, want: &Value, have: &str) -> Value {
 // ─── the leg-IO seam ────────────────────────────────────────────
 // EVERY byte this agent moves crosses one of these three functions and nothing
 // else in the bundle speaks to the leg's stream verbs. The two IO bodies are
-// the only place that knows HOW a chunk rides (one binary-framed send today);
-// `leg_failure` is channel-agnostic. Moving text_file's leg IO onto the batch
-// swaps the two bodies and nothing else.
+// the only place that knows HOW a chunk rides; `leg_failure` is
+// channel-agnostic.
+//
+// A chunk rides THE BATCH (C37): one `Item::with_binary`, so every leg read and
+// every leg write is an execution like any other — a call row, a ledger id, a
+// task row in `ps`, a timeout, and a settle row. `send_with_binary` bypassed all
+// of it, so a `write_stream` the model asked for left no trace the checkpoint
+// ids could be read back from.
 
-/// One `read_stream` chunk: the leg's reply and the raw chunk it carried.
-/// `path` rides VERBATIM — a truthy non-string is the leg's to refuse.
+/// One `read_stream` chunk: the leg's reply and the raw chunk it carried, or
+/// `None` when the verb returned no chunk at all (a refusal). `path` rides
+/// VERBATIM — a truthy non-string is the leg's to refuse.
 async fn leg_read_chunk(
     kernel: &Arc<Kernel>,
     fb: &str,
     path: &Value,
     offset: u64,
     length: u64,
-) -> (Value, Vec<u8>) {
-    kernel
-        .send_with_binary(
-            &AgentId::from(fb),
+) -> (Value, Option<Vec<u8>>) {
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(fb),
             json!({"type": "read_stream", "path": path, "offset": offset, "length": length}),
-            Vec::new(),
         )
+        .with_binary(Vec::new())])
         .await
+        .remove(0);
+    (out.result, out.body)
 }
 
 /// One `write_stream` chunk. An absent `offset`/`truncate` is python's append
@@ -254,9 +262,12 @@ async fn leg_write_chunk(
         header.insert("truncate".to_string(), json!(t));
     }
     kernel
-        .send_with_binary(&AgentId::from(fb), Value::Object(header), bytes)
+        .send(vec![
+            Item::new(AgentId::from(fb), Value::Object(header)).with_binary(bytes)
+        ])
         .await
-        .0
+        .remove(0)
+        .result
 }
 
 /// python's `if not isinstance(r, dict) or r.get("error"):` — the ONE
@@ -292,6 +303,9 @@ async fn read_all(kernel: &Arc<Kernel>, fb: &str, path: &Value) -> Result<Vec<u8
         if let Some(err) = leg_failure(&r) {
             return Err(err);
         }
+        // python `b = r.get("bytes") or b""` — no chunk is an empty chunk, which
+        // ends the loop on the next test.
+        let body = body.unwrap_or_default();
         raw.extend_from_slice(&body);
         if py_truthy(arg(&r, "eof")) || body.is_empty() {
             break;
@@ -333,10 +347,16 @@ async fn write_atomic(kernel: &Arc<Kernel>, fb: &str, path: &Value, data: &[u8])
     let r = leg_call(
         kernel,
         fb,
-        json!({"type": "rename", "old_path": tmp, "new_path": path}),
+        json!({"type": "rename", "old_path": tmp.clone(), "new_path": path}),
     )
     .await;
-    leg_failure(&r)
+    if let Some(err) = leg_failure(&r) {
+        // The tmp sibling is debris now (a refused rename left it on disk,
+        // python 2026-09-16); best-effort, the refusal is what is answered.
+        let _ = leg_call(kernel, fb, json!({"type": "delete", "path": tmp})).await;
+        return Some(err);
+    }
+    None
 }
 
 /// `/` in the document path would nest under `.ckpt`; flatten it so every
@@ -481,17 +501,20 @@ fn path_of<'a>(payload: &'a Value, verb: &str) -> Result<&'a Value, Value> {
 /// Neither ⇒ python's per-verb `missing`.
 fn blob_of<'a>(
     payload: &'a Value,
-    blob: &'a [u8],
+    blob: Option<&'a [u8]>,
     verb: &str,
     arg_text: &str,
 ) -> Result<Cow<'a, [u8]>, Value> {
     if let Some(s) = payload.get("bytes").and_then(Value::as_str) {
         return Ok(Cow::Borrowed(s.as_bytes()));
     }
-    if blob.is_empty() {
-        return Err(missing(verb, arg_text));
+    // PRESENCE, NOT LENGTH. Python asks `isinstance(payload["bytes"], bytes)`,
+    // so a document that IS empty is a legal write; testing `blob.is_empty()`
+    // refused `<bytes></bytes>` as if the argument had been left out.
+    match blob {
+        Some(b) => Ok(Cow::Borrowed(b)),
+        None => Err(missing(verb, arg_text)),
     }
-    Ok(Cow::Borrowed(blob))
 }
 
 async fn reflect_reply(agent: &Agent) -> Value {
@@ -600,7 +623,12 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
     })
 }
 
-async fn write_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
+async fn write_reply(
+    kernel: &Arc<Kernel>,
+    fb: &str,
+    payload: &Value,
+    blob: Option<&[u8]>,
+) -> Value {
     let path = match path_of(payload, "write") {
         Ok(p) => p,
         Err(e) => return e,
@@ -638,7 +666,12 @@ async fn write_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
     out
 }
 
-async fn append_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
+async fn append_reply(
+    kernel: &Arc<Kernel>,
+    fb: &str,
+    payload: &Value,
+    blob: Option<&[u8]>,
+) -> Value {
     let path = match path_of(payload, "append") {
         Ok(p) => p,
         Err(e) => return e,
@@ -670,7 +703,12 @@ async fn append_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u
     })
 }
 
-async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
+async fn patch_reply(
+    kernel: &Arc<Kernel>,
+    fb: &str,
+    payload: &Value,
+    blob: Option<&[u8]>,
+) -> Value {
     // A TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file
     // rides the array (one shape, no single/multi drift; user decision
     // 2026-09-01). ONE raw hunk blob, split by the per-edit counts; verify
@@ -1036,7 +1074,12 @@ fn unknown_type(verb: &Value) -> Value {
 
 /// One dispatch used by BOTH channels — the byte verbs take the blob, the rest
 /// ignore it.
-async fn dispatch(agent: &Agent, payload: &Value, blob: &[u8], kernel: &Arc<Kernel>) -> Value {
+async fn dispatch(
+    agent: &Agent,
+    payload: &Value,
+    blob: Option<&[u8]>,
+    kernel: &Arc<Kernel>,
+) -> Value {
     let raw_verb = arg(payload, "type");
     let verb = raw_verb.as_str().unwrap_or("");
     match verb {
@@ -1098,7 +1141,7 @@ impl Bundle for TextFileBundle {
         // NO early bytes refusal here: python types the args IN the verb, so an
         // unwired agent, or a missing `path`, is reported before anyone looks
         // for a document. `blob_of` raises the per-verb `missing` in its place.
-        Ok(Some(dispatch(&agent, payload, &[], kernel).await))
+        Ok(Some(dispatch(&agent, payload, None, kernel).await))
     }
 
     async fn handle_binary(
@@ -1107,16 +1150,16 @@ impl Bundle for TextFileBundle {
         header: Value,
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), BundleError> {
+    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
         let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
-            return Ok((
-                Some(json!({"error": format!("no agent {agent_id}")})),
-                Vec::new(),
-            ));
+            return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None));
         };
+        // text_file answers documents, never raw chunks — no reply body (C37).
+        // THE BLOB IS THE `bytes` ARGUMENT, present even when empty — that is
+        // the bytes-TYPED carrier a model's `<bytes>` document rides (A13.19).
         Ok((
-            Some(dispatch(&agent, &header, &blob, kernel).await),
-            Vec::new(),
+            Some(dispatch(&agent, &header, Some(&blob), kernel).await),
+            None,
         ))
     }
 }

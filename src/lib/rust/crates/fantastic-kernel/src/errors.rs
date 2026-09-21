@@ -41,11 +41,14 @@ pub enum KernelError {
     },
 
     /// Another daemon holds the lock file in this workdir.
-    /// Mirrors Python's friendlier message — name the pid AND tell
-    /// the user how to recover (stop the daemon or route through the
-    /// daemon's WS surface).
+    ///
+    /// C81: python's exact three lines (`P/kernel/_lock.py:52-64`) — name the
+    /// pid and tell the operator how to recover (kill it, or remove a stale
+    /// lock). `RCLI/src/main.rs` prints this as `[kernel] {e}` and exits 1,
+    /// NOT through the generic `fantastic_kernel: {e}` wrapper every other
+    /// error takes.
     #[error(
-        "fantastic: another fantastic owns this dir (pid={pid}). Stop it, or forward your call over the WS bridge served by the running daemon."
+        "another fantastic owns this dir: pid={pid}\n  -> kill it:  kill {pid}\n  -> or, if stale, remove the lock:  rm .fantastic/lock.json"
     )]
     LockHeld {
         /// PID of the owning daemon.

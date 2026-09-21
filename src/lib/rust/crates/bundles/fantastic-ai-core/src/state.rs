@@ -231,7 +231,8 @@ pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
     // caller asking for the redacted view was answered as if it were `cli`.
     let raw_client = payload.get("client_id").cloned().unwrap_or(Value::Null);
     let requesting = if py_truthy(&raw_client) {
-        Some(safe_client(raw_client.as_str().unwrap_or_default()))
+        // `str(client_id)` for a truthy non-string (python, 2026-09-20).
+        Some(safe_client(&fantastic_bundle::py_str(&raw_client)))
     } else {
         None
     };

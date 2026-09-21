@@ -48,6 +48,46 @@ public enum RuntimeLog {
         return box.lines()
     }
 
+    /// Every ACTIVE stdout capture — the operator-facing channel, separate from
+    /// the runtime's own WARN channel above.
+    nonisolated(unsafe) private static var outSinks: [LineBox] = []
+
+    /// One stdout line, FLUSHED — python's `print(..., flush=True)`. stdout is
+    /// block-buffered on a pipe, and an operator-facing line the process is
+    /// signalled right after must not be left in the buffer.
+    public static func out(_ line: String) {
+        lock.lock()
+        let active = outSinks
+        lock.unlock()
+        if active.isEmpty {
+            print(line)
+            fflush(stdout)
+            return
+        }
+        for box in active { box.append(line) }
+    }
+
+    /// Collect every `out` line emitted while `body` runs. Test-only seam.
+    public static func captureOut(_ body: () async throws -> Void) async rethrows -> [String] {
+        let box = LineBox()
+        attachOut(box)
+        defer { detachOut(box) }
+        try await body()
+        return box.lines()
+    }
+
+    private static func attachOut(_ box: LineBox) {
+        lock.lock()
+        outSinks.append(box)
+        lock.unlock()
+    }
+
+    private static func detachOut(_ box: LineBox) {
+        lock.lock()
+        outSinks.removeAll { $0 === box }
+        lock.unlock()
+    }
+
     private static func attach(_ box: LineBox) {
         lock.lock()
         sinks.append(box)

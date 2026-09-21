@@ -6,10 +6,12 @@
 //! handler; bare agents via [`reflect_identity`]). The composable flags
 //! are appended uniformly by [`apply_reflect_flags`] in `send`:
 //!
-//! - `tree=all|ids|none` (default `all`) — nested distilled subtree /
-//!   flat descendant-id index / omitted.
-//! - `bundles=all|ids|none` (default `none`) — `{name, handler_module}`
-//!   catalog / names / omitted.
+//! - `detail=distilled|full` (default distilled) — distilled carries the
+//!   gated ROSTER and the `more` hint; full carries the wiring tree.
+//! - `tree=all|ids` (default `all`; any other PRESENT value omits it) — the
+//!   nested subtree / the flat descendant-id index, paged with `next`.
+//! - `bundles=all|ids` (default none) — the INSTALLED `{name, handler_module}`
+//!   catalog / its names, paged with `bundles_next`.
 //! - `readme=true` — attach the agent's readme.md (string or null).
 //!
 //! There is NO `primer`: transport/wire docs moved into the root readme
@@ -19,9 +21,32 @@ use crate::agent::Agent;
 #[cfg(test)]
 use crate::agent::AgentId;
 use crate::kernel::Kernel;
+use crate::outcome::Status;
 use serde_json::{json, Map, Value};
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+
+/// The escalation line every DISTILLED reflect carries — python `_MORE_HINT`,
+/// verbatim. Escalation rides in the reply itself, not in any caller's prompt.
+pub const MORE_HINT: &str = "Distilled: every agent and what it is FOR. Reflect one agent for its \
+verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include \
+system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). \
+<detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see \
+how agents are plumbed, not to find one.";
+
+/// PURPOSE, not wiring — the reflect keys a roster node copies beyond its
+/// `sentence` (python `_PURPOSE_KEYS`).
+const PURPOSE_KEYS: [&str; 1] = ["mode"];
+
+/// `display_name or id` — python's truthiness: an empty name is no name.
+fn display_name_or_id(target: &Agent) -> Value {
+    match target.display_name() {
+        Some(s) if !s.is_empty() => json!(s),
+        _ => json!(target.id.0),
+    }
+}
 
 // ─── keyed / tiered doc tree ───────────────────────────────────
 // The root manual is a SHORT `readme.md` orientation + a `docs/` tree of topic
@@ -36,15 +61,19 @@ fn est_tokens(text: &str) -> usize {
 }
 
 /// A topic's one-line descriptor: the leading `> ` line if present, else the
-/// first prose line (skipping headings).
+/// first prose line (skipping headings). Python `_read_desc` splits like
+/// `str.splitlines()` (the `\x1c`-`\x1e`/`\x85`/U+2028/U+2029 boundaries
+/// included, not just `\n`) and strips like `str.strip()` (python's wider
+/// whitespace set) — C59.
 fn read_desc(text: &str) -> String {
-    for line in text.lines() {
+    let lines = fantastic_bundle::py_splitlines(text);
+    for line in &lines {
         if let Some(rest) = line.strip_prefix("> ") {
-            return rest.trim().to_string();
+            return fantastic_bundle::py_strip(rest).to_string();
         }
     }
-    for line in text.lines() {
-        let s = line.trim();
+    for line in &lines {
+        let s = fantastic_bundle::py_strip(line);
         if !s.is_empty() && !s.starts_with('#') && !s.starts_with('>') {
             return s.to_string();
         }
@@ -52,11 +81,85 @@ fn read_desc(text: &str) -> String {
     String::new()
 }
 
+/// A doc file's raw bytes read in PYTHON TEXT MODE: UTF-8 decode, universal
+/// newlines (`\r\n` and lone `\r` → `\n`) — mirrors
+/// `pathlib.Path.read_text(encoding="utf-8")` (C59).
+///
+/// `Io` = the file could not be read at all (permission, races after an
+/// `is_file()` check) — every `_readme_*` call site in python catches ONLY
+/// `OSError` here and treats it as "no doc". `Decode` = the bytes are not
+/// valid UTF-8: python's `except OSError` does NOT catch
+/// `UnicodeDecodeError`, so this is NOT "unreadable" — it propagates out of
+/// the verb and fails the WHOLE reflect (C60). Callers turn it into that
+/// raise via [`decode_raise`].
+enum DocRead {
+    Ok(String),
+    Io,
+    Decode(String),
+}
+
+fn read_doc_text(path: &Path) -> DocRead {
+    let Ok(bytes) = std::fs::read(path) else {
+        return DocRead::Io;
+    };
+    match String::from_utf8(bytes) {
+        Ok(s) => DocRead::Ok(translate_newlines(&s)),
+        Err(e) => {
+            let bytes = e.as_bytes();
+            DocRead::Decode(utf8_error_text(bytes, &e.utf8_error()))
+        }
+    }
+}
+
+/// `\r\n` and a lone `\r` both become `\n` — python's universal-newlines text
+/// mode, applied to every doc/readme read (C59; rust/swift used to KEEP the
+/// CRs, so `tokens`/`desc` diverged from python's).
+fn translate_newlines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// CPython's `UnicodeDecodeError` message for a `'utf-8' codec` failure:
+/// `"'utf-8' codec can't decode byte 0x.. in position N: <reason>"` (C60).
+fn utf8_error_text(bytes: &[u8], e: &std::str::Utf8Error) -> String {
+    let pos = e.valid_up_to();
+    let reason = match e.error_len() {
+        None => "unexpected end of data",
+        Some(1) => "invalid start byte",
+        Some(_) => "invalid continuation byte",
+    };
+    let byte = bytes.get(pos).copied().unwrap_or(0);
+    format!("'utf-8' codec can't decode byte 0x{byte:02x} in position {pos}: {reason}")
+}
+
+/// The reply python's dispatch builds for an uncaught exception — here a
+/// `UnicodeDecodeError` propagating out of a doc read (C60). Same shape as
+/// every other raised handler: `{"error": "<Class>: <message>", "raised":
+/// true}`, which settles the whole call `failed`.
+fn decode_raise(message: &str) -> Value {
+    json!({"error": format!("UnicodeDecodeError: {message}"), "raised": true})
+}
+
 /// Token-annotated topic index under `dir` (recursive; nesting preserved). Each
 /// entry `{key, desc, tokens, children?}` — NO body. Absent dir → empty.
-fn readme_index(dir: &Path, prefix: &str) -> Vec<Value> {
+///
+/// `Err` = a doc under `dir` is not valid UTF-8 — python's `except OSError`
+/// does not catch that, so scanning the tree (index, keys-on-error, a
+/// directory view's children) raises and fails the whole reflect (C60).
+pub fn readme_index(dir: &Path, prefix: &str) -> Result<Vec<Value>, Value> {
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     paths.sort();
@@ -65,11 +168,13 @@ fn readme_index(dir: &Path, prefix: &str) -> Vec<Value> {
         if !(path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md")) {
             continue;
         }
-        let (Some(stem), Ok(body)) = (
-            path.file_stem().and_then(|s| s.to_str()),
-            std::fs::read_to_string(&path),
-        ) else {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
+        };
+        let body = match read_doc_text(&path) {
+            DocRead::Ok(s) => s,
+            DocRead::Io => continue,
+            DocRead::Decode(msg) => return Err(decode_raise(&msg)),
         };
         let key = format!("{prefix}{stem}");
         let mut entry = Map::new();
@@ -78,18 +183,18 @@ fn readme_index(dir: &Path, prefix: &str) -> Vec<Value> {
         entry.insert("tokens".to_string(), json!(est_tokens(&body)));
         let sub = dir.join(stem);
         if sub.is_dir() {
-            let children = readme_index(&sub, &format!("{key}/"));
+            let children = readme_index(&sub, &format!("{key}/"))?;
             if !children.is_empty() {
                 entry.insert("children".to_string(), Value::Array(children));
             }
         }
         entries.push(Value::Object(entry));
     }
-    entries
+    Ok(entries)
 }
 
 /// Flatten every doc key (for an unknown-key error reply).
-fn readme_keys(dir: &Path) -> Vec<String> {
+fn readme_keys(dir: &Path) -> Result<Vec<String>, Value> {
     fn walk(entries: &[Value], out: &mut Vec<String>) {
         for e in entries {
             if let Some(k) = e.get("key").and_then(Value::as_str) {
@@ -101,24 +206,56 @@ fn readme_keys(dir: &Path) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    walk(&readme_index(dir, ""), &mut out);
-    out
+    walk(&readme_index(dir, "")?, &mut out);
+    Ok(out)
 }
 
 /// Polymorphic `readme=<str>`: `"index"` → the token-annotated tree; a `<key>` →
 /// that topic's body + its immediate sub-docs' index; unknown/escaping key →
 /// `{error, keys}` (the reply stays well-formed).
-fn readme_view(dir: &Path, sel: &str) -> Value {
+///
+/// PORT OF PYTHON'S `_readme_view`, r2 correction R2-RFL-5: `safe` is the RAW
+/// (unrejected) string after `sel.strip("/").replace("\\", "/")`; `f = dir /
+/// (safe + ".md")` by plain concatenation, so `Path::join`'s own rules apply
+/// (an absolute `safe` REPLACES `dir` entirely — `\topic` → `/topic.md` →
+/// escapes and is a `bad key`; `//` inside `safe` collapses like any POSIX
+/// path). The CLAMP check is [`clamped_within`] (lexical, tolerates
+/// nonexistent components); the EXISTENCE check is a real `is_file()` on the
+/// UNRESOLVED `f` — the OS itself refuses to walk a `..` through a segment
+/// that is not really a directory (`frontend/panel-recipe/../routing` is
+/// `no doc` because `panel-recipe` is a FILE, not a dir, even though the
+/// clamp check alone would have allowed it).
+fn readme_view(dir: &Path, sel: &str) -> Result<Value, Value> {
     if sel == "index" {
-        return json!({ "index": readme_index(dir, "") });
+        return Ok(json!({ "index": readme_index(dir, "")? }));
     }
     let safe = sel.trim_matches('/').replace('\\', "/");
-    if safe.is_empty() || safe.split('/').any(|c| c == ".." || c.is_empty()) {
-        return json!({ "error": format!("bad key '{sel}'"), "keys": readme_keys(dir) });
+    // LEXICAL, then the key list — never the filesystem (python 2026-09-20):
+    // a `..` segment is a bad key whether or not the path it walked through
+    // exists, and a key is a doc only if the index lists it.
+    if safe.is_empty() || safe.split('/').any(|p| matches!(p, "" | "." | "..")) {
+        return Ok(json!({
+            "error": format!("bad key {}", fantastic_bundle::py_repr(sel)),
+            "keys": readme_keys(dir)?,
+        }));
+    }
+    let keys = readme_keys(dir)?;
+    if !keys.contains(&safe) {
+        return Ok(json!({
+            "error": format!("no doc {}", fantastic_bundle::py_repr(sel)),
+            "keys": keys,
+        }));
     }
     let file = dir.join(format!("{safe}.md"));
-    let Ok(body) = std::fs::read_to_string(&file) else {
-        return json!({ "error": format!("no doc '{sel}'"), "keys": readme_keys(dir) });
+    let body = match read_doc_text(&file) {
+        DocRead::Ok(s) => s,
+        DocRead::Io => {
+            return Ok(json!({
+                "error": format!("unreadable {}", fantastic_bundle::py_repr(sel)),
+                "keys": readme_keys(dir)?,
+            }))
+        }
+        DocRead::Decode(msg) => return Err(decode_raise(&msg)),
     };
     let mut view = Map::new();
     view.insert("key".to_string(), json!(safe));
@@ -127,12 +264,12 @@ fn readme_view(dir: &Path, sel: &str) -> Value {
     view.insert("body".to_string(), json!(body));
     let sub = dir.join(&safe);
     if sub.is_dir() {
-        let children = readme_index(&sub, &format!("{safe}/"));
+        let children = readme_index(&sub, &format!("{safe}/"))?;
         if !children.is_empty() {
             view.insert("children".to_string(), Value::Array(children));
         }
     }
-    Value::Object(view)
+    Ok(Value::Object(view))
 }
 
 /// Uniform reflect identity for a bare agent (the root, or any node with
@@ -159,13 +296,7 @@ pub fn reflect_identity(target: &Arc<Agent>) -> Value {
             .map(|s| json!(s))
             .unwrap_or(Value::Null),
     );
-    obj.insert(
-        "display_name".to_string(),
-        target
-            .display_name()
-            .map(|s| json!(s))
-            .unwrap_or_else(|| json!(target.id.0)),
-    );
+    obj.insert("display_name".to_string(), display_name_or_id(target));
     if let Some(d) = target.description() {
         obj.insert("description".to_string(), json!(d));
     }
@@ -189,25 +320,99 @@ fn sentence_for(target: &Arc<Agent>) -> &'static str {
     }
 }
 
+/// `{id, sentence?, description?, mode?, children:[...]}` — the tree, carrying
+/// what each agent is FOR instead of how it is wired (python `_roster`).
+///
+/// The sentence is ASKED FROM THE AGENT ITSELF: a node with a handler is
+/// reflected through [`Kernel::internal_dispatch`] (a real call — row, task,
+/// watcher echo — but no reflect flags, so a roster never recurses into
+/// rosters); a bare node answers its identity directly.
+///
+/// GATED PER NODE. A caller allowed to reflect ONE agent must not read every
+/// descendant's `sentence`/`description` through the tree. A denied node keeps
+/// its `id` and `children` (the shape is public through `tree=ids`) and is not
+/// dispatched at all. An operator sees everything.
+///
+/// `Err` carries a node's RAISED reflect: python's exception propagates out of
+/// `_roster` and fails the whole reflect.
+fn roster(
+    kernel: Arc<Kernel>,
+    a: Arc<Agent>,
+) -> Pin<Box<dyn Future<Output = Result<Value, Value>> + Send>> {
+    Box::pin(async move {
+        let may_reflect = match crate::send::current_sender() {
+            None => true,
+            Some(sender) => kernel
+                .gate(&sender, "reflect", &a, &Value::Object(Map::new()))
+                .is_none(),
+        };
+        let raw = if a.handler_module.is_some() && may_reflect {
+            let (reply, status) = kernel
+                .internal_dispatch(&a, &json!({"type": "reflect"}))
+                .await;
+            if status == Status::Failed {
+                return Err(reply);
+            }
+            reply
+        } else if may_reflect {
+            reflect_identity(&a)
+        } else {
+            Value::Object(Map::new())
+        };
+        let mut node = Map::new();
+        node.insert("id".to_string(), json!(a.id.0));
+        if let Some(sentence) = raw
+            .get("sentence")
+            .filter(|v| fantastic_bundle::py_truthy(v))
+        {
+            node.insert("sentence".to_string(), sentence.clone());
+        }
+        // Operator-set purpose — more specific than the bundle sentence.
+        if may_reflect {
+            if let Some(d) = a.description() {
+                node.insert("description".to_string(), json!(d));
+            }
+        }
+        for k in PURPOSE_KEYS {
+            if let Some(v) = raw.get(k).filter(|v| !v.is_null()) {
+                node.insert(k.to_string(), v.clone());
+            }
+        }
+        let mut children = Vec::new();
+        for c in a.children_snapshot() {
+            children.push(roster(Arc::clone(&kernel), c).await?);
+        }
+        node.insert("children".to_string(), Value::Array(children));
+        Ok(Value::Object(node))
+    })
+}
+
 /// Append the composable reflect flags to any reflect reply — applied
-/// uniformly to bare-agent and bundle reflects. `tree` defaults to
-/// `all`, `bundles` to `none`, `readme` to false. Non-object replies
-/// (errors / null) pass through.
-pub fn apply_reflect_flags(
+/// uniformly to bare-agent and bundle reflects (python
+/// `_apply_reflect_flags`). Non-object replies and refusals pass through.
+///
+/// Key order is python's: identity, `description`, gate fields,
+/// `kernel_verbs`, the root frame, `tree`, `next`, `more`, `bundles`,
+/// `bundles_next`, `readme`.
+///
+/// `Err` = a roster node's reflect raised; the caller settles the whole
+/// reflect `failed` with that reply.
+pub async fn apply_reflect_flags(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
     payload: &Value,
     reply: &mut Value,
-) {
+) -> Result<(), Value> {
     let Some(obj) = reply.as_object_mut() else {
-        return;
+        return Ok(());
     };
     // A REFUSAL IS NOT A REFLECT. Decorating one with kernel_verbs/tree/more
     // produced a reply that reads like a healthy reflect with a stray error
     // field, and a caller could not tell the two apart (2026-09-02).
     if obj.contains_key("error") {
-        return;
+        return Ok(());
     }
+    let full = payload.get("detail").and_then(Value::as_str) == Some("full");
     // `description` is a substrate meta field — surface it on every
     // reflect (bundle handlers don't know about it) unless already set.
     if !obj.contains_key("description") {
@@ -233,9 +438,7 @@ pub fn apply_reflect_flags(
     // exist, guesses, and gives up.
     obj.insert(
         "kernel_verbs".to_string(),
-        crate::send::kernel_verbs_view(
-            payload.get("detail").and_then(Value::as_str) == Some("full"),
-        ),
+        crate::send::kernel_verbs_view(full),
     );
     // Kernel runtime identity + deployment context — surfaced on the ROOT
     // reflect so a client that hops to this kernel learns, in one round-trip:
@@ -246,15 +449,6 @@ pub fn apply_reflect_flags(
     // .fantastic workdir). Same field names + key order (runtime → env →
     // version) across all four runtimes.
     if target.parent_id.is_none() {
-        // Stable kernel instance guid — PERSISTENCE-scoped (sourced from the
-        // persisted root meta, minted once at boot), unlike runtime/env/version
-        // which are run-scoped. Always present: disk boot reads it back, an
-        // in-memory boot mints an ephemeral one.
-        if let Ok(meta) = target.meta.read() {
-            if let Some(guid) = meta.get("guid").and_then(Value::as_str) {
-                obj.insert("guid".to_string(), json!(guid));
-            }
-        }
         obj.insert("runtime".to_string(), json!("rust"));
         obj.insert(
             "env".to_string(),
@@ -264,131 +458,91 @@ pub fn apply_reflect_flags(
             "version".to_string(),
             json!(std::env::var("FANTASTIC_VERSION").ok()),
         );
-        // WHICH file_bridge the loader auto-persists records THROUGH (the
-        // discovered store), or null = nothing wired (state in RAM). With the
-        // provider's posture inline in the tree, a client sees in one reflect
-        // whether persistence is wired AND whether the wired leg is open.
-        obj.insert(
-            "persistence".to_string(),
-            json!({ "provider": crate::persistence::find_store(kernel).map(|id| id.0) }),
-        );
-        // The EXECUTION MODEL rides here, not only the affordance. The SHAPE of a
-        // durable program cannot be left to a readme, because a model that lacks it
-        // writes something that cannot work — and the weak models are exactly the
-        // ones that never follow the pointer to go read it. A durable program is a
-        // FILE plus a command; there is NO `code` field (a program squeezed into a
-        // JSON string is lost to one stray quote — the old `code` field's whole
-        // failure). Word-for-word with python's full `self_extension`.
-        obj.insert(
-            "self_extension".to_string(),
-            json!(
-                "A DURABLE PROGRAM is a FILE you write plus a command that runs it — \
-                 not a `code`-carrying agent. There is no `code` field: a program used \
-                 to be embedded as a JSON string, which is exactly how a call gets lost \
-                 to escaping. Assemble these THREE pieces and you have built something \
-                 that persists and re-runs, with no `code` field at all:\n\
-                 1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON \
-                 string. Use the file leg's STREAM verbs — <type>write_stream</type> \
-                 <path>…</path> <truncate>true</truncate> <bytes>…</bytes> to write, \
-                 <type>read_stream</type> <path>…</path> <offset>0</offset> to read, one \
-                 raw chunk at a time. `bytes` is VERBATIM: the program between \
-                 `<bytes>` and `</bytes>` exactly as written, real newlines, nothing \
-                 escaped. That is the only byte path; the string read/write verbs are \
-                 gone.\n\
-                 2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect \
-                 it, read its `allowed` regexes, then send \
-                 <type>start</type> <command>path</command> <args><item>…</item></args>; \
-                 poll <type>status</type>. \
-                 It runs commands, not inline programs.\n\
-                 3. RE-RUN: the file is durable on disk, so the SAME `start` command run \
-                 again later re-executes the SAME program against whatever the inputs \
-                 hold THEN — that is how a thing 'keeps itself up to date'.\n\
-                 A WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING \
-                 command runner) that owns a program file — you never author a new \
-                 handler_module (you cannot add modules to the catalog and do not need \
-                 to). 'A specialist with child workers' = a parent agent whose children \
-                 are exec_bridge runners, each with its own program file.\n\
-                 WIRING TO A SIBLING: you cannot raise your OWN authority, but if you \
-                 hold `update_agent` (e.g. on the root) you may open ANY agent's ingress \
-                 — including a sibling like `totals`/`readings` that is not your child. \
-                 To let your worker call `totals`: grant the worker `can_call:{totals}` \
-                 AND `update_agent id='totals'` to add the worker to `totals.callable_by` \
-                 (send the WHOLE map — update replaces, not merges).\n\
-                 A SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket \
-                 (FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply \
-                 comes back on the SAME fd as {op:'reply', rid, data}. It is not inline \
-                 — read frames until one carries your `rid`, skipping event/inbox frames.\n\
-                 COMPOSE the agents you were given for everything else (`list_agents`, \
-                 reflect each, send). CREATE/DELETE plain agents (create_agent with a \
-                 handler_module and grants, delete_agent) work as before. Read \
-                 <type>reflect</type> <readme>self-extension</readme> — send it to \
-                 'kernel' (the \
-                 manual lives on the ROOT, not on any other agent) — for the fd wire + \
-                 detail."
-            ),
-        );
-        // Always-on doc-tree FRAME: `readmes` (the top-level token-annotated topic
-        // index) + `docs` (a one-liner teaching keyed fetch). So the manual's map is
-        // in front of a caller from the first root reflect — it drills with
-        // readme=index / readme=<key> instead of eating a monolith.
-        let docs_dir = target.root_path.join("docs");
-        obj.insert(
-            "readmes".to_string(),
-            Value::Array(readme_index(&docs_dir, "")),
-        );
-        obj.insert(
-            "docs".to_string(),
-            json!(
-                "This kernel's manual is a keyed doc tree. To read it, send 'kernel' \
-                 a reflect with a string `readme` field: <type>reflect</type> \
-                 <readme>index</readme> lists every topic with its ~token cost; \
-                 <readme>key</readme> opens one (e.g. self-extension, streams); \
-                 <readme>true</readme> is the short orientation. The field is named \
-                 exactly `readme` (a string) - not 'readme_key'. Read only what a task \
-                 needs."
-            ),
-        );
-    }
-    match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {
-        "all" => {
-            obj.insert("tree".to_string(), tree_node(target));
+        // DUCK-TYPED ROOT EXTENSION (python `_agent.py:1697-1709`). The root's
+        // handler_module — the kernel_state loader — contributes root-only
+        // fields the substrate cannot compute without coupling to bundle logic:
+        // `persistence: {provider}`, the instance `guid`, the doc-tree frame
+        // and the `self_extension` shape. No bundle import here: the registry
+        // already holds it, and a root whose bundle is not installed in this
+        // runtime simply contributes nothing.
+        if let Some(extra) = target
+            .handler_module
+            .as_deref()
+            .and_then(|hm| kernel.bundles.get(hm))
+            .and_then(|b| b.reflect_root_extra(target, full, kernel))
+        {
+            for (k, v) in extra {
+                obj.insert(k, v);
+            }
         }
-        "ids" => {
-            // PAGED — the cheap id tier is the one most likely to be walked by a
-            // caller with a small budget, so it is also the one that most needs
-            // a bound. Same cursor law as `list_agents`/`ps`.
+    }
+    // DECIDED BY KEY PRESENCE (python `payload.get("tree", "all")`): absent is
+    // `all`; a present `all`/`ids` acts; any other present value — null, a bool,
+    // a number, `none` — omits the tree.
+    match payload.get("tree") {
+        None => insert_tree(kernel, target, full, obj).await?,
+        Some(Value::String(t)) if t == "all" => insert_tree(kernel, target, full, obj).await?,
+        Some(Value::String(t)) if t == "ids" => {
+            // The FLAT id index is the one tree shape that is a plain list, so it
+            // is the one that pages. The nested tree is never sliced — a page of
+            // it would be a forest with no root.
             let (ids, next) = crate::paging::page(descendant_ids(target), payload, Clone::clone);
             obj.insert("tree".to_string(), json!(ids));
-            obj.insert("tree_next".to_string(), json!(next));
+            if let Some(next) = next {
+                obj.insert("next".to_string(), json!(next));
+            }
         }
-        _ => {} // "none" → omit
+        _ => {}
     }
-    match payload
-        .get("bundles")
-        .and_then(Value::as_str)
-        .unwrap_or("none")
-    {
-        "all" => {
-            obj.insert(
-                "bundles".to_string(),
-                Value::Array(available_bundles(kernel)),
-            );
+    if !full {
+        obj.insert("more".to_string(), json!(MORE_HINT));
+    }
+    // The catalog pages with the SAME `limit`/`after` as `tree=ids`, and names
+    // its cursor `bundles_next` only when a further page exists.
+    match payload.get("bundles") {
+        Some(Value::String(b)) if b == "all" => {
+            let (cat, next) = crate::paging::page(available_bundles(kernel), payload, |b| {
+                b.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            });
+            obj.insert("bundles".to_string(), Value::Array(cat));
+            if let Some(next) = next {
+                obj.insert("bundles_next".to_string(), json!(next));
+            }
         }
-        "ids" => {
-            let names: Vec<Value> = available_bundles(kernel)
-                .into_iter()
-                .filter_map(|b| b.get("name").cloned())
+        Some(Value::String(b)) if b == "ids" => {
+            let names: Vec<String> = available_bundles(kernel)
+                .iter()
+                .filter_map(|b| b.get("name").and_then(Value::as_str).map(str::to_string))
                 .collect();
-            obj.insert("bundles".to_string(), Value::Array(names));
+            let (names, next) = crate::paging::page(names, payload, Clone::clone);
+            obj.insert("bundles".to_string(), json!(names));
+            if let Some(next) = next {
+                obj.insert("bundles_next".to_string(), json!(next));
+            }
         }
-        _ => {} // "none" → omit
+        _ => {}
     }
     // Polymorphic `readme`: `true` → the SHORT orientation readme.md (string or
     // null); `"index"` → the token-annotated topic tree; `"<key>"` → one topic's
     // body + sub-docs' index. Read from the seeded on-disk tree, one agent at a time.
     match payload.get("readme") {
         Some(Value::Bool(true)) => {
-            let readme = std::fs::read_to_string(target.readme_file()).ok();
+            // python: `if p.exists(): try: return p.read_text(...) except
+            // OSError: return None`; a `UnicodeDecodeError` is not an
+            // `OSError` and propagates (C60).
+            let path = target.readme_file();
+            let readme = if path.exists() {
+                match read_doc_text(&path) {
+                    DocRead::Ok(s) => Some(s),
+                    DocRead::Io => None,
+                    DocRead::Decode(msg) => return Err(decode_raise(&msg)),
+                }
+            } else {
+                None
+            };
             obj.insert(
                 "readme".to_string(),
                 match readme {
@@ -399,15 +553,33 @@ pub fn apply_reflect_flags(
         }
         Some(Value::String(sel)) if !sel.is_empty() => {
             let docs_dir = target.root_path.join("docs");
-            obj.insert("readme".to_string(), readme_view(&docs_dir, sel));
+            obj.insert("readme".to_string(), readme_view(&docs_dir, sel)?);
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// `tree=all`: the wiring tree under `detail:full`, the gated roster otherwise.
+async fn insert_tree(
+    kernel: &Arc<Kernel>,
+    target: &Arc<Agent>,
+    full: bool,
+    obj: &mut Map<String, Value>,
+) -> Result<(), Value> {
+    let tree = if full {
+        tree_node(target)
+    } else {
+        roster(Arc::clone(kernel), Arc::clone(target)).await?
+    };
+    obj.insert("tree".to_string(), tree);
+    Ok(())
 }
 
 /// Walk an agent and its descendants, producing a nested
-/// `{id, parent_id, handler_module, display_name, description?,
-/// children:[...]}` dict (the `tree=all` shape; children sorted by id).
+/// `{id, parent_id, handler_module, display_name, description?, ...posture,
+/// children:[...]}` dict — the `detail:full` wiring tree (python `_tree`),
+/// children in creation order.
 pub fn tree_node(target: &Agent) -> Value {
     let mut obj = Map::new();
     obj.insert("id".to_string(), json!(target.id.0));
@@ -423,13 +595,7 @@ pub fn tree_node(target: &Agent) -> Value {
             None => Value::Null,
         },
     );
-    obj.insert(
-        "display_name".to_string(),
-        target
-            .display_name()
-            .map(|s| json!(s))
-            .unwrap_or_else(|| json!(target.id.0)),
-    );
+    obj.insert("display_name".to_string(), display_name_or_id(target));
     if let Some(d) = target.description() {
         obj.insert("description".to_string(), json!(d));
     }
@@ -476,12 +642,13 @@ pub fn descendant_ids(target: &Agent) -> Vec<String> {
     out
 }
 
-/// The installable-bundle catalog as `{name, handler_module}`, sorted by
-/// name. The `bundles=all` tier (`bundles=ids` maps to just the names).
+/// The INSTALLABLE-bundle catalog as `{name, handler_module}`, sorted by
+/// name (python's entry-point scan) — unlisted fixtures are not in it. The
+/// `bundles=all` tier (`bundles=ids` maps to just the names).
 fn available_bundles(kernel: &Arc<Kernel>) -> Vec<Value> {
     let mut out: Vec<Value> = kernel
         .bundles
-        .iter()
+        .catalog()
         .map(|(handler_module, b)| {
             json!({
                 "name": b.name(),

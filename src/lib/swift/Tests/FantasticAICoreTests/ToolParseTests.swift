@@ -215,11 +215,14 @@ struct ToolParseTests {
         let bad = malformedCalls(text)
         try #require(bad.count == 1, "\(bad.map(\.error))", sourceLocation: loc)
         for n in needles {
-            #expect(bad[0].error.contains(n), "missing \(n) in: \(bad[0].error)", sourceLocation: loc)
+            #expect(
+                bad[0].error.contains(n), "missing \(n) in: \(bad[0].error)", sourceLocation: loc)
         }
         #expect(bad[0].error.hasPrefix("call NOT dispatched: "), sourceLocation: loc)
         #expect(bad[0].error.contains("The shape:"), sourceLocation: loc)
-        #expect(!bad[0].yourBlock.contains("<call"), "the echoed block is defanged", sourceLocation: loc)
+        #expect(
+            !bad[0].yourBlock.contains("<call"), "the echoed block is defanged", sourceLocation: loc
+        )
         return bad[0]
     }
 
@@ -272,6 +275,21 @@ struct ToolParseTests {
         try refused(
             #"<call name="send"><type>reflect</type></call>"#,
             ["a send names its target", "<target_id>", "<to><item>"])
+    }
+
+    /// C74 (D13): python's `coerce_scalar` types a numeric-shaped target_id
+    /// as an (unbounded) `int`, so `isinstance(target, str)` fails and the
+    /// send is refused even though the digits are too wide for this
+    /// runtime's `Int64` carrier — it must not fall back to dispatching to a
+    /// literal numeral agent id.
+    @Test("a numeric-shaped target_id, even too wide for Int64, is not a string target")
+    func numericTargetIdIsNotAStringTarget() throws {
+        try refused(
+            #"<call name="send"><target_id>123456789012345678901234567890</target_id><type>reflect</type></call>"#,
+            ["a send names its target"])
+        try refused(
+            #"<call name="send"><target_id>42</target_id><type>reflect</type></call>"#,
+            ["a send names its target"])
     }
 
     @Test("a head with an extra attribute")

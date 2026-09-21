@@ -90,3 +90,56 @@ fn an_empty_after_is_ignored() {
     let (p, _) = page(ids(&["a", "b"]), &json!({"after": ""}), id_of);
     assert_eq!(p, ids(&["a", "b"]));
 }
+
+#[test]
+fn int_ids_page_with_a_decimal_cursor() {
+    // C17: `ps`/`ledger` row identities are ints (`str(ident(item))` in
+    // python's `page`); a JSON-integer `after` must resume past the item
+    // whose ident STRINGIFIES to the same decimal digits — not just an
+    // already-string cursor.
+    let (p, next) = page(ids(&["1", "2", "3", "4"]), &json!({"after": 2}), id_of);
+    assert_eq!(p, ids(&["3", "4"]));
+    assert_eq!(next, None);
+
+    // The cursor page() HANDS BACK is itself a plain string, so the two
+    // representations of the same id (the caller's int, the page's string
+    // cursor) are interchangeable across pages.
+    let (p, next) = page(
+        ids(&["1", "2", "3", "4"]),
+        &json!({"after": 2, "limit": 1}),
+        id_of,
+    );
+    assert_eq!(p, ids(&["3"]));
+    assert_eq!(next.as_deref(), Some("3"));
+    let (p, _) = page(
+        ids(&["1", "2", "3", "4"]),
+        &json!({"after": next.unwrap()}),
+        id_of,
+    );
+    assert_eq!(p, ids(&["4"]));
+}
+
+#[test]
+fn a_non_string_cursor_compares_as_python_str() {
+    // C17 (r2 R2-RFL-2), measured against python: `after=True` is IGNORED
+    // (bools are never a cursor, matching); `after=1.5`/`after=["c1"]` compare
+    // as `str(1.5)`/`str(["c1"])` and, naming no item, page EMPTY rather than
+    // the whole list; `after=2.0` renders `"2.0"` — NOT the same string as an
+    // item literally named `"2"` (this is where rust used to page the WHOLE
+    // list — ignoring the non-string `after` outright — and swift wrongly
+    // matched `"2.0"` against `"2"`).
+    let items = ids(&["1", "2", "3"]);
+
+    let (p, _) = page(items.clone(), &json!({"after": true}), id_of);
+    assert_eq!(p, items, "a bool cursor is never a cursor at all");
+
+    let (p, next) = page(items.clone(), &json!({"after": 1.5}), id_of);
+    assert!(p.is_empty(), "{p:?}");
+    assert_eq!(next, None);
+
+    let (p, _) = page(items.clone(), &json!({"after": ["c1"]}), id_of);
+    assert!(p.is_empty());
+
+    let (p, _) = page(items.clone(), &json!({"after": 2.0}), id_of);
+    assert!(p.is_empty(), "'2.0' must not match the item '2': {p:?}");
+}

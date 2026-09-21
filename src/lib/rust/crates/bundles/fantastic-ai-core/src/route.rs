@@ -232,12 +232,6 @@ pub(crate) async fn deliver(
     // level here until 2026-09-02, so every subscriber reading `ev.detail.reason`
     // saw nothing — the silent-death regression this announcement exists for,
     // wearing the announcement's own clothes.
-    trace(&format!(
-        "deliver -> {} status={:?} err={:?}",
-        target,
-        out.status,
-        out.result.get("error").and_then(Value::as_str)
-    ));
     // FAILED IS `failed`/`timed_out` — python `out["status"] in ("failed",
     // "timed_out")` — plus any truthy `error` on the reply itself. `cancelled`
     // is NOT announced: an operator kill already told whoever asked for it, and
@@ -295,7 +289,7 @@ fn clean_title(raw: Option<&Value>) -> Option<String> {
 
 /// Expand every `<to>` list into one call per recipient, each carrying the whole
 /// list in its payload. A call with no `<to>` passes through untouched.
-fn fan_out(
+pub(crate) fn fan_out(
     calls: Vec<crate::tool_parse::ToolCall>,
     turn_id: Option<i64>,
 ) -> Vec<crate::tool_parse::ToolCall> {
@@ -322,7 +316,7 @@ fn fan_out(
                 .and_then(Value::as_str)
                 == Some("send");
             if call.name == "send" && is_peer_send {
-                let re = call.arguments.remove("re");
+                let re = call.arguments.shift_remove("re");
                 if let Some(Value::Object(p)) = call.arguments.get_mut("payload") {
                     if let Some(t) = turn_id {
                         p.entry("msg".to_string()).or_insert(json!(t));
@@ -465,20 +459,6 @@ struct Unit {
     title: Option<String>,
 }
 
-/// TEMPORARY ROUTE TRACE. A chain that ends with no reply block and no error is
-/// unreadable from outside: `subai_graph:rust` died after well-formed turns with
-/// nothing on record (2026-09-03). Enabled only by `FANTASTIC_TRACE_ROUTE=1`, so
-/// a shipped kernel prints nothing.
-pub(crate) fn trace_pub(msg: &str) {
-    trace(msg)
-}
-
-fn trace(msg: &str) {
-    if std::env::var("FANTASTIC_TRACE_ROUTE").as_deref() == Ok("1") {
-        eprintln!("[route] {msg}");
-    }
-}
-
 /// One rendered reply block, owed to `dest`. [`deliver_grouped`] composes the tag
 /// — including the batch stamp, which lives INSIDE it.
 struct Block {
@@ -504,12 +484,6 @@ async fn route_reply_gated(
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
-    trace(&format!(
-        "enter self={} calls={}",
-        self_id.as_str(),
-        calls.len()
-    ));
-
     // Everything owed to ONE destination, in the order the model wrote it.
     // Grouping (not a message per call) is the whole point — see below.
     let mut units: Vec<Unit> = Vec::new();
@@ -666,13 +640,27 @@ async fn route_reply_gated(
             None => "?".to_string(),
         };
 
-        // NO `send_binary`, NO FENCE, NO BLOB LIFT. The document rides in the
-        // payload as `bytes`, verbatim, because the grammar carries it verbatim
-        // — and `text_file` takes exactly that (its `handle` REFUSES
-        // `write`/`patch`/`append` whose `bytes` is not a string). Lifting it
-        // into the item's binary channel would delete the key the target reads
-        // and route to `handle_binary`, which is not where a document goes.
+        // THE `bytes` ARGUMENT IS RAW BYTES, NOT A JSON STRING (A13.19).
+        // Python's parser returns `raw.encode("utf-8")` for the one argument
+        // named `bytes`, so the value that reaches a handler is TYPED — which
+        // is why `file_bridge.write_stream` can refuse `bytes: "abc"` from a
+        // wire client (`isinstance(data, bytes)`) while a model's `<bytes>`
+        // document still writes. `serde_json::Value` has no bytes variant, so
+        // the item's BINARY CHANNEL is that type: the key leaves the JSON
+        // header and the document rides beside it, raw. Carrying it as a JSON
+        // string instead made the two indistinguishable, and rust wrote `abc`
+        // where python refused.
+        let document = match payload.get("bytes") {
+            Some(Value::String(s)) => Some(s.clone().into_bytes()),
+            _ => None,
+        };
+        if document.is_some() {
+            payload.shift_remove("bytes");
+        }
         let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
+        if let Some(doc) = document {
+            item = item.with_binary(doc);
+        }
         // EVERY dispatched call carries the layer's deadline. The KERNEL
         // defaults nothing, so a call to a handler that never returns used to
         // hang the whole batch forever here — no reply, no timeout block, the
@@ -682,22 +670,25 @@ async fn route_reply_gated(
         // as a refusal the model can read.
         item = item.with_timeout(send_timeout);
         // The model may NAME the execution (dedup/join across retries) and may
-        // bound its own call. The kernel validates both; a bad value settles
-        // that one call as a refusal the model can read.
+        // bound its own call. FORWARDED RAW (C38) — the kernel is what
+        // validates all three and produces python's exact refusals; this used
+        // to coerce with `.and_then(Value::as_str/as_f64/as_u64)`, which
+        // silently DROPPED anything that did not already match the expected
+        // shape (an int `exec_id` never attempted the join python performs; a
+        // malformed `timeout` like `"soon"` vanished, defaulting to
+        // `send_timeout`, instead of settling the kernel's `bad_arg` refusal).
         // `exec_id`, not `id`: arguments are INLINE now, so a bare `<id>` would
         // collide with the many verbs whose payload has one (`delete_agent`,
         // `update_agent`, …). The parser keeps the name at the call level; here
         // it becomes the item's execution name.
-        if let Some(id) = args.get("exec_id").and_then(Value::as_str) {
-            if !id.is_empty() {
-                item = item.with_id(id);
-            }
+        if let Some(id) = args.get("exec_id") {
+            item = item.with_raw_id(id.clone());
         }
-        if let Some(t) = args.get("timeout").and_then(Value::as_f64) {
-            item = item.with_timeout(t);
+        if let Some(t) = args.get("timeout") {
+            item = item.with_raw_timeout(t.clone());
         }
-        if let Some(r) = args.get("retries").and_then(Value::as_u64) {
-            item = item.with_retries(r as u32);
+        if let Some(r) = args.get("retries") {
+            item = item.with_raw_retries(r.clone());
         }
         items.push(item);
         // Fire-and-forget: it acted, nobody awaits the answer. Deliberately
@@ -724,9 +715,7 @@ async fn route_reply_gated(
         // coming?" — the alternative the model reaches for otherwise is
         // re-issuing the call, which only lengthens the queue that delays it.
         inflight_bump(self_id.as_str(), 1);
-        trace(&format!("dispatching {} item(s)", items.len()));
         let out = kernel.send(items).await;
-        trace(&format!("dispatch returned {} outcome(s)", out.len()));
         inflight_bump(self_id.as_str(), -1);
         out
     };
@@ -841,15 +830,8 @@ async fn route_reply_gated(
     // model's own prose for the old `{"type":"question"}` line — a text convention
     // had to recognise, with the human living outside it entirely.
     let nudging = !any_calls && !any_blocks && chained;
-    trace(&format!(
-        "blocks={} any_calls={} nudging={}",
-        blocks.len(),
-        any_calls,
-        nudging
-    ));
     if any_blocks {
         deliver_grouped(&kernel, blocks, &client_id, sp, turn_id).await;
-        trace("delivered");
     }
     if done_called {
         // Explicitly finished — nothing more runs, nothing reminds. A caller's

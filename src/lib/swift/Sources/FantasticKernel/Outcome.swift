@@ -78,6 +78,25 @@ public struct Item: Sendable {
     /// and no timeout (measured 2026-09-02).
     public var binary: Data?
 
+    /// The RAW (tag-typed) `exec_id`, when a caller is FORWARDING a value it
+    /// did not itself parse — a model's `<exec_id>` argument, or a wire
+    /// frame's `id` field (C38). An untyped `JSON` the KERNEL validates and
+    /// produces python's exact refusals for: an int NAMES an execution to
+    /// JOIN (refused if none exists under it), a non-empty string NAMES one
+    /// to open-or-join, anything else is `bad_arg`. Set, this SUPERSEDES the
+    /// typed `id` above — routing used to coerce with `args["exec_id"]?
+    /// .asString`, which silently DROPPED an int `exec_id` (never attempting
+    /// the join python performs) instead of forwarding it.
+    public var rawId: JSON?
+    /// The RAW `timeout`, forwarded untouched (C38) instead of `args["timeout"]?
+    /// .asDouble`, which silently DROPPED a malformed value (e.g. the string
+    /// `"soon"`) — defaulting to "wait forever" — instead of the kernel's
+    /// `bad_arg` refusal. Set, this SUPERSEDES the typed `timeout` above.
+    public var rawTimeout: JSON?
+    /// The RAW `retries`, forwarded untouched (C38) for the same reason. Set,
+    /// this SUPERSEDES the typed `retries` above.
+    public var rawRetries: JSON?
+
     /// A plain item: call `target` with `payload`, wait forever, no retries.
     public init(
         _ target: AgentId, _ payload: JSON,
@@ -114,12 +133,25 @@ public struct Outcome: Sendable {
     public var result: JSON
     /// How many dispatch attempts this execution spent (1 unless retried).
     public var attempts: UInt32
+    /// THE BINARY REPLY BODY — the carrier for the `bytes` value python's reply
+    /// dict holds natively (C37). `nil` = the verb returned NO chunk;
+    /// `.some(d)` = it returned one, `d` possibly EMPTY (a 0-byte read of an
+    /// empty file). Every wire leg picks its response shape from THAT
+    /// distinction, exactly as python's `isinstance(reply["bytes"], bytes)`
+    /// does; testing `isEmpty` instead served an empty file as JSON.
+    ///
+    /// Only a binary item can set it (`Item.binary`), and only the bundle's
+    /// `handleBinary` fills it in.
+    public var body: Data?
 
-    public init(pid: TaskId?, status: Status, result: JSON, attempts: UInt32 = 1) {
+    public init(
+        pid: TaskId?, status: Status, result: JSON, attempts: UInt32 = 1, body: Data? = nil
+    ) {
         self.pid = pid
         self.status = status
         self.result = result
         self.attempts = attempts
+        self.body = body
     }
 
     /// The item never reached the task table: a gate denial, an unknown agent, a

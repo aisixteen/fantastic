@@ -27,9 +27,9 @@ private final class Sink: AgentBundle, @unchecked Sendable {
     }
     func handleBinary(
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-    ) async throws -> (JSON?, Data) {
+    ) async throws -> (JSON?, Data?) {
         lock.withLock { seen = blob }
-        return (.object(["written": .integer(Int64(blob.count))]), Data())
+        return (.object(["written": .integer(Int64(blob.count))]), nil)
     }
 }
 
@@ -41,14 +41,14 @@ struct BinaryBatchTests {
         let registry = BundleRegistry()
         registry.register("sink.tools", sink)
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         _ = await kernel.send([
             Item(
                 AgentId("kernel"),
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "id": .string("sink"), "handler_module": .string("sink.tools"),
                 ]))
         ])[0].result
@@ -112,5 +112,93 @@ struct BinaryBatchTests {
         #expect(out.status == .completed, "\(out.result.serialize())")
         #expect(out.result["written"].asInt == Int64(payload.count), "\(out.result.serialize())")
         #expect(sink.received == payload, "a deadline must not divert the blob")
+    }
+
+    /// C34: `send_binary` to a BARE agent (no handler_module) answers the SAME
+    /// UNHANDLED text + `verb` the text channel gives — python has no separate
+    /// binary dispatch at all, one `_dispatch` resolution serves both.
+    @Test func binaryToABareAgentIsTheSameUnhandledTextAsTheTextChannel() async {
+        let registry = BundleRegistry()
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        let textReply = await kernel.send([
+            Item(AgentId("kernel_state"), .object(["type": .string("write_stream")]))
+        ])[0].result
+        let binaryReply = await kernel.send([
+            Item(
+                AgentId("kernel_state"), .object(["type": .string("write_stream")]),
+                binary: Data("x".utf8))
+        ])[0].result
+        #expect(binaryReply["error"] == textReply["error"], "\(binaryReply) vs \(textReply)")
+        #expect(binaryReply["reason"].asString == "unhandled")
+        #expect(binaryReply["verb"].asString == "write_stream")
+    }
+
+    /// C34/C24: `send_binary` naming a `handler_module` no bundle answers
+    /// answers the SAME `not_installed` text + `verb` as the text channel.
+    @Test func binaryToAnUninstalledHandlerModuleIsTheSameTextAsTheTextChannel() async {
+        let registry = BundleRegistry()
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        let ghost = Agent(
+            id: AgentId("ghost"), handlerModule: "missing.tools", parentId: root.id)
+        kernel.register(ghost)
+        root.insertChild(ghost)
+        let textReply = await kernel.send([
+            Item(AgentId("ghost"), .object(["type": .string("write_stream")]))
+        ])[0].result
+        let binaryReply = await kernel.send([
+            Item(
+                AgentId("ghost"), .object(["type": .string("write_stream")]),
+                binary: Data("x".utf8))
+        ])[0].result
+        #expect(binaryReply["error"] == textReply["error"], "\(binaryReply) vs \(textReply)")
+        #expect(
+            binaryReply["error"].asString?.contains("missing.tools") == true, "\(binaryReply)")
+        #expect(binaryReply["reason"].asString == "unhandled")
+        #expect(binaryReply["verb"].asString == "write_stream")
+    }
+
+    /// C34: a binary handler that THROWS settles `raised:true`, exactly like
+    /// the text channel's catch — a handler blowing up is a RESULT, not a
+    /// crash, either way.
+    @Test func aRaisingBinaryHandlerSettlesRaisedTrue() async {
+        struct Boom: Error {}
+        struct Raiser: AgentBundle {
+            let name = "raiser"
+            func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+                nil
+            }
+            func handleBinary(
+                agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+            ) async throws -> (JSON?, Data?) {
+                throw Boom()
+            }
+        }
+        let registry = BundleRegistry()
+        registry.register("raiser.tools", Raiser())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        _ = await kernel.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                    "id": .string("raiser"), "handler_module": .string("raiser.tools"),
+                ]))
+        ])
+        let out = await kernel.send([
+            Item(
+                AgentId("raiser"), .object(["type": .string("write_stream")]),
+                binary: Data("x".utf8))
+        ])[0]
+        #expect(out.status == .failed, "\(out.result.serialize())")
+        #expect(out.result["raised"].asBool == true, "\(out.result.serialize())")
     }
 }

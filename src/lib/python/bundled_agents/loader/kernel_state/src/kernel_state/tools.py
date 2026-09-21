@@ -108,22 +108,35 @@ def hydrate_messages(kernel, root_dir: Path) -> int:
     return len(rows)
 
 
+ROOT_ID = "kernel_state"
+
+
 def read_tree(root_dir: Path) -> list[dict]:
     """Walk a `.fantastic` tree → flat list of records (root + descendants).
     `parent_id` comes from disk position (authoritative). Pure read; the
     bootstrap calls this BEFORE any agent exists. Corrupt records skip."""
     rd = str(root_dir)
-    if not fs.exists(rd, "agent.json"):
-        return []
-    try:
-        root_rec = json.loads(fs.read_text(rd, "agent.json"))
-    except (json.JSONDecodeError, OSError, ValueError):
-        return []
+    root_rec: dict | None = None
+    if fs.exists(rd, "agent.json"):
+        try:
+            parsed = json.loads(fs.read_text(rd, "agent.json"))
+            if isinstance(parsed, dict):
+                root_rec = parsed
+        except (json.JSONDecodeError, OSError, ValueError):
+            root_rec = None
+    # A MISSING OR CORRUPT ROOT RECORD DOES NOT HIDE THE TREE. It used to return
+    # `[]`, so the boot reseeded a fresh root and hydrated none of the children
+    # sitting under `agents/` (measured 2026-09-16). The children are walked under
+    # the default layout and parented to the id the reseed will mint.
+    if root_rec is None:
+        records: list[dict] = []
+        _walk(rd, "agents", ROOT_ID, records, "agents")
+        return records
     # The root record declares the children-dir name (declared config; default
     # "agents"). A self-describing layout sets e.g. "host_agents" / "web_agents".
     cd = root_rec.get("children_dir")
     children_dir = cd if isinstance(cd, str) and cd else "agents"
-    records: list[dict] = [root_rec]
+    records = [root_rec]
     _walk(rd, children_dir, root_rec.get("id"), records, children_dir)
     return records
 
@@ -343,14 +356,38 @@ async def _persist_via_store(
     reldir = _store_reldir(agent, abs_path)
     af = f"{reldir}/agent.json" if reldir else "agent.json"
     existing: dict = {}
-    got = (
-        await kernel.send(
-            [{"target": store_id, "payload": {"type": "read_stream", "path": af}}]
-        )
-    )[0]["result"]
-    if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
+    # The WHOLE document: `read_stream` answers one chunk (64 KiB by default),
+    # so a record larger than that failed `json.loads` and silently lost its
+    # unknown keys on the next write (measured 2026-09-16). Page to eof.
+    buf = bytearray()
+    offset = 0
+    while True:
+        got = (
+            await kernel.send(
+                [
+                    {
+                        "target": store_id,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": af,
+                            "offset": offset,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        if not (
+            isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray))
+        ):
+            buf = bytearray()
+            break
+        buf += bytes(got["bytes"])
+        if got.get("eof", True) or not isinstance(got.get("next_offset"), int):
+            break
+        offset = got["next_offset"]
+    if buf:
         try:
-            parsed = json.loads(bytes(got["bytes"]))
+            parsed = json.loads(bytes(buf))
             if isinstance(parsed, dict):
                 existing = parsed
         except (ValueError, json.JSONDecodeError):
@@ -484,6 +521,26 @@ async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
 # ─── the auto-flush loop (the root subscribes the live tree) ────────
 
 
+def _is_own_persistence(agent, row: dict | None) -> bool:
+    """THE LOADER'S OWN PERSISTENCE TRAFFIC — one definition, two readers.
+
+    An operator-context call (`origin` is None: nobody sent it, the loader is
+    writing as itself) addressed to the DISCOVERED store is bookkeeping of
+    persisting: the pump's appends, the record flusher's writes, the blob verbs.
+    It never enters the message log, and — the same law, one settle later — it
+    never dirties the ledger. Without the second half the kernel spun on itself:
+    a settle kicked a ledger flush, the flush's `ledger_flush` task row was a row,
+    the pump appended it through the store, and THAT append's settle kicked the
+    flusher again (measured 2026-09-21: 19 flushes in 3 idle seconds).
+    """
+    return (
+        isinstance(row, dict)
+        and row.get("kind") == "call"
+        and row.get("origin") is None
+        and row.get("agent") == _find_store(agent)
+    )
+
+
 class _MessagePump:
     """PERSIST THE MESSAGE STORE — a tail of the kernel, appended to the provider.
 
@@ -531,11 +588,10 @@ class _MessagePump:
         self._tasks = [self.kernel.tasks[i]["_task"] for i in ids]
 
     def _skip(self, row: dict) -> bool:
-        store = _find_store(self.agent)
         if row.get("kind") == "task" and row.get("agent") == self.agent.id:
             return row.get("verb") in self.VERBS
-        if row.get("kind") == "call" and row.get("agent") == store:
-            return row.get("origin") is None  # the loader's own persistence traffic
+        if row.get("kind") == "call":
+            return _is_own_persistence(self.agent, row)
         # A SETTLE FOLLOWS ITS CALL. The pump's own writes are skipped so that
         # persisting a row does not itself produce a row to persist; their
         # endings must be skipped for the same reason, or the recursion comes
@@ -979,7 +1035,14 @@ def _install_ledger_flusher(agent) -> None:
     mid-write coalesce into exactly one follow-up pass."""
     state = {"pending": False, "running": False}
 
-    def kick() -> None:
+    def kick(exec_id: int | None) -> None:
+        # PERSISTENCE DOES NOT DIRTY THE LEDGER. The flush's own write settles
+        # here, and so does every append the pump makes of the rows this flush
+        # minted; flushing for those rewrites the file the write just wrote.
+        # `_is_own_persistence` is the same predicate the pump keeps out of the
+        # log — one rule, both halves.
+        if _is_own_persistence(agent, agent.ctx.rows.get(exec_id)):
+            return
         if state["running"]:
             state["pending"] = True
             return
@@ -1370,7 +1433,16 @@ async def _load_blob(id, payload, agent):
 
 async def flush_pending(agent):
     """The kernel's shutdown hook (awaited before the teardown walk, provider still
-    alive): land every message minted so far, then stop the pump."""
+    alive): write the settled ledger once, land every message minted so far, then
+    stop the pump. The ledger write is EXPLICIT — the debounced flusher is a fork,
+    and the quiet phase does not wait for forks, so the last settle before a
+    shutdown had no guaranteed write. Ledger first: its own rows are persistence
+    rows the pump skips, so the pump's final window is unchanged by it."""
+    await flush_ledger_now(agent)
+    await _stop_pump(agent)
+
+
+async def _stop_pump(agent):
     pump = getattr(agent, "_message_pump", None)
     if pump is not None:
         await pump.stop()
@@ -1380,11 +1452,12 @@ async def flush_pending(agent):
 async def on_shutdown(agent):
     """Final flush + unsubscribe — a graceful shutdown loses nothing. `flush_pending`
     normally ran already (the kernel calls it before the walk); a path that skipped
-    it (a bare `Agent.shutdown`) still lands the last window here."""
+    it (a bare `Agent.shutdown`) still lands the last window here. The ledger is
+    NOT rewritten here: mid-walk the store may already be down."""
     loop = getattr(agent, "_fs_flush_loop", None)
     if loop is not None:
         await loop.stop()
-    await flush_pending(agent)
+    await _stop_pump(agent)
 
 
 VERBS = {

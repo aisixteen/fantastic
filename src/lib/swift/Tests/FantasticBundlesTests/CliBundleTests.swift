@@ -18,11 +18,11 @@ struct CliBundleTests {
         let registry = BundleRegistry()
         registry.register(CliBundle.handlerModule, CliBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
-        _ = await kernel.send([Item("core", [
-                "type": "create_agent", "parent_id": "core",
+        _ = await kernel.send([Item("kernel_state", [
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(CliBundle.handlerModule), "id": "cli",
             ])])[0].result
         return kernel
@@ -307,7 +307,7 @@ struct CliBundleTests {
         #expect(out.contains("PULL") && out.contains("PUSH") && out.contains("REACH"))
         #expect(out.contains("reflect readme=true"))
         // identity line carries deployment context + the root id + this pid
-        #expect(out.contains("swift") && out.contains("env=") && out.contains("root=core"))
+        #expect(out.contains("swift") && out.contains("env=") && out.contains("root=kernel_state"))
         #expect(out.contains("pid \(ProcessInfo.processInfo.processIdentifier)"))
     }
 

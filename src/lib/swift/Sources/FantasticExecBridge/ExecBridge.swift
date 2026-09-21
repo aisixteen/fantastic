@@ -159,6 +159,20 @@
 
     public final class ExecBridgeBundle: AgentBundle, @unchecked Sendable {
         public let name = "exec_bridge"
+        public var verbs: [String] { Array(Self.verbDocs.keys) }
+
+        /// python's module-level `VERBS` — ONE table: reflect renders it and
+        /// `advertises` reads it.
+        static let verbDocs: OrderedDictionary<String, JSON> = [
+            "start": .string("args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes."),
+            "status": .string("args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}."),
+            "stop": .string("args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs."),
+            "interrupt": .string("args: job_id:str? — SIGINT one job or ALL of this agent's running jobs."),
+            "clear": .string("args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM"),
+            "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
+            "reflect": .string("Identity + running job count + auth posture. No args."),
+            "boot": .string("No-op. Nothing auto-restarts: a command is started by a caller, not by the record."),
+        ]
         public init() {}
 
         // MARK: - the job table
@@ -555,7 +569,16 @@
         private func noSuchJob(_ agentId: AgentId, _ payload: JSON) -> JSON? {
             guard let want = jobArg(payload) else { return nil }
             let known = lock.withLock { want.asString.flatMap { jobs[$0] }?.agent == agentId }
-            return known ? nil : noJob(want)
+            // NOT a ternary, for the same reason `jobArg` is not one: `JSON` is
+            // `ExpressibleByNilLiteral`, so `known ? nil : noJob(want)` unifies
+            // BOTH branches at `JSON` and the "known" branch hands back
+            // `.some(.null)` — the caller's `if let gone = noSuchJob(…)` then
+            // fired for every job that DOES exist and answered `null` instead of
+            // stopping it. Measured on the wire: `stop {job_id}` replied `null`,
+            // no signal was sent, and the job ran to completion (`exit_code: 0`)
+            // where python answers `{killed: 1}` and emits `job_done` with -9.
+            if known { return nil }
+            return noJob(want)
         }
 
         /// `interrupt` / `stop` — signal this agent's jobs, or one named `job_id`.
@@ -914,16 +937,7 @@
                 "cwd": pyTruthy(cwd) ? cwd : .string("<process default>"),
                 "allowed": .array(allowedPatterns(record).map(JSON.string)),
                 "running": .integer(Int64(running)),
-                "verbs": .object([
-                    "start": .string("args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra"),
-                    "status": .string("args: job_id:str? — one job (with full stdout/stderr), or all of this agent's"),
-                    "stop": .string("args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs."),
-                    "interrupt": .string("args: job_id:str? — SIGINT one job or ALL of this agent's running jobs."),
-                    "clear": .string("args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM"),
-                    "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
-                    "reflect": .string("Identity + running job count + auth posture. No args."),
-                    "boot": .string("No-op. Nothing auto-restarts: a command is started by a caller, not by the"),
-                ]),
+                "verbs": .object(Self.verbDocs),
                 "emits": .object([
                     "job_started": .string("{type:'job_started', job_id}"),
                     "progress": .string(
@@ -991,9 +1005,11 @@
     /// zero-based — a sliced `Data`'s are not, which is a quiet way to read the wrong
     /// bytes back out.
     private final class CarryBox: @unchecked Sendable {
-        /// python's `asyncio.StreamReader` limit: past 64 KiB with no separator in
-        /// sight the read RAISES rather than buffering without bound.
-        static let limit = 65536
+        /// python's `asyncio.StreamReader` limit — 16 MiB since 2026-09-20 (a
+        /// line over 64 KiB used to end the pipe with `[pump error]`); past it
+        /// with no separator in sight the read RAISES rather than buffering
+        /// without bound.
+        static let limit = 16 * 1024 * 1024
 
         private let lock = NSLock()
         private var buf: [UInt8] = []

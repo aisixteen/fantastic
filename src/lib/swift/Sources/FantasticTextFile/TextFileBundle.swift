@@ -93,6 +93,22 @@ private func locked(_ fb: String, _ paths: [String], _ body: () async -> JSON) a
 
 public struct TextFileBundle: AgentBundle {
     public let name = "text_file"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
+
+    /// python's module-level `VERBS` — ONE table: reflect renders it and
+    /// `advertises` reads it.
+    static let verbDocs: OrderedDictionary<String, JSON> = [
+        "reflect": .string("no args — identity, verb guide, and the wired default surface."),
+        "boot": .string("no args — no-op; this agent holds no state to hydrate."),
+        "read": .string("args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary."),
+        "write": .string("args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."),
+        "patch": .string("args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."),
+        "append": .string("args: path:str (req), bytes (req — one chunk; str is utf-8-encoded), on:str? — appends (creates if absent); {path, size, version}."),
+        "checkpoint": .string("args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}."),
+        "checkpoints": .string("args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}."),
+        "restore": .string("args: path:str (req), ckpt_id:str (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}."),
+        "drop": .string("args: path:str (req), ckpt_id:str (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}."),
+    ]
 
     public init() {}
 
@@ -177,16 +193,26 @@ public struct TextFileBundle: AgentBundle {
     // below and touches no verb.
 
     /// One `read_stream` chunk: the leg's reply plus the chunk itself, which
-    /// rides the binary body here and `r["bytes"]` in python.
+    /// rides the binary body here and `r["bytes"]` in python. `nil` = the verb
+    /// returned no chunk at all (a refusal).
+    ///
+    /// A chunk rides THE BATCH (C37): ONE binary item, so every leg read and
+    /// every leg write is an execution like any other — a call row, a ledger id,
+    /// a `ps` row, a timeout and a settle row. `sendWithBinary` bypassed all of
+    /// it, so a `write_stream` the model asked for left no trace the checkpoint
+    /// ids could be read back from.
     private func legReadChunk(
         _ kernel: Kernel, fb: String, path: JSON, offset: Int, length: Int
-    ) async -> (JSON, Data) {
-        await kernel.sendWithBinary(
-            AgentId(fb),
-            .object([
-                "type": .string("read_stream"), "path": path,
-                "offset": .integer(Int64(offset)), "length": .integer(Int64(length)),
-            ]), Data())
+    ) async -> (JSON, Data?) {
+        let out = await kernel.send([
+            Item(
+                AgentId(fb),
+                .object([
+                    "type": .string("read_stream"), "path": path,
+                    "offset": .integer(Int64(offset)), "length": .integer(Int64(length)),
+                ]), binary: Data())
+        ])[0]
+        return (out.result, out.body)
     }
 
     /// One `write_stream` chunk. An absent `offset`/`truncate` means append at
@@ -199,7 +225,7 @@ public struct TextFileBundle: AgentBundle {
         ]
         if let offset { p["offset"] = .integer(Int64(offset)) }
         if let truncate { p["truncate"] = .bool(truncate) }
-        return await kernel.sendWithBinary(AgentId(fb), .object(p), bytes).0
+        return await kernel.send([Item(AgentId(fb), .object(p), binary: bytes)])[0].result
     }
 
     /// A leg call that moves no bytes (`rename`, `delete`, `list`).
@@ -227,11 +253,12 @@ public struct TextFileBundle: AgentBundle {
             let (r, body) = await legReadChunk(
                 kernel, fb: fb, path: path, offset: offset, length: CHUNK)
             if let err = legFailure(r) { return .failure(err) }
-            raw.append(body)
+            let chunk = body ?? Data()
+            raw.append(chunk)
             // python: `if r.get("eof") or not b: break` — an ABSENT `eof` is
             // falsy and keeps pulling, it does not end the file.
-            if pyTruthy(r["eof"]) || body.isEmpty { break }
-            offset = Int(r["next_offset"].asInt ?? Int64(offset + body.count))
+            if pyTruthy(r["eof"]) || chunk.isEmpty { break }
+            offset = Int(r["next_offset"].asInt ?? Int64(offset + chunk.count))
         }
         return .success(raw)
     }
@@ -257,12 +284,20 @@ public struct TextFileBundle: AgentBundle {
         if let err = await writeChunks(kernel, fb: fb, path: .string(tmp), data: data) {
             return err
         }
-        return legFailure(
+        let refused = legFailure(
             await legCall(
                 kernel, fb: fb,
                 .object([
                     "type": .string("rename"), "old_path": .string(tmp), "new_path": path,
                 ])))
+        if let refused {
+            // The tmp sibling is debris now (a refused rename left it on disk,
+            // python 2026-09-16); best-effort, the refusal is what is answered.
+            _ = await legCall(
+                kernel, fb: fb, .object(["type": .string("delete"), "path": .string(tmp)]))
+            return refused
+        }
+        return nil
     }
 
     /// python `_ckpt_path`: `.ckpt/<path, `/` flattened>/<ckpt id>`. Both halves
@@ -477,18 +512,7 @@ public struct TextFileBundle: AgentBundle {
                     + "newlines, real quotes, nothing escaped, no fence — then close the "
                     + "call. The document ends at the first `</bytes>`. A patch names its "
                     + "edits as tags: <edits><item><path>a.py</path><hunks>2</hunks></item></edits>"),
-            "verbs": .object([
-                "reflect": .string("no args — identity, verb guide, and the wired default surface."),
-                "boot": .string("no args — no-op; this agent holds no state to hydrate."),
-                "read": .string("args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary."),
-                "write": .string("args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."),
-                "patch": .string("args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."),
-                "append": .string("args: path:str (req), bytes (req — one chunk; str is utf-8-encoded), on:str? — appends (creates if absent); {path, size, version}."),
-                "checkpoint": .string("args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}."),
-                "checkpoints": .string("args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}."),
-                "restore": .string("args: path:str (req), ckpt_id:str (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}."),
-                "drop": .string("args: path:str (req), ckpt_id:str (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}."),
-            ]),
+            "verbs": .object(Self.verbDocs),
         ])
     }
 
@@ -987,12 +1011,12 @@ public struct TextFileBundle: AgentBundle {
     }
 
     public func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
-        async throws -> (JSON?, Data)
+        async throws -> (JSON?, Data?)
     {
         guard let agent = kernel.agent(agentId) else {
-            return (.object(["error": .string("no agent \(agentId)")]), Data())
+            return (.object(["error": .string("no agent \(agentId)")]), nil)
         }
-        return (await dispatch(agent: agent, payload: header, blob: blob, kernel: kernel), Data())
+        return (await dispatch(agent: agent, payload: header, blob: blob, kernel: kernel), nil)
     }
 
     static let readmeText = """

@@ -37,6 +37,21 @@ public let DEFAULT_TICK_SEC = 1.0
 
 public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public let name = "scheduler"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
+
+    /// python's module-level `VERBS` — ONE table: reflect renders it and
+    /// `advertises` reads it.
+    static let verbDocs: OrderedDictionary<String, JSON> = [
+        "reflect": .string("Identity + tick state. No args."),
+        "boot": .string("Idempotent. Starts the tick loop; persistence is THROUGH the loader."),
+        "schedule": .string("args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."),
+        "unschedule": .string("args: schedule_id:str (req). Returns {removed:bool, schedule_id}."),
+        "list": .string("No args. Returns {schedules: [<schedule record>, ...]}."),
+        "pause": .string("args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler."),
+        "resume": .string("args: schedule_id:str?. With id resumes one; without, resumes the whole scheduler."),
+        "tick_now": .string("args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately. Returns {fired:true, schedule_id}."),
+        "history": .string("args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count}."),
+    ]
 
     public init() {}
 
@@ -136,10 +151,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         _ = await stopTick(agentId, kernel: kernel)
     }
 
-    /// The tick loop dies with the agent — the SCHEDULE CACHE does NOT. python's
-    /// `_cache` is a module global nothing removes from, so a scheduler recreated
-    /// under the same id sees the schedules the process already knew.
+    /// The tick loop AND the schedule cache die with the agent: a scheduler
+    /// recreated under the same id used to list and fire its predecessor's
+    /// schedules (python `on_delete`, 2026-09-20).
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        lock.withLock { cache[agentId.value] = nil }
         _ = await stopTick(agentId, kernel: kernel)
     }
 
@@ -389,17 +405,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             // python `bool(rec.get("paused"))` — truthiness in, a BOOL out.
             "paused": .bool(pyTruthy(agent?.metaValue(forKey: "paused") ?? .null)),
             "running": .bool(running),
-            "verbs": .object([
-                "reflect": .string("Identity + tick state. No args."),
-                "boot": .string("Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write"),
-                "schedule": .string("args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."),
-                "unschedule": .string("args: schedule_id:str (req). Returns {removed:bool, schedule_id}."),
-                "list": .string("No args. Returns {schedules: [<schedule record>, ...]}."),
-                "pause": .string("args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler."),
-                "resume": .string("args: schedule_id:str?. With id resumes one; without, resumes the whole scheduler."),
-                "tick_now": .string("args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately. Returns {fired:true, schedule_id}."),
-                "history": .string("args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count}."),
-            ]),
+            "verbs": .object(Self.verbDocs),
             "emits": .object([
                 "schedule_fired": .string(
                     "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
@@ -573,9 +579,10 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             out["schedule_id"] = sid
             return out
         }
-        if let agent = kernel.agent(agentId) {
-            _ = agent.updateMeta(["paused": .bool(paused)])
-            await kernel.persistRecord(agent)
+        if kernel.agent(agentId) != nil {
+            // Through the kernel update path (publishes `updated`) — never a
+            // direct persist, which the loader's writer never learns about.
+            kernel.update(agentId, ["paused": .bool(paused)])
         }
         var out: JSON = .object([:])
         out[key] = .bool(true)

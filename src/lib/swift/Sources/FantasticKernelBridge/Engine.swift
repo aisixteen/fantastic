@@ -336,7 +336,19 @@ extension KernelBridgeBundle {
                 // and asked it to stream, so this re-emit is trusted by
                 // association, not a sealed-ingress inbound leak.
                 let payload = frame["payload"]
-                await kernel.emit(agentId, pyTruthy(payload) ? payload : .object([:]))
+                let inner = pyTruthy(payload) ? payload : .object([:])
+                // A BINARY event re-emits WHOLE. The envelope's `_binary_path` is
+                // `payload.<p>`; the inbox carrier wants `<p>`, the path INSIDE
+                // the payload, so the body reaches a local watcher as the frame
+                // the remote sent rather than a head with a hole in it.
+                let innerPath = frame["_binary_path"].asString.flatMap {
+                    $0.hasPrefix("payload.") ? String($0.dropFirst("payload.".count)) : nil
+                }
+                if isBinary, let p = innerPath {
+                    await kernel.emitItem(agentId, .binary(inner, p, body))
+                } else {
+                    await kernel.emit(agentId, inner)
+                }
             default:
                 break  // other frame types are ignored so the loop stays robust
             }
@@ -365,7 +377,7 @@ extension KernelBridgeBundle {
                 kind: "call", target: addr, verb: inner["type"].asString ?? "",
                 token: frame["auth_token"].asString))
         var reply: JSON
-        var replyBody = Data()
+        var replyBody: Data? = nil
         if case .deny(let denial) = decision {
             // FORWARDED, not re-worded — the rule's own reason and repair, so a
             // peer hitting a sealed leg learns how to open it.
@@ -389,13 +401,15 @@ extension KernelBridgeBundle {
         var out: JSON = .object([
             "type": .string("reply"), "id": frame["id"], "data": reply,
         ])
-        // The peer went away mid-dispatch; the read loop already knows.
-        if replyBody.isEmpty {
+        // THE CARRIER picks the frame kind, never the body's length: a 0-byte
+        // chunk is still a chunk (C37). The peer went away mid-dispatch; the
+        // read loop already knows.
+        guard let replyBody else {
             try? await transport.send(out)
-        } else {
-            out["_binary_path"] = .string("data.bytes")
-            try? await transport.sendBinary(header: out, body: replyBody)
+            return
         }
+        out["_binary_path"] = .string("data.bytes")
+        try? await transport.sendBinary(header: out, body: replyBody)
     }
 
     // MARK: - shared verbs

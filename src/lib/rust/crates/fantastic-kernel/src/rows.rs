@@ -213,15 +213,26 @@ impl RowStore {
         let inner = self.lock();
         let rid = *inner.body_by_parent.get(&pid)?;
         let row = inner.rows.get(&rid)?;
-        let body = row.get("content").and_then(Value::as_str).unwrap_or("");
-        // CHARACTERS, not bytes: python slices a str, and a byte slice would cut
+        // python: `b = str(row.get("content", ""))` — a non-string body is
+        // stringified, not treated as empty.
+        let empty = Value::String(String::new());
+        let body = fantastic_bundle::py_str(row.get("content").unwrap_or(&empty));
+        // CODE POINTS, not bytes: python slices a str, and a byte slice would cut
         // a codepoint in half on any non-ascii body.
         let chars: Vec<char> = body.chars().collect();
-        let start = offset.min(chars.len());
-        let end = (start + length.max(1)).min(chars.len());
-        let chunk: String = chars[start..end].iter().collect();
-        let next = start + (end - start);
-        Some((chunk, next, next >= chars.len(), chars.len()))
+        let len = chars.len();
+        // python slicing never clamps the offset: `b[offset:offset+max(1,length)]`
+        // past the end is simply empty, and `next = offset + len(chunk)` carries
+        // the RAW offset forward — it is not pulled back into range.
+        let start = offset.min(len);
+        let end = offset.saturating_add(length.max(1)).min(len);
+        let chunk: String = if start < end {
+            chars[start..end].iter().collect()
+        } else {
+            String::new()
+        };
+        let next = offset + chunk.chars().count();
+        Some((chunk, next, next >= len, len))
     }
 
     /// The agent's VIEW as a `view` row; the newest one is current.

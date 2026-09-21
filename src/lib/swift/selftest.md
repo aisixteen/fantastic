@@ -30,19 +30,20 @@ Strict rules:
   remaining tests and flag it.
 - Do not invent expected output — ask if the spec is unclear.
 - A correctly-deployed `fantastic` answers `reflect` over the CLI
-  (`fantastic reflect core`) with the agent tree, and over WS with the
+  (`fantastic reflect kernel_state`) with the agent tree, and over WS with the
   same plus the root readme (`readme=true`) — the readme carries the
   transport/wire docs you need to issue your first send. Open
-  `ws://host/<any-agent>/ws` and send `{"type":"call","target":"core",
+  `ws://host/<any-agent>/ws` and send `{"type":"call","target":"kernel",
   "payload":{"type":"reflect","readme":true},"id":"1"}`. If you find
   yourself reading `Sources/FantasticKernel/` or
   `Sources/FantasticWeb/` to figure out a transport URL — that belongs
   in the root readme. Stop and flag it.
 
-The Swift root agent id is **`core`** (not `kernel_state`, not `kernel`) —
-the native runtime keeps the userland-orchestrator root id. Substitute
-`core` anywhere a cross-runtime Python spec writes `kernel_state` as the
-create/list target.
+The Swift root agent id is **`kernel_state`**, python's, and its
+`handler_module` is `kernel_state.tools` — the durable-state loader bundle
+that owns `load_tree` / `persist_record` / `forget_record` / `persist_blob` /
+`load_blob`. `kernel` is the alias every runtime answers on. A cross-runtime
+Python spec's create/list target needs no substitution.
 
 ## Stateful bundles need a running `fantastic` daemon
 
@@ -76,14 +77,14 @@ layout, WS frames) for **wire-identical** bundles. Run them against the
 Swift binary by substituting the binary path and the root id:
 
 ```bash
-# The Swift binary (debug build; root agent id is `core`):
+# The Swift binary (debug build; root agent id is `kernel_state`):
 BIN=/Users/oleksandr/Projects/fantastic_canvas/swift/.build/debug/fantastic
 export PATH="$(dirname "$BIN"):$PATH"
 which fantastic    # → .../swift/.build/debug/fantastic
 
 # Drive each Python per-bundle spec as written, but:
 #   • point `fantastic` at the Swift binary (above)
-#   • replace the create/list root target `kernel_state` → `core`
+#   • the create/list root target `kernel_state` is the same on both
 cat ../python/bundled_agents/file/selftest.md       # ← read; run the bash blocks
 cat ../python/bundled_agents/web/host/selftest.md
 # ...etc, for every bundle you want to exercise
@@ -104,7 +105,6 @@ Surviving bundles that run cross-runtime against the Swift binary
 | web_rest | [`io/web_rest/selftest.md`](../python/bundled_agents/io/web_rest/selftest.md) |
 | ollama_backend | [`ai/ollama/ollama_backend/selftest.md`](../python/bundled_agents/ai/ollama/ollama_backend/selftest.md) (needs running ollama) |
 | nvidia_nim_backend | [`ai/nvidia/nvidia_nim_backend/selftest.md`](../python/bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md) (needs `NVAPI_KEY`) |
-| foundation_models_backend | native overlay (no Python equivalent) — see below |
 | exec_bridge | [`io/exec_bridge/selftest.md`](../python/bundled_agents/io/exec_bridge/selftest.md) (Full tier only) |
 | terminal_backend | [`terminal/selftest.md`](../python/bundled_agents/terminal/selftest.md) (Full tier only) |
 
@@ -124,12 +124,9 @@ Python equivalent:
 
 | File | Scopes | Requires |
 |---|---|---|
-| [`selftest/foundation_models_backend.md`](selftest/foundation_models_backend.md) | ai, apple | macOS 26 + Apple Silicon (FoundationModels); structural-only otherwise |
 | [`selftest/feature_gates.md`](selftest/feature_gates.md) | build, packaging | `swift` toolchain + Xcode iPhoneSimulator SDK |
 
-`foundation_models_backend` wraps Apple's on-device `FoundationModels`
-framework behind the same LLM-backend verb surface as ollama/nvidia —
-no Python equivalent. `feature_gates` asserts the Embedded vs Full tier
+`feature_gates` asserts the Embedded vs Full tier
 split (the `#if os(macOS)` compile gate that drops the four subprocess
 bundles from the sandbox-safe slice). Both run only against the Swift
 runtime.

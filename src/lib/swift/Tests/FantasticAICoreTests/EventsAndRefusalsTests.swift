@@ -66,11 +66,15 @@ struct EventsAndRefusalsTests {
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
         let out = await kernel.send([
-            Item(id, .object(["type": .string("send"), "text": .string("hi")]))
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("hi"), "client_id": .string("tab"),
+                ]))
         ])[0]
         #expect(out.status == .failed)
         #expect(out.result["error"].asString == "RuntimeError: upstream said no")
@@ -98,7 +102,10 @@ struct EventsAndRefusalsTests {
         }
         let (kernel, id) = try await freshMockKernel(config: cfg)
         let out = await kernel.send([
-            Item(id, .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")]))
+            Item(
+                id,
+                .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")])
+            )
         ])[0]
         #expect(out.result["error"].asString == "send: provider HTTP 503")
         #expect(out.result["client_id"].asString == "c")
@@ -120,11 +127,14 @@ struct EventsAndRefusalsTests {
         let id = ids["mock"]!
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
         let r = await kernel.send([
-            Item(id, .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")]))
+            Item(
+                id,
+                .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")])
+            )
         ])[0].result
         #expect(r["error"].asString?.hasPrefix("mock_backend: context_insufficient — ") == true)
         #expect(
@@ -149,10 +159,14 @@ struct EventsAndRefusalsTests {
             config: baseConfig { .provider(MockProvider()) })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
         _ = await kernel.send([
-            Item(id, .object(["type": .string("send"), "text": .string("hi")]))
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("hi"), "client_id": .string("tab"),
+                ]))
         ])[0].result
         try await waitUntil("status(done)") { sink.statusDone() != nil }
         let sendId = try #require(sink.statusDone()?["detail"]["send_id"].asString)
@@ -191,10 +205,13 @@ struct EventsAndRefusalsTests {
             config: baseConfig { .provider(MockProvider(tokens: ["ab"])) })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
         _ = await kernel.send([
-            Item(id, .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")]))
+            Item(
+                id,
+                .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")])
+            )
         ])[0].result
         try await waitUntil("a token event") { sink.first(type: "token") != nil }
         let tok = try #require(sink.first(type: "token"))
@@ -216,11 +233,14 @@ struct EventsAndRefusalsTests {
         let (kernel, id) = try await freshMockKernel(config: cfg)
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
         let r = await kernel.send([
-            Item(id, .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")]))
+            Item(
+                id,
+                .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")])
+            )
         ])[0].result
         // The float is rendered python's way — `0.1`, never `0`.
         #expect(r["error"].asString == "send: timeout after 0.1s")
@@ -251,8 +271,8 @@ struct EventsAndRefusalsTests {
         // A SYNCHRONOUS subscriber: it runs inside `emit`, so what it reads is
         // the store as it stood at that instant — an async inbox reader could
         // only ever see the state after both writes.
-        let token = kernel.subscribe { ev in
-            guard ev["verb"].asString == "status" else { return }
+        let token = kernel.subscribe { ev, _ in
+            guard ev["payload"]["type"].asString == "status" else { return }
             // CONVERSATION rows only: the dispatch's own `call`/`task`
             // bookkeeping lands in the same table and says nothing about when
             // the turn was persisted.
@@ -261,13 +281,110 @@ struct EventsAndRefusalsTests {
         defer { kernel.unsubscribe(token) }
 
         let before = conversationRows(kernel: kernel, id: id).count
+        // A browser-style caller, so the events are EMITS on the inbox (a `cli`
+        // caller's would be sends to the cli agent).
         _ = await kernel.send([
-            Item(id, .object(["type": .string("send"), "text": .string("hi")]))
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("hi"), "client_id": .string("tab"),
+                ]))
         ])[0].result
         try await waitForHistory(kernel: kernel, id: id, count: 2)
 
         #expect(rowsAtStatus.last() == before, "the last status ran before the two turn rows")
         #expect(conversationRows(kernel: kernel, id: id).count == before + 2)
+    }
+
+    // ── B2.7: ONE caller route ───────────────────────────────────────────
+
+    /// `client_id == 'cli'` → every stream event is a SEND to the `cli` agent
+    /// (whose handler prints it), and NOTHING lands on the backend's inbox.
+    /// python `test_cli_caller_routes_to_cli_only`.
+    @Test func cliCallerRoutesToCliOnly() async throws {
+        let (kernel, ids, recorder) = await bootMockKernel(
+            config: baseConfig { .provider(MockProvider(tokens: ["hel", "lo ", doneEnvelope])) },
+            backendIds: ["mock"])
+        let id = ids["mock"]!
+        // The cli agent the backend streams to — granted both ways, like the
+        // daemon wires it.
+        _ = await kernel.send([
+            Item(
+                AgentId("kernel_state"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                    "handler_module": .string("mock_recorder.tools"), "id": .string("cli"),
+                    "callable_by": .object([id.value: .string("*")]),
+                ]))
+        ])[0].result
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
+        defer { pump.cancel() }
+
+        _ = await kernel.send([
+            Item(id, .object(["type": .string("send"), "text": .string("hi")]))
+        ])[0].result
+        try await waitUntil("status(done) at the cli") {
+            recorder.payloads().contains {
+                $0["type"].asString == "status" && $0["phase"].asString == "done"
+            }
+        }
+        let atCli = recorder.payloads()
+        let tokens = atCli.filter { $0["type"].asString == "token" }
+        #expect(tokens.compactMap { $0["text"].asString }.joined().hasPrefix("hello "))
+        #expect(atCli.allSatisfy { $0["client_id"].asString == "cli" })
+        #expect(
+            Set(atCli.compactMap { $0["type"].asString }).isSubset(of: ["token", "status"]),
+            "\(atCli.map { $0["type"].asString ?? "?" })")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        // The backend's OWN inbox carries the dispatch that was sent TO it — C76,
+        // python's `_fanout` at dispatch start — and NOTHING of the stream: no
+        // token, no `say`, no status. Python asserts exactly this (its `emits`
+        // filter over `token`/`say`/`status(done)` on the backend's own id).
+        let leaked = sink.snapshot().filter {
+            let t = $0["type"].asString
+            return t == "token" || t == "say"
+                || (t == "status" && $0["phase"].asString == "done")
+        }
+        #expect(leaked.isEmpty, "unexpected leak to own inbox: \(leaked.map { $0.serialize() })")
+    }
+
+    /// Any other client id → the backend's OWN inbox, and nothing is sent to
+    /// the cli. python `test_browser_caller_routes_to_own_inbox_only`.
+    @Test func browserCallerRoutesToOwnInboxOnly() async throws {
+        let (kernel, ids, recorder) = await bootMockKernel(
+            config: baseConfig { .provider(MockProvider(tokens: ["hi ", doneEnvelope])) },
+            backendIds: ["mock"])
+        let id = ids["mock"]!
+        _ = await kernel.send([
+            Item(
+                AgentId("kernel_state"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                    "handler_module": .string("mock_recorder.tools"), "id": .string("cli"),
+                    "callable_by": .object([id.value: .string("*")]),
+                ]))
+        ])[0].result
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
+        defer { pump.cancel() }
+
+        _ = await kernel.send([
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("hi"), "client_id": .string("tab-7"),
+                ]))
+        ])[0].result
+        try await waitUntil("status(done) on the inbox") { sink.statusDone() != nil }
+        #expect(sink.first(type: "token")?["client_id"].asString == "tab-7")
+        #expect(
+            !recorder.payloads().contains {
+                ["token", "status"].contains($0["type"].asString ?? "")
+            },
+            "a browser's stream never reaches the cli")
     }
 
     // ── B3.1: the unknown-type refusal ───────────────────────────────────
@@ -289,7 +406,8 @@ struct EventsAndRefusalsTests {
         // kernel refuses the send first — so python's `{t!r}` of a number is a
         // branch nothing can observe.
         let numeric = await kernel.send([Item(id, .object(["type": .integer(5)]))])[0].result
-        #expect(numeric["error"].asString == "send: payload.type must be a non-empty string")
+        // C30: python's `got {verb!r}` tail.
+        #expect(numeric["error"].asString == "send: payload.type must be a non-empty string, got 5")
     }
 
     // ── B3.2: the inquiry placeholder ────────────────────────────────────
@@ -335,7 +453,11 @@ struct EventsAndRefusalsTests {
             })
         let running = Task {
             await kernel.send([
-                Item(id, .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")]))
+                Item(
+                    id,
+                    .object([
+                        "type": .string("send"), "text": .string("hi"), "client_id": .string("c"),
+                    ]))
             ])[0].result
         }
         try await waitUntil("a generation in flight") {
@@ -359,7 +481,10 @@ struct EventsAndRefusalsTests {
         #expect(redacted["client_id"] == .null)
         #expect(
             redacted["current"].asObject.map { Array($0.keys) }
-                == ["client_id", "send_id", "queued_at", "started_at", "phase", "elapsed", "is_mine"])
+                == [
+                    "client_id", "send_id", "queued_at", "started_at", "phase", "elapsed",
+                    "is_mine",
+                ])
         #expect(redacted["current"]["is_mine"].asBool == false)
 
         // An EMPTY client_id is falsy: echoed as-is, and it asks as nobody.
@@ -378,10 +503,12 @@ struct EventsAndRefusalsTests {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
         let cycle = await kernel.send([
-            Item(id, .object([
-                "type": .string("send"), "text": .string("hi"),
-                "_call_stack": .array([.string("peer"), .string(id.value)]),
-            ]))
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("hi"),
+                    "_call_stack": .array([.string("peer"), .string(id.value)]),
+                ]))
         ])[0].result
         #expect(cycle["error"].asString == "mock_backend: cycle detected")
         #expect(cycle["response"].asString == "")
@@ -390,11 +517,13 @@ struct EventsAndRefusalsTests {
         #expect(cycle["client_id"].asString == "cli")
 
         let deep = await kernel.send([
-            Item(id, .object([
-                "type": .string("send"), "text": .string("hi"),
-                "client_id": .string("c"),
-                "_call_stack": .array((1...8).map { .string("a\($0)") }),
-            ]))
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("hi"),
+                    "client_id": .string("c"),
+                    "_call_stack": .array((1...8).map { .string("a\($0)") }),
+                ]))
         ])[0].result
         #expect(deep["error"].asString == "mock_backend: max call depth 8 reached")
         #expect(deep["response"].asString == "")

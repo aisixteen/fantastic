@@ -35,6 +35,7 @@ public let DEFAULT_MODEL = "(server-loaded)"
 
 public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
     public let name = "llamacpp_backend"
+    public var verbs: [String] { AIBackend.verbNames }
 
     let core: AIBackend
 

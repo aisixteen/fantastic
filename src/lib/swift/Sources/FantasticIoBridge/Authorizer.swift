@@ -181,12 +181,12 @@ public func describe(_ meta: OrderedDictionary<String, JSON>) -> OrderedDictiona
     let auth = meta["auth"]
     let hasIngress = meta.keys.contains("ingress_rule")
     let hasEgress = meta.keys.contains("egress_rule")
-    let ingress = scopedName(
-        ruleName(hasIngress ? meta["ingress_rule"] : auth, default: "deny_ingress"),
-        "_ingress", wasScoped: hasIngress)
-    let egress = scopedName(
-        ruleName(hasEgress ? meta["egress_rule"] : auth, default: "silent_egress"),
-        "_egress", wasScoped: hasEgress)
+    // A present stem is scoped the way the gate scopes it; an ABSENT spec is the
+    // manifold's default, which already carries its suffix (python 2026-09-16).
+    let ingName = ruleName(hasIngress ? meta["ingress_rule"] : auth, default: "")
+    let egrName = ruleName(hasEgress ? meta["egress_rule"] : auth, default: "")
+    let ingress = ingName.isEmpty ? "deny_ingress" : scopedName(ingName, "_ingress", wasScoped: hasIngress)
+    let egress = egrName.isEmpty ? "silent_egress" : scopedName(egrName, "_egress", wasScoped: hasEgress)
     return [
         "ingress_rule": .string(ingress),
         "egress_rule": .string(egress),
@@ -194,10 +194,12 @@ public func describe(_ meta: OrderedDictionary<String, JSON>) -> OrderedDictiona
     ]
 }
 
-/// Python `_scoped`: the name as written when it came from the per-direction field
-/// or already ends with the suffix; an inbound-only stem presents nothing outbound.
+/// Python `_scoped`: a per-direction field is taken as written; an `auth` stem
+/// gets this manifold's suffix — the GATE's exact rule, so `reflect` never shows
+/// a name that resolves differently when written back. An inbound-only stem
+/// presents nothing outbound.
 private func scopedName(_ name: String, _ suffix: String, wasScoped: Bool) -> String {
-    if wasScoped || name.hasSuffix(suffix) { return name }
+    if wasScoped { return name }
     if suffix == "_egress" && (name == "allow_all" || name == "deny") { return "silent_egress" }
     return name + suffix
 }

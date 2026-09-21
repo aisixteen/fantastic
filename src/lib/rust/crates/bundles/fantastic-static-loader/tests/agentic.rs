@@ -4,7 +4,7 @@
 //! python's runner reads (`src/lib/python/tests/agentic/_engine.py`) and swift's
 //! will. A scenario is DATA; the runner is the only per-runtime part.
 //!
-//! `$root` in a config or spec means THIS runtime's root — `core` here,
+//! `$root` in a config or spec means THIS runtime's root — `kernel_state` here,
 //! `kernel_state` in python. Parity asserts the per-runtime value, never
 //! equality.
 
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// THIS runtime's root id.
-const ROOT: &str = "core";
+const ROOT: &str = "kernel_state";
 
 fn contract_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -284,7 +284,7 @@ async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
     let (mut reply, body) = k
         .send_with_binary(&AgentId::from(target), payload, blob)
         .await;
-    if !body.is_empty() {
+    if let Some(body) = body {
         if let Some(o) = reply.as_object_mut() {
             o.insert(
                 "bytes".into(),

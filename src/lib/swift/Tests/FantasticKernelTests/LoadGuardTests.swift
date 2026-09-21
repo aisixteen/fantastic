@@ -19,7 +19,7 @@ import Testing
 
 private func kernelWithRoot() -> Kernel {
     let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     return kernel

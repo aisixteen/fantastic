@@ -39,13 +39,14 @@ public struct CliBundle: AgentBundle {
         "status":
             "args: phase:str, source:str?, detail:dict?. Renders one-line phase markers for queued / thinking / tool_calling (entry+exit). `streaming` and `done` produce no output (token + done handlers cover them). Returns None.",
         "context":
-            "args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a",
+            "args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a one-line context-protocol notice.",
         "intro_booting":
             "First PTY push, BEFORE boot. Identity + the pull/push control-plane map — port-independent, so it prints instantly. No args. Returns None.",
-        "booted": "Final PTY push — the kernel's \"all booted\" signal, sent AFTER the boot",
+        "booted": "Final PTY push — the kernel's \"all booted\" signal, sent AFTER the boot loop.",
     ]
 
     public let name = "cli"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
 
     public init() {}
 
@@ -206,7 +207,7 @@ public struct CliBundle: AgentBundle {
     static func identity(_ kernel: Kernel) -> String {
         let env = ProcessInfo.processInfo.environment["FANTASTIC_ENV"] ?? "host"
         let ver = ProcessInfo.processInfo.environment["FANTASTIC_VERSION"]
-        let root = kernel.root?.id.value ?? "core"
+        let root = kernel.root?.id.value ?? ROOT_ID
         var parts = ["swift", "env=\(env)"]
         if let ver, !ver.isEmpty { parts.append(ver) }
         parts += ["root=\(root)", "pid \(ProcessInfo.processInfo.processIdentifier)"]

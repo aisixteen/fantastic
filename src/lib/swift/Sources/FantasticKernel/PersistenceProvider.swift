@@ -75,23 +75,45 @@ extension Kernel {
         return a
     }
 
+    /// A `secrets.token_hex(4)`-shaped tmp-file suffix: 4 random bytes as 8 lowercase
+    /// hex digits (`agent.json.tmp.361406e7`, python's own spelling).
+    private static func randomHex8() -> String {
+        (0..<4).map { _ -> String in
+            let h = String(UInt8.random(in: 0...255), radix: 16)
+            return h.count < 2 ? "0" + h : h
+        }.joined()
+    }
+
     /// Read a store-relative path's text content through the provider (`nil` on
     /// any error / missing file).
     /// A store I/O send made with OPERATOR authority — the substrate persisting to
     /// its OWN discovered store is bookkeeping (like create_agent's child boot),
     /// not an agent reaching out, so it never runs against a grant.
     private func storeSend(_ storeId: AgentId, _ payload: JSON) async -> JSON {
-        await KernelTaskLocals.$currentSender.withValue(nil) { await send([Item(storeId, payload)])[0].result }
+        await KernelTaskLocals.$currentSender.withValue(nil) {
+            await send([Item(storeId, payload)])[0].result
+        }
     }
 
-    /// The BINARY store edge — `read_stream`/`write_stream` over the raw-bytes
-    /// channel (the file_bridge string `read`/`write` verbs are GONE). Operator
-    /// authority, like `storeSend`.
+    /// ONE STORE IO, THROUGH THE BATCH (C47).
+    ///
+    /// Every persistence byte — the record merge read, the record write, the
+    /// readme probe and seed — crosses this function, and it is a `send` of ONE
+    /// BINARY ITEM under operator authority. So each is a ledger execution with
+    /// a call row, a `ps` row, a settle row and a timeout, exactly like python's
+    /// `kernel_state`, which does all of this with `kernel.send([...])`.
+    /// `sendWithBinary` minted none of it, so the substrate's own writes were
+    /// the one class of work the message log could not see.
+    ///
+    /// Operator authority: the substrate reading and writing its OWN store is
+    /// persistence bookkeeping, not an agent reaching out — it never runs
+    /// against a grant.
     private func storeSendBinary(_ storeId: AgentId, _ header: JSON, _ blob: Data) async
-        -> (JSON, Data)
+        -> (JSON, Data?)
     {
         await KernelTaskLocals.$currentSender.withValue(nil) {
-            await sendWithBinary(storeId, header, blob)
+            let out = await send([Item(storeId, header, binary: blob)])[0]
+            return (out.result, out.body)
         }
     }
 
@@ -131,7 +153,7 @@ extension Kernel {
                 // shorter file.
                 return .refused(got)
             }
-            data.append(body)
+            data.append(body ?? Data())
             if got["eof"].asBool == true { break }
             guard let next = got["next_offset"].asInt, Int(next) > offset else { break }
             offset = Int(next)
@@ -139,25 +161,24 @@ extension Kernel {
         return .bytes(data)
     }
 
+    /// ONE `read_stream` call, no pumping (C44, D6): python's merge read and
+    /// readme/doc presence check are each a SINGLE
+    /// `kernel.send([{read_stream...}])` at the store's default 64 KiB chunk
+    /// (`file_bridge._read_stream`'s `length` default) — a record or doc over
+    /// that size fails its `json.loads`/never round-trips its tail, and
+    /// python accepts exactly that (`existing = {}`, unknown keys silently
+    /// drop on the next write) rather than pumping to EOF. Mirrored, not
+    /// patched over: pumping here would make a swift store more forgiving of
+    /// a large record than python's own loader ever is.
+    ///
+    /// `nil` only for a refused reply; an error-free reply with zero bytes
+    /// (an empty file) answers `""` — "present, empty" is a real answer, not
+    /// an absence.
     private func readViaStore(_ storeId: AgentId, _ path: String) async -> String? {
-        var data = Data()
-        var offset = 0
-        while true {
-            let (got, body) = await storeSendBinary(
-                storeId,
-                .object([
-                    "type": .string("read_stream"), "path": .string(path),
-                    "offset": .integer(Int64(offset)),
-                ]), Data())
-            if got["error"].asString != nil {
-                return data.isEmpty ? nil : String(data: data, encoding: .utf8)
-            }
-            data.append(body)
-            if got["eof"].asBool == true { break }
-            guard let next = got["next_offset"].asInt, Int(next) > offset else { break }
-            offset = Int(next)
-        }
-        return String(data: data, encoding: .utf8)
+        let (got, body) = await storeSendBinary(
+            storeId, .object(["type": .string("read_stream"), "path": .string(path)]), Data())
+        if got["error"].asString != nil { return nil }
+        return String(data: body ?? Data(), encoding: .utf8) ?? ""
     }
 
     /// Persist an agent's record onto its per-agent `agent.json` THROUGH the
@@ -179,19 +200,40 @@ extension Kernel {
         {
             existing = d
         }
-        existing["id"] = .string(agent.id.value)
-        existing["handler_module"] = agent.handlerModule.map { .string($0) }
-        existing["parent_id"] = agent.parentId.map { .string($0.value) }
-        for (k, v) in agent.meta { existing[k] = v }
+        // `existing.update(record)` — python `dict.update`: the record's keys in
+        // RECORD order (`id, handler_module?, <meta>, parent_id`), a key already
+        // on disk keeping the position it has, and a key the record does not
+        // carry (no handler_module, the root's absent parent_id) left alone.
+        // Assigning `nil` here DELETED such a key instead.
+        for (k, v) in agent.record().ordered { existing[k] = v }
         // The record persists AS-IS — a single stream, no `code`/`main.py` split.
         let serialized = JSON.object(existing).serializePretty(indent: 2)
-        _ = await storeSendBinary(
+        // ATOMIC COMMIT (C43): stream into a tmp beside the target, then
+        // RENAME — never `write_stream` the live path directly. A
+        // `write_stream` that dies after truncating `af` itself would leave a
+        // half-written or empty `agent.json`: the record gone, the next boot
+        // hydrating a tree with a hole in it. `rename` is the leg's own
+        // single atomic op (and creates parents), so the only two outcomes
+        // are "the old record survives" or "the new one is complete" — never
+        // a torn file. Same protocol `text_file`'s `_write_atomic` uses for a
+        // document.
+        let tmp = "\(af).tmp.\(Self.randomHex8())"
+        let written = await storeSendBinary(
             storeId,
             .object([
-                "type": .string("write_stream"), "path": .string(af),
+                "type": .string("write_stream"), "path": .string(tmp),
                 "truncate": .bool(true),
             ]),
             Data(serialized.utf8))
+        if pyTruthy(written.0["error"]) {
+            // Leave the previous record untouched; a debris tmp is visible in `list`.
+            return
+        }
+        _ = await storeSend(
+            storeId,
+            .object([
+                "type": .string("rename"), "old_path": .string(tmp), "new_path": .string(af),
+            ]))
     }
 
     /// Seed a `readme.md` (copy-if-missing) into the agent's dir THROUGH the
@@ -214,9 +256,17 @@ extension Kernel {
     /// Remove an agent's dir THROUGH the provider (the `delete` verb). Never the
     /// root. No-op without a wired provider. Mirrors py `_forget_via_store`.
     public func forgetRecord(_ agent: Agent) async {
-        if storage.isInMemory || agent.ephemeral { return }
+        if agent.ephemeral { return }
+        await forgetPath(agent.rootPath)
+    }
+
+    /// Remove a DIR the writer remembered for an agent that is already gone —
+    /// a removed agent is no longer in the tree to resolve a path from, so the
+    /// state-stream subscriber caches it at `added`/`updated` time.
+    public func forgetPath(_ dir: URL) async {
+        if storage.isInMemory { return }
         guard let storeId = findStore(), let rootAgent = root else { return }
-        let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: agent.rootPath)
+        let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: dir)
         if reldir.isEmpty { return }  // never remove the root
         // `recursive` is REQUIRED: an agent's dir holds `agent.json` (and any
         // sidecars), and a bare `delete` on a populated dir refuses — py parity

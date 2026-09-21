@@ -65,3 +65,5 @@ scenario-probes = ["dep:fantastic-scenario-probes"]
 
 [dev-dependencies]
 tempfile = "3"
+# SIGTERM a spawned daemon in the A14.13 lifecycle-lines integration test.
+libc = { workspace = true }

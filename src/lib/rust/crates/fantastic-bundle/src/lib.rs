@@ -24,8 +24,10 @@ pub use oserror::{
 };
 pub use pyset::py_set_order;
 pub use repr::{py_float_repr, py_repr, py_repr_value, py_str, py_truthy};
-pub use text::{py_isdigit, py_split_whitespace, py_splitlines, py_strip};
-pub use unicode::{decimal_value, is_alnum, is_digit, is_printable, is_space};
+pub use text::{py_isdecimal, py_isdigit, py_split_whitespace, py_splitlines, py_strip};
+pub use unicode::{
+    decimal_value, is_alnum, is_digit, is_printable, is_space, transform_decimal_and_space_to_ascii,
+};
 
 #[cfg(test)]
 mod tests;

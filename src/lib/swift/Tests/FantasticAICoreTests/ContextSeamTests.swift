@@ -47,9 +47,38 @@ private func seam(
     let (kernel, ids, _) = await bootMockKernel(config: config, backendIds: [AI], contextWindow: window, meta: meta)
     let agent = kernel.agent(ids[AI]!)!
     let sink = EventSink()
+    // THE CALLER IS `cli`, so the seam's context events are SENDS to the cli
+    // agent — python's twin asserts exactly that (`k.sent`, "cli → kernel.send").
+    // The cli stand-in forwards what it receives into the sink; the backend's own
+    // inbox is pumped too, so an event that went the WRONG way is seen as well.
+    kernel.bundles.register("sink_cli.tools", SinkBundle(sink))
+    _ = await kernel.send([
+        Item(
+            AgentId("kernel_state"),
+            .object([
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                "handler_module": .string("sink_cli.tools"), "id": .string("cli"),
+                "callable_by": .object([AI: .string("*")]),
+            ]))
+    ])[0].result
     let inbox = kernel.ensureInbox(agent.id)
-    let pump = Task { for await ev in inbox { sink.add(ev) } }
+    let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
     return (kernel, agent, buildAIBackend(config), sink, pump)
+}
+
+/// A `cli` stand-in: every payload it is sent lands in `sink`.
+private final class SinkBundle: AgentBundle, @unchecked Sendable {
+    let name = "sink_cli"
+    let sink: EventSink
+    init(_ sink: EventSink) { self.sink = sink }
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString ?? "" {
+        case "boot", "shutdown", "reflect": return nil
+        default:
+            sink.add(payload)
+            return nil
+        }
+    }
 }
 
 /// A meta-only agent, for the record-reading primitives.
