@@ -58,7 +58,7 @@ async def _agent(kernel, aid: str) -> None:
 
 
 async def _stream(kernel, src: str, tokens=TOKENS) -> None:
-    """One producer turn: N `token` events then exactly one `done`.
+    """One producer pass: N `token` events then exactly one `done`.
 
     `emit` resolves its target as an AGENT (`ctx.agents.get`), so a bare inbox id
     is silently a no-op — the producer must be a real agent.
@@ -84,7 +84,7 @@ async def test_a_stream_arrives_in_order_and_the_last_event_is_terminal(kernel):
     assert [e["type"] for e in got].count("done") == 1, "exactly one terminal"
 
 
-async def test_nothing_follows_the_terminal_event_within_a_turn(kernel):
+async def test_nothing_follows_the_terminal_event_within_a_pass(kernel):
     """A `done` that is not last is worse than a missing one: a consumer that
     stops on `done` silently drops whatever came after it."""
     await _agent(kernel, "sink")

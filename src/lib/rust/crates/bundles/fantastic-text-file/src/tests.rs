@@ -385,7 +385,7 @@ async fn checkpointed_write_restores_byte_identical() {
     )
     .await;
     // A checkpoint id IS the dispatch's kernel task pid — an INT, python's
-    // one id space with `ps`, the trace and the chat turn (A3.10).
+    // one id space with `ps`, the trace and the chat message (A3.10).
     let ck = w["ckpt_id"].as_i64().expect("ckpt_id is an int");
     assert!(ck > 0, "minted pid: {w}");
     assert_eq!(on_disk(&tmp, "c.txt"), "mutated\n");

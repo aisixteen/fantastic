@@ -35,7 +35,7 @@ extension Kernel {
         return _teardownHooks
     }
 
-    /// One bound for every agent's `shutdown` turn. Python
+    /// One bound for every agent's `shutdown` pass. Python
     /// `Kernel.SHUTDOWN_VERB_TIMEOUT`.
     public static let SHUTDOWN_VERB_TIMEOUT: Double = 30.0
     /// How long in-flight work may take to settle before it is cancelled.
@@ -121,7 +121,7 @@ extension Kernel {
     ///
     /// 1. DRAIN: new roots are refused; sends with a live parent task still pass.
     /// 2. `shutdown` VERB: every agent whose bundle ADVERTISES it is told, all at
-    ///    once, under the shutdown scope, bounded. For an AI it is a turn ("the
+    ///    once, under the shutdown scope, bounded. For an AI it is a message ("the
     ///    kernel is stopping; persist what matters, then done"); its tools work.
     /// 3. QUIET: wait for the in-flight DISPATCHES to settle (persister loops
     ///    marked `keepalive` and `spawnTask` service loops excepted), bounded;

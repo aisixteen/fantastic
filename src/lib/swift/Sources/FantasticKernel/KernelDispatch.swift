@@ -1203,9 +1203,9 @@ extension Kernel {
                             return .object([
                                 "error": .string(
                                     "\(sender.value) cannot delegate \(pyRepr(v)) on \(key): no such "
-                                        + "agent — calls of one turn run concurrently, so an "
+                                        + "agent — calls of one batch run concurrently, so an "
                                         + "agent created in this batch does not exist yet; "
-                                        + "create in one turn, grant in the next"),
+                                        + "create in one batch, grant in the next"),
                                 "reason": .string("unauthorized"), "side": .string("delegation"),
                                 "missing": .string(key),
                                 "hint": .string(fromAbove),
@@ -1214,7 +1214,7 @@ extension Kernel {
                         // The target exists but the granter does not hold it. Say WHY
                         // in one line — the usual cause is a specialist created under
                         // the root instead of under the granter, and "you don't hold
-                        // it" hid that for twenty turns (2026-09-02).
+                        // it" hid that for twenty passes (2026-09-02).
                         let pid = agent(AgentId(key))?.parentId?.value
                         return .object([
                             "error": .string(

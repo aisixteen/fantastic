@@ -313,7 +313,7 @@ impl Bundle for ExecBridgeBundle {
             "stop" => stop_reply(agent_id, payload),
             // The reference wire client SOURCE — a model pastes it at the top of
             // its program instead of re-deriving the socket framing (measured
-            // 2026-09-01, E30 subai:rust: ten turns lost to int(fd)/buffering/
+            // 2026-09-01, E30 subai:rust: ten messages lost to int(fd)/buffering/
             // not-seekable before the first working frame). Ungated like reflect.
             "connector" => json!({
                 "source": CONNECTOR_SRC,
@@ -493,7 +493,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             "job_done": "{type:'job_done', job_id, exit_code, ok, stdout, stderr}",
         },
         "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
-        "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first turn arrives.",
+        "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
         "tasks": "Every running job holds a row in the kernel TASK TABLE (`task_id` in each `status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
         "authoring": "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",
     });

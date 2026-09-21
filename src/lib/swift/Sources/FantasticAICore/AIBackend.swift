@@ -24,7 +24,7 @@
 //
 // Wire contract (python `ai_core/core.py`):
 //
-//   send → {response, final, client_id, turn_id}   (the pass runs INLINE;
+//   send → {response, final, client_id, message_id}   (the pass runs INLINE;
 //          `{error, client_id}` for a mapped provider failure or a timeout, the
 //          projection's own refusal body verbatim, and a RAISE — settled as
 //          `{error:"<Type>: <msg>", raised:true}` — for anything unmapped)
@@ -306,7 +306,7 @@ public final class AIBackend: @unchecked Sendable {
             "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued."
         ),
         "context": .string(
-            "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb."
+            "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb."
         ),
     ]
 
@@ -648,12 +648,12 @@ public final class AIBackend: @unchecked Sendable {
 
         let reply: JSON
         switch produced {
-        case .ok(let textOut, let turnId):
+        case .ok(let textOut, let messageId):
             reply = .object([
                 "response": .string(textOut),
                 "final": .string(textOut),
                 "client_id": .string(clientId),
-                "turn_id": .integer(turnId),
+                "message_id": .integer(messageId),
             ])
         case .failed(let why):
             reply = .object(["error": .string(why), "client_id": .string(clientId)])
@@ -676,7 +676,7 @@ public final class AIBackend: @unchecked Sendable {
         // individually visible and killable. NEVER `Task.detached`: that loses
         // the task-locals and the row would land parentless, outside `cancel`'s
         // reach.
-        if case .ok(let textOut, let turnId) = produced {
+        if case .ok(let textOut, let messageId) = produced {
             let deadline = sendTimeoutSeconds
             // THE COORDINATION STATE, threaded through so `await` can count what
             // is actually pending for this agent — its queue and its FIFO lock.
@@ -691,7 +691,7 @@ public final class AIBackend: @unchecked Sendable {
                     // the router dispatches. The kernel defaults nothing.
                     sendTimeout: deadline,
                     runState: st,
-                    turnId: turnId)
+                    messageId: messageId)
             }
         }
         return reply
@@ -750,7 +750,7 @@ public final class AIBackend: @unchecked Sendable {
         // row's own id, so `↑` on every reply points at something the model can
         // see. Python `core.py` (`_row_ids_for_incoming` + `_mint_row_id`).
         let (inId, inParent) = rowIdsForIncoming(userText, kernel: kernel)
-        let turnId = kernel.rows.mintId()
+        let messageId = kernel.rows.mintId()
 
         // Context-Protocol seam: shape what the MODEL sees this turn to fit the
         // window (prepending the canonical [context-notice]), ONCE at entry.
@@ -901,7 +901,7 @@ public final class AIBackend: @unchecked Sendable {
                 ],
                 [
                     "role": .string("assistant"), "content": .string(withoutThinking(accumulated)),
-                    "id": .integer(turnId), "parent": .integer(inId),
+                    "id": .integer(messageId), "parent": .integer(inId),
                 ],
             ]
             saveHistory(agent: agent, kernel: kernel, newTurns: newTurns)
@@ -910,7 +910,7 @@ public final class AIBackend: @unchecked Sendable {
         // The RAW completion — markers in — is what routing parses: a call the
         // model wrote mid-thought still dispatches. Only the DURABLE turn above
         // is stripped.
-        return .ok(accumulated, turnId)
+        return .ok(accumulated, messageId)
     }
 
     // MARK: - status (verb + phase events)

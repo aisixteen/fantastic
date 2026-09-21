@@ -149,7 +149,7 @@ def wired(seeded_kernel, store_agent):
         "ollama_backend.tools",
         id="ua_ai",
         context_window=32768,
-        # The chat store inherits ITS OWNER'S leg — the refusal turn this test
+        # The chat store inherits ITS OWNER'S leg — the refusal message this test
         # polls history for has nowhere durable to land without one.
         file_bridge_id=store_agent,
         # THE WALL: no ua_buy anywhere in the AI's reach
@@ -213,10 +213,10 @@ def test_c3_reject_the_wall_refusal_is_model_visible(wired):
             )
         # the rogue call crossed no wall...
         assert _bought == [], "the AI reached purchase DIRECTLY — the wall is down"
-        # ...and the refusal came back as the model's next turn, typed
+        # ...and the refusal came back as the model's next message, typed
         hist = None
 
-        # poll the durable history for the delivered refusal turn
+        # poll the durable history for the delivered refusal message
         async def _read():
             return (
                 await kernel.send(

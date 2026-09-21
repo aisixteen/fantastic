@@ -18,12 +18,12 @@ fn round(v: Value) -> Row {
 #[test]
 fn scalars_are_attributes_and_text_is_a_child() {
     let out = row_to_xml(&row(json!({
-        "id": 412, "agent": "ai", "kind": "turn", "ok": true, "ts": 1.5,
+        "id": 412, "agent": "ai", "kind": "message", "ok": true, "ts": 1.5,
         "content": "hello",
     })));
     assert_eq!(
         out,
-        "<row id=\"412\" agent=\"ai\" kind=\"turn\" ok=\"true\" ts=\"1.5\">\
+        "<row id=\"412\" agent=\"ai\" kind=\"message\" ok=\"true\" ts=\"1.5\">\
          <content>hello</content></row>\n"
     );
 }

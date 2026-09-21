@@ -38,7 +38,7 @@ LEG's own `guid` on a `relay_connector` record).
 
 ## The message log — `messages.xml`
 
-Every message the kernel makes — a turn, a delivered reply, a fold, a recall, a `body`
+Every message the kernel makes — an AI reply, a delivered reply, a fold, a recall, a `body`
 (a reply too large to inline, its text merged in), a `view`, a `call` per send, a `task`
 per fork — is one `<row>` element, appended in id order, in `.fantastic/messages.xml`:
 ONE XML document opened by `<messages v="1">` and never closed (a stream). Scalars are

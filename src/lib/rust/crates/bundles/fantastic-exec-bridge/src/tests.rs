@@ -766,7 +766,7 @@ threading.Event().wait()
     assert_eq!(ack["queued"], true, "not queued: {ack}");
     let pong = until(&mut rx, |v| v["type"] == "pong", 20)
         .await
-        .expect("program never received the turn");
+        .expect("program never received the message");
     assert_eq!(pong["count"], 1, "delivered more than once: {pong}");
     let _ = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
@@ -843,7 +843,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
 }
 
 /// `connector` hands over the reference wire client — a model pastes it instead of
-/// re-deriving the socket framing (measured 2026-09-01: ten turns lost). Ungated
+/// re-deriving the socket framing (measured 2026-09-01: ten messages lost). Ungated
 /// like reflect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_connector_verb_hands_over_the_reference_client() {
@@ -1360,7 +1360,7 @@ async fn reflect_texts_match_python_verbatim() {
     );
     assert_eq!(
         r["inbox"],
-        "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first turn arrives."
+        "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives."
     );
     assert_eq!(
         r["emits"]["progress"],

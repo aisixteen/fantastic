@@ -291,7 +291,7 @@ fn clean_title(raw: Option<&Value>) -> Option<String> {
 /// list in its payload. A call with no `<to>` passes through untouched.
 pub(crate) fn fan_out(
     calls: Vec<crate::tool_parse::ToolCall>,
-    turn_id: Option<i64>,
+    message_id: Option<i64>,
 ) -> Vec<crate::tool_parse::ToolCall> {
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
@@ -318,7 +318,7 @@ pub(crate) fn fan_out(
             if call.name == "send" && is_peer_send {
                 let re = call.arguments.shift_remove("re");
                 if let Some(Value::Object(p)) = call.arguments.get_mut("payload") {
-                    if let Some(t) = turn_id {
+                    if let Some(t) = message_id {
                         p.entry("msg".to_string()).or_insert(json!(t));
                     }
                     if let Some(r) = re {
@@ -341,7 +341,7 @@ pub(crate) fn fan_out(
                 "to".to_string(),
                 Value::Array(recipients.iter().map(|x| json!(x)).collect()),
             );
-            if let Some(t) = turn_id {
+            if let Some(t) = message_id {
                 payload.insert("msg".to_string(), json!(t));
             }
             if let Some(v) = &re {
@@ -415,7 +415,7 @@ pub async fn route_reply(
     system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
-    turn_id: Option<i64>,
+    message_id: Option<i64>,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
     // detached, and a tokio spawn does NOT inherit the task-local sender
@@ -435,7 +435,7 @@ pub async fn route_reply(
             system_prompt,
             incoming,
             send_timeout,
-            turn_id,
+            message_id,
         )
         .await
     })
@@ -480,7 +480,7 @@ async fn route_reply_gated(
     system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
-    turn_id: Option<i64>,
+    message_id: Option<i64>,
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
@@ -532,7 +532,7 @@ async fn route_reply_gated(
     // agent. What the list buys is that each copy carries the WHOLE list, so a
     // recipient can see who else heard it and reply to the same group instead of
     // forking a private conversation the others never see.
-    let calls = fan_out(calls, turn_id);
+    let calls = fan_out(calls, message_id);
 
     for call in calls {
         if call.name == "done" || call.name == "await" || call.name == "inquiry_answer" {
@@ -831,7 +831,7 @@ async fn route_reply_gated(
     // had to recognise, with the human living outside it entirely.
     let nudging = !any_calls && !any_blocks && chained;
     if any_blocks {
-        deliver_grouped(&kernel, blocks, &client_id, sp, turn_id).await;
+        deliver_grouped(&kernel, blocks, &client_id, sp, message_id).await;
     }
     if done_called {
         // Explicitly finished — nothing more runs, nothing reminds. A caller's
@@ -906,7 +906,7 @@ async fn deliver_grouped(
     blocks: Vec<Block>,
     client_id: &str,
     sp: Option<&str>,
-    turn_id: Option<i64>,
+    message_id: Option<i64>,
 ) {
     // Destination order = first appearance, so the model reads them in the order
     // it wrote the calls.
@@ -922,7 +922,7 @@ async fn deliver_grouped(
     // a model reading two destinations' messages can see they came from one turn.
     // THE BATCH TOKEN IS THE TURN'S OWN ID when one exists (python), so every
     // `↑` and every `batch` on a reply points at a row the model can see.
-    let token = turn_id.map_or_else(mint_batch_token, |t| t.to_string());
+    let token = message_id.map_or_else(mint_batch_token, |t| t.to_string());
     // EVERY DESTINATION'S INCARNATION, READ NOW — before any delivery is spawned.
     // python reads `born` for all of them in one synchronous loop
     // (`_deliver_soon`), so a target that reboots while a sibling delivery is
@@ -951,7 +951,7 @@ async fn deliver_grouped(
                 if let Some(t) = &b.title {
                     tag.push_str(&format!(" \u{b7} \"{t}\""));
                 }
-                if let Some(t) = turn_id {
+                if let Some(t) = message_id {
                     tag.push_str(&format!(" \u{b7} \u{2191}{t}"));
                 }
                 if m > 1 {

@@ -322,7 +322,7 @@ fn status_values_render_like_python_str() {
         "  ⟲ context compacted (?, 0 dropped; recall to page back)"
     );
     assert_eq!(
-        context(json!({"phase": "compacted", "source": "ai", "detail": {"strategy": null, "dropped_turns": 2}}))
+        context(json!({"phase": "compacted", "source": "ai", "detail": {"strategy": null, "dropped_messages": 2}}))
             .unwrap()
             .unwrap(),
         "  [ai] ⟲ context compacted (None, 2 dropped; recall to page back)"

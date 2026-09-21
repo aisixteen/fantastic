@@ -257,9 +257,11 @@ struct FantasticCLI {
 
     /// `bootDiskBacked` for the process entrypoints: a failure here is a dead
     /// invocation, so it prints and exits rather than propagating.
-    private static func bootOrExit() async -> Kernel {
+    private static func bootOrExit(cwd: String = FileManager.default.currentDirectoryPath)
+        async -> Kernel
+    {
         do {
-            return try await bootDiskBacked()
+            return try await bootDiskBacked(cwd: cwd)
         } catch {
             errLine("fantastic: kernel boot failed: \(error)")
             exit(1)
@@ -351,7 +353,8 @@ struct FantasticCLI {
 
     private static func runInit(rest: [String]) async {
         guard rest.count >= 2 else {
-            errLine(initUsageText)
+            let kernel = await initUsage()
+            await kernel.shutdown()
             exit(2)
         }
         let loaderName = rest[0]
@@ -376,6 +379,20 @@ struct FantasticCLI {
         print(replyJSON(reply))
         lock.release()
         await kernel.shutdown()
+    }
+
+    /// A14.3's USAGE branch, factored out like `dispatchInit` so a test can
+    /// pin the ORDER without the process-level `exit(2)`: python builds the
+    /// kernel in `main` BEFORE `dispatch_argv` runs, so even `init`'s usage
+    /// error leaves the SEEDED root behind — `.fantastic/` + `agent.json` +
+    /// `readme.md` + `docs/**` (19 paths, measured). Same shape as the
+    /// `.usage` branch; NO lock — python's `init` probes the lock only once
+    /// it has both arguments. Rust mirrors it in
+    /// `fantastic-cli/src/main.rs:407`.
+    static func initUsage(cwd: String = FileManager.default.currentDirectoryPath) async -> Kernel {
+        let kernel = await bootOrExit(cwd: cwd)
+        errLine(initUsageText)
+        return kernel
     }
 
     /// A14.3's actual sequencing, factored out so a test can pin it without

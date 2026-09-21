@@ -19,7 +19,7 @@ extension Kernel {
         // so the agent named is the OPERAND, not the actor. Answered everywhere,
         // "send create_agent to X" could mean X performs it, X is created under
         // something, or X is the parent — only the last was ever true, and a
-        // model asked "which target?" for 16 turns and finished with nothing
+        // model asked "which target?" for 16 passes and finished with nothing
         // created.
         //
         // Refused HERE, in the handler — not at the call gate — so probes
@@ -150,7 +150,7 @@ extension Kernel {
     /// `detail:"full"` callers only — and these are the facts a caller needs
     /// BEFORE firing the verb, not after. Measured 2026-08-24: `create_agent`
     /// read as `args: handler_module:str, id:str?, **meta` with "spawn a child
-    /// agent" cut, and a model spent 16 turns unable to work out what the target
+    /// agent" cut, and a model spent 16 passes unable to work out what the target
     /// meant, finishing with `agents_created: []`.
     static func kernelVerbDocs() -> JSON {
         .object([
@@ -693,7 +693,7 @@ extension Kernel {
     static let POSTURE_KEYS = [
         "ingress_rule", "egress_rule", "auth", "root", "file_bridge_id",
         // THE CALL GATE, made readable. Without these an agent cannot read its
-        // own authority — only discover it by trying, which cost whole turns of
+        // own authority — only discover it by trying, which cost whole passes of
         // empirical probing every run. They also make the replace-not-merge
         // warning on `update_agent` actionable: you must send the map WHOLE, so
         // you must be able to read it.

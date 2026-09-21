@@ -23,7 +23,7 @@ mid-sequence: rare, and biased SAFE by ordering — the crash leaves visible
 tmp/`.ckpt` debris, never lost data or a half-written target.
 
 Checkpoint ids ARE the dispatch's kernel task pid (a message id, an int) — one id
-space with `ps`, the trace, and the chat turn that caused the mutation.
+space with `ps`, the trace, and the chat message that caused the mutation.
 POSIX-legal verbatim as a filename (this project does not target Windows).
 """
 

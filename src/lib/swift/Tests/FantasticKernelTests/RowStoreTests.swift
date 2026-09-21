@@ -246,7 +246,7 @@ struct RowStoreTests {
             return got
         }
         try await Task.sleep(nanoseconds: 10_000_000)
-        let turn = k.rows.mintId()  // reserved now, written later
+        let msg = k.rows.mintId()  // reserved now, written later
         let later = try k.rows.put(
             AgentId("notes"), row(["kind": .string("call"), "verb": .string("read")]))
         let later2 = try k.rows.put(
@@ -254,9 +254,9 @@ struct RowStoreTests {
         try k.rows.put(
             AgentId("ai"),
             row([
-                "id": .integer(turn), "role": .string("assistant"), "content": .string("the turn"),
+                "id": .integer(msg), "role": .string("assistant"), "content": .string("the message"),
             ]))
         let got = await consumer.value
-        #expect(got == [later, later2, turn], "arrival order, the late pre-minted row kept")
+        #expect(got == [later, later2, msg], "arrival order, the late pre-minted row kept")
     }
 }

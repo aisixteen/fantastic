@@ -127,8 +127,8 @@ pub async fn project_context(
                     // WHAT IT COULD NOT FIT — python's detail. A probe reading
                     // `too_small` off the wire needs the size and the head of
                     // the turn that did not fit, not only the window.
-                    "last_turn_tokens": last_cost,
-                    "last_turn_head": body[body.len() - 1].get("content")
+                    "last_message_tokens": last_cost,
+                    "last_message_head": body[body.len() - 1].get("content")
                         .map(|c| match c.as_str() {
                             Some(s) => s.chars().take(200).collect::<String>(),
                             None => c.to_string().chars().take(200).collect::<String>(),
@@ -215,8 +215,8 @@ pub async fn project_context(
     *state.projection.lock().expect("projection poisoned") = Some(json!({
         "fired": true,
         "strategy": strat_name,
-        "kept_turns": out_body.len(),
-        "dropped_turns": dropped_n,
+        "kept_messages": out_body.len(),
+        "dropped_messages": dropped_n,
         "summarized": summarized,
         // ALWAYS 0 here: this runtime has no pinned-facts block, and python's key
         // is in the projection a model reads off `context_status`. An absent key
@@ -274,8 +274,8 @@ pub async fn project_context(
             "type": "context", "source": self_id.as_str(), "ts": now_secs(),
             "phase": "compacted",
             "detail": {
-                "strategy": strat_name, "dropped_turns": dropped_n,
-                "kept_turns": out_body.len(), "summarized": summarized,
+                "strategy": strat_name, "dropped_messages": dropped_n,
+                "kept_messages": out_body.len(), "summarized": summarized,
                 // WHAT THE STRATEGY DID, on the event a probe scores from —
                 // python's detail. Without these the fold arm read `folded=0`
                 // with four fold levels in its store (2026-09-12).

@@ -1,7 +1,7 @@
 """C24 for the TOKEN stream — an AI generation watched through the WS surface.
 
 The closest shape to what a session hub actually consumes: a browser holds a WS
-to the kernel, watches the AI agent, sends it a turn, and receives the
+to the kernel, watches the AI agent, sends it a message, and receives the
 generation as `event` frames — `token` chunks then the terminal
 `status(phase='done')`. Asserted the C24 way: chunk order preserved exactly,
 terminal last, nothing model-facing reordered by the wire.
@@ -62,7 +62,7 @@ def test_token_stream_order_and_terminal_across_ws(wired):
     with ws_ctx as ws:
         # subscribe to the AI's inbox — where non-cli token events land
         ws.send_text(json.dumps({"type": "watch", "src": "c24_ai"}))
-        # drive one turn AS the browser (client_id != cli ⇒ tokens to inbox)
+        # drive one message AS the browser (client_id != cli ⇒ tokens to inbox)
         ws.send_text(
             json.dumps(
                 {

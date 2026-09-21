@@ -109,10 +109,10 @@ def _target_arg(verb: str, root: str, payload: dict, name: str = "path"):
 
 
 # One `read` used to return a whole file, however large. MEASURED 2026-08-07: an AI agent
-# read an 86 KB source file, its conversation went to 21k tokens, and the NEXT turn was
+# read an 86 KB source file, its conversation went to 21k tokens, and the NEXT message was
 # cancelled mid-prefill because prefill at ~95 tok/s outran the backend's 180s send
 # timeout. Nothing caught it — the context window (32k) was never exceeded, so the
-# compaction handshake never fired and `context_insufficient` never appeared. The turn
+# compaction handshake never fired and `context_insufficient` never appeared. The message
 # became un-completable on TIME while staying legal on SIZE, and no guard covers that.
 #
 # So a text read is WINDOWED. Not silently: an unread tail is reported with the totals and

@@ -127,7 +127,7 @@ public protocol AgentBundle: Sendable {
     /// Cancelling a Swift `Task` frees NO real resource — it flips a flag. An OS
     /// subprocess, a PTY, an HTTP stream held FOR THAT TASK must be released
     /// here; this is where the orphaned-subprocess class of bug is fixed. Match
-    /// on `taskId` when the resource is task-scoped (an LLM turn): the cancelled
+    /// on `taskId` when the resource is task-scoped (an LLM pass): the cancelled
     /// task may be some OTHER dispatch on the same agent. Do NOT tear down
     /// AGENT-scoped resources here (a PTY outlives the `write` that fed it) —
     /// that is what `onDelete` / `onShutdown` are for.

@@ -29,7 +29,7 @@ extension Kernel {
     /// - `currentSender` = nil says the KERNEL is acting, not the agent that
     ///   asked — so the write never runs against that agent's grant.
     /// - `currentKilled` = nil says this is not part of the CALLER'S killed
-    ///   subtree. Without it, cancelling a turn silently swallowed a record the
+    ///   subtree. Without it, cancelling a pass silently swallowed a record the
     ///   kernel had already committed to writing, and the history read back
     ///   EMPTY — a cancel must not corrupt what was already durable.
     func storeBookkeeping(_ store: AgentId, _ payload: JSON) async -> JSON {
@@ -61,7 +61,7 @@ extension Kernel {
     /// It exists as one function because it was written twice and drifted:
     /// `storeBookkeeping` cleared both locals, `save_history` cleared only the
     /// sender, and the second one was a live data-loss bug (measured 2026-08-27:
-    /// cancelling a turn mid-stream swallowed the user row the backend had
+    /// cancelling a pass mid-stream swallowed the user row the backend had
     /// already committed, and the chat read back EMPTY). Two copies of a rule is
     /// one copy that will be missed on the next fix.
     public func asBookkeeping<T: Sendable>(_ body: @Sendable () async -> T) async -> T {

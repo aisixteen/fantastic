@@ -215,7 +215,7 @@ async def test_seam_fires_prepends_notice_and_emits_event():
     )  # notice
     proj = _projection["ai"]
     assert proj["fired"] is True and proj["strategy"] == "compact"
-    assert proj["summarized"] is True and proj["dropped_turns"] > 0
+    assert proj["summarized"] is True and proj["dropped_messages"] > 0
     # public projection record stays a clean summary — no internal scan bookkeeping
     assert "fired_at_index" not in proj and "client_id" not in proj
     # the private reaction cursor holds the bookkeeping instead
@@ -225,7 +225,7 @@ async def test_seam_fires_prepends_notice_and_emits_event():
     assert len(ctx_events) == 1
     ev = ctx_events[0]
     assert ev["phase"] == "compacted" and ev["detail"]["strategy"] == "compact"
-    assert ev["detail"]["dropped_turns"] > 0
+    assert ev["detail"]["dropped_messages"] > 0
 
 
 async def test_seam_notice_is_not_in_the_input_history():
@@ -480,7 +480,7 @@ async def test_cli_context_renders_both_phases(capsys):
             "type": "context",
             "phase": "compacted",
             "source": "ai",
-            "detail": {"strategy": "compact", "dropped_turns": 9},
+            "detail": {"strategy": "compact", "dropped_messages": 9},
         },
         None,
     )

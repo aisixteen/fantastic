@@ -287,7 +287,7 @@ async def test_parent_confers_only_a_subset_it_holds(seeded_kernel):
     assert no.get("side") == "delegation"
     # The refusal names WHY the granter does not hold `peer`: not its child (and
     # whose child it is), not in its can_call — the one-line diagnosis that used to
-    # cost twenty turns of delete+recreate (measured 2026-09-02).
+    # cost twenty messages of delete+recreate (measured 2026-09-02).
     assert "not your child" in no["error"] and no.get("parent") == seeded_kernel.id, no
 
 
@@ -381,7 +381,7 @@ async def test_create_agent_refuses_a_non_dict_grant(kernel):
 async def test_delegating_on_an_agent_that_does_not_exist_names_that(seeded_kernel):
     """THE BATCH TRAP: `[create X, grant peer→X]` in ONE send. Items launch
     concurrently, so X is not an agent yet when the grant's gate runs. The refusal
-    must say "no such agent" and point at the next turn — "you don't hold X" is
+    must say "no such agent" and point at the next batch — "you don't hold X" is
     false and sent a builder into a 382-second deliberation (measured 2026-09-02,
     E30 subai:python). The same grant in the NEXT send passes."""
     root = seeded_kernel.id
@@ -422,7 +422,7 @@ async def test_delegating_on_an_agent_that_does_not_exist_names_that(seeded_kern
         assert no.get("reason") == "unauthorized" and no.get("side") == "delegation"
         assert no.get("missing") == "kid_dg", no
         assert "no such agent" in no["error"] and "next" in no["error"], no
-        # Next turn: kid_dg exists and is the granter's child → the grant passes.
+        # Next batch: kid_dg exists and is the granter's child → the grant passes.
         ok = (
             await seeded_kernel.send(
                 [

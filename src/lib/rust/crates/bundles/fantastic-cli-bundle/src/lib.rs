@@ -7,7 +7,7 @@
 //!
 //! Rust had no such bundle: `fantastic-cli` is the HOST BINARY, not a render
 //! agent. That was a real gap rather than a naming difference — the AI backends
-//! stream their turn to an agent called `cli`, so on rust that stream had
+//! stream their reply to an agent called `cli`, so on rust that stream had
 //! nowhere to land.
 //!
 //! Three properties worth stating, because all three are deliberate:
@@ -202,7 +202,7 @@ fn render_context(payload: &Value) -> Result<Option<String>, BundleError> {
     let line = match phase {
         "compacted" => {
             let strat = str_or(py_get(&detail, "strategy")?, "?");
-            let dropped = str_or(py_get(&detail, "dropped_turns")?, "0");
+            let dropped = str_or(py_get(&detail, "dropped_messages")?, "0");
             format!(
                 "{prefix} ⟲ context compacted ({strat}, {dropped} dropped; recall to page back)"
             )

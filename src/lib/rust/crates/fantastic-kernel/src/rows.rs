@@ -4,7 +4,7 @@
 //! A rule-for-rule port of python's `kernel/_kernel.py:430-545`, which is
 //! canonical.
 //!
-//! An agent's CONVERSATION (a turn, a delivered reply, a fold mark, a recall
+//! An agent's CONVERSATION (a message, a delivered reply, a fold mark, a recall
 //! decision) and the kernel's own bookkeeping — a `call` row per batch item, a
 //! `task` row per forked job — live in the same table; readers filter by `kind`.
 //! A dehydrated reply BODY is a `body` row whose `parent` is the call's id; an
@@ -89,7 +89,7 @@ impl RowStore {
     /// task, a conversation row, a reply body all take their id here, so one
     /// number names one thing everywhere (`ps`, `cancel`, `messages`, a reply
     /// tag). Minting RESERVES the id; the row may be written later ([`Self::put`]
-    /// accepts a pre-minted id) — an AI turn names its own id in the reply tags
+    /// accepts a pre-minted id) — an AI message names its own id in the reply tags
     /// it sends before its row exists.
     pub fn mint_id(&self) -> i64 {
         let mut inner = self.lock();
@@ -289,10 +289,10 @@ pub struct RowTail {
     replay: std::vec::IntoIter<i64>,
     /// The REPLAY set only.
     ///
-    /// IDS DO NOT ARRIVE IN ORDER. An AI turn's id is minted when the turn starts
-    /// and its row lands when the turn ends, AFTER the calls it made — so a
+    /// IDS DO NOT ARRIVE IN ORDER. An AI message's id is minted when the message starts
+    /// and its row lands when the message ends, AFTER the calls it made — so a
     /// high-water filter ("newer than the last id yielded") drops exactly those
-    /// turns. Measured in python 2026-09-08: every conversation turn missing from
+    /// messages. Measured in python 2026-09-08: every conversation message missing from
     /// the log. Dedupe against what was replayed, and nothing else.
     seen: HashSet<i64>,
     after: i64,

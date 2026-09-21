@@ -16,7 +16,7 @@ parent of a `create_agent`. That made the target ambiguous — "send it to X" co
 mean X performs it, X is created under something, or X is the parent, and only
 the last was true — while `parent_id` in the payload was stripped and ignored. A
 model asked "But how do I invoke create_agent? Which target?", never resolved it,
-and finished sixteen turns having created nothing.
+and finished sixteen messages having created nothing.
 
 ## Composition
 

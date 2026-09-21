@@ -67,7 +67,7 @@ async fn a_mixed_batch_answers_every_item_in_input_order() {
 #[tokio::test]
 async fn a_batch_runs_concurrently_not_one_after_another() {
     // Wall-clock ≈ the SLOWEST item, not the sum. This is the whole reason the
-    // batch exists: a model turn's N calls must not cost N round-trips.
+    // batch exists: a model reply's N calls must not cost N round-trips.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_conc").await;

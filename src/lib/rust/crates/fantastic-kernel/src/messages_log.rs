@@ -31,7 +31,7 @@ use crate::{AgentId, Kernel};
 pub const MESSAGES_FILE: &str = "messages.xml";
 
 /// Debounce before a flush, matching python's pump: a burst of rows from one
-/// turn becomes one append, not one per row.
+/// message becomes one append, not one per row.
 const DEBOUNCE_MS: u64 = 150;
 
 /// The verbs the pump's OWN kernel tasks run under. A `task` row on the pump's
@@ -159,7 +159,7 @@ impl MessagePump {
         };
         // PROBE ONCE. The header question is answered the first time a flush
         // asks it and remembered; rust probed before EVERY append, which is one
-        // extra round-trip per turn on the store's own call rows.
+        // extra round-trip per message on the store's own call rows.
         let probe_needed = self.state.lock().expect("pump poisoned").header_needed;
         let header_needed = match probe_needed {
             Some(v) => v,
@@ -288,8 +288,8 @@ pub fn install_message_pump(kernel: &Arc<Kernel>, after: i64) -> MessagePump {
         };
         loop {
             w_flush.notified().await;
-            // DEBOUNCE: give the rest of this turn's rows a moment to land, so
-            // one turn is one append rather than one per row.
+            // DEBOUNCE: give the rest of this batch's rows a moment to land, so
+            // one batch is one append rather than one per row.
             tokio::time::sleep(std::time::Duration::from_millis(DEBOUNCE_MS)).await;
             handle.flush(&k_flush).await;
         }

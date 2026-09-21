@@ -217,7 +217,7 @@ fn mk_rooted(tmp: &tempfile::TempDir) -> Arc<Kernel> {
 async fn a_kernel_verb_at_a_non_root_agent_says_where_to_send_it() {
     // The verb acts on the TREE, so the agent named is the OPERAND, not the
     // actor. Answered everywhere, "send create_agent to X" read three ways and
-    // a model spent 16 turns unable to resolve which — finishing with nothing
+    // a model spent 16 messages unable to resolve which — finishing with nothing
     // created. Refused in the HANDLER, so gate-denial probes stay valid.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);

@@ -658,7 +658,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
 #[tokio::test]
 async fn an_agent_can_read_its_own_authority() {
     // The gate used to be INVISIBLE: an agent could only discover its authority
-    // by trying, which cost whole turns of empirical probing every run. It also
+    // by trying, which cost whole passes of empirical probing every run. It also
     // makes `update_agent`'s replace-not-merge warning actionable — you must
     // send the map whole, so you must be able to read it.
     let kernel = Arc::new(Kernel::new());

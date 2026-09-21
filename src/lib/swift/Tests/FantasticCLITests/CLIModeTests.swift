@@ -400,4 +400,39 @@ struct CLIBootstrapTests {
         #expect(reply["handler_module"].asString == "static_loader.tools")
         #expect(kernel.agent(AgentId("static_loader")) != nil)
     }
+
+    // A14.3, the USAGE half: python builds the kernel BEFORE `dispatch_argv`
+    // looks at argv, so `fantastic init` (no args) and `fantastic init
+    // static_loader` (one arg) print the usage, exit 2 — AND STILL LEAVE THE
+    // SEEDED ROOT BEHIND. Measured in the acceptance capture
+    // (`cli/cli/init_no_args.json`, `cli/cli/init_usage.json`): python and
+    // rust create 19 paths, swift used to create none.
+    @Test func initUsageStillSeedsTheRoot() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fantastic-init-usage-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let kernel = await FantasticCLI.initUsage(cwd: dir.path)
+        await kernel.shutdown()
+
+        // The exact 19 paths python's capture lists, `.fantastic/` included.
+        // Resolved on both sides: on macOS the temp dir is a `/var` symlink and
+        // the enumerator hands back the `/private/var` spelling.
+        let root = dir.resolvingSymlinksInPath()
+        var seeded: Set<String> = []
+        let walk = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+        while let u = walk?.nextObject() as? URL {
+            seeded.insert(
+                u.resolvingSymlinksInPath().path
+                    .replacingOccurrences(of: root.path + "/", with: ""))
+        }
+        #expect(seeded.count == 19, "\(seeded.sorted())")
+        for p in [
+            ".fantastic/agent.json", ".fantastic/readme.md", ".fantastic/docs/reflect.md",
+            ".fantastic/docs/frontend/routing.md",
+        ] {
+            #expect(seeded.contains(p), "\(p) missing from \(seeded.sorted())")
+        }
+    }
 }

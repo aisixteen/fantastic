@@ -5,11 +5,11 @@ run for human input and asserts the answer resumes it at the exact point. In
 this paradigm there is NO SUSPENSION MACHINERY, and since 2026-09-11 there is
 no suspension either: ASKING IS A CALL. The chain `send`s an `inquiry` to the
 `user` agent and the human's answer comes back as THAT CALL'S REPLY, in the
-next turn, tagged and correlated like any other. Nothing is scraped out of
+next message, tagged and correlated like any other. Nothing is scraped out of
 prose and nothing waits on a convention.
 
 What made the old shape untenable: the mind asked by printing a JSON blob and
-emitting no call, and a call-less turn ENDED the chain. A turn that emits no
+emitting no call, and a call-less message ENDED the chain. A message that emits no
 call is now `try again`, so a printed question is not an ending — it is a model
 that forgot to act. The three claims that make this C1 rather than "just chat"
 survive the change unaltered:
@@ -93,7 +93,7 @@ def _ask() -> str:
 
 
 class _FakeProvider:
-    """Scripted mind: does one write, asks, and — only when the ANSWER turn
+    """Scripted mind: does one write, asks, and — only when the ANSWER message
     arrives — does the dependent write and finishes."""
 
     def __init__(self):
@@ -105,7 +105,7 @@ class _FakeProvider:
         self.requests.append(messages)
         last = messages[-1]["content"]
         if self.calls == 1:
-            # step 1: a side effect, then next turn will hold its reply
+            # step 1: a side effect, then next message will hold its reply
             yield _call({"type": "write", "path": "step1", "bytes": "done"})
         elif "[reply to" in last:
             if "step2" in last:
@@ -118,7 +118,7 @@ class _FakeProvider:
                 # CALL: the chain does not end here, it waits on this reply.
                 yield "I need a decision. " + _ask()
         else:
-            yield "unexpected turn " + '<call name="done"></call>'
+            yield "unexpected message " + '<call name="done"></call>'
 
 
 @pytest.fixture
@@ -227,8 +227,8 @@ async def test_a_chain_asks_the_human_and_the_answer_resumes_it(wired):
     rows = {r.get("name"): r for r in led["executions"] if r.get("name")}
     assert rows["c1-step1"]["attempts"] == 1, "suspension re-ran completed work"
     assert rows["c1-step2"]["status"] == "completed"
-    # and the turn that continued saw its full pre-ask history
+    # and the message that continued saw its full pre-ask history
     joined = json.dumps(fp.requests[-1])
     assert "step1" in joined and "request_id" in joined, (
-        "the continuing turn lost its pre-ask context"
+        "the continuing message lost its pre-ask context"
     )

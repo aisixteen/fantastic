@@ -22,7 +22,7 @@ fn ids_come_from_one_counter_starting_at_one() {
     assert_eq!(s.mint_id(), 1);
     assert_eq!(s.mint_id(), 2);
     // A put with no id takes the next one — the SAME counter, not a second.
-    assert_eq!(s.put(&aid("ai"), row("turn", "hi")).unwrap(), 3);
+    assert_eq!(s.put(&aid("ai"), row("message", "hi")).unwrap(), 3);
     assert_eq!(s.next_id(), 4);
 }
 
@@ -31,13 +31,13 @@ fn a_pre_minted_id_is_accepted_and_anything_else_refused() {
     let s = RowStore::new();
     let reserved = s.mint_id(); // 1
     let _ = s.mint_id(); // 2
-    let mut r = row("turn", "late");
+    let mut r = row("message", "late");
     r.insert("id".to_string(), json!(reserved));
     assert_eq!(s.put(&aid("ai"), r.clone()).unwrap(), reserved);
     // The same id twice is the hydrator's own mistake, said loudly.
     assert!(s.put(&aid("ai"), r).unwrap_err().contains("pre-minted"));
     for bad in [json!(0), json!(-1), json!(99), json!(true), json!("7")] {
-        let mut r = row("turn", "x");
+        let mut r = row("message", "x");
         r.insert("id".to_string(), bad.clone());
         assert!(s.put(&aid("ai"), r).is_err(), "{bad} must be refused");
     }
@@ -46,7 +46,7 @@ fn a_pre_minted_id_is_accepted_and_anything_else_refused() {
 #[test]
 fn every_row_carries_its_agent_and_a_timestamp() {
     let s = RowStore::new();
-    let id = s.put(&aid("ai"), row("turn", "hi")).unwrap();
+    let id = s.put(&aid("ai"), row("message", "hi")).unwrap();
     let got = s.get_one(id).unwrap();
     assert_eq!(got["agent"], json!("ai"));
     assert_eq!(got["id"], json!(id));
@@ -56,9 +56,9 @@ fn every_row_carries_its_agent_and_a_timestamp() {
 #[test]
 fn rows_are_per_agent_in_append_order_and_get_keeps_the_order_asked() {
     let s = RowStore::new();
-    let a1 = s.put(&aid("a"), row("turn", "a1")).unwrap();
-    let b1 = s.put(&aid("b"), row("turn", "b1")).unwrap();
-    let a2 = s.put(&aid("a"), row("turn", "a2")).unwrap();
+    let a1 = s.put(&aid("a"), row("message", "a1")).unwrap();
+    let b1 = s.put(&aid("b"), row("message", "b1")).unwrap();
+    let a2 = s.put(&aid("a"), row("message", "a2")).unwrap();
     let mine: Vec<i64> = s
         .for_agent(&aid("a"))
         .iter()
@@ -168,10 +168,10 @@ fn a_stamp_edits_the_row_and_does_not_re_notify() {
 #[tokio::test]
 async fn the_tail_replays_above_the_cursor_then_follows_live() {
     let s = RowStore::new();
-    let a = s.put(&aid("ai"), row("turn", "one")).unwrap();
-    let b = s.put(&aid("ai"), row("turn", "two")).unwrap();
+    let a = s.put(&aid("ai"), row("message", "one")).unwrap();
+    let b = s.put(&aid("ai"), row("message", "two")).unwrap();
     let mut tail = s.subscribe(a);
-    let c = s.put(&aid("ai"), row("turn", "three")).unwrap();
+    let c = s.put(&aid("ai"), row("message", "three")).unwrap();
     assert_eq!(
         tail.recv().await,
         Some(b),
@@ -182,17 +182,17 @@ async fn the_tail_replays_above_the_cursor_then_follows_live() {
 
 #[tokio::test]
 async fn a_pre_minted_row_that_lands_late_still_reaches_the_tail() {
-    // IDS DO NOT ARRIVE IN ORDER: a turn's id is minted at its start and its row
+    // IDS DO NOT ARRIVE IN ORDER: a message's id is minted at its start and its row
     // lands at its end, after the calls it made. A high-water filter drops it.
     let s = RowStore::new();
     let mut tail = s.subscribe(0);
-    let turn = s.mint_id(); // 1, reserved
+    let msg = s.mint_id(); // 1, reserved
     let call = s.put(&aid("ai"), row("call", "")).unwrap(); // 2, lands first
-    let mut late = row("turn", "the turn");
-    late.insert("id".to_string(), json!(turn));
+    let mut late = row("message", "the message");
+    late.insert("id".to_string(), json!(msg));
     s.put(&aid("ai"), late).unwrap();
     assert_eq!(tail.recv().await, Some(call));
-    assert_eq!(tail.recv().await, Some(turn), "the late row is not dropped");
+    assert_eq!(tail.recv().await, Some(msg), "the late row is not dropped");
 }
 
 #[tokio::test]
@@ -203,7 +203,7 @@ async fn a_burst_before_the_first_recv_is_not_dropped() {
     let s = RowStore::new();
     let mut tail = s.subscribe(0);
     for i in 0..10_000 {
-        s.put(&aid("ai"), row("turn", &i.to_string())).unwrap();
+        s.put(&aid("ai"), row("message", &i.to_string())).unwrap();
     }
     for want in 1..=10_000i64 {
         assert_eq!(tail.recv().await, Some(want));
@@ -215,11 +215,11 @@ async fn two_tails_each_see_everything_and_a_dropped_one_is_pruned() {
     let s = RowStore::new();
     let mut one = s.subscribe(0);
     let two = s.subscribe(0);
-    let id = s.put(&aid("ai"), row("turn", "hi")).unwrap();
+    let id = s.put(&aid("ai"), row("message", "hi")).unwrap();
     assert_eq!(one.recv().await, Some(id));
     drop(two);
     // The dead sender goes on the next append, not on a sweep.
-    let id2 = s.put(&aid("ai"), row("turn", "again")).unwrap();
+    let id2 = s.put(&aid("ai"), row("message", "again")).unwrap();
     assert_eq!(one.recv().await, Some(id2));
 }
 
@@ -242,6 +242,6 @@ fn rows_outlive_their_agent() {
     // Agent id IS conversation id: a re-created id continues where it left off,
     // and a clean slate is a NEW id. The store never hears about deletion.
     let s = RowStore::new();
-    s.put(&aid("ai"), row("turn", "before")).unwrap();
+    s.put(&aid("ai"), row("message", "before")).unwrap();
     assert_eq!(s.for_agent(&aid("ai")).len(), 1);
 }

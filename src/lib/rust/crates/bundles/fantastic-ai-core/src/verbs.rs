@@ -62,7 +62,7 @@ pub fn reflect_emits() -> Value {
     json!({
         "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
         "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued.",
-        "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
+        "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
     })
 }
 
@@ -673,15 +673,15 @@ pub async fn send(
     )
     .await;
 
-    let mut turn_id: Option<i64> = None;
+    let mut message_id: Option<i64> = None;
     // A provider failure python does NOT map propagates out of the handler. The
     // raise is deferred to after the cleanup below (python does it from an
     // `except` whose `finally` clears the current entry and releases the lock).
     let mut raise: Option<String> = None;
     let reply = match outcome {
         Ok(Ok((final_text, tid))) => {
-            turn_id = Some(tid);
-            // `turn_id` IS PART OF THE REPLY — python `_run`'s last statement.
+            message_id = Some(tid);
+            // `message_id` IS PART OF THE REPLY — python `_run`'s last statement.
             // Rust computed it (routing needs it to parent the next turn) and
             // then dropped it on the floor, so a caller could not name the row
             // its own send produced.
@@ -689,7 +689,7 @@ pub async fn send(
                 "response": final_text,
                 "final": final_text,
                 "client_id": client_id,
-                "turn_id": tid,
+                "message_id": tid,
             })
         }
         // THE SEAM'S OWN WORDS. A projection refusal never opened a provider
@@ -786,7 +786,7 @@ pub async fn send(
                 // THE LAYER'S PER-CALL DEADLINE, threaded to every model call the
                 // router dispatches. The kernel defaults nothing.
                 timeout_secs,
-                turn_id,
+                message_id,
             )
             .await;
         });

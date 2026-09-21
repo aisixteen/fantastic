@@ -805,7 +805,7 @@ struct RoutingTests {
         let r = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
             ]))])[0].result
-        let turn = try #require(r["turn_id"].asInt, "send answers the assistant row's id: \(r.serialize())")
+        let turn = try #require(r["message_id"].asInt, "send answers the assistant row's id: \(r.serialize())")
         #expect(await script.waitForCalls(2), "the batch never came back")
         let turn2 = script.requestText(1)
         #expect(turn2.contains(" \u{b7} \u{2191}\(turn) \u{b7} 1 of 2 in batch \(turn)]"), "\(turn2.suffix(400))")
@@ -1286,12 +1286,12 @@ struct RoutingTests {
 
         // The ITEMS, in emission order — python reads them off its stub's batch;
         // here `fanOut` is the step that makes them, read before dispatch.
-        let items = fanOut(extractToolCalls(call), turnId: 412)
+        let items = fanOut(extractToolCalls(call), messageId: 412)
         #expect(items.map { $0.arguments["target_id"].asString } == ["solver_2", "solver_3"])
         // …and each copy REALLY reaches its recipient, carrying the same fields.
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: call, clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, turnId: 412)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, messageId: 412)
         let landed = await sent.settled(2)
         let peers = landed.filter { ["solver_2", "solver_3"].contains($0.0) }
         #expect(Set(peers.map(\.0)) == ["solver_2", "solver_3"], "\(peers.map(\.0))")

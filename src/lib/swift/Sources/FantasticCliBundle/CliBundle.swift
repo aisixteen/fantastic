@@ -190,7 +190,7 @@ public struct CliBundle: AgentBundle {
         switch phase {
         case "compacted":
             let strat = pyStr(get(detail, "strategy", .string("?")))
-            let dropped = pyStr(get(detail, "dropped_turns", .integer(0)))
+            let dropped = pyStr(get(detail, "dropped_messages", .integer(0)))
             return
                 "\(prefix) ⟲ context compacted (\(strat), \(dropped) dropped; recall to page back)"
         case "too_small":

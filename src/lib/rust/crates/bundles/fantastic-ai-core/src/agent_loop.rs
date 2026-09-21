@@ -118,10 +118,10 @@ pub async fn run_generation(
     // the live tree every turn and its two `reflect` dispatches take their call
     // ids FIRST. Minting here first put this turn's user + assistant rows two
     // ids ahead of python's on every single turn (measured in the r3 capture:
-    // `turn_id` 740 where python had 742).
+    // `message_id` 740 where python had 742).
     let in_id = kernel.rows.mint_id();
     let in_parent = incoming_parent(user_text);
-    let turn_id = kernel.rows.mint_id();
+    let message_id = kernel.rows.mint_id();
     let model_messages = if stateless {
         messages
     } else {
@@ -184,7 +184,7 @@ pub async fn run_generation(
     // APPEND this send's user + assistant turns to the durable chat store so
     // context management (compaction/recall) has the FULL conversation next turn.
     if stateless {
-        return Ok((last_text, turn_id));
+        return Ok((last_text, message_id));
     }
     let new_turns = vec![
         json!({"role": "user", "content": user_text, "id": in_id, "parent": in_parent}),
@@ -194,10 +194,10 @@ pub async fn run_generation(
         // reasoning model re-fed its own prior deliberation drowns in it
         // (gemma4:12b re-sent a 3,800-char turn-1 thought every later prompt,
         // 2026-08-02).
-        json!({"role": "assistant", "content": without_thinking(&last_text), "id": turn_id, "parent": in_id}),
+        json!({"role": "assistant", "content": without_thinking(&last_text), "id": message_id, "parent": in_id}),
     ];
     append_history(self_id, kernel, client_id, &new_turns).await;
-    Ok((last_text, turn_id))
+    Ok((last_text, message_id))
 }
 
 /// The turn a delivered reply answers: `↑N` on the FIRST tag of the incoming

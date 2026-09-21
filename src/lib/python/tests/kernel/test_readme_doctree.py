@@ -323,7 +323,7 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
 
 async def test_full_reflect_names_no_dead_authoring_recipe(kernel):
     """Self-authoring is withdrawn, so the full reflect must not advertise the old
-    `code`/interpreter/shim recipe — a model following a dead recipe burns turns
+    `code`/interpreter/shim recipe — a model following a dead recipe burns messages
     on a `create_agent` now refused. Replaces the old advertised-executors test,
     whose invariant is moot while nothing is advertised."""
     r = (

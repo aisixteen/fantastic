@@ -135,7 +135,7 @@ pub struct Kernel {
     ledger_flusher: Mutex<Option<LedgerFlusher>>,
 }
 
-/// One bound for every agent's `shutdown` turn. Python
+/// One bound for every agent's `shutdown` dispatch. Python
 /// `Kernel.SHUTDOWN_VERB_TIMEOUT`.
 const SHUTDOWN_VERB_TIMEOUT: f64 = 30.0;
 /// How long in-flight work may take to settle before it is cancelled. Python
@@ -342,7 +342,7 @@ impl Kernel {
     ///
     /// 1. DRAIN: new roots are refused; sends with a live parent task still pass.
     /// 2. `shutdown` VERB: every live agent is told, all at once, bounded. For
-    ///    an AI it is a turn ("the kernel is stopping; persist what matters");
+    ///    an AI it is a message ("the kernel is stopping; persist what matters");
     ///    its tools work, because the kernel keeps serving.
     /// 3. QUIET: wait for the task table to empty (keepalive loops excepted),
     ///    bounded; the rest is cancelled through the normal `cancel_task` path,

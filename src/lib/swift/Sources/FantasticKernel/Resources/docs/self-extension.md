@@ -86,12 +86,12 @@ Reach everything by id. A denied send's `hint` and `side` are
 discovery-through-denial — the same way a sealed io leg's denial teaches
 `ingress_rule`.
 
-## Two facts that save turns
+## Two facts that save messages
 
 - **Do not write the wire client yourself.** Send the command runner `<type>connector</type>`
   and paste its `source` verbatim at the top of your program — it gives the program a
   `kernel` object (`send`/`emit`/`watch`/`on_message`). Hand-rolling the socket framing
-  costs ten turns and gets the buffering wrong.
+  costs ten messages and gets the buffering wrong.
 - **ONLY AN `exec_bridge` AGENT CAN REACT. A plain agent has NO behaviour.**
   An agent with no `handler_module` holds a record and answers nothing: it cannot
   receive a tick and forward it, and it cannot own a job in any active sense.
@@ -101,7 +101,7 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   `<type>schedule</type> <target>runner</target> <payload><type>start</type><command>…</command><args><item>…</item></args></payload>`, gated by
   that runner's `allowed`. Point the clock at the runner and give the runner the
   reach; do not build an inert parent to hold the job. (A model spent 26,000
-  characters of one turn deriving this from silence — measured 2026-09-04.)
+  characters of one message deriving this from silence — measured 2026-09-04.)
 
 - **A program's sends carry ITS RUNNER's identity** — the exec_bridge agent that
   started it. Its reach is that runner's `can_call`; a target must list the runner in
@@ -111,7 +111,7 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   id>`). `$children` then covers them, so wiring `clock → your specialist` needs no
   lateral grant. A specialist created under the root is NOT yours: you cannot confer
   reach on it (refused: not your child, not in your can_call), and repairing that
-  costs a delete + recreate (measured 2026-09-02: twenty turns).
+  costs a delete + recreate (measured 2026-09-02: twenty messages).
 - **A lateral edge is opened on the CALLEE, never on the caller.** To let `clock` call
   your child, add `clock` to the child's `callable_by`. You never edit a peer's
   `can_call` (you cannot, and you need not): `can_call` is yours to set only on your

@@ -61,8 +61,8 @@ pub struct BackendState {
     /// Entries waiting on `lock`. Front = next to acquire.
     pub queue: Mutex<VecDeque<QueuedEntry>>,
     /// PUBLIC last context-overflow projection summary (the `context_status`
-    /// verb's `last_projection`). `{fired, strategy?, kept_turns?,
-    /// dropped_turns?, summarized?, too_small?}`. Free of internal bookkeeping.
+    /// verb's `last_projection`). `{fired, strategy?, kept_messages?,
+    /// dropped_messages?, summarized?, too_small?}`. Free of internal bookkeeping.
     pub projection: Mutex<Option<Value>>,
     /// PRIVATE reaction cursor: `(fired_at_index, client_id)` where the last
     /// compaction notice landed in the durable store, so `derive_reaction`

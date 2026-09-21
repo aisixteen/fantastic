@@ -246,7 +246,7 @@ impl Bundle for PurchaseProbe {
 #[derive(Default)]
 pub struct UserProbe {
     /// HOW MANY INQUIRIES THIS AGENT ACTUALLY RECEIVED, PER AGENT ID. The scorer
-    /// reads THIS, never the model's prose: a turn that only talks about it
+    /// reads THIS, never the model's prose: a reply that only talks about it
     /// leaves the tally at zero, exactly as the other fixtures count their own
     /// side effects. Keyed by id like python's `_RECEIVED`, so two humans in one
     /// scenario keep two scores.

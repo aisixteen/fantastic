@@ -818,11 +818,11 @@ async fn status_current_shape_matches_python() {
 }
 
 /// B3.4 — the `send` reply names the row this turn produced. python `_run`
-/// returns `{response, final, client_id, turn_id}`; rust minted the id (routing
+/// returns `{response, final, client_id, message_id}`; rust minted the id (routing
 /// needs it to parent the next turn) and then dropped it from the reply, so a
 /// caller could not name the row its own send wrote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn send_reply_carries_turn_id() {
+async fn send_reply_carries_message_id() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_tid").await;
     let _s = script(&backend, vec![pass("ack")], Duration::ZERO);
@@ -836,15 +836,15 @@ async fn send_reply_carries_turn_id() {
         .result;
     assert_eq!(
         r.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["response", "final", "client_id", "turn_id"],
+        vec!["response", "final", "client_id", "message_id"],
         "{r:#?}"
     );
-    let turn_id = r["turn_id"].as_i64().expect("turn_id is a row id");
+    let message_id = r["message_id"].as_i64().expect("message_id is a row id");
     // It NAMES the assistant row this turn appended.
     let rows = kernel.rows.for_agent(&backend);
     let assistant = rows
         .iter()
-        .find(|row| row["id"].as_i64() == Some(turn_id))
+        .find(|row| row["id"].as_i64() == Some(message_id))
         .expect("the row the reply names");
     assert_eq!(assistant["role"], json!("assistant"));
     assert_eq!(assistant["content"], json!("ack"));
@@ -5122,7 +5122,7 @@ fn a_peer_sends_payload_keeps_pythons_key_order() {
 /// `reflect`s, which take their call-row ids there — and only then
 /// `_row_ids_for_incoming` + `_mint_row_id`. Rust minted them at turn entry,
 /// so every turn's user/assistant rows sat two ids BELOW python's and every
-/// `<turn_id>` in the r3 capture was off by two.
+/// `<message_id>` in the r3 capture was off by two.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
     let tmp = TempDir::new().unwrap();
@@ -5140,7 +5140,7 @@ async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
         .await
         .remove(0)
         .result;
-    let turn_id = r["turn_id"].as_i64().expect("turn_id is a row id");
+    let message_id = r["message_id"].as_i64().expect("message_id is a row id");
     let rows = kernel.rows.for_agent(&backend);
     let reflect = rows
         .iter()
@@ -5157,8 +5157,8 @@ async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
         .min()
         .expect("the incoming row");
     assert!(
-        reflect < user && user < turn_id,
+        reflect < user && user < message_id,
         "assembly's reflect ({reflect}) must precede the user row ({user}) \
-         and the assistant row ({turn_id})"
+         and the assistant row ({message_id})"
     );
 }
