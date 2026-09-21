@@ -33,11 +33,6 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             // THE ROW STORE's whole surface — hydration's pair, PRIVILEGED.
             | "rows_read"
             | "rows_write"
-            // THE BLOB CHANNEL — an agent's sidecars, persisted through the
-            // loader's discovered store. The consumer never computes a path and
-            // never wires a provider of its own.
-            | "persist_blob"
-            | "load_blob"
             // Root-only control verbs — gated inside `handle_system_verb`
             // to the tree root; a non-root target answers with an error.
             | "shutdown_agents"
@@ -58,10 +53,12 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
 /// "spawn a child agent" cut, and a model spent 16 turns unable to work out what
 /// the target meant, finishing with `agents_created: []`.
 pub fn kernel_verb_docs() -> Value {
+    // PYTHON DECLARATION ORDER (`_SYSTEM_VERB_DOCS`): `detail:"full"` renders the
+    // map in this order, only the distilled view sorts.
     json!({
         "create_agent": "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. \
     Creates a CHILD OF `parent_id` — your own id grows your own subtree \
-    (no grant needed); 'core' for top-level. No default parent.",
+    (no grant needed); 'kernel_state' for top-level. No default parent.",
         "update_agent": "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED \
     (a field you do not name is untouched), so a dict field must be sent \
     WHOLE — `can_call`/`callable_by` included: restate every key you want \
@@ -71,12 +68,21 @@ pub fn kernel_verb_docs() -> Value {
         "delete_agent": "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, \
     deepest first; refuses if any descendant carries `delete_lock`.",
         "list_agents": "No args. Every agent's record, flat. Paged.",
-        // The verb lists EVERY row it holds, so the doc says so. It used to have
-        // no entry here at all (python's and swift's both claimed NAMED-only
-        // while their replies carried the unnamed rows too), which is the worst
-        // of the three: a caller reading a reflect learned the verb existed only
-        // from the code.
-        "rows_read": "args: agent:str (req), after:int?, limit:int?. PRIVILEGED (a \
+        "ps": "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, \
+    verb, started_at}]}, one row per in-flight dispatch. Paged.",
+        // EVERY execution, not just the named ones: the doc once said NAMED-only
+        // while the reply carried every minted-pid row beside them.
+        "ledger": "No args. EVERY execution and what it became — named under its id, \
+    unnamed under its minted pid — {executions:[{id, target, status, attempts, \
+    retries, named, outcome?}]}, paged, scoped to what YOU originated. \
+    Failed/timed_out/cancelled rows are the dead-letter queue: inspect, then \
+    retry with a NEW id if you choose — nothing is retried silently.",
+        "messages": "args: ids:list[str] (req), limit:int?, after:str?. Conversation \
+    rows by id, at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, \
+    bytes, title?, level?, refs?}], refused:[ids], next?}. Your own rows always; \
+    another agent's only if its callable_by names you for `messages`. Bodies are \
+    behind that agent's `pull`.",
+        "rows_read": "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a \
     wildcard does not carry it). \
     That agent's rows WHOLE (content included), oldest first — {rows:[…], next?}. \
     The hydration read; agents read digests through `messages` instead.",
@@ -84,24 +90,13 @@ pub fn kernel_verb_docs() -> Value {
     wildcard does not carry it). \
     Appends rows to that agent's conversation, each under a FRESH id — {ids:[int]}. \
     A row may not carry an `id`; re-ids are the caller's to remap.",
-        "messages": "args: ids:list[int] (req), limit:int?, after:int?. Conversation \
-    rows by id, at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, \
-    bytes, title?, level?, refs?}], refused:[ids], next?}. Your own rows always; \
-    another agent's only if its callable_by names you for `messages`. Bodies are \
-    behind that agent's `pull`.",
-        "ledger": "No args. EVERY execution and what it became — named under its id, \
-    unnamed under its minted pid — {executions:[{id, target, status, attempts, \
-    retries, named, outcome?}]}, paged, scoped to what YOU originated. \
-    Failed/timed_out/cancelled rows are the dead-letter queue: inspect, then \
-    retry with a NEW id if you choose — nothing is retried silently.",
-        "ps": "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, \
-    verb, started_at}]}, one row per in-flight dispatch. Paged.",
         "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its \
     own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's \
     batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}.",
-        "shutdown_agents": "No args. The AGENT half of a graceful stop — drains, sends \
-    every agent `shutdown`, waits for work to settle, cancels what is left. \
-    The kernel KEEPS SERVING; the persister catches up. Root only.",
+        // No em-dash, so the distilled line is the whole doc.
+        "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new \
+    roots refused), sends `shutdown` to every agent advertising it, waits for \
+    in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}.",
         "shutdown_kernel": "No args. Stops the kernel PROCESS — under env:'container', the container.",
     })
 }
@@ -113,8 +108,9 @@ pub const KERNEL_VERBS_PREAMBLE: &str =
     "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, \
 not the actor. (`verbs` is what this agent itself does.)";
 
-/// `kernel_verbs` as a reflect renders it. `full` keeps each doc whole; the
-/// default truncates at the first em-dash.
+/// `kernel_verbs` as a reflect renders it. `full` keeps each doc whole, in
+/// python's declaration order; the default truncates at the first em-dash and
+/// sorts by name.
 ///
 /// Read-only verbs used to render as `""` (name only), on the ground that their
 /// reply teaches the rest — but a name with no signature is exactly what left
@@ -125,7 +121,9 @@ pub fn kernel_verbs_view(full: bool) -> Value {
     let docs = kernel_verb_docs();
     let obj = docs.as_object().expect("kernel_verb_docs is an object");
     let mut names: Vec<&String> = obj.keys().collect();
-    names.sort();
+    if !full {
+        names.sort();
+    }
     for name in names {
         let doc = obj[name].as_str().unwrap_or("");
         let text = if full {
@@ -153,7 +151,7 @@ pub(super) async fn handle_kernel_verb(
             let mut out: Vec<Value> = Vec::new();
             for id in kernel.agent_ids() {
                 if let Some(a) = kernel.agents.get(&id) {
-                    out.push(serde_json::to_value(a.record()).unwrap_or(Value::Null));
+                    out.push(crate::jsonsafe::record_value(&a.record()));
                 }
             }
             // PAGED. Absent `limit` ⇒ everything and `next: null`, so a caller
@@ -161,9 +159,7 @@ pub(super) async fn handle_kernel_verb(
             // last id handed over, never an offset.
             let (out, next) = crate::paging::page(out, payload, |r| {
                 r.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
+                    .map_or_else(String::new, fantastic_bundle::py_str)
             });
             // `more` is not decoration (py-canonical, measured 2026-08-07): a model
             // that opened with `list_agents` got bare records, never learned that
@@ -188,9 +184,7 @@ pub(super) async fn handle_kernel_verb(
             let rows = kernel.ledger.rows_for(viewer.as_ref());
             let (rows, next) = crate::paging::page(rows, payload, |r| {
                 r.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
+                    .map_or_else(String::new, fantastic_bundle::py_str)
             });
             json!({ "executions": rows, "next": next })
         }
@@ -207,17 +201,13 @@ pub(super) async fn handle_kernel_verb(
         // saying yes takes a grant that NAMES them.
         "rows_read" => rows_read(kernel, payload),
         "rows_write" => rows_write(kernel, payload),
-        "persist_blob" => crate::persistence::persist_blob(kernel, payload).await,
-        "load_blob" => crate::persistence::load_blob(kernel, payload).await,
         "ps" => {
             // PAGED like `list_agents` — same cursor law: the id of the last row
             // handed over. Over a LIVE table a cursor may miss a row that
             // finished mid-walk; this is a kernel, not a snapshot store.
             let (rows, next) = crate::paging::page(kernel.tasks.rows(), payload, |r| {
                 r.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
+                    .map_or_else(String::new, fantastic_bundle::py_str)
             });
             json!({ "tasks": rows, "next": next })
         }
@@ -230,22 +220,37 @@ pub(super) async fn handle_kernel_verb(
         // execution — the ledger resolves that last case. An id that resolves to
         // nothing is an honest `{cancelled:false}`, not a refusal: python does
         // not pretend to know whether a stranger's id ever existed.
-        "cancel" => match payload.get("task_id") {
-            Some(Value::Number(n)) if n.as_i64().is_some() => {
-                kernel.cancel_task(&TaskId(n.as_i64().unwrap())).await
+        // PYTHON, VERBATIM (C18): `raw = payload.get("task_id")`; None / "" /
+        // a bool / anything not (int, str) → `missing_arg`. Otherwise
+        // `task_id = _as_id(raw)`; if that names nothing AND raw is a
+        // string, the caller's NAME for its own execution is its handle too
+        // (`resolve_name`). Still nothing → an honest `{cancelled:false}`,
+        // never a refusal — python does not pretend to know whether a
+        // stranger's id ever existed. Used to accept `"+5"`/padded strings
+        // via a bare `str::parse::<i64>()` fallback, which python's
+        // `str.isdigit()` gate refuses (they fall through to the name path
+        // instead, exactly like any other non-digit string).
+        "cancel" => {
+            let raw = payload.get("task_id").filter(|v| !v.is_null());
+            let usable = matches!(raw, Some(Value::Number(_)))
+                || matches!(raw, Some(Value::String(s)) if !s.is_empty());
+            if !usable {
+                return crate::refusal::missing("cancel", "task_id");
             }
-            Some(Value::String(t)) if !t.is_empty() => {
-                let id = t
-                    .parse::<i64>()
-                    .ok()
-                    .or_else(|| kernel.ledger.resolve_name(t));
-                match id {
-                    Some(n) => kernel.cancel_task(&TaskId(n)).await,
-                    None => json!({"cancelled": false, "killed": []}),
-                }
+            let raw = raw.expect("checked usable above");
+            let task_id = match as_id(raw) {
+                Ok(v) => v,
+                Err(raise) => return raise,
+            };
+            let resolved = match task_id {
+                Some(n) => Some(n),
+                None => raw.as_str().and_then(|s| kernel.ledger.resolve_name(s)),
+            };
+            match resolved {
+                Some(n) => kernel.cancel_task(&TaskId(n)).await,
+                None => json!({"cancelled": false, "killed": []}),
             }
-            _ => crate::refusal::missing("cancel", "task_id"),
-        },
+        }
         "shutdown_agents" => {
             // Privileged: root control surface only, gated on rootness like
             // `shutdown_kernel` so it holds whether the verb was addressed to
@@ -291,49 +296,60 @@ pub(super) async fn handle_kernel_verb(
 }
 
 async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload: &Value) -> Value {
-    let id = match payload.get("id").and_then(Value::as_str) {
+    let id = match payload
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => AgentId::from(s),
         None => return crate::refusal::missing("update_agent", "id"),
     };
+    // REFUSED, not silently skipped, and checked BEFORE the id is even
+    // resolved to a live agent — python's `for k in ("handler_module",
+    // *sorted(RESERVED_RECORD_KEYS)):`. `handler_module` is fixed at create —
+    // swapping it would leave a live agent whose in-process state belongs to
+    // the OLD bundle. The reserved keys name substrate wiring; they used to
+    // be dropped without a word, so the caller believed a change had landed
+    // that never did (2026-09-02).
+    let mut checks: Vec<&str> = vec!["handler_module"];
+    let mut reserved: Vec<&str> = RESERVED_RECORD_KEYS.to_vec();
+    reserved.sort_unstable();
+    checks.extend(reserved);
+    for k in checks {
+        if payload.get(k).is_some() {
+            return crate::refusal::bad(
+                "update_agent",
+                k,
+                "absent — handler_module is fixed at create_agent, and \
+                 root_path/ctx/parent name substrate wiring the record may \
+                 not carry",
+            );
+        }
+    }
+    // Patch is every field in payload except `type`, `id` and `parent_id`.
+    // `parent_id` is STRUCTURAL — where the agent actually sits, which only
+    // the tree knows. Letting it into meta lets a record LIE about its own
+    // parent: `$parent` then resolves differently on the two halves of the
+    // gate, and a reboot silently corrects it from the agent's position on
+    // disk. Capture changed-field names so the lifecycle event mirrors
+    // Python's `agent_updated.changed`.
+    let mut patch: Map<String, Value> = Map::new();
+    let mut changed: Vec<String> = Vec::new();
+    if let Some(obj) = payload.as_object() {
+        for (k, v) in obj {
+            if k == "type" || k == "id" || k == "parent_id" {
+                continue;
+            }
+            patch.insert(k.clone(), v.clone());
+            changed.push(k.clone());
+        }
+    }
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
         return crate::refusal::unknown_agent(
             id.as_str(),
             kernel.agents.iter().map(|e| e.key().to_string()).collect(),
         );
     };
-    // Patch is every field in payload except `type` and `id`. Capture
-    // changed-field names so the lifecycle event mirrors Python's
-    // `agent_updated.changed`.
-    let mut patch: Map<String, Value> = Map::new();
-    let mut changed: Vec<String> = Vec::new();
-    if let Some(obj) = payload.as_object() {
-        for (k, v) in obj {
-            // `parent_id` is STRUCTURAL — where the agent actually sits, which
-            // only the tree knows. Letting it into meta lets a record LIE about
-            // its own parent: `$parent` then resolves differently on the two
-            // halves of the gate, and a reboot silently corrects it from the
-            // agent's position on disk.
-            if k == "type" || k == "id" || k == "parent_id" {
-                continue;
-            }
-            // REFUSED, not silently skipped. `handler_module` is fixed at
-            // create — swapping it would leave a live agent whose in-process
-            // state belongs to the OLD bundle. Reserved keys name substrate
-            // wiring; they used to be dropped without a word, so the caller
-            // believed a change had landed that never did (2026-09-02).
-            if k == "handler_module" || RESERVED_RECORD_KEYS.contains(&k.as_str()) {
-                return crate::refusal::bad(
-                    "update_agent",
-                    k,
-                    "absent — handler_module is fixed at create_agent, and \
-                     root_path/ctx/parent name substrate wiring the record may \
-                     not carry",
-                );
-            }
-            patch.insert(k.clone(), v.clone());
-            changed.push(k.clone());
-        }
-    }
     // Grant-map SHAPE, judged here at write time — the gate only judges edges
     // (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare string left
     // a silently-dead grant; refuse loud at the point of the mistake).
@@ -357,12 +373,9 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
         }
     }
     let rec = target.update_meta(patch);
-    // Persist the updated record THROUGH the discovered provider. Merge-only —
-    // the existing agent.json's other fields (bundle-specific, user additions)
-    // survive. No-op in InMemory mode or when no provider is wired (RAM). See
-    // `persistence::persist` for the dirty-binding semantics.
-    let _ = crate::persistence::persist(kernel, &target).await;
-    let rec_value = serde_json::to_value(&rec).unwrap_or(Value::Null);
+    // NO INLINE PERSIST: the `updated` event published below is what the root
+    // loader's `persist_writer` turns into the merge-write.
+    let rec_value = crate::jsonsafe::record_value(&rec);
     // Telemetry state event, python's shape: `{agent_id, kind:"updated",
     // changed}` — the CHANGED KEYS, nothing more. The full record rode along as
     // `agent` in the port; a state event is a notification that something moved,
@@ -379,19 +392,23 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     kernel
         .emit(
             &caller.id,
-            json!({
-                "type": "agent_updated",
-                "id": rec.id,
-                "changed": changed,
-                "agent": rec_value.clone(),
-            }),
+            crate::jsonsafe::obj([
+                ("type", Value::from("agent_updated")),
+                ("id", Value::from(rec.id.clone())),
+                ("changed", Value::from(changed)),
+                ("agent", rec_value.clone()),
+            ]),
         )
         .await;
     // PYTHON'S REPLY SHAPE. The bare record left a caller that branches on
     // `updated` — the field the kernel_verbs doc teaches — reading `undefined`
     // on this runtime for the call that succeeded, so a model read success as
     // failure and retried.
-    json!({ "updated": true, "id": rec.id, "agent": rec_value })
+    crate::jsonsafe::obj([
+        ("updated", Value::from(true)),
+        ("id", Value::from(rec.id)),
+        ("agent", rec_value),
+    ])
 }
 
 /// The `messages` verb — conversation rows by id, at digest resolution.
@@ -494,22 +511,48 @@ fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     json!({"rows": kept, "refused": refused, "next": next})
 }
 
-/// A message id from whatever the caller wrote: an int, or the decimal string a
-/// URL or a form carries. A bool is not an id.
+/// A message id from whatever the caller wrote: a POSITIVE int, or the
+/// decimal string a URL or a form carries. A bool is not an id (C18).
+///
+/// PYTHON'S `_as_id`, verbatim:
+/// ```python
+/// if isinstance(x, bool): return None
+/// if isinstance(x, int): return x if x > 0 else None
+/// if isinstance(x, str) and x.isdigit(): return int(x)
+/// return None
+/// ```
+/// A non-`isdigit` string is NOT a fallback-parsed id — it is simply not one
+/// (0, negatives, whitespace-padded and `+5` all fail `isdigit` and answer
+/// `None`, never a best-effort `str::parse`).
 ///
 /// `Err` is a RAISE, not a refusal: python's `_as_id` gates on `str.isdigit()`
 /// and then calls `int(x)`, and the two disagree — `'²'` is a digit CPython's
 /// base-10 parser rejects, so the verb dies with a `ValueError` instead of
 /// answering. The whole call is reported as a raised handler, as python's
 /// dispatch reports any exception out of a verb body.
+/// `len(x)` for a sized value, `1` for a scalar — a digest counts, it never
+/// raises on a row a caller wrote by hand (python, 2026-09-20).
+fn sized_len(v: &Value) -> usize {
+    match v {
+        Value::Array(a) => a.len(),
+        Value::Object(o) => o.len(),
+        Value::String(s) => s.chars().count(),
+        _ => 1,
+    }
+}
+
 fn as_id(v: &Value) -> Result<Option<i64>, Value> {
     match v {
-        Value::Number(n) => Ok(n.as_i64()),
-        Value::String(s) if fantastic_bundle::py_isdigit(s) => match fantastic_bundle::py_int(v) {
-            Ok(n) => Ok(Some(n)),
-            Err(e) => Err(raised(e.class_name(), e.message())),
-        },
-        Value::String(s) => Ok(s.trim().parse::<i64>().ok()),
+        Value::Bool(_) => Ok(None),
+        Value::Number(n) => Ok(n.as_i64().filter(|i| *i > 0)),
+        // `isdecimal`, not `isdigit`: a superscript digit passed the guard and
+        // then raised inside `int()` (python fixed 2026-09-20).
+        Value::String(s) if fantastic_bundle::py_isdecimal(s) => {
+            match fantastic_bundle::py_int(v) {
+                Ok(n) => Ok(Some(n)),
+                Err(e) => Err(raised(e.class_name(), e.message())),
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -519,23 +562,6 @@ fn as_id(v: &Value) -> Result<Option<i64>, Value> {
 /// from `type(e).__name__` and `str(e)`, which settles the item `failed`.
 fn raised(class: &str, message: &str) -> Value {
     json!({"error": format!("{class}: {message}"), "raised": true})
-}
-
-/// `len(x)`, or python's `TypeError` for a value that has no length. A string
-/// counts CODE POINTS, a list its items, an object its keys.
-fn py_len(v: &Value) -> Result<usize, Value> {
-    match v {
-        Value::Array(a) => Ok(a.len()),
-        Value::String(s) => Ok(s.chars().count()),
-        Value::Object(o) => Ok(o.len()),
-        other => Err(raised(
-            "TypeError",
-            &format!(
-                "object of type '{}' has no len()",
-                fantastic_bundle::py_type_name(other)
-            ),
-        )),
-    }
 }
 
 /// `int(payload.get("limit") or 0)` — python's coercion, with its two
@@ -647,7 +673,7 @@ fn digest(id: i64, row: &crate::rows::Row) -> Result<Value, Value> {
         d.insert("level".to_string(), l.clone());
     }
     if let Some(r) = row.get("refs").filter(|v| py_truthy(v)) {
-        d.insert("refs".to_string(), json!(py_len(r)?));
+        d.insert("refs".to_string(), json!(sized_len(r)));
     }
     match row.get("kind").and_then(Value::as_str) {
         Some("call" | "task") => {
@@ -659,18 +685,14 @@ fn digest(id: i64, row: &crate::rows::Row) -> Result<Value, Value> {
                 d.insert("name".to_string(), n.clone());
             }
             if let Some(outcome) = row.get("outcome").filter(|v| py_truthy(v)) {
-                let Some(o) = outcome.as_object() else {
-                    return Err(raised(
-                        "AttributeError",
-                        &format!(
-                            "'{}' object has no attribute 'get'",
-                            fantastic_bundle::py_type_name(outcome)
-                        ),
-                    ));
-                };
+                // A non-dict stamp is no status (python guards `.get` since
+                // 2026-09-20; it used to raise off the wire).
                 d.insert(
                     "status".to_string(),
-                    o.get("status").cloned().unwrap_or(Value::Null),
+                    outcome
+                        .as_object()
+                        .and_then(|o| o.get("status").cloned())
+                        .unwrap_or(Value::Null),
                 );
             }
         }
@@ -680,7 +702,7 @@ fn digest(id: i64, row: &crate::rows::Row) -> Result<Value, Value> {
             d.insert(
                 "ids".to_string(),
                 json!(match ids {
-                    Some(v) => py_len(v)?,
+                    Some(v) => sized_len(v),
                     None => 0,
                 }),
             );
@@ -706,7 +728,7 @@ fn rows_read(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let Some(agent) = payload
         .get("agent")
         .and_then(Value::as_str)
-        .map(str::trim)
+        .map(crate::scalar::py_strip)
         .filter(|s| !s.is_empty())
     else {
         let mut r = crate::refusal::refusal(
@@ -759,7 +781,7 @@ fn rows_write(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let Some(agent) = payload
         .get("agent")
         .and_then(Value::as_str)
-        .map(str::trim)
+        .map(crate::scalar::py_strip)
         .filter(|s| !s.is_empty())
     else {
         let mut r = crate::refusal::refusal(

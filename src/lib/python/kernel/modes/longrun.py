@@ -175,6 +175,8 @@ async def _repl_loop(kernel) -> None:
                 (await kernel.send([{"target": r["id"], "payload": {"type": "boot"}}]))[
                     0
                 ]["result"]
+                print(f"  created {r['id']}")
+                continue
             await _print_result(r)
             continue
         if line.startswith("delete "):

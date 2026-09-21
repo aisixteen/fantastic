@@ -18,7 +18,9 @@ private struct DiskStore: AgentBundle {
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         .object(["ok": .bool(true)])
     }
-    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel) async throws -> (JSON?, Data) {
+    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel) async throws
+        -> (JSON?, Data?)
+    {
         let path = root.appendingPathComponent(header["path"].asString ?? "")
         switch header["type"].asString ?? "" {
         case "write_stream":
@@ -30,16 +32,82 @@ private struct DiskStore: AgentBundle {
             } else {
                 try blob.write(to: path)
             }
-            return (.object(["written": .bool(true), "size": .integer(Int64(blob.count))]), Data())
+            return (.object(["written": .bool(true), "size": .integer(Int64(blob.count))]), nil)
         case "read_stream":
             guard let data = try? Data(contentsOf: path) else {
-                return (.object(["error": .string("not found"), "reason": .string("not_found")]), Data())
+                return (
+                    .object(["error": .string("not found"), "reason": .string("not_found")]), nil
+                )
             }
             let length = Int(header["length"].asInt ?? Int64(data.count))
             let chunk = data.prefix(length)
             return (.object(["eof": .bool(chunk.count >= data.count), "size": .integer(Int64(data.count)), "next_offset": .integer(Int64(chunk.count))]), Data(chunk))
         default:
-            return (.object(["error": .string("unknown verb")]), Data())
+            return (.object(["error": .string("unknown verb")]), nil)
+        }
+    }
+}
+
+/// A store whose `write_stream` REFUSES while `refusing` is set, so the pump's
+/// requeue path can be driven. `error` is whatever the caller parks there —
+/// python decides on TRUTHINESS, not on it being a string.
+private final class RefusingStore: AgentBundle, @unchecked Sendable {
+    let name = "file_bridge"
+    let root: URL
+    private let lock = NSLock()
+    private var _error: JSON = .null
+    private var _probes = 0
+    init(root: URL) { self.root = root }
+    /// Sync-scoped: `NSLock.lock()` is unavailable from an async frame, and
+    /// every reader here is called from one.
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+    var probes: Int { withLock { _probes } }
+    func setError(_ e: JSON) { withLock { _error = e } }
+    private var error: JSON { withLock { _error } }
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        .object(["ok": .bool(true)])
+    }
+    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel) async throws
+        -> (JSON?, Data?)
+    {
+        let path = root.appendingPathComponent(header["path"].asString ?? "")
+        switch header["type"].asString ?? "" {
+        case "write_stream":
+            // A TRUTHY error refuses (nothing is written); a FALSY one still
+            // rides the reply, so the pump's own truthiness rule is what decides.
+            let e = error
+            if pyTruthy(e) { return (.object(["error": e]), nil) }
+            try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            if let h = try? FileHandle(forWritingTo: path) {
+                try h.seekToEnd()
+                try h.write(contentsOf: blob)
+                try h.close()
+            } else {
+                try blob.write(to: path)
+            }
+            return (.object(["written": .bool(true), "error": e]), nil)
+        case "read_stream":
+            withLock { _probes += 1 }
+            guard let data = try? Data(contentsOf: path) else {
+                return (
+                    .object(["error": .string("not found"), "reason": .string("not_found")]),
+                    nil
+                )
+            }
+            let length = Int(header["length"].asInt ?? Int64(data.count))
+            let chunk = data.prefix(length)
+            return (
+                .object([
+                    "eof": .bool(chunk.count >= data.count),
+                    "next_offset": .integer(Int64(chunk.count)),
+                ]), Data(chunk)
+            )
+        default:
+            return (.object(["error": .string("unknown verb")]), nil)
         }
     }
 }
@@ -50,6 +118,15 @@ private struct Work: AgentBundle {
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         if delayNanos > 0 { try await Task.sleep(nanoseconds: delayNanos) }
         return .object(["ok": .bool(true)])
+    }
+}
+
+/// Answers with whatever reply the payload names — a handler composing its own
+/// refusal, of whatever shape it likes.
+private struct Echo: AgentBundle {
+    let name = "echo"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        payload["reply"]
     }
 }
 
@@ -72,7 +149,7 @@ private func boot(root: URL, store: Bool, slowNanos: UInt64 = 0) async -> Kernel
     reg.register("file_bridge.tools", DiskStore(root: root))
     reg.register("work.tools", Work(delayNanos: slowNanos))
     let k = Kernel(storage: .inMemory, bundles: reg)
-    let core = Agent(id: "core", handlerModule: nil, parentId: nil, rootPath: root)
+    let core = Agent(id: "kernel_state", handlerModule: nil, parentId: nil, rootPath: root)
     k.register(core)
     k.setRoot(core)
     if store {
@@ -139,7 +216,7 @@ struct MessagesLogTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let rows: [Row] = [
             row(["id": .integer(2), "agent": .string("sp"), "kind": .string("call"), "verb": .string("work")]),
-            row(["id": .integer(3), "agent": .string("core"), "kind": .string("settle"), "parent": .integer(2), "settled": .string("sp"), "outcome": .object(["status": .string("completed")])]),
+            row(["id": .integer(3), "agent": .string("kernel_state"), "kind": .string("settle"), "parent": .integer(2), "settled": .string("sp"), "outcome": .object(["status": .string("completed")])]),
         ]
         try (MessagesXML.header + rows.map(MessagesXML.rowToXml).joined())
             .write(to: root.appendingPathComponent(MESSAGES_FILE), atomically: true, encoding: .utf8)
@@ -256,6 +333,88 @@ struct MessagesLogTests {
         await k.flushPendingMessages()
     }
 
+    /// C48 — the header probe runs ONCE, and a refused append is PRINTED
+    /// python-style and REQUEUED rather than dropped. Truthiness decides: an
+    /// `error` of `""`/`0`/`[]` is not a refusal, a non-string one is.
+    @Test func refusedAppendRequeuesOnTruthyErrorOnly() async throws {
+        let root = tmpRoot()
+        let store = RefusingStore(root: root)
+        let reg = BundleRegistry()
+        reg.register("file_bridge.tools", store)
+        let k = Kernel(storage: .inMemory, bundles: reg)
+        let rootAgent = Agent(id: AgentId(ROOT_ID), handlerModule: nil, parentId: nil, rootPath: root)
+        k.register(rootAgent)
+        k.setRoot(rootAgent)
+        _ = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel"),
+                    "handler_module": .string("file_bridge.tools"), "id": .string("store"),
+                    "root": .string(root.path),
+                ]))
+        ])
+        let pump = k.installMessagePump(after: k.rows.nextId - 1)
+
+        // The tail is a TASK: WAIT FOR IT to have seen the row, rather than
+        // guessing a sleep — under parallel load a fixed tick is a flake.
+        func put(_ text: String) async throws {
+            let id = try k.rows.put(
+                AgentId("ai"), row(["role": .string("user"), "content": .string(text)]))
+            for _ in 0..<400 {
+                if pump.seen >= id { return }
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
+            Issue.record("the pump's tail never saw row \(id)")
+        }
+
+        // One healthy append first, so the log carries its header.
+        try await put("a")
+        await pump.flush()
+        #expect(try lines(root).count == 1)
+        let probesAfterFirst = store.probes
+
+        // A REFUSAL — a NON-STRING `error`, which swift used to ignore entirely,
+        // counting the append as written and dropping the batch.
+        store.setError(.object(["why": .string("sealed")]))
+        try await put("b")
+        await pump.flush()
+        #expect(try lines(root).count == 1, "a refused append must not land")
+
+        // REQUEUED, not lost: the next flush carries it.
+        store.setError(.null)
+        await pump.flush()
+        let landed = try lines(root)
+        #expect(
+            landed.contains { $0["content"]?.asString == "b" },
+            "the requeued row never landed: \(landed.count) rows")
+
+        // A FALSY `error` is NOT a refusal — python tests truthiness.
+        store.setError(.string(""))
+        try await put("c")
+        await pump.flush()
+        #expect(try lines(root).contains { $0["content"]?.asString == "c" }, "a falsy error refused")
+
+        // THE HEADER PROBE RAN ONCE, not once per append (rust probed every time).
+        #expect(
+            store.probes == probesAfterFirst,
+            "the header probe re-ran: \(probesAfterFirst) → \(store.probes)")
+        await k.flushPendingMessages()
+    }
+
+    /// C54 — the no-store line is FLUSHED, so a piped stdout carries it even
+    /// when the process is signalled right after.
+    @Test func noStoreLineIsFlushed() async throws {
+        // `printFlushed` IS the contract; the line's own text is pinned by
+        // `noStoreMeansRamOnly`. Here: nothing else is printed on the happy
+        // path — hydration and rehydrate are silent on success (C54).
+        let root = tmpRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let k = Kernel(storage: .inMemory, bundles: BundleRegistry())
+        #expect(try hydrateMessages(k, rootDir: root) == 0)
+        #expect(await k.rehydrateLedger() == 0)
+    }
+
     @Test func aSlowSettleStillReachesTheLog() async throws {
         // THE BUG THE SETTLE ROW EXISTS FOR: a call that settles after its
         // launch row was written must still record an ending on disk.
@@ -271,5 +430,66 @@ struct MessagesLogTests {
         let settle = got.first { $0["kind"]?.asString == "settle" && $0["parent"]?.asInt == pid }
         #expect(settle?["outcome"]?["status"].asString == "completed", "no ending on disk: \(got.map { ($0["id"]?.asInt, $0["kind"]?.asString) })")
         await k.flushPendingMessages()
+    }
+
+    /// C49 — the settle stamp is python's: an `error` of ANY truthy type is
+    /// rendered with `str()` and cut at 200 CODE POINTS, and `reason` is copied
+    /// RAW. Reading only a non-empty string dropped every structured error from
+    /// the log, and `String.prefix(200)` cut GRAPHEMES — 100 ZWJ families where
+    /// python keeps 40.
+    @Test func stampErrorIsFirst200CodePointsOfPyStr() async throws {
+        let reg = BundleRegistry()
+        reg.register("echo.tools", Echo())
+        let k = Kernel(storage: .inMemory, bundles: reg)
+        let core = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
+        k.register(core)
+        k.setRoot(core)
+        _ = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel"),
+                    "handler_module": .string("echo.tools"), "id": .string("e"),
+                ]))
+        ])
+
+        func stamp(_ reply: JSON) async throws -> Row {
+            let out = await k.send([
+                Item(
+                    AgentId("e"),
+                    .object([
+                        "type": .string("work"), "reply": reply,
+                    ]))
+            ])[0]
+            let pid = try #require(out.pid?.value)
+            let row = try #require(k.rows.getOne(pid))
+            return try #require(row["outcome"]?.asObject)
+        }
+
+        // A dict error is still an error, and `reason` keeps its own type.
+        var s = try await stamp(
+            .object(["error": .object(["code": .integer(5)]), "reason": .array([.string("a")])]))
+        #expect(s["status"] == .string("errored"), "\(JSON.object(s).serialize())")
+        #expect(s["error"] == .string("{'code': 5}"), "\(JSON.object(s).serialize())")
+        #expect(s["reason"] == .array([.string("a")]), "a raw reason, not a string")
+
+        // 200 CODE POINTS: each family is 5 scalars and one Character.
+        let family = "👨‍👩‍👧"
+        s = try await stamp(.object(["error": .string(String(repeating: family, count: 100))]))
+        #expect(
+            s["error"] == .string(String(repeating: family, count: 40)),
+            "cut on graphemes, not code points")
+
+        // Python truthiness on both halves. (The settle STATUS of a falsy
+        // non-string error is `classify`'s call, not the stamp's — swift reads
+        // `0`/`[]`/`{}` as error-shaped where python does not; no plan item
+        // covers that yet, so this pins only the stamp keys.)
+        s = try await stamp(.object(["error": .integer(0), "reason": .string("dropped")]))
+        #expect(s["error"] == nil && s["reason"] == nil, "\(JSON.object(s).serialize())")
+        s = try await stamp(.object(["error": .integer(7), "reason": .integer(0)]))
+        #expect(s["error"] == .string("7") && s["reason"] == nil, "\(JSON.object(s).serialize())")
+        // …and the settle row on the ROOT carries the same stamp.
+        let settles = k.rows.forAgent(AgentId("kernel_state")).filter { $0["kind"]?.asString == "settle" }
+        #expect(settles.last?["outcome"]?["error"].asString == "7", "\(settles.count) settle rows")
     }
 }

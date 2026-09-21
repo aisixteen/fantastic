@@ -64,6 +64,7 @@ public let DEFAULT_MAX_TOKENS = 8192
 
 public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     public let name = "anthropic_backend"
+    public var verbs: [String] { AIBackend.verbNames }
 
     private let core: AIBackend
 
@@ -304,18 +305,18 @@ struct AnthropicProvider: AIProvider {
                                 && !ctype.lowercased().contains("json")
                                 && attempt < Self.retries)
                             {
-                                continuation.finish(
-                                    throwing: PyError("RuntimeError", "anthropic \(code): \(detail)")
-                                )
+                                let why = "anthropic \(code): \(detail)"
+                                continuation.finish(throwing: PyError("RuntimeError", why))
                                 return
                             }
                             attempt += 1
-                            FileHandle.standardOutput.write(
-                                Data(
-                                    ("[anthropic] \(code) "
-                                        + "(\(ctype.isEmpty ? "no content-type" : ctype)) — "
-                                        + "transport error, retry \(attempt)/\(Self.retries)\n")
-                                        .utf8))
+                            // A15.4: python's `print(..., flush=True)` — routed
+                            // through `RuntimeLog.out` (not a raw stdout write)
+                            // so a test can read what an operator would.
+                            RuntimeLog.out(
+                                "[anthropic] \(code) "
+                                    + "(\(ctype.isEmpty ? "no content-type" : ctype)) — "
+                                    + "transport error, retry \(attempt)/\(Self.retries)")
                         } else {
                             var state = AnthropicStreamState()
                             for try await line in bytesToLines(response.body) {

@@ -38,7 +38,7 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
         .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -51,7 +51,7 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
     let fid = format!("ff_{}", nim);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type":"create_agent",
                 "parent_id": "kernel",
@@ -81,7 +81,7 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
         create["endpoint"] = json!(e);
     }
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("core"), create)])
+        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -657,7 +657,7 @@ async fn an_unmapped_nim_failure_still_raises() {
     let _key = KeyEnv::set(Some("nvapi-x")).await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": nim.as_str(), "model": DEFAULT_MODEL}),
         )])
         .await;

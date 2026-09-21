@@ -323,7 +323,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                     # REGISTERED: a drain lives as long as the subscription.
                     t = kernel.ctx.tasks[
                         kernel.ctx.spawn_task(
-                            id,
+                            owner_id,
                             "watch_drain",
                             drain(
                                 proxy,
@@ -359,7 +359,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                         continue
                     t = kernel.ctx.tasks[
                         kernel.ctx.spawn_task(
-                            id, "inbox_drain", drain(proxy, _inbox_framer)
+                            owner_id, "inbox_drain", drain(proxy, _inbox_framer)
                         )
                     ]["_task"]
                     self_sub[0] = (proxy, t)
@@ -435,8 +435,8 @@ def _command_permitted(rec: dict, line: str) -> str | None:
 
 
 async def _start(id, payload, kernel):
-    """args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra
-    env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the
+    """args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes.
+    The FULL line (command + args) must fullmatch one of the
     record's `allowed` regexes or the start is refused naming the patterns.
     Spawns in the BACKGROUND and returns {job_id, status:'running'} at once;
     streams `progress` per output line + a final `job_done`. Many run in parallel.
@@ -566,8 +566,7 @@ def _snap(job_id: str, full: bool = False) -> dict:
 
 
 async def _status(id, payload, kernel):
-    """args: job_id:str? — one job (with full stdout/stderr), or all of this agent's
-    jobs (summary). Returns {jobs:[…]}."""
+    """args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}."""
     jid = payload.get("job_id")
     if jid:
         j = _jobs.get(jid)
@@ -701,8 +700,8 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """No-op. Nothing auto-restarts: a command is started by a caller, not by the
-    record — the `code`-field auto-run died with the code field."""
+    """No-op. Nothing auto-restarts: a command is started by a caller, not by the record.
+    The `code`-field auto-run died with the code field."""
     return None
 
 

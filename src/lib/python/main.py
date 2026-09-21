@@ -31,12 +31,15 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     compose per-process ephemerals. No agent boots here — `dispatch_argv`
     runs the boot pass (which is when the root loader subscribes)."""
     records = read_tree(root_dir)
-    seeded = not records
+    # No ROOT record on disk (fresh project, or a missing/corrupt `agent.json`
+    # with children still under `agents/`): the root IS the loader
+    # (id="kernel_state"). Seed its agent.json + readme now so the next boot
+    # reads it (read-only `reflect` paths take no lock and write nothing).
+    seeded = not any(r.get("parent_id") is None for r in records)
     if seeded:
-        # Fresh project: the root IS the loader (id="kernel_state"). Seed its
-        # agent.json + readme now so the next boot reads it (read-only
-        # `reflect` paths take no lock and write nothing).
-        records = [{"id": "kernel_state", "handler_module": "kernel_state.tools"}]
+        records = [
+            {"id": "kernel_state", "handler_module": "kernel_state.tools"}
+        ] + records
     kernel.load(records, root_path=root_dir)
     # HYDRATE THE MESSAGE STORE, cold, before the first send mints an id. The kernel
     # starts empty; the loader bundle's reader fills it from above and sets the counter.
@@ -119,8 +122,22 @@ def main_dispatch() -> None:
 
     atexit.register(_atexit_shutdown)
 
+    async def _run() -> None:
+        # SHUTDOWN ON THE LOOP THAT RAN THE CALL. A one-shot subcommand used to
+        # leave `asyncio.run` and let the atexit net start a FRESH loop — where
+        # the pump's tail task had died with the first one, so `catch_up` could
+        # never see the counter caught up and burned its full 1000 × 0.01 s
+        # bound: `kernel ps` took 11.5 s (measured 2026-09-21). Shutting down
+        # inside the same loop lands every row the one-shot minted and returns
+        # as soon as the log is caught up; the atexit net below then no-ops on
+        # `_shutdown_complete`, and the long-running mode's own `finally` does too.
+        try:
+            await dispatch_argv(kernel, sys.argv[1:])
+        finally:
+            await kernel.shutdown()
+
     try:
-        asyncio.run(dispatch_argv(kernel, sys.argv[1:]))
+        asyncio.run(_run())
     except KeyboardInterrupt:
         pass
     except RuntimeError as e:

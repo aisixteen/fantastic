@@ -101,6 +101,28 @@ func intArg(_ verb: String, _ payload: JSON, _ name: String, default def: Int64,
 
 public struct FileBundle: AgentBundle {
     public let name = "file_bridge"
+    public var verbs: [String] { Array((Self.verbDocs.asObject ?? [:]).keys) }
+
+    /// python's module-level `VERBS` — ONE table: reflect renders it and
+    /// `advertises` reads it.
+    static let verbDocs: JSON = [
+        "reflect":
+            "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
+        "boot": "No-op. Returns None.",
+        "list":
+            "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …).",
+        "read_stream":
+            "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns ONE chunk {path, offset, bytes, next_offset, eof, size}.",
+        "write_stream":
+            "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default = append at end), truncate:bool=False. The SINK half — a producer pushes RAW chunks by offset.",
+        "pump": "The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE call.",
+        "delete":
+            "args: path:str (req), recursive:bool=False. Returns {path, deleted:true}.",
+        "rename":
+            "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
+        "mkdir":
+            "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
+    ] as JSON
 
     public init() {}
 
@@ -201,20 +223,17 @@ public struct FileBundle: AgentBundle {
             return .object(out)
         case "write_stream":
             if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) { return readonlyRefusal() }
-            let blob: Data
-            switch payload["bytes"] {
-            case .string(let text): blob = Data(text.utf8)
-            // The tag grammar types a bare number; a number is a document too.
-            case .integer(let n): blob = Data(String(n).utf8)
-            case .double(let d): blob = Data(pyFloatRepr(d).utf8)
-            case .null where payload.asObject?["bytes"] == nil:
-                // ABSENT is an empty chunk (python `payload.get("bytes", b"")`);
-                // an explicit `null` is not a chunk at all.
-                blob = Data()
-            default:
+            // `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK (A13.19). Python
+            // TYPES the argument — `isinstance(data, (bytes, bytearray))` — and
+            // JSON has no bytes, so ANY present value here (a string, a number,
+            // a null) is `missing_arg` and nothing is written. A raw chunk
+            // reaches this bundle on the BINARY channel only; that is the
+            // carrier a model's `<bytes>` document rides too. ABSENT is python's
+            // `payload.get("bytes", b"")` — an empty chunk, a legal write.
+            guard payload.asObject?["bytes"] == nil else {
                 return Refusal.missing("write_stream", "bytes (one raw chunk)")
             }
-            return writeStream(agent: agent, payload: payload, blob: blob, base: base)
+            return writeStream(agent: agent, payload: payload, blob: Data(), base: base)
         case "pump":
             // The PUMP coordinates a SOURCE→SINK copy over the binary channel
             // (it never touches bytes itself), so it rides the text channel.
@@ -231,15 +250,15 @@ public struct FileBundle: AgentBundle {
     /// verb routes through the text `handle` (its blob is unused).
     public func handleBinary(
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-    ) async throws -> (JSON?, Data) {
+    ) async throws -> (JSON?, Data?) {
         let verb = header["type"].asString ?? ""
         guard verb == "read_stream" || verb == "write_stream"
         else {
             let reply = try await handle(agentId: agentId, payload: header, kernel: kernel)
-            return (reply, Data())
+            return (reply, nil)
         }
         guard let agent = kernel.agent(agentId) else {
-            return (.object(["error": .string("no agent \(agentId)")]), Data())
+            return (.object(["error": .string("no agent \(agentId)")]), nil)
         }
         // GATE — same sealed-by-default choke point as the text channel.
         if let denied = gateVerb(
@@ -248,16 +267,31 @@ public struct FileBundle: AgentBundle {
             authToken: nil,
             agentId: agent.id.value, verb: verb)
         {
-            return (denied, Data())
+            return (denied, nil)
         }
         let base = workdirBase(kernel: kernel)
         if verb == "read_stream" {
-            return readStream(agent: agent, payload: header, base: base)
+            let (reply, chunk) = readStream(agent: agent, payload: header, base: base)
+            // A REFUSAL CARRIES NO CHUNK. A success does — a 0-byte one
+            // included, which is how an empty file reads back as octet instead
+            // of JSON (C37/A13.1).
+            guard case .object(let o) = reply, !pyTruthy(o["error"] ?? .null) else {
+                return (reply, nil)
+            }
+            return (reply, chunk)
         }
         if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) {
-            return (readonlyRefusal(), Data())
+            return (readonlyRefusal(), nil)
         }
-        return (writeStream(agent: agent, payload: header, blob: blob, base: base), Data())
+        // THE BLOB IS THE CHUNK, and a header `bytes` key of ANY JSON value is
+        // a wire client trying to smuggle one through the envelope — python
+        // OVERWRITES `payload[field]` with the body, so the key never reaches
+        // this handler holding a JSON value (A13.1). Refuse it rather than
+        // write whatever it spelled.
+        if header.asObject?["bytes"] != nil {
+            return (Refusal.missing("write_stream", "bytes (one raw chunk)"), nil)
+        }
+        return (writeStream(agent: agent, payload: header, blob: blob, base: base), nil)
     }
 
     // MARK: - Verbs
@@ -282,24 +316,7 @@ public struct FileBundle: AgentBundle {
             "root": .string(rootDisplay),
             "readonly": .bool(pyTruthy(agent.metaValue(forKey: "readonly") ?? .null)),
             "hidden_count": .integer(Int64(hidden(agent: agent).count)),
-            "verbs": [
-                "reflect":
-                    "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
-                "boot": "No-op. Returns None.",
-                "list":
-                    "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …).",
-                "read_stream":
-                    "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns",
-                "write_stream":
-                    "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default =",
-                "pump": "The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE",
-                "delete":
-                    "args: path:str (req), recursive:bool=False. Returns {path, deleted:true}.",
-                "rename":
-                    "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
-                "mkdir":
-                    "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
-            ] as JSON,
+            "verbs": Self.verbDocs,
         ]
         // The auth posture, python's `**_describe(rec)` — after `verbs`.
         for (k, v) in describe(agent.meta) { out[k] = v }
@@ -581,7 +598,7 @@ public struct FileBundle: AgentBundle {
                 .object([
                     "type": .string("write_stream"), "path": dpath,
                     "offset": .integer(offset), "truncate": .bool(first),
-                ]), body)
+                ]), body ?? Data())
             guard case .object(let wo) = wmeta, !pyTruthy(wo["error"] ?? .null) else {
                 return Refusal.make(
                     Refusal.transportError,
@@ -612,7 +629,7 @@ public struct FileBundle: AgentBundle {
     static let readmeText = """
         # file_bridge — filesystem edge
 
-        Verbs: `read(path)` · `write(path,content)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `reflect`
+        Verbs: `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `reflect`
         **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
         - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
         - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.

@@ -14,23 +14,35 @@ public func gateInbound(rule: IngressRule, action: AuthAction) -> AuthDecision {
     rule.authorize(action)
 }
 
-/// Gate an inbound WEB-leg call (web_ws / web_rest) at the shared choke point.
+/// Gate an inbound WEB-leg action (web_ws / web_rest) at the shared choke point.
 /// Unlike `gateVerb` there is NO reflect/boot bypass — a sealed web leg refuses
 /// a browser/REST client entirely (the io-leg-as-surface case), so `deny_inbound`
 /// denies every verb. `token` is the leg's credential (frame `auth_token` /
 /// `X-Fantastic-Auth` header). Returns `nil` to ADMIT, or a deny JSON.
+///
+/// `kind` is the FRAME KIND — `call`, `emit`, `watch` or `state_subscribe`
+/// (python `gate_inbound(rule, kind, frame)`, C41). Only a `call` carries a verb
+/// of its own; for every other kind the verb IS the kind. This built `call`
+/// unconditionally, so a `watch`/`emit`/`state_subscribe` frame was authorized
+/// against a rule clause that names calls.
+///
+/// A MISSING LEG RECORD IS SEALED, not admitted: `resolveIngress` on an absent
+/// rule denies, and a leg that is not in the registry has no rule at all. This
+/// returned `nil` (admit) for it, so deleting the leg record OPENED the socket.
 public func gateWebLeg(
-    kernel: Kernel, legId: AgentId, target: String, verb: String, token: String?
+    kernel: Kernel, legId: AgentId, kind: String, target: String, verb: String, token: String?
 ) -> JSON? {
-    guard let leg = kernel.agent(legId) else { return nil }
+    let leg = kernel.agent(legId)
     let rule: IngressRule
     do {
         rule = try resolveIngress(
-            ingressRule: leg.metaValue(forKey: "ingress_rule"), auth: leg.metaValue(forKey: "auth"))
+            ingressRule: leg?.metaValue(forKey: "ingress_rule"),
+            auth: leg?.metaValue(forKey: "auth"))
     } catch {
         return .object(["error": .string("\(error)")])
     }
-    let action = AuthAction(kind: "call", target: target, verb: verb, token: token)
+    let action = AuthAction(
+        kind: kind, target: target, verb: kind == "call" ? verb : kind, token: token)
     // FORWARDED, not re-worded. The rule states the reason AND the repair; a web
     // leg used to drop the repair entirely, so a browser/REST client hitting a
     // sealed leg learned only that it was refused.

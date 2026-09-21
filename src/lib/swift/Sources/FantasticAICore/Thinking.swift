@@ -19,12 +19,9 @@
 // the STRIPPED text is persisted and shown as the answer. One convention, no
 // provider learns anything about the tool protocol.
 //
-// SWIFT-SPECIFIC: the `done` event's `accumulated` (and the `status` verb's
-// `text_so_far`) stay RAW — with the markers in. That field is contractually the
-// concatenation of the `token` deltas the client already received, asserted
-// across AIBackendTests and consumed by TUI/CLI/web; stripping it there would
-// make two truths out of one stream. Only the DURABLE assistant turn is
-// stripped (see `AIBackend.runStream`).
+// The `token` events carry the RAW text — markers in — because they are exactly
+// what the model streamed; only the DURABLE assistant turn is stripped (see
+// `AIBackend.runStream`).
 
 import Foundation
 

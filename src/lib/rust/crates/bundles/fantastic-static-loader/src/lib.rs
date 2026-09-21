@@ -159,9 +159,9 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             }
             drop(live);
             let mut patch = obj.clone();
-            patch.remove("id");
-            patch.remove("handler_module");
-            patch.remove("parent_id");
+            patch.shift_remove("id");
+            patch.shift_remove("handler_module");
+            patch.shift_remove("parent_id");
             // `update_agent` REPLACES a named field, so a bare re-apply of
             // `can_call` would delete the structural baseline the kernel
             // stamps at create and sever the agent from its own parent and

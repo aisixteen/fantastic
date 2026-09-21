@@ -201,7 +201,7 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
 
     func handleBinary(
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-    ) async throws -> (JSON?, Data) {
+    ) async throws -> (JSON?, Data?) {
         let path = header["path"].asString ?? ""
         switch header["type"].asString ?? "" {
         case "write_stream":
@@ -217,11 +217,11 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
                 .object([
                     "written": .bool(true),
                     "size": .integer(Int64(content.utf8.count)),
-                ]), Data()
+                ]), nil
             )
         case "read_stream":
             guard let c = get(agentId, path) else {
-                return (.object(["error": .string("not found")]), Data())
+                return (.object(["error": .string("not found")]), nil)
             }
             let data = Data(c.utf8)
             return (
@@ -231,7 +231,7 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
                 ]), data
             )
         default:
-            return (.object(["error": .string("unknown verb")]), Data())
+            return (.object(["error": .string("unknown verb")]), nil)
         }
     }
 }
@@ -275,9 +275,9 @@ final class PayloadRecorder: AgentBundle, @unchecked Sendable {
     /// the JSON header, which is exactly the bug this records the difference for.
     func handleBinary(
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-    ) async throws -> (JSON?, Data) {
+    ) async throws -> (JSON?, Data?) {
         lock.withLock { blobs.append((header, blob)) }
-        return (.object(["written": .integer(Int64(blob.count))]), Data())
+        return (.object(["written": .integer(Int64(blob.count))]), nil)
     }
 
     /// Every `(header, blob)` that reached the BINARY channel, in arrival order.
@@ -447,7 +447,7 @@ func bootMockKernel(
         .appendingPathComponent("fantastic-mock-\(UUID().uuidString)")
         .appendingPathComponent(".fantastic")
     let root = Agent(
-        id: AgentId("core"), handlerModule: nil, parentId: nil, rootPath: storeRoot)
+        id: AgentId("kernel_state"), handlerModule: nil, parentId: nil, rootPath: storeRoot)
     kernel.register(root)
     kernel.setRoot(root)
     // Two-sided deny-all: each callee must ACCEPT the backends that reach it. The
@@ -461,9 +461,9 @@ func bootMockKernel(
     // whose `root` resolves to the root agent's dir). Chat no longer rides this
     // leg — each backend gets its own below — but the kernel's record
     // persistence still wants a provider to exist.
-    _ = await kernel.send([Item(AgentId("core"), .object([
+    _ = await kernel.send([Item(AgentId("kernel_state"), .object([
             "type": .string("create_agent"),
-            "parent_id": .string("core"),
+            "parent_id": .string("kernel_state"),
             "handler_module": .string("file_bridge.tools"),
             // `findStore` matches a file_bridge whose `root` resolves to the
             // root agent's own dir — that is how the loader owns sidecar
@@ -472,23 +472,23 @@ func bootMockKernel(
             "id": .string("store"),
             "callable_by": acceptJSON,
         ]))])[0].result
-    _ = await kernel.send([Item(AgentId("core"), .object([
+    _ = await kernel.send([Item(AgentId("kernel_state"), .object([
             "type": .string("create_agent"),
-            "parent_id": .string("core"),
+            "parent_id": .string("kernel_state"),
             "handler_module": .string("mock_recorder.tools"),
             "id": .string("probe"),
             "callable_by": acceptJSON,
         ]))])[0].result
-    _ = await kernel.send([Item(AgentId("core"), .object([
+    _ = await kernel.send([Item(AgentId("kernel_state"), .object([
             "type": .string("create_agent"),
-            "parent_id": .string("core"),
+            "parent_id": .string("kernel_state"),
             "handler_module": .string("mock_raiser.tools"),
             "id": .string("raiser"),
             "callable_by": acceptJSON,
         ]))])[0].result
-    _ = await kernel.send([Item(AgentId("core"), .object([
+    _ = await kernel.send([Item(AgentId("kernel_state"), .object([
             "type": .string("create_agent"),
-            "parent_id": .string("core"),
+            "parent_id": .string("kernel_state"),
             "handler_module": .string("mock_slow.tools"),
             "id": .string("slowpoke"),
             "callable_by": acceptJSON,
@@ -508,9 +508,9 @@ func bootMockKernel(
         // (`agents/<self>/chat_<client>.jsonl`) — a private leg keeps each
         // backend's transcripts under its own `agents/` tree.
         let legId = "store_\(id)"
-        _ = await kernel.send([Item(AgentId("core"), .object([
+        _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("create_agent"),
-                "parent_id": .string("core"),
+                "parent_id": .string("kernel_state"),
                 "handler_module": .string("file_bridge.tools"),
                 "root": .string(storeRoot.appendingPathComponent(id).path),
                 "id": .string(legId),
@@ -520,7 +520,7 @@ func bootMockKernel(
         backendGrant[legId] = .string("*")
         var create: OrderedCollections.OrderedDictionary<String, JSON> = [
             "type": .string("create_agent"),
-            "parent_id": .string("core"),
+            "parent_id": .string("kernel_state"),
             "handler_module": .string("mock_backend.tools"),
             "id": .string(id),
             "file_bridge_id": .string(legId),
@@ -532,7 +532,7 @@ func bootMockKernel(
         // Per-test record fields (`nudge_limit`, the context_* flags) ride here so
         // a case can vary ONE thing without a second boot helper.
         for (k, v) in meta { create[k] = v }
-        let r = await kernel.send([Item(AgentId("core"), .object(create))])[0].result
+        let r = await kernel.send([Item(AgentId("kernel_state"), .object(create))])[0].result
         out[id] = AgentId(r["id"].asString ?? id)
     }
     return (kernel, out, recorder)

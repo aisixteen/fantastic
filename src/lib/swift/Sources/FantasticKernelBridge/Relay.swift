@@ -105,10 +105,14 @@ public actor RelayTransport: BridgeTransport {
         heartbeat: Double = DEFAULT_HEARTBEAT,
         reconnect: Double = DEFAULT_RECONNECT,
         identity: JSON = [:],
-        spawn: (@Sendable (String, @escaping @Sendable () async -> Void) -> Void)? = nil
+        spawn: (@Sendable (String, @escaping @Sendable () async -> Void) -> Void)? = nil,
+        dialer: (@Sendable () async throws -> any RelayWire)? = nil
     ) async throws -> RelayTransport {
+        // Python `connect(..., dialer=None)`: `dialer or _default_dialer(...)`.
+        // The caller-supplied dialer is how the self-healing loop is driven
+        // without a network, and it is python's own signature.
         let dialURL = relayURL.appendingPathComponent(guid)
-        let dialer: @Sendable () async throws -> any RelayWire = {
+        let dialer: @Sendable () async throws -> any RelayWire = dialer ?? {
             try await NIOWebSocketClient.connect(
                 url: dialURL, subprotocols: [RELAY_SUBPROTOCOL], authToken: token)
         }
@@ -299,12 +303,20 @@ public actor RelayTransport: BridgeTransport {
 
     /// Python `_reconnect_ws`: (re)dial with the backoff. nil = explicitly
     /// closed or one-shot.
+    ///
+    /// THE DIAL COMES FIRST AND THE SLEEP ONLY AFTER A FAILED ONE, exactly as
+    /// python's loop is written (`try: dial ... except: await sleep; continue`).
+    /// Sleeping before the first attempt charged a full `reconnect` interval to
+    /// a socket that was already gone — and `recv`'s own catch has ALREADY slept
+    /// one, so a drop healed at 2x the backoff. Measured on the parity `bridges`
+    /// capture: `relay_connections` 1 where python opened 2, because python's
+    /// re-dial landed inside the window and this one did not.
     private func reconnect() async -> (any RelayWire)? {
         guard reconnectSecs > 0, let dialer else { return nil }
         while !closedFlag {
-            try? await Task.sleep(nanoseconds: UInt64(reconnectSecs * 1_000_000_000))
-            if closedFlag { return nil }
             if let c = try? await dialer() { return c }
+            if closedFlag { return nil }
+            try? await Task.sleep(nanoseconds: UInt64(reconnectSecs * 1_000_000_000))
         }
         return nil
     }
@@ -430,9 +442,11 @@ extension KernelBridgeBundle {
         // half-configured leg leaves no durable identity behind.
         var guid = pyTruthy(meta["guid"] ?? .null) ? pyStr(meta["guid"]!) : ""
         if guid.isEmpty, let agent = kernel.agent(agentId) {
-            guid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            _ = agent.updateMeta(["guid": .string(guid)])
-            await kernel.persistRecord(agent)
+            guid = Kernel.mintGuid()
+            // THROUGH THE KERNEL UPDATE PATH: it publishes `updated`, which is
+            // what makes the record dirty for the root loader's writer. A direct
+            // persist bypassed the writer's dirty set entirely.
+            kernel.update(agent.id, ["guid": .string(guid)])
         }
         let roleValue = meta["role"] ?? .null
         if case .null = roleValue {

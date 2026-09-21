@@ -109,6 +109,14 @@ async fn a_timeout_kills_through_the_front_door() {
     assert_eq!(out[0].status, Status::TimedOut);
     assert_eq!(out[0].result["reason"], "timeout");
     assert!(out[0].pid.is_some(), "it DID reach the task table");
+    // C31: python's prose, verbatim — target id RAW, verb `py_repr`-quoted,
+    // plus `task_id`.
+    let pid = out[0].pid.expect("checked above").0;
+    assert_eq!(
+        out[0].result["error"],
+        json!("send: b_to 'slow' exceeded its 0.2s timeout; task cancelled")
+    );
+    assert_eq!(out[0].result["task_id"], json!(pid));
 
     // The hook ran, and it ran while the row was still there — the ordering is
     // the point, not the fact.

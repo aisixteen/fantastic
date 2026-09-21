@@ -42,8 +42,13 @@ use serde_json::Map;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Default id for the root agent.
-pub const DEFAULT_ROOT_ID: &str = "core";
+/// Default id for the root agent — python's `kernel_state`, which IS the tree
+/// root and carries the loader's own `handler_module`.
+pub const DEFAULT_ROOT_ID: &str = "kernel_state";
+
+/// The root's `handler_module`: the durable-state loader bundle. A root record
+/// is seeded with it on a virgin dir, exactly as python's `_bootstrap` does.
+pub const ROOT_HANDLER_MODULE: &str = "kernel_state.tools";
 
 /// Options for [`bootstrap`].
 #[derive(Debug, Clone)]
@@ -53,12 +58,12 @@ pub struct BootstrapOptions {
     /// Whether to acquire the PID lock. Ignored in
     /// [`StorageMode::InMemory`] (no lock without a workdir).
     pub acquire_lock: bool,
-    /// Override the root agent's id. Default `"core"`.
+    /// Override the root agent's id. Default `"kernel_state"`.
     pub root_id: String,
 }
 
 impl BootstrapOptions {
-    /// Disk-backed daemon bootstrap (acquires lock; root id `"core"`).
+    /// Disk-backed daemon bootstrap (acquires lock; root id `"kernel_state"`).
     pub fn daemon(workdir: impl Into<PathBuf>) -> Self {
         Self {
             storage: StorageMode::Disk(workdir.into()),
@@ -130,48 +135,22 @@ fn boot_disk(
         lock::acquire(workdir)?;
     }
 
-    // Root record. Auto-create if absent — matches Python's behaviour
-    // (fantastic on a virgin dir writes the bootstrap record).
+    // THE ROOT RECORD, or a fresh seed. A missing or unparseable `agent.json`
+    // reseeds the root like a virgin dir; the children under `agents/` are
+    // walked either way (python `read_tree`, 2026-09-20).
     let root_record_path = fantastic_dir.join("agent.json");
-    let root_rec: AgentRecord = match read_record_at(&root_record_path)? {
-        Some(rec) => rec,
-        None => {
-            let rec = AgentRecord {
+    let (root_rec, seeded) = match read_record_at(&root_record_path) {
+        Some(rec) => (rec, false),
+        None => (
+            AgentRecord {
                 id: opts.root_id.clone(),
-                handler_module: None,
+                handler_module: Some(ROOT_HANDLER_MODULE.to_string()),
                 parent_id: None,
                 meta: Map::new(),
-            };
-            // COLD primitive: seed the root record directly. This is the
-            // chicken-egg bring-up — it runs BEFORE any agent (and thus any
-            // `file_bridge` store provider) exists, so it cannot route through a
-            // provider. The file is absent here (we're in the `None` branch), so
-            // a plain write is correct (nothing to merge). Ongoing persistence
-            // (after boot) flows through the discovered provider — see
-            // `persistence::persist`.
-            if opts.storage.is_disk() {
-                persistence::write_record_at(&root_record_path, &rec)?;
-            }
-            rec
-        }
+            },
+            true,
+        ),
     };
-
-    // Stable instance guid (persistence-scoped). Mint ONCE — an
-    // explicit/existing guid in the persisted meta always wins and is read
-    // back verbatim on every subsequent boot. Persist through the COLD
-    // primitive (`write_record_at`), same as the virgin-record seed above: no
-    // store provider is wired this early. The `meta.clone()` below then carries
-    // the guid into the live root, and root reflect surfaces it.
-    let mut root_rec = root_rec;
-    if !root_rec.meta.contains_key("guid") {
-        root_rec.meta.insert(
-            "guid".to_string(),
-            serde_json::Value::String(crate::lifecycle::mint_guid()),
-        );
-        if opts.storage.is_disk() {
-            persistence::write_record_at(&root_record_path, &root_rec)?;
-        }
-    }
 
     // Construct the root agent — its on-disk dir is `.fantastic/`
     // (children live under `.fantastic/agents/<id>/`).
@@ -186,16 +165,23 @@ fn boot_disk(
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
+    // THE VIRGIN SEED IS THE CONSTRUCTED ROOT, not the bare literal: the record
+    // on disk then carries the structural grant baseline `Agent::new` stamps, in
+    // its order (`can_call, callable_by`), and the loader's `boot` appends
+    // `guid` after them. COLD primitive — this runs before any agent (and thus
+    // any `file_bridge` store provider) exists, so it cannot route through one.
+    if seeded && opts.storage.is_disk() {
+        persistence::write_record_at(&root_record_path, &root.record())?;
+    }
+
     // THE MESSAGE LOG, COLD — before any child exists, so a hydrated id can
     // never collide with one a booting agent mints. A cut or foreign log is
     // LOUD: half a conversation is worse than none, and the operator truncates
-    // at the last complete row rather than the kernel guessing.
+    // at the last complete row rather than the kernel guessing. Success is
+    // SILENT (python prints nothing).
     let messages_after = match crate::messages_log::hydrate_messages(kernel, &fantastic_dir) {
         Ok(0) => 0,
-        Ok(n) => {
-            println!("  [messages] hydrated {n} row(s)");
-            kernel.rows.next_id() - 1
-        }
+        Ok(_) => kernel.rows.next_id() - 1,
         Err(e) => {
             return Err(KernelError::Persistence {
                 path: fantastic_dir.join(crate::messages_log::MESSAGES_FILE),
@@ -204,6 +190,9 @@ fn boot_disk(
         }
     };
 
+    // A RESEEDED ROOT STILL HYDRATES ITS CHILDREN: python's `read_tree` walks
+    // `agents/` under the default layout when the root record is missing or
+    // corrupt (2026-09-20); the reseed only replaces the root's own record.
     let loaded = persistence::load_children(kernel, &kernel.bundles, Arc::clone(&root))?;
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
@@ -218,18 +207,14 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
     // write sidecars in InMemory mode will get an fs error from
     // their own code, which is correct (they shouldn't be writing
     // sidecars in a brain-kernel context).
-    // Ephemeral guid so root reflect always carries one, even with no disk.
-    // Minted, never persisted (InMemory never touches the filesystem).
-    let mut meta = Map::new();
-    meta.insert(
-        "guid".to_string(),
-        serde_json::Value::String(crate::lifecycle::mint_guid()),
-    );
+    // NO GUID HERE. The instance guid is minted ONCE by the root loader's `boot`
+    // (python `kernel_state._boot`), so an in-memory kernel gets one the same
+    // way a disk one does — and never two different ones.
     let root = Agent::new(
         AgentId(root_id.to_string()),
+        Some(ROOT_HANDLER_MODULE.to_string()),
         None,
-        None,
-        meta,
+        Map::new(),
         PathBuf::new(),
         false,
     );
@@ -243,22 +228,14 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
     })
 }
 
-/// Read an [`AgentRecord`] from `path`. Returns `None` if the file
-/// doesn't exist; an error if it exists but is unreadable or
-/// malformed.
-fn read_record_at(path: &Path) -> KernelResult<Option<AgentRecord>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(path).map_err(|e| KernelError::Persistence {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let rec: AgentRecord = serde_json::from_str(&raw).map_err(|e| KernelError::CorruptRecord {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    Ok(Some(rec))
+/// Read the ROOT [`AgentRecord`] from `path`, or `None` when there is nothing
+/// usable there — absent, unreadable, or not JSON. python's `read_tree`
+/// swallows all three the same way (`json.JSONDecodeError, OSError,
+/// ValueError` → `[]`) and the caller reseeds; a corrupt root is NOT a fatal
+/// error, and nothing is migrated or repaired.
+fn read_record_at(path: &Path) -> Option<AgentRecord> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 /// Release the lock the bootstrap call acquired. Idempotent.

@@ -67,7 +67,7 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
     kernel.bundles.register(HANDLER_MODULE, ExecBridgeBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -87,7 +87,7 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
         obj.insert(k, v);
     }
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("core"), create)])
+        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -713,7 +713,7 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
             a.clone(),
             py_start(
                 &py,
-                "r = kernel.send('core', {'type': 'reflect'})\nprint('GOT', r.get('id'))\n",
+                "r = kernel.send('kernel_state', {'type': 'reflect'})\nprint('GOT', r.get('id'))\n",
                 true,
             ),
         )])
@@ -724,7 +724,10 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
         .await
         .expect("no job_done");
     assert!(
-        done["stdout"].as_str().unwrap().contains("GOT core"),
+        done["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("GOT kernel_state"),
         "connector send did not round-trip: {done}"
     );
 }
@@ -800,11 +803,11 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    // a SIBLING runner under core — no edge from `a` to it (baseline only)
+    // a SIBLING runner under the root — no edge from `a` to it (baseline only)
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({"type": "create_agent", "parent_id": "core", "id": "sib",
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel_state", "id": "sib",
                    "handler_module": "exec_bridge.tools",
                    "ingress_rule": "allow_all_ingress"}),
         )])
@@ -818,7 +821,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
             py_start(
                 &py,
                 "r = kernel.send('sib', {'type': 'reflect'})\nprint('SIB', r.get('reason'))\n\
-                 r2 = kernel.send('core', {'type': 'reflect'})\nprint('CORE', r2.get('id'))\n",
+                 r2 = kernel.send('kernel_state', {'type': 'reflect'})\nprint('CORE', r2.get('id'))\n",
                 true,
             ),
         )])
@@ -834,7 +837,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
         "the sibling must refuse: {done}"
     );
     assert!(
-        out.contains("CORE core"),
+        out.contains("CORE kernel_state"),
         "the parent (baseline edge) still answers: {done}"
     );
 }
@@ -884,19 +887,21 @@ impl fantastic_kernel::bundle::Bundle for BlobStore {
         header: Value,
         blob: Vec<u8>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(fantastic_kernel::bundle::Reply, Vec<u8>), fantastic_kernel::bundle::BundleError>
-    {
+    ) -> Result<
+        (fantastic_kernel::bundle::Reply, Option<Vec<u8>>),
+        fantastic_kernel::bundle::BundleError,
+    > {
         match header["type"].as_str() {
             Some("write_stream") => {
                 let n = blob.len();
                 *self.0.lock().unwrap() = blob;
-                Ok((Some(json!({"written": n})), Vec::new()))
+                Ok((Some(json!({"written": n})), None))
             }
             Some("read_stream") => {
                 let b = self.0.lock().unwrap().clone();
-                Ok((Some(json!({"eof": true, "size": b.len()})), b))
+                Ok((Some(json!({"eof": true, "size": b.len()})), Some(b)))
             }
-            other => Ok((Some(json!({"error": format!("{other:?}")})), Vec::new())),
+            other => Ok((Some(json!({"error": format!("{other:?}")})), None)),
         }
     }
 }
@@ -919,7 +924,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
         .register("blob.tools", BlobStore(std::sync::Mutex::new(Vec::new())));
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -931,7 +936,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
     let a = AgentId::from(agent_id_for(&tmp).as_str());
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
                    "handler_module": HANDLER_MODULE,
                    "ingress_rule": "allow_all_ingress", "allowed": [".*"],
@@ -942,8 +947,8 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
         .result;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({"type": "create_agent", "parent_id": "core", "id": "blob",
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel_state", "id": "blob",
                    "handler_module": "blob.tools",
                    "callable_by": {a.as_str(): "*"}}),
         )])
@@ -1045,7 +1050,7 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     // A sibling the runner holds no edge to: watch must refuse.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": "secret",
                    "handler_module": HANDLER_MODULE, "ingress_rule": "allow_all_ingress"}),
         )])
@@ -1386,7 +1391,7 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["start"],
-        "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra"
+        "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes."
     );
     assert_eq!(
         verbs["clear"],
@@ -1394,7 +1399,7 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["boot"],
-        "No-op. Nothing auto-restarts: a command is started by a caller, not by the"
+        "No-op. Nothing auto-restarts: a command is started by a caller, not by the record."
     );
     assert_eq!(
         verbs["reflect"],
@@ -1832,11 +1837,11 @@ async fn output_is_collected_raw_like_python() {
     assert_eq!(done["stdout"], "a\r\nb\u{fffd}", "{done}");
 }
 
-/// A4.14 (D6) — a line past asyncio's 65536-byte StreamReader bound is not
-/// truncated: python's `readline` RAISES, the pump reports the raise as the job's
-/// stderr, and stdout comes back EMPTY.
+/// A line past the old 64 KiB bound is read whole: python raised asyncio's
+/// StreamReader limit to 16 MiB (2026-09-20), so a program's long line no longer
+/// ends the pipe with `[pump error]`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_overlong_line_is_a_pump_error() {
+async fn an_overlong_line_is_read_whole() {
     let Some(py) = find_real_python() else {
         return;
     };
@@ -1854,11 +1859,13 @@ async fn an_overlong_line_is_a_pump_error() {
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
-    assert_eq!(done["stdout"], "", "{}", done["stdout"]);
-    assert_eq!(
-        done["stderr"],
-        "[pump error] Separator is not found, and chunk exceed the limit"
+    let out = done["stdout"].as_str().unwrap_or("");
+    assert!(
+        out.starts_with(&"x".repeat(200_000)),
+        "stdout len {}",
+        out.len()
     );
+    assert_eq!(done["stderr"], "");
 }
 
 /// A4.6 — a signal death reports `exit_code = -signal`, `ok:false`. `ExitStatus::
@@ -2134,4 +2141,25 @@ async fn a_watching_program_holds_drain_task_rows() {
         .filter(|v| v == "watch_drain" || v == "inbox_drain")
         .collect();
     assert!(left.is_empty(), "drain rows leaked past teardown: {left:?}");
+}
+
+/// python `secrets.token_hex(4)` — 8 lowercase hex characters from the OS
+/// CSPRNG. Rust minted `counter ^ pid` and the capture read the SEQUENTIAL
+/// `76fa189x` family.
+#[test]
+fn job_ids_are_pythons_token_hex_4_and_random() {
+    let ids: Vec<String> = (0..64).map(|_| crate::rand_job_id()).collect();
+    for id in &ids {
+        assert_eq!(id.len(), 8, "{id}");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{id}"
+        );
+    }
+    let uniq: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(uniq.len(), ids.len(), "job ids repeated: {ids:?}");
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_ne!(sorted, ids, "job ids ascend like a counter: {ids:?}");
 }

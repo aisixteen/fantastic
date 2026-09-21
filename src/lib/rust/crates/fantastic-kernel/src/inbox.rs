@@ -102,6 +102,15 @@ impl InboxReceiver {
         }
     }
 
+    /// Wait until the queue MAY hold something — the WAKE half of
+    /// [`Self::recv`], split out so a drainer can keep the receiver behind a
+    /// lock while it forwards and still wait with that lock RELEASED. A permit
+    /// is stored when nobody is waiting, so a put between a drain and this call
+    /// is never missed.
+    pub async fn ready(&self) {
+        self.0.ready.notified().await;
+    }
+
     /// The next payload if one is already queued.
     pub fn try_recv(&mut self) -> Option<InboxItem> {
         self.0.queue.lock().expect("inbox poisoned").pop_front()

@@ -42,7 +42,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -91,7 +91,7 @@ async fn create_as(kernel: &Arc<Kernel>, sender: &str, payload: Value) -> Value 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_agent_creates_under_itself_with_no_grant() {
     let (_t, kernel) = mk();
-    seed(&kernel, "mid", "core", json!({})).await;
+    seed(&kernel, "mid", "kernel_state", json!({})).await;
     seed(&kernel, "deep", "mid", json!({})).await; // a GRANDCHILD
     let r = create_as(&kernel, "deep", json!({"parent_id": "deep", "id": "kid"})).await;
     assert_eq!(r["id"], "kid", "{r}");
@@ -100,7 +100,7 @@ async fn an_agent_creates_under_itself_with_no_grant() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creating_under_own_descendant_is_baseline() {
     let (_t, kernel) = mk();
-    seed(&kernel, "mid", "core", json!({})).await;
+    seed(&kernel, "mid", "kernel_state", json!({})).await;
     seed(&kernel, "kid", "mid", json!({})).await;
     let r = create_as(
         &kernel,
@@ -116,13 +116,13 @@ async fn a_root_create_grant_does_not_reach_a_sibling() {
     // THE ESCALATION. `<root>:[create_agent]` is the ordinary authoring grant; it
     // must not be a key to every other agent's subtree.
     let (_t, kernel) = mk();
-    seed(&kernel, "victim", "core", json!({})).await;
+    seed(&kernel, "victim", "kernel_state", json!({})).await;
     seed(
         &kernel,
         "author",
-        "core",
+        "kernel_state",
         json!({"can_call": {"$self": "*", "$parent": "*", "$children": "*",
-                            "core": ["*", "create_agent", "update_agent"]}}),
+                            "kernel_state": ["*", "create_agent", "update_agent"]}}),
     )
     .await;
     let r = create_as(
@@ -140,11 +140,11 @@ async fn a_root_create_grant_does_not_reach_a_sibling() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creating_under_an_unrelated_agent_needs_both_halves() {
     let (_t, kernel) = mk();
-    seed(&kernel, "victim", "core", json!({})).await;
+    seed(&kernel, "victim", "kernel_state", json!({})).await;
     seed(
         &kernel,
         "author",
-        "core",
+        "kernel_state",
         json!({"can_call": {"$self": "*", "$parent": "*", "$children": "*",
                             "victim": ["create_agent"]}}),
     )
@@ -169,13 +169,13 @@ async fn creating_under_an_unrelated_agent_needs_both_halves() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn loader_token_in_a_conferred_grant_is_bounded() {
     let (_t, kernel) = mk();
-    seed(&kernel, "mid", "core", json!({})).await;
+    seed(&kernel, "mid", "kernel_state", json!({})).await;
     seed(
         &kernel,
         "deep",
         "mid",
         json!({"can_call": {"$self": "*", "$parent": "*", "$children": "*",
-                            "core": ["create_agent"]}}),
+                            "kernel_state": ["create_agent"]}}),
     )
     .await;
     // The granter itself cannot reach the root's task table…
@@ -210,8 +210,8 @@ async fn a_granter_that_holds_the_root_may_confer_loader() {
     seed(
         &kernel,
         "holder",
-        "core",
-        json!({"can_call": {"$self": "*", "$parent": "*", "$children": "*", "core": "*"}}),
+        "kernel_state",
+        json!({"can_call": {"$self": "*", "$parent": "*", "$children": "*", "kernel_state": "*"}}),
     )
     .await;
     let r = create_as(
@@ -226,7 +226,7 @@ async fn a_granter_that_holds_the_root_may_confer_loader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_structural_token_is_refused() {
     let (_t, kernel) = mk();
-    seed(&kernel, "a", "core", json!({})).await;
+    seed(&kernel, "a", "kernel_state", json!({})).await;
     let r = create_as(
         &kernel,
         "a",

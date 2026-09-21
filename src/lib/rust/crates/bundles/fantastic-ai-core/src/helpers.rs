@@ -85,20 +85,16 @@ pub fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The mixer both minters below share: clock nanos ^ a stack address ^ the pid ^
-/// a monotonic counter. No `rand` dependency, and the counter is what makes two
-/// mints in the SAME nanosecond differ.
-fn mix() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let mut stack: u64 = 0;
-    let stack_ptr = &mut stack as *mut u64 as u64;
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    nanos ^ stack_ptr ^ std::process::id() as u64 ^ seq
+/// `n` bytes from the OS CSPRNG — the source class python's `secrets` module
+/// is (`os.urandom`). The clock/stack/counter mixer this replaced was not
+/// random at all: the capture read `AAAAAVnE3yQ`, a big-endian counter, where
+/// python had `cijoBiyMnnw`. A failure is FATAL — there is no second source.
+pub(crate) fn os_random(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    // SAFETY: `buf` is a valid writable buffer of exactly `n` bytes.
+    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), n) };
+    assert!(rc == 0, "getentropy failed: no randomness source");
+    buf
 }
 
 /// The base64url alphabet, python's `secrets.token_urlsafe` spelling.
@@ -108,7 +104,7 @@ const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 /// 8 bytes as UNPADDED base64url, so 11 characters and NO prefix. Rust minted
 /// `snd_<8 hex>`, a shape no python-facing consumer (or capture diff) expects.
 pub fn mint_send_id() -> String {
-    let bytes = mix().to_be_bytes();
+    let bytes = os_random(8);
     let mut out = String::with_capacity(11);
     for chunk in bytes.chunks(3) {
         let n = (u32::from(chunk[0]) << 16)
@@ -132,5 +128,5 @@ pub fn mint_send_id() -> String {
 /// the same file twice in a row saw `1 of 2 in batch 7f3a` both times and could
 /// not tell the batches apart (measured 2026-08-24, the re-read loop).
 pub fn mint_batch_token() -> String {
-    format!("{:04x}", mix() as u16)
+    os_random(2).iter().map(|b| format!("{b:02x}")).collect()
 }

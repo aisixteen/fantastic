@@ -114,9 +114,23 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    /// Run `work` under the boot dispatch's task scope — the parent every
-    /// request-originated dispatch reports.
+    /// Run `work` under the boot dispatch's task AND sender scope — what
+    /// python's uvicorn serve task inherits.
+    ///
+    /// The serve task is created INSIDE the `boot` dispatch, so a request
+    /// handler inherits BOTH contextvars that dispatch set: `_current_task`
+    /// (the boot pid) and `_current_sender` (the agent's OWN id — `_dispatch`
+    /// sets it before calling the handler). A route that does not re-scope the
+    /// sender (`GET /`) therefore calls as the WEB AGENT, never as the
+    /// operator, and the distilled roster's per-node gate denies a lateral
+    /// sibling. Measured 2026-09-21 on python: `GET /` sender = `web`, and a
+    /// sibling's watcher saw nothing. Running it as operator made the roster
+    /// ungated and dispatched `reflect` on every agent in the tree.
+    ///
+    /// The REST/WS/file-proxy routes re-scope to their own leg id inside, so
+    /// this only decides the routes python leaves inherited.
     pub(crate) async fn scoped<F: Future>(&self, work: F) -> F::Output {
+        let work = fantastic_kernel::send::with_sender(self.web_agent_id.clone(), work);
         match self.boot_task {
             Some(t) => fantastic_kernel::CURRENT_TASK.scope(t, work).await,
             None => work.await,
@@ -327,7 +341,9 @@ fn leg_admits(meta: &Map<String, Value>, target: &str, verb: &str) -> bool {
 /// THEN start serving, then announce the URL to `cli`.
 async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
     let already = SERVERS.lock().contains_key(agent_id);
-    let boot_task = fantastic_kernel::current_task();
+    // NOT the boot dispatch: it ends, and a request parented to it named a dead
+    // pid (python detaches its serve task the same way, 2026-09-20).
+    let boot_task: Option<fantastic_kernel::TaskId> = None;
     if !already {
         // python `_spawn`: a falsy `port` RAISES — no default, no fallback.
         let Some(port) = read_port(agent_id, kernel) else {

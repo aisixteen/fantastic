@@ -24,7 +24,7 @@
 
 use crate::agent::AgentId;
 use crate::tasks::TaskId;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// How one batch item ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +103,26 @@ pub struct Item {
     /// row, ledger id, timeout and retries as any other item. Never base64:
     /// the bytes travel beside the JSON header, not inside it.
     pub binary: Option<Vec<u8>>,
+    /// The RAW (tag-typed) `exec_id`, when a caller is forwarding a value it
+    /// did not itself parse — a model's `<exec_id>` argument, or a wire
+    /// frame's `id` field (C38). An untyped [`Value`] the KERNEL validates
+    /// and produces python's exact refusals for: `int(id)` NAMES an
+    /// execution to JOIN (refused if none exists under it), a non-empty
+    /// string NAMES one to open-or-join, anything else is `bad_arg`. Set,
+    /// this SUPERSEDES the typed `id` above — routing used to coerce with
+    /// `args.get("exec_id").and_then(Value::as_str)`, which silently
+    /// DROPPED an int `exec_id` (never attempting the join python performs)
+    /// instead of forwarding it.
+    pub raw_id: Option<Value>,
+    /// The RAW `timeout`, forwarded untouched (C38) instead of
+    /// `args.get("timeout").and_then(Value::as_f64)`, which silently
+    /// DROPPED a malformed value (e.g. the string `"soon"`) — defaulting to
+    /// "wait forever" — instead of the kernel's `bad_arg` refusal. Set, this
+    /// SUPERSEDES the typed `timeout` above.
+    pub raw_timeout: Option<Value>,
+    /// The RAW `retries`, forwarded untouched (C38) for the same reason.
+    /// Set, this SUPERSEDES the typed `retries` above.
+    pub raw_retries: Option<Value>,
 }
 
 impl Item {
@@ -116,6 +136,9 @@ impl Item {
             timeout: None,
             retries: None,
             binary: None,
+            raw_id: None,
+            raw_timeout: None,
+            raw_retries: None,
         }
     }
 
@@ -150,6 +173,31 @@ impl Item {
         self
     }
 
+    /// Forward a RAW (tag-typed) `exec_id` for the KERNEL to validate (C38) —
+    /// use this instead of `.with_id(...)` whenever the value came from a
+    /// caller this code did not itself construct (model tag args, a wire
+    /// frame), so an int join or a malformed value reaches python's exact
+    /// refusal instead of being silently coerced/dropped at the call site.
+    #[must_use]
+    pub fn with_raw_id(mut self, v: Value) -> Self {
+        self.raw_id = Some(v);
+        self
+    }
+
+    /// Forward a RAW `timeout` for the kernel to validate (C38).
+    #[must_use]
+    pub fn with_raw_timeout(mut self, v: Value) -> Self {
+        self.raw_timeout = Some(v);
+        self
+    }
+
+    /// Forward RAW `retries` for the kernel to validate (C38).
+    #[must_use]
+    pub fn with_raw_retries(mut self, v: Value) -> Self {
+        self.raw_retries = Some(v);
+        self
+    }
+
     /// Read an item off a wire frame's fields. `id` here is the FRAME id — the
     /// execution id and the correlation id are ONE id space, deliberately: id
     /// reuse across sockets or reconnects is the same intent, so a double-click
@@ -177,6 +225,16 @@ pub struct Outcome {
     pub result: Value,
     /// How many dispatch attempts this execution spent (1 unless retried).
     pub attempts: u32,
+    /// THE BINARY REPLY BODY — the carrier for the `bytes` value python's
+    /// reply dict holds natively (C37). `None` = the verb returned NO chunk;
+    /// `Some(b)` = it returned one, `b` possibly EMPTY (a 0-byte read of an
+    /// empty file). Every wire leg picks its response shape from this
+    /// distinction, exactly as python's `isinstance(reply["bytes"], bytes)`
+    /// does; testing `is_empty()` instead served an empty file as JSON.
+    ///
+    /// Only a binary item can set it (`Item::with_binary`), and only the
+    /// bundle's `handle_binary` fills it in.
+    pub body: Option<Vec<u8>>,
 }
 
 impl Outcome {
@@ -188,7 +246,15 @@ impl Outcome {
             status,
             result,
             attempts: 1,
+            body: None,
         }
+    }
+
+    /// …carrying the binary reply body the handler returned (C37).
+    #[must_use]
+    pub fn with_body(mut self, body: Option<Vec<u8>>) -> Self {
+        self.body = body;
+        self
     }
 
     /// The item never reached the task table: a gate denial, an unknown agent,
@@ -208,12 +274,12 @@ impl Outcome {
     /// The wire shape: `{pid, status, result, attempts}`.
     #[must_use]
     pub fn to_value(&self) -> Value {
-        json!({
-            "pid": self.pid.as_ref().map(|p| p.0),
-            "status": self.status.as_str(),
-            "result": self.result,
-            "attempts": self.attempts,
-        })
+        crate::jsonsafe::obj([
+            ("pid", Value::from(self.pid.as_ref().map(|p| p.0))),
+            ("status", Value::from(self.status.as_str())),
+            ("result", self.result.clone()),
+            ("attempts", Value::from(self.attempts)),
+        ])
     }
 }
 

@@ -322,6 +322,7 @@ dependencies = [
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",
@@ -358,6 +359,7 @@ dependencies = [
  "fantastic-io-bridge",
  "fantastic-kernel",
  "futures-util",
+ "libc",
  "nix",
  "serde_json",
  "tempfile",
@@ -397,6 +399,7 @@ dependencies = [
  "fantastic-web",
  "fantastic-web-rest",
  "fantastic-web-ws",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",
@@ -408,6 +411,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-bundle",
+ "fantastic-core",
  "fantastic-kernel",
  "serde_json",
  "tokio",
@@ -417,7 +421,12 @@ dependencies = [
 name = "fantastic-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -427,6 +436,7 @@ dependencies = [
  "async-trait",
  "fancy-regex",
  "fantastic-bundle",
+ "fantastic-core",
  "fantastic-io-bridge",
  "fantastic-kernel",
  "indexmap",
@@ -535,6 +545,7 @@ dependencies = [
  "async-trait",
  "fantastic-bundle",
  "fantastic-kernel",
+ "libc",
  "serde_json",
  "tokio",
 ]
@@ -545,9 +556,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-bundle",
+ "fantastic-core",
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",
@@ -607,6 +620,7 @@ dependencies = [
  "async-trait",
  "axum",
  "fantastic-bundle",
+ "fantastic-core",
  "fantastic-file",
  "fantastic-io-bridge",
  "fantastic-kernel",
@@ -614,6 +628,7 @@ dependencies = [
  "fantastic-web-rest",
  "fantastic-web-ws",
  "futures-util",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

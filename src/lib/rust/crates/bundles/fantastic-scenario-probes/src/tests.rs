@@ -34,7 +34,7 @@ fn agent(kernel: &Arc<Kernel>, id: &str, meta: Value) -> AgentId {
 /// A root, so `user_probe`'s grants have somewhere to go.
 fn with_root(kernel: &Arc<Kernel>) {
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),

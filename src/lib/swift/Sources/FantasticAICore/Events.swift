@@ -14,12 +14,19 @@ import FantasticKernel
 import Foundation
 import OrderedCollections
 
-/// Route ONE stream event to the originating caller. Python `_to_caller`.
+/// Route ONE stream event to the originating caller ONLY. Python `_to_caller`.
 ///
-/// The event is stamped with `client_id` LAST (python's `{**ev, "client_id": …}`)
-/// and emitted on the backend's own inbox; a browser's WS subscription mirrors it
-/// and filters to its own id. There is no fan-out — one caller's tokens never
-/// reach another's.
+/// ONE ROUTE, decided by the client id:
+///   - `cli` → a `send` to the `cli` agent, whose handler prints it (the REPL and
+///     headless flow);
+///   - anything else (a browser tab's id, a harness's) → an `emit` on this
+///     backend's own inbox, which that caller's WS subscription mirrors and
+///     filters to its own id.
+///
+/// No fan-out: the cli never sees a browser's tokens, and a browser never sees
+/// the cli's. Swift emitted EVERYTHING on the inbox, so a cli-driven turn printed
+/// nothing unless something happened to be watching the agent. The event is
+/// stamped with `client_id` LAST (python's `{**ev, "client_id": …}`).
 func toCaller(
     kernel: Kernel,
     agentId: AgentId,
@@ -28,7 +35,13 @@ func toCaller(
 ) async {
     var ev = event
     ev["client_id"] = .string(clientId)
-    await kernel.emit(agentId, .object(ev))
+    if clientId == "cli" {
+        // The outcome is not read, as in python: a missing or ungranted `cli`
+        // agent refuses the send, and the stream carries on.
+        _ = await kernel.send([Item(AgentId("cli"), .object(ev))])
+    } else {
+        await kernel.emit(agentId, .object(ev))
+    }
 }
 
 /// Broadcast a structured `status` event AND keep the in-flight entry's phase in
@@ -92,5 +105,12 @@ enum AIRunStates {
         let s = AIAgentRunState()
         states[key, default: [:]][id] = s
         return s
+    }
+
+    /// Drop a dead kernel's whole sub-table — see `AISideTables`.
+    static func forget(_ kernel: Kernel) {
+        lock.lock()
+        states.removeValue(forKey: ObjectIdentifier(kernel))
+        lock.unlock()
     }
 }

@@ -46,7 +46,7 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -58,17 +58,17 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
 
     let peer = create(
         &kernel,
-        json!({"type": "create_agent", "parent_id": "core", "id": "peer",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "peer",
                "handler_module": "noop.tools"}),
     )
     .await;
     assert_eq!(peer["id"], "peer", "{peer}");
     let granter = create(
         &kernel,
-        json!({"type": "create_agent", "parent_id": "core", "id": "granter",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "granter",
                "handler_module": "noop.tools",
                "can_call": {"$self": "*", "$parent": "*", "$children": "*",
-                            "core": ["*", "create_agent", "update_agent"]}}),
+                            "kernel_state": ["*", "create_agent", "update_agent"]}}),
     )
     .await;
     assert_eq!(granter["id"], "granter", "{granter}");
@@ -111,7 +111,7 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
     })
     .await;
     assert_eq!(held["side"], "delegation", "{held}");
-    assert_eq!(held["parent"], "core", "{held}");
+    assert_eq!(held["parent"], "kernel_state", "{held}");
     assert!(
         held["error"].as_str().unwrap().contains("not your child"),
         "{held}"

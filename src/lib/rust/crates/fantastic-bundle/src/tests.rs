@@ -304,6 +304,19 @@ fn py_float_is_cpython_float() {
     );
 }
 
+/// C72: `int()`/`float()` transform every Unicode `Nd` digit to its ASCII
+/// value BEFORE parsing — mixed scripts allowed in the one literal.
+#[test]
+fn unicode_decimal_digits_are_ascii_to_int_and_float() {
+    assert_eq!(py_int(&json!("١٢")).unwrap(), 12); // Arabic-Indic
+    assert_eq!(py_int(&json!("1١")).unwrap(), 11); // mixed ASCII + Arabic-Indic
+    assert_eq!(py_float(&json!("١.٥")).unwrap(), 1.5);
+    assert_eq!(py_float(&json!("１２")).unwrap(), 12.0); // fullwidth digits
+                                                         // A `Numeric_Type=Digit` (not `Nd`) form, e.g. superscript ², stays refused —
+                                                         // `decimal_value` is None for it, so it is not a valid int()/float() digit.
+    assert!(py_int(&json!("²")).is_err());
+}
+
 /// `os_error_class` names the `OSError` subclass CPython raises, which is what
 /// a kernel's raised reply prints before the message.
 #[test]
@@ -386,4 +399,34 @@ fn py_isdigit_matches_cpython() {
     assert!(!py_isdigit("1a"));
     assert!(!py_isdigit("1 2"));
     assert!(!py_isdigit(""));
+}
+
+#[test]
+fn a_non_finite_and_a_wide_int_keep_their_python_spelling() {
+    // D7 / C74. An arbitrary-precision number keeps the TEXT it was built from,
+    // and `as_f64()` answers `None` for exactly the two shapes an `f64` cannot
+    // hold. Routing them through `unwrap_or(0.0)` printed `0.0` for `Infinity`
+    // and `1.2345678901234568e+29` for a 30-digit int — measured against the
+    // python baseline's `kernel create_agent … big2=… inf=inf nan=nan`.
+    let raw = |s: &str| {
+        serde_json::Value::Number(serde_json::Number::from_string_unchecked(s.to_string()))
+    };
+    let wide = "123456789012345678901234567890";
+    for (v, dumps, repr) in [
+        (raw("Infinity"), "Infinity", "inf"),
+        (raw("-Infinity"), "-Infinity", "-inf"),
+        (raw("NaN"), "NaN", "nan"),
+        (raw(wide), wide, wide),
+    ] {
+        // `json.dumps(..., allow_nan=True)` — the kernel's default.
+        assert_eq!(py_json_dumps(&v, true, None), dumps, "dumps {v}");
+        // `repr()` / `str()` spell a non-finite float differently.
+        assert_eq!(py_repr_value(&v), repr, "repr {v}");
+        assert_eq!(py_str(&v), repr, "str {v}");
+    }
+    assert_eq!(
+        py_json_dumps(&json!({"inf": f64::INFINITY}), true, None),
+        "{\"inf\": null}",
+        "an f64 infinity never reaches Number::from_f64 — it is null there"
+    );
 }

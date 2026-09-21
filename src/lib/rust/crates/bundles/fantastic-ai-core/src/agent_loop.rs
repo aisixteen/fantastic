@@ -97,15 +97,6 @@ pub async fn run_generation(
     if due && !stateless {
         let _ = crate::retrieval::context_recall(self_id, &json!({}), kernel, Some(provider)).await;
     }
-    // ROW IDS FOR THIS TURN — python `_row_ids_for_incoming` + `_mint_row_id`:
-    // the incoming row (a root, or a delivered reply that names the turn it
-    // answers with `↑N` on its first tag) and the assistant row that answers
-    // it. Pre-minted so this turn's reply tags can name the assistant row
-    // before it exists, and so every row carries the `parent` the fold
-    // machinery derives chains from.
-    let in_id = kernel.rows.mint_id();
-    let in_parent = incoming_parent(user_text);
-    let turn_id = kernel.rows.mint_id();
     let (messages, store_len) = assemble_messages(
         self_id,
         state,
@@ -116,6 +107,21 @@ pub async fn run_generation(
         messages_override.as_deref(),
     )
     .await;
+    // ROW IDS FOR THIS TURN — python `_row_ids_for_incoming` + `_mint_row_id`:
+    // the incoming row (a root, or a delivered reply that names the turn it
+    // answers with `↑N` on its first tag) and the assistant row that answers
+    // it. Pre-minted so this turn's reply tags can name the assistant row
+    // before it exists, and so every row carries the `parent` the fold
+    // machinery derives chains from.
+    //
+    // MINTED AFTER ASSEMBLY, as python does: the system block is rebuilt from
+    // the live tree every turn and its two `reflect` dispatches take their call
+    // ids FIRST. Minting here first put this turn's user + assistant rows two
+    // ids ahead of python's on every single turn (measured in the r3 capture:
+    // `turn_id` 740 where python had 742).
+    let in_id = kernel.rows.mint_id();
+    let in_parent = incoming_parent(user_text);
+    let turn_id = kernel.rows.mint_id();
     let model_messages = if stateless {
         messages
     } else {

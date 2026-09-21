@@ -128,7 +128,7 @@ async fn run(
                 .scoped(rest_reflect(st, owner, target, q, req.headers().clone()))
                 .await
         }
-        Handler::Ws => ws_upgrade(state, caps, req).await,
+        Handler::Ws(leg) => ws_upgrade(state, leg, caps, req).await,
     }
 }
 
@@ -213,21 +213,19 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
     }
     let sender = state.web_agent_id.clone();
     let kernel = Arc::clone(&state.kernel);
-    let (meta, first) = fantastic_kernel::send::with_sender(sender.clone(), async {
-        kernel
-            .send_with_binary(
-                &target,
-                json!({"type": "read_stream", "path": path, "offset": 0, "length": CHUNK}),
-                Vec::new(),
-            )
-            .await
-    })
-    .await;
-    if meta.get("error").is_some() {
+    let (meta, first) = read_chunk(&kernel, &sender, &target, &path, 0).await;
+    // PYTHON'S TEST IS THE CHUNK, not the absence of an error:
+    // `isinstance(first.get("bytes"), (bytes, bytearray))`. Anything that did
+    // not answer with a chunk — a denial, a missing file, an agent that is not
+    // a SOURCE at all — is a 404 (C37 gives rust the same question to ask).
+    let Some(first) = first else {
         // A GATE denial carries its reason in the body: this kernel teaches
         // through denials, and the route used to throw that away. A MISSING
         // FILE stays a bare 404 — no body, no existence leak.
         if meta.get("reason").and_then(Value::as_str) == Some("unauthorized") {
+            // EXACTLY four keys, in THIS order, a missing one as `null` (a
+            // sealed io-gate denial carries no `side`); `see` and anything else
+            // is dropped. Note the order differs from the REST refusal's.
             let mut detail = serde_json::Map::new();
             for k in ["error", "reason", "side", "hint"] {
                 detail.insert(k.into(), meta.get(k).cloned().unwrap_or(Value::Null));
@@ -240,7 +238,7 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
             );
         }
         return routes::respond(StatusCode::NOT_FOUND, &[], None, Vec::new());
-    }
+    };
     let ct = mimetypes::content_type(&path);
     let eof = meta.get("eof").and_then(Value::as_bool).unwrap_or(true);
     // python: `headers={"content-length": str(size)} if size else None` — a
@@ -265,24 +263,9 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
             }
             // The generator is iterated AFTER the handler returned, so it
             // re-enters the sender context per chunk (python does the same).
-            let (m, body) = fantastic_kernel::send::with_sender(sender.clone(), {
-                let kernel = Arc::clone(&kernel);
-                let target = target.clone();
-                let path = path.clone();
-                async move {
-                    kernel
-                        .send_with_binary(
-                            &target,
-                            json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
-                            Vec::new(),
-                        )
-                        .await
-                }
-            })
-            .await;
-            if m.get("error").is_some() {
-                return None;
-            }
+            let (m, body) = read_chunk(&kernel, &sender, &target, &path, offset).await;
+            // python breaks on anything that is not a chunk.
+            let body = body?;
             let eof = m.get("eof").and_then(Value::as_bool).unwrap_or(true);
             let next = m
                 .get("next_offset")
@@ -292,6 +275,31 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
         },
     );
     routes::respond_stream(&ct, size, Body::from_stream(stream))
+}
+
+/// ONE file-proxy chunk, THROUGH THE BATCH and as the web agent (C37/C40):
+/// python dispatches `kernel.send([{target, payload}])` under
+/// `sender_context(web_agent_id)`, so the served agent's `callable_by` AND its
+/// io leg both decide. `send_with_binary` skipped the ledger, so a browser fetch
+/// left no execution behind and ran outside the two-sided gate.
+async fn read_chunk(
+    kernel: &Arc<fantastic_kernel::Kernel>,
+    sender: &AgentId,
+    target: &AgentId,
+    path: &str,
+    offset: u64,
+) -> (Value, Option<Vec<u8>>) {
+    let kernel2 = Arc::clone(kernel);
+    let item = Item::new(
+        target.clone(),
+        json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
+    )
+    .with_binary(Vec::new());
+    let out = fantastic_kernel::send::with_sender(sender.clone(), async move {
+        kernel2.send(vec![item]).await.remove(0)
+    })
+    .await;
+    (out.result, out.body)
 }
 
 // ─── `POST /<rest_id>/{target_id}` ──────────────────────────────────
@@ -344,7 +352,7 @@ async fn rest_post(
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "bytes".to_string());
         let blob = if field == "bytes" {
-            obj.remove("bytes");
+            obj.shift_remove("bytes");
             body
         } else {
             Vec::new()
@@ -354,39 +362,43 @@ async fn rest_post(
         if let Some(denial) = rest_gate(&state, &owner, &target_id, verb, auth_token.as_deref()) {
             return denial;
         }
+        // THROUGH THE BATCH, with the header's execution id NAMING the execution
+        // (A13.3): python builds `{target, payload+bytes}`, sets `item["id"]`
+        // from `X-Fantastic-Execution-Id` and calls `kernel.send([item])`, so a
+        // repeated id on the same target REPLAYS instead of re-running.
         let kernel = Arc::clone(&state.kernel);
-        let (reply, out_body) = fantastic_kernel::send::with_sender(owner.clone(), async move {
-            kernel.send_with_binary(&target, payload, blob).await
+        let out = fantastic_kernel::send::with_sender(owner.clone(), async move {
+            let mut item = Item::new(target, payload).with_binary(blob);
+            if let Some(id) = exec_id {
+                item = item.with_id(id);
+            }
+            kernel.send(vec![item]).await.remove(0)
         })
         .await;
-        if !out_body.is_empty() {
-            // A reply that carries raw bytes goes back the way it came in —
-            // octet body + JSON header — never base64. The header is python's
-            // `json.dumps(rest)`: `, `/`: ` separators and ensure_ascii.
-            return routes::respond(
-                StatusCode::OK,
-                &[
-                    (
-                        header::HeaderName::from_static(PAYLOAD_HEADER),
-                        py_json_dumps(&reply, true, None),
-                    ),
-                    (
-                        header::HeaderName::from_static(BYTES_FIELD_HEADER),
-                        "bytes".to_string(),
-                    ),
-                ],
-                Some(OCTET_CT),
-                out_body,
-            );
-        }
-        return json_reply(reply);
+        return octet_or_json(out.result, out.body);
     }
 
     // ── JSON leg ────────────────────────────────────────────────────
     let payload: Value = if body.is_empty() {
         json!({})
     } else {
-        match serde_json::from_slice(&body) {
+        // CPython `json.loads(bytes)` DETECTS THE ENCODING first (A13.11), so a
+        // UTF-8 BOM, a UTF-16 or a UTF-32 body all parse; `serde_json` reads
+        // UTF-8 only and answered 400 for each. A body that will not decode at
+        // all raises `UnicodeDecodeError` OUT of python's handler — an uncaught
+        // 500, mirrored here rather than quietly turned into a 400.
+        let text = match decode_json_bytes(&body) {
+            Some(t) => t,
+            None => {
+                return routes::respond(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &[],
+                    Some("text/plain; charset=utf-8"),
+                    b"Internal Server Error".to_vec(),
+                )
+            }
+        };
+        match serde_json::from_str(&text) {
             Ok(v) => v,
             // Don't echo the parser exception back — generic message only
             // (CodeQL: information exposure through an exception).
@@ -409,15 +421,61 @@ async fn rest_post(
         return denial;
     }
     let kernel = Arc::clone(&state.kernel);
-    let reply = fantastic_kernel::send::with_sender(owner.clone(), async move {
+    let out = fantastic_kernel::send::with_sender(owner.clone(), async move {
         let mut item = Item::new(target.clone(), payload);
         if let Some(id) = exec_id {
             item = item.with_id(id);
         }
-        kernel.send(vec![item]).await.remove(0).result
+        // A BINARY-EDGE VERB RIDES THE BINARY CHANNEL even on the JSON leg
+        // (A13.1): python's `read_stream` reply holds real bytes whatever leg
+        // asked for it, and a `write_stream` whose `bytes` is a JSON string is
+        // `missing_arg` with nothing written. Routing it here gives both.
+        let binary_edge = item
+            .payload
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|v| ws::BINARY_EDGE_VERBS.contains(&v));
+        if binary_edge {
+            item = item.with_binary(Vec::new());
+        }
+        kernel.send(vec![item]).await.remove(0)
     })
     .await;
-    json_reply(reply)
+    octet_or_json(out.result, out.body)
+}
+
+/// The ONE reply-shape decision, shared by both REST legs: a reply that carries
+/// a CHUNK is octet (a 0-byte chunk included — an empty file is still a file),
+/// anything else is JSON. Python decides the same way, on whether the reply dict
+/// holds a `bytes` value; rust used to test `!out_body.is_empty()`, which served
+/// an empty file as JSON and hardcoded the field name.
+fn octet_or_json(reply: Value, body: Option<Vec<u8>>) -> Response {
+    let Some(body) = body else {
+        return json_reply(reply);
+    };
+    // The bytes value never travels twice: `X-Fantastic-Payload` is the reply
+    // MINUS the field, and `X-Fantastic-Bytes-Field` names it.
+    let mut head = reply;
+    if let Some(m) = head.as_object_mut() {
+        // SHIFT, not swap: `Map::remove` moves the LAST key into the hole, so
+        // dropping `bytes` reordered the header python writes in place.
+        m.shift_remove("bytes");
+    }
+    routes::respond(
+        StatusCode::OK,
+        &[
+            (
+                header::HeaderName::from_static(PAYLOAD_HEADER),
+                py_json_dumps(&head, true, None),
+            ),
+            (
+                header::HeaderName::from_static(BYTES_FIELD_HEADER),
+                "bytes".to_string(),
+            ),
+        ],
+        Some(OCTET_CT),
+        body,
+    )
 }
 
 // ─── `GET /<rest_id>/_reflect[/{target_id}]` ────────────────────────
@@ -457,6 +515,104 @@ async fn rest_reflect(
         Some("application/json"),
         reply.to_string().into_bytes(),
     )
+}
+
+/// CPython `json.detect_encoding` + `b.decode(<enc>, "surrogatepass")` — the
+/// first half of `json.loads(bytes)` (A13.11). `None` = the bytes do not decode,
+/// which in python is an uncaught `UnicodeDecodeError` (a 500).
+///
+/// A HEADER goes through `json.loads(str)` instead, which does NOT detect an
+/// encoding and REFUSES a leading BOM — so this is the body's path only.
+///
+/// RESIDUAL: python decodes with `surrogatepass`, so a lone surrogate survives
+/// into the `str` it parses. A rust `String` cannot hold one, so such a body
+/// reads as undecodable here instead of parsing.
+fn decode_json_bytes(b: &[u8]) -> Option<String> {
+    const BOM_UTF8: &[u8] = &[0xEF, 0xBB, 0xBF];
+    const BOM_UTF32_BE: &[u8] = &[0x00, 0x00, 0xFE, 0xFF];
+    const BOM_UTF32_LE: &[u8] = &[0xFF, 0xFE, 0x00, 0x00];
+    const BOM_UTF16_BE: &[u8] = &[0xFE, 0xFF];
+    const BOM_UTF16_LE: &[u8] = &[0xFF, 0xFE];
+
+    // python's ladder, in its order: a UTF-32 BOM before a UTF-16 one (the
+    // UTF-32-LE BOM starts with the UTF-16-LE BOM), then UTF-8, then the
+    // null-byte pattern of a BOM-less body.
+    if b.starts_with(BOM_UTF32_BE) {
+        return decode_utf32(&b[4..], true);
+    }
+    if b.starts_with(BOM_UTF32_LE) {
+        return decode_utf32(&b[4..], false);
+    }
+    if b.starts_with(BOM_UTF16_BE) {
+        return decode_utf16(&b[2..], true);
+    }
+    if b.starts_with(BOM_UTF16_LE) {
+        return decode_utf16(&b[2..], false);
+    }
+    if b.starts_with(BOM_UTF8) {
+        // `utf-8-sig` — the codec eats the BOM.
+        return String::from_utf8(b[3..].to_vec()).ok();
+    }
+    if b.len() >= 4 {
+        if b[0] == 0 {
+            return if b[1] != 0 {
+                decode_utf16(b, true)
+            } else {
+                decode_utf32(b, true)
+            };
+        }
+        if b[1] == 0 {
+            return if b[2] != 0 || b[3] != 0 {
+                decode_utf16(b, false)
+            } else {
+                decode_utf32(b, false)
+            };
+        }
+    } else if b.len() == 2 {
+        if b[0] == 0 {
+            return decode_utf16(b, true);
+        }
+        if b[1] == 0 {
+            return decode_utf16(b, false);
+        }
+    }
+    String::from_utf8(b.to_vec()).ok()
+}
+
+fn decode_utf16(b: &[u8], big_endian: bool) -> Option<String> {
+    let (pairs, rest) = b.as_chunks::<2>();
+    if !rest.is_empty() {
+        return None;
+    }
+    let units: Vec<u16> = pairs
+        .iter()
+        .map(|c| {
+            if big_endian {
+                u16::from_be_bytes(*c)
+            } else {
+                u16::from_le_bytes(*c)
+            }
+        })
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+fn decode_utf32(b: &[u8], big_endian: bool) -> Option<String> {
+    let (quads, rest) = b.as_chunks::<4>();
+    if !rest.is_empty() {
+        return None;
+    }
+    quads
+        .iter()
+        .map(|c| {
+            let n = if big_endian {
+                u32::from_be_bytes(*c)
+            } else {
+                u32::from_le_bytes(*c)
+            };
+            char::from_u32(n)
+        })
+        .collect()
 }
 
 // ─── shared REST pieces ─────────────────────────────────────────────
@@ -543,7 +699,12 @@ fn rest_gate(
 /// server`). RESIDUAL: python also negotiates `Sec-WebSocket-Extensions:
 /// permessage-deflate` and sends capitalised header names; neither survives
 /// hyper's writer, which lowercases every name and has no deflate codec.
-async fn ws_upgrade(state: AppState, caps: Vec<String>, req: Request<Body>) -> Response {
+async fn ws_upgrade(
+    state: AppState,
+    leg: AgentId,
+    caps: Vec<String>,
+    req: Request<Body>,
+) -> Response {
     let host = AgentId::from(caps.first().map(String::as_str).unwrap_or(""));
     let (mut parts, _body) = req.into_parts();
     let upgrade =
@@ -551,7 +712,7 @@ async fn ws_upgrade(state: AppState, caps: Vec<String>, req: Request<Body>) -> R
             Ok(u) => u,
             Err(rej) => return rej.into_response(),
         };
-    let mut resp = upgrade.on_upgrade(move |socket| ws::ws_loop(state, socket, host));
+    let mut resp = upgrade.on_upgrade(move |socket| ws::ws_loop(state, socket, host, leg));
     let accept = resp.headers().get(header::SEC_WEBSOCKET_ACCEPT).cloned();
     let h = resp.headers_mut();
     h.clear();

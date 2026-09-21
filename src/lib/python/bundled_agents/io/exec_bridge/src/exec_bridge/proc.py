@@ -51,4 +51,7 @@ async def spawn_argv(
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ, **env_extra},
         pass_fds=(pass_fd,),
+        # A line longer than asyncio's 64 KiB default ended the whole pipe with
+        # `[pump error]` (measured 2026-09-16); a program's line is not bounded.
+        limit=16 * 1024 * 1024,
     )

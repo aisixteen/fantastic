@@ -144,31 +144,26 @@ fn attr(out: &mut String, k: &str, v: &str) {
     out.push('"');
 }
 
-/// A float the way python's `repr` writes it — `1e+16`, not `10000000000000000`,
-/// and `3.0`, not `3`. An integer is its digits.
+/// `str(v)` for an int, `repr(v)` for a float (`_fill`: `repr(v) if
+/// isinstance(v, float) else str(v)`) — C51: reuses [`fantastic_bundle::
+/// py_float_repr`], which already writes the two-digit exponent python's
+/// `repr` does (`1e-05`, not rust `{:e}`'s `1e-5`); this file's own hand-rolled
+/// copy only patched the SIGN (`1e+16`) and missed the digit count.
 fn number(n: &serde_json::Number) -> String {
     if let Some(i) = n.as_i64() {
         return i.to_string();
     }
-    let f = n.as_f64().unwrap_or(0.0);
-    let plain = format!("{f}");
-    // Rust prints small-magnitude floats plainly and python switches to
-    // exponent form at 1e16 and below 1e-4. Match the switch, and keep the
-    // trailing `.0` python's repr always writes for a whole float.
-    if f != 0.0 && (f.abs() >= 1e16 || f.abs() < 1e-4) {
-        let e = format!("{f:e}");
-        // Rust writes `1e16`; python writes `1e+16`.
-        return match e.split_once('e') {
-            Some((m, x)) if !x.starts_with('-') => format!("{m}e+{x}"),
-            _ => e,
-        };
+    if let Some(u) = n.as_u64() {
+        return u.to_string();
     }
-    if plain.contains('.') || plain.contains('e') || plain.contains("inf") || plain.contains("NaN")
-    {
-        plain
-    } else {
-        format!("{plain}.0")
+    // Arbitrary precision (C74): an integer literal wider than i64/u64 is
+    // still an int — python `str(v)`, its exact digits — never routed through
+    // `f64`, which would lose precision AND misclassify it as a float.
+    let raw = n.as_str();
+    if !raw.contains(['.', 'e', 'E']) {
+        return raw.to_string();
     }
+    fantastic_bundle::py_float_repr(n.as_f64().unwrap_or(0.0))
 }
 
 /// ElementTree's ATTRIBUTE escaping: `&`, `<`, `>`, `"`, and the three
@@ -317,10 +312,10 @@ fn value_of(name: &str, mut child: Row) -> Value {
     {
         return Value::Null;
     }
-    if let Some(Value::Array(items)) = child.remove("#items") {
+    if let Some(Value::Array(items)) = child.shift_remove("#items") {
         return Value::Array(items);
     }
-    match child.remove("#text") {
+    match child.shift_remove("#text") {
         Some(Value::String(t)) if child.is_empty() => {
             // A TEXT FIELD stays text; anything else is typed by the one scalar
             // rule — the same rule the CLI and the call grammar use.

@@ -40,6 +40,23 @@
 
     public final class TerminalBackendBundle: AgentBundle, @unchecked Sendable {
         public let name = "terminal_backend"
+        public var verbs: [String] { Array((Self.verbDocs.asObject ?? [:]).keys) }
+
+        /// python's module-level `VERBS` — ONE table: reflect renders it and
+        /// `advertises` reads it.
+        static let verbDocs: JSON = [
+            "reflect": "Identity + PTY state. No args. `running`/`scrollback_bytes`/`paused`/`unacked` are process-local — read via the live serve to get truth.",
+            "boot": "Idempotent. Spawns the PTY child if not already running; clears stale flow-control state so a freshly-mounted streamer starts clean. Returns {running:true}.",
+            "write": "args: data:str (req). Writes UTF-8 bytes to PTY stdin IN FULL — loops over the non-blocking fd so large pastes aren't truncated; serialized per-agent so concurrent writes can't interleave a bracketed-paste sequence. Returns {written:int}.",
+            "ack": "args: chars:int. Flow-control ack from a streaming consumer (terminal_view (the TS frontend) acks each chunk after xterm parses it). Decrements the unacked-char count; re-attaches the PTY reader once it drops below LOW_WATERMARK. Returns {unacked:int, paused:bool}.",
+            "paste_image": "args: data:bytes (req), mime:str? (default image/png). Saves a pasted image to a per-agent scratch file and types its absolute path into the PTY. Bridges image paste for a CLI (e.g. claude) running in a browser xterm — the server can't reach the browser clipboard, so path injection mimics a file drag-drop. Returns {path:str, bytes:int}.",
+            "shell": "args: cmd:str (req), timeout:float? (default 30s). Synchronous run via done-token; returns {cmd, output, completed:bool, error?}.",
+            "resize": "args: cols:int, rows:int. Fires SIGWINCH so TUI apps redraw. Returns {resized, cols, rows}.",
+            "output": "args: max_bytes:int? (default MAX_SCROLLBACK=256K). Returns {output:str} — tail of the PTY scrollback.",
+            "restart": "No args. SIGKILLs the PTY child and respawns with the same command/cwd/cols/rows. Returns {restarted:true}.",
+            "signal": "args: signal:int? (default SIGINT=2). os.kill(pid, signal). Returns {signal:int} or {error}.",
+            "stop": "No args. Closes the PTY fd and SIGKILLs the child. Returns {stopped:true}.",
+        ] as JSON
         public init() {}
 
         private let lock = NSLock()
@@ -128,7 +145,7 @@
 
         public func handleBinary(
             agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-        ) async throws -> (JSON?, Data) {
+        ) async throws -> (JSON?, Data?) {
             let verb = header["type"].asString ?? "(none)"
             guard verb == "paste_image" else {
                 return (
@@ -136,13 +153,13 @@
                         "error": .string(
                             "\(name): no binary edge — verb \"\(verb)\" does not accept binary frames"
                         )
-                    ]), Data()
+                    ]), nil
                 )
             }
             guard kernel.agent(agentId) != nil else {
-                return (.object(["error": .string("no agent")]), Data())
+                return (.object(["error": .string("no agent")]), nil)
             }
-            return (try await pasteImage(agentId: agentId, header: header, blob: blob), Data())
+            return (try await pasteImage(agentId: agentId, header: header, blob: blob), nil)
         }
 
         public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
@@ -191,19 +208,7 @@
                 "scrollback_bytes": .integer(Int64(flow.scrollbackBytes)),
                 "paused": .bool(flow.paused),
                 "unacked": .integer(Int64(flow.unacked)),
-                "verbs": [
-                    "reflect": "Identity + PTY state. No args. `running`/`scrollback_bytes`/`paused`/`unacked` are process-local — read via the live serve to get truth.",
-                    "boot": "Idempotent. Spawns the PTY child if not already running; clears stale flow-control state so a freshly-mounted streamer starts clean. Returns {running:true}.",
-                    "write": "args: data:str (req). Writes UTF-8 bytes to PTY stdin IN FULL — loops over the non-blocking fd so large pastes aren't truncated; serialized per-agent so concurrent writes can't interleave a bracketed-paste sequence. Returns {written:int}.",
-                    "ack": "args: chars:int. Flow-control ack from a streaming consumer (terminal_view (the TS frontend) acks each chunk after xterm parses it). Decrements the unacked-char count; re-attaches the PTY reader once it drops below LOW_WATERMARK. Returns {unacked:int, paused:bool}.",
-                    "paste_image": "args: data:bytes (req), mime:str? (default image/png). Saves a pasted image to a per-agent scratch file and types its absolute path into the PTY. Bridges image paste for a CLI (e.g. claude) running in a browser xterm — the server can't reach the browser clipboard, so path injection mimics a file drag-drop. Returns {path:str, bytes:int}.",
-                    "shell": "args: cmd:str (req), timeout:float? (default 30s). Synchronous run via done-token; returns {cmd, output, completed:bool, error?}.",
-                    "resize": "args: cols:int, rows:int. Fires SIGWINCH so TUI apps redraw. Returns {resized, cols, rows}.",
-                    "output": "args: max_bytes:int? (default MAX_SCROLLBACK=256K). Returns {output:str} — tail of the PTY scrollback.",
-                    "restart": "No args. SIGKILLs the PTY child and respawns with the same command/cwd/cols/rows. Returns {restarted:true}.",
-                    "signal": "args: signal:int? (default SIGINT=2). os.kill(pid, signal). Returns {signal:int} or {error}.",
-                    "stop": "No args. Closes the PTY fd and SIGKILLs the child. Returns {stopped:true}.",
-                ] as JSON,
+                "verbs": Self.verbDocs,
                 "emits": [
                     "output": "{type:'output', data:str} — every PTY read chunk; UTF-8-decoded bytes",
                     "closed": "{type:'closed'} — child process exited (EOF on the PTY fd)",
@@ -216,7 +221,17 @@
         /// python's `or` truthiness, not key presence). A fork failure RAISES,
         /// and so does an out-of-ushort winsize (after the child exists).
         private func spawn(agent: Agent, kernel: Kernel) throws {
-            if sessionFor(agent.id) != nil { return }
+            // CHECKED AND STORED UNDER THE SAME LOCK. `if sessionFor(id) != nil`
+            // was a check-then-act: two `boot`s for one agent (the create-time
+            // auto-boot and an explicit one) both read nil, both forked, and the
+            // loser's session was ORPHANED — a live PTY child nothing owned,
+            // holding a master fd, whose reader's EOF later removed the WINNER
+            // from `sessions` (`running:false, pid:null` on a PTY nobody
+            // stopped). Python forks from the one event loop; the window does
+            // not exist there.
+            lock.lock()
+            defer { lock.unlock() }
+            if sessions[agent.id] != nil { return }
             let cmd = truthyString(agent.metaValue(forKey: "command")) ?? detectShell()
             let args = (agent.metaValue(forKey: "args")?.asArray ?? []).compactMap { $0.asString }
             let cwd =
@@ -228,11 +243,17 @@
                 cmd: cmd, args: args, cwd: cwd, cols: cols, rows: rows,
                 agentId: agent.id, kernel: kernel)
             // EOF on the master: python detaches, emits `closed`, cleans up.
-            session.onExit = { [weak self] in self?.cleanup(agentId: agent.id) }
-            lock.lock()
+            // ITS OWN session, not whatever is registered under the id: the
+            // reader reads `stopped` and then calls back OUT of the lock, so a
+            // callback that lands after a `stop` + `boot` cycle would otherwise
+            // SIGKILL the session `boot` just spawned.
+            session.onExit = { [weak self, weak session] in
+                guard let session else { return }
+                self?.cleanup(agentId: agent.id, ifCurrent: session)
+            }
             sessions[agent.id] = session
-            lock.unlock()
             session.attachReader(kernel: kernel)
+            session.beginReading()
         }
 
         /// `rec.get(k) or <default>` — a missing key, a null and an empty string
@@ -346,6 +367,16 @@
             let session = sessions.removeValue(forKey: agentId)
             lock.unlock()
             session?.terminate()
+        }
+
+        /// `cleanup` from a session's OWN reader — a no-op once that session is
+        /// no longer the registered one.
+        private func cleanup(agentId: AgentId, ifCurrent session: PtySession) {
+            lock.lock()
+            let current = sessions[agentId] === session
+            if current { sessions.removeValue(forKey: agentId) }
+            lock.unlock()
+            if current { session.terminate() }
         }
 
         private func sessionFor(_ id: AgentId) -> PtySession? {
@@ -521,6 +552,10 @@
 
     // MARK: - PtySession
 
+    /// Guards `forkpty` — see `PtySession.start`. Process-wide: every PTY in
+    /// this process shares Darwin's one `ptsname` buffer.
+    private let forkLock = NSLock()
+
     /// Python's per-agent `_procs[id]` state, plus the reader thread.
     final class PtySession: @unchecked Sendable {
         let pid: pid_t
@@ -576,6 +611,13 @@
                     await kernel.emit(agentId, event)
                 }
             }
+        }
+
+        /// The reader starts only once the bundle has stored the session AND
+        /// wired `onExit` — python stores `_procs[id]` and only then calls
+        /// `_attach_reader`. Started inside `init`, a child that died in that
+        /// window hit a nil `onExit` and left a dead session reading `running`.
+        func beginReading() {
             readQueue.async { [weak self] in self?.readLoop() }
         }
 
@@ -600,15 +642,50 @@
                 env.map { strdup("\($0.key)=\($0.value)") } + [nil]
             let cwdC = strdup(cwd)
             let pathC = candidates.map { strdup($0.path) }
+            // RAW C VECTORS, BUILT BEFORE THE FORK — the child touches no Swift
+            // array. `execve(p, &a, &e)` is an INOUT access on a copy-on-write
+            // buffer the parent still references, so the copy Swift makes for it
+            // happens IN THE CHILD: a malloc in a fork of a threaded process,
+            // which may have inherited a held malloc lock. The child then never
+            // reaches `execve`, its master sees instant EOF, and the session
+            // comes back `running:false, pid:null` — measured 2026-09-22 at ~1
+            // spawn in 9 (`bootsShellWriteEmitsOutputAndScrollback`, "reflect
+            // carries no pid"). `var a = argv` did NOT copy; it only shared.
+            let argvC = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(
+                capacity: argv.count)
+            argv.withUnsafeBufferPointer { argvC.update(from: $0.baseAddress!, count: $0.count) }
+            let envpC = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(
+                capacity: envp.count)
+            envp.withUnsafeBufferPointer { envpC.update(from: $0.baseAddress!, count: $0.count) }
+            let pathVec = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(
+                capacity: max(1, pathC.count))
+            pathC.withUnsafeBufferPointer { pathVec.update(from: $0.baseAddress!, count: $0.count) }
+            let pathCount = pathC.count
             defer {
                 argv.forEach { free($0) }
                 envp.forEach { free($0) }
                 free(cwdC)
                 pathC.forEach { free($0) }
+                argvC.deallocate()
+                envpC.deallocate()
+                pathVec.deallocate()
             }
             var master: Int32 = 0
+            // SERIALIZED. Darwin's `forkpty` calls `openpty`, which names the
+            // slave with `ptsname()` — a STATIC buffer. Two threads spawning at
+            // once interleave there and one child opens the OTHER pair's slave:
+            // that master sees instant EOF (session reports `running:false`,
+            // `pid:null`) while the other master never sees EOF and carries two
+            // children's output. Python forks from one thread, so nothing here
+            // may fork from two.
+            forkLock.lock()
             let pid = forkpty(&master, nil, nil, nil)
-            if pid < 0 { throw pyOSError(errno) }
+            if pid > 0 { forkLock.unlock() }
+            if pid < 0 {
+                let e = errno
+                forkLock.unlock()
+                throw pyOSError(e)
+            }
             if pid == 0 {
                 // Child: stdin/out/err are the slave already. Every OTHER fd of
                 // the kernel process — sockets, other sessions' masters, an
@@ -621,16 +698,17 @@
                 let maxFd = Int32(min(getdtablesize(), 65536))
                 if maxFd > 3 { for fd in 3..<maxFd { _ = close(fd) } }
                 _ = chdir(cwdC)
-                var a = argv
-                var e = envp
                 // `_execvpe` skips ENOENT/ENOTDIR candidates, raises the FIRST
                 // other failure if there was one, else the LAST.
                 var savedErrno: Int32 = 0
                 var savedIdx = 0
                 var lastErrno: Int32 = ENOENT
                 var lastIdx = 0
-                for (i, p) in pathC.enumerated() {
-                    execve(p, &a, &e)
+                // An INDEX loop over the raw vector: `pathC.enumerated()` is a
+                // Swift sequence, and iterating one after the fork is the same
+                // hazard the vectors above exist to remove.
+                for i in 0..<pathCount {
+                    execve(pathVec[i], argvC, envpC)
                     lastErrno = errno
                     lastIdx = i
                     if errno != ENOENT && errno != ENOTDIR && savedErrno == 0 {
@@ -667,9 +745,26 @@
         /// streaming into a kernel that appears in no `ps` row cannot be found
         /// or cancelled. One holder per (re)attach, python's lifecycle included.
         func attachReader(kernel: Kernel) {
+            // ONE holder per attachment: the previous one ends with its detach
+            // (python cancels the `_hold` task in `_detach_reader`, 2026-09-20).
+            // UNDER `state`: `ack` and `clear_flow_control` re-attach from a
+            // kernel dispatch thread while `terminate` drops the holder from
+            // another, and an unsynchronized store to a strong class reference
+            // is a use-after-free, not a lost wakeup. A session that has already
+            // terminated takes no new holder — that task would park forever.
+            state.lock()
+            let previous = readerHolder
+            let alreadyStopped = stopped
             let holder = ReaderHolder()
+            readerHolder = alreadyStopped ? nil : holder
+            state.unlock()
+            previous?.release()
+            if alreadyStopped { return }
             kernel.spawnTask(agent: agentId, verb: "pty_reader") { await holder.park() }
         }
+
+        /// The reader attachment as kernel work; released on detach.
+        private var readerHolder: ReaderHolder?
 
         private func readLoop() {
             var buffer = [UInt8](repeating: 0, count: 4096)
@@ -682,7 +777,34 @@
                 let done = stopped
                 state.unlock()
                 if done { return }
-                let n = read(fd, &buffer, buffer.count)
+                var n = read(fd, &buffer, buffer.count)
+                // AN EOF IS ONLY TERMINAL WHEN THE CHILD IS GONE. Measured
+                // 2026-09-21 (~2 runs in 15 of `--filter FantasticBundlesTests`):
+                // right after `forkpty` the FIRST `read()` on the correct master
+                // returns 0 while the child is still ALIVE — on Darwin a PTY
+                // master reports EOF in the window before the child has opened
+                // its slave side. Cleanup then dropped a session that was about
+                // to speak (`running:false, pid:null`, empty scrollback). Python
+                // never sees it because its event loop reaches the fd later.
+                // `waitpid(WNOHANG)` is the authority: 0 means the child has not
+                // exited, so the read is retried. Bounded so a live child whose
+                // slave really is gone still terminates, and the 1 ms backoff is
+                // the smallest pause that keeps the retry off a busy spin.
+                if n == 0 {
+                    var attempts = 0
+                    while attempts < 1000 {
+                        var status: Int32 = 0
+                        if waitpid(pid, &status, WNOHANG) != 0 { break }
+                        usleep(1000)
+                        attempts += 1
+                        state.lock()
+                        let gone = stopped
+                        state.unlock()
+                        if gone { return }
+                        n = read(fd, &buffer, buffer.count)
+                        if n != 0 { break }
+                    }
+                }
                 if n <= 0 {
                     // EOF — the child exited. Python: detach, emit closed, cleanup.
                     state.lock()
@@ -896,6 +1018,8 @@
                 return
             }
             stopped = true
+            let holder = readerHolder
+            readerHolder = nil
             let fd = masterFd
             masterFd = -1
             let dir = pasteDir
@@ -903,6 +1027,7 @@
             pendingTokens = [:]
             state.broadcast()
             state.unlock()
+            holder?.release()
             kill(pid, SIGKILL)
             var status: Int32 = 0
             waitpid(pid, &status, 0)

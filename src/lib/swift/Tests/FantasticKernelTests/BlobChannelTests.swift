@@ -6,7 +6,10 @@
 
 import FantasticJSON
 import Foundation
+import OrderedCollections
 import Testing
+
+import FantasticKernelState
 
 @testable import FantasticKernel
 
@@ -50,17 +53,17 @@ private struct Store: AgentBundle {
     }
     func handleBinary(
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-    ) async throws -> (JSON?, Data) {
+    ) async throws -> (JSON?, Data?) {
         let path = header["path"].asString ?? ""
         switch header["type"].asString ?? "" {
         case "write_stream":
             files.put(path, String(data: blob, encoding: .utf8) ?? "")
             return (
-                .object(["written": .bool(true), "size": .integer(Int64(blob.count))]), Data()
+                .object(["written": .bool(true), "size": .integer(Int64(blob.count))]), nil
             )
         case "read_stream":
             guard let c = files.get(path) else {
-                return (.object(["error": .string("not found")]), Data())
+                return (.object(["error": .string("not found")]), nil)
             }
             let data = Data(c.utf8)
             return (
@@ -70,7 +73,7 @@ private struct Store: AgentBundle {
                 ]), data
             )
         default:
-            return (.object(["error": .string("unknown verb")]), Data())
+            return (.object(["error": .string("unknown verb")]), nil)
         }
     }
 }
@@ -80,13 +83,18 @@ struct BlobChannelTests {
     private func makeKernel(_ files: Files) async -> Kernel {
         let reg = BundleRegistry()
         reg.register("file_bridge.tools", Store(files: files))
+        // THE BLOB VERBS ARE THE LOADER'S, not the substrate's (C13) — the root
+        // answers them through its `kernel_state.tools` bundle.
+        reg.register(ROOT_HANDLER_MODULE, KernelStateBundle())
         let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("blobtest-\(UUID().uuidString)")
             .appendingPathComponent(".fantastic")
         // DISK mode: `flushLedger` deliberately no-ops in-memory (the auto-flush
         // law), so the durable half needs a kernel that persists at all.
         let k = Kernel(storage: .disk(storeRoot), bundles: reg)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil, rootPath: storeRoot)
+        let root = Agent(
+            id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil,
+            rootPath: storeRoot)
         k.register(root)
         k.setRoot(root)
         _ = await k.send([
@@ -233,8 +241,76 @@ struct BlobChannelTests {
                         "name": .string(bad), "content": .string("x"),
                     ]))
             ])[0].result
-            #expect(r["reason"].asString == "bad_arg", "\(bad) was accepted: \(r)")
+            // PYTHON'S BARE `{error}` — the loader's own reply, not a kernel
+            // refusal: no code, no `reason`, no `arg`, and the name rendered
+            // with `repr()`.
+            #expect(
+                r["error"].asString?.hasPrefix("persist_blob: name '\(bad)' ") == true,
+                "\(bad) was accepted: \(r)")
+            #expect(r["reason"] == .null, "\(r)")
         }
+        // The three refusals, verbatim.
+        let seg = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("persist_blob"), "agent_id": .string("desk"),
+                    "name": .string("a/b.yaml"), "content": .string("x"),
+                ]))
+        ])[0].result
+        #expect(
+            seg["error"].asString
+                == "persist_blob: name 'a/b.yaml' must be a single filename (no path segments)",
+            "\(seg)")
+        // A BACKSLASH IS A LEGAL POSIX FILENAME BYTE. Python tests `name !=
+        // Path(name).name`, so `a\\b` is ONE segment and passes.
+        let backslash = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("persist_blob"), "agent_id": .string("desk"),
+                    "name": .string("a\\b.yaml"), "content": .string("x"),
+                ]))
+        ])[0].result
+        #expect(backslash["ok"].asBool == true, "\(backslash)")
+    }
+
+    @Test func blobRefusalsArePythonsBareError() async {
+        // C13: every one of these is the LOADER's reply — a bare `{error}`,
+        // with `reason: unauthorized` on the owner denial alone and no `side`.
+        let files = Files()
+        let k = await makeKernel(files)
+        func call(_ p: OrderedDictionary<String, JSON>) async -> JSON {
+            await k.send([Item(AgentId("kernel"), .object(p))])[0].result
+        }
+        let noId = await call(["type": .string("persist_blob"), "name": .string("s.yaml")])
+        #expect(noId == .object(["error": .string("persist_blob: agent_id (str) required")]))
+        let noName = await call([
+            "type": .string("load_blob"), "agent_id": .string("desk"),
+        ])
+        #expect(noName == .object(["error": .string("load_blob: name (non-empty str) required")]))
+        // CONTENT IS CHECKED AFTER THE OWNER GUARD AND BEFORE THE STORE.
+        let noContent = await call([
+            "type": .string("persist_blob"), "agent_id": .string("desk"),
+            "name": .string("s.yaml"),
+        ])
+        #expect(noContent == .object(["error": .string("persist_blob: content (str) required")]))
+        // The owner denial: python's repr on BOTH ids, `reason`, and no `side`.
+        let forged = await KernelTaskLocals.$currentOrigin.withValue(AgentId("attacker")) {
+            await k.persistBlob(
+                .object([
+                    "agent_id": .string("desk"), "name": .string("s.yaml"),
+                    "content": .string("x"),
+                ]))
+        }
+        #expect(
+            forged["error"].asString
+                == "persist_blob: 'attacker' may not use another agent's namespace 'desk' — "
+                + "an agent's blob verbs are scoped to itself; only an operator may name "
+                + "a namespace it does not own", "\(forged)")
+        #expect(forged["reason"].asString == "unauthorized")
+        #expect(forged["side"] == .null, "python's loader refusal carries no side")
+        #expect(forged["code"] == .null, "python's loader refusal carries no code")
     }
 
     @Test func aCompletedExecutionIsNeverReRunAfterRehydrate() async {
@@ -250,22 +326,27 @@ struct BlobChannelTests {
         let doc = files.get(ledgerBlob)
         #expect(doc != nil, "the sidecar never reached the store")
         let parsed = try! JSON.parse(doc!)
-        #expect(parsed["v"].asInt == 1, "the sidecar is version-stamped")
-        // Keyed by the int id; the caller's name rides the row.
-        let named = (parsed["rows"].asObject ?? [:]).values.first { $0["name"].asString == "job-1" }
+        #expect(parsed["v"].asInt == 2, "the sidecar is version-stamped")
+        // v2: rows are an ARRAY (the ids are int64s a JSON key would stringify),
+        // each carrying its own `id`; the caller's name rides the row.
+        let named = (parsed["rows"].asArray ?? []).first { $0["name"].asString == "job-1" }
         #expect(named != nil, "\(parsed.serialize())")
+        #expect(named?["id"].asInt != nil, "a v2 row carries its int id")
 
         // Only SETTLED rows cross: every persisted row carries a terminal outcome.
-        for (_, row) in parsed["rows"].asObject ?? [:] {
+        for row in parsed["rows"].asArray ?? [] {
             let st = row["outcome"]["status"].asString ?? ""
-            #expect(["completed", "failed", "cancelled", "timed_out"].contains(st))
+            #expect(["completed", "errored", "failed", "cancelled", "timed_out"].contains(st))
         }
 
         // A FRESH ledger rehydrates it DONE.
         let fresh = ExecutionLedger()
         #expect(fresh.rehydrate(parsed) >= 1)
         let jid = fresh.resolveName("job-1") ?? -1
-        if case .settled = fresh.open(jid, target: AgentId("desk"), verb: "probe", retries: 0, name: "job-1", origin: nil) {
+        if case .settled = fresh.open(
+            jid, target: AgentId("desk"), payload: .object(["type": .string("probe")]),
+            retries: 0, name: "job-1", origin: nil, callerId: .string("job-1"))
+        {
         } else {
             Issue.record("a rehydrated row must dedup a re-send")
         }
@@ -276,12 +357,101 @@ struct BlobChannelTests {
         // effects it exists to prevent.
         let files = Files()
         let k = await makeKernel(files)
-        files.put(ledgerBlob, "{\"v\": 1, \"rows\": {broken")
+        files.put(ledgerBlob, "{\"v\": 2, \"rows\": [broken")
         #expect(await k.rehydrateLedger() == 0)
-        files.put(ledgerBlob, "{\"v\": 99, \"rows\": {}}")
+        files.put(ledgerBlob, "{\"v\": 99, \"rows\": []}")
+        #expect(await k.rehydrateLedger() == 0)
+        // A v1 file — an OBJECT of rows keyed by a stringified id — is an
+        // unknown version, not a migration: it starts empty, loudly.
+        files.put(ledgerBlob, "{\"v\": 1, \"rows\": {\"7\": {}}}")
         #expect(await k.rehydrateLedger() == 0)
         // ...and the kernel is still perfectly usable.
         let out = await k.send([Item(AgentId("desk"), .object(["type": .string("read")]))])[0]
         #expect(out.status == .completed, "a bad sidecar bricked the kernel")
+    }
+
+    /// C47 — PERSISTENCE IO RIDES THE BATCH. Every store byte (a blob write, a
+    /// blob read, the record write) is a `kernel.send` of ONE binary item under
+    /// operator authority, so each leaves a CALL ROW on the store and a SETTLE
+    /// row on the root — exactly what python's `kernel_state` leaves, because it
+    /// does all of this with `kernel.send([...])`. `sendWithBinary` minted none
+    /// of it, so the substrate's own writes were the one class of work the
+    /// message log could not see.
+    @Test func storeWritesAreLedgerExecutions() async {
+        let files = Files()
+        let k = await makeKernel(files)
+        let w = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("persist_blob"), "agent_id": .string("desk"),
+                    "name": .string("rows.yaml"), "content": .string("a: 1\n"),
+                ]))
+        ])[0].result
+        #expect(w["ok"].asBool == true, "\(w)")
+        let rows = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("rows_read"), "agent": .string("store"),
+                    "limit": .integer(200),
+                ]))
+        ])[0].result
+        let calls = (rows["rows"].asArray ?? []).filter { $0["kind"].asString == "call" }
+        #expect(
+            calls.contains { $0["verb"].asString == "write_stream" },
+            "the blob write left no call row: \(rows.serialize())")
+        #expect(
+            calls.allSatisfy { $0["outcome"]["status"].asString != nil },
+            "a store call never settled: \(rows.serialize())")
+        // The READ half too.
+        _ = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("load_blob"), "agent_id": .string("desk"),
+                    "name": .string("rows.yaml"),
+                ]))
+        ])[0].result
+        let after = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("rows_read"), "agent": .string("store"),
+                    "limit": .integer(200),
+                ]))
+        ])[0].result
+        #expect(
+            (after["rows"].asArray ?? []).contains {
+                $0["kind"].asString == "call" && $0["verb"].asString == "read_stream"
+            }, "the blob read left no call row: \(after.serialize())")
+        // …and the OPERATOR is the sender: a store write never runs against the
+        // asking agent's grant.
+        #expect(
+            (after["rows"].asArray ?? [])
+                .filter { $0["kind"].asString == "call" && $0["verb"].asString == "write_stream" }
+                .allSatisfy { $0["origin"].isNull },
+            "a store write carried an agent origin: \(after.serialize())")
+    }
+
+    /// C79 — the AgentBundle DEFAULT `handleBinary` dispatches the HEADER
+    /// through the text `handle`. Python has no separate binary channel at all,
+    /// so an octet POST of `{type:"say"}` to a bundle with no chunk verb reaches
+    /// its handler; swift answered `no binary edge — verb "say" does not accept
+    /// binary frames`, a refusal python never produces.
+    @Test func defaultHandleBinaryDispatchesTheHeader() async {
+        let files = Files()
+        let k = await makeKernel(files)
+        // `desk` is a file_bridge-shaped mock; `Store.handle` answers any
+        // non-stream verb `{ok:true}` — but `Store` OVERRIDES handleBinary, so
+        // the default is exercised through the root's own bundle instead.
+        let out = await k.send([
+            Item(AgentId("kernel_state"), .object(["type": .string("boot")]), binary: Data())
+        ])[0]
+        #expect(out.status != .failed, "\(out.result.serialize())")
+        #expect(
+            out.result["error"].asString?.contains("no binary edge") != true,
+            "the default refused instead of dispatching: \(out.result.serialize())")
+        #expect(out.body == nil, "a header dispatch returns no chunk")
     }
 }

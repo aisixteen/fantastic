@@ -22,9 +22,9 @@ All test state lives under `/tmp/nim_test/`.
 ```bash
 rm -rf /tmp/nim_test && mkdir -p /tmp/nim_test && cd /tmp/nim_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
-FA=$($FANTASTIC core create_agent handler_module=file_bridge.tools root=/tmp/nim_test | jq -r .id)
-NB=$($FANTASTIC core create_agent handler_module=nvidia_nim_backend.tools file_agent_id=$FA | jq -r .id)
-NB2=$($FANTASTIC core create_agent handler_module=nvidia_nim_backend.tools | jq -r .id)
+FA=$($FANTASTIC kernel_state create_agent handler_module=file_bridge.tools root=/tmp/nim_test | jq -r .id)
+NB=$($FANTASTIC kernel_state create_agent handler_module=nvidia_nim_backend.tools file_agent_id=$FA | jq -r .id)
+NB2=$($FANTASTIC kernel_state create_agent handler_module=nvidia_nim_backend.tools | jq -r .id)
 ```
 
 ## Tests
@@ -63,9 +63,9 @@ blob, and NO sidecar file — the bundle stores nothing.
 ## Cleanup
 
 ```bash
-$FANTASTIC core delete_agent id=$NB
-$FANTASTIC core delete_agent id=$NB2
-$FANTASTIC core delete_agent id=$FA
+$FANTASTIC kernel_state delete_agent id=$NB
+$FANTASTIC kernel_state delete_agent id=$NB2
+$FANTASTIC kernel_state delete_agent id=$FA
 rm -rf /tmp/nim_test
 ```
 

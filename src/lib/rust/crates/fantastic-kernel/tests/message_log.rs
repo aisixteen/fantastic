@@ -39,7 +39,7 @@ impl Bundle for AppendStore {
         header: Value,
         blob: Vec<u8>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
         let target = self.root.join(path);
         match header.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -59,18 +59,21 @@ impl Bundle for AppendStore {
                     .truncate(truncate)
                     .open(&target)?;
                 f.write_all(&blob)?;
-                Ok((Some(json!({"written": blob.len()})), Vec::new()))
+                Ok((Some(json!({"written": blob.len()})), None))
             }
             "read_stream" => match std::fs::read(&target) {
-                Ok(b) => Ok((Some(json!({"path": path, "eof": true, "size": b.len()})), b)),
+                Ok(b) => Ok((
+                    Some(json!({"path": path, "eof": true, "size": b.len()})),
+                    Some(b),
+                )),
                 Err(_) => Ok((
                     Some(json!({"error": format!("no such path {path:?}")})),
-                    Vec::new(),
+                    None,
                 )),
             },
             other => Ok((
                 Some(json!({"error": format!("AppendStore: {other:?}")})),
-                Vec::new(),
+                None,
             )),
         }
     }
@@ -88,7 +91,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -298,7 +301,7 @@ fn kernel_with_worker(store_root: &Path) -> Arc<Kernel> {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -487,4 +490,180 @@ async fn settle_row_outcome_is_the_python_stamp() {
         .find(|r| r.get("kind") == Some(&json!("call")) && r.get("id") == Some(&pid))
         .expect("the call row");
     assert_eq!(call["outcome"], settle["outcome"]);
+}
+
+/// C48: a store that REFUSES the append prints python's line and the batch goes
+/// back in front of the queue — rust used to drop it, so the rows were gone.
+/// The same store then accepts, and the retried rows land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_append_prints_python_str_and_requeues() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Refuses `write_stream` while `sealed`, and counts `read_stream` probes.
+    struct FlakyStore {
+        root: PathBuf,
+        sealed: Arc<AtomicBool>,
+        probes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Bundle for FlakyStore {
+        fn name(&self) -> &str {
+            "file_bridge"
+        }
+        async fn handle(
+            &self,
+            _id: &AgentId,
+            _p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(Some(json!({"ok": true})))
+        }
+        async fn handle_binary(
+            &self,
+            _id: &AgentId,
+            header: Value,
+            blob: Vec<u8>,
+            _k: &Arc<Kernel>,
+        ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
+            let path = header.get("path").and_then(Value::as_str).unwrap_or("");
+            let target = self.root.join(path);
+            match header.get("type").and_then(Value::as_str).unwrap_or("") {
+                "read_stream" => {
+                    self.probes.fetch_add(1, Ordering::SeqCst);
+                    match std::fs::read(&target) {
+                        Ok(b) => Ok((Some(json!({"eof": true, "size": b.len()})), Some(b))),
+                        Err(_) => Ok((Some(json!({"error": "no such path"})), None)),
+                    }
+                }
+                "write_stream" => {
+                    if self.sealed.load(Ordering::SeqCst) {
+                        // A python-truthy error, not a string — the print must
+                        // still be its `str()`, not a JSON-quoted serde Value.
+                        return Ok((
+                            Some(json!({"error": "sealed", "reason": "unauthorized"})),
+                            None,
+                        ));
+                    }
+                    use std::io::Write;
+                    if let Some(p) = target.parent() {
+                        std::fs::create_dir_all(p).ok();
+                    }
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&target)?;
+                    f.write_all(&blob)?;
+                    Ok((Some(json!({"written": blob.len()})), None))
+                }
+                other => Ok((
+                    Some(json!({"error": format!("FlakyStore: {other:?}")})),
+                    None,
+                )),
+            }
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let log = store.join("messages.xml");
+    let sealed = Arc::new(AtomicBool::new(true));
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut kernel = Kernel::with_storage(StorageMode::Disk(store.clone()));
+    let mut reg = BundleRegistry::new();
+    reg.register(
+        "file_bridge.tools",
+        FlakyStore {
+            root: store.clone(),
+            sealed: Arc::clone(&sealed),
+            probes: Arc::clone(&probes),
+        },
+    );
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        store.clone(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    wire_store(&kernel, &store).await;
+    fantastic_kernel::messages_log::install_message_pump(&kernel, 0);
+
+    let ai = AgentId::from("ai");
+    kernel.rows.put(&ai, turn("user", "one")).unwrap();
+    // Sealed: the append is refused, so NOTHING is on disk and nothing is lost.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!log.exists(), "a refused append must not half-write");
+
+    // Open the store: the SAME rows are retried on the next flush.
+    sealed.store(false, Ordering::SeqCst);
+    kernel.rows.put(&ai, turn("user", "two")).unwrap();
+    let text = until_rows(&log, 2).await;
+    assert!(text.contains("one"), "the refused row was dropped: {text}");
+    assert!(text.contains("two"), "{text}");
+    // C48: the header probe is remembered, not re-asked per append.
+    assert!(
+        probes.load(Ordering::SeqCst) <= 1,
+        "the header must be probed ONCE, saw {}",
+        probes.load(Ordering::SeqCst)
+    );
+}
+
+/// C14: the ROOT LOADER's own kernel tasks are in `ps` under python's verbs —
+/// `message_pump` + `message_pump_flush` (rust splits the pump in two, as
+/// python does) and `persist_writer`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_loader_ps_rows_match_python() {
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let mut kernel = Kernel::with_storage(StorageMode::Disk(store.clone()));
+    let mut reg = BundleRegistry::new();
+    reg.register(
+        "file_bridge.tools",
+        AppendStore {
+            root: store.clone(),
+        },
+    );
+    fantastic_kernel::test_support::register_root_loader(&mut reg);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        Some("kernel_state.tools".to_string()),
+        None,
+        Map::new(),
+        store.clone(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    fantastic_kernel::test_support::boot_root(&kernel).await;
+
+    let ps = kernel
+        .send(vec![fantastic_kernel::Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ps"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let verbs: Vec<String> = ps["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .filter(|t| t["agent"] == json!("kernel_state"))
+        .filter_map(|t| t["verb"].as_str().map(str::to_string))
+        .collect();
+    for want in ["message_pump", "message_pump_flush", "persist_writer"] {
+        assert!(
+            verbs.contains(&want.to_string()),
+            "{want} missing: {verbs:?}"
+        );
+    }
 }

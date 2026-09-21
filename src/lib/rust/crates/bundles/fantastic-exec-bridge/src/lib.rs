@@ -478,14 +478,14 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // — the FIRST LINE of each verb's docstring, in `VERBS` order. Several are
         // truncated mid-sentence; that is the python text, not an abbreviation.
         "verbs": {
-            "start": "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra",
-            "status": "args: job_id:str? — one job (with full stdout/stderr), or all of this agent's",
+            "start": "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes.",
+            "status": "args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}.",
             "stop": "args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs.",
             "interrupt": "args: job_id:str? — SIGINT one job or ALL of this agent's running jobs.",
             "clear": "args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM",
             "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
             "reflect": "Identity + running job count + auth posture. No args.",
-            "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the",
+            "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the record.",
         },
         "emits": {
             "job_started": "{type:'job_started', job_id}",
@@ -690,7 +690,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             "exec_bridge: child exited before it could be tracked",
         );
     };
-    let job_id = format!("{:08x}", rand_job_id());
+    let job_id = rand_job_id();
 
     let (rd, wr) = ctrl.into_split();
     // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS — carried by `spawn_task` now,
@@ -816,9 +816,14 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn rand_job_id() -> u32 {
-    // Monotonic + pid is enough: ids only need to be unique within this process.
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    N.fetch_add(1, Ordering::Relaxed) ^ (std::process::id().wrapping_mul(2_654_435_761))
+/// python `secrets.token_hex(4)` — 4 bytes of OS CSPRNG as 8 hex characters.
+/// The counter^pid this replaced minted the SEQUENTIAL `76fa189x` family the
+/// capture read where python had unrelated ids. A failure is FATAL — there is
+/// no second source.
+pub(crate) fn rand_job_id() -> String {
+    let mut buf = [0u8; 4];
+    // SAFETY: `buf` is a valid writable buffer of exactly 4 bytes.
+    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
+    assert!(rc == 0, "getentropy failed: no randomness source");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }

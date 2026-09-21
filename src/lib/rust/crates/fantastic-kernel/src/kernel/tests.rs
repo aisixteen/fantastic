@@ -93,10 +93,10 @@ fn remove_inbox_drops_the_reader_only() {
 #[test]
 fn root_swap_visible_to_all_readers() {
     let k = Arc::new(Kernel::new());
-    let root = make_agent("core");
+    let root = make_agent("kernel_state");
     k.set_root(Arc::clone(&root));
     let seen = k.root().expect("root set");
-    assert_eq!(seen.id, AgentId::from("core"));
+    assert_eq!(seen.id, AgentId::from("kernel_state"));
 }
 
 #[test]
@@ -116,6 +116,46 @@ fn publish_state_reaches_every_subscriber() {
     k.publish_state(&json!({"type": "test"}));
     assert_eq!(count1.load(Ordering::SeqCst), 2);
     assert_eq!(count2.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_raising_state_subscriber_prints_and_others_still_receive() {
+    // C87: python `publish_state` wraps each subscriber call in its own
+    // try/except and keeps going (`_kernel.py:1060-1068`); a rust subscriber
+    // has no `Result` to fail with, so the equivalent of "raised" is a
+    // panic — caught around EACH call so one broken tap never silences the
+    // rest, for this event or any later one. (The printed line itself, "
+    // [kernel] state subscriber raised: <msg>", is reviewed by inspection:
+    // capturing process-wide stderr is not safe under parallel test runs.)
+    let k = Kernel::new();
+    let before = Arc::new(AtomicUsize::new(0));
+    let after = Arc::new(AtomicUsize::new(0));
+    let b = Arc::clone(&before);
+    let a = Arc::clone(&after);
+    let _t1 = k.add_state_subscriber(Arc::new(move |_ev, _body| {
+        b.fetch_add(1, Ordering::SeqCst);
+    }));
+    let _t2: SubscriberToken = k.add_state_subscriber(Arc::new(|_ev, _body| {
+        panic!("boom");
+    }));
+    let _t3 = k.add_state_subscriber(Arc::new(move |_ev, _body| {
+        a.fetch_add(1, Ordering::SeqCst);
+    }));
+    k.publish_state(&json!({"type": "test"}));
+    assert_eq!(
+        before.load(Ordering::SeqCst),
+        1,
+        "the subscriber registered BEFORE the panicking one still ran"
+    );
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        1,
+        "the subscriber registered AFTER the panicking one still ran"
+    );
+    // A second publish proves the panic did not unregister or poison anything.
+    k.publish_state(&json!({"type": "test"}));
+    assert_eq!(before.load(Ordering::SeqCst), 2);
+    assert_eq!(after.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -168,7 +208,7 @@ fn save_drops_the_ephemeral_subtree_transitively() {
     let kernel = Kernel::new();
     // A PERSISTENT root — `make_agent` builds ephemeral ones.
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -202,7 +242,11 @@ fn save_drops_the_ephemeral_subtree_transitively() {
 
     let snap = kernel.save();
     let ids: Vec<&str> = snap.agents.iter().map(|a| a.id.as_str()).collect();
-    assert_eq!(ids, vec!["core"], "the ephemeral subtree survived: {ids:?}");
+    assert_eq!(
+        ids,
+        vec!["kernel_state"],
+        "the ephemeral subtree survived: {ids:?}"
+    );
 
     // The real property: what save() emits, load() accepts.
     let fresh = Kernel::new();
@@ -217,7 +261,7 @@ fn a_reserved_key_is_refused_before_anything_is_torn_down() {
     // Validation BEFORE teardown is what makes a bad document a no-op.
     let kernel = Kernel::new();
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -233,7 +277,7 @@ fn a_reserved_key_is_refused_before_anything_is_torn_down() {
         let state = KernelState {
             version: CURRENT_VERSION,
             agents: vec![AgentRecord {
-                id: "core".into(),
+                id: "kernel_state".into(),
                 handler_module: None,
                 parent_id: None,
                 meta,
@@ -243,7 +287,7 @@ fn a_reserved_key_is_refused_before_anything_is_torn_down() {
         assert!(format!("{err}").contains(key), "{err}");
         // ...and the live tree is UNTOUCHED.
         assert!(
-            kernel.agents.contains_key(&AgentId::from("core")),
+            kernel.agents.contains_key(&AgentId::from("kernel_state")),
             "a refused load tore the tree down anyway"
         );
     }
@@ -356,4 +400,267 @@ async fn state_events_are_python_shape() {
     assert_eq!(dkeys, vec!["agent_id", "kind", "backlog", "ts"]);
     assert_eq!(drain["backlog"], json!(0));
     assert_eq!(a.in_flight(), 0, "the counter came back down");
+}
+
+// ─── C84: `Kernel::shutdown()` ───────────────────────────────────────
+//
+// Nothing used to call `Bundle::on_shutdown` at all — the daemon sent
+// `{type:shutdown}` LIFO to every agent, which most bundles answer "unknown
+// type". This is python's `Kernel.shutdown`: `shutdown_agents` (drain, the verb,
+// quiet), the ROOT bundle's `flush_pending`, then the DEPTH-FIRST walk.
+
+/// Records the order hooks fire in, so a test can read the walk.
+#[derive(Default)]
+struct HookLog {
+    order: std::sync::Mutex<Vec<String>>,
+}
+
+impl HookLog {
+    fn push(&self, s: &str) {
+        self.order.lock().expect("log").push(s.to_string());
+    }
+    fn read(&self) -> Vec<String> {
+        self.order.lock().expect("log").clone()
+    }
+}
+
+struct Hooked {
+    log: Arc<HookLog>,
+    raises: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::Bundle for Hooked {
+    fn name(&self) -> &str {
+        "hooked.tools"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _k: &Arc<Kernel>,
+    ) -> Result<crate::Reply, crate::bundle::BundleError> {
+        Ok(None)
+    }
+    async fn on_delete(
+        &self,
+        agent_id: &AgentId,
+        _k: &Arc<Kernel>,
+    ) -> Result<(), crate::bundle::BundleError> {
+        self.log.push(&format!("delete:{}", agent_id.0));
+        Ok(())
+    }
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        _k: &Arc<Kernel>,
+    ) -> Result<(), crate::bundle::BundleError> {
+        self.log.push(&format!("shutdown:{}", agent_id.0));
+        if self.raises {
+            return Err("hook blew up".into());
+        }
+        Ok(())
+    }
+    async fn flush_pending(
+        &self,
+        agent_id: &AgentId,
+        _k: &Arc<Kernel>,
+    ) -> Result<(), crate::bundle::BundleError> {
+        self.log.push(&format!("flush:{}", agent_id.0));
+        Ok(())
+    }
+}
+
+async fn hooked_tree(log: &Arc<HookLog>, raises: bool) -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(
+        "hooked.tools",
+        Hooked {
+            log: Arc::clone(log),
+            raises,
+        },
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        Some("hooked.tools".to_string()),
+        None,
+        serde_json::Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    for (id, parent) in [("mid", "kernel"), ("leaf", "mid")] {
+        let _ = kernel
+            .send(vec![crate::Item::new(
+                AgentId::from("kernel"),
+                json!({"type":"create_agent","parent_id":parent,"handler_module":"hooked.tools","id":id}),
+            )])
+            .await;
+    }
+    kernel
+}
+
+#[tokio::test]
+async fn shutdown_walks_depth_first_after_the_flush_hook() {
+    let log = Arc::new(HookLog::default());
+    let kernel = hooked_tree(&log, false).await;
+    kernel.shutdown().await;
+    let order = log.read();
+    // The ROOT's `flush_pending` runs BEFORE the walk (the persister writes its
+    // last window while its provider child is still alive), then children before
+    // their parent.
+    assert_eq!(
+        order,
+        vec![
+            "flush:kernel_state",
+            "shutdown:leaf",
+            "shutdown:mid",
+            "shutdown:kernel_state",
+        ],
+        "{order:?}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_prefers_on_shutdown_over_on_delete_and_is_idempotent() {
+    let log = Arc::new(HookLog::default());
+    let kernel = hooked_tree(&log, false).await;
+    kernel.shutdown().await;
+    let once = log.read();
+    assert!(
+        once.iter().all(|e| !e.starts_with("delete:")),
+        "on_delete must not fire for a shutdown: {once:?}"
+    );
+    kernel.shutdown().await;
+    assert_eq!(log.read(), once, "a second shutdown does nothing");
+}
+
+#[tokio::test]
+async fn shutdown_continues_on_a_raising_hook() {
+    let log = Arc::new(HookLog::default());
+    let kernel = hooked_tree(&log, true).await;
+    kernel.shutdown().await;
+    let order = log.read();
+    // Every agent was still visited — teardown is not refusable.
+    for want in ["shutdown:leaf", "shutdown:mid", "shutdown:kernel_state"] {
+        assert!(order.contains(&want.to_string()), "{order:?}");
+    }
+}
+
+// ─── D1(a): the shutdown sweep writes NOTHING ────────────────────────
+//
+// python `_kernel.py:870` asks `a.advertises("shutdown")`, which reads the
+// bundle module's `VERBS` table — no dispatch, so no message id, no call row,
+// no task, no ledger execution. Rust used to `send({type:reflect})` to every
+// agent for the same answer, which wrote one `call`/`reflect` row per agent
+// plus an `internal` roster row per node of the tree. Measured against the
+// python baseline at `e2e/parity` (`ctx/reboot/*_rows_read.json`): 3 rows per
+// agent on every reboot that python does not have.
+
+/// Declares a `verbs` map in its reflect — with or without `shutdown` — and
+/// counts how often the handler is asked anything.
+struct Declares {
+    shutdown: bool,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::Bundle for Declares {
+    fn name(&self) -> &str {
+        "declares.tools"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        payload: &Value,
+        _k: &Arc<Kernel>,
+    ) -> Result<crate::Reply, crate::bundle::BundleError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if payload.get("type").and_then(Value::as_str) != Some("reflect") {
+            return Ok(None);
+        }
+        let mut verbs = Map::new();
+        verbs.insert("reflect".to_string(), json!("Identity."));
+        if self.shutdown {
+            verbs.insert("shutdown".to_string(), json!("Tear down."));
+        }
+        Ok(Some(json!({"sentence": "declares", "verbs": verbs})))
+    }
+}
+
+async fn declaring_tree(shutdown: bool, calls: &Arc<AtomicUsize>) -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(
+        "declares.tools",
+        Declares {
+            shutdown,
+            calls: Arc::clone(calls),
+        },
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let _ = kernel
+        .send(vec![crate::Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel",
+                   "handler_module":"declares.tools","id":"node"}),
+        )])
+        .await;
+    kernel
+}
+
+#[tokio::test]
+async fn the_shutdown_sweep_mints_no_id_and_writes_no_row() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let kernel = declaring_tree(false, &calls).await;
+    let before_id = kernel.rows.next_id();
+    let before_rows = kernel.rows.for_agent(&AgentId::from("node")).len();
+    let seen = calls.load(Ordering::SeqCst);
+
+    let reply = kernel.shutdown_agents().await;
+
+    assert_eq!(
+        kernel.rows.next_id(),
+        before_id,
+        "the advertises read mints no message id"
+    );
+    assert_eq!(
+        kernel.rows.for_agent(&AgentId::from("node")).len(),
+        before_rows,
+        "python's VERBS lookup leaves no call row and no internal roster row"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) > seen,
+        "the bundle WAS asked — rust keeps its verb table in the reflect reply"
+    );
+    assert_eq!(reply["shut"], json!([]), "nothing declares `shutdown`");
+}
+
+#[tokio::test]
+async fn a_bundle_that_declares_shutdown_is_still_the_one_told() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let kernel = declaring_tree(true, &calls).await;
+    let before_rows = kernel.rows.for_agent(&AgentId::from("node")).len();
+
+    let reply = kernel.shutdown_agents().await;
+
+    assert_eq!(reply["shut"], json!(["node"]));
+    // The `shutdown` verb IS a dispatch and keeps its row; only the discovery
+    // read is silent, so exactly one row was added.
+    assert_eq!(
+        kernel.rows.for_agent(&AgentId::from("node")).len(),
+        before_rows + 1,
+        "the shutdown call itself is a call like any other"
+    );
 }

@@ -270,8 +270,8 @@ async def _mkdir(id, payload, kernel):
 
 
 async def _read_stream(id, payload, kernel):
-    """args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns
-    ONE chunk {path, offset, bytes, next_offset, eof, size}; pull the next by calling
+    """args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns ONE chunk {path, offset, bytes, next_offset, eof, size}.
+    Pull the next by calling
     again with offset=next_offset until eof. `bytes` is the RAW chunk — it rides every
     transport as raw bytes (web_ws / bridge binary frame, in-proc dict), NEVER base64.
     Stateless cursor — no open handle, weak-coupled by id."""
@@ -304,8 +304,8 @@ async def _read_stream(id, payload, kernel):
 
 
 async def _write_stream(id, payload, kernel):
-    """args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default =
-    append at end), truncate:bool=False. The SINK half — a producer pushes RAW chunks by
+    """args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default = append at end), truncate:bool=False. The SINK half — a producer pushes RAW chunks by offset.
+    A producer pushes RAW chunks by
     calling repeatedly. Pass truncate:true on the first chunk to start fresh. Returns
     {path, written, offset, size}. Refused if readonly. The chunk is raw bytes — text
     files go through the whole-file `write` verb, not here."""
@@ -337,8 +337,8 @@ async def _write_stream(id, payload, kernel):
 
 
 async def _pump(id, payload, kernel):
-    """The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE
-    call (vs a consumer driving each read/write over the wire). Storage-agnostic:
+    """The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE call.
+    (vs a consumer driving each read/write over the wire). Storage-agnostic:
     both ends are bound BY ID + the duck-typed stream verbs, so a `network_bridge`
     SOURCE pumps to a `file_bridge` SINK the same as fs→fs.
 

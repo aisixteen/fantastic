@@ -4,8 +4,14 @@ name = "fantastic-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Root orchestrator bundle — the userland id=\"core\" agent at the top of the tree."
+description = "kernel_state.tools — the durable-state ROOT loader bundle (id=\"kernel_state\")."
 
 [dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-bundle = { path = "../../fantastic-bundle" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

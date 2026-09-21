@@ -39,13 +39,13 @@ no foreign-language bindings.
        ┌─────────────────┼─────────────────────────────┐
        ▼                 ▼                             ▼
    ┌────────┐      ┌────────────┐              ┌────────────────┐
-   │ core   │      │ web        │              │ scheduler /    │
+   │ kernel │      │ web        │              │ scheduler /    │
    │ cli    │      │ (axum)     │              │ runners /      │
    │ file   │      │ HTTP+WS+   │              │ backends /     │
    │ ...    │      │ REST       │              │ ...            │
    └────────┘      └─────┬──────┘              └────────────────┘
                          │
-                         ▼ HTTP + WS frames (text + binary, chunked supported)
+                         ▼ HTTP + WS frames (text + binary)
    ┌─────────────────────────────────────────────────────────────────────┐
    │           ts/ FRONTEND (weak-bound 4th kernel, served generically)  │
    │  No native view bundles here — the host serves ts/dist via a file   │
@@ -69,11 +69,11 @@ cargo build --release --bin fantastic_kernel
 BIN=$(pwd)/target/release/fantastic_kernel
 
 # One-shot RPCs:
-$BIN reflect                                  # substrate identity + tree of root (id="core")
-$BIN reflect core bundles=all                 # add the registered-bundle catalog
-$BIN reflect core readme=true                 # attach the agent's readme (transport/wire docs)
-$BIN core list_agents                         # every agent in this workdir
-$BIN core create_agent handler_module=web.tools id=w port=8888
+$BIN reflect                                  # substrate identity + tree of root (id="kernel_state")
+$BIN reflect kernel_state bundles=all                 # add the registered-bundle catalog
+$BIN reflect kernel_state readme=true                 # attach the agent's readme (transport/wire docs)
+$BIN kernel_state list_agents                         # every agent in this workdir
+$BIN kernel_state create_agent handler_module=web.tools id=w port=8888
 
 # Daemon mode (blocks if a `web` agent is persisted in the workdir):
 $BIN
@@ -127,7 +127,7 @@ iOS-safe bundles (compile under either tier):
 
 | crate                       | role                                                          |
 |-----------------------------|---------------------------------------------------------------|
-| `fantastic-core`            | root orchestrator (id="core")                                 |
+| `fantastic-core`            | the `kernel_state.tools` root loader (id="kernel_state")      |
 | `fantastic-file`            | filesystem-as-agent                                           |
 | `fantastic-yaml-state`      | durable YAML memory agent (`state.yaml`; mem/data); persists THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | `fantastic-web`             | axum HTTP host + WS + REST (dynamic mounting)                 |
@@ -165,7 +165,7 @@ rust/
 │   ├── fantastic-bundle/              bundle trait every bundle re-exports
 │   ├── fantastic-cli/                 the `fantastic_kernel` headless host binary
 │   └── bundles/
-│       ├── fantastic-core/                root orchestrator
+│       ├── fantastic-core/                kernel_state.tools root loader
 │       ├── fantastic-file/                fs-as-agent
 │       ├── fantastic-yaml-state/          durable YAML memory
 │       ├── fantastic-web/                 axum host + WS/REST router
@@ -206,12 +206,12 @@ HTTP + WebSocket:
 - **HTTP** `/`, `/_assets/favicon.png`, `/favicon.png`, `/<id>/file/<path>`.
 - **WS `/<id>/ws`** — text frames: `call` / `emit` / `watch` /
   `unwatch` / `reply` / `error` / `event`. **Binary frames** carry
-  byte-heavy payloads as `[4-byte BE u32 hdr_len][JSON header][raw blob]`.
-  Opt-in chunked uploads (`upload_id` + `chunk_index` + `total_chunks` +
-  `final` in the header) reassemble server-side; per-WS state means
-  abandoned uploads drop on disconnect.
+  byte-heavy payloads as `[4-byte BE u32 hdr_len][JSON header][raw blob]`,
+  the header naming the blob's slot in `_binary_path`; they are routed by
+  `type` exactly like text frames. There is no chunked-upload dialect — a
+  large transfer is one frame, or a `write_stream` per offset.
 - **Streams** — byte-heavy transfers ride the binary channel as a chunked
-  PULL (raw bytes, never base64), NOT events: `read_stream {path, offset?}
+  PULL (raw bytes, never base64) through the BATCH, NOT events: `read_stream {path, offset?}
   → (header{next_offset, eof, size}, bytes)` (the **SOURCE** — one chunk,
   stateless cursor via `next_offset`); `write_stream {path, offset?,
   truncate?}` + body bytes (the **SINK**); `pump {source, source_path, sink,
@@ -307,7 +307,6 @@ drive the wire surface against either binary by swapping `PATH`.
 Rust-specific behaviour lives in [`selftest/`](selftest/):
 
 - `feature_gates.md` — `full` vs `embedded` compile matrix
-- `binary_frame_chunking.md` — chunked WS uploads protocol
 - `cross_runtime_workdir.md` — round-trip workdir loading
 
 See [`selftest.md`](selftest.md) for the index + driving workflow.

@@ -127,19 +127,21 @@ public enum Refusal {
     public static func guardAgentId(_ verb: String, _ agentId: String) -> JSON? {
         if agentId.isEmpty { return bad(verb, "id", "a non-empty string") }
         if agentId.contains("/") || agentId.contains("\\") {
-            return bad(verb, "id", "a single path segment (no separators); got \"\(agentId)\"")
+            return bad(
+                verb, "id", "a single path segment (no separators); got \(pyRepr(agentId))")
         }
         if agentId == "." || agentId == ".." || agentId.contains("..") {
-            return bad(verb, "id", "a name that is not a path traversal; got \"\(agentId)\"")
+            return bad(verb, "id", "a name that is not a path traversal; got \(pyRepr(agentId))")
         }
         if agentId.hasPrefix(".") {
-            return bad(verb, "id", "a name that is not hidden; got \"\(agentId)\"")
+            return bad(verb, "id", "a name that is not hidden; got \(pyRepr(agentId))")
         }
         // Message ids are plain integers; in prompt text an all-digit agent id
         // would be indistinguishable from a row id. Python `guard_agent_id`.
         if agentId.allSatisfy({ $0.isASCII && $0.isNumber }) {
             return bad(
-                verb, "id", "a name, not a number (message ids are ints); got '\(agentId)'")
+                verb, "id",
+                "a name, not a number (message ids are ints); got \(pyRepr(agentId))")
         }
         return nil
     }
@@ -155,6 +157,15 @@ public enum Refusal {
     public static func bad(_ verb: String, _ arg: String, _ want: String) -> JSON {
         make(
             badArg, "\(verb): \(arg) must be \(want)",
+            extra: [("arg", .string(arg))])
+    }
+
+    /// [`bad`], plus what was actually GIVEN — python's `f"{verb}: {arg} must
+    /// be {want}, got {value!r}"` tail (C30/C38's `timeout`/`payload.type`/
+    /// `id`/`retries` refusals all carry it; `bad` alone omits it).
+    public static func badGot(_ verb: String, _ arg: String, _ want: String, got: JSON) -> JSON {
+        make(
+            badArg, "\(verb): \(arg) must be \(want), got \(pyRepr(got))",
             extra: [("arg", .string(arg))])
     }
 
@@ -187,14 +198,20 @@ public enum Refusal {
             ("agent_count", .integer(Int64(sorted.count))),
             ("agents", .array(sorted.prefix(unknownAgentIdsMax).map { .string($0) })),
         ]
+        var reply = make(unknownAgent, "no agent \(pyRepr(agentId))", extra: extra)
         // An id wrapped in angle brackets is structurally a SLOT, not a name —
         // no id this kernel mints can contain them, so this costs no guessing.
-        var hint = ""
-        if agentId.hasPrefix("<") && agentId.hasSuffix(">") {
-            hint =
-                "\"\(agentId)\" is a PLACEHOLDER from an example, not an id — substitute one of `agents`."
+        //
+        // Python assigns the hint AFTER the refusal is built, so it lands behind
+        // `agent_count`/`agents`, not in `make`'s hint slot.
+        if agentId.hasPrefix("<") && agentId.hasSuffix(">"),
+            case .object(var o) = reply
+        {
+            o["hint"] = .string(
+                "\(pyRepr(agentId)) is a PLACEHOLDER from an example, not an id — "
+                    + "substitute one of `agents`.")
+            reply = .object(o)
         }
-        return make(
-            unknownAgent, "no agent \"\(agentId)\"", hint: hint, extra: extra)
+        return reply
     }
 }

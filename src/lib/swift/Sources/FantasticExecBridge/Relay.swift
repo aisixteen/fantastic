@@ -174,6 +174,25 @@
             writeFrame(kind: UInt8(ascii: "B"), Codec.encodeBinaryFrame(header: header, body: body))
         }
 
+        /// Frame one queued inbox item into `envelope` (whose `payload` already
+        /// holds the item's head) — kind `T` for plain JSON, kind `B` when the
+        /// payload carried raw bytes, `_binary_path` naming where they belong
+        /// under `payload`. THE ONE CODEC: a `write_stream` mirrored to a
+        /// watching program reaches it whole, not as a header with a hole where
+        /// the body was.
+        private func pushItem(_ envelope: JSON, _ item: InboxItem) {
+            guard let body = item.body else {
+                push(envelope)
+                return
+            }
+            var head = envelope
+            if case .object(var o) = head {
+                o["_binary_path"] = .string("payload.\(body.path)")
+                head = .object(o)
+            }
+            pushBinary(header: head, body: body.data)
+        }
+
         /// Write one frame: `[4-byte BE len | kind | rest]`.
         private func writeFrame(kind: UInt8, _ rest: Data) {
             var frame = Data()
@@ -222,7 +241,7 @@
                     // is a registered task and inherits the owner's identity; re-enter
                     // both here.
                     let owner = self?.owner
-                    let (data, body): (JSON, Data) = await KernelTaskLocals.$currentTask
+                    let (data, body): (JSON, Data?) = await KernelTaskLocals.$currentTask
                         .withValue(relayTask) {
                             await KernelTaskLocals.$currentSender.withValue(owner) {
                                 if binary {
@@ -231,21 +250,23 @@
                                 }
                                 return (
                                     await kernel.send([Item(AgentId(target), payload)])[0].result,
-                                    Data()
+                                    nil
                                 )
                             }
                         }
                     self?.queue.async {
                         var env: JSON = .object(["op": .string("reply"), "rid": rid, "data": data])
-                        if body.isEmpty {
+                        // THE CARRIER decides the frame kind, never the body's
+                        // length: a 0-byte chunk is still a chunk (C37).
+                        guard let body else {
                             self?.push(env)
-                        } else {
-                            // A `read_stream` chunk: the reply body rides raw at
-                            // `data.bytes` (python's reply dict holds it there natively).
-                            env["data"]["bytes"] = .null
-                            env["_binary_path"] = .string("data.bytes")
-                            self?.pushBinary(header: env, body: body)
+                            return
                         }
+                        // A `read_stream` chunk: the reply body rides raw at
+                        // `data.bytes` (python's reply dict holds it there natively).
+                        env["data"]["bytes"] = .null
+                        env["_binary_path"] = .string("data.bytes")
+                        self?.pushBinary(header: env, body: body)
                     }
                 }
             case "emit":
@@ -297,11 +318,11 @@
                     kernel.spawnTask(agent: owner, verb: "watch_drain") { [weak self] in
                         for await p in stream {
                             self?.queue.async {
-                                self?.push(
+                                self?.pushItem(
                                     .object([
                                         "op": .string("event"), "src": .string(src),
-                                        "payload": p,
-                                    ]))
+                                        "payload": p.payload,
+                                    ]), p)
                             }
                         }
                     }
@@ -336,12 +357,13 @@
                             // The job's own telemetry echoes back through the owner's
                             // fanout; drop it so a tool does not receive its own
                             // progress/job_started/job_done as inbox mail.
-                            switch p["type"].asString {
+                            switch p.payload["type"].asString {
                             case "progress", "job_started", "job_done": continue
                             default: break
                             }
                             self?.queue.async {
-                                self?.push(.object(["op": .string("inbox"), "payload": p]))
+                                self?.pushItem(
+                                    .object(["op": .string("inbox"), "payload": p.payload]), p)
                             }
                         }
                     }

@@ -45,7 +45,7 @@ ONE XML document opened by `<messages v="1">` and never closed (a stream). Scala
 attributes, text (`content`, `title`, `why`) and lists are child elements; the stdlib
 XML layer escapes `<` and `&` on the way out and restores them on the way in, so a body
 holding `</content>` cannot break the log. Hydrate is the incremental parser
-(`XMLPullParser`), one completed row at a time; EOF without `</messages>` is normal.
+(a streaming XML reader), one completed row at a time; EOF without `</messages>` is normal.
 A row cut by a crash mid-append, or a log of another version, is a LOUD error at boot —
 nothing is skipped or repaired; truncate at the last complete `</row>`.
 
@@ -54,7 +54,7 @@ nothing is skipped or repaired; truncate at the last complete `</row>`.
   the rows to the kernel from above, setting the counter to `max(id) + 1`. A second
   ingestion of the same log is refused by the kernel on its first duplicate id — the
   user's fault, surfaced, never guarded.
-- **The pump** (`_MessagePump`, root loader only) tails `rows_stream(after)` from the
+- **The pump** (root loader only) tails `rows_stream(after)` from the
   highest id present, batches 0.15 s, and appends one `write_stream` per batch through
   the discovered provider. Its own calls to the store — and every operator-context
   call on the store, i.e. this bundle's persistence traffic — never enter the log.

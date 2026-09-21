@@ -36,7 +36,7 @@ PORT_B=18190
 ### Test 1: reflect on an unbooted ws bridge
 
 ```bash
-BR=$($FANTASTIC core create_agent handler_module=ws_bridge.tools \
+BR=$($FANTASTIC kernel_state create_agent handler_module=ws_bridge.tools \
   transport=ws host=127.0.0.1 local_port=$PORT_B peer_id=wws | jq -r .id)
 $FANTASTIC $BR reflect | jq -e '.transport == "ws" and .connected == false and .pending_count == 0 and .auth == "allow_all"'
 ```
@@ -52,7 +52,7 @@ $FANTASTIC $BR forward target=core payload='{"type":"reflect"}' \
 
 ```bash
 # Bring up peer kernel B with a web + web_ws on $PORT_B.
-(cd /tmp/kb_test/b && $FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT_B)
+(cd /tmp/kb_test/b && $FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT_B)
 (cd /tmp/kb_test/b && $FANTASTIC w create_agent handler_module=web_ws.tools id=wws)
 (cd /tmp/kb_test/b && $FANTASTIC) &
 DAEMON_PID=$!
@@ -61,7 +61,7 @@ sleep 2
 
 $FANTASTIC $BR boot | jq -e '.booted == true and .transport == "ws"'
 $FANTASTIC $BR forward target=core payload='{"type":"reflect"}' \
-  | jq -e '.id == "core"'
+  | jq -e '.id == "kernel_state"'
 ```
 
 Expect: the forward returns kernel B's `core.reflect` body unwrapped.
@@ -72,7 +72,7 @@ corr_id mismatch in the read loop.
 ### Test 4: watch_remote subscribes + shutdown rejects pending (LIVE)
 
 ```bash
-$FANTASTIC $BR watch_remote target=core | jq -e '.ok == true and .watching == "core"'
+$FANTASTIC $BR watch_remote target=core | jq -e '.ok == true and .watching == "kernel_state"'
 $FANTASTIC $BR shutdown | jq -e '.stopped == true'
 $FANTASTIC $BR reflect | jq -e '.connected == false'
 ```

@@ -67,15 +67,15 @@ const VERBS: [(&str, &str); 9] = [
     ),
     (
         "read_stream",
-        "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns",
+        "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns ONE chunk {path, offset, bytes, next_offset, eof, size}.",
     ),
     (
         "write_stream",
-        "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default =",
+        "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default = append at end), truncate:bool=False. The SINK half — a producer pushes RAW chunks by offset.",
     ),
     (
         "pump",
-        "The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE",
+        "The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE call.",
     ),
     (
         "delete",
@@ -202,20 +202,21 @@ impl Bundle for FileBundle {
                     // bytes to the same handler; a chunk read back renders utf-8
                     // in the reply. The binary channel stays for real blobs.
                     "read_stream" => read_stream_reply(&root, payload, true).0,
-                    "write_stream" => match payload.get("bytes") {
-                        // Absent ⇒ python's `payload.get("bytes", b"")`: an empty
-                        // chunk, which is a legal write.
-                        None => write_stream_reply(&root, payload, b"", readonly),
-                        Some(Value::String(s)) => {
-                            write_stream_reply(&root, payload, s.as_bytes(), readonly)
-                        }
-                        // The tag grammar types a bare number; a number is a document too.
-                        Some(Value::Number(n)) => {
-                            write_stream_reply(&root, payload, n.to_string().as_bytes(), readonly)
-                        }
-                        Some(_) if readonly => readonly_refusal(),
-                        Some(_) => missing_bytes(),
-                    },
+                    // `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK. python types
+                    // the argument (`isinstance(data, (bytes, bytearray))`), and
+                    // JSON has no bytes, so ANY present value here — a string, a
+                    // number — is `missing_arg`, and nothing is written (A13.19).
+                    // A raw chunk reaches this bundle on the BINARY channel only;
+                    // that is the carrier a model's `<bytes>` document rides too.
+                    // Absent ⇒ python's `payload.get("bytes", b"")`: an empty
+                    // chunk, which is a legal write.
+                    "write_stream" => {
+                        let chunk = match payload.get("bytes") {
+                            None => Some(&b""[..]),
+                            Some(_) => None,
+                        };
+                        write_stream_reply(&root, payload, chunk, readonly)
+                    }
                     "delete" => delete_reply(&root, payload, readonly),
                     "rename" => rename_reply(&root, payload, readonly),
                     "mkdir" => mkdir_reply(&root, payload, readonly),
@@ -236,27 +237,22 @@ impl Bundle for FileBundle {
         header: Value,
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), BundleError> {
+    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         if !matches!(verb, "read_stream" | "write_stream") {
             // file_bridge has no other binary verb — route the header through
             // the text path (which gates + dispatches); the blob is unused.
             let reply = self.handle(agent_id, &header, kernel).await?;
-            return Ok((reply, Vec::new()));
+            return Ok((reply, None));
         }
         let agent = match kernel.agents.get(agent_id) {
             Some(e) => Arc::clone(&e),
-            None => {
-                return Ok((
-                    Some(json!({"error": format!("no agent {agent_id}")})),
-                    Vec::new(),
-                ))
-            }
+            None => return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None)),
         };
         let meta = agent.meta.read().expect("meta poisoned").clone();
         // GATE — same sealed-by-default choke point as the text channel.
         if let Some(denied) = gate(&meta, agent_id, verb) {
-            return Ok((Some(denied), Vec::new()));
+            return Ok((Some(denied), None));
         }
         let root = fs::resolve_root(&root_str(&meta), &workdir_base(kernel));
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
@@ -275,12 +271,14 @@ impl Bundle for FileBundle {
                 if header.get("bytes").is_some() {
                     return Ok((
                         Some(rf::missing("write_stream", "bytes (one raw chunk)")),
-                        Vec::new(),
+                        None,
                     ));
                 }
+                // NO CHUNK COMES BACK from a write — `None`, not an empty body,
+                // so a leg can tell this reply from a 0-byte read (C37).
                 Ok((
-                    Some(write_stream_reply(&root, &header, &blob, readonly)),
-                    Vec::new(),
+                    Some(write_stream_reply(&root, &header, Some(&blob), readonly)),
+                    None,
                 ))
             }
             _ => unreachable!("only the two stream verbs reach here"),
@@ -368,26 +366,32 @@ fn is_hidden(name: &str, hidden: &[Value]) -> bool {
 /// chunk in the reply's `bytes` key (python's shape); the binary channel carries
 /// it in the reply BODY. Stateless cursor (no open handle): pull the next chunk
 /// by calling again with `offset=next_offset`. Mirrors py `_read_stream`.
+///
+/// ON THE BINARY CHANNEL THE `bytes` KEY STILL EXISTS, holding `null`, IN ITS
+/// PYTHON POSITION between `offset` and `next_offset` — python's reply dict
+/// always has it and the codec nulls it in place when it lifts the value onto
+/// the wire. A leg reads the frame kind off that key; a head that simply omitted
+/// it left the browser a different dict shape on the two channels (A11.9).
 fn read_stream_reply(
     root: &Result<PathBuf, String>,
     payload: &Value,
     text_channel: bool,
-) -> (Value, Vec<u8>) {
+) -> (Value, Option<Vec<u8>>) {
     let path_str = match path_arg("read_stream", payload, "path") {
         Ok(p) => p,
-        Err(e) => return (e, Vec::new()),
+        Err(e) => return (e, None),
     };
     let offset = match int_arg("read_stream", payload, "offset", 0, 0) {
         Ok(n) => n,
-        Err(e) => return (e, Vec::new()),
+        Err(e) => return (e, None),
     };
     let length = match int_arg("read_stream", payload, "length", 65536, 1) {
         Ok(n) => n,
-        Err(e) => return (e, Vec::new()),
+        Err(e) => return (e, None),
     };
     let root = match clamped(root) {
         Ok(r) => r,
-        Err(e) => return (e, Vec::new()),
+        Err(e) => return (e, None),
     };
     match fs::is_file(root, path_str) {
         Ok(true) => {}
@@ -397,28 +401,32 @@ fn read_stream_reply(
                 format!("file {} not found", py_repr(path_str)),
             );
             rf::with(&mut v, "path", json!(path_str));
-            return (v, Vec::new());
+            return (v, None);
         }
-        Err(e) => return (rf::refusal(rf::TRANSPORT_ERROR, e), Vec::new()),
+        Err(e) => return (rf::refusal(rf::TRANSPORT_ERROR, e), None),
     }
     let (chunk, size) = match fs::read_chunk(root, path_str, offset, length) {
         Ok(c) => c,
-        Err(e) => return (rf::refusal(rf::TRANSPORT_ERROR, e), Vec::new()),
+        Err(e) => return (rf::refusal(rf::TRANSPORT_ERROR, e), None),
     };
     let next_offset = offset + chunk.len() as u64;
     let mut out = Map::new();
     out.insert("path".to_string(), json!(path_str));
     out.insert("offset".to_string(), json!(offset));
-    if text_channel {
-        out.insert(
-            "bytes".to_string(),
-            json!(String::from_utf8_lossy(&chunk).into_owned()),
-        );
-    }
+    out.insert(
+        "bytes".to_string(),
+        if text_channel {
+            json!(String::from_utf8_lossy(&chunk).into_owned())
+        } else {
+            Value::Null
+        },
+    );
     out.insert("next_offset".to_string(), json!(next_offset));
     out.insert("eof".to_string(), json!(next_offset >= size));
     out.insert("size".to_string(), json!(size));
-    let body = if text_channel { Vec::new() } else { chunk };
+    // A CHUNK CAME BACK — `Some`, even when it is empty (an empty file, or a
+    // read past the end). Only that tells a leg it may answer octet.
+    let body = if text_channel { None } else { Some(chunk) };
     (Value::Object(out), body)
 }
 
@@ -496,7 +504,7 @@ fn target_arg<'a>(
 fn write_stream_reply(
     root: &Result<PathBuf, String>,
     payload: &Value,
-    blob: &[u8],
+    blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
     if readonly {
@@ -505,6 +513,12 @@ fn write_stream_reply(
     let path_str = match path_arg("write_stream", payload, "path") {
         Ok(p) => p,
         Err(e) => return e,
+    };
+    // PYTHON'S ORDER: readonly, path, then the chunk's TYPE, then `offset`. A
+    // caller that passed a JSON value where raw bytes belong learns that before
+    // its offset is graded.
+    let Some(blob) = blob else {
+        return missing_bytes();
     };
     // python's `_int_arg(..., "offset", -1, 0)`: absent ⇒ append at the end.
     let off_in = match payload.get("offset") {
@@ -562,10 +576,10 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 Vec::new(),
             )
             .await;
-        // python tests the reply for a `bytes` chunk; on this channel the chunk
-        // rides the body, so a reply that carries an `error` instead is the same
-        // "no chunk came back".
-        if !rmeta.is_object() || rmeta.get("error").is_some() {
+        // python tests the reply for a `bytes` chunk (`isinstance(r["bytes"],
+        // bytes)`); on this channel the chunk rides the body, so the carrier
+        // answers the same question — `None` is "no chunk came back" (C37).
+        let Some(body) = body.filter(|_| rmeta.is_object()) else {
             return rf::refusal(
                 rf::TRANSPORT_ERROR,
                 format!(
@@ -574,7 +588,7 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                     py_str(&rmeta)
                 ),
             );
-        }
+        };
         let (wmeta, _) = kernel
             .send_with_binary(
                 &sink_id,

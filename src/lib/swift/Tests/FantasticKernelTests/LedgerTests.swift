@@ -21,17 +21,20 @@ private final class Runs: @unchecked Sendable {
     private var n = 0
     private var failUntil = 0
     func setFailUntil(_ v: Int) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         failUntil = v
     }
     func bump() throws -> Int {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         n += 1
         if n < failUntil { throw FlakyMiss(n: n) }
         return n
     }
     var count: Int {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return n
     }
 }
@@ -57,7 +60,7 @@ struct LedgerTests {
         let reg = BundleRegistry()
         reg.register("counting.tools", CountBundle(runs: runs))
         let k = Kernel(storage: .inMemory, bundles: reg)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
         k.register(root)
         k.setRoot(root)
         _ = await k.send([
@@ -116,9 +119,10 @@ struct LedgerTests {
         let out = await k.send([Item(AgentId("desk"), .object(["type": .string("work")]))])[0]
         let pid = try! #require(out.pid)
 
-        let rows = await k.send([
-            Item(AgentId("kernel"), .object(["type": .string("ledger")]))
-        ])[0].result["executions"].asArray ?? []
+        let rows =
+            await k.send([
+                Item(AgentId("kernel"), .object(["type": .string("ledger")]))
+            ])[0].result["executions"].asArray ?? []
         let row = rows.first { $0["id"].asInt == pid.value }
         #expect(row?["named"].asBool == false)
         #expect(row?["status"].asString == "completed")
@@ -161,9 +165,10 @@ struct LedgerTests {
         #expect(runs.count == 2)
 
         // INSPECTABLE — terminal non-completed rows are the dead-letter queue.
-        let rows = await k.send([
-            Item(AgentId("kernel"), .object(["type": .string("ledger")]))
-        ])[0].result["executions"].asArray ?? []
+        let rows =
+            await k.send([
+                Item(AgentId("kernel"), .object(["type": .string("ledger")]))
+            ])[0].result["executions"].asArray ?? []
         // BY NAME: a caller-named row carries `name`; its `id` is the kernel's int.
         let dead = rows.first { $0["name"].asString == "dead-1" }
         #expect(dead?["status"].asString == "failed")
@@ -178,6 +183,47 @@ struct LedgerTests {
         #expect(runs.count == 2, "a parked dead letter re-armed")
     }
 
+    /// C80: `ExecutionLedger.setCap` sets the ring's cap AND immediately
+    /// re-runs eviction against it — RETROACTIVE, unlike python's plain
+    /// `ledger_cap` attribute set (only bites on the NEXT insert; harmless
+    /// since the CLI always sets a cap before any execution exists). Same
+    /// ring rule either way: oldest SETTLED unnamed rows go first, a named
+    /// row (a dedup contract) outlives them, nothing in flight is evicted.
+    @Test func setCapEvictsLikeTheConstructorCap() async {
+        let runs = Runs()
+        let k = await makeKernel(runs)
+        // A named row FIRST — the OLDEST entry, so surviving the cap proves
+        // named rows are evicted LAST, not merely "still young enough".
+        let named = await k.send([
+            Item(AgentId("desk"), .object(["type": .string("work")]), id: "keepme")
+        ])[0]
+        var pids: [Int64] = []
+        for _ in 0..<4 {
+            let o = await k.send([Item(AgentId("desk"), .object(["type": .string("work")]))])[0]
+            pids.append(try! #require(o.pid).value)
+        }
+        // Five settled rows now, all under the ledger's (huge) default cap —
+        // nothing evicted yet.
+        #expect(k.ledger.has(pids[0]))
+
+        // Retroactively shrink the cap on an ALREADY over-cap ledger.
+        k.ledger.setCap(3)
+
+        #expect(!k.ledger.has(pids[0]), "the oldest unnamed row is evicted")
+        #expect(!k.ledger.has(pids[1]), "the second-oldest unnamed row is evicted")
+        #expect(k.ledger.has(pids[3]), "the newest unnamed row survives")
+
+        // The named row survives the unnamed churn and still dedups.
+        let again = await k.send([
+            Item(AgentId("desk"), .object(["type": .string("work")]), id: "keepme")
+        ])[0]
+        #expect(again.result == named.result)
+        #expect(runs.count == 5, "the join must not have re-run the handler")
+    }
+
+    /// C31 r2 correction: BOTH the text and the extras render the CALLER's
+    /// RAW id (`pyRepr` for a string), never the minted exec_id; the target
+    /// names via `pyRepr` too; there is no `bound_to`.
     @Test func anIdIsBoundToItsFirstTarget() async {
         let runs = Runs()
         let k = await makeKernel(runs)
@@ -185,11 +231,17 @@ struct LedgerTests {
             Item(AgentId("desk"), .object(["type": .string("work")]), id: "bound-1")
         ])
         let reaimed = await k.send([
-            Item(AgentId("core"), .object(["type": .string("reflect")]), id: "bound-1")
+            Item(AgentId("kernel_state"), .object(["type": .string("reflect")]), id: "bound-1")
         ])[0]
         #expect(reaimed.status == .failed)
         #expect(reaimed.result["reason"].asString == "bad_arg")
-        #expect(reaimed.result["bound_to"].asString == "desk")
+        #expect(
+            reaimed.result["error"].asString
+                == "send: id 'bound-1' already names an execution on 'desk', not 'kernel_state' "
+                + "— an id is bound to its first execution; a retry aimed elsewhere needs a "
+                + "new id",
+            "\(reaimed.result)")
+        #expect(reaimed.result["bound_to"] == nil)
     }
 
     @Test func theLedgerVerbIsPagedLikeEveryOtherListing() async {
@@ -207,6 +259,31 @@ struct LedgerTests {
         ])[0].result
         #expect(p["executions"].asArray?.count == 2)
         #expect(p["next"].asString != nil, "a further page must be named")
+    }
+
+    /// C16: python's exact key order — `{id, target, attempts, retries,
+    /// named, name?, status, outcome?}`. `status`/`outcome` land AFTER
+    /// `named`/`name`, not right after `target`.
+    @Test func ledgerRowKeyOrderMatchesPython() async {
+        let runs = Runs()
+        let k = await makeKernel(runs)
+        _ = await k.send([
+            Item(AgentId("desk"), .object(["type": .string("work")]), id: "job-order")
+        ])
+        let unnamed = await k.send([Item(AgentId("desk"), .object(["type": .string("work")]))])[0]
+        let r = await k.send([Item(AgentId("kernel"), .object(["type": .string("ledger")]))])[0]
+            .result
+        let rows = r["executions"].asArray ?? []
+        let named = rows.first { $0["name"].asString == "job-order" }
+        #expect(
+            named?.asObject.map { Array($0.keys) }
+                == ["id", "target", "attempts", "retries", "named", "name", "status", "outcome"],
+            "\(String(describing: named))")
+        let bare = rows.first { $0["id"].asInt == unnamed.pid?.value }
+        #expect(
+            bare?.asObject.map { Array($0.keys) }
+                == ["id", "target", "attempts", "retries", "named", "status", "outcome"],
+            "\(String(describing: bare))")
     }
 }
 
@@ -260,5 +337,89 @@ extension LedgerTests {
         ])[0]
         #expect(said.status == .errored)
         #expect(said.attempts == 1, "a semantic no is never re-sent: \(said.attempts)")
+    }
+
+    /// C46 — the sidecar is python's v2 document, and every terminal status
+    /// comes back: an `errored` row read as anything else would re-arm the side
+    /// effect the ledger exists to prevent.
+    @Test func testSidecarIsPythonV2Bytes() async throws {
+        let ledger = ExecutionLedger()
+        for (id, status) in [
+            (7 as Int64, Status.completed), (9, .errored), (11, .failed), (13, .cancelled),
+        ] {
+            _ = ledger.open(
+                id, target: AgentId("desk"), payload: .object(["type": .string("work")]),
+                retries: 0, name: id == 7 ? "job-1" : nil, origin: AgentId("caller"),
+                callerId: id == 7 ? .string("job-1") : .integer(id))
+            _ = ledger.settle(
+                id, Outcome(pid: TaskId(id), status: status, result: .object([:]), attempts: 1))
+        }
+        let snap = ledger.settledSnapshot()
+        #expect(snap["v"].asInt == 2)
+        let rows = try #require(snap["rows"].asArray)
+        #expect(rows.count == 4)
+        // PYTHON'S KEY ORDER, and NO `verb`.
+        #expect(
+            rows[0].asObject.map { Array($0.keys) }
+                == ["id", "target", "retries", "attempts", "named", "name", "origin", "outcome"],
+            "\(rows[0])")
+        #expect(rows[0]["id"].asInt == 7 && rows[0]["name"].asString == "job-1")
+        #expect(rows[1]["name"] == .null && rows[1]["named"].asBool == false)
+
+        // A FRESH ledger restores every one of them, `errored` included…
+        let fresh = ExecutionLedger()
+        #expect(fresh.rehydrate(snap) == 4)
+        #expect(fresh.settledOutcome(9)?.status == .errored)
+        // …and the id counter is raised above the highest row.
+        #expect(fresh.highestId() == 13)
+    }
+
+    /// C46 / A11.5 — a settled outcome that carried RAW BYTES is RAM-ONLY.
+    /// Python's `_ledger_dump` drops any row `json.dumps` cannot encode, and
+    /// "bytes in a read_stream result" is the case it names; swift carries the
+    /// bytes on the outcome's binary channel instead, so the JSON always
+    /// encoded and the row persisted — measured as `{path, offset, size,
+    /// next_offset, eof}` rows in `ledger.json` that python has none of.
+    @Test func testSidecarDropsOutcomesThatCarriedBytes() async throws {
+        let ledger = ExecutionLedger()
+        for id in [21 as Int64, 22] {
+            _ = ledger.open(
+                id, target: AgentId("store"),
+                payload: .object(["type": .string("read_stream")]), retries: 0, name: nil,
+                origin: AgentId("rest"), callerId: .integer(id))
+        }
+        let envelope: JSON = .object([
+            "path": .string("a.txt"), "offset": .integer(0), "size": .integer(3),
+            "next_offset": .integer(3), "eof": .bool(true),
+        ])
+        _ = ledger.settle(21, Outcome(pid: TaskId(21), status: .completed, result: envelope))
+        _ = ledger.settle(
+            22,
+            Outcome(
+                pid: TaskId(22), status: .completed, result: envelope,
+                body: Data("abc".utf8)))
+        let rows = try #require(ledger.settledSnapshot()["rows"].asArray)
+        #expect(rows.map { $0["id"].asInt } == [21], "\(rows)")
+        // The row is still LIVE in RAM — dedup holds for this process.
+        #expect(ledger.settledOutcome(22)?.status == .completed)
+    }
+
+    /// RP-08 — each ledger flush pass is a REGISTERED kernel task on the root,
+    /// verb `ledger_flush`, so `ps` sees it, `cancel` reaches it and the message
+    /// pump can recognise the kernel's own persistence traffic. A bare `Task`
+    /// was invisible to all three.
+    @Test func testFlushRunsAsLedgerFlushTask() async {
+        let runs = Runs()
+        let k = await makeKernel(runs)
+        await k.installLedgerPersistence()
+        _ = await k.send([
+            Item(AgentId("desk"), .object(["type": .string("work")]), id: "job-1")
+        ])[0]
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let flushRows = k.rows.forAgent(k.root!.id).filter {
+            $0["kind"]?.asString == "task" && $0["verb"]?.asString == "ledger_flush"
+        }
+        #expect(!flushRows.isEmpty, "the flush pass minted no `ledger_flush` task row")
+        #expect(flushRows.first?["parent"] != nil, "it is parented to the settling dispatch")
     }
 }

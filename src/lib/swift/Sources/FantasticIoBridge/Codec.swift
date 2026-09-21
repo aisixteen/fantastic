@@ -44,6 +44,63 @@ public enum Codec {
         public var description: String { message }
     }
 
+    /// python `set_path(obj, path, value)` — walk the dotted path and assign at
+    /// the last segment. A list holder indexes with `int(part)` (negative
+    /// indices resolve from the end, as python's do); an object holder keys with
+    /// the raw segment.
+    ///
+    /// Every python failure — a missing intermediate key, a non-int index into a
+    /// list, an index out of range, a scalar where a container was expected —
+    /// raises out of `set_path`, and the ws loop turns that into the ONE frame
+    /// error (A11.7). So this throws for each of them rather than silently
+    /// creating what was not there.
+    public static func setPath(_ obj: inout JSON, _ path: String, _ value: JSON) throws(FrameError)
+    {
+        let parts = path.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        try assign(&obj, parts, value)
+    }
+
+    private static func assign(_ obj: inout JSON, _ parts: [String], _ value: JSON)
+        throws(FrameError)
+    {
+        guard let head = parts.first else { throw FrameError("empty path") }
+        let rest = Array(parts.dropFirst())
+        switch obj {
+        case .array(var items):
+            guard let raw = Int(head) else {
+                throw FrameError("list indices must be integers or slices, not str")
+            }
+            let idx = raw < 0 ? items.count + raw : raw
+            guard idx >= 0, idx < items.count else {
+                throw FrameError("list assignment index out of range")
+            }
+            if rest.isEmpty {
+                items[idx] = value
+            } else {
+                var child = items[idx]
+                try assign(&child, rest, value)
+                items[idx] = child
+            }
+            obj = .array(items)
+        case .object(var members):
+            if rest.isEmpty {
+                members[head] = value
+                obj = .object(members)
+                return
+            }
+            // python raises `KeyError` on a missing intermediate — it does NOT
+            // create one. A frame naming `payload.nope.deep` is malformed.
+            guard var child = members[head] else { throw FrameError("\(pyRepr(head))") }
+            try assign(&child, rest, value)
+            members[head] = child
+            obj = .object(members)
+        default:
+            // python: `'int' object does not support item assignment` and
+            // friends — a scalar is not a holder.
+            throw FrameError("object does not support item assignment")
+        }
+    }
+
     /// Decode a binary frame → `(header, body)`.
     ///
     /// A frame arrives from a PEER, so every length in it is hostile until

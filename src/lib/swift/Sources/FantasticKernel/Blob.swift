@@ -14,6 +14,7 @@
 
 import FantasticJSON
 import Foundation
+import OrderedCollections
 
 /// Files the KERNEL manages. A sidecar may not overwrite them.
 private let reservedBlobNames: Set<String> = ["agent.json", "readme.md"]
@@ -39,10 +40,18 @@ extension Kernel {
     /// over the raw-bytes channel (never base64), under operator authority. The
     /// file_bridge string `read`/`write` verbs are GONE — a blob rides the stream
     /// verbs like any other file (mirrors python `persist_blob`/`load_blob`).
+    ///
+    /// THROUGH THE BATCH (C47): ONE binary item, so the blob verbs, the message
+    /// log and the ledger flush are ledger executions with call, task and settle
+    /// rows — python's `persist_blob` is a plain `kernel.send([...])` and leaves
+    /// exactly those. `sendWithBinary` minted none of them.
     func storeBookkeepingBinary(_ store: AgentId, _ header: JSON, _ blob: Data) async
-        -> (JSON, Data)
+        -> (JSON, Data?)
     {
-        await asBookkeeping { await self.sendWithBinary(store, header, blob) }
+        await asBookkeeping {
+            let out = await self.send([Item(store, header, binary: blob)])[0]
+            return (out.result, out.body)
+        }
     }
 
     /// Run `body` as the KERNEL'S OWN BOOKKEEPING — the ONE definition of that
@@ -71,16 +80,25 @@ extension Kernel {
     /// error the caller cannot act on.
     static func guardBlobName(_ name: String?) -> (name: String?, error: String?) {
         guard let name, !name.isEmpty else { return (nil, "name (non-empty str) required") }
-        if name.contains("/") || name.contains("\\") {
-            return (nil, "name \"\(name)\" must be a single filename (no path segments)")
+        // `name != Path(name).name` — python's own test, so a backslash (a legal
+        // POSIX filename byte) is NOT a path segment here and `.` is.
+        if name != pyPathName(name) {
+            return (nil, "name \(pyRepr(name)) must be a single filename (no path segments)")
         }
         if name.hasPrefix(".") || name.contains("..") {
-            return (nil, "name \"\(name)\" must not be hidden or contain '..'")
+            return (nil, "name \(pyRepr(name)) must not be hidden or contain '..'")
         }
         if reservedBlobNames.contains(name.lowercased()) {
-            return (nil, "name \"\(name)\" is reserved (kernel-managed)")
+            return (nil, "name \(pyRepr(name)) is reserved (kernel-managed)")
         }
         return (name, nil)
+    }
+
+    /// `PurePosixPath(s).name` — the last component, empty parts and `.` parts
+    /// dropped, `..` kept.
+    static func pyPathName(_ s: String) -> String {
+        let parts = s.split(separator: "/", omittingEmptySubsequences: true).filter { $0 != "." }
+        return parts.last.map(String.init) ?? ""
     }
 
     /// Refuse a blob verb that names SOMEONE ELSE'S namespace.
@@ -106,114 +124,198 @@ extension Kernel {
         guard let caller = KernelTaskLocals.currentOrigin else { return nil }
         if caller.value == aid { return nil }
         return
-            "\(caller.value) may not use another agent's namespace \"\(aid)\" — an agent's "
-            + "blob verbs are scoped to itself; only an operator may name a namespace it "
-            + "does not own"
+            "\(pyRepr(caller.value)) may not use another agent's namespace \(pyRepr(aid)) —"
+            + " an agent's blob verbs are scoped to itself; only an operator may name"
+            + " a namespace it does not own"
     }
 
     /// Shared preamble: validate, authorize, resolve the store-relative path.
+    ///
+    /// PYTHON'S ORDER AND PYTHON'S TEXTS (`kernel_state._persist_blob` /
+    /// `_load_blob`): agent_id, name, owner, then the store. Every refusal is a
+    /// BARE `{error}` (plus `reason` on the owner denial) — these are the
+    /// loader's own replies, not kernel refusals, so they carry no code and no
+    /// `side`.
     private func resolveBlob(_ verb: String, _ payload: JSON) -> (
-        ok: (store: AgentId, path: String)?, refusal: JSON?
+        ok: (store: AgentId, name: String, path: String)?, refusal: JSON?
     ) {
         guard let aid = payload["agent_id"].asString, !aid.isEmpty else {
-            return (nil, Refusal.missing(verb, "agent_id"))
+            return (nil, .object(["error": .string("\(verb): agent_id (str) required")]))
         }
         let checked = Kernel.guardBlobName(payload["name"].asString)
         guard let name = checked.name else {
             return (
-                nil,
-                Refusal.make(
-                    Refusal.badArg, "\(verb): \(checked.error ?? "bad name")",
-                    extra: [("arg", .string("name"))])
+                nil, .object(["error": .string("\(verb): \(checked.error ?? "bad name")")])
             )
         }
         if let why = Kernel.guardBlobOwner(aid) {
             return (
                 nil,
-                Refusal.make(
-                    Refusal.unauthorized, "\(verb): \(why)",
-                    extra: [("side", .string("ingress"))])
+                .object([
+                    "error": .string("\(verb): \(why)"), "reason": .string("unauthorized"),
+                ])
             )
         }
         guard let store = findStore() else {
             return (
                 nil,
-                Refusal.make(
-                    Refusal.notHere, "\(verb): no store wired — persistence not available")
+                .object([
+                    "error": .string("\(verb): no store wired — persistence not available")
+                ])
             )
         }
-        guard let rootAgent = root, let a = agent(AgentId(aid)) else {
-            return (nil, Refusal.unknown(aid, live: allAgents().map { $0.id.value }))
-        }
-        let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: a.rootPath)
-        return ((store, reldir.isEmpty ? name : "\(reldir)/\(name)"), nil)
+        let reldir = blobReldir(aid)
+        return ((store, name, reldir.isEmpty ? name : "\(reldir)/\(name)"), nil)
+    }
+
+    /// Store-relative dir for an agent's sidecars — `agents/<id>`. Prefers the
+    /// LIVE agent's own dir; a record that is no longer live resolves under the
+    /// root's children container, exactly as python's `_resolve_path` walk ends
+    /// up for a parentless id. Python `_blob_reldir`.
+    func blobReldir(_ agentId: String) -> String {
+        guard let rootAgent = root else { return "" }
+        let dir =
+            agent(AgentId(agentId))?.rootPath
+            ?? rootAgent.rootPath.appendingPathComponent(childrenDir)
+            .appendingPathComponent(agentId)
+        return storeReldir(storeRoot: rootAgent.rootPath, agentRoot: dir)
     }
 
     /// `persist_blob` — whole-file write of one sidecar.
-    func persistBlob(_ payload: JSON) async -> JSON {
-        let store: AgentId
-        let path: String
+    public func persistBlob(_ payload: JSON) async -> JSON {
         let r = resolveBlob("persist_blob", payload)
-        guard let ok = r.ok else { return r.refusal ?? .null }
-        (store, path) = (ok.store, ok.path)
-        guard let content = payload["content"].asString else {
-            return Refusal.make(
-                Refusal.badArg, "persist_blob: content (str) required",
-                extra: [("arg", .string("content"))])
+        // CONTENT IS CHECKED BETWEEN THE OWNER GUARD AND THE STORE LOOKUP in
+        // python, so a contentless call with no store wired says `content (str)
+        // required`, not `no store wired`. `resolveBlob` ends at the store, so
+        // the content test runs on its refusal too when that refusal IS the
+        // store one.
+        let content = payload["content"].asString
+        guard let ok = r.ok else {
+            if content == nil,
+                r.refusal?["error"].asString?.hasSuffix(
+                    "no store wired — persistence not available") == true
+            {
+                return .object(["error": .string("persist_blob: content (str) required")])
+            }
+            return r.refusal ?? .null
+        }
+        guard let content else {
+            return .object(["error": .string("persist_blob: content (str) required")])
         }
         // Operator authority: the loader writing to its OWN discovered store is
         // persistence bookkeeping, not the loader reaching out as an agent.
         let (reply, _) = await storeBookkeepingBinary(
-            store,
+            ok.store,
             .object([
-                "type": .string("write_stream"), "path": .string(path),
+                "type": .string("write_stream"), "path": .string(ok.path),
                 "truncate": .bool(true),
             ]),
             Data(content.utf8))
-        if let err = reply["error"].asString {
-            var out = Refusal.make(Refusal.transportError, "persist_blob: \(err)")
-            // Carry the provider's own machine field + recipe through — a gate
-            // denial on the store must not be relabelled as a transport fault.
-            if case .object(var o) = out {
-                if reply["reason"] != .null { o["reason"] = reply["reason"] }
-                if reply["hint"] != .null { o["hint"] = reply["hint"] }
-                out = .object(o)
-            }
-            return out
+        if pyTruthy(reply["error"]) {
+            var out: OrderedDictionary<String, JSON> = [
+                "error": .string("persist_blob: \(pyStr(reply["error"]))")
+            ]
+            // The provider's own machine field + recipe ride through ONLY when
+            // truthy — a gate denial on the store must not be relabelled.
+            if pyTruthy(reply["reason"]) { out["reason"] = reply["reason"] }
+            if pyTruthy(reply["hint"]) { out["hint"] = reply["hint"] }
+            return .object(out)
         }
         return .object([
-            "ok": .bool(true), "name": payload["name"], "size": reply["size"],
+            "ok": .bool(true), "name": .string(ok.name), "size": reply["size"],
         ])
     }
 
-    /// `load_blob` — read one sidecar back.
+    /// `load_blob` — read one sidecar back, PUMPED TO EOF.
     ///
     /// `content: null` when the file is absent: a never-written sidecar reads
     /// empty rather than erroring, because "nothing saved yet" is the normal
     /// first state.
-    func loadBlob(_ payload: JSON) async -> JSON {
-        let store: AgentId
-        let path: String
+    public func loadBlob(_ payload: JSON) async -> JSON {
         let r = resolveBlob("load_blob", payload)
         guard let ok = r.ok else { return r.refusal ?? .null }
-        (store, path) = (ok.store, ok.path)
-        switch await readWholeViaStore(store, path) {
-        case .refused(let r):
-            // ABSENT is `content: null`; anything else is the leg's own refusal
-            // and must propagate — a sealed store used to read as an empty file.
-            if r["reason"].asString == "not_found" || r["reason"] == .null {
-                return .object(["name": payload["name"], "content": .null])
+        var chunks = Data()
+        var offset = 0
+        var last: JSON = .null
+        while true {
+            let (reply, body) = await storeBookkeepingBinary(
+                ok.store,
+                .object([
+                    "type": .string("read_stream"), "path": .string(ok.path),
+                    "offset": .integer(Int64(offset)),
+                ]), Data())
+            last = reply
+            // python tests `isinstance(reply.get("bytes"), bytes)` — on the swift
+            // binary channel the body rides beside the header, and a refusal
+            // carries none.
+            if reply["error"] != .null { break }
+            chunks.append(body ?? Data())
+            if reply["eof"].asBool == true { return decodedBlob(ok.name, chunks) }
+            guard let next = reply["next_offset"].asInt, Int(next) > offset else {
+                // No forward progress: stop rather than spin. Returning what we
+                // have would be the truncation this loop exists to prevent.
+                return .object([
+                    "error": .string(
+                        "load_blob: \(ok.name) stalled at offset \(offset)"
+                            + " — the store returned no forward progress"),
+                    "name": .string(ok.name), "content": .null,
+                ])
             }
-            return r
-        case .bytes(let data):
-            guard let text = String(data: data, encoding: .utf8) else {
-                return Refusal.make(
-                    Refusal.badArg,
-                    "load_blob: \(path) is not valid utf-8",
-                    extra: [("name", payload["name"]), ("content", .null)])
-            }
-            return .object(["name": payload["name"], "content": .string(text)])
+            offset = Int(next)
         }
+        if !chunks.isEmpty { return decodedBlob(ok.name, chunks) }
+        if last["reason"].asString == "unauthorized" {
+            var out: OrderedDictionary<String, JSON> = [
+                "error": .string(
+                    "load_blob: "
+                        + (last["error"] == .null ? "unauthorized" : pyStr(last["error"]))),
+                "reason": .string("unauthorized"),
+            ]
+            if pyTruthy(last["hint"]) { out["hint"] = last["hint"] }
+            return .object(out)
+        }
+        return .object(["name": .string(ok.name), "content": .null])  // absent → empty
+    }
+
+    /// Decode a sidecar STRICTLY. A non-text file handed back as U+FFFD mojibake
+    /// is indistinguishable from a real read, and writing that back destroys the
+    /// file. Python `_decoded_blob`.
+    private func decodedBlob(_ name: String, _ raw: Data) -> JSON {
+        if let text = String(data: raw, encoding: .utf8) {
+            return .object(["name": .string(name), "content": .string(text)])
+        }
+        return .object([
+            "error": .string("load_blob: \(name) is not utf-8 at byte \(firstBadUTF8(raw))"),
+            "reason": .string("bad_encoding"),
+            "name": .string(name),
+            "content": .null,
+        ])
+    }
+
+    /// The byte offset python's `UnicodeDecodeError.start` names — the first
+    /// byte of the first sequence that does not decode.
+    private func firstBadUTF8(_ raw: Data) -> Int {
+        var i = 0
+        let bytes = [UInt8](raw)
+        while i < bytes.count {
+            let b = bytes[i]
+            let len: Int
+            if b < 0x80 {
+                len = 1
+            } else if b >= 0xC2 && b <= 0xDF {
+                len = 2
+            } else if b >= 0xE0 && b <= 0xEF {
+                len = 3
+            } else if b >= 0xF0 && b <= 0xF4 {
+                len = 4
+            } else {
+                return i
+            }
+            if i + len > bytes.count { return i }
+            if String(bytes: bytes[i..<(i + len)], encoding: .utf8) == nil { return i }
+            i += len
+        }
+        return i
     }
 
     // ── the DURABLE LEDGER (#37) ──────────────────────────────────
@@ -226,7 +328,16 @@ extension Kernel {
     public func flushLedger() async {
         if storage.isInMemory { return }
         guard let store = findStore() else { return }
-        let doc = ledger.settledSnapshot().serialize()
+        // python `json.dumps(...)` DEFAULTS: ensure_ascii, compact separators —
+        // `_ledger_dump` passes nothing else, so the bytes on disk are the same
+        // on every runtime.
+        let doc = pyJsonDumps(ledger.settledSnapshot())
+        // THE FLUSH IS AN EXECUTION, and its settle re-kicks the flusher (D6 /
+        // C47). Python behaves exactly so — `flush_ledger_now` writes through
+        // `_persist_blob`, which is `kernel.send([...])`, whose settle calls the
+        // flusher's `kick` — so with a store wired `ledger.json` is rewritten
+        // continuously and a `ledger_flush` task stays in `ps`. That loop is the
+        // measured python behaviour, not an accident of this port.
         _ = await storeBookkeepingBinary(
             store,
             .object([
@@ -249,15 +360,22 @@ extension Kernel {
         guard case .bytes(let data) = await readWholeViaStore(store, ledgerBlob),
             let text = String(data: data, encoding: .utf8), !text.isEmpty
         else { return 0 }
-        guard let doc = try? JSON.parse(text) else {
-            print("  [ledger] \(ledgerBlob) unreadable, starting empty")
+        let doc: JSON
+        do {
+            doc = try JSON.parse(text)
+        } catch {
+            // The tail is this parser's own message; python prints its
+            // `json.JSONDecodeError` str, which no other parser reproduces.
+            print("  [ledger] \(ledgerBlob) unreadable, starting empty: \(error)")
             return 0
         }
-        // An unknown version is not a migration we can guess at.
-        guard doc["v"].asInt == 1 else {
+        // THE UPGRADE CONTRACT, from day one: an unknown version starts empty
+        // LOUDLY — never guessed at, never silently reinterpreted. A v1 file (an
+        // object of rows keyed by a stringified id) is one of those.
+        guard doc["v"].asInt == Int64(ledgerSidecarVersion) else {
             print(
-                "  [ledger] \(ledgerBlob) is version \(doc["v"].asInt.map(String.init) ?? "?"), "
-                    + "this kernel reads 1 — starting empty (no migration written)")
+                "  [ledger] \(ledgerBlob) is version \(pyRepr(doc["v"])), this kernel "
+                    + "reads \(ledgerSidecarVersion) — starting empty (no migration written)")
             return 0
         }
         let n = ledger.rehydrate(doc)
@@ -268,19 +386,36 @@ extension Kernel {
     }
 
     /// Rehydrate, then install the write-through.
+    ///
+    /// SILENT ON SUCCESS. A clean rehydrate prints nothing — python says nothing
+    /// either, and only its loud lines (an unknown version, an unreadable file)
+    /// survive here.
     public func installLedgerPersistence() async {
-        let n = await rehydrateLedger()
-        if n > 0 { print("  [ledger] rehydrated \(n) settled execution(s)") }
+        _ = await rehydrateLedger()
         let gate = LedgerFlushGate()
         setLedgerFlusher { [weak self] in
             guard let self else { return }
-            Task {
+            // THE WRITER IS CHOSEN BEFORE THE TASK IS SPAWNED, as python does
+            // (`kick` returns under `if state["running"]` and only then reaches
+            // `spawn_task`). Deciding INSIDE the task minted a `ledger_flush`
+            // task row per settle; each row is a row the message pump logs, the
+            // log write is an execution, its settle kicks the flusher again —
+            // 127 `ledger_flush` rows against python's 7 for the same four
+            // commands (measured 2026-09-20).
+            guard gate.mark() else { return }
+            // EACH FLUSH PASS IS A REGISTERED KERNEL TASK on the root, verb
+            // `ledger_flush`, parented to the settling dispatch — python spawns
+            // it through `spawn_task` (`tools.py:977-1000`), so it is in `ps`,
+            // it is cancellable, and the message pump can recognise and skip its
+            // own persistence traffic. A bare `Task` was invisible to all three.
+            // NOT keepalive: a pass ends.
+            let root = self.root?.id ?? AgentId("kernel")
+            self.spawnTask(agent: root, verb: "ledger_flush") {
                 // ONE writer, and always a pass AFTER the last settle.
-                guard await gate.mark() else { return }
                 repeat {
-                    await gate.beginPass()
+                    gate.beginPass()
                     await self.flushLedger()
-                } while await gate.needsAnother()
+                } while gate.needsAnother()
             }
         }
     }
@@ -295,30 +430,36 @@ extension Kernel {
 /// with a flag it cleared before awaiting, and it saturated multiple cores on
 /// `agentic.plan` until the writer was serialised.
 ///
-/// An actor rather than two atomics: `mark` and `needsAnother` must decide
-/// together, and the actor gives that for free — a settle observed after
-/// `needsAnother` releases the writer starts a fresh one, and one observed
-/// before it is caught by the next lap.
-actor LedgerFlushGate {
+/// One lock rather than two atomics: `mark` and `needsAnother` must decide
+/// together — a settle observed after `needsAnother` releases the writer starts
+/// a fresh one, and one observed before it is caught by the next lap. A LOCK and
+/// not an actor, because `mark` is python's synchronous `kick`: the writer has
+/// to be chosen before the flush task is spawned, or the spawn itself is a row.
+final class LedgerFlushGate: @unchecked Sendable {
+    private let lock = NSLock()
     private var dirty = false
     private var running = false
 
     /// Record a change. Returns true if THIS caller becomes the writer.
     func mark() -> Bool {
-        dirty = true
-        if running { return false }
-        running = true
-        return true
+        lock.withLock {
+            dirty = true
+            if running { return false }
+            running = true
+            return true
+        }
     }
 
     /// Clear the flag BEFORE snapshotting, so a settle landing during the pass
     /// re-dirties and is caught rather than dropped.
-    func beginPass() { dirty = false }
+    func beginPass() { lock.withLock { dirty = false } }
 
     /// True if more arrived during the pass. When false, the writer is released.
     func needsAnother() -> Bool {
-        if dirty { return true }
-        running = false
-        return false
+        lock.withLock {
+            if dirty { return true }
+            running = false
+            return false
+        }
     }
 }

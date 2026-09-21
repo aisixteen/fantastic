@@ -1,7 +1,6 @@
 //! The parsed shape ([`ToolCall`]) and the call-id minter.
 
 use serde_json::{Map, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One tool call a model named in text: `{id, name, arguments}`.
 ///
@@ -46,12 +45,9 @@ impl ToolCall {
 /// `_mint_id` inside `tool_parse.py` for exactly that reason — so there is one
 /// minter, in the module that needs it.
 pub fn mint_call_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let mut stack: u64 = 0;
-    let stack_ptr = &mut stack as *mut u64 as u64;
-    let mix = nanos ^ stack_ptr ^ std::process::id() as u64;
-    format!("call_{:08x}", mix as u32)
+    let hex: String = crate::helpers::os_random(4)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("call_{hex}")
 }

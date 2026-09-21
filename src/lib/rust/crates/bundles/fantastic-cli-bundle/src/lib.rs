@@ -73,7 +73,7 @@ pub const VERBS: [(&str, &str); 9] = [
     ),
     (
         "context",
-        "args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a",
+        "args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a one-line context-protocol notice.",
     ),
     (
         "intro_booting",
@@ -81,7 +81,7 @@ pub const VERBS: [(&str, &str); 9] = [
     ),
     (
         "booted",
-        "Final PTY push — the kernel's \"all booted\" signal, sent AFTER the boot",
+        "Final PTY push — the kernel's \"all booted\" signal, sent AFTER the boot loop.",
     ),
 ];
 

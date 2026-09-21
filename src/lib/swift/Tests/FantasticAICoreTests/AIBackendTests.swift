@@ -297,7 +297,7 @@ struct AIBackendTests {
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
         _ = await kernel.send([Item(id, .object([
@@ -337,7 +337,7 @@ struct AIBackendTests {
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
         _ = await kernel.send([Item(id, .object([
@@ -396,7 +396,7 @@ struct AIBackendTests {
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
         // The pass runs INLINE (py/rust parity), so the send is launched on its
@@ -522,12 +522,12 @@ struct AIBackendTests {
         registry.register(
             "mock_backend.tools", MockBundle(config: baseConfig { .provider(MockProvider(tokens: ["ok ", doneEnvelope])) }))
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
-        let r = await kernel.send([Item(AgentId("core"), .object([
+        let r = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("create_agent"),
-                "parent_id": .string("core"),
+                "parent_id": .string("kernel_state"),
                 "handler_module": .string("mock_backend.tools"), "id": .string("naked"),
             ]))])[0].result
         let id = AgentId(r["id"].asString ?? "naked")
@@ -737,7 +737,7 @@ struct AIBackendTests {
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
-        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
         let first = Task {
@@ -763,6 +763,12 @@ struct AIBackendTests {
         }
         #expect(queued.count == 1, "one contended submission, one queued status")
         #expect(queued.first?["detail"]["ahead"].asInt != nil)
+        // B2.17: python's `**detail` order — the caller's `send_id, ahead`, then
+        // what `_emit_status` auto-fills. The in-flight entry is the FIRST turn,
+        // so `started_at` is ITS start (python reads `_current` whoever holds it).
+        #expect(
+            queued.first?["detail"].asObject.map { Array($0.keys) }
+                == ["send_id", "ahead", "started_at", "queue_depth"])
     }
 
     /// `recall` answers the turn WHOLE. Rust/swift capped each recalled turn at 2000
@@ -908,7 +914,7 @@ struct AIBackendTests {
             agent: agent, systemPrompt: nil, kernel: kernel)
         // The alias resolved to the ROOT: its reflect is the first block. An
         // unresolved target would have rendered an error here instead.
-        #expect(prompt.contains("id=core"), "\(prompt.prefix(200))")
+        #expect(prompt.contains("id=kernel_state"), "\(prompt.prefix(200))")
         #expect(!prompt.contains("unknown agent"))
         // `context_titles: 1` is truthy in python; `asBool` read only `true`.
         #expect(prompt.contains("## Titling your calls"))

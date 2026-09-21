@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 /// This runtime's root id. `$root` in the corpus means exactly this — parity
 /// asserts the per-runtime value, never equality (python's root is
-/// `kernel_state`, ours is `core`).
-const ROOT_ID: &str = "core";
+/// `kernel_state` — ours too, since C12).
+const ROOT_ID: &str = "kernel_state";
 
 /// The corpus path, resolved from this crate rather than the cwd so the test is
 /// runnable from anywhere in the workspace.

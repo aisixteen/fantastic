@@ -14,7 +14,11 @@ so a `web` instance can run rendering-only and multiple call surfaces
 Verbs:
   reflect       -> identity + endpoint URL pattern
   boot          -> no-op (web mounts the route by pulling get_routes)
-  get_routes    -> the duck-typed call surface used by `web._boot`
+  get_routes    -> the duck-typed call surface used by `web._boot`; PURE DATA
+                   ({kind, path}), so the reply renders over REST and persists
+                   into the ledger like any other. The live endpoint callable
+                   is handed to the parent in-process through the module hook
+                   `route_endpoints(agent)` below — never through a reply.
 """
 
 from __future__ import annotations
@@ -40,6 +44,18 @@ def _make_endpoint(self_id: str, kernel):
     return _ws_endpoint
 
 
+PATH_PATTERN = "/{host_id}/ws"
+
+
+def route_endpoints(agent):
+    """Duck-typed module hook the parent `web` host calls at mount time
+    (discovered exactly like `on_delete` / `reflect_root_extra`): `{path: live
+    endpoint}` for every path `get_routes` declared. The callable is an
+    in-process object — it travels this way, NOT inside a verb reply, so the
+    reply stays JSON."""
+    return {PATH_PATTERN: _make_endpoint(agent.id, agent)}
+
+
 # ─── verbs ──────────────────────────────────────────────────────
 
 
@@ -50,7 +66,7 @@ async def _reflect(id, payload, kernel):
     return {
         "id": id,
         "sentence": "WS verb-invocation surface; mounts /<host_id>/ws on the parent web.",
-        "path_pattern": "/{host_id}/ws",
+        "path_pattern": PATH_PATTERN,
         # The leg is a CHANNEL — surface its auth posture so discovery-through-denial
         # has something to discover (the door + the pointer to how to open it).
         **_describe(kernel.get(id) or {}),
@@ -66,19 +82,11 @@ async def _boot(id, payload, kernel):
 
 
 async def _get_routes(id, payload, kernel):
-    """Declares this surface's HTTP/WS route mounts. Returns
-    {routes:[{kind:'websocket', path, endpoint}]}. `endpoint` is an
-    async callable accepting (websocket, host_id) — same shape FastAPI
-    expects for `app.add_api_websocket_route(path, endpoint)`."""
-    return {
-        "routes": [
-            {
-                "kind": "websocket",
-                "path": "/{host_id}/ws",
-                "endpoint": _make_endpoint(id, kernel),
-            }
-        ]
-    }
+    """Declares this surface's HTTP/WS route mounts. No args. Returns
+    {routes:[{kind:'websocket', path}]} — pure data. The parent `web` host gets
+    the live endpoint for each path from this module's `route_endpoints(agent)`
+    hook, in-process."""
+    return {"routes": [{"kind": "websocket", "path": PATH_PATTERN}]}
 
 
 # ─── dispatch ───────────────────────────────────────────────────

@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web_ws.tools import _get_routes, _make_endpoint, _reflect
+from web_ws.tools import _get_routes, _make_endpoint, _reflect, route_endpoints
 
 
 async def test_reflect_describes_surface(seeded_kernel):
@@ -19,13 +19,20 @@ async def test_reflect_describes_surface(seeded_kernel):
 
 
 async def test_get_routes_returns_one_websocket(seeded_kernel):
+    """DECLARATIVE — pure JSON data, byte-shaped like rust/swift. No callable
+    rides the reply, so it renders over REST and persists into the ledger."""
     r = await _get_routes("ws_xyz", {}, seeded_kernel)
-    routes = r["routes"]
-    assert len(routes) == 1
-    spec = routes[0]
-    assert spec["kind"] == "websocket"
-    assert spec["path"] == "/{host_id}/ws"
-    assert callable(spec["endpoint"])
+    assert r == {"routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]}
+    assert json.loads(json.dumps(r)) == r
+
+
+def test_route_endpoints_hands_over_the_live_endpoint(seeded_kernel):
+    """The other half: `web` gets the callable in-process, keyed by the path
+    `get_routes` declared."""
+    seeded_kernel.create("web_ws.tools", id="ws_hook")
+    eps = route_endpoints(seeded_kernel.ctx.agents["ws_hook"])
+    assert set(eps) == {"/{host_id}/ws"}
+    assert callable(eps["/{host_id}/ws"])
 
 
 def test_endpoint_mountable_on_fastapi(seeded_kernel):

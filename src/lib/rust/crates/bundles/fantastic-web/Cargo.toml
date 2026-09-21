@@ -12,6 +12,8 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 tokio = { workspace = true }
+# `getentropy` — the OS CSPRNG behind python's `secrets` module.
+libc = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +22,9 @@ tower = "0.5"
 futures-util = "0.3"
 
 [dev-dependencies]
+# The ROOT LOADER bundle — tests need it registered so the root answers the
+# verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
+fantastic-core = { path = "../fantastic-core" }
 tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }

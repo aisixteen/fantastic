@@ -31,7 +31,8 @@ private func pythonReadme(_ relative: String) throws -> String {
 struct BackendReadmeTests {
 
     @Test func anthropicReadmeIsPythonVerbatim() throws {
-        let expected = try pythonReadme("anthropic/anthropic_backend/src/anthropic_backend/readme.md")
+        let expected = try pythonReadme(
+            "anthropic/anthropic_backend/src/anthropic_backend/readme.md")
         #expect(AnthropicBundle().readme == expected)
         #expect(expected.utf8.count == 3022, "the python file moved; re-copy it")
     }

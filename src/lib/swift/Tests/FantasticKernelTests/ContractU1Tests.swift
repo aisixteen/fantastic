@@ -27,7 +27,7 @@ struct ContractU1Tests {
         let registry = BundleRegistry()
         registry.register("noop.tools", Noop())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         return kernel
@@ -70,7 +70,7 @@ struct ContractU1Tests {
                 "handler_module": .string("noop.tools"), "id": .string("x"),
             ]))])[0].result
         #expect(missing["reason"].asString == "missing_arg")
-        #expect(missing["hint"].asString?.contains("subtree") == true)
+        #expect(missing["hint"].asString?.contains("OWN the new one") == true, "\(missing)")
 
         // Unknown ⇒ unknown_agent, carrying the live id index.
         let unknown = await mk(k, "x", parent: "nope")
@@ -100,9 +100,14 @@ struct ContractU1Tests {
         #expect(own["can_call"]["store"][0].asString == "read")
         #expect(own["callable_by"]["cli"].asString == "*")
 
-        // ...and the same two keys ride every distilled TREE node, so the whole
-        // authorization landscape is readable from ONE root reflect.
-        let tree = await k.send([Item(AgentId("kernel"), .object(["type": .string("reflect")]))])[0].result
+        // ...and the same two keys ride every WIRING tree node, so the whole
+        // authorization landscape is readable from ONE `detail:full` root
+        // reflect. (The DISTILLED tree is the roster — purpose, not posture.)
+        let tree = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object(["type": .string("reflect"), "detail": .string("full")]))
+        ])[0].result
         let node = tree["tree"]["children"].asArray?.first { $0["id"].asString == "worker" }
         #expect(node?["can_call"]["store"][0].asString == "read")
         #expect(node?["callable_by"]["cli"].asString == "*")
@@ -141,6 +146,9 @@ struct ContractU1Tests {
                 "type": .string("reflect"), "tree": .string("ids"), "limit": .integer(2),
             ]))])[0].result
         #expect(p["tree"].asArray?.count == 2)
-        #expect(p["tree_next"].asString != nil, "a further page must be named")
+        // The cursor is `next` (python's one paging key), and it is present
+        // ONLY when a further page follows — there is no `tree_next`.
+        #expect(p["next"].asString != nil, "a further page must be named")
+        #expect(p.asObject?["tree_next"] == nil, "python names no `tree_next`")
     }
 }

@@ -17,7 +17,7 @@ mkdir -p /tmp/fw_test
 cd /tmp/fw_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
-$FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
+$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null' EXIT
@@ -57,7 +57,7 @@ mkdir -p /tmp/fw_root
 echo "file content" > /tmp/fw_root/test.txt
 # The fs edge is an io_bridge leg — SEALED by default. Open it (ingress_rule=allow_all_ingress)
 # or the /file/ route's read_stream is denied and the proxy returns 404.
-$FANTASTIC core create_agent handler_module=file_bridge.tools id=fw_f root=/tmp/fw_root ingress_rule=allow_all_ingress
+$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=fw_f root=/tmp/fw_root ingress_rule=allow_all_ingress
 # Daemon needs to be aware of the new agent — restart cycle:
 kill $DAEMON_PID; sleep 1
 $FANTASTIC &

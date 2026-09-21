@@ -92,7 +92,7 @@ impl Bundle for ProbeBundle {
 }
 
 /// A kernel with the loader's store (a file agent at `.fantastic`) and a
-/// scheduler that fires against `core` (its $parent — no grant needed).
+/// scheduler that fires against `kernel_state` (its $parent — no grant needed).
 async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     let (kernel, sch, _hits) = mk_probed(tmp, &[], None, true).await;
     (kernel, sch)
@@ -110,6 +110,12 @@ async fn mk_probed(
     let hits = Hits::default();
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, SchedulerBundle);
+    // THE ROOT LOADER serves `persist_blob`/`load_blob` now (they left the
+    // kernel-verb set), so a kernel whose root answers them must have it.
+    kernel.bundles.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
@@ -122,8 +128,8 @@ async fn mk_probed(
     );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
-        None,
+        AgentId::from("kernel_state"),
+        Some(fantastic_core::HANDLER_MODULE.to_string()),
         None,
         Map::new(),
         tmp.path().join(".fantastic"),
@@ -135,7 +141,7 @@ async fn mk_probed(
     if with_store {
         let r = kernel
             .send(vec![Item::new(
-                AgentId::from("core"),
+                AgentId::from("kernel_state"),
                 json!({
                     "type":"create_agent",
                     "parent_id": "kernel",
@@ -154,7 +160,7 @@ async fn mk_probed(
     for p in probes {
         let r = kernel
             .send(vec![Item::new(
-                AgentId::from("core"),
+                AgentId::from("kernel_state"),
                 json!({
                     "type":"create_agent",
                     "parent_id": "kernel",
@@ -172,7 +178,7 @@ async fn mk_probed(
     // Nothing to wire: the scheduler persists THROUGH the loader.
     let r = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type":"create_agent",
                 "parent_id": "kernel",
@@ -293,7 +299,7 @@ async fn boot_succeeds_without_store_schedule_failfasts() {
             sch.clone(),
             json!({
                 "type": "schedule",
-                "target": "core",
+                "target": "kernel_state",
                 "payload": {"type": "list_agents"},
                 "interval_seconds": 5,
             }),
@@ -321,7 +327,7 @@ async fn schedule_persists_and_lists() {
             sch.clone(),
             json!({
                 "type": "schedule",
-                "target": "core",
+                "target": "kernel_state",
                 "payload": {"type": "list_agents"},
                 "interval_seconds": 5,
             }),
@@ -361,7 +367,7 @@ async fn schedule_requires_target_and_payload_type() {
     let r2 = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "schedule", "target": "core"}),
+            json!({"type": "schedule", "target": "kernel_state"}),
         )])
         .await
         .remove(0)
@@ -379,7 +385,7 @@ async fn schedule_rejects_a_bad_timeout() {
                 sch.clone(),
                 json!({
                     "type": "schedule",
-                    "target": "core",
+                    "target": "kernel_state",
                     "payload": {"type": "list_agents"},
                     "timeout": bad_value,
                 }),
@@ -407,7 +413,7 @@ async fn unschedule_removes() {
             sch.clone(),
             json!({
                 "type": "schedule",
-                "target": "core",
+                "target": "kernel_state",
                 "payload": {"type": "list_agents"},
                 "interval_seconds": 5,
             }),
@@ -470,7 +476,7 @@ async fn tick_now_fires_immediately_and_appends_history() {
             sch.clone(),
             json!({
                 "type": "schedule",
-                "target": "core",
+                "target": "kernel_state",
                 "payload": {"type": "list_agents"},
                 "interval_seconds": 999_999,
             }),
@@ -498,7 +504,7 @@ async fn tick_now_fires_immediately_and_appends_history() {
         .result;
     let entries = hist["history"].as_array().unwrap();
     assert!(!entries.is_empty());
-    assert_eq!(entries[0]["target"], "core");
+    assert_eq!(entries[0]["target"], "kernel_state");
 }
 
 #[tokio::test]
@@ -511,7 +517,7 @@ async fn tick_loop_fires_due_schedule() {
             sch.clone(),
             json!({
                 "type": "schedule",
-                "target": "core",
+                "target": "kernel_state",
                 "payload": {"type": "list_agents"},
                 "interval_seconds": 1,
             }),
@@ -752,7 +758,7 @@ async fn a_non_numeric_tick_sec_is_refused_at_write_time() {
     let (kernel, _sch, _hits) = mk_probed(&tmp, &[], None, true).await;
     let r = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
@@ -821,7 +827,7 @@ async fn reflect_verbs_are_python_verbatim() {
     );
     assert_eq!(
         verbs["boot"],
-        "Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write"
+        "Idempotent. Starts the tick loop; persistence is THROUGH the loader."
     );
     assert_eq!(
         verbs["unschedule"],
@@ -927,7 +933,7 @@ async fn an_int_timeout_stays_an_int() {
     let r = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "schedule", "target": "core",
+            json!({"type": "schedule", "target": "kernel_state",
                    "payload": {"type": "list_agents"}, "timeout": 5}),
         )])
         .await
@@ -971,7 +977,7 @@ async fn paused_meta_uses_python_truthiness() {
     let (kernel, sch) = mk_kernel(&tmp).await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": sch.as_str(), "paused": "no"}),
         )])
         .await
@@ -991,7 +997,7 @@ async fn tick_sec_below_a_tenth_is_not_clamped() {
     let (kernel, sch) = mk_kernel(&tmp).await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": sch.as_str(), "tick_sec": 0.02}),
         )])
         .await
@@ -1028,18 +1034,17 @@ async fn history_line_uses_python_json_layout() {
     assert!(body.contains("c\\u00f3re"), "{body}");
 }
 
-/// A5.14 (D6) — the process schedule cache is NOT evicted by `delete_agent`.
-/// python's `_cache` is a module global keyed by agent id and nothing removes it, so
-/// an agent recreated under the same id in the same process inherits its
-/// predecessor's schedules.
+/// A5.14 — `delete_agent` evicts the process schedule cache (python's
+/// `on_delete`, 2026-09-20): an agent recreated under the same id in the same
+/// process starts empty instead of inheriting its predecessor's schedules.
 #[tokio::test]
-async fn recreated_scheduler_keeps_the_process_cache() {
+async fn recreated_scheduler_drops_the_process_cache() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     let r = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "schedule", "target": "core", "payload": {"type": "list_agents"}}),
+            json!({"type": "schedule", "target": "kernel_state", "payload": {"type": "list_agents"}}),
         )])
         .await
         .remove(0)
@@ -1048,7 +1053,7 @@ async fn recreated_scheduler_keeps_the_process_cache() {
     assert!(sid.is_string(), "{r}");
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": sch.as_str()}),
         )])
         .await
@@ -1056,8 +1061,8 @@ async fn recreated_scheduler_keeps_the_process_cache() {
         .result;
     assert_eq!(
         SCHEDULE_CACHE.lock().get(&sch).map(Vec::len),
-        Some(1),
-        "delete must not evict the process cache"
+        None,
+        "delete evicts the process cache"
     );
 }
 

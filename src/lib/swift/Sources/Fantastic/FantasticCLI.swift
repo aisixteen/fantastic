@@ -74,6 +74,7 @@ struct FantasticCLI {
         case daemon
         case help
         case reflect([String])
+        case initCmd([String])
         case oneShot(target: String, rest: [String])
         case usage
     }
@@ -84,6 +85,10 @@ struct FantasticCLI {
         // `help` / `-h` / `--help` as the FIRST word; later words ignored.
         if first == "-h" || first == "--help" || first == "help" { return .help }
         if first == "reflect" { return .reflect(Array(args.dropFirst())) }
+        // A14.3: checked by NAME, like `reflect` — `fantastic init` (a single
+        // word) still routes here, not to `.usage`, exactly as python's
+        // `dispatch_argv` matches subcommands before the generic `len>=2` case.
+        if first == "init" { return .initCmd(Array(args.dropFirst())) }
         if args.count >= 2 { return .oneShot(target: first, rest: Array(args.dropFirst())) }
         return .usage
     }
@@ -113,6 +118,62 @@ struct FantasticCLI {
             + "(see ws_bridge bundle)."
     }
 
+    /// Python `kernel/modes/dispatch.py:109-113` — `init`'s own refusal (a
+    /// shorter text than the generic one-shot's `callLockRefusal`).
+    static func initLockRefusal(pid: Int) -> String {
+        "[init] another fantastic owns this dir (pid=\(pid)). Stop it first."
+    }
+
+    /// Python `kernel/modes/dispatch.py:98-101` — `init`'s usage line.
+    static let initUsageText =
+        "usage: fantastic init <loader_bundle> <manifest>\n"
+        + "   e.g. fantastic init static_loader ./fantastic.yaml"
+
+    // MARK: - ledger cap (C80)
+
+    /// Python `main.py:_ledger_cap_from` — strip `--ledger-cap <v>` from argv
+    /// (value REQUIRED: a trailing bare flag with nothing after it stays,
+    /// matching python's `i + 1 < len(argv)` guard); absent ⇒ fall back to
+    /// `FANTASTIC_LEDGER_CAP`. `"inf"` ⇒ unbounded (`nil`); anything else must
+    /// parse as an int (python's `int()`, `pyInt` here) or the caller exits 1.
+    /// Returns `(argv without the flag, cap, whether a cap was named at all)`
+    /// — `wasSet == false` means "leave the ledger's own default cap alone".
+    static func ledgerCapFrom(
+        _ argv: [String],
+        env: [String: String] = ProcessInfo.processInfo
+            .environment
+    ) -> (argv: [String], cap: Int?, wasSet: Bool) {
+        var raw: String?
+        var out: [String] = []
+        var i = 0
+        while i < argv.count {
+            if argv[i] == "--ledger-cap", i + 1 < argv.count {
+                raw = argv[i + 1]
+                i += 2
+                continue
+            }
+            out.append(argv[i])
+            i += 1
+        }
+        if raw == nil { raw = env["FANTASTIC_LEDGER_CAP"] }
+        guard let raw else { return (out, nil, false) }
+        if raw == "inf" { return (out, nil, true) }
+        guard let cap = try? pyInt(.string(raw)) else {
+            errLine(
+                "fantastic: invalid --ledger-cap value \(pyRepr(raw)) (must be an int or 'inf')")
+            exit(1)
+        }
+        return (out, cap, true)
+    }
+
+    /// Resolved ONCE at process start (`main()`), applied after EVERY kernel
+    /// construction — `bootOrExit()` here, and `DaemonMode.run()`'s own,
+    /// separate `startKernel` call, since python builds exactly one kernel
+    /// per process but this runtime's mode branches each construct their own.
+    /// `nonisolated(unsafe)`: written once by `main()` before any concurrent
+    /// reader exists (every mode branch runs sequentially after that write).
+    nonisolated(unsafe) static var ledgerCap: (cap: Int?, wasSet: Bool) = (nil, false)
+
     static func main() async {
         // Python `main.py:89-91` — the `.env` autoload is the first step of
         // EVERY mode, before the kernel is built.
@@ -126,22 +187,33 @@ struct FantasticCLI {
             exit(1)
         }
 
-        switch mode(for: Array(CommandLine.arguments.dropFirst())) {
+        // `FANTASTIC_LEDGER_CAP` may itself come from the `.env` just loaded,
+        // so this reads the environment AFTER that step — python's own order.
+        let (strippedArgv, cap, capSet) = ledgerCapFrom(Array(CommandLine.arguments.dropFirst()))
+        ledgerCap = (cap, capSet)
+
+        switch mode(for: strippedArgv) {
         case .daemon:
             await DaemonMode.run()
         case .help:
             // Python bootstraps (and seeds a virgin dir) before dispatch even
             // looks at argv, so `fantastic help` leaves a `.fantastic/` behind.
-            _ = await bootOrExit()
+            let kernel = await bootOrExit()
             FileHandle.standardOutput.write(
                 (CliBundle.helpText + "\n").data(using: .utf8) ?? Data())
+            // A14.18: every non-daemon mode ends with an idempotent kernel
+            // shutdown (python's `atexit` → `Kernel.shutdown`).
+            await kernel.shutdown()
         case .reflect(let argTokens):
             await runReflect(argTokens: argTokens)
+        case .initCmd(let rest):
+            await runInit(rest: rest)
         case .oneShot(let target, let rest):
             await runOneShotRPC(target: target, rest: rest)
         case .usage:
-            _ = await bootOrExit()
+            let kernel = await bootOrExit()
             errLine(usageText)
+            await kernel.shutdown()
             exit(2)
         }
     }
@@ -159,7 +231,28 @@ struct FantasticCLI {
         try hydrateMessages(
             kernel,
             rootDir: URL(fileURLWithPath: cwd).appendingPathComponent(".fantastic"))
+        // C80: applied after EVERY kernel construction, python's own
+        // `if cap_set: kernel.ledger_cap = cap` right after `_build_kernel()`.
+        // A no-op in tests, which never touch `ledgerCap` (stays `wasSet:
+        // false`).
+        if ledgerCap.wasSet { kernel.ledger.setCap(ledgerCap.cap) }
+        composeCliIfTTY(kernel)
         return kernel
+    }
+
+    /// Python `main._bootstrap`: `if sys.stdin.isatty(): Cli(kernel,
+    /// parent=kernel.root)` — an ephemeral stdout renderer composed for
+    /// EVERY mode (one-shot, reflect, init, help, the daemon), not the
+    /// daemon alone; a human (or an LLM in a PTY) landing in an
+    /// interactive `fantastic reflect` sees `cli` in the tree exactly as
+    /// python does. No-op without a root or a tty. Called exactly once per
+    /// freshly-constructed kernel (`bootDiskBacked` / `DaemonMode.run`'s own
+    /// `startKernel` call), never on an already-composed one.
+    static func composeCliIfTTY(_ kernel: Kernel) {
+        guard isatty(0) != 0, let root = kernel.root else { return }
+        _ = kernel.composeEphemeralChild(
+            id: AgentId("cli"), handlerModule: CliBundle.handlerModule, parent: root,
+            meta: ["display_name": .string("cli"), "singleton": .bool(true)])
     }
 
     /// `bootDiskBacked` for the process entrypoints: a failure here is a dead
@@ -198,6 +291,8 @@ struct FantasticCLI {
         let body = cliPayload(verb: "reflect", kvTokens: kvTokens)
         let reply = await kernel.send([Item(AgentId(target), body)])[0].result
         print(replyJSON(reply))
+        // A14.18: no lock was ever taken, so shutdown runs right after the print.
+        await kernel.shutdown()
     }
 
     // MARK: - one-shot RPC
@@ -221,12 +316,91 @@ struct FantasticCLI {
             errLine("fantastic: lock acquisition failed: \(error)")
             exit(1)
         }
-        defer { lock.release() }
 
         let kernel = await bootOrExit()
-        let body = cliPayload(verb: verb, kvTokens: rest.dropFirst())
-        let reply = await kernel.send([Item(AgentId(target), body)])[0].result
+        let reply = await dispatchOneShot(
+            kernel: kernel, target: target, verb: verb, rest: rest.dropFirst())
         print(replyJSON(reply))
+        // A14.18: shutdown runs AFTER the lock is released, never via `defer`
+        // (which would fire before this line, running shutdown first).
+        lock.release()
+        await kernel.shutdown()
+    }
+
+    /// A14.6's actual sequencing, factored out so a test can pin it without
+    /// the process-level lock/exit plumbing around it: boot the ROOT LOADER
+    /// FIRST, so THIS call's mutations (create/update/delete) subscribe +
+    /// persist (python `dispatch.py:73-78`) — rust/swift never did this: no
+    /// pump, no ledger, no record writer installed for a one-shot RPC. Then
+    /// dispatch the call itself, and drain the debounced writer
+    /// SYNCHRONOUSLY — its own 150ms tick would never fire before this
+    /// process exits otherwise (python `await loop.aflush()`).
+    static func dispatchOneShot(
+        kernel: Kernel, target: String, verb: String, rest: some Sequence<String>
+    ) async -> JSON {
+        if let root = kernel.root {
+            _ = await kernel.send([Item(root.id, .object(["type": .string("boot")]))])[0].result
+        }
+        let body = cliPayload(verb: verb, kvTokens: rest)
+        let reply = await kernel.send([Item(AgentId(target), body)])[0].result
+        await kernel.flushRecords()
+        return reply
+    }
+
+    // MARK: - init (A14.3)
+
+    private static func runInit(rest: [String]) async {
+        guard rest.count >= 2 else {
+            errLine(initUsageText)
+            exit(2)
+        }
+        let loaderName = rest[0]
+        let manifest = rest[1]
+
+        let workdirURL = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true)
+        let lock = WorkdirLock(workdir: workdirURL)
+        do {
+            try lock.acquire()
+        } catch WorkdirLock.LockError.alreadyRunning(let pid, _) {
+            errLine(initLockRefusal(pid: Int(pid)))
+            exit(1)
+        } catch {
+            errLine("fantastic: lock acquisition failed: \(error)")
+            exit(1)
+        }
+
+        let kernel = await bootOrExit()
+        let reply = await dispatchInit(kernel: kernel, loaderName: loaderName, manifest: manifest)
+        print(replyJSON(reply))
+        lock.release()
+        await kernel.shutdown()
+    }
+
+    /// A14.3's actual sequencing, factored out so a test can pin it without
+    /// the process-level lock/exit plumbing: boot the root loader so the new
+    /// loader record subscribes + persists, then `create_agent` it — which
+    /// ALSO boots the loader CHILD, whose own boot reads the manifest and
+    /// hydrates the roster (the kernel never parses YAML; the loader bundle
+    /// does). Idempotent by id: a second `init` refuses as a duplicate
+    /// create — python's own "no duplicate-init guard".
+    static func dispatchInit(kernel: Kernel, loaderName: String, manifest: String) async -> JSON {
+        let root = kernel.root!
+        _ = await kernel.send([Item(root.id, .object(["type": .string("boot")]))])[0].result
+        let reply = await kernel.send([
+            Item(
+                root.id,
+                .object([
+                    "type": .string("create_agent"),
+                    "parent_id": .string(root.id.value),
+                    "handler_module": .string("\(loaderName).tools"),
+                    "id": .string(loaderName),
+                    "manifest": .string(manifest),
+                ]))
+        ])[0].result
+        await kernel.flushRecords()
+        return reply
     }
 
     // MARK: - stderr

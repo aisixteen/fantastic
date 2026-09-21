@@ -321,8 +321,8 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write
-    failfasts only when no store is wired (reads are empty until then)."""
+    """Idempotent. Starts the tick loop; persistence is THROUGH the loader.
+    A write failfasts only when no store is wired (reads are empty until then)."""
     if id not in _tick_tasks or _tick_tasks[id].done():
         # REGISTERED. The tick loop outlives this `boot` dispatch and fires
         # sends for the life of the agent; a bare `create_task` left it out of
@@ -495,3 +495,13 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     if fn is None:
         return {"error": f"scheduler: unknown type {t!r}"}
     return await fn(id, payload, kernel)
+
+
+async def on_delete(agent):
+    """Cascade hook: drop the in-process cache and stop the tick loop, so a
+    re-created scheduler with the same id does not list and fire the old
+    schedules (measured 2026-09-16)."""
+    _cache.pop(agent.id, None)
+    t = _tick_tasks.pop(agent.id, None)
+    if t is not None and not t.done():
+        t.cancel()

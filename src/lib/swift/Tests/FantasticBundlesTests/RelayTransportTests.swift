@@ -34,22 +34,23 @@ private func makeKernel(
     let bundle = KernelBridgeBundle(family: .relay)
     registry.register("relay_connector.tools", bundle)
     let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     if withEcho {
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 [
-                    "type": "create_agent", "parent_id": "core", "handler_module": "echo.tools",
+                    "type": "create_agent", "parent_id": "kernel_state",
+                    "handler_module": "echo.tools",
                     "id": "echo",
                 ])
         ])[0].result
     }
     if let leg {
         await makeLeg(
-            kernel, id: leg, canCall: withEcho ? ["echo"] : ["core"], ingress: ingress,
+            kernel, id: leg, canCall: withEcho ? ["echo"] : ["kernel_state"], ingress: ingress,
             egress: egress, auth: auth)
     }
     return (kernel, bundle)
@@ -70,7 +71,7 @@ private func makeLeg(
     var grants: JSON = .object([:])
     for t in canCall { grants[t] = .string("*") }
     var create: JSON = .object([
-        "type": .string("create_agent"), "parent_id": .string("core"),
+        "type": .string("create_agent"), "parent_id": .string("kernel_state"),
         "handler_module": .string("relay_connector.tools"), "id": .string(id),
         "can_call": grants,
         // python's test seam: `memory` is the kind `boot` POPS an injected
@@ -80,17 +81,17 @@ private func makeLeg(
     if let ingress { create["ingress_rule"] = ingress }
     if let egress { create["egress_rule"] = egress }
     if let auth { create["auth"] = auth }
-    _ = await kernel.send([Item("core", create)])[0].result
+    _ = await kernel.send([Item("kernel_state", create)])[0].result
     // The INGRESS half. `core` is the leg's parent, so `$children` already
     // covers it; a SIBLING needs the edge opened by name.
-    for t in canCall where t != "core" {
+    for t in canCall where t != "kernel_state" {
         var accept: JSON = .object([
             "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
         ])
         accept[id] = .string("*")
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
                     "type": .string("update_agent"), "id": .string(t),
                     "callable_by": accept,
@@ -240,7 +241,7 @@ private func forward(_ kernel: Kernel, _ leg: String, target: String, payload: J
 
 private func binaryForward(
     _ kernel: Kernel, _ leg: String, target: String, payload: JSON, blob: Data
-) async -> (JSON, Data) {
+) async -> (JSON, Data?) {
     await kernel.sendWithBinary(
         AgentId(leg),
         .object([
@@ -250,8 +251,8 @@ private func binaryForward(
 
 /// Tear both legs down (python `on_delete` → the engine's `_teardown`).
 private func dropLegs(_ kernelA: Kernel, _ kernelB: Kernel) async {
-    _ = await kernelA.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
-    _ = await kernelB.send([Item("core", ["type": "delete_agent", "id": "brB"])])[0].result
+    _ = await kernelA.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0].result
+    _ = await kernelB.send([Item("kernel_state", ["type": "delete_agent", "id": "brB"])])[0].result
 }
 
 // ── transport tests ────────────────────────────────────────────
@@ -277,10 +278,11 @@ struct RelayTransportTests {
                 kernelA, "brA", target: "echo", payload: ["type": "echo", "blob": .string(big)])
             #expect(r2["echoed"]["blob"].asString?.count == big.count)
 
-            // 3) reverse: B → A's "core" (both legs serve inbound calls — symmetric).
-            let r3 = await forward(kernelB, "brB", target: "core", payload: ["type": "list_agents"])
+            // 3) reverse: B → A's "kernel_state" (both legs serve inbound calls — symmetric).
+            let r3 = await forward(
+                kernelB, "brB", target: "kernel_state", payload: ["type": "list_agents"])
             let names = (r3["agents"].asArray ?? []).compactMap { $0["id"].asString }
-            #expect(names.contains("core"), "\(r3.serialize())")
+            #expect(names.contains("kernel_state"), "\(r3.serialize())")
 
             await dropLegs(kernelA, kernelB)
         }
@@ -296,7 +298,7 @@ struct RelayTransportTests {
             let bundleB = KernelBridgeBundle(family: .relay)
             registry.register("relay_connector.tools", bundleB)
             let kernelB = Kernel(storage: .inMemory, bundles: registry)
-            let rootB = Agent(id: "core", handlerModule: nil, parentId: nil)
+            let rootB = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
             kernelB.register(rootB)
             kernelB.setRoot(rootB)
             let fm = FileManager.default
@@ -306,9 +308,9 @@ struct RelayTransportTests {
             defer { try? fm.removeItem(at: dir) }
             _ = await kernelB.send([
                 Item(
-                    "core",
+                    "kernel_state",
                     [
-                        "type": "create_agent", "parent_id": "core",
+                        "type": "create_agent", "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
                         "id": "fs", "root": .string(rel), "ingress_rule": "allow_all_ingress",
                     ])
@@ -357,9 +359,9 @@ struct RelayTransportTests {
         let (kernel, _) = await makeKernel(withEcho: false)
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("relay_connector.tools"), "id": .string("rc"),
                     "transport": .string("relay"),
                     "relay_url": .string("ws://localhost:9/"), "partner_guid": .string("peer"),
@@ -389,16 +391,16 @@ struct RelayTransportTests {
         let registry = BundleRegistry()
         registry.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("ws_bridge.tools"), "id": .string("wb"),
-                    "peer_id": .string("core"), "local_port": .integer(8123),
+                    "peer_id": .string("kernel_state"), "local_port": .integer(8123),
                 ]))
         ])[0].result
         let r = await kernel.send([Item("wb", ["type": "reflect"])])[0].result
@@ -412,7 +414,7 @@ struct RelayTransportTests {
         // A7.24 — the dial to a dead port FAILED, so nothing attached: boot is
         // not a half-success that reflects `connected:true` and times out later.
         #expect(r["connected"].asBool == false)
-        #expect(r["host"].isNull && r["peer_id"].asString == "core")
+        #expect(r["host"].isNull && r["peer_id"].asString == "kernel_state")
         #expect(r["local_port"].asInt == 8123 && r["remote_port"].isNull)
         #expect(r["tunnel_pid"].isNull)
         #expect(r["verbs"].asObject?.count == 6)
@@ -428,9 +430,9 @@ struct RelayTransportTests {
         let (kernel, _) = await makeKernel(withEcho: false)
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("relay_connector.tools"), "id": .string("rc2"),
                     "transport": .string("relay"),
                     "relay_url": .string("ws://localhost:9/"),
@@ -465,14 +467,14 @@ struct RelayTransportTests {
         let registry = BundleRegistry()
         registry.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("ws_bridge.tools"), "id": .string("wb"),
                 ]))
         ])[0].result
@@ -488,14 +490,14 @@ struct RelayTransportTests {
         let registry = BundleRegistry()
         registry.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": .string("create_agent"), "parent_id": .string("core"),
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("ws_bridge.tools"), "id": .string("wb"),
                 ]))
         ])[0].result
@@ -510,7 +512,7 @@ struct RelayTransportTests {
         // memory needs the test seam.
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
                     "type": .string("update_agent"), "id": .string("wb"),
                     "transport": .string("memory"),
@@ -568,7 +570,8 @@ struct RelayTransportTests {
                 == "set_identity: role must be one of ('manager', 'kernel')",
             "\(badRole.serialize())")
         #expect(badRole["reason"].asString == "bad_arg" && badRole["arg"].asString == "role")
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
+            .result
     }
 
     /// A7.27 — the correlator is namespaced by agent id (`<bridge_id>-<n>`).
@@ -590,7 +593,8 @@ struct RelayTransportTests {
             return
         }
         #expect(env["payload"]["id"].asString == "brA-1", "\(s)")
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
+            .result
     }
 
     /// A7.30/A7.17 — `bridge_up` after boot, exactly one `bridge_down` when the
@@ -604,14 +608,15 @@ struct RelayTransportTests {
         bundle.injectTransport(
             agentId: "brA", transport: await RelayTransport.attach(wire: wire, partnerGuid: "B"))
         _ = await kernel.send([Item("brA", ["type": "boot"])])[0].result
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
+            .result
         var seen: [String] = []
         var iter = inbox.makeAsyncIterator()
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline, seen.count < 2, let ev = await iter.next() {
             // The leg's inbox also carries the kernel's own lifecycle events; the
             // bridge's own pair is what this pins.
-            if let t = ev["type"].asString, t.hasPrefix("bridge_") { seen.append(t) }
+            if let t = ev.payload["type"].asString, t.hasPrefix("bridge_") { seen.append(t) }
         }
         #expect(seen == ["bridge_up", "bridge_down"], "\(seen)")
     }
@@ -630,7 +635,8 @@ struct RelayTransportTests {
             (ps["tasks"].asArray ?? []).contains {
                 $0["agent"].asString == "brA" && $0["verb"].asString == "read_loop"
             }, "\(ps.serialize())")
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
+            .result
     }
 
     /// A7.34 — an `error` frame with no `error` field is python's `str(None)`.
@@ -670,13 +676,14 @@ struct RelayTransportTests {
         var iter = inbox.makeAsyncIterator()
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline, let ev = await iter.next() {
-            if ev == .object([:]) {
+            if ev.payload == .object([:]) {
                 sawEmpty = true
                 break
             }
         }
         #expect(sawEmpty, "a payload-less remote event must re-emit as {}")
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
+            .result
     }
 
     /// A7.25/A7.26 — the `timeout` arg bounds the forward, rendered as python's
@@ -703,7 +710,8 @@ struct RelayTransportTests {
             r == .object(["error": .string("bridge.forward: timeout after 0.2s")]),
             "\(r.serialize())")
         #expect(Date().timeIntervalSince(started) < 5)
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
+            .result
     }
 
     /// A7.33 — teardown closes the transport and fails every pending forward
@@ -718,7 +726,8 @@ struct RelayTransportTests {
         _ = await kernel.send([Item("brA", ["type": "boot"])])[0].result
         async let pending = forward(kernel, "brA", target: "x", payload: ["type": "reflect"])
         try await Task.sleep(nanoseconds: 100_000_000)
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "brA"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
+            .result
         let r = await pending
         #expect(
             r == .object(["error": .string("bridge.forward: bridge transport closed")]),
@@ -869,6 +878,51 @@ private func binaryFrame(headerLen: UInt32, _ tail: [UInt8]) -> [UInt8] {
     ]
     out.append(contentsOf: tail)
     return out
+}
+
+// ── A7.22 — the self-healing re-dial starts at once, not after a backoff ──
+
+/// Counts dial attempts and fails the first `failures` of them.
+private actor DialScript {
+    private var attempts = 0
+    private let failures: Int
+    init(failures: Int) { self.failures = failures }
+    func count() -> Int { attempts }
+    func dial() throws -> any RelayWire {
+        attempts += 1
+        if attempts <= failures {
+            throw NIOWebSocketClient.Closed(reason: "relay down")
+        }
+        return ScriptedWire([
+            .text(#"{"type": "event", "source": "B", "payload": {"ok": true}}"#)
+        ])
+    }
+}
+
+@Suite("relay self-healing")
+struct RelaySelfHealTests {
+
+    /// Python `_reconnect_ws` DIALS FIRST and sleeps only after a dial FAILS, so
+    /// a leg that boots with no socket re-dials immediately. Swift slept one full
+    /// `reconnect` interval before every attempt; with a 30 s backoff that is the
+    /// difference between healing now and never healing inside the window.
+    /// Measured on the parity `bridges` capture as `relay_connections` 1 vs
+    /// python's 2.
+    @Test func reDialHappensBeforeTheBackoffSleep() async throws {
+        let script = DialScript(failures: 1)
+        let transport = try await RelayTransport.connect(
+            relayURL: URL(string: "ws://127.0.0.1:1")!, guid: "A", token: "",
+            partnerGuid: "B", heartbeat: 0, reconnect: 30,
+            dialer: { try await script.dial() })
+        // The eager dial failed, so the leg booted with NO socket (python:
+        // "boot still succeeds and the leg connects in the background"). The
+        // 30 s backoff must not be charged before the first re-dial.
+        let frame = try await withDeadline(5) { try await transport.recv().frame }
+        #expect(frame["ok"].asBool == true)
+        let attempts = await script.count()
+        #expect(attempts == 2)
+        await transport.close()
+    }
 }
 
 @Suite("ws_bridge frame resilience")

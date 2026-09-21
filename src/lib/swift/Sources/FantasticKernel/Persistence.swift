@@ -17,8 +17,13 @@ public enum Persistence {
         case ioFailure(String)
     }
 
-    /// Write `agent`'s record to disk, merging into any existing
-    /// agent.json. Ephemeral agents and InMemory mode skip silently.
+    /// Write `agent`'s record to disk, merging into any existing agent.json.
+    /// Ephemeral agents and InMemory mode skip silently.
+    ///
+    /// THE COLD PRIMITIVE, python's `_testkit.persist`: the ONE direct write,
+    /// for materializing a live record without a provider. Ongoing persistence
+    /// rides the root loader's debounced `RecordWriter` through the discovered
+    /// store — persisting at the verb is what C14 removed.
     ///
     /// The record persists AS-IS — a single `agent.json`. There is no `code`/
     /// `main.py` split: exec_bridge is a general-purpose COMMAND runner now, not a
@@ -70,97 +75,64 @@ public enum Persistence {
         try bytes.write(to: file, options: .atomic)
     }
 
-    /// Seed `<agent.root>/readme.md` with `content` if it doesn't
-    /// already exist. Used at create_agent time when the bundle ships
-    /// a non-nil readme.
-    public static func seedReadme(agent: Agent, content: String, storage: StorageMode)
-        throws
+    /// Walk a `.fantastic` tree → a flat list of records (root first, then
+    /// descendants depth-first). Port of python `kernel_state.read_tree`.
+    ///
+    ///   <rootDir>/agent.json                      ← the root record
+    ///   <rootDir>/<children_dir>/<id>/agent.json
+    ///   <rootDir>/<children_dir>/<id>/<children_dir>/<child>/agent.json
+    ///
+    /// THE DISK POSITION IS AUTHORITATIVE: each record's `parent_id` is
+    /// overwritten with the id of the agent whose children dir it sits in (the
+    /// root's id at the top level), so a stale or hand-edited `parent_id` can
+    /// never contradict where the record actually lives.
+    ///
+    /// The container's NAME is declared by the root record (`children_dir`,
+    /// default `agents`) — a self-describing tree may call it `host_agents`.
+    ///
+    /// Pure read; the bootstrap calls it BEFORE any agent exists. An entry with
+    /// no `agent.json`, or one that does not parse, is skipped SILENTLY and is
+    /// NOT descended into — a corrupt record takes its subtree with it, exactly
+    /// as python's `_walk` does, rather than orphaning children onto a parent
+    /// that failed to load. Entries are visited in sorted order (`fs.list_dir`).
+    /// A MISSING or unparseable root record yields the children alone, parented
+    /// to `fallbackRootId` (python `read_tree`, 2026-09-20 — it used to hide the
+    /// whole tree behind a reseed).
+    public static func readTree(rootDir: URL, fallbackRootId: String = "kernel_state") -> [AgentRecord]
     {
-        guard case .disk = storage else { return }
         let fm = FileManager.default
-        try? fm.createDirectory(
-            at: agent.rootPath, withIntermediateDirectories: true)
-        let file = agent.readmeFile
-        if fm.fileExists(atPath: file.path) { return }
-        try content.write(to: file, atomically: true, encoding: .utf8)
-    }
-
-    /// Remove `agent`'s root directory recursively. Best-effort —
-    /// non-existent paths are not an error.
-    public static func remove(agent: Agent, storage: StorageMode) throws {
-        guard case .disk = storage else { return }
-        let fm = FileManager.default
-        if fm.fileExists(atPath: agent.rootPath.path) {
-            try? fm.removeItem(at: agent.rootPath)
+        let rootFile = rootDir.appendingPathComponent("agent.json")
+        var rootRec: AgentRecord? = nil
+        if let data = try? Data(contentsOf: rootFile),
+            let parsed = try? JSON.parse(data),
+            let rec = try? AgentRecord(json: parsed)
+        {
+            rootRec = rec
         }
-    }
+        let declared = rootRec?.meta["children_dir"]?.asString
+        let childrenDir = (declared?.isEmpty == false) ? declared! : "agents"
 
-    /// Recursively walk the nested on-disk agent tree and decode every
-    /// `agent.json` into an `AgentRecord`. The canonical layout nests
-    /// children under their parent:
-    ///
-    ///   <agentsDir>/<id>/agent.json
-    ///   <agentsDir>/<id>/agents/<child>/agent.json
-    ///   <agentsDir>/<id>/agents/<child>/agents/<grandchild>/agent.json
-    ///
-    /// so a shallow read (direct children only) would drop every
-    /// nested agent — canvas members, a `web_ws` under `web`, etc. —
-    /// and the one-shot CLI / daemon would boot a partial fleet.
-    /// Mirrors Python's `_load_children` recursion.
-    ///
-    /// Failures (missing file, unparseable JSON) are LOGGED to stderr
-    /// and skipped — mirrors the weak-load policy the substrate
-    /// applies for unknown handler_modules. The kernel deals with a
-    /// partial fleet gracefully.
-    ///
-    /// Returns records depth-first. The caller wraps them in a
-    /// `KernelState` and calls `kernel.load(_:)`, which wires the tree
-    /// by `parent_id` (order-independent) and validates root + parent
-    /// integrity.
-    public static func readAllAgentRecords(from agentsDir: URL) -> [AgentRecord] {
-        var records: [AgentRecord] = []
-        let decoder = JSONDecoder()
-        let fm = FileManager.default
+        var records: [AgentRecord] = rootRec.map { [$0] } ?? []
 
-        func walk(_ dir: URL) {
-            guard
+        func walk(_ dir: URL, parentId: String?) {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
                 let entries = try? fm.contentsOfDirectory(
-                    at: dir, includingPropertiesForKeys: nil,
-                    options: [.skipsHiddenFiles])
-            else {
-                return
-            }
-            for entry in entries {
-                // Each direct child of `dir` is `<id>/`, containing an
-                // `agent.json` plus (optionally) a nested `agents/` dir.
-                var isDir: ObjCBool = false
-                guard
-                    fm.fileExists(atPath: entry.path, isDirectory: &isDir),
-                    isDir.boolValue
-                else { continue }
+                    at: dir, includingPropertiesForKeys: nil, options: [])
+            else { return }
+            for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 let agentFile = entry.appendingPathComponent("agent.json")
-                if let data = try? Data(contentsOf: agentFile) {
-                    do {
-                        let record = try decoder.decode(AgentRecord.self, from: data)
-                        records.append(record)
-                    } catch {
-                        FileHandle.standardError.write(
-                            "[kernel] skipping malformed agent.json at \(agentFile.path): \(error)\n"
-                                .data(using: .utf8) ?? Data())
-                    }
-                }
-                // Recurse into this agent's children, if any.
-                let childrenDir = entry.appendingPathComponent("agents")
-                var childIsDir: ObjCBool = false
-                if fm.fileExists(atPath: childrenDir.path, isDirectory: &childIsDir),
-                    childIsDir.boolValue
-                {
-                    walk(childrenDir)
-                }
+                guard let data = try? Data(contentsOf: agentFile),
+                    let parsed = try? JSON.parse(data),
+                    var rec = try? AgentRecord(json: parsed)
+                else { continue }
+                rec.parentId = parentId
+                records.append(rec)
+                walk(entry.appendingPathComponent(childrenDir), parentId: rec.id)
             }
         }
 
-        walk(agentsDir)
+        walk(rootDir.appendingPathComponent(childrenDir), parentId: rootRec?.id ?? fallbackRootId)
         return records
     }
 }

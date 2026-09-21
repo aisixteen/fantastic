@@ -26,6 +26,7 @@ public let HANDLER_MODULE = "web_rest.tools"
 
 public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendable {
     public let name = "web_rest"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
     public init() {}
 
     public var readme: String? { Self.readmeText }
@@ -102,7 +103,7 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
 
     // MARK: - WebRouteOwner (python's mounted endpoints)
 
-    public func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> JSON {
+    public func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> (JSON, Data?) {
         let method = request["method"].asString ?? "GET"
         let target = request["params"]["target_id"].asString
         if method == "POST" {
@@ -110,8 +111,10 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
                 legId: legId, target: target, request: request, kernel: kernel)
         }
         // GET `_reflect` (root) and `_reflect/{target_id}` (one agent).
-        return await reflectEndpoint(
-            legId: legId, target: target ?? "kernel", request: request, kernel: kernel)
+        return (
+            await reflectEndpoint(
+                legId: legId, target: target ?? "kernel", request: request, kernel: kernel), nil
+        )
     }
 
     /// python `_make_post_endpoint._rest_call` (JSON leg; the octet leg is the
@@ -119,9 +122,11 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
     /// raw bytes or response headers).
     private func postEndpoint(
         legId: AgentId, target: String?, request: JSON, kernel: Kernel
-    ) async -> JSON {
+    ) async -> (JSON, Data?) {
         guard let target = target else {
-            return Self.jsonResponse(400, .object(["error": .string("web_rest: missing target")]))
+            return (
+                Self.jsonResponse(400, .object(["error": .string("web_rest: missing target")])), nil
+            )
         }
         let body = request["body"].asString ?? ""
         let payload: JSON
@@ -130,14 +135,37 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
             payload = .object([:])
         } else {
             guard let parsed = try? JSON.parse(body) else {
+                // PYTHON PARSES THE THREE NON-FINITE CONSTANTS (`allow_nan`), so
+                // a bare `NaN` / `Infinity` / `-Infinity` body is a FLOAT there
+                // — valid input, just not a dict, which is the object refusal
+                // below and not a parse error. Swift's codec refuses them (it
+                // mirrors serde_json), so the distinction is spelled here rather
+                // than by widening the codec for every reader.
+                if ["NaN", "Infinity", "-Infinity"].contains(
+                    body.trimmingCharacters(in: .whitespacesAndNewlines))
+                {
+                    return (
+                        Self.jsonResponse(
+                            400,
+                            .object(["error": .string("web_rest: body must be a JSON object")])),
+                        nil
+                    )
+                }
                 // Don't echo the parser exception back — generic message only
                 // (CodeQL: information exposure through an exception).
-                return Self.jsonResponse(
-                    400, .object(["error": .string("web_rest: request body is not valid JSON")]))
+                return (
+                    Self.jsonResponse(
+                        400,
+                        .object(["error": .string("web_rest: request body is not valid JSON")])),
+                    nil
+                )
             }
             guard case .object = parsed else {
-                return Self.jsonResponse(
-                    400, .object(["error": .string("web_rest: body must be a JSON object")]))
+                return (
+                    Self.jsonResponse(
+                        400, .object(["error": .string("web_rest: body must be a JSON object")])),
+                    nil
+                )
             }
             payload = parsed
         }
@@ -146,10 +174,10 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
         // lowercases every header before handing them over.
         let headers = request["headers"]
         if let denied = gateWebLeg(
-            kernel: kernel, legId: legId, target: target,
+            kernel: kernel, legId: legId, kind: "call", target: target,
             verb: payload["type"].asString ?? "", token: headers["x-fantastic-auth"].asString)
         {
-            return Self.jsonResponse(403, denied)
+            return (Self.jsonResponse(403, denied), nil)
         }
         // NAMING an execution. The credential rides `X-Fantastic-Auth`; an
         // execution id rides its own header for the same reason — it is dispatch
@@ -161,12 +189,42 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
         if let execId = headers["x-fantastic-execution-id"].asString, !execId.isEmpty {
             item.id = execId
         }
-        let reply = await KernelTaskLocals.$currentSender.withValue(legId) {
-            await kernel.send([item])[0].result
+        // A BINARY-EDGE VERB RIDES THE BINARY CHANNEL even on the JSON leg
+        // (A13.1): that is the only way the bundle returns — or receives — a raw
+        // chunk. Python needs no such list; its payload dict simply HOLDS the
+        // bytes and `_first_bytes_field` finds them in the reply. Here the
+        // carrier is the item's blob, so the decision is static, by verb, and
+        // identical on both legs. The request blob is EMPTY: a JSON body cannot
+        // hold one, so `write_stream` with a JSON-string `bytes` reaches
+        // file_bridge as a header `bytes` key and is refused `missing_arg`
+        // (A13.19), which is python's answer too.
+        if Self.binaryEdgeVerbs.contains(payload["type"].asString ?? "") {
+            item.binary = Data()
         }
-        if case .null = reply { return Self.noContent }
-        return Self.jsonResponse(200, reply)
+        let out = await KernelTaskLocals.$currentSender.withValue(legId) {
+            await kernel.send([item])[0]
+        }
+        if case .null = out.result { return (Self.noContent, nil) }
+        // The host turns a CHUNK — a 0-byte one included — into the octet reply;
+        // a refusal carries none and stays JSON. `payload_header` is the reply
+        // dict rendered with python's `json.dumps` DEFAULTS, which is what rides
+        // `X-Fantastic-Payload`; the JSON body uses the compact separators
+        // starlette's `JSONResponse` writes, so the two are not the same bytes.
+        if let chunk = out.body {
+            var route = Self.jsonResponse(200, out.result)
+            if case .object(var o) = route {
+                o["payload_header"] = .string(pyJsonDumps(out.result))
+                route = .object(o)
+            }
+            return (route, chunk)
+        }
+        return (Self.jsonResponse(200, out.result), nil)
     }
+
+    /// The verbs a JSON-leg POST must route down the BINARY channel, chosen
+    /// STATICALLY by verb — the SAME pair the WS leg uses, so a browser and a
+    /// curl client get the same answer for the same request (A11.9/A13.1).
+    static let binaryEdgeVerbs: Set<String> = ["read_stream", "write_stream"]
 
     /// python `_make_reflect_root` / `_make_reflect_get`.
     private func reflectEndpoint(
@@ -174,7 +232,7 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
     ) async -> JSON {
         let payload = Self.reflectPayload(request["query"])
         if let denied = gateWebLeg(
-            kernel: kernel, legId: legId, target: target, verb: "reflect",
+            kernel: kernel, legId: legId, kind: "call", target: target, verb: "reflect",
             token: request["headers"]["x-fantastic-auth"].asString)
         {
             return Self.jsonResponse(403, denied)

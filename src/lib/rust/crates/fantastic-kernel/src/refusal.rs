@@ -213,10 +213,17 @@ pub fn missing(verb: &str, arg: &str) -> Value {
 /// point of the code. Measured by the shared C21 corpus 2026-08-27 —
 /// `create_agent: parent_id required` carried a hint and no `arg`, so python's
 /// reply and ours disagreed on a field a caller branches on.
+///
+/// KEY ORDER matches python's `refusal(code, error, hint=hint, arg=arg)`:
+/// `error, reason, hint, arg` — `hint` is a named parameter of `refusal()`
+/// itself and is inserted before `**extra` (which is where `arg` rides), so
+/// hint precedes arg. `missing()` alone has no hint and stays `error, reason,
+/// arg`.
 #[must_use]
 pub fn missing_hint(verb: &str, arg: &str, hint: impl Into<String>) -> Value {
-    let mut v = missing(verb, arg);
+    let mut v = refusal(MISSING_ARG, format!("{verb}: {arg} required"));
     with(&mut v, "hint", Value::String(hint.into()));
+    with(&mut v, "arg", Value::String(arg.to_string()));
     v
 }
 

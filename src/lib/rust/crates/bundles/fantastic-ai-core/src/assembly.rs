@@ -28,7 +28,7 @@ use std::sync::Arc;
 /// comma-joined through `str()`, and anything nested is the REPLY NOTATION
 /// collapsed onto the line. Rust used to serialize every non-string as JSON, so
 /// a model read `parent_id=null`, `can_call={"$self":"*"}` and
-/// `tree=["core",…]` where python's says `parent_id=`, `can_call=<$self>*</$self>`
+/// `tree=["kernel_state",…]` where python's says `parent_id=`, `can_call=<$self>*</$self>`
 /// and `tree=kernel_state,web`.
 fn reflect_field(v: &Value) -> String {
     match v {

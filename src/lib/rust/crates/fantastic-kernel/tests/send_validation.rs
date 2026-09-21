@@ -35,7 +35,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -48,7 +48,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
 }
 
 async fn create(kernel: &Arc<Kernel>, id: &str, extra: Value) -> Value {
-    let mut p = json!({"type": "create_agent", "parent_id": "core", "id": id,
+    let mut p = json!({"type": "create_agent", "parent_id": "kernel_state", "id": id,
                        "handler_module": "noop.tools"});
     if let Some(m) = extra.as_object() {
         for (k, v) in m {
@@ -120,6 +120,71 @@ async fn empty_id_is_refused_bad_arg() {
         .await
         .remove(0);
     assert!(out.pid.is_some(), "{}", out.result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_target_is_missing_arg() {
+    // C30: an empty target is a coded `missing_arg`, checked FIRST — never an
+    // `unknown_agent` (the empty string is not a candidate id to suggest
+    // corrections against). Also true on `send_with_binary`.
+    let (_t, kernel) = mk();
+    let out = kernel
+        .send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))])
+        .await
+        .remove(0);
+    assert!(out.pid.is_none(), "{out:?}");
+    assert_eq!(out.result["reason"], "missing_arg", "{}", out.result);
+    assert_eq!(out.result["arg"], "target");
+    assert_eq!(out.result["error"], "send: target required");
+
+    let (v, body) = kernel
+        .send_with_binary(&AgentId::from(""), json!({"type": "poke"}), vec![1, 2, 3])
+        .await;
+    assert_eq!(v["reason"], "missing_arg", "{v}");
+    assert_eq!(v["arg"], "target");
+    assert_eq!(v["error"], "send: target required");
+    assert_eq!(body, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draining_refuses_before_resolving_the_target() {
+    // C30 (rust): draining used to be checked AFTER the target was resolved,
+    // so a send to an id that does not even exist answered `unknown_agent`
+    // instead of `draining` while the kernel was stopping.
+    let (_t, kernel) = mk();
+    let _ = kernel.shutdown_agents().await;
+    assert!(kernel.draining());
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("no-such-agent"),
+            json!({"type": "poke"}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(out.result["reason"], "draining", "{}", out.result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_from_a_killed_task_does_not_dispatch() {
+    // C30 (rust): a task already marked killed registers no new work — the
+    // send settles `cancelled` synchronously, never reaching the task table.
+    let (_t, kernel) = mk();
+    create(&kernel, "a", json!({})).await;
+    let killed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let out = fantastic_kernel::tasks::CURRENT_KILLED
+        .scope(killed, async {
+            kernel
+                .send(vec![Item::new(AgentId::from("a"), json!({"type": "poke"}))])
+                .await
+                .remove(0)
+        })
+        .await;
+    assert!(
+        out.pid.is_none(),
+        "must never reach the task table: {out:?}"
+    );
+    assert_eq!(out.status, fantastic_kernel::Status::Cancelled);
+    assert_eq!(out.result, json!({"cancelled": true}));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

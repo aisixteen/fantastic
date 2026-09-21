@@ -70,7 +70,7 @@ async fn send_to_missing_target_returns_error() {
 #[tokio::test]
 async fn send_kernel_alias_routes_to_root() {
     let kernel = Arc::new(Kernel::new());
-    let root = make_agent("core");
+    let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     // Root has no handler_module → reflect is answered natively.
@@ -147,7 +147,7 @@ async fn send_with_binary_missing_target_returns_error() {
         )
         .await;
     assert!(v["error"].as_str().unwrap_or("").contains("no agent"));
-    assert!(body.is_empty());
+    assert_eq!(body, None);
 }
 
 #[tokio::test]
@@ -173,10 +173,10 @@ async fn send_with_binary_routes_through_bundle_handle_binary() {
             _header: Value,
             blob: Vec<u8>,
             _kernel: &Arc<Kernel>,
-        ) -> Result<(Reply, Vec<u8>), BundleError> {
+        ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
             // Echo the bytes back as the reply BODY (symmetric channel).
             let len = blob.len();
-            Ok((Some(json!({"ok": true, "len": len})), blob))
+            Ok((Some(json!({"ok": true, "len": len})), Some(blob)))
         }
     }
     let mut kernel = Kernel::new();
@@ -203,7 +203,105 @@ async fn send_with_binary_routes_through_bundle_handle_binary() {
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["len"], 64);
     // Symmetric channel: bytes flow back as the reply body too.
-    assert_eq!(body.len(), 64);
+    assert_eq!(body.expect("a chunk came back").len(), 64);
+}
+
+#[tokio::test]
+async fn binary_dispatch_refusals_match_the_text_channel() {
+    // C34: python has ONE dispatch path for both channels, so a binary send to
+    // a bare agent (no handler_module) or one whose bundle is not installed
+    // answers the exact same UNHANDLED shape + `verb` the text channel does —
+    // not a different, binary-only wording.
+    let kernel = Arc::new(Kernel::new());
+    let bare = make_agent("bare");
+    kernel.register(Arc::clone(&bare));
+    let (v, body) = kernel
+        .send_with_binary(&AgentId::from("bare"), json!({"type": "ingest"}), vec![1])
+        .await;
+    assert_eq!(v["reason"], "unhandled");
+    assert_eq!(v["verb"], "ingest");
+    assert_eq!(
+        v["error"],
+        "agent 'bare' has no handler_module; cannot answer verb 'ingest'"
+    );
+    assert_eq!(body, None);
+
+    let orphan = Agent::new(
+        AgentId::from("orphan_b"),
+        Some("nope_state.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("orphan_b"),
+        true,
+    );
+    kernel.register(Arc::clone(&orphan));
+    let (v, body) = kernel
+        .send_with_binary(
+            &AgentId::from("orphan_b"),
+            json!({"type": "ingest"}),
+            vec![1],
+        )
+        .await;
+    assert_eq!(v["reason"], "unhandled");
+    assert_eq!(v["verb"], "ingest");
+    assert_eq!(
+        v["error"],
+        "agent 'orphan_b': handler_module 'nope_state.tools' cannot be \
+         imported in this runtime: ModuleNotFoundError: No module named \
+         'nope_state.tools'"
+    );
+    assert_eq!(body, None);
+}
+
+#[tokio::test]
+async fn a_binary_bundle_error_settles_raised() {
+    // C34: a bundle error on the binary channel settles `raised:true`,
+    // exactly like the text channel's bundle-error path.
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Boom;
+    #[async_trait::async_trait]
+    impl Bundle for Boom {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            _payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(None)
+        }
+        async fn handle_binary(
+            &self,
+            _agent_id: &AgentId,
+            _header: Value,
+            _blob: Vec<u8>,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+            Err(BundleError::from("kaboom"))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("boom.tools", Boom);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let agent = Agent::new(
+        AgentId::from("bm"),
+        Some("boom.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("bm"),
+        true,
+    );
+    kernel.register(Arc::clone(&agent));
+    let (v, body) = kernel
+        .send_with_binary(&AgentId::from("bm"), json!({"type": "ingest"}), vec![1])
+        .await;
+    assert_eq!(v["raised"], true);
+    assert!(v["error"].as_str().unwrap().contains("kaboom"));
+    assert_eq!(body, None);
 }
 
 #[tokio::test]
@@ -228,6 +326,65 @@ async fn list_agents_returns_records_for_every_registered() {
         .filter_map(|x| x.get("id").and_then(Value::as_str))
         .collect();
     assert_eq!(ids, vec!["a_1", "b_1"]);
+}
+
+#[tokio::test]
+async fn list_agents_points_back_at_the_briefing() {
+    // C23: python's `_LIST_HINT` reads `<type>reflect</type>` — the TAG form,
+    // not `{type:'reflect'}` — since that is the wire grammar a caller
+    // actually sends.
+    let kernel = Arc::new(Kernel::new());
+    let a = make_agent("a_1");
+    kernel.register(Arc::clone(&a));
+    kernel.set_root(Arc::clone(&a));
+    let v = kernel
+        .send(vec![Item::new(
+            AgentId::from("a_1"),
+            json!({"type": "list_agents"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(v["more"].as_str().unwrap(), LIST_HINT);
+    assert!(v["more"].as_str().unwrap().contains("<type>reflect</type>"));
+    assert!(!v["more"].as_str().unwrap().contains("{type:'reflect'}"));
+}
+
+#[tokio::test]
+async fn handler_module_not_installed_is_the_python_unhandled_shape() {
+    // C24: `agent <id!r>: handler_module <hm!r> cannot be imported in this
+    // runtime: <tail>` — the stable PREFIX is pinned; the exception tail is
+    // not (python's own wording drifts between runs), so only the prefix and
+    // the `reason`/`verb` machine fields are checked.
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let orphan = Agent::new(
+        AgentId::from("orphan"),
+        Some("nope_state.tools".to_string()),
+        Some(AgentId::from("kernel_state")),
+        Map::new(),
+        Path::new("/tmp/nowhere").join("orphan"),
+        true,
+    );
+    kernel.register(Arc::clone(&orphan));
+    let v = kernel
+        .send(vec![Item::new(
+            AgentId::from("orphan"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(v["reason"], "unhandled");
+    assert_eq!(v["verb"], "reflect");
+    assert_eq!(
+        v["error"],
+        "agent 'orphan': handler_module 'nope_state.tools' cannot be \
+         imported in this runtime: ModuleNotFoundError: No module named \
+         'nope_state.tools'"
+    );
 }
 
 // ─── #2 — current_origin: the CALLER, not the callee ────────────────
@@ -346,7 +503,7 @@ async fn an_ungranted_agent_cannot_watch_another() {
     // `assistant:[send]` could mirror ANY agent's inbox in its session and read
     // the packed confidential context out of the model's prompt.
     let kernel = Arc::new(Kernel::new());
-    let root = make_agent("core");
+    let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let secret = make_agent("secret");
@@ -396,12 +553,12 @@ async fn the_state_stream_is_not_covered_by_a_wildcard() {
     // child of the root could tap the whole stream while holding no grant that
     // names it.
     let kernel = Arc::new(Kernel::new());
-    let root = make_agent("core");
+    let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut meta = Map::new();
     // A wildcard on the root — deliberately generous, and still not enough.
-    meta.insert("can_call".into(), json!({"core": "*"}));
+    meta.insert("can_call".into(), json!({"kernel_state": "*"}));
     let leaf = Agent::new(
         AgentId::from("leaf"),
         None,
@@ -466,7 +623,7 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     // extras — so `side` is LAST. The port wrote `side` before `hint`, and the
     // measured `prompt_req_05.json` msg 8 disagreed key for key.
     let kernel = Arc::new(Kernel::new());
-    let root = make_agent("core");
+    let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let store = make_agent("kernel_store");
@@ -494,7 +651,7 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     // Ingress: the sender may call out, the target does not accept it.
     let ws = make_agent("ws");
     kernel.register(Arc::clone(&ws));
-    let rest = granted("rest", Some("core"), "can_call", json!({"ws": "*"}));
+    let rest = granted("rest", Some("kernel_state"), "can_call", json!({"ws": "*"}));
     kernel.register(Arc::clone(&rest));
     let d = kernel
         .gate(
@@ -515,7 +672,7 @@ async fn conferral_refusals_use_python_repr_and_none() {
     // (`side` before `hint`) — only the four `refusal()` denials reorder. What
     // changes here is the quoting, and the absent parent: python renders `None`.
     let kernel = Arc::new(Kernel::new());
-    let root = make_agent("core");
+    let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mid = make_agent("mid");
@@ -549,7 +706,7 @@ async fn conferral_refusals_use_python_repr_and_none() {
         d["error"]
             .as_str()
             .unwrap()
-            .starts_with("leaf cannot delegate '*' on $loader: it resolves to core,"),
+            .starts_with("leaf cannot delegate '*' on $loader: it resolves to kernel_state,"),
         "got {}",
         d["error"]
     );
@@ -569,17 +726,163 @@ async fn conferral_refusals_use_python_repr_and_none() {
 
     // A target that exists and is not held: python prints `its parent is None`
     // for a parentless agent (the root), not `none`.
-    let d = confer(json!({"core": ["ps"]})).expect("a grant on the root passed");
+    let d = confer(json!({"kernel_state": ["ps"]})).expect("a grant on the root passed");
     assert!(
         d["error"].as_str().unwrap().starts_with(
-            "leaf cannot delegate 'ps' on core: core is not your child \
-                          (its parent is None) and not in your can_call —"
+            "leaf cannot delegate 'ps' on kernel_state: kernel_state is not your \
+             child (its parent is None) and not in your can_call —"
         ),
         "got {}",
         d["error"]
     );
     assert_eq!(keys(&d), ["error", "reason", "side", "parent", "hint"]);
     assert_eq!(d["parent"], Value::Null);
+}
+
+#[tokio::test]
+async fn conferring_an_empty_verb_list_probes_star() {
+    // python: `probe = need if (need and "*" not in need) else ["*"]` — an
+    // EMPTY conferred verb list is falsy, so it probes `*` too. Before the
+    // C21 fix, `Value::Array(vs)` with `vs.is_empty()` still matched the
+    // "use the list" arm, built an EMPTY probe vec, the `for v in probe` loop
+    // ran zero times, and the conferral silently PASSED — `can_call:{"x":[]}`
+    // was accepted from a granter holding NOTHING on `x` at all.
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let mid = make_agent("mid");
+    kernel.register(Arc::clone(&mid));
+    let leaf = make_agent_under("leaf", "mid");
+    kernel.register(Arc::clone(&leaf));
+
+    // `leaf` holds nothing on the ROOT (its grandparent, not its own parent —
+    // the `$parent` baseline does not cover it) and tries to confer an EMPTY
+    // verb list on it.
+    let d = kernel
+        .gate(
+            &AgentId::from("leaf"),
+            "create_agent",
+            &root,
+            &json!({"type": "create_agent", "parent_id": "leaf",
+                    "can_call": {"kernel_state": []}}),
+        )
+        .expect("an empty conferred verb list must still probe '*' and be denied");
+    assert_eq!(d["reason"], "unauthorized");
+    assert_eq!(d["side"], "delegation");
+}
+
+// ── C35: alias resolves through well_known ──────────────────────────────
+
+/// Answers `{"id": <own id>}` on every verb — just enough to prove a `send`
+/// landed on the right agent.
+struct IdEcho;
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for IdEcho {
+    fn name(&self) -> &str {
+        "id_echo"
+    }
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        Ok(Some(json!({"id": agent_id.0})))
+    }
+}
+
+fn alias_kernel() -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    reg.register("id_echo.tools", IdEcho);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    kernel
+}
+
+#[tokio::test]
+async fn alias_resolves_to_agent() {
+    // python `test_alias_resolves_to_agent`: `alias` wires into `well_known`
+    // on register, and `send` resolves a target through it.
+    let kernel = alias_kernel();
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","id":"store_x",
+                   "handler_module":"id_echo.tools","alias":"store"}),
+        )])
+        .await;
+    assert_eq!(
+        kernel.well_known.get("store").map(|e| e.value().clone()),
+        Some(AgentId::from("store_x"))
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("store"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "store_x");
+}
+
+#[tokio::test]
+async fn literal_id_unaffected_by_aliases() {
+    // python `test_literal_id_unaffected_by_aliases`: a literal id that is
+    // NOT an alias resolves to itself, alias meta on the record or not.
+    let kernel = alias_kernel();
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","id":"real",
+                   "handler_module":"id_echo.tools","alias":"real_alias"}),
+        )])
+        .await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("real"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "real");
+}
+
+#[tokio::test]
+async fn alias_cleared_on_delete() {
+    // python `test_alias_cleared_on_delete`: `unregister` drops any alias
+    // pointing at the removed agent; a dangling alias then names no agent.
+    let kernel = alias_kernel();
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","id":"a1",
+                   "handler_module":"id_echo.tools","alias":"myalias"}),
+        )])
+        .await;
+    assert!(kernel.well_known.contains_key("myalias"));
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":"a1"}),
+        )])
+        .await;
+    assert!(!kernel.well_known.contains_key("myalias"));
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("myalias"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_some());
 }
 
 // ── C36: the call row and its settle ───────────────────────────────────
@@ -603,6 +906,11 @@ impl crate::bundle::Bundle for C36Bundle {
             "nope" => Ok(Some(
                 json!({"error": "х".repeat(300), "reason": "not_found", "extra": 1}),
             )),
+            // C89: echoes back WHATEVER `error` value the caller sent, so one
+            // handler can probe every falsy shape python's truthiness admits.
+            "echo_error" => Ok(Some(
+                json!({"error": payload.get("error").cloned().unwrap_or(Value::Null)}),
+            )),
             _ => Ok(Some(json!({"ok": true}))),
         }
     }
@@ -614,7 +922,7 @@ fn c36_kernel() -> (Arc<Kernel>, Arc<Agent>) {
     reg.register("c36.tools", C36Bundle);
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
-    let root = make_agent("core");
+    let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let worker = Agent::new(
@@ -667,6 +975,61 @@ async fn a_dispatch_writes_a_call_row_with_outcome() {
 }
 
 #[tokio::test]
+async fn an_unnamed_kernel_reflect_writes_no_row() {
+    // C88: python's UNNAMED `kernel` reflect fast path (`_agent.py:846`) — a
+    // pure identity read with no ledger entry, no call row, no task-table
+    // row, and the outcome's pid is None.
+    let (kernel, _worker) = c36_kernel();
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0);
+    assert!(
+        out.pid.is_none(),
+        "the fast path never touches the task table: {out:?}"
+    );
+    assert_eq!(out.status, Status::Completed);
+    assert_eq!(out.result["id"], json!("kernel_state"));
+    let root_rows = kernel.rows.for_agent(&AgentId::from("kernel_state"));
+    assert!(
+        root_rows.is_empty(),
+        "no call row on the root: {root_rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_named_kernel_reflect_still_opens_the_ledger() {
+    // Contrast: an `id` in the payload (named or joining) still opens the
+    // ledger (`_agent.py:816`) — ONLY the unnamed path skips it.
+    let (kernel, _worker) = c36_kernel();
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )
+        .with_id("named-reflect")])
+        .await
+        .remove(0);
+    assert!(
+        out.pid.is_some(),
+        "a named reflect still mints an id: {out:?}"
+    );
+    let root_rows = kernel.rows.for_agent(&AgentId::from("kernel_state"));
+    let calls: Vec<_> = root_rows
+        .iter()
+        .filter(|r| r.get("kind").and_then(Value::as_str) == Some("call"))
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "a named reflect still writes a call row: {root_rows:?}"
+    );
+}
+
+#[tokio::test]
 async fn an_errored_call_row_stamps_the_python_error_and_reason() {
     let (kernel, worker) = c36_kernel();
     kernel
@@ -686,6 +1049,51 @@ async fn an_errored_call_row_stamps_the_python_error_and_reason() {
 }
 
 #[tokio::test]
+async fn a_falsy_non_string_error_settles_completed() {
+    // C89: python `ERRORED if isinstance(reply, dict) and reply.get("error")
+    // else COMPLETED` (`_agent.py:1051-1052`) — FULL truthiness, not "the key
+    // is present". `0`, `0.0`, `[]`, `{}` and `""` are all falsy.
+    let (kernel, worker) = c36_kernel();
+    for falsy in [
+        json!(0),
+        json!(0.0),
+        json!([]),
+        json!({}),
+        json!(""),
+        json!(false),
+        Value::Null,
+    ] {
+        let out = kernel
+            .send(vec![Item::new(
+                worker.id.clone(),
+                json!({"type": "echo_error", "error": falsy}),
+            )])
+            .await
+            .remove(0);
+        assert_eq!(
+            out.status,
+            Status::Completed,
+            "a falsy error must settle completed: {falsy:?}"
+        );
+    }
+    // The contrast case: a TRUTHY non-string/non-bool error still errors.
+    for truthy in [json!(1), json!(-1), json!([1]), json!({"k": 1})] {
+        let out = kernel
+            .send(vec![Item::new(
+                worker.id.clone(),
+                json!({"type": "echo_error", "error": truthy}),
+            )])
+            .await
+            .remove(0);
+        assert_eq!(
+            out.status,
+            Status::Errored,
+            "a truthy error must still settle errored: {truthy:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_settle_row_carries_the_stamp_not_the_outcome() {
     let (kernel, worker) = c36_kernel();
     kernel
@@ -693,7 +1101,7 @@ async fn the_settle_row_carries_the_stamp_not_the_outcome() {
         .await;
     let settles: Vec<_> = kernel
         .rows
-        .for_agent(&AgentId::from("core"))
+        .for_agent(&AgentId::from("kernel_state"))
         .into_iter()
         .filter(|r| r.get("kind") == Some(&json!("settle")))
         .collect();
@@ -722,7 +1130,7 @@ async fn a_refusal_that_opened_no_call_row_appends_no_settle() {
         .await;
     assert!(kernel
         .rows
-        .for_agent(&AgentId::from("core"))
+        .for_agent(&AgentId::from("kernel_state"))
         .iter()
         .all(|r| r.get("kind") != Some(&json!("settle"))));
 }
@@ -895,6 +1303,83 @@ async fn emit_to_a_non_agent_id_is_a_noop() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forked_body_mints_before_the_dispatch_settles() {
+    // Python's ready queue is FIFO: the handler's `spawn_task` queues the body
+    // (`asyncio.create_task`) and the settle that awaits the dispatch task
+    // resumes BEHIND it, so the body's first mints precede the `settle` row.
+    //
+    // WHAT THIS DOES NOT PIN. The `ai_paths` id-order divergence measured on
+    // 2026-09-21 (`deliver_reply` rows 2 ids late, `call send` rows 1 early,
+    // 20 + 9 occurrences) is NOT this shape: rust already matches python here,
+    // on the multi-thread runtime, 50 iterations out of 50. That divergence
+    // needs a deeper chain (a spawned body that itself spawns) and is open on
+    // the owner — a single `yield_now()` at python's await point in `settle`
+    // fixed the `deliver_reply` class and made the `call send` class worse
+    // (ai_to_ai id/parent mismatches 71 -> 166), and one worker thread was
+    // worse still (354/354). Kept as the characterisation of the simple case.
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Forker;
+    #[async_trait::async_trait]
+    impl Bundle for Forker {
+        fn name(&self) -> &str {
+            "forker"
+        }
+        async fn handle(
+            &self,
+            a: &AgentId,
+            _p: &Value,
+            k: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            let k2 = Arc::clone(k);
+            let a2 = a.clone();
+            let id = k.spawn_task(a, "body", async move {
+                let mut row = Map::new();
+                row.insert("kind".to_string(), Value::from("note"));
+                let _ = k2.rows.put(&a2, row);
+            });
+            Ok(Some(json!({ "task": id.0 })))
+        }
+    }
+    let mine = AgentId::from("f");
+    for _ in 0..50 {
+        let mut kernel = Kernel::new();
+        let mut reg = BundleRegistry::new();
+        reg.register("forker.tools", Forker);
+        kernel.bundles = reg;
+        let kernel = Arc::new(kernel);
+        let root = make_agent("kernel_state");
+        kernel.register(Arc::clone(&root));
+        kernel.set_root(Arc::clone(&root));
+        kernel.register(Agent::new(
+            mine.clone(),
+            Some("forker.tools".to_string()),
+            None,
+            Map::new(),
+            Path::new("/tmp/nowhere").join("f"),
+            true,
+        ));
+        kernel
+            .send(vec![Item::new(mine.clone(), json!({"type": "go"}))])
+            .await;
+        let find = |owner: &AgentId, kind: &str| -> Option<i64> {
+            kernel
+                .rows
+                .for_agent(owner)
+                .into_iter()
+                .find(|r| r.get("kind").and_then(Value::as_str) == Some(kind))
+                .and_then(|r| r.get("id").and_then(Value::as_i64))
+        };
+        let note =
+            find(&mine, "note").expect("the forked body minted its row before send returned");
+        let settle = find(&root.id, "settle").expect("the dispatch wrote a settle row");
+        assert!(
+            note < settle,
+            "the forked body's row {note} must precede the settle row {settle}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
     // C86: the binary channel's payload rides the inbox WHOLE. The watcher gets
@@ -921,8 +1406,8 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
             _h: Value,
             blob: Vec<u8>,
             _k: &Arc<Kernel>,
-        ) -> Result<(Reply, Vec<u8>), BundleError> {
-            Ok((Some(json!({"written": blob.len()})), Vec::new()))
+        ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+            Ok((Some(json!({"written": blob.len()})), None))
         }
     }
     let mut kernel = Kernel::new();
@@ -967,6 +1452,60 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
 }
 
 #[tokio::test]
+async fn binary_dispatch_runs_the_same_pre_bundle_path_as_text() {
+    // python's `handle` is ONE path: the root answers `reflect` with the
+    // substrate identity whether the payload carried bytes or not. The binary
+    // channel used to go straight to the bundle, so an octet `reflect` on the
+    // ROOT described the loader instead of the kernel.
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Loader;
+    #[async_trait::async_trait]
+    impl Bundle for Loader {
+        fn name(&self) -> &str {
+            "loader"
+        }
+        async fn handle(
+            &self,
+            _a: &AgentId,
+            _p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(Some(
+                json!({"sentence": "Disk persistence/hydration root."}),
+            ))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("loader.tools", Loader);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        Some("loader.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("kernel_state"),
+        true,
+    );
+    kernel.register(Arc::clone(&root));
+
+    let (reply, _) = kernel
+        .send_with_binary(&root.id, json!({"type": "reflect"}), vec![b'x'])
+        .await;
+    assert_eq!(
+        reply["sentence"],
+        "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "the root's own identity, not the bundle's: {reply}"
+    );
+    // A bundle verb still routes to the bundle on this channel.
+    let (reply, _) = kernel
+        .send_with_binary(&root.id, json!({"type": "load_tree"}), vec![])
+        .await;
+    assert_eq!(reply["sentence"], "Disk persistence/hydration root.");
+}
+
+#[tokio::test]
 async fn state_summary_is_python_json_dumps() {
     // C77: `json.dumps(shrunk, ensure_ascii=False)` — `, `/`: ` separators, raw
     // non-ASCII, bytes as `<bytes:N>`, never truncated.
@@ -1003,4 +1542,73 @@ async fn a_bytes_payload_summarizes_as_bytes_n() {
         Some(&("bytes".to_string(), vec![0u8; 12])),
     );
     assert_eq!(s, r#"{"type": "write_stream", "bytes": "<bytes:12>"}"#);
+}
+
+// ─── C2 + C4 — the kernel_verbs map is python's `_SYSTEM_VERB_DOCS` ─────────
+
+/// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
+/// (`P/kernel/_agent.py`). `create_agent` names this runtime's root id until
+/// C12 renames the root to `kernel_state`.
+const PY_KERNEL_VERB_DOCS: [(&str, &str); 12] = [
+    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — your own id grows your own subtree (no grant needed); 'kernel_state' for top-level. No default parent."),
+    ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self`/`$parent`/`$children` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT."),
+    ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`."),
+    ("list_agents", "No args. Every agent's record, flat. Paged."),
+    ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
+    ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?}]}, paged, scoped to what YOU originated. Failed/timed_out/cancelled rows are the dead-letter queue: inspect, then retry with a NEW id if you choose — nothing is retried silently."),
+    ("messages", "args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, bytes, title?, level?, refs?}], refused:[ids], next?}. Your own rows always; another agent's only if its callable_by names you for `messages`. Bodies are behind that agent's `pull`."),
+    ("rows_read", "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a wildcard does not carry it). That agent's rows WHOLE (content included), oldest first — {rows:[…], next?}. The hydration read; agents read digests through `messages` instead."),
+    ("rows_write", "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a wildcard does not carry it). Appends rows to that agent's conversation, each under a FRESH id — {ids:[int]}. A row may not carry an `id`; re-ids are the caller's to remap."),
+    ("cancel", "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
+    ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
+    ("shutdown_kernel", "No args. Stops the kernel PROCESS — under env:'container', the container."),
+];
+
+#[test]
+fn kernel_verb_docs_match_python_verbatim() {
+    let docs = kernel_verb_docs();
+    let obj = docs.as_object().expect("an object");
+    assert_eq!(obj.len(), PY_KERNEL_VERB_DOCS.len(), "{docs}");
+    for (verb, text) in PY_KERNEL_VERB_DOCS {
+        assert_eq!(obj[verb], json!(text), "{verb}");
+    }
+    // `shutdown_agents` has no em-dash, so distilled == full.
+    let distilled = kernel_verbs_view(false);
+    assert_eq!(
+        distilled["shutdown_agents"],
+        json!(PY_KERNEL_VERB_DOCS[10].1)
+    );
+    assert_eq!(
+        distilled["messages"],
+        json!("args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, at DIGEST resolution")
+    );
+}
+
+#[test]
+fn full_kernel_verbs_keep_python_order() {
+    // python renders `dict(_SYSTEM_VERB_DOCS)` under `detail:full` — declaration
+    // order — and sorts only the distilled comprehension.
+    let full = kernel_verbs_view(true);
+    let keys: Vec<&str> = full
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut want = vec!["_"];
+    want.extend(PY_KERNEL_VERB_DOCS.iter().map(|(v, _)| *v));
+    assert_eq!(keys, want);
+
+    let distilled = kernel_verbs_view(false);
+    let keys: Vec<&str> = distilled
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut sorted: Vec<&str> = PY_KERNEL_VERB_DOCS.iter().map(|(v, _)| *v).collect();
+    sorted.sort_unstable();
+    let mut want = vec!["_"];
+    want.extend(sorted);
+    assert_eq!(keys, want);
 }

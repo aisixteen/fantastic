@@ -19,89 +19,81 @@ import Foundation
 
 /// `s` with python's whitespace stripped from both ends.
 ///
-/// NOT Foundation's `.whitespacesAndNewlines`. Python's `str.strip()` removes
-/// every character where `str.isspace()` is true, and that set includes the four
-/// ASCII separators U+001C..U+001F, which Unicode's whitespace class does not.
-/// One character of difference matters only because a value that keeps a stray
-/// separator stops being a scalar the far side recognises.
+/// NOT Foundation's `.whitespacesAndNewlines`, and NOT a `Character`-at-a-time
+/// walk either. Python's `str.strip()` removes SCALARS where `str.isspace()`
+/// is true (`pyIsSpace`, which also covers U+001C..U+001F). A `Character` scan
+/// strips too much: `" \u{301}x"` (a bare combining acute accent after a space)
+/// is ONE swift grapheme cluster whose first scalar is the space, so a
+/// `Character`-granularity strip drops the combining mark along with it, where
+/// python — which strips scalars, not clusters — keeps it (`" ́x".strip() ==
+/// "́x"`, the mark still attached to nothing).
 public func pyStrip(_ s: String) -> String {
-    let strippable: (Character) -> Bool = { c in
-        c.isWhitespace || ("\u{1c}"..."\u{1f}").contains(c)
-    }
-    var out = Substring(s)
-    while let f = out.first, strippable(f) { out = out.dropFirst() }
-    while let l = out.last, strippable(l) { out = out.dropLast() }
-    return String(out)
+    let scalars = Array(s.unicodeScalars)
+    var start = 0
+    var end = scalars.count
+    while start < end, pyIsSpace(scalars[start]) { start += 1 }
+    while end > start, pyIsSpace(scalars[end - 1]) { end -= 1 }
+    return String(String.UnicodeScalarView(scalars[start..<end]))
 }
 
-/// Type one scalar the way python's `coerce_scalar` does.
-///
-/// CPython parity notes, each a real difference from a naive `Int64(v)`:
+/// Type one scalar the way python's `coerce_scalar` does: `try: int(v) / except
+/// ValueError: try: float(v) / except ValueError: return v`. Built ON `pyInt`/
+/// `pyFloat` (`FantasticJSON/PyFormat.swift`) rather than a second hand-rolled
+/// parse, so every CPython grammar quirk they already mirror carries over here
+/// for free:
 ///
 /// - the bool test is case-insensitive (`v.lower() in ("true","false")`);
 /// - `int()` and `float()` accept `_` between digits (`1_000`) and a leading
 ///   `+`, and reject a leading, trailing or doubled underscore;
-/// - `float()` accepts `inf`, `infinity` and `nan` in any case, with a sign.
+/// - `int()` and `float()` map EVERY Unicode decimal digit (any script) to its
+///   ASCII value before parsing — CPython's
+///   `_PyUnicode_TransformDecimalAndSpaceToASCII` — so scripts may even mix
+///   within one literal (`int('1١')` is 11, both digits meaning 1);
+/// - `float()` accepts `inf`, `infinity` and `nan` in any case, with a sign,
+///   and REJECTS every spelling outside its plain decimal-literal grammar —
+///   no hex float (`0x10`, `0x1p3`) and no NaN payload (`nan(1)`), both of
+///   which a bare `Double(text)` would have taken.
 ///
-/// ONE value python holds that this cannot: an integer wider than `Int64`.
-/// Python's ints are unbounded, and going through `Double` would silently lose
-/// digits — so a too-wide integer stays the string it was written as. Non-finite
+/// ONE value python holds that this cannot: an integer wider than `Int64`
+/// (python's ints are unbounded, and going through `Double` would silently
+/// lose digits) — `pyInt` reports that as `OverflowError`, caught here and
+/// kept as the string it was written as, never promoted to a double. Non-finite
 /// doubles ARE representable here (`JSON.double`), unlike in rust where
 /// `serde_json` has no such number.
 public func coerceScalar(_ v: String) -> JSON {
     let lowered = v.lowercased()
     if lowered == "true" { return .bool(true) }
     if lowered == "false" { return .bool(false) }
-    guard let text = withoutUnderscores(v) else { return .string(v) }
-    if let i = Int64(text) { return .integer(i) }
-    // AN INTEGER TOO WIDE FOR Int64 IS NOT A DOUBLE. `Double(text)` would take
-    // it and lose digits; the text stands instead.
-    if isIntegerShaped(text) { return .string(v) }
-    if let d = pyDouble(text) { return .double(d) }
+    switch coerceScalarIntPhase(v) {
+    case .value(let i): return .integer(i)
+    case .tooWide: return .string(v)
+    case .notAnInt: break
+    }
+    if let d = try? pyFloat(.string(v)) { return .double(d) }
     return .string(v)
 }
 
-/// True when the text is a plain signed run of digits — an integer python holds
-/// exactly and `Double` would round.
-private func isIntegerShaped(_ text: String) -> Bool {
-    var digits = Substring(text)
-    if let f = digits.first, f == "+" || f == "-" { digits = digits.dropFirst() }
-    return !digits.isEmpty && digits.allSatisfy(\.isASCII) && digits.allSatisfy(\.isNumber)
+/// True when python's `coerce_scalar` would type `v` as an int — an ordinary
+/// `Int64`-shaped one AND one too wide for that carrier (`coerceScalar` keeps
+/// the latter as `.string`, the D13 residual). A caller that must refuse a
+/// numeric-shaped value the way python's `isinstance(x, str)` gate does —
+/// e.g. a `<target_id>` naming a send's recipient, which python types as an
+/// `int` and therefore never dispatches as a string id — checks this instead
+/// of trusting `coerceScalar(v)`'s `.string` case alone.
+public func coerceScalarIsIntegerShaped(_ v: String) -> Bool {
+    if case .notAnInt = coerceScalarIntPhase(v) { return false }
+    return true
 }
 
-/// `Double(text)` plus the spellings python accepts and swift does not.
-private func pyDouble(_ text: String) -> Double? {
-    if let d = Double(text) { return d }
-    var body = Substring(text)
-    var sign = 1.0
-    if let f = body.first, f == "+" || f == "-" {
-        if f == "-" { sign = -1 }
-        body = body.dropFirst()
-    }
-    switch body.lowercased() {
-    case "inf", "infinity": return sign * Double.infinity
-    case "nan": return Double.nan
-    default: return nil
-    }
+private enum IntPhase {
+    case value(Int64)
+    case tooWide, notAnInt
 }
 
-/// `v` with python's legal digit-separating underscores removed, or `nil` when
-/// an underscore sits where python would refuse it: at either end, beside
-/// another underscore, or next to anything but a digit on both sides.
-private func withoutUnderscores(_ v: String) -> String? {
-    guard v.contains("_") else { return v }
-    let chars = Array(v)
-    var out = ""
-    out.reserveCapacity(chars.count)
-    for (i, c) in chars.enumerated() {
-        if c != "_" {
-            out.append(c)
-            continue
-        }
-        guard i > 0, i + 1 < chars.count else { return nil }
-        guard chars[i - 1].isASCII, chars[i - 1].isNumber,
-              chars[i + 1].isASCII, chars[i + 1].isNumber
-        else { return nil }
+private func coerceScalarIntPhase(_ v: String) -> IntPhase {
+    do {
+        return .value(Int64(try pyInt(.string(v))))
+    } catch {
+        return error.type == "OverflowError" ? .tooWide : .notAnInt
     }
-    return out
 }

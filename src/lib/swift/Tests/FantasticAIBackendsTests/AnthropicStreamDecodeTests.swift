@@ -105,7 +105,9 @@ struct AnthropicStreamDecodeTests {
             #"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
             state: &st)
         #expect(
-            d.error == "anthropic stream error: {'type': 'overloaded_error', 'message': 'Overloaded'}")
+            d.error
+                == "anthropic stream error: "
+                + "{'type': 'overloaded_error', 'message': 'Overloaded'}")
         // `evt.get("error") or {}` — a missing object is the empty dict.
         var bare = AnthropicStreamState()
         let e = decodeAnthropicSSELine(#"data: {"type":"error"}"#, state: &bare)
@@ -134,21 +136,22 @@ struct AnthropicStreamDecodeTests {
     @Test("stop_reason=tool_use with no tool_use block is an anomaly and is loud")
     func toolUseIsAnAnomaly() {
         var st = AnthropicStreamState()
-        _ = decodeAnthropicSSELine(
-            #"data: {"type":"content_block_start","content_block":{"type":"text"}}"#, state: &st)
+        let text = #"data: {"type":"content_block_start","content_block":{"type":"text"}}"#
+        _ = decodeAnthropicSSELine(text, state: &st)
         st.stopReason = "tool_use"
         #expect(
             anthropicTerminalityError(st)
-                == "anthropic stream ended without end_turn: stop_reason='tool_use' blocks=['text']")
+                == "anthropic stream ended without end_turn: "
+                + "stop_reason='tool_use' blocks=['text']")
     }
 
     @Test("max_tokens is a TRUNCATED turn and must be loud, with the blocks it held")
     func truncatedIsLoud() {
         var st = AnthropicStreamState()
-        _ = decodeAnthropicSSELine(
-            #"data: {"type":"content_block_start","content_block":{"type":"thinking"}}"#, state: &st)
-        _ = decodeAnthropicSSELine(
-            #"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#, state: &st)
+        let start = #"data: {"type":"content_block_start","content_block":{"type":"thinking"}}"#
+        let delta = #"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#
+        _ = decodeAnthropicSSELine(start, state: &st)
+        _ = decodeAnthropicSSELine(delta, state: &st)
         #expect(
             anthropicTerminalityError(st)
                 == "anthropic stream ended without end_turn: stop_reason='max_tokens' "

@@ -24,6 +24,12 @@ struct LockFile {
 /// only run macOS + Linux today; Windows handling lands when we
 /// add Windows CI).
 pub fn pid_alive(pid: u32) -> bool {
+    // python `_pid_alive`: `pid <= 0` is dead, no syscall. `kill(0, sig)`
+    // targets the CALLER'S OWN process GROUP (not "pid 0" as a process), so
+    // without this a lock recorded `{"pid": 0}` read back as alive — C83.
+    if pid == 0 {
+        return false;
+    }
     #[cfg(unix)]
     {
         // Safety: kill(pid, 0) only checks existence + permission; no
@@ -38,7 +44,6 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
         true
     }
 }
@@ -70,8 +75,9 @@ pub fn acquire(workdir: &Path) -> KernelResult<PathBuf> {
         }
     }
     let me = std::process::id();
-    let lock = LockFile { pid: me };
-    let json = serde_json::to_string(&lock).expect("LockFile always serializable");
+    // python `json.dumps({"pid": os.getpid()})` — DEFAULT separators, i.e.
+    // `: ` after the key, not serde_json's compact `:` (C50).
+    let json = fantastic_bundle::py_json_dumps(&serde_json::json!({"pid": me}), true, None);
     fs::write(&path, json).map_err(|e| KernelError::LockIo {
         path: path.clone(),
         source: e,
@@ -91,16 +97,20 @@ pub fn release(workdir: &Path) -> KernelResult<()> {
     if !path.exists() {
         return Ok(());
     }
-    // Read the holder pid; bail if the file is malformed (don't touch).
-    let raw = fs::read_to_string(&path).map_err(|e| KernelError::LockIo {
-        path: path.clone(),
-        source: e,
-    })?;
-    if let Ok(lock) = serde_json::from_str::<LockFile>(&raw) {
-        if lock.pid != std::process::id() {
-            // Someone else owns this lock — leave it alone.
-            return Ok(());
-        }
+    // python `release_lock`: `cur = _read_lock()` is `None` on ANY read/parse
+    // failure, and `if cur and cur.get("pid") == os.getpid(): unlink()` — a
+    // malformed file is left ALONE, never removed (C83; this used to fall
+    // through to `remove_file` on a parse error, which could delete a lock we
+    // never verified we own).
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Ok(lock) = serde_json::from_str::<LockFile>(&raw) else {
+        return Ok(());
+    };
+    if lock.pid != std::process::id() {
+        // Someone else owns this lock — leave it alone.
+        return Ok(());
     }
     fs::remove_file(&path).map_err(|e| KernelError::LockIo { path, source: e })?;
     Ok(())

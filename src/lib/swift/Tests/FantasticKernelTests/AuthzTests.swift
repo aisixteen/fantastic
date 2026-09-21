@@ -123,7 +123,7 @@ private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Deci
     // `assistant:[send]` could mirror ANY agent's inbox in its session and read
     // the packed confidential context out of the model's prompt.
     let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     let secret = Agent(id: "secret", handlerModule: nil, parentId: nil)
@@ -157,14 +157,14 @@ private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Deci
     // child of the root could tap the whole stream while holding no grant that
     // names it.
     let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     // A wildcard on the root — deliberately generous, and still not enough.
     var meta: OrderedDictionary<String, JSON> = [:]
-    meta["can_call"] = .object(["core": .string("*")])
+    meta["can_call"] = .object(["kernel_state": .string("*")])
     let leaf = Agent(
-        id: "leaf", handlerModule: nil, parentId: AgentId("core"), meta: meta)
+        id: "leaf", handlerModule: nil, parentId: AgentId("kernel_state"), meta: meta)
     kernel.register(leaf)
 
     let denial = KernelTaskLocals.$currentSender.withValue(AgentId("leaf")) {

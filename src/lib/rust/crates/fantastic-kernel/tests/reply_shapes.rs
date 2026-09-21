@@ -40,7 +40,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -123,7 +123,7 @@ async fn delete_agent_on_an_unknown_id_is_the_unknown_agent_refusal() {
         .filter_map(Value::as_str)
         .collect();
     assert!(ids.contains(&"kid"), "{r}");
-    assert!(ids.contains(&"core"), "{r}");
+    assert!(ids.contains(&"kernel_state"), "{r}");
 }
 
 /// No `id` at all is `missing_arg`, carrying the ARG — the machine field is the
@@ -250,7 +250,7 @@ async fn list_agents_is_registry_order() {
         .iter()
         .map(|a| a["id"].as_str().unwrap_or(""))
         .collect();
-    assert_eq!(ids, vec!["core", "zulu", "mike", "alpha"], "{r}");
+    assert_eq!(ids, vec!["kernel_state", "zulu", "mike", "alpha"], "{r}");
 
     // A delete removes it from the order and leaves the rest as they were.
     let d = call(
@@ -267,7 +267,7 @@ async fn list_agents_is_registry_order() {
         .iter()
         .map(|a| a["id"].as_str().unwrap_or(""))
         .collect();
-    assert_eq!(ids, vec!["core", "zulu", "alpha"], "{r}");
+    assert_eq!(ids, vec!["kernel_state", "zulu", "alpha"], "{r}");
 
     // …and the cursor pages through THAT order, not a sorted one.
     let p = call(
@@ -282,7 +282,7 @@ async fn list_agents_is_registry_order() {
         .iter()
         .map(|a| a["id"].as_str().unwrap_or(""))
         .collect();
-    assert_eq!(ids, vec!["core", "zulu"], "{p}");
+    assert_eq!(ids, vec!["kernel_state", "zulu"], "{p}");
 }
 
 /// C15 — a record serializes `id, handler_module?, <meta in order>, parent_id`.
@@ -343,7 +343,7 @@ async fn record_parent_id_is_last() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|a| a["id"] == "core")
+        .find(|a| a["id"] == "kernel_state")
         .expect("root is registered");
     assert!(root.get("parent_id").is_none(), "{root}");
 }

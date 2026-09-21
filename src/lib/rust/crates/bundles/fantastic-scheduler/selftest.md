@@ -18,8 +18,8 @@ All test state lives under `/tmp/sc_test/`.
 ```bash
 rm -rf /tmp/sc_test && mkdir -p /tmp/sc_test && cd /tmp/sc_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
-SC=$($FANTASTIC core create_agent handler_module=scheduler.tools | jq -r .id)
-FA=$($FANTASTIC core create_agent handler_module=file_bridge.tools root=/tmp/sc_test | jq -r .id)
+SC=$($FANTASTIC kernel_state create_agent handler_module=scheduler.tools | jq -r .id)
+FA=$($FANTASTIC kernel_state create_agent handler_module=file_bridge.tools root=/tmp/sc_test | jq -r .id)
 ```
 
 ## Tests
@@ -36,7 +36,7 @@ Expect: no implicit fallback — persistence is mandatory.
 ### Test 2: configure file_agent_id, then schedule persists
 
 ```bash
-$FANTASTIC core update_agent id=$SC file_agent_id=$FA
+$FANTASTIC kernel_state update_agent id=$SC file_agent_id=$FA
 SCH=$($FANTASTIC $SC schedule target=core payload='{"type":"reflect"}' interval_seconds=60 \
   | jq -r .schedule_id)
 $FANTASTIC $SC list | jq -e --arg s "$SCH" '[.schedules[].id] | contains([$s])'
@@ -68,8 +68,8 @@ $FANTASTIC $SC list | jq -e '.schedules == []'
 ## Cleanup
 
 ```bash
-$FANTASTIC core delete_agent id=$SC
-$FANTASTIC core delete_agent id=$FA
+$FANTASTIC kernel_state delete_agent id=$SC
+$FANTASTIC kernel_state delete_agent id=$FA
 rm -rf /tmp/sc_test
 ```
 

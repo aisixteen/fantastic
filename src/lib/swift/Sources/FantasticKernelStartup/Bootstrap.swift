@@ -6,9 +6,10 @@
 //     state.json if present, returns a kernel ready to run forever
 //   - `Bootstrap.oneShot(workdir:)` — no lock; for `fantastic <id>
 //     <verb>` style one-off RPC against an existing workdir
-//   - `runUntilSignal(_:)` — daemon-mode helper that boots all loaded
-//     agents, then blocks until SIGINT/SIGTERM/SIGHUP or a root-only
-//     `shutdown_kernel`, then runs the kernel's graceful `shutdown()`
+//   - `Bootstrap.awaitStop(kernel:)` — blocks until SIGINT/SIGTERM/SIGHUP or
+//     a root-only `shutdown_kernel`; the real daemon entrypoint (`Fantastic/
+//     Daemon.swift`) races it against the REPL/block tasks and runs the
+//     kernel's graceful `shutdown()` itself.
 
 import FantasticJSON
 import FantasticKernel
@@ -83,47 +84,7 @@ public enum Bootstrap {
         {
             try? kernel.load(json: json)
         }
-        // THE DURABLE LEDGER. `installLedgerPersistence` had no production
-        // caller in swift, so every settled execution was lost on exit and a
-        // reboot started with an empty ledger — dedup and join silently stopped
-        // holding across restarts (measured 2026-09-02).
-        await kernel.installLedgerPersistence()
         return kernel
-    }
-
-    /// Run a kernel forever in daemon mode. Boots every loaded agent,
-    /// installs SIGINT/SIGTERM/SIGHUP handlers, awaits a signal OR the
-    /// kernel's own stop request (`shutdown_kernel`), then runs the graceful
-    /// `Kernel.shutdown()` — drain, the last message window, the depth-first
-    /// hook walk — and releases the lock.
-    public static func runUntilSignal(
-        kernel: Kernel,
-        lock: WorkdirLock
-    ) async {
-        // Boot every loaded agent.
-        for agent in kernel.allAgents() {
-            _ = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[0].result
-        }
-        // AFTER the boot loop: the store agent must be live before the ledger
-        // can rehydrate through it or install its flusher.
-        await kernel.installLedgerPersistence()
-        // THE PUMP SUBSCRIBES HERE: after hydration (cold, above) and the
-        // ledger, at the highest id present. `subscribe(after:)` replays what
-        // the boot loop minted meanwhile, so nothing is lost.
-        kernel.installMessagePump(after: kernel.rows.nextId - 1)
-
-        FileHandle.standardError.write(
-            "fantastic: daemon up. \(kernel.allAgents().count) agent(s) loaded. Ctrl-C to stop.\n"
-                .data(using: .utf8) ?? Data())
-
-        await awaitStop(kernel: kernel)
-
-        FileHandle.standardError.write(
-            "fantastic: shutting down...\n".data(using: .utf8) ?? Data())
-        // Drain, land the last message window (provider still alive), then the
-        // depth-first `onShutdown`/`onDelete` walk. Records and tree untouched.
-        await kernel.shutdown()
-        lock.release()
     }
 
     /// Block until an OS stop signal (SIGINT/SIGTERM/SIGHUP) arrives OR the
@@ -131,48 +92,69 @@ public enum Bootstrap {
     /// verb, which deferred its trigger 100 ms so its ack flushed first). The
     /// two are raced; whichever loses is cancelled. Python `longrun` installs
     /// the same three handlers on one stop event that `shutdown_kernel` shares.
-    public static func awaitStop(kernel: Kernel) async {
-        await withTaskGroup(of: Void.self) { group in
+    ///
+    /// Returns the SIGNAL's name (`"SIGINT"`/`"SIGTERM"`/`"SIGHUP"`) when that
+    /// leg won, or `nil` for `shutdown_kernel`/cancellation — the caller
+    /// prints python's `\n[kernel] <SIG> — shutting down...` line ONLY for a
+    /// real signal (python's `_request_stop` runs only from
+    /// `add_signal_handler`; `shutdown_kernel` sets the same event directly,
+    /// with no such print).
+    ///
+    /// BOTH LEGS ARE CANCELLATION-AWARE. `shutdownRequested()` parked on a
+    /// `withCheckedContinuation` with no cancellation handler, so `cancelAll`
+    /// never returned: a SIGTERM printed nothing, the teardown lines never ran,
+    /// `kernel.shutdown()` never ran, and the process was still alive 15 s later
+    /// with `lock.json` left behind (measured; the e2e driver SIGKILLed swift).
+    public static func awaitStop(kernel: Kernel) async -> String? {
+        await withTaskGroup(of: String?.self) { group -> String? in
             group.addTask { await waitForSignal() }
-            group.addTask { await kernel.shutdownRequested() }
-            await group.next()
+            group.addTask {
+                await kernel.shutdownRequested()
+                return nil
+            }
+            let caught = await group.next()
             group.cancelAll()
+            return caught ?? nil
         }
     }
 
-    /// Resolve on the first of SIGINT/SIGTERM/SIGHUP — or on cancellation, so
-    /// a serve loop that ends another way (`shutdown_kernel`) does not hang on
-    /// a continuation nobody will ever resume.
-    private static func waitForSignal() async {
-        let sources = [SIGINT, SIGTERM, SIGHUP].map { sig -> DispatchSourceSignal in
+    /// Resolve with the caught signal's name on the first of SIGINT/SIGTERM/
+    /// SIGHUP — or `nil` on cancellation, so a serve loop that ends another
+    /// way (`shutdown_kernel`) does not hang on a continuation nobody will
+    /// ever resume.
+    private static func waitForSignal() async -> String? {
+        let names: [Int32: String] = [SIGINT: "SIGINT", SIGTERM: "SIGTERM", SIGHUP: "SIGHUP"]
+        let sigs = [SIGINT, SIGTERM, SIGHUP]
+        let sources = sigs.map { sig -> DispatchSourceSignal in
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
             signal(sig, SIG_IGN)
             return src
         }
         let resumed = Atomic(false)
         let slot = ContinuationSlot()
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        let caught = await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
                 slot.store(cont)
-                for src in sources {
+                for (sig, src) in zip(sigs, sources) {
                     src.setEventHandler {
                         if resumed.compareAndSwap(false, true) {
-                            slot.take()?.resume()
+                            slot.take()?.resume(returning: names[sig])
                         }
                     }
                     src.resume()
                 }
                 // Cancelled before the continuation was stored: honour it now.
                 if Task.isCancelled, resumed.compareAndSwap(false, true) {
-                    slot.take()?.resume()
+                    slot.take()?.resume(returning: nil)
                 }
             }
         } onCancel: {
             if resumed.compareAndSwap(false, true) {
-                slot.take()?.resume()
+                slot.take()?.resume(returning: nil)
             }
         }
         for src in sources { src.cancel() }
+        return caught
     }
 }
 
@@ -180,15 +162,17 @@ public enum Bootstrap {
 /// hand the same continuation to exactly one resumer.
 private final class ContinuationSlot: @unchecked Sendable {
     private let lock = NSLock()
-    private var cont: CheckedContinuation<Void, Never>?
+    private var cont: CheckedContinuation<String?, Never>?
 
-    func store(_ c: CheckedContinuation<Void, Never>) {
-        lock.lock(); defer { lock.unlock() }
+    func store(_ c: CheckedContinuation<String?, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
         cont = c
     }
 
-    func take() -> CheckedContinuation<Void, Never>? {
-        lock.lock(); defer { lock.unlock() }
+    func take() -> CheckedContinuation<String?, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
         let c = cont
         cont = nil
         return c
@@ -205,7 +189,8 @@ private final class Atomic<T: Equatable>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 
     func compareAndSwap(_ expected: T, _ new: T) -> Bool {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         if value == expected {
             value = new
             return true

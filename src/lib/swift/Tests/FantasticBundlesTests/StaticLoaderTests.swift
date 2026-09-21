@@ -22,7 +22,7 @@ private let MANIFEST = """
 
 private func mkKernel() -> Kernel {
     let kernel = Kernel(storage: .inMemory, bundles: defaultBundleRegistry())
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     return kernel
@@ -57,10 +57,10 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     // which hydrates the roster.
     let rec = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": .string(StaticLoaderBundle.handlerModule),
                 "id": "static_loader",
                 "manifest": .string(path),
@@ -98,8 +98,8 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     defer { cleanup() }
     // deny-all: a roster agent is not granted create_agent on anyone.
     let r = await kernel.sendAs(
-        sender: "worker", target: "core",
-        payload: ["type": "create_agent", "parent_id": "core", "handler_module": "cli.tools"])
+        sender: "worker", target: "kernel_state",
+        payload: ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "cli.tools"])
     #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
 }
 
@@ -131,10 +131,10 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let before = kernel.allAgents().count
     let rec = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": .string(StaticLoaderBundle.handlerModule),
                 "id": "sl2", "manifest": "/no/such/path/nope.yaml",
             ])
@@ -150,9 +150,9 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let cwd = FileManager.default.currentDirectoryPath
     let miss = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(StaticLoaderBundle.handlerModule),
                 "id": "sl3", "manifest": "nope.yaml",
             ])
@@ -173,9 +173,9 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let abs = FileManager.default.currentDirectoryPath + "/" + rel
     let rec = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(StaticLoaderBundle.handlerModule),
                 "id": "sl_abs", "manifest": .string(abs),
             ])
@@ -197,9 +197,9 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     defer { try? fm.removeItem(at: link) }
     let rec = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(StaticLoaderBundle.handlerModule),
                 "id": "sl_link", "manifest": .string(name),
             ])
@@ -230,9 +230,9 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let kernel = mkKernel()
     let rec = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(StaticLoaderBundle.handlerModule), "id": "bare",
             ])
     ])[0].result
@@ -330,7 +330,7 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     #expect(kernel.agent(AgentId("a")) == nil, "the create verb was overridden: \(r.serialize())")
     #expect(r["booted"].asBool == true, "\(r.serialize())")
     #expect(
-        (r["created"].asArray ?? []).compactMap { $0.asString } == ["core"], "\(r.serialize())")
+        (r["created"].asArray ?? []).compactMap { $0.asString } == ["kernel_state"], "\(r.serialize())")
 }
 
 /// A8.6 — the handler_module mismatch text is python's, with `{!r}` on all
@@ -343,7 +343,7 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     defer { cleanup2() }
     _ = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
                 "type": "update_agent", "id": "static_loader", "manifest": .string(path),
             ])
@@ -364,7 +364,7 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     defer { cleanup() }
     _ = await kernel.send([
         Item(
-            "core",
+            "kernel_state",
             [
                 "type": "update_agent", "id": "static_loader", "display_name": "",
             ])

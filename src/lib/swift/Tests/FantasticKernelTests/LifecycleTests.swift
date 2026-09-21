@@ -12,6 +12,8 @@ import Foundation
 import OrderedCollections
 import Testing
 
+import FantasticKernelState
+
 @testable import FantasticKernel
 
 // MARK: - shared recorder
@@ -66,6 +68,8 @@ private final class Log: @unchecked Sendable {
 private struct ShutProbe: AgentBundle {
     let name = "shut_probe"
     let log: Log
+    /// The STATIC table `shutdown_agents` reads — python's module `VERBS`.
+    let verbs = ["reflect", "shutdown", "slow", "work"]
 
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         switch payload["type"].asString ?? "" {
@@ -80,7 +84,8 @@ private struct ShutProbe: AgentBundle {
             log.append(agentId.value)
             // The shutdown turn may still use its tools: a nested send passes
             // the drain.
-            let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])[0]
+            let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])[
+                0]
             return .object(["wrapped": .bool(true), "tools_ok": .bool(r.status == .completed)])
         case "slow":
             log.flag("running:\(agentId.value)")
@@ -94,9 +99,55 @@ private struct ShutProbe: AgentBundle {
     }
 }
 
+/// Python's `quiet_probe.tools`: `VERBS = {reflect, work}`. It ACCEPTS
+/// `shutdown` as a lifecycle no-op but does not DECLARE it, so python never
+/// tells it — and never reads it to find out. Records every verb delivered.
+private struct QuietProbe: AgentBundle {
+    let name = "quiet_probe"
+    let log: Log
+    let verbs = ["reflect", "work"]
+
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        log.append("\(agentId.value):\(payload["type"].asString ?? "")")
+        switch payload["type"].asString ?? "" {
+        case "reflect":
+            return .object([
+                "id": .string(agentId.value), "sentence": .string("quiet probe"),
+                "verbs": .object(["reflect": .string("identity"), "work": .string("a verb")]),
+            ])
+        default:
+            return .null
+        }
+    }
+}
+
+/// Every call row the kernel holds, oldest first — the ledger a reader sees.
+private func allRows(_ kernel: Kernel) -> [Row] {
+    kernel.allAgents().flatMap { kernel.rows.forAgent($0.id) }
+        .sorted { ($0["id"]?.asInt ?? 0) < ($1["id"]?.asInt ?? 0) }
+}
+
 /// Python's `_stub_bundle`: a handler that answers nothing, carrying whatever
 /// hooks the test wants to observe. `onShutdown == nil` leaves the protocol
 /// default in place — which IS `onDelete`, python's fallback.
+/// A bundle whose `boot` does what the payload's `boot_mode` meta asks: RAISE,
+/// answer `{error}`, or succeed. The create_agent line branches on the OUTCOME
+/// STATUS, so all three must be reachable.
+private struct BootProbe: AgentBundle {
+    let name = "bootprobe"
+    struct Boom: Error, CustomStringConvertible {
+        var description: String { "Boom: the handler raised" }
+    }
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        guard payload["type"].asString == "boot" else { return .null }
+        switch kernel.agent(agentId)?.metaValue(forKey: "boot_mode")?.asString {
+        case "raise": throw Boom()
+        case "error": return .object(["error": .string("a refusal, not a bug")])
+        default: return .null
+        }
+    }
+}
+
 private struct HookProbe: AgentBundle {
     let name: String
     let log: Log
@@ -152,7 +203,9 @@ private struct ForkProbe: AgentBundle {
             let job = kernel.spawnTask(agent: agentId, verb: "job") {
                 try? await Task.sleep(nanoseconds: 50_000_000)
                 _ = await kernel.send([
-                    Item(peer, .object(["type": .string("note"), "text": .string("from the program")]))
+                    Item(
+                        peer,
+                        .object(["type": .string("note"), "text": .string("from the program")]))
                 ])
             }
             return .object(["job_id": .integer(job.value), "status": .string("running")])
@@ -164,19 +217,22 @@ private struct ForkProbe: AgentBundle {
 
 // MARK: - harness
 
-private func makeKernel(_ bundles: [(String, any AgentBundle)]) -> Kernel {
+private func makeKernel(
+    _ bundles: [(String, any AgentBundle)], rootHandler: String? = nil
+) -> Kernel {
     let registry = BundleRegistry()
     for (module, b) in bundles { registry.register(module, b) }
     let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    let root = Agent(id: AgentId(ROOT_ID), handlerModule: rootHandler, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     return kernel
 }
 
 private func create(
-    _ kernel: Kernel, _ id: String, _ module: String, parent: String = "core",
-    canCall: JSON = .null, callableBy: JSON = .null
+    _ kernel: Kernel, _ id: String, _ module: String, parent: String = "kernel_state",
+    canCall: JSON = .null, callableBy: JSON = .null,
+    meta: OrderedDictionary<String, JSON> = [:]
 ) async -> AgentId {
     var payload: OrderedDictionary<String, JSON> = [
         "type": .string("create_agent"),
@@ -186,7 +242,8 @@ private func create(
     ]
     if case .object = canCall { payload["can_call"] = canCall }
     if case .object = callableBy { payload["callable_by"] = callableBy }
-    let r = await kernel.send([Item(AgentId("core"), .object(payload))])[0].result
+    for (k, v) in meta { payload[k] = v }
+    let r = await kernel.send([Item(AgentId("kernel_state"), .object(payload))])[0].result
     #expect(r["id"].asString == id, "create_agent failed: \(r.serialize())")
     return AgentId(id)
 }
@@ -214,10 +271,13 @@ struct DrainTests {
         kernel.setDraining(true)
         defer { kernel.setDraining(false) }
         let out = await send(kernel, a.value, "work")
-        #expect(out.status == .failed && out.result["reason"].asString == "draining", "\(out.result.serialize())")
+        #expect(
+            out.status == .failed && out.result["reason"].asString == "draining",
+            "\(out.result.serialize())")
         #expect(
             out.result["error"].asString
-                == "send: the kernel is draining for shutdown — no new work is accepted; in-flight work may finish")
+                == "send: the kernel is draining for shutdown — no new work is accepted; in-flight work may finish"
+        )
         #expect(out.pid == nil, "a refused root costs no id")
         let inside = await KernelTaskLocals.withShutdown { await send(kernel, a.value, "work") }
         #expect(inside.status == .completed, "\(inside.result.serialize())")
@@ -229,21 +289,29 @@ struct DrainTests {
     @Test func shutdownAgentsTellsAdvertisersWaitsThenCancelsTheRest() async throws {
         let log = Log()
         let kernel = makeKernel([("shut_probe.tools", ShutProbe(log: log))])
-        let a = await create(kernel, "sp_a", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
-        let b = await create(kernel, "sp_b", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
+        let a = await create(
+            kernel, "sp_a", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
+        let b = await create(
+            kernel, "sp_b", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
         kernel.quietTimeout = 0.3
         let slow = Task { await send(kernel, b.value, "slow") }
         try await waitUntil("the slow handler to start") { log.has("running:sp_b") }
         // A keepalive loop (a persister) survives the quiet phase. THE KERNEL
         // CREATES THE TASK — only it can mint the id the fork runs under.
-        let keep = kernel.spawnTask(agent: AgentId("core"), verb: "message_pump", keepalive: true) {
+        let keep = kernel.spawnTask(
+            agent: AgentId("kernel_state"), verb: "message_pump", keepalive: true
+        ) {
             try? await Task.sleep(nanoseconds: 30_000_000_000)
         }
         let out = await send(kernel, "kernel", "shutdown_agents").result
         #expect(out["drained"].asBool == true, "\(out.serialize())")
-        #expect((out["shut"].asArray ?? []).compactMap { $0.asString }.sorted() == [a.value, b.value], "\(out.serialize())")
+        #expect(
+            (out["shut"].asArray ?? []).compactMap { $0.asString }.sorted() == [a.value, b.value],
+            "\(out.serialize())")
         #expect(Set(log.all()) == [a.value, b.value], "every advertiser was told")
-        #expect(!(out["cancelled"].asArray ?? []).isEmpty, "the slow task was cancelled after the quiet bound")
+        #expect(
+            !(out["cancelled"].asArray ?? []).isEmpty,
+            "the slow task was cancelled after the quiet bound")
         #expect(kernel.tasks.contains(keep), "the keepalive loop is not pending work")
         let settled = await slow.value
         #expect(settled.status == .cancelled, "\(settled.result.serialize())")
@@ -251,8 +319,90 @@ struct DrainTests {
         let r = await send(kernel, a.value, "work")
         #expect(r.result["reason"].asString == "draining")
         let again = await send(kernel, "kernel", "shutdown_agents").result
-        #expect(again["drained"].asBool == true && again["cancelled"] == .array([]), "\(again.serialize())")
+        #expect(
+            again["drained"].asBool == true && again["cancelled"] == .array([]),
+            "\(again.serialize())")
         _ = await kernel.cancelTask(keep)
+        kernel.setDraining(false)
+    }
+
+    /// A `spawnTask` FORK is a SERVICE LOOP — scheduler tick, bridge read loop,
+    /// ws drain, job pump, pty reader — and never settles by construction, so
+    /// the quiet phase must not wait for one: python's `settling()` drops
+    /// `_forked` entries (2026-09-21; SIGTERM→exit was 10.25 s with a scheduler
+    /// on the tree, 0.29 s after). It is still CANCELLED, and a real in-flight
+    /// DISPATCH still holds the quiet phase.
+    @Test func aForkDoesNotHoldTheQuietPhaseButIsStillCancelled() async throws {
+        let log = Log()
+        let kernel = makeKernel([("shut_probe.tools", ShutProbe(log: log))])
+        _ = await create(
+            kernel, "sp_f", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
+        kernel.quietTimeout = 3.0
+        let fork = kernel.spawnTask(agent: AgentId("kernel_state"), verb: "ws_drain") {
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+        }
+        let t0 = Date()
+        let out = await send(kernel, "kernel", "shutdown_agents").result
+        let waited = Date().timeIntervalSince(t0)
+        #expect(waited < 1.0, "a fork held the quiet phase for \(waited)s")
+        #expect(
+            (out["cancelled"].asArray ?? []).compactMap { $0.asInt }.contains(fork.value),
+            "the fork was not cancelled: \(out.serialize())")
+        kernel.setDraining(false)
+
+        // The CONTRAST: an in-flight dispatch is not a fork, so it burns the
+        // whole bound and is cancelled at the end of it.
+        let k2 = makeKernel([("shut_probe.tools", ShutProbe(log: log))])
+        let b = await create(
+            k2, "sp_g", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
+        k2.quietTimeout = 0.5
+        let slow = Task { await send(k2, b.value, "slow") }
+        try await waitUntil("the slow handler to start") { log.has("running:sp_g") }
+        let t1 = Date()
+        let out2 = await send(k2, "kernel", "shutdown_agents").result
+        #expect(
+            Date().timeIntervalSince(t1) >= 0.5,
+            "a live dispatch did not hold the quiet phase")
+        #expect(!(out2["cancelled"].asArray ?? []).isEmpty, "\(out2.serialize())")
+        _ = await slow.value
+        k2.setDraining(false)
+    }
+
+    /// C32: EVERY system verb on a non-root answers the SAME generic
+    /// `not_here` — `shutdown_agents`/`shutdown_kernel` carry no special
+    /// case (python `_agent.py:2036-2044` generalises the old shutdown_kernel-
+    /// only refusal to all seven system verbs).
+    /// `shutdown_agents` READS THE BUNDLE'S STATIC VERBS TABLE — python's
+    /// `advertises("shutdown")` imports the module and looks at `VERBS`,
+    /// sending nothing. A tree of N agents therefore costs NO reflect call row,
+    /// no task row and no watcher echo. Swift used to fan a `reflect` out to
+    /// every agent to learn the same thing, which is why its ledger carried
+    /// about twice python's rows for the same command.
+    @Test func shutdownAgentsReadsTheStaticTableWithoutASingleSend() async throws {
+        let quiet = Log()
+        let kernel = makeKernel([
+            ("shut_probe.tools", ShutProbe(log: Log())),
+            ("quiet_probe.tools", QuietProbe(log: quiet)),
+        ])
+        for i in 0..<5 { _ = await create(kernel, "q\(i)", "quiet_probe.tools") }
+        let a = await create(
+            kernel, "sp_a", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
+        kernel.quietTimeout = 0.3
+        let before = allRows(kernel).count
+        let out = await send(kernel, "kernel", "shutdown_agents").result
+        #expect(
+            (out["shut"].asArray ?? []).compactMap { $0.asString } == [a.value],
+            "\(out.serialize())")
+        // `boot` is the create line's, not the shutdown's.
+        let delivered = quiet.all().filter { !$0.hasSuffix(":boot") }
+        #expect(delivered.isEmpty, "no verb reached a non-advertiser: \(delivered)")
+        let rows = allRows(kernel)
+        let seenVerbs = rows.compactMap { $0["verb"]?.asString }
+        #expect(!seenVerbs.contains("reflect"), "not one reflect row: \(seenVerbs)")
+        // The ONLY rows the verb writes are its own dispatch, the `shutdown`
+        // send to the single advertiser, and the nested `ps` that handler makes.
+        let wrote = rows.suffix(rows.count - before).compactMap { $0["verb"]?.asString }
+        #expect(wrote.sorted() == ["ps", "shutdown", "shutdown_agents"], "\(wrote)")
         kernel.setDraining(false)
     }
 
@@ -262,22 +412,33 @@ struct DrainTests {
         let a = await create(kernel, "sp_c", "shut_probe.tools")
         let r = await send(kernel, a.value, "shutdown_agents").result
         #expect(
-            r["error"].asString
-                == "shutdown_agents: root control surface only; address the kernel root (alias 'kernel')",
+            r["error"].asString == "shutdown_agents is a kernel verb — sp_c does not answer it",
             "\(r.serialize())")
+        #expect(r["reason"].asString == "not_here")
+        #expect(
+            r["hint"].asString
+                == "address the kernel root (alias 'kernel'); name the agent you mean in "
+                + "`parent_id` / `id`")
+        #expect(r["verb"].asString == "shutdown_agents")
         let k = await send(kernel, a.value, "shutdown_kernel").result
         #expect(
-            k["error"].asString
-                == "shutdown_kernel: root control surface only; address the kernel root (alias 'kernel')",
+            k["error"].asString == "shutdown_kernel is a kernel verb — sp_c does not answer it",
             "\(k.serialize())")
+        #expect(k["reason"].asString == "not_here")
+        #expect(k["verb"].asString == "shutdown_kernel")
     }
 
     @Test func shutdownKernelAcksThenRequestsTheStop() async throws {
         let kernel = makeKernel([])
         let r = await send(kernel, "kernel", "shutdown_kernel").result
-        #expect(r == .object(["type": .string("shutdown_kernel"), "ok": .bool(true)]), "\(r.serialize())")
+        #expect(
+            r == .object(["type": .string("shutdown_kernel"), "ok": .bool(true)]),
+            "\(r.serialize())")
         // The trigger is deferred so the ack flushes first; the waiter wakes.
-        let woke = Task { await kernel.shutdownRequested(); return true }
+        let woke = Task {
+            await kernel.shutdownRequested()
+            return true
+        }
         let winner = await withTaskGroup(of: Bool.self) { group in
             group.addTask { await woke.value }
             group.addTask {
@@ -294,24 +455,79 @@ struct DrainTests {
     }
 
     @Test func kernelShutdownRunsTheFlushHookBeforeTheWalk() async throws {
+        // THE HOOK IS THE ROOT LOADER'S, not the kernel's own branch: `shutdown`
+        // offers `flushPending` to every loaded agent's bundle, and
+        // `kernel_state` is the one that lands the last message window there
+        // (python `flush_pending`).
         let log = Log()
-        let kernel = makeKernel([
-            ("walk.tools",
-             HookProbe(
-                name: "walk", log: log,
-                shutdownHook: { _, k in
-                    log.append("walk")
-                    // The pump was landed + forgotten BEFORE the walk reached us.
-                    log.notePump(gone: k.messagePump == nil)
-                }, deleteHook: nil)),
-        ])
+        let kernel = makeKernel(
+            [
+                (ROOT_HANDLER_MODULE, KernelStateBundle()),
+                (
+                    "walk.tools",
+                    HookProbe(
+                        name: "walk", log: log,
+                        shutdownHook: { _, k in
+                            log.append("walk")
+                            // The pump was landed + forgotten BEFORE the walk reached us.
+                            log.notePump(gone: k.messagePump == nil)
+                        }, deleteHook: nil)
+                ),
+            ], rootHandler: ROOT_HANDLER_MODULE)
         _ = await create(kernel, "w", "walk.tools")
-        kernel.installMessagePump(after: kernel.rows.nextId - 1)
-        #expect(kernel.messagePump != nil)
+        // The ROOT'S boot is what installs the pump (and the ledger flusher and
+        // the record writer) — python `kernel_state._boot`.
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        #expect(kernel.messagePump != nil, "the root loader's boot installs the pump")
         await kernel.shutdown()
         #expect(log.all() == ["walk"], "\(log.all())")
         #expect(log.pumpGone() == true, "the flush hook ran before the walk")
         #expect(kernel.draining && kernel.shutdownComplete)
+    }
+
+    /// C57 — the create_agent boot line branches on the OUTCOME STATUS: a boot
+    /// that RAISED (`failed`) prints python's stdout line; one that answered
+    /// `{error}` (`errored`) or succeeded prints nothing. Swift discarded the
+    /// boot reply entirely, so a raised child boot was invisible.
+    @Test func testRaisedChildBootPrintsPythonLine() async throws {
+        let kernel = makeKernel([("bootprobe.tools", BootProbe())])
+        let raised = await RuntimeLog.captureOut {
+            _ = await create(
+                kernel, "boom", "bootprobe.tools", meta: ["boot_mode": .string("raise")])
+        }
+        // `{boot['result']}` in python's f-string is `str(<dict>)` — the WHOLE
+        // reply body, python-repr'd, not just its `error` text.
+        #expect(
+            raised == [
+                "  [create_agent] boom boot failed: "
+                    + "{'error': 'Boom: the handler raised', 'raised': True}"
+            ], "\(raised)")
+        // An `errored` boot is a refusal the create does not undo and does not
+        // narrate; a clean one says nothing either.
+        let errored = await RuntimeLog.captureOut {
+            _ = await create(
+                kernel, "refuses", "bootprobe.tools", meta: ["boot_mode": .string("error")])
+            _ = await create(kernel, "fine", "bootprobe.tools")
+        }
+        #expect(errored.isEmpty, "\(errored)")
+    }
+
+    @Test func theRootLoaderBootMintsTheGuidAfterItsGrants() async throws {
+        // C14: the guid is minted ONCE, by the root loader's `boot`, AFTER the
+        // record writer subscribes — so the `updated` event it publishes is what
+        // carries the new record to disk. Meta order is grants, then guid.
+        let kernel = makeKernel(
+            [(ROOT_HANDLER_MODULE, KernelStateBundle())], rootHandler: ROOT_HANDLER_MODULE)
+        #expect(kernel.root?.metaValue(forKey: "guid") == nil, "a virgin root has none")
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        let guid = try #require(kernel.root?.metaValue(forKey: "guid")?.asString)
+        #expect(guid.count == 32, "\(guid)")
+        #expect(
+            Array(kernel.root!.meta.keys) == ["can_call", "callable_by", "guid"],
+            "\(Array(kernel.root!.meta.keys))")
+        // Idempotent: a second boot neither re-mints nor re-installs.
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
+        #expect(kernel.root?.metaValue(forKey: "guid")?.asString == guid)
     }
 }
 
@@ -319,7 +535,9 @@ struct DrainTests {
 
 @Suite("Lifecycle: Kernel.shutdown walk", .serialized)
 struct GracefulShutdownTests {
-    private func recorder(_ log: Log, _ tag: String) -> @Sendable (AgentId, Kernel) async throws -> Void {
+    private func recorder(_ log: Log, _ tag: String)
+        -> @Sendable (AgentId, Kernel) async throws -> Void
+    {
         { id, _ in log.append("\(tag):\(id.value)") }
     }
 
@@ -328,9 +546,18 @@ struct GracefulShutdownTests {
     @Test func shutdownWalksDepthFirst() async throws {
         let log = Log()
         let kernel = makeKernel([
-            ("test_shutdown_p", HookProbe(name: "p", log: log, shutdownHook: recorder(log, "p"), deleteHook: nil)),
-            ("test_shutdown_c1", HookProbe(name: "c1", log: log, shutdownHook: recorder(log, "c1"), deleteHook: nil)),
-            ("test_shutdown_c2", HookProbe(name: "c2", log: log, shutdownHook: recorder(log, "c2"), deleteHook: nil)),
+            (
+                "test_shutdown_p",
+                HookProbe(name: "p", log: log, shutdownHook: recorder(log, "p"), deleteHook: nil)
+            ),
+            (
+                "test_shutdown_c1",
+                HookProbe(name: "c1", log: log, shutdownHook: recorder(log, "c1"), deleteHook: nil)
+            ),
+            (
+                "test_shutdown_c2",
+                HookProbe(name: "c2", log: log, shutdownHook: recorder(log, "c2"), deleteHook: nil)
+            ),
         ])
         _ = await create(kernel, "P", "test_shutdown_p")
         _ = await create(kernel, "C1", "test_shutdown_c1", parent: "P")
@@ -346,7 +573,10 @@ struct GracefulShutdownTests {
     @Test func shutdownDoesNotTouchRecordsOrTree() async throws {
         let log = Log()
         let kernel = makeKernel([
-            ("test_shutdown_keep", HookProbe(name: "keep", log: log, shutdownHook: recorder(log, "k"), deleteHook: nil))
+            (
+                "test_shutdown_keep",
+                HookProbe(name: "keep", log: log, shutdownHook: recorder(log, "k"), deleteHook: nil)
+            )
         ])
         _ = await create(kernel, "K", "test_shutdown_keep")
         _ = await create(kernel, "K_child", "test_shutdown_keep", parent: "K")
@@ -363,7 +593,11 @@ struct GracefulShutdownTests {
     @Test func shutdownFallsBackToOnDelete() async throws {
         let log = Log()
         let kernel = makeKernel([
-            ("test_shutdown_only_od", HookProbe(name: "od", log: log, shutdownHook: nil, deleteHook: recorder(log, "on_delete")))
+            (
+                "test_shutdown_only_od",
+                HookProbe(
+                    name: "od", log: log, shutdownHook: nil, deleteHook: recorder(log, "on_delete"))
+            )
         ])
         _ = await create(kernel, "OD", "test_shutdown_only_od")
         await kernel.shutdown()
@@ -375,8 +609,12 @@ struct GracefulShutdownTests {
     @Test func shutdownPrefersOnShutdownOverOnDelete() async throws {
         let log = Log()
         let kernel = makeKernel([
-            ("test_shutdown_both",
-             HookProbe(name: "both", log: log, shutdownHook: recorder(log, "on_shutdown"), deleteHook: recorder(log, "on_delete")))
+            (
+                "test_shutdown_both",
+                HookProbe(
+                    name: "both", log: log, shutdownHook: recorder(log, "on_shutdown"),
+                    deleteHook: recorder(log, "on_delete"))
+            )
         ])
         _ = await create(kernel, "B", "test_shutdown_both")
         await kernel.shutdown()
@@ -388,7 +626,10 @@ struct GracefulShutdownTests {
     @Test func shutdownIsIdempotent() async throws {
         let log = Log()
         let kernel = makeKernel([
-            ("test_shutdown_idem", HookProbe(name: "idem", log: log, shutdownHook: recorder(log, "i"), deleteHook: nil))
+            (
+                "test_shutdown_idem",
+                HookProbe(name: "idem", log: log, shutdownHook: recorder(log, "i"), deleteHook: nil)
+            )
         ])
         _ = await create(kernel, "I", "test_shutdown_idem")
         await kernel.shutdown()
@@ -402,21 +643,69 @@ struct GracefulShutdownTests {
         struct Boom: Error {}
         let log = Log()
         let kernel = makeKernel([
-            ("test_shutdown_good", HookProbe(name: "good", log: log, shutdownHook: recorder(log, "ok"), deleteHook: nil)),
-            ("test_shutdown_bad",
-             HookProbe(
-                name: "bad", log: log,
-                shutdownHook: { id, _ in
-                    log.append("raised:\(id.value)")
-                    throw Boom()
-                }, deleteHook: nil)),
+            (
+                "test_shutdown_good",
+                HookProbe(
+                    name: "good", log: log, shutdownHook: recorder(log, "ok"), deleteHook: nil)
+            ),
+            (
+                "test_shutdown_bad",
+                HookProbe(
+                    name: "bad", log: log,
+                    shutdownHook: { id, _ in
+                        log.append("raised:\(id.value)")
+                        throw Boom()
+                    }, deleteHook: nil)
+            ),
         ])
         _ = await create(kernel, "A", "test_shutdown_good")
         _ = await create(kernel, "B", "test_shutdown_bad")
         _ = await create(kernel, "C", "test_shutdown_good")
         await kernel.shutdown()
         let fired = log.all()
-        #expect(fired.contains("ok:A") && fired.contains("raised:B") && fired.contains("ok:C"), "\(fired)")
+        #expect(
+            fired.contains("ok:A") && fired.contains("raised:B") && fired.contains("ok:C"),
+            "\(fired)")
+    }
+
+    /// C87: `flush_pending` raising prints python's stderr line — bare
+    /// `str(e)`, no agent id (python calls the hook on the root alone;
+    /// swift's own broader "every agent is offered it" design keeps the
+    /// text id-less all the same, matching python's literal spelling).
+    ///
+    /// C87 residual (documented, not reproduced): python's OTHER two
+    /// `Agent.shutdown` lines — the recursive `await child.shutdown()`
+    /// catch (`  [shutdown] <cid> raised: <e>`) and the
+    /// `importlib.import_module` catch (`  [shutdown] <id> import '<hm>'
+    /// raised: <e>`) — have no swift counterpart: `shutdownWalk` is
+    /// non-throwing (its one fallible step already has its own catch, so
+    /// nothing escapes the recursive call to catch further up), and swift
+    /// resolves a bundle from the static `BundleRegistry`, never an import
+    /// that can fail at shutdown time — an unregistered `handler_module`
+    /// never even reaches this walk (C53 skips its whole subtree at
+    /// hydration). `LifecycleTests.shutdownChildFailurePrintsPythonLine`
+    /// is therefore not written: there is no swift code path that could
+    /// make it pass without fabricating a throw site python does not have
+    /// an analogue for either (see `shutdownWalk`'s doc comment).
+    @Test func flushPendingFailurePrintsPythonLine() async throws {
+        struct Boom: Error, CustomStringConvertible {
+            var description: String { "disk full" }
+        }
+        struct FlushRaises: AgentBundle {
+            let name = "flushraises"
+            func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+                .null
+            }
+            func flushPending(agentId: AgentId, kernel: Kernel) async throws { throw Boom() }
+        }
+        let kernel = makeKernel(
+            [("test_flush_raises", FlushRaises())], rootHandler: "test_flush_raises")
+        let lines = await RuntimeLog.capture {
+            await kernel.shutdown()
+        }
+        #expect(
+            lines.contains { $0.contains("[shutdown] flush_pending raised: disk full") }, "\(lines)"
+        )
     }
 }
 
@@ -431,7 +720,7 @@ struct KilledTaskSendTests {
         let kernel = makeKernel([("fork_probe.tools", ForkProbe(log: log))])
         let victim = await create(kernel, "tc_victim", "fork_probe.tools")
         let box = OutcomeBox()
-        let probe = kernel.spawnTask(agent: AgentId("core"), verb: "probe") {
+        let probe = kernel.spawnTask(agent: AgentId("kernel_state"), verb: "probe") {
             // A live, REGISTERED task whose handle we mark exactly as
             // `cancelTask` does before it aborts anything.
             KernelTaskLocals.currentKilled?.mark()
@@ -455,7 +744,7 @@ struct KilledTaskSendTests {
         let kernel = makeKernel([("fork_probe.tools", ForkProbe(log: log))])
         let victim = await create(kernel, "tc_live", "fork_probe.tools")
         let box = OutcomeBox()
-        _ = kernel.spawnTask(agent: AgentId("core"), verb: "probe") {
+        _ = kernel.spawnTask(agent: AgentId("kernel_state"), verb: "probe") {
             let out = await kernel.send([
                 Item(victim, .object(["type": .string("note"), "text": .string("y")]))
             ])[0]
@@ -494,8 +783,10 @@ struct ForkParentageTests {
     @Test func aProgramsSendIsParentedToTheJobNotADeadDispatch() async throws {
         let log = Log()
         let kernel = makeKernel([("fork_probe.tools", ForkProbe(log: log))])
-        let mailbox = await create(kernel, "mailbox", "fork_probe.tools", callableBy: .object(["runner": .string("*")]))
-        let runner = await create(kernel, "runner", "fork_probe.tools", canCall: .object(["mailbox": .string("*")]))
+        let mailbox = await create(
+            kernel, "mailbox", "fork_probe.tools", callableBy: .object(["runner": .string("*")]))
+        let runner = await create(
+            kernel, "runner", "fork_probe.tools", canCall: .object(["mailbox": .string("*")]))
         let start = await kernel.send([
             Item(runner, .object(["type": .string("fork"), "peer": .string(mailbox.value)]))
         ])[0]
@@ -515,8 +806,12 @@ struct ForkParentageTests {
         // The dispatch that forked the job is LONG GONE...
         #expect(!kernel.tasks.contains(startPid!), "the fork dispatch is still in flight")
         // ...so it must not be what the program's work hangs from.
-        #expect(parent != startPid?.value, "the program's send is parented to the settled `fork` dispatch")
+        #expect(
+            parent != startPid?.value,
+            "the program's send is parented to the settled `fork` dispatch")
         #expect(parent != nil, "the program's send became a ROOT: unreachable by cancel")
-        #expect(parent == jobId, "parent \(String(describing: parent)) != job \(String(describing: jobId))")
+        #expect(
+            parent == jobId,
+            "parent \(String(describing: parent)) != job \(String(describing: jobId))")
     }
 }

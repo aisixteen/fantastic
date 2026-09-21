@@ -41,7 +41,7 @@ async fn mk_term(
         .register(HANDLER_MODULE, TerminalBackendBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -729,7 +729,8 @@ async fn paste_image_writes_the_blob_and_types_its_path() {
         )
         .await
         .expect("paste");
-    assert!(body.is_empty());
+    // `paste_image` answers a status, never a chunk (C37).
+    assert_eq!(body, None);
     let reply = reply.expect("a reply");
     assert_eq!(reply["bytes"], json!(png.len()));
     let path = reply["path"].as_str().expect("path").to_string();
@@ -936,10 +937,11 @@ async fn pty_reader_rows_follow_python_holder_lifecycle() {
                 .unwrap_or(0)
         }
     };
-    // create_agent auto-booted once already, and python's holder task is never
-    // cancelled — so its row is still there after that first `stop`.
+    // create_agent auto-booted once already; python cancels the holder on detach
+    // (2026-09-20), so nothing is live after that first `stop`.
+    tokio::time::sleep(Duration::from_millis(150)).await; // the holder observes the detach on its next poll
     let base = rows(&kernel, term.clone()).await;
-    assert_eq!(base, 1, "the auto-boot's holder survived its stop");
+    assert_eq!(base, 0, "the auto-boot's holder ended with its stop");
     let _ = call(&kernel, &term, json!({"type": "boot"})).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
@@ -951,8 +953,8 @@ async fn pty_reader_rows_follow_python_holder_lifecycle() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         rows(&kernel, term.clone()).await,
-        base + 1,
-        "the holder survives stop — python never cancels it"
+        base,
+        "the holder ends with the attachment"
     );
     // C36 — one `task` row per attach, and every live pid in `ps` is one of them.
     let store: Vec<_> = kernel
@@ -963,7 +965,8 @@ async fn pty_reader_rows_follow_python_holder_lifecycle() {
             r.get("kind") == Some(&json!("task")) && r.get("verb") == Some(&json!("pty_reader"))
         })
         .collect();
-    assert_eq!(store.len(), base + 1, "one row per (re)attach: {store:?}");
+    // Two attaches so far (the auto-boot's and this one); the store keeps both.
+    assert_eq!(store.len(), 2, "one row per (re)attach: {store:?}");
     let ids: Vec<i64> = store
         .iter()
         .filter_map(|r| r.get("id").and_then(Value::as_i64))
@@ -1112,4 +1115,46 @@ async fn write_delivers_every_byte() {
     let out = wait_for_output(&kernel, &term, "START_L00000", Duration::from_secs(10)).await;
     assert!(out.contains("START_L00000"), "the PTY never saw the write");
     let _ = call(&kernel, &term, json!({"type": "stop"})).await;
+}
+
+/// A burst the child writes in ONE `write` arrives in ONE `output` event when
+/// it fits python's read size, and the concatenation of every event is the text
+/// verbatim. Rust polled per byte-arrival and split `echo wirecap` into three
+/// events (`"echo wirecap\r\n"`, `"wirecap\r\n"`, `"sh-3.2$ "`) where python's
+/// one `os.read(fd, 4096)` made one (r3 capture, `wire/frames.jsonl[185]`).
+#[tokio::test]
+async fn a_single_child_write_arrives_as_one_output_event() {
+    let tmp = TempDir::new().expect("tmp");
+    let (kernel, term, mut rx) = mk_term(&tmp, "burst", json!({})).await;
+    boot(&kernel, &term).await;
+    // Drain the shell banner + first prompt.
+    let _ = collect_events(&mut rx, Duration::from_millis(900), |_| false).await;
+    // ONE write by the child: printf emits all four lines in a single syscall.
+    let line = "printf 'a1\\nb2\\nc3\\nd4\\n'\n";
+    call(&kernel, &term, json!({"type": "write", "data": line})).await;
+    // `d4\r\n` is the PRINTED line; the command echo carries a literal `d4\\n`.
+    let events = collect_events(&mut rx, Duration::from_secs(6), |es| {
+        concat_text(es).contains("d4\r\n")
+    })
+    .await;
+    let text = concat_text(&events);
+    assert!(text.contains("a1\r\nb2\r\nc3\r\nd4\r\n"), "text: {text:?}");
+    let burst: Vec<&Value> = events
+        .iter()
+        .filter(|e| {
+            e.get("data")
+                .and_then(Value::as_str)
+                .is_some_and(|d| d.contains("a1\r\n"))
+        })
+        .collect();
+    assert_eq!(
+        burst.len(),
+        1,
+        "the burst must arrive in ONE event, got {burst:?}"
+    );
+    let d = burst[0]["data"].as_str().expect("data");
+    assert!(
+        d.contains("a1\r\nb2\r\nc3\r\nd4\r\n"),
+        "one event must hold the whole burst: {d:?}"
+    );
 }

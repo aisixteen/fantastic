@@ -17,11 +17,12 @@ import FantasticStaticLoader
 import FantasticTextFile
 import Foundation
 import OrderedCollections
+import FantasticKernelState
 import Testing
 import Yams
 
 /// THIS runtime's root id.
-private let ROOT = "core"
+private let ROOT = "kernel_state"
 
 private func contractDir() -> URL {
     // From this file: Tests/FantasticBundlesTests/ → swift → lib → src → repo
@@ -143,6 +144,7 @@ private struct LifecycleProbe: AgentBundle {
 
 private func makeKernel(workdir: URL) -> Kernel {
     let registry = BundleRegistry()
+    registry.register(ROOT_HANDLER_MODULE, KernelStateBundle())
     registry.register("static_loader.tools", StaticLoaderBundle())
     registry.register("file_bridge.tools", FileBundle())
     registry.register("text_file.tools", TextFileBundle())
@@ -154,7 +156,7 @@ private func makeKernel(workdir: URL) -> Kernel {
     // so a bare workdir here would make every declared store undiscoverable and
     // the whole tree would silently stay in RAM.
     let root = Agent(
-        id: AgentId(ROOT), handlerModule: nil, parentId: nil,
+        id: AgentId(ROOT), handlerModule: ROOT_HANDLER_MODULE, parentId: nil,
         rootPath: workdir.appendingPathComponent(".fantastic"))
     kernel.register(root)
     kernel.setRoot(root)
@@ -277,7 +279,7 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
         case "read_stream":
             let (reply, body) = await k.sendWithBinary(AgentId(target), payload, Data())
             if case .object(var o) = reply {
-                o["bytes"] = .string(String(data: body, encoding: .utf8) ?? "")
+                o["bytes"] = .string(String(data: body ?? Data(), encoding: .utf8) ?? "")
                 return .object(o)
             }
             return reply

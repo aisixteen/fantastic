@@ -24,7 +24,7 @@ mkdir -p /tmp/ftb_test
 cd /tmp/ftb_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18920
-$FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
+$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_ws.tools id=wws
 $FANTASTIC &
 DAEMON_PID=$!

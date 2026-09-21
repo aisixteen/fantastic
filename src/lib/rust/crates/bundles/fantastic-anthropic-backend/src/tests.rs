@@ -49,7 +49,7 @@ async fn mk_kernel_with(
         .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -62,7 +62,7 @@ async fn mk_kernel_with(
     let fid = format!("ff_{}", ant);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type":"create_agent",
                 "parent_id": "kernel",
@@ -96,7 +96,7 @@ async fn mk_kernel_with(
         create[k] = v;
     }
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("core"), create)])
+        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -853,4 +853,81 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             "unexpected error: {err}"
         );
     }
+}
+
+// ── the wire trace ──────────────────────────────────────────────────
+//
+// PYTHON IS THE ORACLE (`provider.py`): `FANTASTIC_AI_WIRE=1` prints exactly two
+// lines on STDOUT — `[wire] -> …` once per `chat`, `[wire] <- …` once per
+// completed stream — and NOTHING else. The api key and the headers are never on
+// the trace, so nothing here redacts: they are not printed at all.
+
+#[test]
+fn the_wire_trace_lines_are_pythons_text() {
+    // python `f"[wire] -> max_tokens={body['max_tokens']} tools={len(body.get('tools', []))} msgs={len(anth_messages)}"`
+    // — this route declares no `tools`, so the count is python's `[]` default.
+    let body = json!({"model": "m", "max_tokens": 4096, "messages": [], "stream": true});
+    assert_eq!(
+        wire_request_line(&body, 3),
+        "[wire] -> max_tokens=4096 tools=0 msgs=3"
+    );
+    // python `f"[wire] <- stop_reason={stop_reason!r} blocks={blocks!r}"` — a
+    // stream that carried nothing prints python's `None` and `[]`.
+    let mut st = SseState::new();
+    assert_eq!(wire_reply_line(&st), "[wire] <- stop_reason=None blocks=[]");
+    st.stop_reason = Some("end_turn".to_string());
+    st.blocks = vec![json!("thinking"), json!("text")];
+    assert_eq!(
+        wire_reply_line(&st),
+        "[wire] <- stop_reason='end_turn' blocks=['thinking', 'text']"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wire_trace_prints_only_when_the_var_is_1() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("{}/v1/messages", server.uri());
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    // `KeyEnv` holds the process-global env lock — the wire var rides with it.
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+    let prev = std::env::var("FANTASTIC_AI_WIRE").ok();
+    std::env::remove_var("FANTASTIC_AI_WIRE");
+    assert!(!wire_on(), "unset prints nothing");
+    std::env::set_var("FANTASTIC_AI_WIRE", "0");
+    assert!(!wire_on(), "only `1` prints — python `== \"1\"`");
+    std::env::set_var("FANTASTIC_AI_WIRE", "1");
+    assert!(wire_on());
+
+    let body = sse(&[
+        json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[]}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+        json!({"type":"message_stop"}),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    // The traced path is the ORDINARY path: tracing changes no reply.
+    let r = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "hi", "client_id": "test_client"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    match prev {
+        Some(x) => std::env::set_var("FANTASTIC_AI_WIRE", x),
+        None => std::env::remove_var("FANTASTIC_AI_WIRE"),
+    }
+    assert_eq!(r["response"], "hi");
 }

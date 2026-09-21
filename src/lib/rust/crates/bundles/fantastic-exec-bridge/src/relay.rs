@@ -207,7 +207,7 @@ pub async fn serve(
                 // payload reaches the bundle, or a `read_stream` chunk comes back.
                 let binary = m.get("_binary_path").is_some();
                 let (data, body) = match guard_call_stack(owner.as_str(), &mut payload) {
-                    Err(e) => (json!({ "error": e }), Vec::new()),
+                    Err(e) => (json!({ "error": e }), None),
                     Ok(()) if binary => {
                         kernel
                             .send_with_binary(&AgentId::from(target), payload, blob)
@@ -219,18 +219,22 @@ pub async fn serve(
                             .await
                             .remove(0)
                             .result,
-                        Vec::new(),
+                        None,
                     ),
                 };
                 let mut env = json!({"op": "reply", "rid": m.get("rid"), "data": data});
-                if body.is_empty() {
-                    push(&wr, &env).await;
-                } else {
-                    // A `read_stream` chunk: the reply body rides raw at `data.bytes`
-                    // (python's reply dict holds it there natively).
-                    set_path(&mut env, "data.bytes", Value::Null);
-                    env["_binary_path"] = json!("data.bytes");
-                    push_binary(&wr, &env, &body).await;
+                match body {
+                    // The verb returned NO chunk — a plain text frame. `Some(b)`
+                    // with `b` EMPTY is still a chunk (an empty file), so the
+                    // test is the carrier, never the length (C37).
+                    None => push(&wr, &env).await,
+                    Some(body) => {
+                        // A `read_stream` chunk: the reply body rides raw at `data.bytes`
+                        // (python's reply dict holds it there natively).
+                        let _ = set_path(&mut env, "data.bytes", Value::Null);
+                        env["_binary_path"] = json!("data.bytes");
+                        push_binary(&wr, &env, &body).await;
+                    }
                 }
             }
             Some("emit") => {

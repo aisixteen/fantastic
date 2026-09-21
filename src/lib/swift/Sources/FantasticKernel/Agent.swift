@@ -38,6 +38,9 @@ public final class Agent: @unchecked Sendable {
     private let childrenLock = NSLock()
     private var _children: OrderedDictionary<AgentId, Agent> = [:]
 
+    private let inFlightLock = NSLock()
+    private var _inFlight: Int = 0
+
     public init(
         id: AgentId,
         handlerModule: String?,
@@ -128,8 +131,11 @@ public final class Agent: @unchecked Sendable {
         rootPath.appendingPathComponent("agent.json")
     }
 
-    public var childrenDir: URL {
-        rootPath.appendingPathComponent("agents")
+    /// Where this agent's children live on disk. The container's NAME is
+    /// declared config on the kernel (`Kernel.childrenDir`, default `agents`),
+    /// never hardcoded — python `Agent._children_dir`.
+    public func childrenDir(_ name: String) -> URL {
+        rootPath.appendingPathComponent(name)
     }
 
     public var readmeFile: URL {
@@ -163,13 +169,13 @@ public final class Agent: @unchecked Sendable {
         return _children.count
     }
 
-    /// Direct child ids, sorted alphabetically for deterministic
-    /// iteration.
+    /// Direct child ids in INSERTION (creation) order — python
+    /// `child_ids()` returns `list(self._children.keys())`, and the tree,
+    /// `tree=ids` and every descendant walk read that order.
     public func childIds() -> [AgentId] {
         childrenLock.lock()
-        let ids = Array(_children.keys)
-        childrenLock.unlock()
-        return ids.sorted { $0.value < $1.value }
+        defer { childrenLock.unlock() }
+        return Array(_children.keys)
     }
 
     public func children() -> [Agent] {
@@ -196,5 +202,33 @@ public final class Agent: @unchecked Sendable {
         watcherLock.lock()
         defer { watcherLock.unlock() }
         return _watcherIds
+    }
+
+    // ── in-flight dispatches ────────────────────────────────────
+
+    /// How many dispatches are running on THIS agent right now — python's
+    /// `_in_flight`. Bumped at dispatch start, dropped in the `finally`; it is
+    /// what a state event reports as `backlog`, and what `state_snapshot`
+    /// reports per agent. NOT a queue length: the kernel dispatches
+    /// concurrently, so the number a reader wants is the work in hand.
+    public var inFlight: Int {
+        inFlightLock.lock()
+        defer { inFlightLock.unlock() }
+        return _inFlight
+    }
+
+    /// Enter a dispatch (python's `self._in_flight += 1`).
+    func inFlightEnter() {
+        inFlightLock.lock()
+        _inFlight += 1
+        inFlightLock.unlock()
+    }
+
+    /// Leave a dispatch — python's `max(0, self._in_flight - 1)`, clamped so an
+    /// unbalanced leave can never drive the count negative.
+    func inFlightLeave() {
+        inFlightLock.lock()
+        _inFlight = max(0, _inFlight - 1)
+        inFlightLock.unlock()
     }
 }

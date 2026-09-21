@@ -74,6 +74,16 @@ public enum KernelTaskLocals {
     }
 }
 
+/// The tree root's id — python's `kernel_state`, which IS the root and carries
+/// the durable-state loader's own `handler_module`. Not a default that may be
+/// substituted: there is exactly one root id, and a persisted record that names
+/// another one is the authority for THAT tree.
+public let ROOT_ID = "kernel_state"
+
+/// The root's `handler_module`: the durable-state loader bundle. A root record is
+/// seeded with it on a virgin dir, exactly as python's `_bootstrap` does.
+public let ROOT_HANDLER_MODULE = "kernel_state.tools"
+
 /// Subscriber token returned by `Kernel.subscribe`; pass to
 /// `Kernel.unsubscribe` to detach.
 public struct SubscriberToken: Sendable, Hashable {
@@ -81,19 +91,43 @@ public struct SubscriberToken: Sendable, Hashable {
     init(_ value: UInt64) { self.value = value }
 }
 
-public typealias StateSubscriber = @Sendable (JSON) -> Void
+/// A subscriber callback fired on every state event (`send` / `drain` / `emit` /
+/// `added` / `updated` / `removed`). Synchronous, called inline — keep it cheap.
+///
+/// The second argument is the event payload's RAW BODY — `(path within
+/// `payload`, bytes)` — for a traffic event whose payload carried bytes. Python
+/// queues the bytes inside the payload dict and its WS tap re-encodes the whole
+/// event as a binary frame; `JSON` cannot hold raw `Data`, so the body rides
+/// beside the event exactly as it rides beside an `InboxItem`. `nil` for every
+/// event with no bytes.
+public typealias StateSubscriber = @Sendable (JSON, InboxBody?) -> Void
 
 public final class Kernel: @unchecked Sendable {
-    /// The flat agents map. Lock-protected; readers snapshot via
-    /// `agent(id:)`. Mirrors Rust's `DashMap<AgentId, Arc<Agent>>`.
+    /// The flat agents map, in REGISTRATION order — python's registry is a
+    /// plain dict and `list_agents` walks `self.ctx.agents.values()` with no
+    /// sort, so the order records come back in IS the order they were made.
+    /// Lock-protected; readers snapshot via `agent(id:)`.
     private let agentsLock = NSLock()
-    private var _agents: [AgentId: Agent] = [:]
+    private var _agents: OrderedDictionary<AgentId, Agent> = [:]
+
+    /// Declared aliases (an agent's `alias` meta → its id) — python's `well_
+    /// known`. Wired at `register`, dropped at `unregister`. `send` targets,
+    /// `create_agent parent_id` and the gate's placement operand all resolve
+    /// through it, AFTER the built-in `kernel` alias (C35) — see
+    /// [`resolveAgent`].
+    private let wellKnownLock = NSLock()
+    private var _wellKnown: [String: AgentId] = [:]
+
+    /// The name of the container directory a parent keeps its children in.
+    /// DECLARED CONFIG, read off the root record at hydration (`children_dir`),
+    /// default `agents` — a self-describing tree may name it `host_agents`.
+    /// Python `Kernel.children_dir`.
+    public var childrenDir: String = "agents"
 
     /// Per-agent inbox stream-continuations. `emit` appends to
     /// these; watchers fan out by reading their own inbox stream.
     private let inboxLock = NSLock()
-    private var _inboxes: [AgentId: AsyncStream<JSON>.Continuation] = [:]
-    private var _inboxStreams: [AgentId: AsyncStream<JSON>] = [:]
+    private var _inboxes: [AgentId: Inbox] = [:]
 
     /// State subscribers — opaque tokens + callback closures.
     private let subscriberLock = NSLock()
@@ -124,6 +158,10 @@ public final class Kernel: @unchecked Sendable {
     public let rows = RowStore()
     /// The loader's message pump, once installed (see `MessagesLog.swift`).
     public var messagePump: MessagePump?
+    /// The loader's debounced RECORD writer, once installed (see
+    /// `RecordWriter.swift`). Held here so a one-shot caller with no reference
+    /// to the loader bundle can still drain it before the process exits.
+    public var recordWriter: RecordWriter?
 
     /// EVERY execution and what it became — named (a caller's dedup contract) or
     /// unnamed (under its minted pid). Session lifetime, retention-ringed; the
@@ -149,7 +187,7 @@ public final class Kernel: @unchecked Sendable {
     /// The daemon's stop signal: `requestShutdown` flips it and wakes every
     /// `shutdownRequested()` waiter; a late waiter returns at once.
     var _shutdownRequested = false
-    var _shutdownWaiters: [CheckedContinuation<Void, Never>] = []
+    var _shutdownWaiters: [ShutdownWaitSlot] = []
     /// How long in-flight work may take to settle before it is cancelled. An
     /// instance value so a test can tighten it, exactly as python's test sets
     /// `k.QUIET_TIMEOUT`; the constant is `Kernel.QUIET_TIMEOUT`.
@@ -167,16 +205,55 @@ public final class Kernel: @unchecked Sendable {
 
     // ── Agent map ───────────────────────────────────────────────
 
-    /// Register `agent` in the flat routing map and create its inbox
-    /// stream. Returns the stream the caller can iterate to read
-    /// inbox messages. Mirrors `Rust Kernel::register` (which returns
-    /// `mpsc::Receiver<Value>`).
-    @discardableResult
-    public func register(_ agent: Agent) -> AsyncStream<JSON> {
+    /// Register `agent` in the flat routing map. NO INBOX.
+    ///
+    /// An agent does not get a queue merely by existing. `register` used to mint
+    /// one and hand back the stream, which almost every caller dropped on the
+    /// same line — so the queue was live, nobody read it, and `watch` happily
+    /// mirrored into it forever. `ensureInbox` IS the reader registration, and
+    /// every caller of it drains what it gets. Python `Kernel.register`.
+    public func register(_ agent: Agent) {
         agentsLock.lock()
         _agents[agent.id] = agent
         agentsLock.unlock()
-        return ensureInbox(agent.id)
+        // C35: a declared `alias` meta becomes addressable by that stable
+        // name — like the built-in `kernel`→root alias, but for anything an
+        // operator names. Declared config the substrate makes functional,
+        // not autonomous behavior. Python `Kernel.register`.
+        if case .string(let alias)? = agent.metaValue(forKey: "alias"), !alias.isEmpty {
+            wellKnownLock.lock()
+            _wellKnown[alias] = agent.id
+            wellKnownLock.unlock()
+        }
+    }
+
+    /// Compose an EPHEMERAL child directly under `parent` — python's `Cli
+    /// (kernel, parent=...)` (`class Cli(Agent): ephemeral = True`), which
+    /// bypasses `create_agent` entirely. `ephemeral` is a CONSTRUCTION-time
+    /// flag no verb payload can set (a bundle has no distinct Swift class the
+    /// way python's `Cli` subclass carries its own `ephemeral = True`), and
+    /// the renderer is WIRED, never booted (A14.13/A14.15: the daemon fires
+    /// `intro_booting`/`booted` at it directly). Publishes the same `added`
+    /// state event `create_agent` does, so a watcher sees it exactly as it
+    /// would any other child — the record-writer ignores it all the same
+    /// (`!ephemeral` guards every persist queue).
+    @discardableResult
+    public func composeEphemeralChild(
+        id: AgentId, handlerModule: String, parent: Agent,
+        meta: OrderedDictionary<String, JSON> = [:]
+    ) -> Agent {
+        let child = Agent(
+            id: id, handlerModule: handlerModule, parentId: parent.id, meta: meta,
+            ephemeral: true)
+        register(child)
+        parent.insertChild(child)
+        publishState(
+            .object([
+                "agent_id": .string(child.id.value), "kind": .string("added"),
+                "name": .string(meta["display_name"]?.asString ?? id.value),
+                "parent_id": .string(parent.id.value),
+            ]))
+        return child
     }
 
     /// Snapshot the registered agent for `id`, if any.
@@ -184,6 +261,19 @@ public final class Kernel: @unchecked Sendable {
         agentsLock.lock()
         defer { agentsLock.unlock() }
         return _agents[id]
+    }
+
+    /// Resolve an id the way `send` does (C35): `"kernel"` → the root, else
+    /// through a declared `alias` (`well_known`), else a literal id. `nil`
+    /// when it names no live agent. Python `Agent._resolve_agent` / the
+    /// inline resolve in `_launch`.
+    public func resolveAgent(_ id: String) -> Agent? {
+        if id.isEmpty { return nil }
+        if id == "kernel" { return root }
+        wellKnownLock.lock()
+        let real = _wellKnown[id]
+        wellKnownLock.unlock()
+        return agent(real ?? AgentId(id))
     }
 
     /// All registered agents in insertion order.
@@ -197,12 +287,15 @@ public final class Kernel: @unchecked Sendable {
     /// Used by cascade delete.
     func unregister(_ id: AgentId) {
         agentsLock.lock()
-        _agents[id] = nil
+        _agents.removeValue(forKey: id)
         agentsLock.unlock()
+        // Drop any alias pointing at it (C35). Python `Kernel.unregister`.
+        wellKnownLock.lock()
+        for (name, target) in _wellKnown where target == id { _wellKnown.removeValue(forKey: name) }
+        wellKnownLock.unlock()
         inboxLock.lock()
         _inboxes[id]?.finish()
         _inboxes[id] = nil
-        _inboxStreams[id] = nil
         inboxLock.unlock()
     }
 
@@ -221,21 +314,15 @@ public final class Kernel: @unchecked Sendable {
     // ── Inbox + watchers ────────────────────────────────────────
 
     @discardableResult
-    public func ensureInbox(_ id: AgentId) -> AsyncStream<JSON> {
+    public func ensureInbox(_ id: AgentId) -> Inbox {
         inboxLock.lock()
         defer { inboxLock.unlock() }
-        if let stream = _inboxStreams[id] {
-            return stream
+        if let inbox = _inboxes[id] {
+            return inbox
         }
-        var continuation: AsyncStream<JSON>.Continuation!
-        let stream = AsyncStream<JSON>(
-            bufferingPolicy: .bufferingNewest(inboxBound)
-        ) { c in
-            continuation = c
-        }
-        _inboxes[id] = continuation
-        _inboxStreams[id] = stream
-        return stream
+        let inbox = Inbox(bound: inboxBound)
+        _inboxes[id] = inbox
+        return inbox
     }
 
     /// Drop a SYNTHETIC inbox its owner created with `ensureInbox` — a relay's
@@ -249,21 +336,28 @@ public final class Kernel: @unchecked Sendable {
         defer { inboxLock.unlock() }
         _inboxes[id]?.finish()
         _inboxes[id] = nil
-        _inboxStreams[id] = nil
     }
 
-    func deliverToInbox(_ id: AgentId, _ payload: JSON) {
+    func deliverToInbox(_ id: AgentId, _ item: InboxItem) {
         inboxLock.lock()
-        let continuation = _inboxes[id]
+        let inbox = _inboxes[id]
         inboxLock.unlock()
         // AN INBOX EXISTS IFF A READER REGISTERED IT. Delivery to an id nobody
         // holds a stream for is a no-op. This used to auto-vivify, which minted
         // a buffer for a consumer that never arrived: it filled to `inboxBound`
         // and then evicted one payload per message, forever, with nothing to say
         // so. `ensureInbox` IS the registration.
-        if let continuation = continuation {
-            _ = continuation.yield(payload)
+        if let inbox = inbox {
+            inbox.put(item)
         }
+    }
+
+    /// Does `id` hold a registered inbox? A watcher without one receives neither
+    /// the mail nor a state event — python's `if tgt_inbox is None: continue`.
+    func hasInbox(_ id: AgentId) -> Bool {
+        inboxLock.lock()
+        defer { inboxLock.unlock() }
+        return _inboxes[id] != nil
     }
 
     /// Register `watcherId` as an observer of `srcId`'s inbox.
@@ -295,16 +389,13 @@ public final class Kernel: @unchecked Sendable {
         // watcher's inbox, so a caller could watch and never drain: the mirror
         // went into a buffer nobody read. Registering a consumer is what `watch`
         // requires, not what it does.
-        let known: Bool = {
-            inboxLock.lock()
-            defer { inboxLock.unlock() }
-            return _inboxes[watcher] != nil
-        }()
-        guard known else {
+        guard hasInbox(watcher) else {
             return Refusal.make(
                 Refusal.noConsumer,
-                "watch: \(watcher.value) has no registered inbox, so nothing "
+                "watch: \(pyRepr(watcher.value)) has no registered inbox, so nothing "
                     + "would read what is mirrored there",
+                hint: "register the reader first — ctx.ensure_inbox(\(pyRepr(watcher.value))) "
+                    + "— then watch",
                 extra: [
                     ("watcher", .string(watcher.value)),
                     ("src", .string(src.value)),
@@ -336,10 +427,78 @@ public final class Kernel: @unchecked Sendable {
         }
     }
 
-    func fanoutToWatchers(_ target: Agent, _ payload: JSON) {
+    /// THE ONE FANOUT — python's `Agent._fanout`, run BEFORE the handler and
+    /// once per attempt.
+    ///
+    /// The target's OWN inbox first (a registered reader sees what was sent TO
+    /// it, not only what its handler replied), then the state event for the
+    /// target, then each watcher's inbox plus a state event per watcher that is a
+    /// REAL agent. A synthetic watcher (a browser client id) gets the mail and no
+    /// telemetry ray — publishing one would mint a phantom sprite.
+    ///
+    /// The whole `item` travels, bytes included: a watcher on a `write_stream`
+    /// receives the body, which is the binary frame python sends it.
+    func fanout(_ target: Agent, _ kind: String, _ item: InboxItem) {
+        // THE CALLER, not the target. Read before any dispatch scope re-points
+        // `currentSender` at the target; an operator send carries JSON null.
+        let sender = KernelTaskLocals.currentSender
+        let summary = summarize(item.payload, body: item.body)
+        deliverToInbox(target.id, item)
+        publishState(
+            Kernel.trafficEvent(
+                target.id, kind, target.inFlight, sender, summary, item.payload),
+            body: item.body)
         for w in target.watcherIds() {
-            deliverToInbox(w, payload)
+            guard hasInbox(w) else { continue }
+            deliverToInbox(w, item)
+            if let wa = agent(w) {
+                publishState(
+                    Kernel.trafficEvent(w, kind, wa.inFlight, sender, summary, item.payload),
+                    body: item.body)
+            }
         }
+    }
+
+    /// One traffic state event, in python's key order:
+    /// `{agent_id, kind, backlog, sender, summary, payload}` (`ts` is stamped by
+    /// `publishState`). `sender` is the originator or JSON null — never the
+    /// target's own id, which is what swift used to substitute for an operator
+    /// send.
+    static func trafficEvent(
+        _ agentId: AgentId, _ kind: String, _ backlog: Int, _ sender: AgentId?,
+        _ summary: String, _ payload: JSON
+    ) -> JSON {
+        .object([
+            "agent_id": .string(agentId.value),
+            "kind": .string(kind),
+            "backlog": .integer(Int64(backlog)),
+            "sender": sender.map { JSON.string($0.value) } ?? .null,
+            "summary": .string(summary),
+            "payload": payload,
+        ])
+    }
+
+    /// The inbox element for a BINARY dispatch: the header with `bytes` nulled,
+    /// plus the blob at that same path. `bytes` is the key python's own payload
+    /// dict holds the blob under, so a watcher receives the body — not a header
+    /// with a hole where it was.
+    static func binaryItem(_ header: JSON, _ blob: Data) -> InboxItem {
+        var head = header
+        if case .object(var o) = head {
+            o["bytes"] = .null
+            head = .object(o)
+        }
+        return .binary(head, "bytes", blob)
+    }
+
+    /// The `{agent_id, kind:"drain", backlog}` event every dispatch publishes
+    /// once its handler has returned — python's `_dispatch` `finally`.
+    static func drainEvent(_ agentId: AgentId, _ backlog: Int) -> JSON {
+        .object([
+            "agent_id": .string(agentId.value),
+            "kind": .string("drain"),
+            "backlog": .integer(Int64(backlog)),
+        ])
     }
 
     // ── State events ────────────────────────────────────────────
@@ -361,12 +520,41 @@ public final class Kernel: @unchecked Sendable {
         _subscribers.removeAll { $0.0 == token }
     }
 
-    func publishState(_ event: JSON) {
+    /// Push a state event to every subscriber. Keep callbacks short — they run
+    /// on the dispatching task.
+    ///
+    /// `ts` is stamped HERE and LAST (python `{**event, "ts": time.time()}`), so
+    /// every event carries the moment it was published and no caller has to
+    /// remember to add one. No subscribers = no work at all, as in python.
+    func publishState(_ event: JSON, body: InboxBody? = nil) {
         subscriberLock.lock()
         let subs = _subscribers
         subscriberLock.unlock()
+        if subs.isEmpty { return }
+        var stamped = event
+        if case .object(var o) = event {
+            o["ts"] = .double(Date().timeIntervalSince1970)
+            stamped = .object(o)
+        }
         for (_, cb) in subs {
-            cb(event)
+            cb(stamped, body)
+        }
+    }
+
+    /// Synchronous read of every loaded agent's identity + in-flight handler
+    /// count — python's `Kernel.state_snapshot`. Used by a new `state_subscribe`
+    /// subscriber to bootstrap its agent view before the first event arrives. No
+    /// queue puts, no fanout.
+    ///
+    /// Each entry `{agent_id, name, backlog}`, in REGISTRATION ORDER (python
+    /// walks `self.agents.values()`).
+    public func stateSnapshot() -> [JSON] {
+        allAgents().map { a in
+            .object([
+                "agent_id": .string(a.id.value),
+                "name": .string(displayNameOrId(a)),
+                "backlog": .integer(Int64(a.inFlight)),
+            ])
         }
     }
 }

@@ -30,6 +30,15 @@ public struct StaticLoaderBundle: AgentBundle {
     public static let handlerModule = "static_loader.tools"
 
     public let name = "static_loader"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
+
+    /// python's module-level `VERBS` — ONE table: reflect renders it and
+    /// `advertises` reads it.
+    static let verbDocs: OrderedDictionary<String, JSON> = [
+        "reflect": .string(
+            "The loader's posture: what manifest it hydrates, and that it IS a loader"),
+        "boot": .string("Hydrate the declared roster as OPERATOR."),
+    ]
 
     public init() {}
 
@@ -253,11 +262,7 @@ public struct StaticLoaderBundle: AgentBundle {
             "display_name": .string(name.isEmpty ? agent.id.value : name),
             "loader": .bool(true),
             "manifest": agent.metaValue(forKey: MANIFEST_FIELD) ?? .null,
-            "verbs": .object([
-                "reflect": .string(
-                    "The loader's posture: what manifest it hydrates, and that it IS a loader"),
-                "boot": .string("Hydrate the declared roster as OPERATOR."),
-            ]),
+            "verbs": .object(Self.verbDocs),
         ])
     }
 

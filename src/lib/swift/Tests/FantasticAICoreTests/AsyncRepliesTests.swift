@@ -240,10 +240,10 @@ struct AsyncRepliesTests {
     // A CRLF is ONE Character and TWO code points, so a grapheme-counted page
     // and a grapheme-counted width both return more than python returns.
     //
-    // NOTE: the STORED-BODY branch's page still comes from `kernel.rows.bodyGet`,
-    // which counts graphemes today — `ViewRecallTests.pullPagesACrlfBodyByCodePoints`
-    // lands with C70. What is pinned here is the FOLD branch and the grep width,
-    // which are this batch's.
+    // The STORED-BODY branch's page (`kernel.rows.bodyGet`) counts code points
+    // too as of C70 — pinned separately in
+    // `ViewRecallTests.pullPagesACrlfBodyByCodePoints`. What is pinned here is
+    // the FOLD branch and the grep width.
     @Test func pullAndGrepWidthCountCodePoints() async throws {
         let (kernel, agent, f) = await boot()
         let fold = f.fold([], "t", String(repeating: "a\r\nb", count: 3), false)

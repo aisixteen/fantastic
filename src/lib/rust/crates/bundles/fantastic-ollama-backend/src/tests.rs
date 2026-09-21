@@ -35,7 +35,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
         .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -49,7 +49,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
     let file_id = format!("ff_{}", backend_id);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
@@ -66,7 +66,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
         .result;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
@@ -371,7 +371,7 @@ async fn sends_temperature_default_and_override() {
     // override via the record: reflect + the next request both carry it.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type":"update_agent","id": backend.as_str(), "temperature": 0.15}),
         )])
         .await
@@ -583,7 +583,7 @@ async fn reflect_extras_match_python() {
     // `bool(x) if x is not None`.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
                    "temperature": "0.7", "num_ctx": "4096", "num_predict": 0,
                    "think": 0}),

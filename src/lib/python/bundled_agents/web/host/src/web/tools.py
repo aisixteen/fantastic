@@ -4,11 +4,13 @@
 in (`/`, `/<id>/file/<path>`, favicon — no server-side `/<id>/` render
 route and no transport.js; all UI is the TS frontend). Verb-
 invocation routes are NOT — those live in sub-agent bundles (`web_ws`,
-`web_rest`) that declare their routes via the duck-typed `get_routes`
-verb. On boot, web walks its children and mounts whatever they return
-onto the live FastAPI app via `app.add_api_route` /
-`app.add_api_websocket_route`. Children emit `routes_changed` on
-themselves to hot-swap their surface.
+`web_rest`) that DECLARE their routes via the duck-typed `get_routes`
+verb (pure data: `{kind, method?, path}`) and hand over the matching LIVE
+endpoint callables through the duck-typed module hook
+`route_endpoints(agent) -> {path: endpoint}`. On boot, web walks its children,
+pulls both halves and mounts them onto the live FastAPI app via
+`app.add_api_route` / `app.add_api_websocket_route`. Children emit
+`routes_changed` on themselves to hot-swap their surface.
 
 Verbs:
   reflect   -> {sentence, port, served_agent_count, running, surfaces}
@@ -27,6 +29,8 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
+
+from kernel._kernel import _current_task
 
 from .app import make_app
 
@@ -52,8 +56,16 @@ class _ServerHandle:
 
 
 async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
-    """Pull `get_routes` from one child and mount the returned routes
-    onto the live FastAPI app. No-op if the child doesn't answer."""
+    """Mount one child's call surface. Two halves, one path each:
+
+    - the DECLARATION — the `get_routes` reply, pure JSON data, so it renders
+      over REST and persists into the ledger like any other reply;
+    - the LIVE endpoints — the child bundle's `route_endpoints(agent)` module
+      hook, discovered like `on_delete`, keyed by the declared path.
+
+    A child that answers no routes has no surface (no-op). A child that DECLARES
+    routes but exposes no hook — or no endpoint for a declared path — is a broken
+    leg: fail loud at boot, never mount half a surface."""
     try:
         r = (
             await kernel.send([{"target": child_id, "payload": {"type": "get_routes"}}])
@@ -64,13 +76,26 @@ async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
     if not isinstance(r, dict):
         return
     routes = r.get("routes") or []
+    if not routes:
+        return
+    child = kernel.ctx.agents.get(child_id)
+    hook = child.module_hook("route_endpoints") if child is not None else None
+    if hook is None:
+        raise RuntimeError(
+            f"web: {child_id} declares {len(routes)} route(s) but its bundle "
+            "exposes no route_endpoints(agent) hook"
+        )
+    endpoints = hook(child)
     mounted: list[Any] = []
     for spec in routes:
         kind = spec.get("kind")
         path = spec.get("path")
-        endpoint = spec.get("endpoint")
+        endpoint = endpoints.get(path)
         if not path or not callable(endpoint):
-            continue
+            raise RuntimeError(
+                f"web: {child_id} declares route {path!r} but route_endpoints() "
+                "hands over no endpoint for it"
+            )
         if kind == "websocket":
             handle.app.add_api_websocket_route(path, endpoint)
         else:
@@ -141,6 +166,11 @@ def _start_serving(agent_id: str, handle: _ServerHandle) -> None:
     port = handle.port
 
     async def _safe_serve():
+        # NOT a child of the boot dispatch: this task outlives it, and every
+        # request task uvicorn creates inherits the context here. Left as it
+        # was, each REST-ingress task named a parent pid that had ended
+        # (measured 2026-09-16: `parent: 7`, no such row).
+        _current_task.set(None)
         # uvicorn calls sys.exit(1) on bind failure (e.g. port already
         # in use). SystemExit out of an asyncio task aborts the whole
         # event loop — taking the kernel down with one bad webapp.
@@ -218,9 +248,7 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             aid,
             holder_id=web_id,
             holder_parent=web.record.get("parent_id"),
-            holder_children=frozenset(
-                c.id for c in getattr(web, "_children", []) or []
-            ),
+            holder_children=frozenset(getattr(web, "_children", {}) or {}),
         )
         if not egress.allowed:
             continue
@@ -230,9 +258,7 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             web_id,
             holder_id=aid,
             holder_parent=rec.get("parent_id"),
-            holder_children=frozenset(
-                c.id for c in getattr(agent, "_children", []) or []
-            ),
+            holder_children=frozenset(getattr(agent, "_children", {}) or {}),
         )
         if not ingress.allowed:
             continue

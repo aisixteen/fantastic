@@ -52,13 +52,18 @@ fn not_here_points_at_the_root() {
 fn unknown_agent_carries_the_live_index() {
     let v = unknown_agent(
         "typo",
-        vec!["core".into(), "cli".into(), "file_bridge_ab12".into()],
+        vec![
+            "kernel_state".into(),
+            "cli".into(),
+            "file_bridge_ab12".into(),
+        ],
     );
     assert_eq!(v["reason"], "unknown_agent");
     assert_eq!(v["agent_count"], 3);
     // sorted, so a caller reading them gets a stable list
     assert_eq!(v["agents"][0], "cli");
-    assert_eq!(v["agents"][1], "core");
+    assert_eq!(v["agents"][1], "file_bridge_ab12");
+    assert_eq!(v["agents"][2], "kernel_state");
     assert!(
         v.get("hint").is_none(),
         "a real id needs no placeholder hint"
@@ -69,7 +74,7 @@ fn unknown_agent_carries_the_live_index() {
 fn a_placeholder_id_is_named_as_one() {
     // Measured 2026-08-04: a model copied `<id>` out of an example and received
     // the same bare refusal 34 times without correcting.
-    let v = unknown_agent("<id>", vec!["core".into()]);
+    let v = unknown_agent("<id>", vec!["kernel_state".into()]);
     let hint = v["hint"].as_str().unwrap();
     assert!(hint.contains("PLACEHOLDER"));
     assert!(hint.contains("agents"));
@@ -114,10 +119,10 @@ fn py_repr_matches_python() {
 fn unknown_agent_error_is_python_repr() {
     // Measured: `refusal_unknown_agent.json` / `prompt_req_02.json` carry
     // `no agent 'ghost'` — rust's Debug quoting said `no agent "ghost"`.
-    let v = unknown_agent("ghost", vec!["core".into()]);
+    let v = unknown_agent("ghost", vec!["kernel_state".into()]);
     assert_eq!(v["error"], "no agent 'ghost'");
     // Same helper behind the placeholder hint.
-    let p = unknown_agent("<id>", vec!["core".into()]);
+    let p = unknown_agent("<id>", vec!["kernel_state".into()]);
     assert_eq!(
         p["hint"],
         "'<id>' is a PLACEHOLDER from an example, not an id — substitute one of `agents`."

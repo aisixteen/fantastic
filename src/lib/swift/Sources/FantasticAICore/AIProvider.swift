@@ -19,9 +19,7 @@
 // identically.
 //
 // IMPORTANT: this module is provider-agnostic and MUST NOT import
-// any provider SDK. In particular it MUST NOT import FoundationModels
-// — all Apple-FM gating (`#if canImport(FoundationModels)`,
-// `#available`) lives ONLY in the FM adapter target.
+// any provider SDK.
 
 import FantasticJSON
 import Foundation

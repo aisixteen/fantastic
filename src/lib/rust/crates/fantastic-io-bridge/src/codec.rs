@@ -59,38 +59,58 @@ pub fn decode_binary_frame(data: &[u8]) -> Result<(Value, Vec<u8>), String> {
     Ok((header, body))
 }
 
+/// Resolve one python list index: `int(p)` plus python's negative indexing.
+/// `Err` for a non-int spelling or an out-of-range index — python raises
+/// `ValueError` / `IndexError` for both, and `decode_frame` turns either into
+/// the one malformed-frame error.
+fn list_index(part: &str, len: usize) -> Result<usize, String> {
+    let n: i64 = part
+        .parse()
+        .map_err(|_| format!("list index {part:?} is not an int"))?;
+    let i = if n < 0 { n + len as i64 } else { n };
+    if i < 0 || i as usize >= len {
+        return Err(format!("list index {n} out of range"));
+    }
+    Ok(i as usize)
+}
+
 /// Set `value` at a dotted `path` in a JSON object/array (mirrors py `set_path`). Used to
 /// place the body back at `_binary_path` after decoding, or to null it before encoding.
-pub fn set_path(obj: &mut Value, path: &str, value: Value) {
+///
+/// FALLIBLE, like python's, which raises `KeyError`/`IndexError`/`TypeError`
+/// through `decode_frame` into one `ValueError` the read loop answers as a
+/// malformed frame. Rust used to return `()` and SILENTLY do nothing on an
+/// unplaceable path, so a frame naming `payload.nope.deep` was handled as if it
+/// were well-formed and the peer got a reply instead of the frame error.
+pub fn set_path(obj: &mut Value, path: &str, value: Value) -> Result<(), String> {
     let parts: Vec<&str> = path.split('.').collect();
     let mut cur = obj;
-    for p in &parts[..parts.len().saturating_sub(1)] {
+    for p in &parts[..parts.len() - 1] {
         cur = match cur {
-            Value::Array(a) => match p.parse::<usize>() {
-                Ok(i) if i < a.len() => &mut a[i],
-                _ => return,
-            },
-            Value::Object(m) => match m.get_mut(*p) {
-                Some(v) => v,
-                None => return,
-            },
-            _ => return,
+            Value::Array(a) => {
+                let i = list_index(p, a.len())?;
+                &mut a[i]
+            }
+            Value::Object(m) => m
+                .get_mut(*p)
+                .ok_or_else(|| format!("no key {p:?} on the way to {path:?}"))?,
+            _ => return Err(format!("{p:?} is not a container in {path:?}")),
         };
     }
-    if let Some(last) = parts.last() {
-        match cur {
-            Value::Array(a) => {
-                if let Ok(i) = last.parse::<usize>() {
-                    if i < a.len() {
-                        a[i] = value;
-                    }
-                }
-            }
-            Value::Object(m) => {
-                m.insert((*last).to_string(), value);
-            }
-            _ => {}
+    let last = parts[parts.len() - 1];
+    match cur {
+        Value::Array(a) => {
+            let i = list_index(last, a.len())?;
+            a[i] = value;
+            Ok(())
         }
+        Value::Object(m) => {
+            m.insert(last.to_string(), value);
+            Ok(())
+        }
+        _ => Err(format!(
+            "{last:?} does not name a settable slot in {path:?}"
+        )),
     }
 }
 
@@ -116,8 +136,29 @@ mod tests {
     #[test]
     fn set_path_places_body_at_binary_path() {
         let mut env = json!({"type":"reply","data":{"bytes":null}});
-        set_path(&mut env, "data.bytes", json!("RESTORED"));
+        set_path(&mut env, "data.bytes", json!("RESTORED")).unwrap();
         assert_eq!(env["data"]["bytes"], "RESTORED");
+    }
+
+    /// python raises `KeyError`/`IndexError`/`TypeError` out of `set_path`, and
+    /// `decode_frame` turns each into the one malformed-frame `ValueError`. A
+    /// silent no-op here made a frame with an unplaceable `_binary_path` look
+    /// well-formed (A11.7 case f).
+    #[test]
+    fn set_path_unresolvable_intermediate_errors() {
+        // missing intermediate key
+        let mut env = json!({"payload": {}});
+        assert!(set_path(&mut env, "payload.nope.deep", json!(1)).is_err());
+        // the holder is not a container
+        let mut env = json!({"payload": "text"});
+        assert!(set_path(&mut env, "payload.bytes", json!(1)).is_err());
+        // a non-int list index, and one past the end
+        let mut env = json!({"items": [1, 2]});
+        assert!(set_path(&mut env, "items.x", json!(1)).is_err());
+        assert!(set_path(&mut env, "items.5", json!(1)).is_err());
+        // python's negative indexing resolves
+        set_path(&mut env, "items.-1", json!(9)).unwrap();
+        assert_eq!(env["items"][1], 9);
     }
 
     #[test]

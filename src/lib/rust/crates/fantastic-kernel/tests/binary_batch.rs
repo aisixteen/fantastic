@@ -39,12 +39,12 @@ impl Bundle for Sink {
         header: Value,
         blob: Vec<u8>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
         let n = blob.len();
         *self.0.lock().unwrap() = blob;
         Ok((
             Some(json!({"written": n, "path": header.get("path").cloned()})),
-            Vec::new(),
+            None,
         ))
     }
 }
@@ -58,7 +58,7 @@ async fn mk() -> (TempDir, Arc<Kernel>, Arc<Mutex<Vec<u8>>>) {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -70,7 +70,7 @@ async fn mk() -> (TempDir, Arc<Kernel>, Arc<Mutex<Vec<u8>>>) {
     kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "create_agent", "parent_id": "core", "id": "sink",
+            json!({"type": "create_agent", "parent_id": "kernel_state", "id": "sink",
                    "handler_module": "sink.tools"}),
         )])
         .await;

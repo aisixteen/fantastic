@@ -165,19 +165,21 @@ extension JSON {
         return out
     }
 
-    /// Pretty-print with `indent` spaces per level, matching
-    /// Python's `json.dumps(obj, indent=2)` byte-for-byte:
-    ///   - `": "` between key and value
-    ///   - `,\n<indent>` between items
-    ///   - empty `{}` / `[]` stay compact (no inner newline)
-    ///   - no trailing newline on the outermost value
+    /// Pretty-print with `indent` spaces per level, matching Python's
+    /// `json.dumps(obj, indent=2)` BYTE FOR BYTE (C42): `": "` between key and
+    /// value, `,\n<indent>` between items, empty `{}`/`[]` stay compact, no
+    /// trailing newline on the outermost value, non-ASCII as lowercase
+    /// `\uXXXX` (astral scalars as a surrogate PAIR — `ensure_ascii=True`,
+    /// python's default), and the python float repr. Delegates to
+    /// `pyJsonDumps` rather than this file's OWN compact `writeTo` (which
+    /// mirrors rust's `serde_json` instead — raw UTF-8, `null` for a
+    /// non-finite double) because on-disk `agent.json` bytes must match what
+    /// the python kernel writes for the same record, and `writeTo` never did.
     ///
-    /// Used for on-disk persistence (`agent.json`) so the bytes
-    /// match what the Python kernel writes for the same record.
+    /// Used for on-disk persistence (`agent.json`) — never for the wire,
+    /// which stays on the compact `serialize()` above.
     public func serializePretty(indent: Int = 2) -> String {
-        var out = String()
-        writeToPretty(&out, level: 0, indent: indent)
-        return out
+        pyJsonDumps(self, ensureAscii: true, indent: indent)
     }
 
     private func writeTo(_ out: inout String) {
@@ -221,56 +223,6 @@ extension JSON {
                 out.append(":")
                 v.writeTo(&out)
             }
-            out.append("}")
-        }
-    }
-
-    /// Pretty-print writer mirroring CPython's `json.encoder`
-    /// `indent=N` behavior. Item separators are `,` (no trailing
-    /// space — Python writes `,\n<indent>`), key/value separator
-    /// is `": "`.
-    private func writeToPretty(_ out: inout String, level: Int, indent: Int) {
-        switch self {
-        case .null, .bool, .integer, .double, .string:
-            // Scalars: same bytes as compact mode.
-            writeTo(&out)
-        case .array(let arr):
-            if arr.isEmpty {
-                out.append("[]")
-                return
-            }
-            out.append("[\n")
-            let childPad = String(repeating: " ", count: (level + 1) * indent)
-            let parentPad = String(repeating: " ", count: level * indent)
-            var first = true
-            for item in arr {
-                if !first { out.append(",\n") }
-                first = false
-                out.append(childPad)
-                item.writeToPretty(&out, level: level + 1, indent: indent)
-            }
-            out.append("\n")
-            out.append(parentPad)
-            out.append("]")
-        case .object(let dict):
-            if dict.isEmpty {
-                out.append("{}")
-                return
-            }
-            out.append("{\n")
-            let childPad = String(repeating: " ", count: (level + 1) * indent)
-            let parentPad = String(repeating: " ", count: level * indent)
-            var first = true
-            for (k, v) in dict {
-                if !first { out.append(",\n") }
-                first = false
-                out.append(childPad)
-                JSON.writeEscapedString(k, to: &out)
-                out.append(": ")
-                v.writeToPretty(&out, level: level + 1, indent: indent)
-            }
-            out.append("\n")
-            out.append(parentPad)
             out.append("}")
         }
     }

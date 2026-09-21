@@ -157,21 +157,36 @@ public final class RowStore: @unchecked Sendable {
     /// Keep a reply body too large to inline, under its pid.
     @discardableResult
     public func bodyPut(_ agent: AgentId, pid: Int64, text: String) throws -> Int64 {
-        try put(agent, ["kind": .string("body"), "parent": .integer(pid), "content": .string(text)])
+        try put(
+            agent, ["kind": .string("body"), "parent": .integer(pid), "content": .string(text)])
     }
 
-    /// One page of a stored body: `(text, nextOffset, eof, size)`. CHARACTERS,
-    /// not bytes: python slices a str, and a byte slice would cut a codepoint in
-    /// half on any non-ascii body.
+    /// One page of a stored body: `(text, nextOffset, eof, size)`. CODE
+    /// POINTS, not `Character`s and not bytes: python slices a `str` by index
+    /// (`b[offset:offset+max(1,length)]`), so a byte slice would cut a
+    /// codepoint in half and a `Character`/grapheme slice would merge a CRLF
+    /// pair python counts as two.
+    ///
+    /// `offset` is NEVER clamped into `nextOffset` — only the slice bounds
+    /// are, exactly as a python slice silently empties past the end without
+    /// raising. A page pulled at `offset:9999` on a 12-codepoint body answers
+    /// `("", 9999, true, 12)`: `nextOffset` echoes the caller's own offset, a
+    /// deliberate "you asked past the end, here's where you asked" rather
+    /// than a value walked back to `size`.
     public func bodyGet(_ pid: Int64, offset: Int, length: Int) -> (String, Int, Bool, Int)? {
         lock.lock()
         defer { lock.unlock() }
         guard let rid = bodyByParent[pid], let row = rows[rid] else { return nil }
-        let chars = Array(row["content"]?.asString ?? "")
-        let start = min(max(offset, 0), chars.count)
-        let end = min(start + max(length, 1), chars.count)
-        let next = end
-        return (String(chars[start..<end]), next, next >= chars.count, chars.count)
+        let scalars = Array(pyStr(row["content"] ?? .string("")).unicodeScalars)
+        let len = scalars.count
+        let stop = offset + max(length, 1)
+        // Python slice-index normalization: a negative bound counts from the
+        // end (floored at 0), a non-negative one clamps at `len`.
+        let start = offset < 0 ? max(len + offset, 0) : min(offset, len)
+        let clampedStop = stop < 0 ? max(len + stop, 0) : min(stop, len)
+        let chunk = start < clampedStop ? scalars[start..<clampedStop] : scalars[0..<0]
+        let next = offset + chunk.count
+        return (String(String.UnicodeScalarView(chunk)), next, next >= len, len)
     }
 
     // MARK: views

@@ -13,10 +13,10 @@
 
 import FantasticCliBundle
 import FantasticFile
-import FantasticFoundationModelsBackend
 import FantasticJSON
 import OrderedCollections
 import FantasticKernel
+import FantasticKernelState
 import FantasticScenarioProbes
 import FantasticKernelBridge
 import FantasticAnthropicBackend
@@ -42,21 +42,28 @@ import Foundation
 /// `register_default_bundles` exactly.
 public func defaultBundleRegistry() -> BundleRegistry {
     let r = BundleRegistry()
+    // THE ROOT LOADER. `kernel_state` IS the tree root, and its handler_module is
+    // this bundle — so it is registered first and every embedder gets it (there
+    // is no kernel without a root).
+    r.register(ROOT_HANDLER_MODULE, KernelStateBundle())
     r.register("file_bridge.tools", FileBundle())
     // TEST-ONLY. The shared e2e scenarios declare stateful fixture roles that
     // python and js register in process; a compiled kernel can only run what is
     // compiled in, so without these the scenarios naming them are SKIPPED.
+    // UNLISTED: python registers them as importable modules with no
+    // `fantastic.bundles` entry point, so they dispatch but never show up in
+    // the `bundles` catalog a model reflects.
     #if SCENARIO_PROBES
-        r.register(DISPENSER_MODULE, DispenserProbe())
-        r.register(PLANT_MODULE, PlantProbe())
-        r.register(PURCHASE_MODULE, PurchaseProbe())
+        r.registerUnlisted(DISPENSER_MODULE, DispenserProbe())
+        r.registerUnlisted(PLANT_MODULE, PlantProbe())
+        r.registerUnlisted(PURCHASE_MODULE, PurchaseProbe())
         // THE HUMAN, as an agent. Every AI probe tasks its model through this
         // one, so the task is a gated `user -> ai` send with a ledger row
         // instead of an operator injection from outside the kernel.
-        r.register(USER_MODULE, UserProbe())
+        r.registerUnlisted(USER_MODULE, UserProbe())
         // A fixed body of knowledge per solver: `ask` is keyword search over
         // the `lines` on its record; `asked` is the tally the scorer reads.
-        r.register(ORACLE_MODULE, OracleProbe())
+        r.registerUnlisted(ORACLE_MODULE, OracleProbe())
     #endif
     r.register("text_file.tools", TextFileBundle())
     // The render sink the AI backends stream their turn to (python `cli`).
@@ -74,7 +81,6 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("nvidia_nim_backend.tools", NvidiaNimBundle())
     r.register("anthropic_backend.tools", AnthropicBundle())
     r.register("llamacpp_backend.tools", LlamaCppBundle())
-    r.register("foundation_models_backend.tools", FoundationModelsBackendBundle())
     #if os(macOS)
         r.register("exec_bridge.tools", ExecBridgeBundle())
         r.register("terminal_backend.tools", TerminalBackendBundle())
@@ -96,16 +102,13 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
         storage: .inMemory,
         bundles: defaultBundleRegistry()
     )
-    // Mint an ephemeral guid into the root meta so reflect always carries one.
-    // No-disk boot → not persisted, just present in RAM (persistence-scoped
-    // field, but the in-memory kernel still needs a value to reflect). Mirrors
-    // the disk path's mint; explicit is impossible here (virgin RAM root).
-    let ephemeralGuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    // NO GUID HERE. The instance guid is minted ONCE by the root loader's `boot`
+    // (python `kernel_state._boot`), so an in-memory kernel gets one the same way
+    // a disk one does — and never two different ones.
     let root = Agent(
-        id: AgentId("core"),
-        handlerModule: nil,
-        parentId: nil,
-        meta: ["guid": .string(ephemeralGuid)]
+        id: AgentId(ROOT_ID),
+        handlerModule: ROOT_HANDLER_MODULE,
+        parentId: nil
     )
     kernel.register(root)
     kernel.setRoot(root)
@@ -114,9 +117,9 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
     // app can immediately call `kernel.send("web", {boot})` to
     // start listening. Port hint stashes into the agent's meta so
     // 8B picks it up.
-    _ = await kernel.send([Item(AgentId("core"), .object([
+    _ = await kernel.send([Item(AgentId("kernel"), .object([
             "type": .string("create_agent"),
-            "parent_id": .string("core"),
+            "parent_id": .string(ROOT_ID),
             "handler_module": .string("web.tools"),
             "id": .string("web"),
             "port": .integer(Int64(portHint)),
@@ -155,80 +158,39 @@ public func startKernel(
     )
     let dotFantastic = url.appendingPathComponent(".fantastic")
     try? fm.createDirectory(at: dotFantastic, withIntermediateDirectories: true)
-    // Seed `.fantastic/readme.md` (the substrate doc) if missing — the
-    // root has no handler_module, so per-bundle readme seeding skips it.
-    // Mirrors Rust's `seed_root_readme` / Python's `Core._seed_root_readme`.
-    RootReadme.seed(workdir: url)
-    // Seed the keyed doc TREE `.fantastic/docs/<key>.md` too — `reflect
-    // readme=index`/`readme=<key>` serves it back (mirrors Rust's DOCS seeding).
-    RootDocs.seed(workdir: url)
-
-    // COLD primitive: seed the root record `.fantastic/agent.json` on a virgin
-    // dir. This is the chicken-egg bring-up — it runs BEFORE any agent (and thus
-    // any file_bridge store provider) exists, so it cannot route through a
-    // provider. Ongoing persistence (after boot) flows through the discovered
-    // provider (see PersistenceProvider). Mirrors py write_record / rust
-    // write_record_at, so a swift workdir handed to py/rust carries the root.
+    // THE ROOT RECORD, or a fresh seed. Python's `read_tree` returns `[]` when
+    // `.fantastic/agent.json` is MISSING **or not JSON**, and `_bootstrap` then
+    // seeds a fresh root, overwrites the file, and hydrates NO CHILDREN on that
+    // boot — a tree whose root is unreadable has no walk to start from. A corrupt
+    // root used to be overwritten here while the children were hydrated anyway.
     let rootRecordFile = dotFantastic.appendingPathComponent("agent.json")
-    // Determine the kernel's stable instance `guid`. Persistence-scoped (unlike
-    // run-scoped runtime/env/version): read it back verbatim from the persisted
-    // root record if present; otherwise MINT a 32-hex guid ONCE and persist it
-    // through the SAME cold serializePretty primitive. Explicit/existing always
-    // wins — a minted guid is never regenerated (next boot reads it back). Covers
-    // BOTH the virgin-dir and already-exists-but-guidless cases. Mirrors the relay
-    // guid idiom in KernelBridge.bootRelay + py write_record / rust.
-    let rootGuid: String
-    // EVERYTHING ELSE the root record carries — `callable_by`, `can_call`, and any
-    // operator-authored field. This used to read the file for its `guid` ALONE and
-    // drop the rest, so a root whose record granted `callable_by: {rest: "*"}` came
-    // up with only the three `$` baseline tokens: the grant was on disk, ignored in
-    // memory, and every non-kernel verb from that agent was refused at ingress.
-    // Measured 2026-08-29 against the seeded e2e workdir — `reflect` on the root was
-    // refused on swift and allowed on rust from a byte-identical record, which hid
-    // swift's entire root identity block (`self_extension` included) behind a
-    // refusal. The comment below is why it went unnoticed: `kernel.load` replaces
-    // the root only from a record under `agents/`, and the ROOT's record is not
-    // there — it is `.fantastic/agent.json`.
+    var rootId = ROOT_ID
+    var rootHandler: String? = ROOT_HANDLER_MODULE
     var rootMeta: OrderedDictionary<String, JSON> = [:]
-    if fm.fileExists(atPath: rootRecordFile.path),
-        let data = try? Data(contentsOf: rootRecordFile),
+    var seeded = true
+    if let data = try? Data(contentsOf: rootRecordFile),
         let parsed = try? JSON.parse(data),
-        case .object(let obj0) = parsed
+        case .object(let obj) = parsed
     {
-        // Structural fields are the record's identity, not meta.
-        for (k, v) in obj0 where !["id", "handler_module", "parent_id", "guid"].contains(k) {
+        seeded = false
+        // A PERSISTED RECORD IS AUTHORITATIVE, id and handler_module included —
+        // the tree on disk says what its root is called and what answers for it.
+        if let id = obj["id"]?.asString, !id.isEmpty { rootId = id }
+        rootHandler = obj["handler_module"]?.asString
+        // EVERYTHING ELSE the root record carries — `callable_by`, `can_call`,
+        // `guid`, and any operator-authored field. This used to read the file for
+        // its `guid` ALONE and drop the rest, so a root whose record granted
+        // `callable_by: {rest: "*"}` came up with only the three `$` baseline
+        // tokens: the grant was on disk, ignored in memory, and every non-kernel
+        // verb from that agent was refused at ingress (measured 2026-08-29).
+        for (k, v) in obj where !["id", "handler_module", "parent_id"].contains(k) {
             rootMeta[k] = v
         }
     }
-    if fm.fileExists(atPath: rootRecordFile.path),
-        let data = try? Data(contentsOf: rootRecordFile),
-        let parsed = try? JSON.parse(data),
-        case .object(var obj) = parsed
-    {
-        if let existing = obj["guid"]?.asString, !existing.isEmpty {
-            rootGuid = existing
-        } else {
-            rootGuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            obj["guid"] = .string(rootGuid)
-            try? JSON.object(obj).serializePretty(indent: 2).data(using: .utf8)?
-                .write(to: rootRecordFile)
-        }
-    } else {
-        rootGuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        let rec: JSON = .object([
-            "id": .string("core"), "handler_module": .null, "parent_id": .null,
-            "guid": .string(rootGuid),
-        ])
-        try? rec.serializePretty(indent: 2).data(using: .utf8)?.write(to: rootRecordFile)
-    }
 
-    // Register a bare `core` root agent carrying the persisted guid. If the
-    // workdir has a persisted `core` record under agents/, `kernel.load()` below
-    // will replace this one with the disk-backed shape (carrying meta etc.).
-    rootMeta["guid"] = .string(rootGuid)
     let root = Agent(
-        id: AgentId("core"),
-        handlerModule: nil,
+        id: AgentId(rootId),
+        handlerModule: rootHandler,
         parentId: nil,
         meta: rootMeta,
         rootPath: dotFantastic
@@ -236,51 +198,50 @@ public func startKernel(
     kernel.register(root)
     kernel.setRoot(root)
 
+    // THE VIRGIN SEED IS THE CONSTRUCTED ROOT, not a bare literal: the record on
+    // disk carries the structural grant baseline `Agent.init` stamps, in its
+    // order (`can_call, callable_by`), and the loader's `boot` appends `guid`
+    // after them. COLD primitive — it runs before any provider exists.
+    if seeded {
+        try? Data(JSON.object(root.record().ordered).serializePretty(indent: 2).utf8)
+            .write(to: rootRecordFile, options: .atomic)
+        // ONLY ON THE SEED, as python does: `_bootstrap` calls `write_record`
+        // (which is what seeds `readme.md` + the keyed `docs/` tree) under `if
+        // seeded`. Seeding on EVERY invocation put back a doc the operator had
+        // deleted — measured 2026-09-20: `docs/memory.md` and `docs/frontend/`
+        // removed by hand came back on the next `reflect`, where python leaves
+        // the tree as the operator left it. Copy-if-missing per file still
+        // holds, so an edited doc is never clobbered.
+        RootReadme.seed(workdir: url)
+        RootDocs.seed(workdir: url)
+    }
+
     // Hydrate persisted children. Reads every
-    // <workdir>/.fantastic/agents/<id>/agent.json into an
-    // AgentRecord, wraps them in a KernelState, and calls
-    // `kernel.load(_:)`. `kernel.load` already implements weak-load
-    // — agents whose handler_module isn't in the current bundle
-    // registry are skipped silently. Same byte-shape guarantee
-    // Python provides.
-    let agentsDir = dotFantastic.appendingPathComponent("agents")
-    let records = Persistence.readAllAgentRecords(from: agentsDir)
+    // <workdir>/.fantastic/agents/<id>/agent.json into an AgentRecord, wraps them
+    // in a KernelState, and calls `kernel.load(_:)`, which already implements
+    // weak-load — agents whose handler_module isn't in the current bundle
+    // registry are skipped silently. A RESEEDED ROOT KEEPS ITS CHILDREN (python
+    // `read_tree`, 2026-09-20): the walk runs whether or not the root parsed.
+    var records = Persistence.readTree(rootDir: dotFantastic, fallbackRootId: rootId)
     if !records.isEmpty {
-        // Ensure a root exists in the snapshot — `kernel.load`
-        // requires exactly one parent_id == nil entry. The root's record is
-        // NOT under `agents/` (it is `.fantastic/agent.json`), so this branch
-        // is the NORMAL path, not the rare one: every boot with any child
-        // rebuilds the root from here.
-        //
-        // It must carry `rootMeta`. With `meta: [:]` the load REPLACED the
-        // hydrated root with a blank one, so the grants read off
-        // `.fantastic/agent.json` moments earlier were discarded and the root
-        // came back with only its `$` baseline tokens — a `callable_by` an
-        // operator had written was silently inert.
-        var fullRecords = records
-        let hasRoot = records.contains { $0.parentId == nil }
-        if !hasRoot {
-            fullRecords.insert(
-                AgentRecord(
-                    id: "core", handlerModule: nil, parentId: nil, meta: rootMeta),
+        // `readTree` yields the root record first when `.fantastic/agent.json`
+        // parsed; a reseeded root is not on disk as a record it yields, so the
+        // one `parent_id == nil` entry `kernel.load` requires is prepended
+        // (python `main.py`, 2026-09-20).
+        if !records.contains(where: { $0.parentId == nil }) {
+            records.insert(
+                AgentRecord(id: rootId, handlerModule: rootHandler, parentId: nil, meta: [:]),
                 at: 0)
         }
-        let state = KernelState(agents: fullRecords)
+        let state = KernelState(agents: records)
         do {
             try kernel.load(state)
         } catch {
             FileHandle.standardError.write(
-                "[kernel] hydration from \(agentsDir.path) failed: \(error)\n"
+                "[kernel] hydration from \(dotFantastic.path) failed: \(error)\n"
                     .data(using: .utf8) ?? Data())
             throw error
         }
-    }
-
-    // Ensure the in-memory root always carries the guid — hydration/load may
-    // have swapped in a synthesized root with empty meta (rare agents/-has-root
-    // path). Sourced from the persisted root record, never regenerated.
-    if let r = kernel.root, r.metaValue(forKey: "guid")?.asString == nil {
-        _ = r.updateMeta(["guid": .string(rootGuid)])
     }
 
     // NOTE: `portHint` is unused in disk mode — CLI / daemon mode passes the

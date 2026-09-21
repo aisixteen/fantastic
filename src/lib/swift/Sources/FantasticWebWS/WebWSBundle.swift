@@ -21,6 +21,7 @@ public let HANDLER_MODULE = "web_ws.tools"
 
 public final class WebWSBundle: AgentBundle, @unchecked Sendable {
     public let name = "web_ws"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
     public init() {}
 
     public var readme: String? { Self.readmeText }

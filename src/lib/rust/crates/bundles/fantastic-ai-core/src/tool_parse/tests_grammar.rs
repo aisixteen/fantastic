@@ -281,6 +281,25 @@ fn a_send_with_neither_target_nor_to_is_refused_naming_both() {
 }
 
 #[test]
+fn a_huge_numeric_target_is_refused() {
+    // C74/D13: coerce_scalar types a numeric-shaped target_id as a NUMBER
+    // (wide integers included, once arbitrary-precision lands) — python's
+    // `isinstance(target, str)` then fails it exactly as a bare `<target_id>
+    // 123</target_id>` does, so the send is malformed, never dispatched to an
+    // agent literally named "123456789012345678901234567890".
+    refused(
+        r#"<call name="send"><target_id>123456789012345678901234567890</target_id><type>reflect</type></call>"#,
+        &["a send names its target"],
+    );
+    // A small numeric-shaped target_id is refused the same way — it was
+    // already a Number before C74, this just pins it stays that way.
+    refused(
+        r#"<call name="send"><target_id>42</target_id><type>reflect</type></call>"#,
+        &["a send names its target"],
+    );
+}
+
+#[test]
 fn head_with_extra_attribute() {
     refused(
         r#"<call name="send" id="7"><target_id>n</target_id></call>"#,

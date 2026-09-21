@@ -12,15 +12,15 @@ private func oracleKernel(lines: JSON?) async -> (Kernel, AgentId) {
     let r = BundleRegistry()
     r.register(ORACLE_MODULE, OracleProbe())
     let kernel = Kernel(storage: .inMemory, bundles: r)
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     var rec: JSON = [
-        "type": "create_agent", "parent_id": "core",
+        "type": "create_agent", "parent_id": "kernel_state",
         "handler_module": .string(ORACLE_MODULE), "id": "oracle",
     ]
     if let lines { rec["lines"] = lines }
-    let out = await kernel.send([Item("core", rec)])[0].result
+    let out = await kernel.send([Item("kernel_state", rec)])[0].result
     #expect(out["id"].asString == "oracle", "\(out)")
     return (kernel, AgentId("oracle"))
 }
@@ -147,16 +147,16 @@ struct OracleProbeTests {
         let r = BundleRegistry()
         r.register(ORACLE_MODULE, OracleProbe())
         let kernel = Kernel(storage: .inMemory, bundles: r)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         for name in ["o1", "o2"] {
             let rec: JSON = [
-                "type": "create_agent", "parent_id": "core",
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(ORACLE_MODULE), "id": .string(name),
                 "lines": ["Dana is in room 4."],
             ]
-            let out = await kernel.send([Item("core", rec)])[0].result
+            let out = await kernel.send([Item("kernel_state", rec)])[0].result
             #expect(out["id"].asString == name, "\(out)")
         }
         for _ in 0..<3 {

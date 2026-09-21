@@ -17,8 +17,12 @@ mkdir -p /tmp/fws_test
 cd /tmp/fws_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
-$FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
-$FANTASTIC w create_agent handler_module=web_ws.tools id=wws
+$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT
+# THE LEG IS THE SENDER of every frame, and a leg with no `ingress_rule` is
+# SEALED — open it consciously, and grant it the reach the frames below need
+# (a grant map is keyed by a literal id, never `*`).
+$FANTASTIC w create_agent handler_module=web_ws.tools id=wws ingress_rule=allow_all_ingress can_call='{"kernel_state": "*"}'
+$FANTASTIC kernel_state update_agent id=kernel_state callable_by='{"$self": "*", "$parent": "*", "$children": "*", "wws": "*"}'
 $FANTASTIC &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null' EXIT
@@ -46,7 +50,7 @@ PY
 ### Test 1: WS handshake at /<agent>/ws
 
 ```bash
-call w kernel '{"type":"reflect"}' | jq -e '.id == "core" and .tree.id == "core"'
+call w kernel '{"type":"reflect"}' | jq -e '.id == "kernel_state" and .tree.id == "kernel_state"'
 ```
 
 ### Test 2: call frame returns reply
@@ -70,8 +74,8 @@ python3 - <<'PY'
 import asyncio, json, websockets
 async def main():
     async with websockets.connect(f"ws://localhost:18181/w/ws") as ws:
-        await ws.send(json.dumps({"type":"watch","src":"core"}))
-        await ws.send(json.dumps({"type":"emit","target":"core","payload":{"type":"hello"}}))
+        await ws.send(json.dumps({"type":"watch","src":"kernel_state"}))
+        await ws.send(json.dumps({"type":"emit","target":"kernel_state","payload":{"type":"hello"}}))
         # First message after watch should be the mirrored event:
         async for msg in ws:
             d = json.loads(msg)
@@ -85,12 +89,32 @@ PY
 
 ### Test 5: binary frame round-trip
 
+A binary frame is an ORDINARY envelope plus a body: the header names the
+body's slot in `_binary_path`, and the frame is routed by `type` exactly like
+a text one. There is no chunked-upload dialect.
+
 ```bash
-# Send a binary frame with a 4-byte header + JSON header + raw blob;
-# verify the receiver unpacks it correctly. Spec lives in
-# crates/bundles/fantastic-web-ws/src/lib.rs.
-echo "TODO once binary impl lands (Phase 1, task #229)"
+python3 - <<'PY'
+import asyncio, json, struct, websockets
+async def main():
+    head = {"type": "call", "target": "fwsf", "id": "b1",
+            "payload": {"type": "write_stream", "path": "x.bin", "truncate": True},
+            "_binary_path": "payload.bytes"}
+    h = json.dumps(head).encode()
+    async with websockets.connect("ws://localhost:18181/w/ws") as ws:
+        await ws.send(struct.pack(">I", len(h)) + h + bytes([0, 1, 2]))
+        async for msg in ws:
+            d = json.loads(msg) if isinstance(msg, str) else None
+            if d and d.get("id") == "b1":
+                assert d["data"]["written"] == 3, d
+                print("OK")
+                return
+asyncio.run(main())
+PY
 ```
+
+(Needs a `file_bridge` named `fwsf` that `wws` may call — see the
+fantastic-file selftest for the two-sided wiring.)
 
 ## Summary table
 
@@ -100,4 +124,4 @@ echo "TODO once binary impl lands (Phase 1, task #229)"
 | 2. call → reply |  |  |
 | 3. error on bad target |  |  |
 | 4. watch mirrors inbox |  |  |
-| 5. binary frame | skip | impl pending |
+| 5. binary frame |  |  |

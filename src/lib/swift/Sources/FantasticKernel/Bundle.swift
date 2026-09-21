@@ -24,6 +24,16 @@ public protocol AgentBundle: Sendable {
     /// return `nil` (the default).
     var readme: String? { get }
 
+    /// WHICH VERBS THIS BUNDLE DECLARES — python's module-level `VERBS` table,
+    /// read STATICALLY (`Agent.advertises(verb)`): no send, no call row, no task
+    /// row, no ledger execution, no watcher echo. `shutdownAgents` picks its
+    /// targets from this exactly as python does. Reflect's `verbs` map is
+    /// rendered from the SAME per-bundle table, so the two cannot drift.
+    ///
+    /// Default `[]` — python's "a module with no VERBS table advertises
+    /// nothing" (`kernel/_agent.py: advertises`).
+    var verbs: [String] { get }
+
     /// Dispatch a verb. Receives the agent the verb is targeting,
     /// the JSON payload, and a kernel handle. Returns the reply
     /// (`nil` for fire-and-forget verbs).
@@ -34,19 +44,27 @@ public protocol AgentBundle: Sendable {
     ) async throws -> JSON?
 
     /// Dispatch a binary-framed verb. The binary channel is **symmetric**: a
-    /// request carries `(header, blob)` and the reply carries `(JSON?, Data)` —
+    /// request carries `(header, blob)` and the reply carries `(JSON?, Data?)` —
     /// raw bytes flow in BOTH directions, never base64 (mirrors py/rust's
-    /// `read_stream`/`write_stream`). The returned `Data` is the raw reply body
-    /// (empty when the verb returns no bytes, e.g. `write_stream`'s status).
-    /// Default: REFUSE — a bundle with no binary edge does not accept binary
-    /// frames. There is NO base64 fallback (raw bytes ride the binary carrier,
-    /// never base64); a bundle that speaks binary overrides this.
+    /// `read_stream`/`write_stream`).
+    ///
+    /// The reply body is OPTIONAL and the distinction is load-bearing (C37):
+    /// `nil` = the verb returned NO chunk (a `write_stream` status, a refusal);
+    /// `.some(d)` = it returned one, `d` possibly EMPTY (a 0-byte read of an
+    /// empty file). Every wire leg picks its response shape from that, exactly
+    /// as python's `isinstance(reply["bytes"], bytes)` does — testing
+    /// `isEmpty` instead served an empty file as JSON.
+    ///
+    /// Default: dispatch the HEADER through the text `handle` (C79) — python
+    /// has no separate binary channel at all, so a bundle without a binary edge
+    /// answers the header exactly as the text channel would. There is NO base64
+    /// fallback: the blob is simply not a chunk such a verb ever asked for.
     func handleBinary(
         agentId: AgentId,
         header: JSON,
         blob: Data,
         kernel: Kernel
-    ) async throws -> (JSON?, Data)
+    ) async throws -> (JSON?, Data?)
 
     /// Refuse an `update_agent` patch this bundle cannot honour. Called by the
     /// substrate BEFORE the record changes; a returned string REFUSES the patch.
@@ -66,6 +84,27 @@ public protocol AgentBundle: Sendable {
     func validateMeta(
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
     ) -> String?
+
+    /// DUCK-TYPED ROOT EXTENSION — python `reflect_root_extra(agent, full=…)`.
+    ///
+    /// The ROOT's bundle (the `kernel_state` loader) contributes root-only
+    /// reflect fields the substrate cannot compute without coupling to bundle
+    /// logic: `persistence: {provider}`, the instance `guid`, the doc-tree frame
+    /// and the `self_extension` shape. Merged by `applyReflectFlags` on the ROOT
+    /// ALONE; every other bundle returns the default `nil` and contributes
+    /// nothing.
+    ///
+    /// THROWS like any other reflect step: the doc-tree frame walks the same
+    /// `docs/` a bad-UTF-8 file can fail on `detail:"full"` (C60) — python's
+    /// exception is not scoped to the `readme` flag alone.
+    func reflectRootExtra(agent: Agent, full: Bool, kernel: Kernel) throws(PyError)
+        -> OrderedDictionary<String, JSON>?
+
+    /// LAND THE LAST WINDOW while the provider child is still alive. `Kernel
+    /// .shutdown` awaits this for every loaded agent BEFORE the teardown walk,
+    /// so the loader's message pump can append what the shutdown produced
+    /// (python `kernel_state.flush_pending`). Default: nothing to land.
+    func flushPending(agentId: AgentId, kernel: Kernel) async throws
 
     /// Fired during cascade delete BEFORE the agent unregisters.
     /// Use for cleanup (close connections, dispose sessions, etc.).
@@ -107,22 +146,27 @@ extension AgentBundle {
 
     public var readme: String? { nil }
 
+    public var verbs: [String] { [] }
+
     public func handleBinary(
         agentId: AgentId,
         header: JSON,
         blob: Data,
         kernel: Kernel
-    ) async throws -> (JSON?, Data) {
-        // NO base64 fallback (pure streams): a bundle with no binary edge refuses
-        // the frame loudly rather than smuggling the blob through the text `handle`.
-        let verb = header["type"].asString ?? "(none)"
-        return (
-            .object([
-                "error": .string(
-                    "\(name): no binary edge — verb \"\(verb)\" does not accept binary frames")
-            ]), Data()
-        )
+    ) async throws -> (JSON?, Data?) {
+        // C79: THE HEADER IS THE PAYLOAD. Python has one dispatch — a REST octet
+        // POST of `{type:"say"}` to the cli agent reaches `handle` and answers
+        // 204; swift refused it with "no binary edge", which is a channel this
+        // substrate invented and python never had. A bundle with no chunk verb
+        // simply never looks at the blob.
+        (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
     }
+
+    public func reflectRootExtra(agent: Agent, full: Bool, kernel: Kernel) throws(PyError)
+        -> OrderedDictionary<String, JSON>?
+    { nil }
+
+    public func flushPending(agentId: AgentId, kernel: Kernel) async throws {}
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {}
     public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {

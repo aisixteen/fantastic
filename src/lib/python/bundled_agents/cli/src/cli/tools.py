@@ -97,8 +97,8 @@ async def _status(id, payload, kernel):
 
 
 async def _context(id, payload, kernel):
-    """args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a
-    one-line context-protocol notice: `⟲ context compacted (strategy, N dropped)` or
+    """args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a one-line context-protocol notice.
+    `⟲ context compacted (strategy, N dropped)` or
     `✗ context too small — <hint>`. Returns None."""
     phase = payload.get("phase", "")
     src = payload.get("source", "")
@@ -153,8 +153,8 @@ async def _intro_booting(id, payload, kernel):
 
 
 async def _booted(id, payload, kernel):
-    """Final PTY push — the kernel's "all booted" signal, sent AFTER the boot
-    loop. cli is a DUMB SINK: it does NOT inspect the tree for ports/surfaces.
+    """Final PTY push — the kernel's "all booted" signal, sent AFTER the boot loop.
+    cli is a DUMB SINK: it does NOT inspect the tree for ports/surfaces.
     Each agent announces its OWN endpoints to cli during its boot (e.g. `web`
     sends a `say` with its listening URL), so this just closes the intro. Live
     coordinates therefore arrive between `intro_booting` and here, or — if no

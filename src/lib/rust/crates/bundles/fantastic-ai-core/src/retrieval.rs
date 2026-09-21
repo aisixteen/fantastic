@@ -58,27 +58,6 @@ pub fn as_id(x: &Value) -> Option<i64> {
     }
 }
 
-/// python `for x in (v or [])`: what iterating a JSON value yields, or the type
-/// name of the truthy scalar that raises `TypeError` instead.
-///
-/// A falsy value is `[]` (the `or` short-circuits); a list yields its items, a
-/// STRING its characters and an object its KEYS. A truthy int/float/bool is not
-/// iterable and python raises before the view or the recall row is written.
-fn py_iter(v: &Value) -> Result<Vec<Value>, &'static str> {
-    if !py_truthy(v) {
-        return Ok(Vec::new());
-    }
-    match v {
-        Value::Array(a) => Ok(a.clone()),
-        Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
-        Value::Object(o) => Ok(o.keys().map(|k| Value::String(k.clone())).collect()),
-        Value::Bool(_) => Err("bool"),
-        Value::Number(n) if n.is_f64() => Err("float"),
-        Value::Number(_) => Err("int"),
-        Value::Null => Ok(Vec::new()),
-    }
-}
-
 fn bad_arg(msg: &str, arg: &str) -> Value {
     json!({"error": msg, "reason": "bad_arg", "arg": arg})
 }
@@ -101,7 +80,6 @@ pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     // python: `offset = max(0, int(payload.get("offset") or 0))` and
     // `length = int(payload.get("length") or cap)` under ONE try/except — a
     // non-integer either side is the SAME refusal, and it carries no `arg`.
-    // `length` is NOT clamped: a negative one is a python slice from the end.
     let null = Value::Null;
     let (offset, length) = match (
         py_int_or(payload.get("offset").unwrap_or(&null), 0),
@@ -115,6 +93,12 @@ pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
             })
         }
     };
+    if length < 0 {
+        return json!({
+            "error": "pull: length must not be negative",
+            "reason": "bad_arg",
+        });
+    }
     if length > cap {
         return bad_arg(
             &format!(
@@ -222,17 +206,11 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     if q.is_empty() {
         return bad_arg("grep: `query` is required", "query");
     }
-    // python `int(payload.get(k) or dflt)` for both, under ONE try/except that
-    // resets `limit` to 100.
+    // python `int(payload.get(k) or dflt)`, each knob under its OWN try
+    // (2026-09-20): a bad `limit` no longer leaves `width` unbound.
     let num = |k: &str, dflt: i64| py_int_or(payload.get(k).unwrap_or(&null), dflt);
-    let (limit, width) = match (num("limit", 100), num("width", 200)) {
-        (Ok(l), Ok(w)) => (l.clamp(1, 100) as usize, w.clamp(20, 20_000) as usize),
-        // RESIDUAL: python leaves `width` UNBOUND on this path and NameErrors the
-        // moment a line matches. There is no rust spelling of an unbound local;
-        // the default width is used and the refusal python raises is not
-        // reproduced.
-        _ => (100, 200),
-    };
+    let limit = num("limit", 100).map_or(100, |l| l.clamp(1, 100)) as usize;
+    let width = num("width", 200).map_or(200, |w| w.clamp(20, 20_000)) as usize;
 
     let raw_ids = payload.get("ids");
     let ids: Option<Vec<i64>> = match raw_ids {
@@ -555,17 +533,15 @@ pub async fn context_recall(
         let answered = first_json(&compose(provider, &prompt).await).filter(|a| !a.is_empty());
         if let Some(ans) = answered {
             let head_ids: HashSet<i64> = head.iter().filter_map(|&i| row_id(&view[i])).collect();
-            // python iterates `ans.get("expand") or []`: a list yields items, a
-            // STRING yields its characters, an object its keys — and a truthy
-            // int/float/bool RAISES before anything is saved.
-            let items = match py_iter(ans.get("expand").unwrap_or(&Value::Null)) {
-                Ok(items) => items,
-                Err(type_name) => {
-                    return json!({
-                        "error": format!("TypeError: '{type_name}' object is not iterable"),
-                        "raised": true,
-                    })
-                }
+            // python `_as_list(ans.get("expand"))`: a list as is, a scalar
+            // wrapped, falsy empty (2026-09-20; a truthy scalar used to raise).
+            let raw_expand = ans.get("expand").unwrap_or(&Value::Null);
+            let items: Vec<Value> = if !py_truthy(raw_expand) {
+                Vec::new()
+            } else if let Value::Array(a) = raw_expand {
+                a.clone()
+            } else {
+                vec![raw_expand.clone()]
             };
             let want: Vec<i64> = items
                 .iter()

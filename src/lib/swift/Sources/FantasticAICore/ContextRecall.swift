@@ -72,6 +72,33 @@ enum AIIncarnation {
         table[ObjectIdentifier(kernel), default: [:]][id] = n
         lock.unlock()
     }
+
+    /// Drop a dead kernel's whole sub-table. Without it the map grew one entry
+    /// per kernel the process ever built and nothing ever removed them.
+    static func forget(_ kernel: Kernel) {
+        lock.lock()
+        table.removeValue(forKey: ObjectIdentifier(kernel))
+        lock.unlock()
+    }
+}
+
+/// The process-wide AI side tables are keyed by kernel identity, so a kernel
+/// that shuts down must take its rows with it. Registered ONCE, the first time
+/// any AI backend is built — the kernel cannot reach into this module itself.
+enum AISideTables {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var installed = false
+
+    static func installTeardownHook() {
+        lock.lock()
+        defer { lock.unlock() }
+        if installed { return }
+        installed = true
+        Kernel.onTeardown { kernel in
+            AIIncarnation.forget(kernel)
+            AIRunStates.forget(kernel)
+        }
+    }
 }
 
 /// The first balanced `{…}` object in `text`, parsed. Python `_first_json`.
@@ -265,13 +292,13 @@ extension AIBackend {
             do { ans = firstJson(try await compose(provider, prompt)) } catch { ans = nil }
             if let ans, !ans.isEmpty {
                 let headIds = Set(head.compactMap { rowId(view[$0]) })
-                // `for v in (ans.get("expand") or [])` — python ITERATES the value:
+                // `_as_list(ans.get("expand"))` — a list as is, a scalar wrapped:
                 // a list yields its items, a string its CODE POINTS, an object its
                 // keys, and a truthy number or bool RAISES `'int' object is not
                 // iterable` before anything is saved. Taking `asArray ?? []` made
                 // every one of those a silent empty expansion, so a scalar
                 // `expand` wrote a view and a recall row python never writes.
-                let want: [Int64] = try iterateExpand(ans["expand"] ?? .null)
+                let want: [Int64] = iterateExpand(ans["expand"] ?? .null)
                     .compactMap { aiAsId($0) }
                     .filter { headIds.contains($0) }
                 // `str(ans.get("why") or "")` — 0, "", [] and {} are all falsy and
@@ -366,17 +393,11 @@ extension AIBackend {
 /// `for v in (value or [])` — python's iteration protocol over whatever the
 /// model answered.
 ///
-/// A list yields its items, a string its CODE POINTS, an object its KEYS, and a
-/// falsy value nothing. Anything else is a `TypeError` python raises out of the
-/// verb, so the view and the recall row are never written — which is why this
-/// throws rather than returning an empty list.
-private func iterateExpand(_ v: JSON) throws(PyError) -> [JSON] {
+/// Python `_as_list(ans.get("expand"))` (2026-09-20): a list as is, a scalar
+/// WRAPPED, a falsy value nothing. A truthy string or number used to be
+/// iterated (characters, or a raise) — now it is one `_as_id` candidate.
+private func iterateExpand(_ v: JSON) -> [JSON] {
     if !pyTruthy(v) { return [] }
-    switch v {
-    case .array(let items): return items
-    case .string(let s): return s.unicodeScalars.map { .string(String($0)) }
-    case .object(let o): return o.keys.map { .string($0) }
-    default:
-        throw PyError("TypeError", "'\(pyTypeName(v))' object is not iterable")
-    }
+    if case .array(let items) = v { return items }
+    return [v]
 }

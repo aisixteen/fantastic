@@ -48,7 +48,7 @@ serde = { version = "1", features = ["derive"] }
 # order — matches Python's `dict` insertion-order semantics. Without
 # it, agent.json fields shuffle to alphabetical (BTreeMap), making
 # cross-runtime byte-for-byte parity flaky.
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 
 # Concurrent combinators. The kernel needs `join_all` for the batch send: a
 # batch must run CONCURRENTLY without `tokio::spawn`, because a spawn moves the

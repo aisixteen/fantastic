@@ -184,6 +184,14 @@ struct TaskEntry {
     /// to be alive to catch up on what the shutdown verb just wrote); it dies
     /// with the process. Python marks these `_keepalive` for the same reason.
     keepalive: bool,
+    /// FORKED work — registered by [`Kernel::spawn_task`], not by a dispatch:
+    /// a service loop a bundle runs for as long as its agent lives (a scheduler
+    /// tick, an io_bridge read loop, `ws_drain`, an exec job pump, a
+    /// `pty_reader`). The QUIET phase of `shutdown_agents` does not wait for it
+    /// — it never ends, so waiting spent one full `QUIET_TIMEOUT` every stop
+    /// (measured in python: 10.25 s → 0.29 s). It is still CANCELLED with every
+    /// other non-keepalive root right after. Python's `_forked`.
+    forked: bool,
 }
 
 #[derive(Default)]
@@ -224,10 +232,17 @@ impl TaskTable {
 
     /// Put one in-flight task in the table.
     ///
-    /// A `parent` that is no longer in the table is dropped to `None` — the
-    /// task is a root, adopted by init. Not defensive slack: a bundle's
-    /// long-lived work outlives the dispatch that forked it, and a `send` it
-    /// issues later must not claim a dead parent or the `ps` tree would lie.
+    /// THE PARENT IS RECORDED AS GIVEN. There used to be a silent
+    /// `parent.filter(|p| inner.tasks.contains_key(p))` here, defended as
+    /// init-adoption; python REMOVED the same line for the same shape
+    /// (`_kernel.py:602-616`, "A PARENT IS ALWAYS ALIVE"), because converting a
+    /// dead parent to `None` puts the work OUTSIDE every subtree, where
+    /// `cancel` on its caller can never reach it. Re-parenting belongs to
+    /// [`Self::forget`], which walks the children when the parent actually
+    /// ends. Measured: `kernel ps` answered `parent: null` for the scheduler
+    /// tick loop, the pty readers and `ps` itself, where python names the
+    /// dispatch that spawned them (`e2e/parity` `wire/probes.json`,
+    /// `bundle_verbs/kernel_ps_after.json`, `kernel_verbs/bare/ps.json`).
     pub fn register(
         &self,
         id: &TaskId,
@@ -249,8 +264,36 @@ impl TaskTable {
         handle: TaskHandle,
         keepalive: bool,
     ) {
+        self.put(id, agent_id, verb, parent, handle, keepalive, false);
+    }
+
+    /// [`Self::register_marked`] for work FORKED out of a dispatch
+    /// (`spawn_task`) rather than being a dispatch itself — the QUIET phase of
+    /// `shutdown_agents` does not wait for it.
+    pub fn register_fork(
+        &self,
+        id: &TaskId,
+        agent_id: &AgentId,
+        verb: &str,
+        parent: Option<TaskId>,
+        handle: TaskHandle,
+        keepalive: bool,
+    ) {
+        self.put(id, agent_id, verb, parent, handle, keepalive, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put(
+        &self,
+        id: &TaskId,
+        agent_id: &AgentId,
+        verb: &str,
+        parent: Option<TaskId>,
+        handle: TaskHandle,
+        keepalive: bool,
+        forked: bool,
+    ) {
         let mut inner = self.inner.lock().expect("task table poisoned");
-        let parent = parent.filter(|p| inner.tasks.contains_key(p));
         inner.order += 1;
         let order = inner.order;
         inner.tasks.insert(
@@ -263,8 +306,25 @@ impl TaskTable {
                 order,
                 handle,
                 keepalive,
+                forked,
             },
         );
+    }
+
+    /// Every live DISPATCH that is not `except` — what the QUIET phase of
+    /// `shutdown_agents` waits to settle. Keepalive loops and FORKED service
+    /// loops are excluded: neither ever ends on its own, so waiting for them
+    /// burns the whole `QUIET_TIMEOUT` and settles nothing. Python's quiet
+    /// predicate. The CANCEL step keeps using [`Self::pending`], so a fork
+    /// still dies with the rest.
+    pub fn pending_dispatches(&self, except: Option<TaskId>) -> Vec<TaskId> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner
+            .tasks
+            .iter()
+            .filter(|(id, e)| !e.keepalive && !e.forked && Some(**id) != except)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Every live task that is NOT a keepalive loop and not `except` — what
@@ -478,7 +538,7 @@ impl Kernel {
         );
         let handle = TaskHandle::new();
         self.tasks
-            .register_marked(&task_id, agent_id, verb, parent, handle.clone(), keepalive);
+            .register_fork(&task_id, agent_id, verb, parent, handle.clone(), keepalive);
 
         let cancel = handle.cancel_signal();
         let killed = handle.killed_flag();
@@ -550,9 +610,11 @@ impl Kernel {
                 continue;
             };
             // A hook that fails is logged and the kill still happens: cancel is
-            // not refusable.
+            // not refusable. C87: python's exact stdout line (`_agent.py:2858-
+            // 2859`, `print(f"  [cancel] {self.id} bundle on_cancel raised:
+            // {e}")`).
             if let Err(e) = bundle.on_cancel(&agent.id, tid, self).await {
-                tracing::warn!(agent = %agent.id, task = %tid, "on_cancel hook raised: {e}");
+                println!("  [cancel] {} bundle on_cancel raised: {e}", agent.id.0);
             }
         }
         // ② SIGKILL — leaves-up, no await in the loop.

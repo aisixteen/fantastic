@@ -36,8 +36,8 @@ def boot_root(*, compose_cli: bool = False):
     k = Kernel()
     root_dir = Path(".fantastic")
     records = read_tree(root_dir)
-    if not records:
-        records = [{"id": "kernel_state", "handler_module": "kernel_state.tools"}]
+    if not any(r.get("parent_id") is None for r in records):  # no root record on disk
+        records = [{"id": "kernel_state", "handler_module": "kernel_state.tools"}] + records
     k.load(records, root_path=root_dir)
     # HYDRATE THE MESSAGE STORE, cold, before the first send mints an id. The kernel
     # starts empty; the loader bundle's reader fills it from above and sets the counter.

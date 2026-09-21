@@ -54,13 +54,6 @@ public func readMessages(rootDir: URL) throws -> ([Row], Int64) {
     return (rows, top + 1)
 }
 
-/// Python's `repr` of a str, for the error texts python writes (`{x!r}`).
-func pyRepr(_ s: String) -> String {
-    let body = s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\n", with: "\\n")
-    if s.contains("'") && !s.contains("\"") { return "\"\(body)\"" }
-    return "'\(body.replacingOccurrences(of: "'", with: "\\'"))'"
-}
-
 /// Apply `readMessages` to a kernel FROM ABOVE, before its first mint.
 ///
 /// Sets the counter FIRST, so every hydrated id is a pre-minted one. Returns
@@ -206,7 +199,11 @@ public final class MessagePump: @unchecked Sendable {
         if batch.isEmpty { return }
         guard let store = kernel.findStore() else {
             if !saidNoStore {
-                print("  [messages] no store wired — messages stay in RAM")
+                // FLUSHED, like python's `print(..., flush=True)`: stdout is
+                // block-buffered on a pipe, and this line was missing from
+                // every piped capture because the process was signalled before
+                // the buffer drained.
+                printFlushed("  [messages] no store wired — messages stay in RAM")
                 saidNoStore = true
             }
             return
@@ -239,8 +236,13 @@ public final class MessagePump: @unchecked Sendable {
         let (reply, _) = await kernel.storeBookkeepingBinary(
             store, .object(["type": .string("write_stream"), "path": .string(MESSAGES_FILE)]),
             Data(lines.utf8))
-        if let err = reply["error"].asString {
-            print("  [messages] append refused: \(err)")
+        // PYTHON TRUTHINESS, and python's own rendering. `res.get("error")`
+        // decides, so an `error` of `""`, `0`, `[]` or `{}` is NOT a refusal;
+        // a non-string one (a dict the leg composed) is, and prints as
+        // `str(error)`. Reading only `.asString` let a refusal that answered
+        // anything else look like a successful append and the batch was dropped.
+        if pyTruthy(reply["error"]) {
+            printFlushed("  [messages] append refused: \(pyStr(reply["error"]))")
             withLock { pending = batch + pending }  // nothing lost; retried next flush
             return
         }
@@ -287,4 +289,11 @@ extension Kernel {
         await p.stop()
         messagePump = nil
     }
+}
+
+/// `print(..., flush=True)` — stdout is block-buffered on a pipe, so a line the
+/// operator is meant to see must not wait for the buffer. Routed through
+/// `RuntimeLog.out` so a test can read what an operator would.
+public func printFlushed(_ line: String) {
+    RuntimeLog.out(line)
 }

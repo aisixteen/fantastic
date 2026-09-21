@@ -626,6 +626,45 @@ public func pyIsAlnum(_ c: Unicode.Scalar) -> Bool {
     }
 }
 
+/// Python's `str.isdigit()` for one scalar (`Py_UNICODE_ISDIGIT`): every scalar
+/// CPython can read as a digit — the decimal digits of any script AND the
+/// digit-valued others (the superscripts). NOT the same set `int()` takes:
+/// `'٢'` is decimal and parses to 2, `'²'` is a digit and only a digit, so
+/// `'²'.isdigit()` is true while `int('²')` raises. Everything reading an id
+/// out of a model's text depends on that difference.
+public func pyIsDigit(_ c: Unicode.Scalar) -> Bool {
+    switch c.properties.numericType {
+    case .decimal, .digit: return true
+    default: return false
+    }
+}
+
+/// Python's `str.isdigit()` for a whole string: non-empty and every scalar a
+/// digit.
+public func pyIsDigitString(_ s: String) -> Bool {
+    !s.isEmpty && s.unicodeScalars.allSatisfy(pyIsDigit)
+}
+
+/// Python's `str.isdecimal()` for a whole string: non-empty and every scalar
+/// `Numeric_Type=Decimal` — exactly the set `int()` accepts.
+public func pyIsDecimalString(_ s: String) -> Bool {
+    !s.isEmpty && s.unicodeScalars.allSatisfy { $0.properties.numericType == .decimal }
+}
+
+/// Python's `len(x)` for a JSON value: a list's items, a dict's keys, a str's
+/// CODE POINTS. A number, a bool or `None` HAS no length — python raises
+/// `TypeError` there, and a caller that swallowed it would answer a digest
+/// python never produces.
+public func pyLen(_ v: JSON) throws(PyError) -> Int {
+    switch v {
+    case .array(let a): return a.count
+    case .object(let o): return o.count
+    case .string(let s): return s.unicodeScalars.count
+    default:
+        throw PyError("TypeError", "object of type '\(pyTypeName(v))' has no len()")
+    }
+}
+
 /// Python's `str.isprintable()` for one scalar (`Py_UNICODE_ISPRINTABLE`):
 /// false for categories Cc, Cf, Cs, Co, Cn, Zl, Zp and Zs, except the ASCII space.
 public func pyIsPrintable(_ c: Unicode.Scalar) -> Bool {
@@ -642,6 +681,31 @@ public func pyIsPrintable(_ c: Unicode.Scalar) -> Bool {
 private func hexEscape(_ tag: String, _ value: UInt32, width: Int) -> String {
     let hex = String(value, radix: 16)
     return "\\" + tag + String(repeating: "0", count: max(0, width - hex.count)) + hex
+}
+
+// MARK: - python text-mode universal newlines
+
+/// Python's default text-mode newline translation (`open(..., newline=None)`,
+/// which `Path.read_text()` uses): `\r\n` → `\n`, then a lone `\r` → `\n`.
+///
+/// Scalar-by-scalar, NOT by `Character`: swift reads a CRLF pair as ONE
+/// grapheme, so a `Character`-based scan cannot see the boundary python's text
+/// mode does (same reasoning as [`pySplitlines`]).
+public func pyUniversalNewlines(_ s: String) -> String {
+    var out = String.UnicodeScalarView()
+    let scalars = Array(s.unicodeScalars)
+    var i = 0
+    while i < scalars.count {
+        let c = scalars[i]
+        if c.value == 0x0D {
+            out.append(Unicode.Scalar(0x0A))
+            if i + 1 < scalars.count, scalars[i + 1].value == 0x0A { i += 1 }
+        } else {
+            out.append(c)
+        }
+        i += 1
+    }
+    return String(out)
 }
 
 // MARK: - str.splitlines / str.split()

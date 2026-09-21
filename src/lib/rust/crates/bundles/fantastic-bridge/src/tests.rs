@@ -23,7 +23,7 @@ async fn mk_kernel(tmp: &TempDir) -> Arc<Kernel> {
         .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -52,7 +52,7 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
     // receiver dispatches inbound frames (mirrors py's _wire_memory_pair allow_all).
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
@@ -78,7 +78,7 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
 async fn grant_edge(kernel: &Arc<Kernel>, from: &str, to: &str) {
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": from,
                    "can_call": {"$self": "*", "$parent": "*", "$children": "*", to: "*"}}),
         )])
@@ -87,7 +87,7 @@ async fn grant_edge(kernel: &Arc<Kernel>, from: &str, to: &str) {
         .result;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": to,
                    "callable_by": {"$self": "*", "$parent": "*", "$children": "*", from: "*"}}),
         )])
@@ -125,7 +125,7 @@ async fn identity_from_meta_builds_directory_attrs_blob() {
     meta.insert("exposes".into(), json!(["stop", "restart"]));
     let typed = Agent::new(
         AgentId::from("leg"),
-        Some("core".to_string()),
+        Some("kernel_state".to_string()),
         None,
         meta,
         tmp.path().join(".fantastic"),
@@ -140,7 +140,7 @@ async fn identity_from_meta_builds_directory_attrs_blob() {
     // A plain kernel (role defaults to kernel, no owner/exposes) advertises nothing.
     let plain = Agent::new(
         AgentId::from("plain"),
-        Some("core".to_string()),
+        Some("kernel_state".to_string()),
         None,
         Map::new(),
         tmp.path().join(".fantastic"),
@@ -245,7 +245,7 @@ async fn forward_round_trip_over_memory() {
     let file_id = id_for("ff_fwd", &tmp);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
@@ -362,7 +362,7 @@ async fn pending_futures_rejected_on_close() {
     // may send and nothing tears down behind it (2026-09-12).
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": a_id.as_str()}),
         )])
         .await
@@ -385,7 +385,7 @@ async fn watch_remote_before_boot_errors() {
     let r = kernel
         .send(vec![Item::new(
             AgentId::from(bid.as_str()),
-            json!({"type": "watch_remote", "target": "core"}),
+            json!({"type": "watch_remote", "target": "kernel_state"}),
         )])
         .await
         .remove(0)
@@ -529,7 +529,7 @@ async fn ssh_transport_unreachable_host_fails_cleanly() {
     // so this should resolve well before the 5s tunnel-ready deadline.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
@@ -581,7 +581,7 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
     // address. Bound the overall test to a few seconds.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
@@ -832,7 +832,7 @@ fn auth_shorthand_is_symmetric() {
 async fn create_bridge_with_auth(kernel: &Arc<Kernel>, id: &str, peer_id: &str, auth: &str) {
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
@@ -878,7 +878,7 @@ async fn deny_inbound_refuses_inbound_call() {
     peer.send_frame(json!({
         "type": "call",
         "id": "c1",
-        "target": "core",
+        "target": "kernel_state",
         "payload": {"type": "reflect"},
     }))
     .await
@@ -910,7 +910,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     // An open file_bridge in the workdir to receive/serve the bytes.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
@@ -985,7 +985,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
     // No `ingress_rule` meta ⇒ DenyInbound (SEALED by default).
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
@@ -1020,7 +1020,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
     peer.send_frame(json!({
         "type": "call",
         "id": "c2",
-        "target": "core",
+        "target": "kernel_state",
         "payload": {"type": "reflect"},
     }))
     .await
@@ -1052,7 +1052,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let bid = id_for("brg_pw", &tmp);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
@@ -1089,20 +1089,20 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
 
     // (1) inbound call WITH the matching envelope token dispatches.
     peer.send_frame(json!({
-        "type": "call", "id": "ok", "target": "core",
+        "type": "call", "id": "ok", "target": "kernel_state",
         "payload": {"type": "reflect"}, "auth_token": "s3cret",
     }))
     .await
     .unwrap();
     let good = peer.recv_frame().await.expect("a reply frame").into_value();
     assert_eq!(
-        good["data"]["id"], "core",
+        good["data"]["id"], "kernel_state",
         "valid token should dispatch: {good}"
     );
 
     // (2) inbound call with a WRONG token is refused unauthorized.
     peer.send_frame(json!({
-        "type": "call", "id": "bad", "target": "core",
+        "type": "call", "id": "bad", "target": "kernel_state",
         "payload": {"type": "reflect"}, "auth_token": "WRONG",
     }))
     .await
@@ -1165,7 +1165,7 @@ async fn asymmetric_ingress_egress_via_engine() {
     let bid = id_for("brg_asym", &tmp);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
@@ -1206,7 +1206,7 @@ async fn asymmetric_ingress_egress_via_engine() {
 
     // inbound is refused even with a token (ingress = deny_inbound, not password)
     peer.send_frame(json!({
-        "type": "call", "id": "in", "target": "core",
+        "type": "call", "id": "in", "target": "kernel_state",
         "payload": {"type": "reflect"}, "auth_token": "fleet",
     }))
     .await
@@ -1304,7 +1304,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     kernel.bundles.register("bouncer.tools", BouncerBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -1321,7 +1321,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     create_bridge(&kernel, &b_id, &a_id, "memory").await;
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "bouncer.tools", "id": probe}),
         )])
@@ -1332,7 +1332,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     grant_edge(&kernel, &b_id, &probe).await;
     grant_edge(&kernel, &probe, &b_id).await;
     // A serves the probe's return hop onto the root.
-    grant_edge(&kernel, &a_id, "core").await;
+    grant_edge(&kernel, &a_id, "kernel_state").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     for id in [&a_id, &b_id] {
         let _ = kernel
@@ -1350,7 +1350,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
         kernel.send(vec![Item::new(
             AgentId::from(a_id.as_str()),
             json!({"type": "forward", "target": probe,
-                   "payload": {"type": "bounce", "bridge": b_id, "back_to": "core"},
+                   "payload": {"type": "bounce", "bridge": b_id, "back_to": "kernel_state"},
                    "timeout": 10.0}),
         )]),
     )
@@ -1359,7 +1359,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     .remove(0)
     .result;
     assert_eq!(
-        reply["bounced"]["id"], "core",
+        reply["bounced"]["id"], "kernel_state",
         "re-entrant forward: {reply}"
     );
 }
@@ -1379,7 +1379,7 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
     let target = id_for("ff_ident", &tmp);
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "file_bridge.tools", "id": target,
                    "root": tmp.path().to_string_lossy()}),
@@ -1449,7 +1449,7 @@ async fn create_leg(kernel: &Arc<Kernel>, handler: &str, id: &str, meta: Value) 
     }
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             Value::Object(payload),
         )])
         .await
@@ -1474,7 +1474,7 @@ async fn mk_two_family_kernel(tmp: &TempDir) -> Arc<Kernel> {
         .register(RELAY_HANDLER_MODULE, RelayConnectorBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),

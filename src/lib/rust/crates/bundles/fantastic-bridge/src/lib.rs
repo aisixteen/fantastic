@@ -176,7 +176,7 @@ impl OnceLockBridgeMap {
 
 /// A pending forward's reply channel — carries `(reply, body)` (the body is the
 /// raw chunk for a `read_stream` forward, empty otherwise) or an error string.
-type PendingReply = oneshot::Sender<Result<(Value, Vec<u8>), String>>;
+type PendingReply = oneshot::Sender<Result<(Value, Option<Vec<u8>>), String>>;
 
 /// Per-agent bridge runtime. Cloneable through an `Arc` so the read
 /// loop can hold one reference and the verb handlers can hold
@@ -361,11 +361,11 @@ async fn dispatch_binary(
     header: Value,
     blob: Vec<u8>,
     kernel: &Arc<Kernel>,
-) -> Result<(Reply, Vec<u8>), BundleError> {
+) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
     let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
     if verb != "forward" {
         let reply = dispatch(family, agent_id, &header, kernel).await?;
-        return Ok((reply, Vec::new()));
+        return Ok((reply, None));
     }
     let target = header
         .get("target")
@@ -376,7 +376,7 @@ async fn dispatch_binary(
     if target.is_empty() || !inner.is_object() {
         return Ok((
             Some(json!({"error": "bridge.forward: target (str) + payload (dict) required"})),
-            Vec::new(),
+            None,
         ));
     }
     let timeout_secs = header
@@ -409,7 +409,7 @@ impl Bundle for WsBridgeBundle {
         header: Value,
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), BundleError> {
+    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
         dispatch_binary(Family::Ws, agent_id, header, blob, kernel).await
     }
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
@@ -440,7 +440,7 @@ impl Bundle for RelayConnectorBundle {
         header: Value,
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Vec<u8>), BundleError> {
+    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
         dispatch_binary(Family::Relay, agent_id, header, blob, kernel).await
     }
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
@@ -457,25 +457,18 @@ fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String>
     meta.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Mint an opaque relay GUID (32 hex). Not cryptographic — it only needs to be
-/// unique within a relay group (the relay rejects duplicate GUIDs); composed from
-/// time + pid + a stack address + a process-monotonic counter, mirroring the
-/// kernel's own `mint_id` philosophy (no extra crate dep).
+/// Mint an opaque relay GUID (32 hex) — python `relay_connector._relay`'s
+/// `uuid.uuid4().hex`: 16 bytes from the OS CSPRNG carrying uuid4's version
+/// nibble and the RFC-4122 variant bits. A failure is FATAL — there is no
+/// second source (the time+pid+counter mixer this replaced was not random).
 fn mint_guid() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut stack: u64 = 0;
-    let stack_ptr = &mut stack as *mut u64 as u64;
-    let lo = (std::process::id() as u64).rotate_left(32)
-        ^ stack_ptr
-        ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    format!("{nanos:016x}{lo:016x}")
+    let mut b = [0u8; 16];
+    // SAFETY: `b` is a valid writable buffer of exactly 16 bytes.
+    let rc = unsafe { libc::getentropy(b.as_mut_ptr().cast(), b.len()) };
+    assert!(rc == 0, "getentropy failed: no randomness source");
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Assemble the directory-attributes blob to advertise from the record's well-known
@@ -933,8 +926,9 @@ async fn forward_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
 
 /// The shared forward engine — ships a raw `call` frame (text or binary) to the
 /// remote's web_ws and awaits the correlated reply. Returns `(reply, body)`;
-/// `body` is empty for a text reply, the raw chunk for a binary one
-/// (`read_stream` over the wire). Errors surface as `{error}` in the reply.
+/// `body` is `None` when the remote answered a TEXT frame (no chunk at all) and
+/// `Some(chunk)` when it answered a binary one — empty chunk included (C37).
+/// Errors surface as `{error}` in the reply.
 async fn forward_core(
     agent_id: &AgentId,
     target: &str,
@@ -942,7 +936,7 @@ async fn forward_core(
     body: Vec<u8>,
     is_binary: bool,
     timeout_secs: f64,
-) -> (Value, Vec<u8>) {
+) -> (Value, Option<Vec<u8>>) {
     let state = match BRIDGES
         .lock()
         .get(agent_id)
@@ -957,7 +951,7 @@ async fn forward_core(
                     "bridge.forward: not connected",
                     "call boot first",
                 ),
-                Vec::new(),
+                None,
             )
         }
     };
@@ -968,7 +962,7 @@ async fn forward_core(
     // contain one.
     let corr = format!("{}-{}", agent_id, n);
 
-    let (tx, rx) = oneshot::channel::<Result<(Value, Vec<u8>), String>>();
+    let (tx, rx) = oneshot::channel::<Result<(Value, Option<Vec<u8>>), String>>();
     state
         .pending
         .lock()
@@ -1005,7 +999,7 @@ async fn forward_core(
             .remove(&corr);
         return (
             json!({"error": format!("bridge.forward: send failed: {}", transport_error_text(&e))}),
-            Vec::new(),
+            None,
         );
     }
 
@@ -1028,7 +1022,7 @@ async fn forward_core(
         .lock()
         .expect("pending poisoned")
         .remove(&corr);
-    (json!({ "error": err }), Vec::new())
+    (json!({ "error": err }), None)
 }
 
 /// `watch_remote` / `unwatch_remote`: send `{type:"watch"|"unwatch",
@@ -1136,16 +1130,19 @@ async fn serve_inbound_call(
         let (data, reply_body) = kernel
             .send_with_binary(&AgentId::from(target.as_str()), inner, body)
             .await;
-        if reply_body.is_empty() {
-            let _ = state
-                .transport
-                .send_frame(json!({"type":"reply","id":corr_id,"data":data}))
-                .await;
-        } else {
-            // Binary reply frame — body rides raw at `data.bytes`.
-            let mut env = json!({"type":"reply","id":corr_id,"data":data});
-            env["_binary_path"] = json!("data.bytes");
-            let _ = state.transport.send_binary(env, reply_body).await;
+        match reply_body {
+            None => {
+                let _ = state
+                    .transport
+                    .send_frame(json!({"type":"reply","id":corr_id,"data":data}))
+                    .await;
+            }
+            Some(reply_body) => {
+                // Binary reply frame — body rides raw at `data.bytes`.
+                let mut env = json!({"type":"reply","id":corr_id,"data":data});
+                env["_binary_path"] = json!("data.bytes");
+                let _ = state.transport.send_binary(env, reply_body).await;
+            }
         }
     } else {
         // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already sends
@@ -1230,8 +1227,10 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                 let data = frame.get("data").cloned().unwrap_or(Value::Null);
                 let tx = state.pending.lock().expect("pending poisoned").remove(id);
                 if let Some(tx) = tx {
-                    // Carry the reply body alongside (empty for a text reply).
-                    let _ = tx.send(Ok((data, body)));
+                    // Carry the reply body alongside. A TEXT reply frame carried
+                    // no chunk at all (`None`); a binary one carries `Some`,
+                    // even when the chunk is empty (C37).
+                    let _ = tx.send(Ok((data, is_binary.then_some(body))));
                 }
             }
             "error" => {
@@ -1245,7 +1244,7 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                 if let Some(tx) = tx {
                     let _ = tx.send(Ok((
                         json!({ "error": format!("remote error: {err}") }),
-                        Vec::new(),
+                        None,
                     )));
                 }
             }

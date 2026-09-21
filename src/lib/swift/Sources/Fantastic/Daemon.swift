@@ -1,30 +1,22 @@
 // No-args `fantastic` daemon mode.
 //
-// Mirrors `python/kernel/_modes.py:_default` verbatim. Python's
+// Mirrors `python/kernel/modes/longrun.py:_default` verbatim. Python's
 // composition rule:
 //
-//   1. Acquire `.fantastic/lock.json` PID lock (fail if a live
-//      process owns the dir).
-//   2. Boot all persisted agents.
-//   3. If any persisted `web` agent → run a `_block_forever()` task.
-//   4. If `stdin.isatty()` → also run the `_repl_loop` task.
-//   5. Race those tasks against the stop signal (SIGINT/SIGTERM/SIGHUP,
-//      or the root-only `shutdown_kernel` verb); first to finish (REPL
-//      exit, signal, fatal error) wins and triggers `Kernel.shutdown()`.
-//   6. If neither web nor TTY → exit silently with no lock acquired.
-//
-// Swift's startup gap (carried over from Phase 8H): the substrate
-// doesn't yet hydrate `.fantastic/agents/<id>/agent.json` records
-// on boot. Today only the auto-created `web` agent exists in-memory
-// after `startKernel()`. Pre-seeding workdirs for integration tests
-// is therefore done post-startup via WS, not via direct file
-// writes. Hydration is a tracked follow-up; this daemon is correct
-// once it lands.
+//   1. Build the kernel (read the persisted tree; NO lock yet).
+//   2. Decide composition: a persisted `web.tools` agent, or `stdin.isatty()`
+//      → PTY. NEITHER → return silently, no lock ever taken (A14.13).
+//   3. Only then acquire `.fantastic/lock.json` (fail if a live process owns
+//      it) and boot every loaded agent, root first.
+//   4. web → `_block_forever()`; tty → the REPL loop. Race those against the
+//      stop signal (SIGINT/SIGTERM/SIGHUP, or the root-only `shutdown_kernel`
+//      verb); first to finish wins and triggers `Kernel.shutdown()`.
 //
 // Workdir is **always cwd** — matches Python's implicit-cwd
 // convention. No `<workdir>` argument; the operator picks the
 // project dir by `cd`-ing into it.
 
+import FantasticCliBundle
 import FantasticJSON
 import FantasticKernel
 import FantasticKernelStartup
@@ -35,6 +27,40 @@ import Foundation
 #endif
 
 enum DaemonMode {
+    /// A0.15/A14.15: web composes by `handler_module`, never by the literal id
+    /// `"web"` — a renamed or aliased web agent still composes, and an
+    /// unrelated agent someone happened to id `web` does not. Python:
+    /// `_find_bundle_module("web", ctx=kernel)` then filters by that module;
+    /// swift has no runtime package-entry-point registry to resolve a short
+    /// bundle NAME the way python's plugin discovery does, so this names the
+    /// one handler_module string directly — the same result python's
+    /// resolution produces for the bundle this runtime ships.
+    static let webHandlerModule = "web.tools"
+
+    static func hasWebAgent(_ kernel: Kernel) -> Bool {
+        kernel.allAgents().contains { $0.handlerModule == webHandlerModule }
+    }
+
+    /// Python's plain stdout marker on a non-tty daemon, once every agent has
+    /// booted (`longrun.py:62`, no `file=` argument).
+    static let upLine = "[kernel] up"
+    /// Both STDERR (`file=sys.stderr`), bracketing `Kernel.shutdown()`
+    /// (`longrun.py:124,129`).
+    static let tearingDownLine = "[kernel] tearing down agents..."
+    static let downLine = "[kernel] down"
+
+    /// Python's `_request_stop` line (`longrun.py:79-83`) — printed ONLY for
+    /// a real OS signal, never for `shutdown_kernel` (which sets the same
+    /// stop event directly, with no signal name to report).
+    static func stopSignalLine(_ signalName: String) -> String {
+        "\n[kernel] \(signalName) — shutting down..."
+    }
+
+    /// Python's `_boot_all_agents` per-agent failure line (`longrun.py:207`):
+    /// `f"  [kernel] boot {a.id!r} raised: {e}"`.
+    static func bootRaisedLine(id: AgentId, error: JSON) -> String {
+        "  [kernel] boot \(pyRepr(id.value)) raised: " + pyStr(error)
+    }
 
     /// Run no-args daemon mode in cwd. Returns when the daemon
     /// finishes (REPL exit, SIGINT, SIGTERM, or fatal error).
@@ -43,7 +69,42 @@ enum DaemonMode {
         let cwd = fm.currentDirectoryPath
         let workdirURL = URL(fileURLWithPath: cwd, isDirectory: true)
 
-        // Step 1 — Acquire PID lock. Refuse if another live process
+        // Step 1 (python `_build_kernel`) — build + hydrate the kernel
+        // UNCONDITIONALLY, before any lock or composition decision. Python's
+        // `_default(kernel)` receives an ALREADY-built kernel from
+        // `main_dispatch`; only what THIS function itself does (the lock,
+        // the `{type:boot}` sends) is gated on "is there anything to serve".
+        let kernel: Kernel
+        do {
+            kernel = try await startKernel(workdir: cwd, portHint: 0)
+            // THE MESSAGE STORE, hydrated COLD — before any agent boots, from
+            // above. A file of another version or a cut row refuses the boot
+            // rather than hydrating half a conversation.
+            try hydrateMessages(kernel, rootDir: workdirURL.appendingPathComponent(".fantastic"))
+            // C80: applied after every kernel construction (this mode builds
+            // its own, separate from `FantasticCLI.bootDiskBacked`'s).
+            if FantasticCLI.ledgerCap.wasSet { kernel.ledger.setCap(FantasticCLI.ledgerCap.cap) }
+            FantasticCLI.composeCliIfTTY(kernel)
+        } catch {
+            FileHandle.standardError.write(
+                "fantastic: kernel boot failed: \(error)\n"
+                    .data(using: .utf8) ?? Data())
+            exit(1)
+        }
+
+        // Step 2 (A14.13/A14.15) — decide composition BEFORE the lock and
+        // any boot: a persisted agent whose `handler_module` is `web.tools`
+        // (never `id == "web"` — a renamed/aliased web agent still
+        // composes), OR a tty. Neither ⇒ return silently, no lock ever
+        // taken — matches python's `if not web_agents and not has_repl:
+        // return`, which never even opens `FantasticLock()`.
+        let webExists = hasWebAgent(kernel)
+        // fd 0 is stdin — avoid the `stdin` C global, which Glibc exposes as a
+        // mutable `var` that Swift 6 strict concurrency rejects on Linux.
+        let isTTY = isatty(0) != 0
+        if !webExists && !isTTY { return }
+
+        // Step 3 — Acquire PID lock. Refuse if another live process
         // already holds it (matches Python's `FantasticLock` shape).
         let lock = WorkdirLock(workdir: workdirURL)
         do {
@@ -63,105 +124,59 @@ enum DaemonMode {
         }
         defer { lock.release() }
 
-        // Step 2 — Boot kernel against the workdir.
-        let kernel: Kernel
-        do {
-            kernel = try await startKernel(workdir: cwd, portHint: 0)
-        } catch {
-            FileHandle.standardError.write(
-                "fantastic: kernel boot failed: \(error)\n"
-                    .data(using: .utf8) ?? Data())
-            exit(1)
+        // FIRST PTY PUSH (tty only): orient whoever lands in the terminal —
+        // human or an LLM dropped into the PTY — BEFORE boot, while the port is
+        // still unknown. The text lives in the `cli` renderer bundle.
+        let cli = kernel.allAgents().first { $0.handlerModule == CliBundle.handlerModule }
+        if isTTY, let cli {
+            _ = await kernel.send(
+                [Item(cli.id, .object(["type": .string("intro_booting")]))])[0].result
         }
 
-        // THE MESSAGE STORE, hydrated COLD — before any agent boots, from
-        // above (python `hydrate_messages` in the bootstrap). A file of another
-        // version or a cut row refuses the boot rather than hydrating half a
-        // conversation.
-        do {
-            try hydrateMessages(kernel, rootDir: workdirURL.appendingPathComponent(".fantastic"))
-        } catch {
-            FileHandle.standardError.write(
-                "fantastic: \(error)\n".data(using: .utf8) ?? Data())
-            exit(1)
-        }
-
-        // Step 3 — Identify composition: does a persisted web agent
-        // exist? Is stdin a tty?
-        //
-        // (Substrate hydration gap noted in file header — today this
-        // sees only the auto-created web from startKernel, not any
-        // pre-seeded persisted state. Behavior is still correct:
-        // web auto-created → web boot path runs → daemon blocks.
-        // Aligns with Python's behavior on a freshly-initialized
-        // workdir.)
-        let webExists = kernel.agent(AgentId("web")) != nil
-        // fd 0 is stdin — avoid the `stdin` C global, which Glibc exposes as a
-        // mutable `var` that Swift 6 strict concurrency rejects on Linux.
-        let isTTY = isatty(0) != 0
-
-        if !webExists && !isTTY {
-            // Nothing to do; exit silently. Matches Python's
-            // `_default()` exit-with-no-lock path.
-            return
-        }
-
-        // Step 4 — Boot every persisted agent. Mirrors Python's
-        // `_boot_all_agents` in `python/kernel/_modes.py`: walks the
-        // kernel's flat agent index and sends `{type:"boot"}` to
-        // each. Bundle-level boot hooks (web binds HTTP listener,
-        // kernel_bridge attaches transport, ollama spawns HTTP
-        // client, etc.) all fire here. Errors are logged but don't
-        // abort the daemon — weak loading carries through.
-        let listReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
-        let bootedIds: [String] = (listReply["agents"].asArray ?? [])
-            .compactMap { $0["id"].asString }
-            .filter { $0 != "core" }  // root has no handler_module
-        for id in bootedIds {
-            let bootReply = await kernel.send([Item(AgentId(id), .object(["type": .string("boot")]))])[0].result
-            if let err = bootReply["error"].asString {
-                FileHandle.standardError.write(
-                    "[kernel] boot \(id) failed: \(err)\n"
-                        .data(using: .utf8) ?? Data())
+        // Step 4 — Boot every agent in REGISTRATION ORDER, ROOT FIRST. Python
+        // `_boot_all_agents` walks `kernel.agents.values()`, whose first entry
+        // is the root — and the ROOT'S boot is what installs the ledger, the
+        // message pump and the record writer, so nothing may run before it.
+        // Walking a `list_agents` REPLY instead put those two sends in the
+        // ledger and the message log before the pump even existed. A boot
+        // that raised prints python's line and the loop CONTINUES (python
+        // `except Exception as e: print(f"  [kernel] boot {a.id!r} raised:
+        // {e}", file=sys.stderr)`), the same shape as the substrate's own
+        // `raised: true` settle field.
+        for agent in kernel.allAgents() {
+            let outcome = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[
+                0]
+            if pyTruthy(outcome.result["raised"]) {
+                RuntimeLog.warn(bootRaisedLine(id: agent.id, error: outcome.result["error"]))
             }
         }
-        // AFTER the boot loop: the store agent must be live before the ledger
-        // can rehydrate through it, and THE PUMP SUBSCRIBES HERE — after
-        // hydration (cold, above) and the ledger, at the highest id present.
-        // `subscribe(after:)` replays what the boot loop minted meanwhile.
-        await kernel.installLedgerPersistence()
-        kernel.installMessagePump(after: kernel.rows.nextId - 1)
-        if webExists,
-            let webReflect = kernel.agent(AgentId("web"))
-        {
-            // web's boot reply included the bound port via the live
-            // server. Re-reflect to surface it in the log.
-            let r = await kernel.send([Item(AgentId("web"), .object(["type": .string("reflect")]))])[0].result
-            if let p = r["port"].asInt {
-                FileHandle.standardError.write(
-                    "[kernel] up — web bound on port \(p)\n"
-                        .data(using: .utf8) ?? Data())
-            }
-            _ = webReflect
+        // Second PTY push: the "all booted" close. Each agent already announced
+        // its OWN endpoints during its boot — the kernel does NOT gather them,
+        // and does NOT re-`reflect` web for a port. Non-tty keeps the plain
+        // one-line marker, on STDOUT (python has no `file=` on this one).
+        if isTTY, let cli {
+            _ = await kernel.send([Item(cli.id, .object(["type": .string("booted")]))])[0]
+                .result
         } else {
-            FileHandle.standardError.write(
-                "[kernel] up — REPL only (no web agent persisted)\n"
-                    .data(using: .utf8) ?? Data())
+            printFlushed(upLine)
         }
 
         // Step 5 — Race the REPL task (if tty), the block task (if web) and
         // the stop signal (an OS signal, or `shutdown_kernel` over the web
         // surface, which deferred its trigger so its ack flushed first).
         // First to finish wins.
-        await withTaskGroup(of: Void.self) { group in
+        let signalName = await withTaskGroup(of: String?.self) { group -> String? in
+            var caught: String??
             if isTTY {
                 group.addTask {
                     await REPLMode.run(kernel: kernel)
+                    return nil
                 }
             }
             if webExists {
                 group.addTask {
                     await blockForever()
+                    return nil
                 }
             }
             group.addTask {
@@ -169,19 +184,25 @@ enum DaemonMode {
             }
             // Race — first task to return ends the group; other tasks
             // get cancelled by the task group's structured concurrency.
-            await group.next()
+            caught = await group.next()
             group.cancelAll()
+            return caught ?? nil
+        }
+        // An OS signal (not `shutdown_kernel`, which sets the same event with
+        // no name attached) prints python's line before the teardown walk.
+        if let signalName {
+            RuntimeLog.warn(stopSignalLine(signalName))
         }
 
         // Step 6 — Graceful shutdown: drain the agents, land the last message
         // window (provider still alive), then the depth-first
         // `onShutdown`/`onDelete` walk that stops the listener and frees every
-        // PTY and subprocess. Records and tree untouched. Python `longrun`.
-        FileHandle.standardError.write(
-            "[kernel] tearing down agents...\n".data(using: .utf8) ?? Data())
+        // PTY and subprocess. Records and tree untouched. Both lines are
+        // STDERR in python (`file=sys.stderr`), unlike the stdout `[kernel]
+        // up` marker above.
+        RuntimeLog.warn(tearingDownLine)
         await kernel.shutdown()
-        FileHandle.standardError.write(
-            "[kernel] down\n".data(using: .utf8) ?? Data())
+        RuntimeLog.warn(downLine)
     }
 
     /// Sleeps indefinitely until cancelled by the task group when a

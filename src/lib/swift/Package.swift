@@ -43,6 +43,7 @@ let package = Package(
         // delegate their password rule to the canonical rules, not a local copy.
         .library(name: "FantasticIoBridge", targets: ["FantasticIoBridge"]),
         .library(name: "FantasticBundles", targets: [
+            "FantasticKernelState",
             "FantasticFile",
             "FantasticTextFile",
             "FantasticScheduler",
@@ -55,7 +56,6 @@ let package = Package(
             "FantasticNvidiaNimBackend",
             "FantasticAnthropicBackend",
             "FantasticLlamaCppBackend",
-            "FantasticFoundationModelsBackend",
         ]),
         .library(name: "FantasticKernelStartup", targets: ["FantasticKernelStartup"]),
 
@@ -100,7 +100,7 @@ let package = Package(
         ),
         .testTarget(
             name: "FantasticKernelTests",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticKernelState"]
         ),
 
         // ── Trivially-portable bundles (Phase 3) ─────────────────
@@ -117,6 +117,14 @@ let package = Package(
         .target(
             name: "FantasticFile",
             dependencies: ["FantasticKernel", "FantasticJSON", "FantasticIoBridge",
+                           .product(name: "OrderedCollections", package: "swift-collections")]
+        ),
+        // The `kernel_state.tools` ROOT LOADER — the durable-state bundle the
+        // tree root carries. Its verb surface only; the boot machinery lives in
+        // the kernel (`RecordWriter.swift`), which the kernel's own tests drive.
+        .target(
+            name: "FantasticKernelState",
+            dependencies: ["FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
@@ -204,9 +212,8 @@ let package = Package(
 
         // ── LLM backends (Phase 5 / 8D) ──────────────────────────
         // Shared reflect-driven agent machinery behind an `AIProvider`
-        // seam — the three backends below supply only their provider +
-        // an `AIBackendConfig`. MUST NOT import any provider SDK (no
-        // FoundationModels); all FM gating lives in the FM target.
+        // seam — the backends below supply only their provider +
+        // an `AIBackendConfig`. MUST NOT import any provider SDK.
         .target(
             name: "FantasticAICore",
             dependencies: ["FantasticKernel", "FantasticJSON",
@@ -248,12 +255,6 @@ let package = Package(
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
         ),
-        .target(
-            name: "FantasticFoundationModelsBackend",
-            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
-        ),
-
         // ── Shared runner lifecycle (mirrors FantasticAICore) ────
         // Cross-platform dispatch skeleton (reflect/boot/shutdown/
         // start/stop) behind a `RunnerTransport` seam. The local + ssh
@@ -284,6 +285,7 @@ let package = Package(
                 // so a default build carries none of it.
                 "FantasticScenarioProbes",
                 "FantasticKernel", "FantasticJSON",
+                "FantasticKernelState",
                 "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
@@ -291,7 +293,6 @@ let package = Package(
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
                 "FantasticLlamaCppBackend",
-                "FantasticFoundationModelsBackend",
                 "FantasticExecBridge", "FantasticTerminalBackend",
             ]
         ),
@@ -384,11 +385,11 @@ let package = Package(
             name: "FantasticBundlesTests",
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
+                "FantasticKernelState",
                 "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticTextFile", "FantasticKernelStartup",
-                "FantasticFoundationModelsBackend",
                 // The scenario fixtures are unit-tested here; only their
                 // REGISTRATION is behind -DSCENARIO_PROBES.
                 "FantasticScenarioProbes",

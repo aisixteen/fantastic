@@ -24,7 +24,7 @@ struct TextFileTests {
         registry.register("file_bridge.tools", FileBundle())
         registry.register("text_file.tools", TextFileBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         let fm = FileManager.default
@@ -32,14 +32,14 @@ struct TextFileTests {
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var meta: OrderedDictionary<String, JSON> = [
-            "type": "create_agent", "parent_id": "core",
+            "type": "create_agent", "parent_id": "kernel_state",
             "handler_module": "file_bridge.tools", "id": "fs", "root": .string(rel),
             "callable_by": .object(["ed": .string("*")]),
         ]
         if !sealed { meta["ingress_rule"] = "allow_all_ingress" }
-        _ = await kernel.send([Item("core", .object(meta))])[0].result
-        _ = await kernel.send([Item("core", .object([
-                "type": "create_agent", "parent_id": "core",
+        _ = await kernel.send([Item("kernel_state", .object(meta))])[0].result
+        _ = await kernel.send([Item("kernel_state", .object([
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "text_file.tools", "id": "ed",
                 "target_id": .string("fs"),
                 "can_call": .object(["fs": .string("*")]),
@@ -56,6 +56,51 @@ struct TextFileTests {
 
     private func call(_ k: Kernel, _ payload: JSON) async -> JSON {
         await k.send([Item(AgentId("ed"), payload)])[0].result
+    }
+
+    /// C37 — EVERY LEG BYTE IS AN EXECUTION. The two seam bodies
+    /// (`legReadChunk`/`legWriteChunk`) send ONE binary item through the batch
+    /// instead of `sendWithBinary`, so each leg read and each leg write leaves a
+    /// call row on the leg and a settle row on the root, exactly like python's
+    /// `kernel.send([...])`. `sendWithBinary` minted none of it, so the bytes a
+    /// model moved left no trace the checkpoint ids could be read back from.
+    @Test func legCallsAreBatchRows() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let w = await callBin(
+            k, .object(["type": .string("write"), "path": .string("a.txt")]), "hello\n")
+        #expect(w["error"].isNull, "\(w)")
+        let rows = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("rows_read"), "agent": .string("fs"),
+                    "limit": .integer(200),
+                ]))
+        ])[0].result
+        let calls = (rows["rows"].asArray ?? []).filter { $0["kind"].asString == "call" }
+        let verbs = calls.compactMap { $0["verb"].asString }
+        #expect(verbs.contains("write_stream"), "no leg call row: \(rows.serialize())")
+        #expect(verbs.contains("rename"), "no leg rename row: \(rows.serialize())")
+        // Each one SETTLED — the outcome is stamped on the call row.
+        #expect(
+            calls.allSatisfy { $0["outcome"]["status"].asString != nil },
+            "a leg call never settled: \(rows.serialize())")
+        // …and the read half too.
+        let r = await call(k, .object(["type": .string("read"), "path": .string("a.txt")]))
+        #expect(r["error"].isNull, "\(r)")
+        let after = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("rows_read"), "agent": .string("fs"),
+                    "limit": .integer(200),
+                ]))
+        ])[0].result
+        #expect(
+            (after["rows"].asArray ?? []).contains {
+                $0["kind"].asString == "call" && $0["verb"].asString == "read_stream"
+            }, "no leg read row: \(after.serialize())")
     }
 
     private func seed(_ k: Kernel, _ path: String, _ text: String) async -> JSON {
@@ -344,11 +389,11 @@ struct TextFileTests {
         let registry = BundleRegistry()
         registry.register("text_file.tools", TextFileBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
-        _ = await kernel.send([Item("core", .object([
-                "type": "create_agent", "parent_id": "core",
+        _ = await kernel.send([Item("kernel_state", .object([
+                "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "text_file.tools", "id": "bare",
             ]))])[0].result
         for verb in ["read", "checkpoint", "checkpoints", "restore", "drop"] {
@@ -595,14 +640,14 @@ struct TextFileTests {
         let registry = BundleRegistry()
         registry.register("text_file.tools", TextFileBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": "create_agent", "parent_id": "core",
+                    "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": "text_file.tools", "id": "bare",
                 ]))
         ])[0].result
@@ -722,14 +767,14 @@ struct TextFileTests {
         let registry = BundleRegistry()
         registry.register("text_file.tools", TextFileBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         let r = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": "create_agent", "parent_id": "core",
+                    "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": "text_file.tools", "id": "ed2",
                     "target_id": .string(""),
                 ]))
@@ -788,15 +833,15 @@ struct TextFileTests {
         registry.register("probe_leg.tools", ProbeLegBundle())
         registry.register("text_file.tools", TextFileBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         for (id, mode) in [("nul", "null"), ("blank", "blank_error")] {
             _ = await kernel.send([
                 Item(
-                    "core",
+                    "kernel_state",
                     .object([
-                        "type": "create_agent", "parent_id": "core",
+                        "type": "create_agent", "parent_id": "kernel_state",
                         "handler_module": "probe_leg.tools", "id": .string(id),
                         "mode": .string(mode), "callable_by": .object(["ed": .string("*")]),
                         "ingress_rule": "allow_all_ingress",
@@ -805,9 +850,9 @@ struct TextFileTests {
         }
         _ = await kernel.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": "create_agent", "parent_id": "core",
+                    "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": "text_file.tools", "id": "ed",
                     "can_call": .object(["nul": .string("*"), "blank": .string("*")]),
                 ]))
@@ -890,7 +935,7 @@ struct TextFileTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         _ = await k.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
                     "type": "update_agent", "id": "ed", "description": .string(""),
                 ]))
@@ -1028,8 +1073,8 @@ struct ProbeLegBundle: AgentBundle {
     }
 
     func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
-        async throws -> (JSON?, Data)
+        async throws -> (JSON?, Data?)
     {
-        (reply(agentId, kernel), Data())
+        (reply(agentId, kernel), nil)
     }
 }

@@ -412,8 +412,10 @@ class Kernel:
     # Installed by the ROOT LOADER at boot (kernel_state) — the substrate never
     # touches disk itself. None = no persistence (no store wired, or a test
     # kernel): settled outcomes live and die with the process, exactly like the
-    # tree's own auto-flush law. Called (sync, cheap) at every settle.
-    ledger_flusher: "Callable[[], None] | None" = None
+    # tree's own auto-flush law. Called (sync, cheap) at every settle, with the
+    # id of the execution that settled: the loader decides whether that row is
+    # worth persisting for (its OWN persistence traffic is not).
+    ledger_flusher: "Callable[[int | None], None] | None" = None
 
     # THE MESSAGE STORE — every message the kernel ever made, id-addressed by the
     # one counter, append-only: a row is never edited or removed by this API. An
@@ -552,9 +554,12 @@ class Kernel:
             k: v for k, v in row.items() if k not in ("kind", "agent", "id", "parent")
         }
 
-    def ledger_settled(self) -> None:
+    def ledger_settled(self, exec_id: int | None) -> None:
+        """One execution settled. The id goes through: the loader's own
+        persistence writes settle too, and a flush kicked by them would write
+        the file its own write just dirtied, forever."""
         if self.ledger_flusher is not None:
-            self.ledger_flusher()
+            self.ledger_flusher(exec_id)
 
     def resolve_name(self, name: str) -> int | None:
         """The message id a caller's name stands for, while its execution is held."""
@@ -594,6 +599,7 @@ class Kernel:
         *,
         parent: int | None,
         keepalive: bool = False,
+        forked: bool = False,
     ) -> dict:
         """Put one in-flight asyncio.Task in the table. Self-cleaning: the
         entry is forgotten when the task ends (done-callback), cancelled or
@@ -627,6 +633,11 @@ class Kernel:
             # A persister loop that must outlive `shutdown_agents`' quiet phase
             # (the loader's message pump). Everything else is pending work.
             "_keepalive": keepalive,
+            # A `spawn_task` FORK — a service loop (scheduler tick, bridge read
+            # loop, ws drain, job pump, pty reader), not a dispatch. It is work
+            # that outlives its dispatch BY CONSTRUCTION, so it never settles:
+            # `shutdown_agents` cancels it instead of waiting for it.
+            "_forked": forked,
         }
         self.tasks[task_id] = entry
         task.add_done_callback(lambda _t, tid=task_id: self.forget_task(tid))
@@ -672,7 +683,13 @@ class Kernel:
         ctx.run(_current_task.set, task_id)
         task = asyncio.create_task(coro, context=ctx)
         self.register_task(
-            task_id, agent_id, verb, task, parent=parent, keepalive=keepalive
+            task_id,
+            agent_id,
+            verb,
+            task,
+            parent=parent,
+            keepalive=keepalive,
+            forked=True,
         )
         return task_id
 
@@ -859,9 +876,10 @@ class Kernel:
         2. `shutdown` VERB: every agent whose bundle advertises it is told, all at
            once, under `shutdown_context()`, bounded. For an AI it is a turn ("the
            kernel is stopping; persist what matters, then done"); its tools work.
-        3. QUIET: wait for the task table to empty (persister loops marked
-           `keepalive` excepted), bounded; the rest is cancelled through the
-           normal `cancel_task` path (subtree, `on_cancel` hooks).
+        3. QUIET: wait for the in-flight DISPATCHES to settle (persister loops
+           marked `keepalive` and `spawn_task` service loops excepted), bounded;
+           the rest is cancelled through the normal `cancel_task` path (subtree,
+           `on_cancel` hooks).
         Idempotent: a second call answers the same shape and shuts nothing new.
         The kernel keeps serving afterwards — reads, `messages`, the persister —
         until `shutdown()` tears it down."""
@@ -893,8 +911,20 @@ class Kernel:
                 if not e.get("_keepalive") and tid != me
             ]
 
+        def settling() -> list[int]:
+            """The pending DISPATCHES — work that can finish on its own. A
+            `spawn_task` FORK (scheduler tick, bridge read loop, ws drain, job
+            pump, pty reader) is a service loop that never settles by
+            construction, so waiting on one burned the WHOLE `QUIET_TIMEOUT` on
+            every daemon that ran one: measured 2026-09-21, SIGTERM→exit was
+            10.25 s with a scheduler on the tree and 0.29 s without it, and the
+            e2e harness's 10 s stop window then SIGKILLed the kernel with its
+            PID lock (`.fantastic/lock.json`) still on disk. Forks are cancelled
+            below — that is what a stop does to them — never awaited."""
+            return [tid for tid in pending() if not self.tasks[tid].get("_forked")]
+
         deadline = time.monotonic() + self.QUIET_TIMEOUT
-        while time.monotonic() < deadline and pending():
+        while time.monotonic() < deadline and settling():
             await asyncio.sleep(0.05)
         cancelled: list[int] = []
         for tid in pending():

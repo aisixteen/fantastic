@@ -44,21 +44,21 @@ struct CurrentOriginTests {
         let registry = BundleRegistry()
         registry.register("origin_spy.tools", SpyBundle(seen: seen))
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
 
         // Two-sided deny-all: a sibling send needs BOTH grants.
-        _ = await kernel.send([Item(AgentId("core"), .object([
+        _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("create_agent"),
-                "parent_id": .string("core"),
+                "parent_id": .string("kernel_state"),
                 "handler_module": .string("origin_spy.tools"),
                 "id": .string("spy"),
                 "callable_by": .object(["caller": .string("*")]),
             ]))])[0].result
-        _ = await kernel.send([Item(AgentId("core"), .object([
+        _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("create_agent"),
-                "parent_id": .string("core"),
+                "parent_id": .string("kernel_state"),
                 "handler_module": .string("origin_spy.tools"),
                 "id": .string("caller"),
                 "can_call": .object(["spy": .string("*")]),

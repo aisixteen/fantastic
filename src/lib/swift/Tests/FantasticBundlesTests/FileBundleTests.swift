@@ -21,7 +21,7 @@ struct FileBundleTests {
         let registry = BundleRegistry()
         registry.register("file_bridge.tools", FileBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
         let fm = FileManager.default
@@ -29,12 +29,12 @@ struct FileBundleTests {
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var meta: OrderedDictionary<String, JSON> = [
-            "type": "create_agent", "parent_id": "core",
+            "type": "create_agent", "parent_id": "kernel_state",
             "handler_module": "file_bridge.tools", "id": "fs", "root": .string(rel),
             "ingress_rule": "allow_all_ingress",
         ]
         for (k, v) in extra { meta[k] = v }
-        let r = await kernel.send([Item("core", .object(meta))])[0].result
+        let r = await kernel.send([Item("kernel_state", .object(meta))])[0].result
         #expect(r["id"].asString == meta["id"]?.asString, "\(r)")
         return (kernel, dir)
     }
@@ -44,7 +44,7 @@ struct FileBundleTests {
     }
 
     private func bin(_ k: Kernel, _ header: OrderedDictionary<String, JSON>, _ blob: Data = Data())
-        async -> (JSON, Data)
+        async -> (JSON, Data?)
     {
         await k.sendWithBinary(AgentId("fs"), .object(header), blob)
     }
@@ -77,7 +77,7 @@ struct FileBundleTests {
             let (r, body) = await bin(k, header, Data("z".utf8))
             #expect(r["reason"].asString == "bad_arg", "\(header) → \(r)")
             #expect(header[r["arg"].asString ?? "?"] != nil, "\(r)")
-            #expect(body.isEmpty)
+            #expect(body == nil, "a refusal carries no chunk")
         }
         let (r, _) = await call(
             k,
@@ -88,13 +88,13 @@ struct FileBundleTests {
         let (m, b) = await bin(
             k,
             ["type": "read_stream", "path": "a.txt", "offset": .integer(1), "length": .integer(1)])
-        #expect(String(decoding: b, as: UTF8.self) == "b", "\(m)")
+        #expect(String(decoding: b ?? Data(), as: UTF8.self) == "b", "\(m)")
         #expect(m["next_offset"].asInt == 2)
         #expect(m["bytes_len"].isNull)
         // a huge length reads only what exists
         let (m2, b2) = await bin(
             k, ["type": "read_stream", "path": "a.txt", "length": .integer(Int64.max)])
-        #expect(b2.count == 3, "\(m2)")
+        #expect(b2?.count == 3, "\(m2)")
         #expect(m2["eof"].asBool == true)
     }
 
@@ -113,7 +113,7 @@ struct FileBundleTests {
         let (m, b) = await bin(k, ["type": "read_stream", "path": "docs/secret.txt"])
         #expect(m["reason"].asString == "transport_error", "\(m)")
         #expect(m["error"].asString?.contains("escapes root") == true)
-        #expect(b.isEmpty)
+        #expect(b == nil, "a refusal carries no chunk")
         let l = await call(k, ["type": "list", "path": "docs"])
         #expect(l["reason"].asString == "transport_error", "\(l)")
         let (w, _) = await bin(k, ["type": "write_stream", "path": "docs/new.txt"], Data("x".utf8))
@@ -126,7 +126,7 @@ struct FileBundleTests {
             withDestinationURL: dir.appendingPathComponent("real.txt"))
         let (m2, b2) = await bin(k, ["type": "read_stream", "path": "alias.txt"])
         #expect(m2["error"].isNull, "\(m2)")
-        #expect(String(decoding: b2, as: UTF8.self) == "r")
+        #expect(String(decoding: b2 ?? Data(), as: UTF8.self) == "r")
     }
 
     @Test func deleteOnSymlinkRemovesTheLinkOnly() async throws {
@@ -246,13 +246,14 @@ struct FileBundleTests {
         #expect(names(r) == [".gitignore", "visible.txt"], "\(r)")
         // an operator's `hidden` override is honoured — `.git` unhidden
         _ = await k.send([
-            Item("core", .object(["type": "update_agent", "id": "fs", "hidden": .array([])]))
+            Item(
+                "kernel_state", .object(["type": "update_agent", "id": "fs", "hidden": .array([])]))
         ])[0].result
         let r2 = await call(k, ["type": "list"])
         #expect(names(r2) == [".git", ".gitignore", "visible.txt"], "\(r2)")
         _ = await k.send([
             Item(
-                "core",
+                "kernel_state",
                 .object(["type": "update_agent", "id": "fs", "hidden": .array(["visible.txt"])]))
         ])[0].result
         let r3 = await call(k, ["type": "list"])
@@ -298,35 +299,34 @@ struct FileBundleTests {
         #expect(r2["root_error"].asString?.contains("escapes the running dir") == true, "\(r2)")
     }
 
-    /// THE STREAM VERBS ON THE TEXT CHANNEL, as python serves them: a model
-    /// writes a document VERBATIM between `<bytes>` and `</bytes>` and the tag
-    /// grammar delivers it as utf-8 text to the same handler; a chunk read back
-    /// renders utf-8 in the reply. Swift refused both with "raw bytes on the
-    /// binary channel" until 2026-09-13 — the refusal the `subai_graph` routine
-    /// died on, the same gap rust closed the day before.
-    @Test func textChannelStreamVerbsServeUtf8LikePython() async {
+    /// A13.19 — `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK. Python types the
+    /// argument (`isinstance(data, (bytes, bytearray))`) and JSON has no bytes,
+    /// so a JSON string, a number or a null from a wire client is `missing_arg`
+    /// and NOTHING is written. Measured `text_call_write_stream_str_bytes`:
+    /// python refuses and `ws_text.txt` is absent; swift wrote `3` bytes.
+    ///
+    /// A model's `<bytes>` document keeps working because it rides the BINARY
+    /// channel (D15) — the grammar's one bytes-typed argument becomes the item's
+    /// blob, which is exactly the type python's parser produces.
+    @Test func textWriteStreamWithStringBytesIsMissingArg() async {
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let w = await call(k, ["type": "write_stream", "path": "a.txt", "bytes": "hello\nwörld"])
+        for value: JSON in ["hello\nwörld", .integer(42), .double(1.5), .null, .bool(true)] {
+            let w = await call(k, ["type": "write_stream", "path": "a.txt", "bytes": value])
+            #expect(
+                w["reason"].asString == "missing_arg"
+                    && w["error"].asString == "write_stream: bytes (one raw chunk) required",
+                "\(value) → \(w)")
+        }
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("a.txt").path))
+        // The SAME document through the carrier a model's `<bytes>` rides.
+        let (w, _) = await bin(
+            k, ["type": "write_stream", "path": "a.txt"], Data("hello\nwörld".utf8))
         #expect(w["error"].isNull && w["path"].asString == "a.txt", "\(w)")
+        // A chunk read back still renders utf-8 in the TEXT reply (A2.6) — that
+        // half is how a model reads a document it wrote.
         let r = await call(k, ["type": "read_stream", "path": "a.txt"])
         #expect(r["bytes"].asString == "hello\nwörld" && r["eof"].asBool == true, "\(r)")
-        // A bare number is a document too (the tag grammar types it).
-        let n = await call(
-            k,
-            [
-                "type": "write_stream", "path": "n.txt", "bytes": .integer(42),
-                "truncate": .bool(true),
-            ])
-        #expect(n["error"].isNull, "\(n)")
-        #expect(
-            (await call(k, ["type": "read_stream", "path": "n.txt"]))["bytes"].asString == "42")
-        // An explicit `null` is not a chunk — python's `missing` refusal, never a
-        // channel lecture. (An ABSENT `bytes` key is an empty chunk: A2.7 below.)
-        let m = await call(k, ["type": "write_stream", "path": "a.txt", "bytes": .null])
-        #expect(
-            m["reason"].asString == "missing_arg"
-                && m["error"].asString == "write_stream: bytes (one raw chunk) required", "\(m)")
         let nf = await call(k, ["type": "read_stream", "path": "nope.txt"])
         #expect(nf["reason"].asString == "not_found", "\(nf)")
     }
@@ -350,9 +350,9 @@ struct FileBundleTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await k.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": "create_agent", "parent_id": "core",
+                    "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": "file_bridge.tools",
                     "id": "pw", "ingress_rule": "password_ingress",
                 ]))
@@ -525,10 +525,11 @@ struct FileBundleTests {
             (try? String(contentsOf: dir.appendingPathComponent("b.txt"), encoding: .utf8))
                 == "abcdef")
         // a SOURCE that is not a stream provider: refused, named with `{src!r}`.
-        let bad = await call(k, ["type": "pump", "source": "core", "source_path": "a.txt"])
+        let bad = await call(k, ["type": "pump", "source": "kernel_state", "source_path": "a.txt"])
         #expect(bad["reason"].asString == "transport_error", "\(bad)")
         #expect(
-            bad["error"].asString?.hasPrefix("pump: read from 'core' failed: ") == true, "\(bad)")
+            bad["error"].asString?.hasPrefix("pump: read from 'kernel_state' failed: ") == true,
+            "\(bad)")
     }
 
     /// A2.11 — a `list` entry's `path` is relative to the RESOLVED root, and a
@@ -573,17 +574,19 @@ struct FileBundleTests {
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
         write(dir, "t.txt", "abcdef")
-        // a truthy STRING truncates
-        let w = await call(
-            k, ["type": "write_stream", "path": "t.txt", "bytes": "z", "truncate": "yes"])
+        // a truthy STRING truncates. The chunk rides the binary channel — a
+        // text-channel `bytes` is `missing_arg` since A13.19.
+        let (w, _) = await bin(
+            k, ["type": "write_stream", "path": "t.txt", "truncate": "yes"], Data("z".utf8))
         #expect(w["size"].asInt == 1, "\(w)")
         // `0` is falsy: no truncate
-        let w2 = await call(
+        let (w2, _) = await bin(
             k,
             [
-                "type": "write_stream", "path": "t.txt", "bytes": "q", "offset": .integer(0),
+                "type": "write_stream", "path": "t.txt", "offset": .integer(0),
                 "truncate": .integer(0),
-            ])
+            ],
+            Data("q".utf8))
         #expect(w2["size"].asInt == 1, "\(w2)")
         write(dir, "d/a.txt", "x")
         #expect(
@@ -594,13 +597,15 @@ struct FileBundleTests {
                 == true)
         // `readonly` too: the string "no" is TRUE in python
         _ = await k.send([
-            Item("core", .object(["type": "update_agent", "id": "fs", "readonly": "no"]))
+            Item("kernel_state", .object(["type": "update_agent", "id": "fs", "readonly": "no"]))
         ])[0].result
         #expect(
             (await call(k, ["type": "mkdir", "path": "q"]))["error"].asString == "agent is readonly"
         )
         _ = await k.send([
-            Item("core", .object(["type": "update_agent", "id": "fs", "readonly": .integer(0)]))
+            Item(
+                "kernel_state",
+                .object(["type": "update_agent", "id": "fs", "readonly": .integer(0)]))
         ])[0].result
         #expect((await call(k, ["type": "mkdir", "path": "q"]))["created"].asBool == true)
     }
@@ -631,7 +636,6 @@ struct FileBundleTests {
         try fm.createSymbolicLink(
             at: dir.appendingPathComponent("out.txt"), withDestinationURL: outside)
         for payload: OrderedDictionary<String, JSON> in [
-            ["type": "write_stream", "path": "out.txt", "bytes": "x"],
             ["type": "delete", "path": "out.txt"],
             ["type": "read_stream", "path": "out.txt"],
         ] {
@@ -639,6 +643,11 @@ struct FileBundleTests {
             #expect(r["reason"].asString == "transport_error", "\(payload) → \(r)")
             #expect(r["error"].asString == "fs: path 'out.txt' escapes root", "\(r)")
         }
+        // The write carries its chunk on the binary channel (A13.19).
+        let (wr, _) = await bin(
+            k, ["type": "write_stream", "path": "out.txt"], Data("x".utf8))
+        #expect(wr["reason"].asString == "transport_error", "\(wr)")
+        #expect(wr["error"].asString == "fs: path 'out.txt' escapes root", "\(wr)")
         #expect(!fm.fileExists(atPath: outside.path), "nothing was created through the link")
     }
 
@@ -663,9 +672,9 @@ struct FileBundleTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await k.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": "create_agent", "parent_id": "core",
+                    "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": "file_bridge.tools",
                     "id": "wd", "ingress_rule": "allow_all_ingress",
                 ]))
@@ -711,17 +720,19 @@ struct FileBundleTests {
         // NO `ingress_rule` key at all: the `auth` stem is what resolves.
         let made = await k.send([
             Item(
-                "core",
+                "kernel_state",
                 .object([
-                    "type": "create_agent", "parent_id": "core",
+                    "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": "file_bridge.tools",
                     "id": "fs2", "auth": "allow_all_ingress",
                 ]))
         ])[0].result
         #expect(made["id"].asString == "fs2", "\(made)")
         let r = await k.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
-        #expect(r["ingress_rule"].asString == "allow_all_ingress", "\(r)")
-        #expect(r["sealed"].asBool == false, "\(r)")
+        // Reported as the GATE resolves it (python 2026-09-16): an `auth` stem
+        // always gets the manifold suffix, so this one is an unknown rule — sealed.
+        #expect(r["ingress_rule"].asString == "allow_all_ingress_ingress", "\(r)")
+        #expect(r["sealed"].asBool == true, "\(r)")
         #expect(r["egress_rule"].asString == "allow_all_ingress_egress", "\(r)")
     }
 

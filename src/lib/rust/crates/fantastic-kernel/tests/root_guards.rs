@@ -42,7 +42,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -68,21 +68,21 @@ async fn delete_agent_refuses_the_root() {
     call(
         &kernel,
         "kernel",
-        json!({"type": "create_agent", "parent_id": "core", "id": "child",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "child",
                "handler_module": "noop.tools"}),
     )
     .await;
     let r = call(
         &kernel,
         "kernel",
-        json!({"type": "delete_agent", "id": "core"}),
+        json!({"type": "delete_agent", "id": "kernel_state"}),
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "id", "{r}");
     assert_eq!(r["deleted"], false, "{r}");
     // The tree is intact.
-    assert!(kernel.agents.contains_key(&AgentId::from("core")));
+    assert!(kernel.agents.contains_key(&AgentId::from("kernel_state")));
     assert!(kernel.agents.contains_key(&AgentId::from("child")));
 }
 
@@ -92,7 +92,7 @@ async fn update_agent_refuses_handler_module_and_reserved_keys() {
     call(
         &kernel,
         "kernel",
-        json!({"type": "create_agent", "parent_id": "core", "id": "upd",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "upd",
                "handler_module": "noop.tools"}),
     )
     .await;
@@ -119,7 +119,7 @@ async fn create_agent_refuses_reserved_keys() {
     let r = call(
         &kernel,
         "kernel",
-        json!({"type": "create_agent", "parent_id": "core", "id": "reserved",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "reserved",
                "handler_module": "noop.tools", "root_path": "/tmp/elsewhere"}),
     )
     .await;
@@ -145,7 +145,7 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
     let rec = call(
         &kernel,
         "kernel",
-        json!({"type": "create_agent", "parent_id": "core", "id": "foreign",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "foreign",
                "handler_module": "frontend_view.tools"}),
     )
     .await;
@@ -156,4 +156,40 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
     for decoration in ["kernel_verbs", "tree", "more"] {
         assert!(r.get(decoration).is_none(), "{decoration} in {r}");
     }
+}
+
+/// C13: `persist_blob`/`load_blob` LEFT the kernel-verb set, so they no longer
+/// bypass root ingress. A grandchild granted exactly `kernel_state:[persist_blob]`
+/// is refused by the ROOT's `callable_by` — python's `namespacing` contract
+/// step, which expects `{allow: false, side: "ingress"}`.
+#[tokio::test]
+async fn blob_verbs_pass_root_ingress() {
+    let (_tmp, kernel) = mk();
+    // A direct child, then a grandchild under it — `$children` on the root does
+    // not reach a grandchild, so the only edge it could have is the explicit one.
+    for (id, parent) in [("mid", "kernel"), ("leaf", "mid")] {
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({
+                    "type": "create_agent", "parent_id": parent,
+                    "handler_module": "noop.tools", "id": id,
+                    "can_call": {"kernel_state": ["persist_blob"]},
+                }),
+            )])
+            .await;
+    }
+    let denial = fantastic_kernel::with_sender(AgentId::from("leaf"), async {
+        kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "persist_blob", "agent_id": "leaf", "name": "s.yaml", "content": "x"}),
+            )])
+            .await
+            .remove(0)
+            .result
+    })
+    .await;
+    assert_eq!(denial["reason"], json!("unauthorized"), "{denial}");
+    assert_eq!(denial["side"], json!("ingress"), "{denial}");
 }

@@ -106,6 +106,7 @@ enum BridgeDocs {
 public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     public let family: BridgeFamily
     public var name: String { family.label }
+    public var verbs: [String] { family.verbNames }
 
     let stateLock = NSLock()
     var states: [AgentId: BridgeState] = [:]
@@ -212,9 +213,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     /// Every other binary verb routes through the text `handle`.
     public func handleBinary(
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-    ) async throws -> (JSON?, Data) {
+    ) async throws -> (JSON?, Data?) {
         guard header["type"].asString == "forward" else {
-            return (try await handle(agentId: agentId, payload: header, kernel: kernel), Data())
+            return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
         }
         return try await binaryForwardVerb(
             agentId: agentId, header: header, blob: blob, kernel: kernel)
@@ -312,8 +313,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             for k in ["role", "owner_guid", "exposes"] where m[k] != nil { patch[k] = m[k]! }
         }
         if !patch.isEmpty {
-            _ = agent.updateMeta(patch)
-            await kernel.persistRecord(agent)
+            // Through the kernel update path (publishes `updated`) — never a
+            // direct persist, which the loader's writer never learns about.
+            kernel.update(agent.id, patch)
         }
         return await transport.setIdentity(relayIdentity(kernel.agent(agentId)?.meta ?? [:]))
     }

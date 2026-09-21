@@ -5,6 +5,8 @@ import Foundation
 import OrderedCollections
 import Testing
 
+import FantasticKernelState
+
 @testable import FantasticKernel
 
 /// Echo bundle — verb dispatch returns the payload echoed back
@@ -28,11 +30,13 @@ struct EchoBundle: AgentBundle {
 final class EventCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [JSON] = []
+    private var bodies: [InboxBody?] = []
 
-    func handler() -> @Sendable (JSON) -> Void {
-        return { [weak self] ev in
+    func handler() -> StateSubscriber {
+        return { [weak self] ev, body in
             self?.lock.lock()
             self?.events.append(ev)
+            self?.bodies.append(body)
             self?.lock.unlock()
         }
     }
@@ -42,6 +46,28 @@ final class EventCapture: @unchecked Sendable {
         defer { lock.unlock() }
         return events
     }
+
+    /// The raw body that rode beside each event — `nil` for a text payload.
+    func bodySnapshot() -> [InboxBody?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return bodies
+    }
+}
+
+/// A kernel whose ROOT carries the `kernel_state.tools` loader, as every real one
+/// does. The root reflect FRAME (`persistence`, `guid`, `readmes`, `docs`,
+/// `self_extension`) is that bundle's `reflectRootExtra` contribution, so a
+/// bare-root fixture carries none of it.
+func makeLoaderKernel() -> Kernel {
+    let registry = BundleRegistry()
+    registry.register("echo.tools", EchoBundle())
+    registry.register(ROOT_HANDLER_MODULE, KernelStateBundle())
+    let kernel = Kernel(storage: .inMemory, bundles: registry)
+    let root = Agent(id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil)
+    kernel.register(root)
+    kernel.setRoot(root)
+    return kernel
 }
 
 func makeKernel(withEcho: Bool = true) -> Kernel {
@@ -50,7 +76,7 @@ func makeKernel(withEcho: Bool = true) -> Kernel {
         registry.register("echo.tools", EchoBundle())
     }
     let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
     return kernel
@@ -60,16 +86,16 @@ func makeKernel(withEcho: Bool = true) -> Kernel {
 struct KernelSendTests {
     @Test func sendToBareAgentBoot() async {
         let kernel = makeKernel()
-        let reply = await kernel.send([Item("core", ["type": "boot"])])[0].result
+        let reply = await kernel.send([Item("kernel_state", ["type": "boot"])])[0].result
         // Bare agent's boot returns null per substrate convention.
         #expect(reply.isNull)
     }
 
     @Test func sendToBundleAgentEchoes() async {
         let kernel = makeKernel()
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "echo1",
             ])])[0].result
@@ -90,14 +116,14 @@ struct KernelSendTests {
         #expect(out.pid == nil, "a refusal never reached the task table")
         #expect(out.result["error"].asString?.contains("no agent") == true)
         #expect(out.result["reason"].asString == "unknown_agent")
-        #expect(out.result["agents"].asArray?.contains(.string("core")) == true)
+        #expect(out.result["agents"].asArray?.contains(.string("kernel_state")) == true)
     }
 
     @Test func sendUnknownHandlerModuleReturnsError() async {
         let kernel = makeKernel(withEcho: false)
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "missing.tools",
                 "id": "x",
             ])])[0].result
@@ -105,10 +131,33 @@ struct KernelSendTests {
         #expect(reply["error"].asString?.contains("missing.tools") == true)
     }
 
+    /// C24: python's PREFIX pinned verbatim (`agent <id!r>: handler_module
+    /// <hm!r> cannot be imported in this runtime: `); the tail is a D3
+    /// residual (python's own import error text is not stable across runs —
+    /// "No module named 'yaml_state'" one round, "...'yaml_state.tools'" the
+    /// next — so it is not pinned here either).
+    @Test func handlerModuleNotInstalledPrefixIsPythonExact() async {
+        let kernel = makeKernel(withEcho: false)
+        _ = await kernel.send([Item("kernel_state", [
+                "type": "create_agent",
+                "parent_id": "kernel_state",
+                "handler_module": "yaml_state.tools",
+                "id": "yaml",
+            ])])[0].result
+        let reply = await kernel.send([Item("yaml", ["type": "reflect"])])[0].result
+        #expect(
+            reply["error"].asString
+                == "agent 'yaml': handler_module 'yaml_state.tools' cannot be imported in this "
+                    + "runtime: ModuleNotFoundError: No module named 'yaml_state.tools'",
+            "\(reply)")
+        #expect(reply["reason"].asString == "unhandled")
+        #expect(reply["verb"].asString == "reflect")
+    }
+
     @Test func kernelAliasResolvesToRoot() async {
         let kernel = makeKernel()
         let reply = await kernel.send([Item("kernel", ["type": "reflect"])])[0].result
-        #expect(reply["id"].asString == "core")
+        #expect(reply["id"].asString == "kernel_state")
     }
 }
 
@@ -116,23 +165,70 @@ struct KernelSendTests {
 struct KernelEmitTests {
     @Test func emitDeliversToInbox() async {
         let kernel = makeKernel()
-        let stream = kernel.register(
-            Agent(id: "listener", handlerModule: nil, parentId: nil))
+        kernel.register(Agent(id: "listener", handlerModule: nil, parentId: nil))
+        // THE READER REGISTERS ITS OWN INBOX (C29): `register` mints none.
+        let stream = kernel.ensureInbox("listener")
         await kernel.emit("listener", ["type": "ping", "x": 1])
 
         var iterator = stream.makeAsyncIterator()
         let first = await iterator.next()
-        #expect(first?["type"].asString == "ping")
-        #expect(first?["x"].asInt == 1)
+        #expect(first?.payload["type"].asString == "ping")
+        #expect(first?.payload["x"].asInt == 1)
+    }
+
+    /// C29 — an agent gets no queue merely by existing.
+    @Test func registerMintsNoInbox() async {
+        let kernel = makeKernel()
+        kernel.register(Agent(id: "quiet", handlerModule: nil, parentId: nil))
+        #expect(kernel.hasInbox("quiet") == false)
+        kernel.ensureInbox("quiet")
+        #expect(kernel.hasInbox("quiet") == true)
+    }
+
+    /// C28 + C29 — a registered agent that never called `ensureInbox` cannot be
+    /// a watcher, and the refusal says so in python's words.
+    @Test func watchByABareRegisteredAgentIsRefused() async {
+        let kernel = makeKernel()
+        kernel.register(Agent(id: "ghost", handlerModule: nil, parentId: nil))
+        let denial = kernel.watch(src: "kernel_state", watcher: "ghost")
+        #expect(
+            denial?["error"].asString
+                == "watch: 'ghost' has no registered inbox, so nothing would read "
+                    + "what is mirrored there")
+        #expect(denial?["reason"].asString == "no_consumer")
+        #expect(
+            denial?["hint"].asString
+                == "register the reader first — ctx.ensure_inbox('ghost') — then watch")
+        #expect(denial?["watcher"].asString == "ghost")
+        #expect(denial?["src"].asString == "kernel_state")
+    }
+
+    /// C78 — an emit to an id no agent holds does nothing at all: no inbox put,
+    /// no state event. Python `emit` resolves the target first.
+    @Test func emitToNonAgentIdIsANoop() async {
+        let kernel = makeKernel()
+        let stream = kernel.ensureInbox("_ws_beef")
+        let cap = EventCapture()
+        _ = kernel.subscribe(cap.handler())
+        await kernel.emit("_ws_beef", ["type": "thing"])
+        #expect(cap.snapshot().isEmpty)
+        var it = stream.makeAsyncIterator()
+        // Finish the stream so the read below cannot hang on an empty inbox.
+        kernel.removeInbox("_ws_beef")
+        #expect(await it.next() == nil)
     }
 
     @Test func emitPublishesStateEvent() async {
         let kernel = makeKernel()
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
-        await kernel.emit("core", ["type": "thing"])
+        await kernel.emit("kernel_state", ["type": "thing"])
         let evs = cap.snapshot()
-        #expect(evs.contains { $0["type"].asString == "emit" && $0["target"].asString == "core" })
+        #expect(
+            evs.contains {
+                $0["kind"].asString == "emit" && $0["agent_id"].asString == "kernel_state"
+                    && $0["summary"].asString == #"{"type": "thing"}"#
+            })
     }
 }
 
@@ -142,21 +238,24 @@ struct KernelSubscribeTests {
         let kernel = makeKernel()
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
-        _ = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "list_agents"])])[0].result
         let evs = cap.snapshot()
-        let sendEvents = evs.filter { $0["type"].asString == "send" }
+        let sendEvents = evs.filter { $0["kind"].asString == "send" }
         #expect(!sendEvents.isEmpty)
-        #expect(sendEvents.last?["verb"].asString == "list_agents")
+        #expect(sendEvents.last?["payload"]["type"].asString == "list_agents")
+        // Python pairs every `send` with a `drain` once the handler returns.
+        #expect(evs.last?["kind"].asString == "drain")
+        #expect(evs.last?["backlog"].asInt == 0)
     }
 
     @Test func unsubscribeStopsDelivery() async {
         let kernel = makeKernel()
         let cap = EventCapture()
         let token = kernel.subscribe(cap.handler())
-        _ = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "list_agents"])])[0].result
         let before = cap.snapshot().count
         kernel.unsubscribe(token)
-        _ = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "list_agents"])])[0].result
         let after = cap.snapshot().count
         #expect(after == before)
     }
@@ -167,14 +266,171 @@ struct KernelSubscribeTests {
         // (reflect included), so only a PERMITTED send fires the state event whose
         // sender attribution is under test. A child reflecting its parent is covered
         // by the structural baseline on both ends — no explicit grant needed.
-        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "echo.tools", "id": "ui"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools", "id": "ui"])])[0].result
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
         _ = await kernel.sendAs(
-            sender: "ui", target: "core", payload: ["type": "reflect"])
+            sender: "ui", target: "kernel_state", payload: ["type": "reflect"])
         let evs = cap.snapshot()
-        let sends = evs.filter { $0["type"].asString == "send" }
+        let sends = evs.filter { $0["kind"].asString == "send" }
         #expect(sends.last?["sender"].asString == "ui")
+    }
+
+    /// C77 — the whole traffic-event contract in one place: key order, `sender`
+    /// JSON null for an operator send, `summary` through `py_json_dumps`, a
+    /// `drain` after the handler, and `ts` stamped LAST.
+    @Test func stateEventsArePythonShape() async {
+        let kernel = makeKernel()
+        let cap = EventCapture()
+        _ = kernel.subscribe(cap.handler())
+        _ = await kernel.send([Item("kernel_state", ["type": "list_agents"])])[0].result
+        let evs = cap.snapshot()
+        let send = evs.first { $0["kind"].asString == "send" }
+        #expect(
+            send?.asObject?.keys.elements
+                == ["agent_id", "kind", "backlog", "sender", "summary", "payload", "ts"])
+        #expect(send?["agent_id"].asString == "kernel_state")
+        #expect(send?["backlog"].asInt == 1)
+        // An OPERATOR send carries JSON null — never the target's own id.
+        #expect(send?["sender"] == JSON.null)
+        #expect(send?["summary"].asString == #"{"type": "list_agents"}"#)
+        let drain = evs.last
+        #expect(drain?.asObject?.keys.elements == ["agent_id", "kind", "backlog", "ts"])
+        #expect(drain?["kind"].asString == "drain")
+        #expect(drain?["backlog"].asInt == 0)
+    }
+
+    /// C77 — the snapshot is every agent in REGISTRATION order, reporting the
+    /// in-flight handler count, not a queue length.
+    @Test func stateSnapshotIsRegistrationOrderWithInFlight() async {
+        let kernel = makeKernel()
+        for id in ["beta", "alpha"] {
+            _ = await kernel.send([
+                Item(
+                    "kernel_state",
+                    [
+                        "type": "create_agent", "parent_id": "kernel_state",
+                        "handler_module": "echo.tools", "id": .string(id),
+                    ])
+            ])[0].result
+        }
+        let snap = kernel.stateSnapshot()
+        #expect(snap.map { $0["agent_id"].asString } == ["kernel_state", "beta", "alpha"])
+        #expect(snap.allSatisfy { $0["backlog"].asInt == 0 })
+        #expect(snap.first?.asObject?.keys.elements == ["agent_id", "name", "backlog"])
+    }
+
+    /// C77 — lifecycle events carry python's `{agent_id, kind, …}` shape, not the
+    /// port's `created`/`id`/`handler_module`.
+    @Test func lifecycleEventsArePythonShape() async {
+        let kernel = makeKernel()
+        let cap = EventCapture()
+        _ = kernel.subscribe(cap.handler())
+        _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools", "id": "kid"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "update_agent", "id": "kid", "display_name": "Kid"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "kid"])])[0].result
+        let evs = cap.snapshot()
+        let added = evs.first { $0["kind"].asString == "added" }
+        #expect(added?.asObject?.keys.elements == ["agent_id", "kind", "name", "parent_id", "ts"])
+        #expect(added?["agent_id"].asString == "kid")
+        #expect(added?["name"].asString == "kid")
+        #expect(added?["parent_id"].asString == "kernel_state")
+        let updated = evs.first { $0["kind"].asString == "updated" }
+        #expect(updated?.asObject?.keys.elements == ["agent_id", "kind", "changed", "ts"])
+        #expect(updated?["changed"].asArray?.first?.asString == "display_name")
+        let removed = evs.first { $0["kind"].asString == "removed" }
+        #expect(removed?.asObject?.keys.elements == ["agent_id", "kind", "name", "ts"])
+        #expect(removed?["name"].asString == "Kid")
+    }
+}
+
+@Suite("Watcher fanout")
+struct WatcherFanoutTests {
+    /// C76 — the payload reaches the watcher BEFORE the handler runs, and it
+    /// reaches the target's own registered inbox too.
+    @Test func sendFansOutBeforeHandlerRuns() async {
+        let registry = BundleRegistry()
+        let seen = OrderBox()
+        registry.register("slow.tools", OrderBundle(seen: seen))
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "slow.tools", "id": "worker"])])[0].result
+
+        let watcher = kernel.ensureInbox("spy")
+        kernel.watch(src: "worker", watcher: "spy")
+        // The target's OWN inbox is a reader too — python puts there first.
+        let own = kernel.ensureInbox("worker")
+
+        var wit = watcher.makeAsyncIterator()
+        var oit = own.makeAsyncIterator()
+        async let reply = kernel.send([Item("worker", ["type": "work"])])[0].result
+        let mirrored = await wit.next()
+        #expect(mirrored?.payload["type"].asString == "work")
+        // Observed while the handler is still suspended: the fanout ran first.
+        #expect(seen.handlerRan() == false)
+        seen.release()
+        _ = await reply
+        let ownCopy = await oit.next()
+        #expect(ownCopy?.payload["type"].asString == "work")
+    }
+
+    /// C86 — a binary send fans the FULL payload out: the header with `bytes`
+    /// nulled, plus the raw body at that path. Without it a watcher could never
+    /// receive the binary frame python sends.
+    @Test func watchedBinarySendCarriesTheBody() async {
+        let kernel = makeKernel()
+        _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools", "id": "sink"])])[0].result
+        let watcher = kernel.ensureInbox("spy")
+        kernel.watch(src: "sink", watcher: "spy")
+        let cap = EventCapture()
+        _ = kernel.subscribe(cap.handler())
+
+        var it = watcher.makeAsyncIterator()
+        _ = await kernel.sendWithBinary(
+            "sink", ["type": "write_stream", "path": "a.bin"], Data([1, 2, 3, 4, 5]))
+        let got = await it.next()
+        #expect(got?.payload["type"].asString == "write_stream")
+        #expect(got?.payload["bytes"] == JSON.null)
+        #expect(got?.body?.path == "bytes")
+        #expect(got?.body?.data == Data([1, 2, 3, 4, 5]))
+        // The state event carries the same body, and its summary shrinks it.
+        let idx = cap.snapshot().firstIndex { $0["kind"].asString == "send" }
+        #expect(idx != nil)
+        #expect(cap.bodySnapshot()[idx ?? 0]?.data == Data([1, 2, 3, 4, 5]))
+        #expect(
+            cap.snapshot()[idx ?? 0]["summary"].asString
+                == #"{"type": "write_stream", "path": "a.bin", "bytes": "<bytes:5>"}"#)
+    }
+}
+
+/// A handler that parks until released — so a test can observe what the kernel
+/// published BEFORE it ran.
+final class OrderBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ran = false
+    private let sem = DispatchSemaphore(value: 0)
+    func handlerRan() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ran
+    }
+    func enter() {
+        sem.wait()
+        lock.lock()
+        ran = true
+        lock.unlock()
+    }
+    func release() { sem.signal() }
+}
+
+struct OrderBundle: AgentBundle {
+    let name = "order"
+    let seen: OrderBox
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        if payload["type"].asString == "work" { seen.enter() }
+        return .object(["ok": .bool(true)])
     }
 }
 
@@ -182,76 +438,151 @@ struct KernelSubscribeTests {
 struct SystemVerbTests {
     @Test func listAgents() async {
         let kernel = makeKernel()
-        let reply = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
+        let reply = await kernel.send([Item("kernel_state", ["type": "list_agents"])])[0].result
         let agents = reply["agents"].asArray ?? []
         #expect(agents.count == 1)
-        #expect(agents[0]["id"].asString == "core")
+        #expect(agents[0]["id"].asString == "kernel_state")
     }
 
     @Test func createAgent() async {
         let kernel = makeKernel()
-        let reply = await kernel.send([Item("core", [
+        let reply = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "alpha",
             ])])[0].result
         #expect(reply["id"].asString == "alpha")
         #expect(reply["handler_module"].asString == "echo.tools")
 
-        let listed = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
+        let listed = await kernel.send([Item("kernel_state", ["type": "list_agents"])])[0].result
         let names = (listed["agents"].asArray ?? []).map { $0["id"].asString ?? "" }
         #expect(names.contains("alpha"))
     }
 
     @Test func createAgentRequiresHandlerModule() async {
         let kernel = makeKernel()
-        let reply = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "id": "x"])])[0].result
+        let reply = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "id": "x"])])[0].result
         #expect(reply["error"].asString?.contains("handler_module") == true)
+    }
+
+    /// C26: an empty STRING is exactly as missing as an absent key — python
+    /// `if not isinstance(x, str) or not x`.
+    @Test func emptyRequiredArgsAreMissing() async {
+        let kernel = makeKernel()
+        let hm = await kernel.send([
+            Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "", "id": "x"])
+        ])[0].result
+        #expect(hm["reason"].asString == "missing_arg")
+        #expect(hm["arg"].asString == "handler_module")
+        let pid = await kernel.send([
+            Item("kernel_state", ["type": "create_agent", "parent_id": "", "handler_module": "echo.tools", "id": "x"])
+        ])[0].result
+        #expect(pid["reason"].asString == "missing_arg")
+        #expect(pid["arg"].asString == "parent_id")
+    }
+
+    /// C26: the `hint` key precedes `arg` in the refusal object — python's
+    /// `refusal()` writes `error, reason, hint, ...extra` in that order, and
+    /// `missing()` passes `arg` as part of `extra`.
+    @Test func missingHintOrdersHintBeforeArg() async {
+        let kernel = makeKernel()
+        let reply = await kernel.send([
+            Item("kernel_state", ["type": "create_agent", "handler_module": "echo.tools", "id": "x"])
+        ])[0].result
+        let keys = reply.asObject?.keys.map { $0 } ?? []
+        let hintIdx = keys.firstIndex(of: "hint")
+        let argIdx = keys.firstIndex(of: "arg")
+        #expect(hintIdx != nil && argIdx != nil && hintIdx! < argIdx!, "\(keys)")
+        #expect(
+            reply["hint"].asString
+                == "name the agent that will OWN the new one — your own id for a tool you keep, "
+                    + "or the root ('kernel_state') for a top-level agent", "\(reply)")
+    }
+
+    /// C26: check order is handler_module → parent_id → resolve parent →
+    /// reserved keys (sorted) → grant shape → validate_meta → guard id →
+    /// exists. Each case below breaks TWO checks at once; the refusal must
+    /// name the earlier one.
+    @Test func createRefusalPrecedenceMatchesPython() async {
+        let kernel = makeKernel()
+        // unknown parent_id BEFORE a reserved key in the payload.
+        let unknownParent = await kernel.send([
+            Item("kernel_state", [
+                "type": "create_agent", "parent_id": "ghost", "handler_module": "echo.tools",
+                "id": "x", "ctx": "nope",
+            ])
+        ])[0].result
+        #expect(unknownParent["reason"].asString == "unknown_agent", "\(unknownParent)")
+        // a reserved key BEFORE a bad grant shape.
+        let reservedBeforeGrant = await kernel.send([
+            Item("kernel_state", [
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools",
+                "id": "y", "ctx": "nope", "can_call": "*",
+            ])
+        ])[0].result
+        #expect(reservedBeforeGrant["reason"].asString == "bad_arg", "\(reservedBeforeGrant)")
+        #expect(reservedBeforeGrant["arg"].asString == "ctx")
+        // a bad grant shape BEFORE the duplicate-id check (`dup` already exists).
+        _ = await kernel.send([
+            Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools", "id": "dup2"])
+        ])[0].result
+        let grantBeforeExists = await kernel.send([
+            Item("kernel_state", [
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools",
+                "id": "dup2", "can_call": "*",
+            ])
+        ])[0].result
+        #expect(grantBeforeExists["reason"].asString == "invalid_meta", "\(grantBeforeExists)")
     }
 
     @Test func createAgentRefusesDuplicate() async {
         let kernel = makeKernel()
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "dup",
             ])])[0].result
-        let second = await kernel.send([Item("core", [
+        let second = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "dup",
             ])])[0].result
-        #expect(second["error"].asString?.contains("already exists") == true)
+        // Python: `f"agent {id!r} exists"` + a hint to pick another id or
+        // update the existing one (C26).
+        #expect(second["error"].asString == "agent 'dup' exists", "\(second)")
+        #expect(second["reason"].asString == "exists")
+        #expect(second["hint"].asString == "pick another id, or update the existing agent")
+        #expect(second["id"].asString == "dup")
     }
 
     @Test func deleteAgent() async {
         let kernel = makeKernel()
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "doomed",
             ])])[0].result
-        let reply = await kernel.send([Item("core", ["type": "delete_agent", "id": "doomed"])])[0].result
+        let reply = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "doomed"])])[0].result
         #expect(reply["deleted"].asBool == true)
-        let listed = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
+        let listed = await kernel.send([Item("kernel_state", ["type": "list_agents"])])[0].result
         let names = (listed["agents"].asArray ?? []).map { $0["id"].asString ?? "" }
         #expect(!names.contains("doomed"))
     }
 
     @Test func deleteAgentRefusedWhenLocked() async {
         let kernel = makeKernel()
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "locked",
                 "delete_lock": true,
             ])])[0].result
-        let reply = await kernel.send([Item("core", ["type": "delete_agent", "id": "locked"])])[0].result
+        let reply = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "locked"])])[0].result
         // #27: the machine field, not the ad-hoc flag it replaced.
         #expect(reply["reason"].asString == "locked")
         #expect(reply["blocked_by"].asString == "locked")
@@ -259,9 +590,9 @@ struct SystemVerbTests {
 
     @Test func deleteCascadesToChildren() async {
         let kernel = makeKernel()
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "parent",
             ])])[0].result
@@ -271,21 +602,21 @@ struct SystemVerbTests {
                 "handler_module": "echo.tools",
                 "id": "child",
             ])])[0].result
-        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "parent"])])[0].result
+        _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "parent"])])[0].result
         #expect(kernel.agent("parent") == nil)
         #expect(kernel.agent("child") == nil)
     }
 
     @Test func updateAgent() async {
         let kernel = makeKernel()
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "u1",
                 "display_name": "Original",
             ])])[0].result
-        let updated = await kernel.send([Item("core", [
+        let updated = await kernel.send([Item("kernel_state", [
                 "type": "update_agent",
                 "id": "u1",
                 "display_name": "Renamed",
@@ -298,18 +629,66 @@ struct SystemVerbTests {
         #expect(updated["agent"]["color"].asString == "#ff00ff")
     }
 
+    /// C27: `update_agent` checks `handler_module` + sorted reserved keys
+    /// BEFORE resolving the target id — a reserved key on an id naming NO
+    /// agent still answers `bad_arg`, not `unknown_agent`.
+    @Test func updateAgentReservedKeyCheckedBeforeTargetResolution() async {
+        let kernel = makeKernel()
+        let reply = await kernel.send([
+            Item("kernel_state", ["type": "update_agent", "id": "ghost", "ctx": "nope"])
+        ])[0].result
+        #expect(reply["reason"].asString == "bad_arg", "\(reply)")
+        #expect(reply["arg"].asString == "ctx")
+        let hmReply = await kernel.send([
+            Item("kernel_state", ["type": "update_agent", "id": "ghost", "handler_module": "x.tools"])
+        ])[0].result
+        #expect(hmReply["reason"].asString == "bad_arg", "\(hmReply)")
+        #expect(hmReply["arg"].asString == "handler_module")
+    }
+
+    /// C27: `update_agent id ""` is `missing_arg`, exactly like every other
+    /// empty required string arg.
+    @Test func updateAgentEmptyIdIsMissingArg() async {
+        let kernel = makeKernel()
+        let reply = await kernel.send([Item("kernel_state", ["type": "update_agent", "id": ""])])[0].result
+        #expect(reply["reason"].asString == "missing_arg")
+        #expect(reply["arg"].asString == "id")
+    }
+
+    /// C27: python's exact delete_lock text — `pyRepr` on both ids, `blocked_
+    /// by` then `id` in the extras, PLUS the `hint`.
+    @Test func deleteAgentLockedRefusalIsPythonText() async {
+        let kernel = makeKernel()
+        _ = await kernel.send([
+            Item("kernel_state", [
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools",
+                "id": "locked2", "delete_lock": true,
+            ])
+        ])[0].result
+        let reply = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "locked2"])])[0]
+            .result
+        #expect(
+            reply["error"].asString
+                == "delete_agent: 'locked2' blocked by delete_lock on 'locked2'; clear it via update_agent before deleting",
+            "\(reply)")
+        #expect(reply["hint"].asString == "clear the lock with update_agent, then delete again")
+        let keys = reply.asObject?.keys.map { $0 } ?? []
+        #expect(
+            (keys.firstIndex(of: "blocked_by") ?? -1) < (keys.firstIndex(of: "id") ?? -1), "\(keys)")
+    }
+
     @Test func getIsNotAKernelVerb() async {
         // It was, in rust and swift only — python has no `get` and answers the
         // root bundle's UNHANDLED refusal. A record is read with `list_agents`
         // or a `reflect`, both of which every runtime has.
         let kernel = makeKernel()
-        _ = await kernel.send([Item("core", [
+        _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
-                "parent_id": "core",
+                "parent_id": "kernel_state",
                 "handler_module": "echo.tools",
                 "id": "g1",
             ])])[0].result
-        let reply = await kernel.send([Item("core", ["type": "get", "id": "g1"])])[0].result
+        let reply = await kernel.send([Item("kernel_state", ["type": "get", "id": "g1"])])[0].result
         #expect(reply["reason"].asString == "unhandled", "\(reply.serialize())")
         #expect(reply["verb"].asString == "get", "the refusal names the verb")
         #expect(reply["id"].asString == nil, "it must not answer with a record")

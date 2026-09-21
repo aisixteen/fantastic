@@ -24,6 +24,9 @@ fancy-regex = "0.11"
 indexmap = "2"
 
 [dev-dependencies]
+# The ROOT LOADER bundle — tests need it registered so the root answers the
+# verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
+fantastic-core = { path = "../fantastic-core" }
 tempfile = "3"
 # TEST-ONLY. The resolver does NOT probe PATH — that would invent an
 # interpreter nobody named. The tests use `which` to find a real python to

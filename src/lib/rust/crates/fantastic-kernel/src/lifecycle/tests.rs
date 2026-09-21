@@ -47,6 +47,9 @@ fn mk_kernel_with_storage(
     if let Some(wd) = storage.workdir() {
         crate::test_support::register_fake_store(&mut kernel.bundles, wd);
     }
+    // The ROOT LOADER — its `boot` is what subscribes the record writer, which
+    // is the only path a record reaches disk by now.
+    crate::test_support::register_root_loader(&mut kernel.bundles);
     Arc::new(kernel)
 }
 
@@ -73,8 +76,8 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     );
     // Stand up a root pointing at the tempdir.
     let root = Agent::new(
-        AgentId::from("core"),
-        None,
+        AgentId::from("kernel_state"),
+        Some("kernel_state.tools".to_string()),
         None,
         Map::new(),
         tmp.path().to_path_buf(),
@@ -82,22 +85,25 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    // Wire the persistence provider (rooted at the workdir) so records land on
-    // disk — persistence is provider-routed now, RAM without one.
+    // The root boots FIRST (registration order), then the provider is wired —
+    // that is what lets the store persist itself through itself.
+    crate::test_support::boot_root(&kernel).await;
     crate::test_support::wire_fake_store(&kernel, tmp.path()).await;
 
     // Create one child via the system verb.
     let v = kernel
-        .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "kid_1"}))])
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "kid_1"}))])
         .await.remove(0).result;
     assert_eq!(v["id"], "kid_1");
     assert!(kernel.agents.contains_key(&AgentId::from("kid_1")));
+    // DEBOUNCED: the record reaches disk through the root loader's writer.
+    crate::test_support::settle_records().await;
     assert!(tmp.path().join("agents/kid_1/agent.json").exists());
 
     // Delete it.
     let v = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "kid_1"}),
         )])
         .await
@@ -106,6 +112,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     assert_eq!(v["deleted"], true);
     assert!(!kernel.agents.contains_key(&AgentId::from("kid_1")));
     assert_eq!(deletes.load(Ordering::SeqCst), 1);
+    crate::test_support::settle_records().await;
     assert!(!tmp.path().join("agents/kid_1").exists());
 }
 
@@ -114,7 +121,7 @@ async fn delete_refuses_locked() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_kernel(Arc::new(AtomicUsize::new(0)));
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -124,11 +131,11 @@ async fn delete_refuses_locked() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "locked_1", "delete_lock": true}))])
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "locked_1", "delete_lock": true}))])
         .await.remove(0).result;
     let v = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "locked_1"}),
         )])
         .await
@@ -145,7 +152,7 @@ async fn cascade_delete_fires_hooks_depth_first() {
     let deletes = Arc::new(AtomicUsize::new(0));
     let kernel = mk_kernel(Arc::clone(&deletes));
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -155,7 +162,7 @@ async fn cascade_delete_fires_hooks_depth_first() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "p_1"}))])
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "p_1"}))])
         .await.remove(0).result;
     // PLACEMENT IS `parent_id`, not the target. The verb is kernel-owned, so
     // these go to the root; the id names the OWNER of the new agent. Addressing
@@ -175,7 +182,7 @@ async fn cascade_delete_fires_hooks_depth_first() {
     // Delete parent — both children's hooks must fire too.
     let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("core"),
+            AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "p_1"}),
         )])
         .await
@@ -192,7 +199,7 @@ async fn cascade_delete_fires_hooks_depth_first() {
 fn mk_rooted(tmp: &tempfile::TempDir) -> Arc<Kernel> {
     let kernel = mk_kernel(Arc::new(AtomicUsize::new(0)));
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -254,7 +261,10 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
         .remove(0)
         .result;
     assert_eq!(missing["reason"], "missing_arg");
-    assert!(missing["hint"].as_str().unwrap().contains("subtree"));
+    assert!(missing["hint"]
+        .as_str()
+        .unwrap()
+        .contains("OWN the new one"));
 
     // Unknown ⇒ unknown_agent, carrying the live id index.
     let unknown = kernel
@@ -292,4 +302,352 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
         rec["parent_id"], "mid",
         "the field that expresses placement must actually place it"
     );
+}
+
+/// C57: `create_agent` branches on the boot OUTCOME STATUS. A handler that
+/// RAISED settles `failed` and is the one case python prints, on stdout, with
+/// the result's `str()`; a boot that merely answered `{error:…}` (`errored`) or
+/// completed prints nothing. Rust used to log a tracing WARN for every refusal.
+#[tokio::test]
+async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
+    struct BootBundle;
+    #[async_trait::async_trait]
+    impl crate::Bundle for BootBundle {
+        fn name(&self) -> &str {
+            "booty.tools"
+        }
+        async fn handle(
+            &self,
+            id: &AgentId,
+            payload: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<crate::Reply, crate::bundle::BundleError> {
+            if payload.get("type").and_then(Value::as_str) == Some("boot") {
+                if id.0.starts_with("raiser") {
+                    return Err("boot blew up".into());
+                }
+                return Ok(Some(json!({"error": "sealed leg"})));
+            }
+            Ok(None)
+        }
+    }
+
+    let mut kernel = Kernel::new();
+    kernel.bundles.register("booty.tools", BootBundle);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    // A RAISED boot: the agent exists, its boot broke, and the create still
+    // answers the record (surfaced, not fatal).
+    let rec = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"booty.tools","id":"raiser_1"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(rec["id"], json!("raiser_1"));
+    // An ERRORED boot is silent and equally non-fatal.
+    let rec = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"booty.tools","id":"sealed_1"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(rec["id"], json!("sealed_1"));
+    // Both are live — a boot outcome never removes the agent.
+    assert!(kernel.agents.contains_key(&AgentId::from("raiser_1")));
+    assert!(kernel.agents.contains_key(&AgentId::from("sealed_1")));
+}
+
+// ─── C26/C27 — create/update/delete refusals, python's prose + order ───
+
+#[tokio::test]
+async fn duplicate_id_refusal_is_python_text() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"dup"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"dup"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["error"], "agent 'dup' exists");
+    assert_eq!(r["reason"], "exists");
+    assert_eq!(r["hint"], "pick another id, or update the existing agent");
+    assert_eq!(r["id"], "dup");
+    // KEY ORDER: error, reason, hint, id (python `refusal(EXISTS, ..., hint=…, id=…)`).
+    let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
+    assert_eq!(keys, vec!["error", "reason", "hint", "id"]);
+}
+
+#[tokio::test]
+async fn missing_hint_orders_hint_before_arg() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"counting.tools","id":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "missing_arg");
+    assert_eq!(
+        r["hint"],
+        "name the agent that will OWN the new one — your own id for a tool \
+         you keep, or the root ('kernel_state') for a top-level agent"
+    );
+    // python `missing(verb, arg, hint=hint)` → `refusal(code, error, hint=hint,
+    // arg=arg)`: `hint` is a named parameter of `refusal`, inserted BEFORE
+    // `arg`, which rides `**extra`.
+    let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
+    assert_eq!(keys, vec!["error", "reason", "hint", "arg"]);
+}
+
+#[tokio::test]
+async fn empty_required_args_are_missing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let empty_hm = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"","parent_id":"kernel","id":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(empty_hm["reason"], "missing_arg");
+    assert_eq!(empty_hm["arg"], "handler_module");
+    let empty_pid = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"counting.tools","parent_id":"","id":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(empty_pid["reason"], "missing_arg");
+    assert_eq!(empty_pid["arg"], "parent_id");
+}
+
+#[tokio::test]
+async fn create_refusal_precedence_matches_python() {
+    // handler_module -> parent_id -> resolve parent -> reserved keys (sorted)
+    // -> grant shape -> validate_meta -> guard id -> exists. Each probe below
+    // trips exactly ONE gate earlier than the next one down the list would.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+
+    // Both handler_module AND parent_id absent -> handler_module wins (checked first).
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["arg"], "handler_module");
+
+    // parent_id present but unresolvable AND a reserved key present -> parent
+    // resolution wins (checked before the reserved-key sweep).
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"counting.tools",
+                   "parent_id":"ghost","root_path":"/evil"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "unknown_agent");
+
+    // A resolvable parent but TWO reserved keys present -> the alphabetically
+    // FIRST of `sorted(RESERVED_RECORD_KEYS)` = ["ctx", "parent", "root_path"]
+    // is named, never whichever the payload listed first.
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"counting.tools",
+                   "parent_id":"kernel","root_path":"/evil","parent":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["arg"], "parent");
+
+    // Reserved keys clear but the grant shape is bad -> invalid_meta before
+    // `guard_agent_id`/`exists` are ever reached (id is a number, not a str).
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"counting.tools",
+                   "parent_id":"kernel","can_call":"*","id":123}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "invalid_meta");
+    // python NAMES THE TYPE THAT ARRIVED: `— got str. To open wide, …`.
+    assert_eq!(
+        r["error"],
+        "can_call must be a grant MAP {\"<id|$token>\": \"*\" | [\"<verb>\", …]} \
+         — got str. To open wide, grant per key (e.g. {\"$self\": \"*\", \"ai\": \"*\"}), \
+         never a bare value"
+    );
+
+    // Grant shape fine, id invalid (a digit-only name) -> guard_agent_id fires
+    // before the (irrelevant here) exists check.
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"counting.tools",
+                   "parent_id":"kernel","id":"123"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg");
+}
+
+#[tokio::test]
+async fn update_agent_checks_reserved_keys_before_resolving_id() {
+    // python: `for k in ("handler_module", *sorted(RESERVED_RECORD_KEYS))` runs
+    // BEFORE `self.ctx.agents.get(target_id)` — an unknown target with a
+    // reserved key present still answers `bad_arg`, not `unknown_agent`.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":"ghost","handler_module":"x.tools"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg");
+    assert_eq!(r["arg"], "handler_module");
+
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":"ghost","root_path":"/evil","parent":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // `handler_module` absent here -> sorted(RESERVED_RECORD_KEYS) =
+    // ["ctx","parent","root_path"] -> `parent` is alphabetically first of the
+    // two present.
+    assert_eq!(r["arg"], "parent");
+
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":""}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "missing_arg");
+    assert_eq!(r["arg"], "id");
+}
+
+#[tokio::test]
+async fn delete_agent_refuses_the_root_with_python_text() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":"kernel_state"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"],
+        "delete_agent: kernel_state is the ROOT — it owns persistence and \
+         answers the kernel verbs; deleting it would leave no kernel"
+    );
+    assert_eq!(r["reason"], "bad_arg");
+    assert_eq!(r["deleted"], false);
+    let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
+    assert_eq!(keys, vec!["error", "reason", "arg", "id", "deleted"]);
+}
+
+#[tokio::test]
+async fn delete_agent_empty_id_is_missing_arg() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":""}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "missing_arg");
+    assert_eq!(r["arg"], "id");
+}
+
+#[tokio::test]
+async fn delete_lock_refusal_is_python_text_and_key_order() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"P","delete_lock":true}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":"P"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"],
+        "delete_agent: 'P' blocked by delete_lock on 'P'; clear it via \
+         update_agent before deleting"
+    );
+    assert_eq!(r["reason"], "locked");
+    assert_eq!(
+        r["hint"],
+        "clear the lock with update_agent, then delete again"
+    );
+    assert_eq!(r["blocked_by"], "P");
+    assert_eq!(r["id"], "P");
+    let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
+    assert_eq!(keys, vec!["error", "reason", "hint", "blocked_by", "id"]);
 }

@@ -21,7 +21,7 @@ fn kernel() -> Arc<Kernel> {
     k.bundles = BundleRegistry::new();
     let k = Arc::new(k);
     let root = Agent::new(
-        AgentId::from("core"),
+        AgentId::from("kernel_state"),
         None,
         None,
         Map::new(),
@@ -40,7 +40,7 @@ fn agent(k: &Arc<Kernel>, id: &str, callable_by: Value) {
     let a = Agent::new(
         AgentId::from(id),
         None,
-        Some(AgentId::from("core")),
+        Some(AgentId::from("kernel_state")),
         meta,
         std::env::temp_dir(),
         false,
@@ -151,6 +151,76 @@ async fn an_unknown_id_is_refused_and_bad_args_are_named() {
         let out = ask(&k, bad).await;
         assert_eq!(out["reason"], "bad_arg", "{out}");
         assert_eq!(out["arg"], "ids");
+    }
+}
+
+#[tokio::test]
+async fn messages_refuses_zero_negative_and_padded_ids() {
+    // C18: python `_as_id` accepts only a positive int or an `str.isdigit()`
+    // string — 0, negatives, whitespace-padded and a leading `+` all fail
+    // both tests and are simply not ids (never a best-effort `str::parse`
+    // fallback, which used to accept `" 5"`/`"+5"`).
+    let k = kernel();
+    for bad_ids in [
+        json!([0]),
+        json!([-5]),
+        json!([" 5"]),
+        json!(["+5"]),
+        json!(["007 "]),
+    ] {
+        let out = ask(&k, json!({"type": "messages", "ids": bad_ids})).await;
+        assert_eq!(out["reason"], "bad_arg", "{bad_ids}: {out}");
+        assert_eq!(out["arg"], "ids", "{bad_ids}: {out}");
+    }
+    // A genuinely all-digit string IS an id — leading zeros parse like
+    // python's `int("007")` == 7, not a `bad_arg`, and it finds the row.
+    let real_id = plant(&k, "ai", "hi");
+    let padded = format!("{real_id:07}");
+    let out = ask(&k, json!({"type": "messages", "ids": [padded]})).await;
+    assert_eq!(
+        out["rows"].as_array().unwrap()[0]["id"],
+        json!(real_id),
+        "{out}"
+    );
+    assert!(out["refused"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancel_a_plus_prefixed_pid_is_not_a_digit_string() {
+    // C18: `"+5".isdigit()` is False in python, so `+<pid>` is not the id —
+    // it falls to the NAME path, and an unregistered name is an honest
+    // `{cancelled:false}`, never a refusal.
+    let k = kernel();
+    let out = ask(&k, json!({"type": "cancel", "task_id": "+5"})).await;
+    assert_eq!(out, json!({"cancelled": false, "killed": []}));
+}
+
+#[tokio::test]
+async fn rows_pair_agent_strips_like_python() {
+    // C39 (r2 MS1): both the emptiness check and the stored/read id use
+    // python's `str.strip()` — which strips `\x1c`-`\x1f` and U+0085 too, a
+    // wider set than `str::trim`/`.whitespaces`.
+    let k = kernel();
+    let id = plant(&k, "rest", "hi");
+
+    // `'\x1c'` strips to empty → bad_arg, same shape as a bare empty string.
+    let out = ask(&k, json!({"type": "rows_read", "agent": "\u{1c}"})).await;
+    assert_eq!(out["reason"], "bad_arg", "{out}");
+    assert_eq!(out["arg"], "agent");
+
+    // `'rest\x1f'`, `'rest\n'`, `'\u{85}rest'` all strip down to `rest` and
+    // read its rows — `str::trim` misses `\x1f` (not whitespace to rust) and
+    // `.whitespaces` alone misses `\n`.
+    for padded in ["rest\u{1f}", "rest\n", "\u{85}rest"] {
+        let out = ask(&k, json!({"type": "rows_read", "agent": padded})).await;
+        let rows = out["rows"].as_array().expect("rows");
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![id],
+            "{padded:?}: {out}"
+        );
     }
 }
 
@@ -309,7 +379,7 @@ async fn a_wildcard_never_carries_the_pair_but_a_named_grant_does() {
     plant(&k, "ai", "private");
     // Wide open BOTH ways, and it still refuses: `*` is not a yes to these.
     grant_root(&k, json!({"peer": "*"}));
-    peer(&k, json!({"core": "*"}));
+    peer(&k, json!({"kernel_state": "*"}));
     for payload in [
         json!({"type": "rows_read", "agent": "ai"}),
         json!({"type": "rows_write", "agent": "ai", "rows": [{"content": "x"}]}),
@@ -328,7 +398,7 @@ async fn a_wildcard_never_carries_the_pair_but_a_named_grant_does() {
 
     // NAMED, and it opens — on both sides of the gate.
     grant_root(&k, json!({"peer": ["rows_read"]}));
-    peer(&k, json!({"core": ["rows_read"]}));
+    peer(&k, json!({"kernel_state": ["rows_read"]}));
     let out = fantastic_kernel::send::with_sender(AgentId::from("peer"), async {
         ask(&k, json!({"type": "rows_read", "agent": "ai"})).await
     })
@@ -360,7 +430,7 @@ fn peer(k: &Arc<Kernel>, can_call: Value) {
     let a = Agent::new(
         AgentId::from("peer"),
         None,
-        Some(AgentId::from("core")),
+        Some(AgentId::from("kernel_state")),
         meta,
         std::env::temp_dir(),
         false,
@@ -743,25 +813,18 @@ fn py_dumps_len(d: &Value) -> usize {
 }
 
 #[tokio::test]
-async fn digest_raises_like_python_on_unsized_refs_and_non_object_outcome() {
-    // C69. Python calls `len()` on a truthy `refs` and `.get()` on a truthy
-    // `outcome`; a scalar in either place kills the whole verb, and the batch
-    // reports it as a RAISED handler. Rust used to drop the key and answer.
+async fn digest_counts_unsized_refs_and_non_object_outcome_like_python() {
+    // C69 (python 2026-09-20). A digest COUNTS: an unsized `refs`/`ids` is `1`,
+    // a non-dict `outcome` is no status. These used to raise off the wire.
     let k = kernel();
     let refs = plant_row(&k, "ai", json!({"kind": "fold", "refs": 5}));
     let r = ask(&k, json!({"type": "messages", "ids": [refs]})).await;
-    assert_eq!(
-        r["error"],
-        json!("TypeError: object of type 'int' has no len()")
-    );
-    assert_eq!(r["raised"], json!(true));
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["rows"][0]["refs"], json!(1));
 
     let ids = plant_row(&k, "ai", json!({"kind": "view", "ids": 5}));
     let r = ask(&k, json!({"type": "messages", "ids": [ids]})).await;
-    assert_eq!(
-        r["error"],
-        json!("TypeError: object of type 'int' has no len()")
-    );
+    assert_eq!(r["rows"][0]["ids"], json!(1), "{r}");
 
     let out = plant_row(
         &k,
@@ -769,28 +832,23 @@ async fn digest_raises_like_python_on_unsized_refs_and_non_object_outcome() {
         json!({"kind": "call", "verb": "w", "outcome": "done"}),
     );
     let r = ask(&k, json!({"type": "messages", "ids": [out]})).await;
-    assert_eq!(
-        r["error"],
-        json!("AttributeError: 'str' object has no attribute 'get'")
-    );
-    assert_eq!(r["raised"], json!(true));
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["rows"][0]["status"], Value::Null);
 
-    // A DIGIT THAT IS NOT A DECIMAL: `'²'.isdigit()` is True, `int('²')` is not.
+    // A DIGIT THAT IS NOT A DECIMAL: `'²'.isdecimal()` is False — not an id, so
+    // the list is refused as a whole; nothing raises.
     let ok = plant(&k, "ai", "plain");
     let r = ask(&k, json!({"type": "messages", "ids": [ok, "²"]})).await;
-    assert_eq!(
-        r["error"],
-        json!("ValueError: invalid literal for int() with base 10: '²'")
-    );
-    // …and the same id as a CURSOR raises too.
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    // …and as a CURSOR it is simply no cursor.
     let r = ask(&k, json!({"type": "messages", "ids": [ok], "after": "²"})).await;
-    assert_eq!(r["raised"], json!(true));
+    assert!(r.get("raised").is_none(), "{r}");
     let r = ask(
         &k,
         json!({"type": "rows_read", "agent": "ai", "after": "²"}),
     )
     .await;
-    assert_eq!(r["raised"], json!(true));
+    assert!(r.get("raised").is_none(), "{r}");
 
     // A FALSY refs/outcome never reaches the raise — nothing is inserted.
     let fine = plant_row(
