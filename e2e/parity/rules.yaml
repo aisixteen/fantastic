@@ -1,0 +1,708 @@
+# Normalisation rules. `diff.py` implements them; this file is the CONTRACT.
+#
+# Every rule runs identically on python, rust and swift — a rule that fires on
+# one runtime and not another is a rule that manufactures agreement. Every
+# placeholder keeps SHAPE and TYPE (`<ID#3:int>` is not `<ID#3:str>`), so a
+# format item stays diffable after the value is gone.
+#
+# Each rule carries:
+#   why          — what it hides, and why hiding it is not hiding a difference
+#   must_not_hide — the items that would become invisible if the rule were wider
+#                   than it is. A rule that starts hiding one of these is broken,
+#                   whatever the diff then says.
+#   landed_gate  — the rule is DELETED once this item is in landed.yaml (it exists
+#                  only to bridge a port that has not landed yet).
+#
+# NEVER NORMALISED, because each is itself an item: key order, value types, JSON
+# spacing, the escaping of raw frames and headers, header order and presence,
+# status codes, exit codes, stdout vs stderr, close codes, and the FORMAT of
+# send_id / job_id / serial / corr / ws-client ids.
+
+version: 7
+#
+# v7 (2026-09-22) — NO NEW RULE. Two existing rules reach further into things
+# they already own, one of them by being NARROWED the same way N12 was in v6,
+# and the biggest single source of diff lines was taken out of the SCENARIO
+# rather than out of the comparison.
+#
+#   NOT A RULE, and the most important change: `ai_paths` no longer compacts by
+#   accident. The family ran 74 model turns through one agent on `CTX_WINDOW`,
+#   and the turn that crossed the 10000-token budget crossed it by ONE BYTE on
+#   python (`runtime=python` against `runtime=swift`), so python compacted at
+#   request 34 and the ports at 35 — ~1100 diff lines, on both ports, from one
+#   character. `spec.AI_WINDOW` gives the family its own 30000-token window,
+#   which its own growth never reaches (measured peak 12548 tokens), and a
+#   scripted `context_fill` turn forces the ONE compaction it records, landing
+#   ~2800 tokens past the budget with ~17000 tokens of room before it. Same
+#   scenario on all three runtimes. Compaction itself is not this family's
+#   subject and is untouched where it IS the subject: `ctx` drives all four
+#   strategies deliberately, at `CTX_WINDOW` and at `CTX_WINDOW_TINY`.
+#
+#   N12's `__tag_shapes__` — the `messages.xml` half — was a SORTED LIST, and
+#   `flatten` indexes a list POSITIONALLY. Exactly the defect v6 fixed in
+#   `__distinct_shapes__`, in the other reduction, and with the same cost: one
+#   tag shape present on one side only shifted every index after it (measured
+#   2026-09-21b, swift `store/store_files_final/disk_raw/messages.xml`: 28 lines
+#   for 2 one-sided shapes). It is now a SET KEYED BY THE SHAPE — one line per
+#   one-sided shape, naming it, plus the key-set line. Nothing became invisible.
+#
+#   N10 reaches two more counts, both of them counts over a text that IS
+#   compared, in full, somewhere the diff does read:
+#     * the `ctx` request CENSUS (`bytes`, `system_chars`). The body they count
+#       is recorded whole as `ctx/stub/req_<n>.bin` and compared there. What
+#       makes the NUMBERS incomparable is already declared so: the `runtime=`
+#       word (N2) and the id DIGIT WIDTH (N4 — python executes ~379
+#       `ledger.json` writes against the ports' ~102, so its row ids reach four
+#       digits and a body quoting 18 of them is 18 bytes longer). A ZERO is kept
+#       as a zero, so "no system block at all" cannot hide in "a shorter one".
+#     * the `context_recall` header's two estimates — `the digests use <N>` (a
+#       token count over the digest block printed under it, whose ids N4 has
+#       just renamed and whose `<n>B` N10 has just dropped) and `your budget for
+#       the body is <N> tokens` (window − reserve − the system block's own size,
+#       and the system block carries `<RUNTIME>`). The INPUTS are compared
+#       exactly, and so is the same budget where it is recorded as a FIELD.
+#
+#   Also in this version, and outside `rules.yaml` because they are decisions and
+#   not normalisations: R-D4-10 widened from `bundle_verbs/**` to every family
+#   (the anchor, not the glob, is what keeps it to the request header NAME slot),
+#   and three new residuals — R-N2-1 (the `runtime=` word in a `budget` /
+#   `stdout_bytes` COUNT slot), R-D13-2 (the lone surrogate `"\udcff"`: one
+#   ledger census bucket, 37 vs 36 errored) and R-D16-3 (`bytes` present-and-null
+#   against absent in a read outcome; raw bytes ride out of band).
+#
+# v6 (2026-09-21) — N18 and N19, the owner's two rulings on the port captures of
+# the same day. One existing rule changed, and it was NARROWED, not widened:
+#   N12's `distinct_shapes` was a SORTED LIST, and `flatten` indexes a list
+#   POSITIONALLY, so one shape present on one side only shifted every index after
+#   it and the file hit the 200-line cap. It is now a SET KEYED BY THE SHAPE, so
+#   a one-sided shape is exactly one line and it NAMES the shape. Measured on
+#   `store/store_files_final/disk_raw/ledger.json`: 131 shapes (python) against
+#   132 (rust) and 133 (swift), of which only 2+3 and 1+3 were actually
+#   one-sided — 201 diff lines for 5 real ones. Nothing became invisible: a
+#   shape on one side only is still `<absent>` on the other.
+#
+# v5 (2026-09-21) — N17, the owner's ruling on PTY `output` chunking. It is the
+# ONLY change: no existing rule was widened.
+#
+# v4 (2026-09-20) — every change below was MEASURED on the python self-diff (two
+# captures of the same immutable tree), which went 1855 → 0:
+#   N8  NARROWED. The bare `:(\d{4,5})` form turned `"max_tokens":4096` into
+#       `<PORT:?>` in every prompt the capture recorded — a rule wide enough to
+#       eat an item. A port in text is now only recognised after a HOST or after
+#       the word `port`.
+#   N3/N4/N5/N6/N7 reach INTO TEXT and into an EMBEDDED json document, where the
+#       key-based pass cannot see: `guid=<hex32>` in a system prompt (664 of the
+#       1855 lines), `"job_id":"<hex8>"` and `"ts":<float>` inside a ws frame's
+#       `text`, `<ids>`/`<view_ids>` blocks, `pid=<n>`, and the same documents
+#       quoted a second time inside a recorded request body.
+#   N10 says which counts are not comparable and why (a count over a text
+#       carrying a renamed id, a timestamp or an OS pid).
+#   N11 is IMPLEMENTED for the frame stream, as (mark, sock) — it was documented
+#       in v3 and the diff compared the interleaving anyway.
+#   N12 covers every field that is a number over, or a digest of, a rewritten
+#       file, and `__distinct_shapes__` is SORTED.
+#   N16 is new: the digest of a persisted file whose bytes embed a minted guid
+#       or an OS-chosen port.
+
+rules:
+  - id: N1
+    name: root_alias
+    why: >
+      Rust and swift called the root `core` before the port; python calls it
+      `kernel_state`. Until C12 lands in a runtime, every reply that names the
+      root differs for that one reason and buries everything else in the file.
+      Whole-token only — `core` inside `fantastic-core`, `core.py` or a sentence
+      is left alone.
+    landed_gate: C12
+    enabled_by_flag: --root-alias
+    pattern: '(?<![\w./-])core(?![\w.-])'
+    replacement: kernel_state
+    applies_to: [string_values, object_keys, text]
+    must_not_hide:
+      - C12   # the root handler module and the root frame itself
+      - C2    # the root reflect shape
+      - A14.7 # `reflect core` / `reflect kernel_state` from the CLI
+
+  - id: N2
+    name: runtime_token
+    why: >
+      The root reflect and the cli intro line name the runtime they are. That is
+      correct behaviour and differs by definition; the rest of both documents is
+      not.
+    paths:
+      - $.runtime
+      - cli intro_booting runtime token
+      # …and `runtime=<name>` in TEXT. The root reflect is rendered into every
+      # system prompt, so the token sat in all 453 files of the ctx family and in
+      # every recorded request body (measured 2026-09-20).
+      - 'runtime=(python|rust|swift) as a whole token'
+    replacement: <RUNTIME>
+    must_not_hide:
+      - A9.5  # the SHAPE of the intro line, which keeps its other fields
+      - C2
+
+  - id: N3
+    name: guid
+    why: >
+      A kernel mints its own guid at first boot. Nothing about the value is
+      comparable; that one was minted, and its SHAPE, are.
+    keys: [guid, owner_guid, partner_guid]
+    shape: '^[0-9a-f]{32}$'
+    #: …and in TEXT, as `guid=<hex32>` / `"guid": "<hex32>"`. The root reflect is
+    #: quoted verbatim into every system prompt, into cli stdout and into HTTP
+    #: bodies recorded as strings, where the key-based pass never sees it. 664 of
+    #: the 1855 lines of the v3 self-diff were this one token.
+    text_forms: ['guid[:=]\s*"?[0-9a-f]{32}']
+    replacement: <GUID:hex32>
+    literal_when_shape_mismatch: true
+    must_not_hide:
+      - A7.16  # an identity the operator SET, which is not minted
+      - C12
+
+  - id: N4
+    name: minted_ids
+    why: >
+      Row ids, task ids and pids come from a counter whose starting point depends
+      on how many executions the boot itself ran. Renaming them per file by first
+      appearance keeps every RELATIONSHIP (which row a reply cites, which parent a
+      fold names) while dropping a number that means nothing across runtimes. The
+      TYPE is kept in the placeholder because an int id and a digit-string id are
+      a difference (C17, A3.10, A4.20, B5.9).
+    keys: [id, ids, parent, task_id, message_id, pid, refs, expand, after, next,
+           bundles_next, view_ids, killed]
+    only_when: int or digit-string; never an agent-id string
+    text_anchors:
+      - '\[reply to (\d+)'
+      - '↑(\d+)'
+      - 'in batch (\d+)'
+      - '<pid>(\d+)</pid>'
+      - '<task_id>(\d+)</task_id>'
+      - '<message_id>(\d+)</message_id>'
+      - '\[fold (\d+) ·'
+      - '\[recall (\d+) ·'
+      - 'msg (\d+) · re (\d+)'
+      - 'joined execution (\d+)'
+      - '^(\d+) · '
+      # The same digest line reached as the RAW request body the stub recorded,
+      # where the newline is still `\` `n` inside a json string and `^` never
+      # sees it.
+      - '\\n(\d+) · '
+    id_lists:
+      # The context_status projection and the grep hint the kernel writes into a
+      # settled reply. Inside an `<ids>`/`<view_ids>` BLOCK only: `<to><item>5`
+      # and `<options><item>true` carry values the HARNESS chose.
+      - '<(ids|view_ids|refs|expand)>(<item>N</item>)+</\1>'
+      - '"(expand|ids|refs|view_ids)": [N, …]'
+      # A row quoted as json inside a prompt (the fold prompt does this), reached
+      # both singly and doubly quoted.
+      - '\\?"(id|task_id|message_id|parent_row|row_id)\\?": N'
+    replacement: <ID#n:int> / <ID#n:str>
+    never_rename:
+      # Harness-chosen ids are deterministic: renaming them would hide a runtime
+      # that echoed the WRONG one back.
+      - 'wirecap-\d+'
+      - 'p-.*'
+      - 'x-.*'
+      - 's-.*'
+      - 'kv-.*'
+      - 'CASE=.*'
+      - 'reuse-1'
+    must_not_hide:
+      - C17   # the cursor TYPE a walk accepts and returns
+      - A3.10 # a checkpoint id's shape
+      - A4.20 # `task_id` as an int
+      - B5.9  # a pid rendered into prompt text
+
+  - id: N5
+    name: os_pids
+    why: >
+      A process id is the operating system's, not the kernel's. What the kernel
+      does with it (report it, kill it, write it into a lock) is the item.
+    keys: [pid, tunnel_pid]
+    contexts: [terminal reflect, lock.json, '(pid=N)', 'pid=N', 'pid N', 'kill N',
+               '"pid":N inside an embedded json document']
+    replacement: <OSPID>
+    keep_literal: ['999999', '0']   # the stale-lock pids the HARNESS wrote
+    must_not_hide:
+      - A14.10  # a STALE lock's pid, which the harness WROTE (999999 / 0)
+      - A6.21   # the pty_reader rows, which are about existence, not value
+
+  - id: N6
+    name: kernel_time
+    why: >
+      A timestamp is when the run happened. Its PRESENCE, its key, its type
+      (float vs int vs ISO string) and its place in the reply are all kept — only
+      the instant goes.
+    keys: [ts, started_at, queued_at, created_at, next_run, last_run, elapsed, duration_ms]
+    conditional_keys: [since, last_seen]   # only when kernel-minted
+    also: ['messages.xml ts="…"', 'ISO-8601 in log lines', 'the HTTP `date` header value',
+           'the same keys inside an EMBEDDED json document — a ws frame''s `text`,
+            an HTTP body recorded as a string, and either of those quoted a
+            second time inside a recorded request body']
+    replacement: <TS:float|int|isostr>
+    must_not_hide:
+      - A5.6   # `next_run` relative to `interval_seconds`, kept as a TYPE
+      - C42    # the persisted record's own time fields
+
+  - id: N7
+    name: random_tokens
+    why: >
+      Ids minted from randomness. Each is replaced BY SHAPE, and a value that
+      does not match the shape stays literal and becomes a diff line — which is
+      the point: the format of a send_id is an item, so a port that mints an
+      8-hex id where python mints 11 base64url characters must show up.
+    shapes:
+      send_id: ['^[A-Za-z0-9_-]{11}$ → <SEND_ID:b64url11>',
+                'snd_[0-9a-f]{8} → <SEND_ID:snd_hex8>',
+                'snd_[0-9A-F]{8} → <SEND_ID:snd_HEX8>',
+                'otherwise → <SEND_ID:len=N>']
+      serial: '^[0-9a-f]{6}$ → <SERIAL:hex6>'
+      job_id: '^[0-9a-f]{8}$ → <JOB_ID:hex8>'
+      schedule_id: 'sch_[0-9a-f]{6} → <SCH:hex6>'
+      corr: '^<bridge_id>-(\d+)$ → <CORR:<bridge_id>-#n>'
+      ws_client: '_ws_[0-9a-f]{6} → <WS_CLIENT:hex6>'
+      correlation_pid: '<agent>:<hex8> → <CPID:hex8>'
+      websocket_accept: 'Sec-WebSocket-Accept → <WS_ACCEPT>'
+      websocket_key: 'Sec-WebSocket-Key → <WS_KEY>   # 16 random bytes the CLIENT
+        mints per connection (RFC 6455 §4.1); the kernel chooses nothing about
+        it, and what it derives from it IS compared, one line above'
+      tmpdir: 'mkdtemp suffixes under $TMPDIR → <TMPSUFFIX>'
+    keep: ['relay dir_<n>']
+    #: send_id, job_id and serial are recognised inside an EMBEDDED json document
+    #: too (`{"job_id":"<hex8>"}` in a ws frame's `text`), singly or doubly
+    #: quoted. Same shapes, same placeholders — a port that mints a different
+    #: shape still becomes a diff line there.
+    also_embedded: [send_id, job_id, serial]
+    must_not_hide:
+      - A7.27  # the correlation id FORMAT, which the shape preserves
+      - C36    # a send_id carried into a row
+
+  - id: N8
+    name: ports
+    why: >
+      The OS picks the number; the harness picks the ROLE. Which role answered is
+      the measurement — a reply naming the web2 port where python named main is a
+      real difference and survives this rule.
+    forms: ['<host>:N where <host> is an IPv4 literal, `localhost` or `[::1]`',
+            'port/local_port/remote_port as an integer VALUE',
+            '`port` followed by `:`, `=` or a space, then N — `"port": 54928` in a
+             persisted agent.json, `bound on port N` in a cli line']
+    never: 'a bare `:N`. That form read `"max_tokens":4096` as a port in every
+            prompt the capture recorded, and the count max_tokens carries is an
+            item (measured 2026-09-20).'
+    replacement: <PORT:role>
+    unknown_port: <PORT:?>      # a diff line, never a silent pass
+    keep_literal: [':9', ':8080', ':11434']   # fixed constants, not run-time ports
+    must_not_hide:
+      - A11.13  # a webapp with NO port
+      - A7.13   # the unreachable :9 peer, whose port is the fixture
+      - B5.3    # max_tokens / output_reserve, which the v3 form ate
+
+  - id: N9
+    name: paths
+    why: >
+      NOTHING is normalised. The workdirs are identical strings on every runtime
+      (`spec.family_workdir`), so a path difference is a real one — a leaked
+      `/var/folders/…/T/` or a `fantastic-kernel-out-*` is a diff line, and the
+      raw-vs-resolved pair (`/var` vs `/private/var`) stays visible because A2.17
+      and A2.20 are exactly that.
+    replacement: none
+    must_not_hide:
+      - A2.17
+      - A2.20
+
+  - id: N10
+    name: derived_counts
+    why: >
+      A count over text is only comparable when the text is. Where the same object
+      carries the text, the count is compared as `count − len(text)` in python's
+      unit (code points for kernel counts, bytes for HTTP), so a count that is
+      right about a different string does not read as a count bug. Everywhere else
+      it is compared exactly.
+    keys: [bytes, size, body_len, content-length, __bytes_len__]
+    unverifiable: context_status estimates whose id-digit signatures differ → flagged count-unverifiable
+    #: THE THREE PLACES A COUNT IS DROPPED, each measured, each with the text it
+    #: counts compared in full somewhere the diff does read:
+    #:   1. a count (`len`/`body_len`/`bytes_len`/`size`/`length`) beside the
+    #:      text it measures, where that text carries `<ID#n>`, `<TS:float|int>`
+    #:      or `<OSPID>` — placeholders whose ORIGINAL had no fixed width, so the
+    #:      same document is a different number of bytes on two runs. The
+    #:      `content-length` of the same exchange goes with it. A guid, a
+    #:      send_id and a job_id are fixed-width, so a count over a text carrying
+    #:      only those is still compared EXACTLY.
+    #:   2. the stub request index's `body_len` and echoed `content-length`: the
+    #:      body is not in the entry at all, it is `req_<n>.bin` beside it, and
+    #:      that file is compared whole.
+    #:   3. the `<n>B` of a message DIGEST line
+    #:      (`<id> · <role> · "<title>" · <n>B · ↑<parent>`) — the count is over
+    #:      the row's content, which is not in the line. Fires only on a line the
+    #:      id renaming already touched.
+    #:   4. (v7) the `ctx` request CENSUS — `bytes` and `system_chars` of an
+    #:      entry carrying `{n, bytes, system_chars, messages, keys}`. Case 2's
+    #:      argument, in the other recorder: the body is `ctx/stub/req_<n>.bin`
+    #:      beside it and is compared whole. Measured: `system_chars` 23214 vs
+    #:      23213 (the `runtime=` word, N2) and `bytes` 2196 vs 2178 (the id
+    #:      digit width, N4 — python runs ~379 `ledger.json` writes against the
+    #:      ports' ~102, so its ids are four digits where theirs are three).
+    #:      A ZERO IS KEPT AS ZERO: a request with NO system block at all is a
+    #:      different thing from one with a shorter one, and stays a diff line.
+    #:   5. (v7) the `context_recall` header's two estimates, in TEXT:
+    #:      `the digests use <N>` (a token count over the digest block printed
+    #:      directly under it — the same `<n>B` lines case 3 has already
+    #:      dropped; measured 2141 vs 2137) and `your budget for the body is
+    #:      <N> tokens` (window − reserve − the system block's own token count,
+    #:      and the system block carries `<RUNTIME>`; measured 3869 vs 3870).
+    #:      The window and the reserve are compared exactly in `meta.json` and
+    #:      in the agent record, and the SAME budget recorded as a FIELD
+    #:      (`$.rows[n].budget`) is left alone — it is a diff line, owned by
+    #:      residual R-N2-1.
+    self_check: diff.py rulecheck — 6 cases (census both ways, recall header
+      both ways)
+    must_not_hide:
+      - A2.21  # a symlinked file's SIZE, where the text is not in the reply
+      - C44    # the 64 KiB record read, which is about a LENGTH
+      - C13    # the request's MESSAGE COUNT, its `keys` set and its flags —
+               # every other field of a census entry is compared exactly
+      - B5.3   # the window/reserve the budget is derived FROM
+
+  - id: N11
+    name: stream_order
+    why: >
+      Order inside one socket is a contract; order BETWEEN independent sockets and
+      timers is not. Frames are grouped by (mark, sock) and compared exactly
+      inside a group.
+    implemented_as: >
+      `frames.jsonl` (the whole-family stream) and any `frames` array inside a
+      case are cut at each `mark` — the family's own phase boundary, written on
+      sock `-` — and inside a phase the frames are grouped by `sock`. Every
+      per-socket sequence survives byte for byte; only the interleaving BETWEEN
+      sockets goes. Measured: two runs of the same immutable tree swapped `ctrl`
+      and `proto` at four places out of 400 frames, and at three places in
+      `wire/protocol.jsonl`. A frame that crossed a phase boundary, or moved
+      within its own socket, is still a diff line.
+    relaxations:
+      - consecutive identical state_event payloads are deduped
+      - terminal output is compared as the concatenated data of a step
+      - the first two schedule_fired only
+      - heartbeat count >= 1
+      - ctx requests aligned by (agent, kind, turn)
+      - kernel_log compared as ordered lines per emitter prefix
+    must_not_hide:
+      - C76   # the ORDER of a state stream within one subscription — ONE sock
+      - B2.13 # the token/status event sequence of one turn — ONE sock
+
+  - id: N12
+    name: persisted_files
+    why: >
+      `agent.json`, `readme.md` and `docs/**` are compared BYTE FOR BYTE — they
+      are the product. The four files the kernel rewrites continuously are parsed
+      first and then normalised by N4–N6, and their sha and length are excluded,
+      because `ledger.json` is rewritten DURING the snapshot that reads it (C47)
+      and a byte compare of a moving file measures the clock.
+    exact: [agent.json, readme.md, 'docs/**']
+    parsed_then_normalised: [ledger.json, messages.xml, schedules.json, lock.json, history lines]
+    #: A record ABOUT one of the four keeps its path, its keys and its envelope,
+    #: and loses every number over its moving bytes and the bytes themselves.
+    #: `store.py` records each persisted file three ways, so the same moving
+    #: length appears as `listed_size`, as the read's `length`, as the reply's
+    #: `next_offset` and as the raw sidecar's byte count.
+    blanked_keys: [sha256, __sha256__, size, bytes_len, len, listed_size, length,
+                   next_offset, offset, __bytes_len__, __raw_bytes_in_raw_file__,
+                   utf8, __utf8__, text, head_hex]
+    #: `ledger.json` is reduced to its SHAPE, and the distinct shapes are SORTED,
+    #: not kept in first-appearance order: its rows are already declared
+    #: unordered (N15), so an index into an arrival-ordered shape list is itself
+    #: a different document every run. Measured: 148 of the 1855 v3 self-diff
+    #: lines were that index shift, with the shape SETS identical.
+    distinct_shapes: sorted
+    #: BOTH shape reductions are SETS KEYED BY THE SHAPE, never lists:
+    #: `__distinct_shapes__` for `ledger.json` (v6) and `__tag_shapes__` for
+    #: `messages.xml` (v7). `flatten` indexes a list POSITIONALLY, so one shape
+    #: present on one side only shifted every index after it — 201 lines for 5
+    #: real ones on the ledger, 28 lines for 2 real ones on the message log.
+    #: Keyed, a one-sided shape is exactly one line, it NAMES the shape, and the
+    #: key-set line beside it says the difference once more. Nothing is hidden:
+    #: a shape on one side only is still `<absent>` on the other.
+    keyed_shape_sets: [__distinct_shapes__, __tag_shapes__]
+    self_check: diff.py rulecheck — 2 cases (a reordered shape set, a one-sided
+      shape)
+    must_not_hide:
+      - C42   # the persisted record's KEYS and their order
+      - C45   # the readme bytes as written
+      - C63   # a row shape only one runtime ever writes — named, not indexed
+
+  # N13 (swift_foundation_models) — DELETED 2026-09-21, and the id is not reused.
+  #
+  # It dropped `foundation_models_backend` from swift's bundle arrays and from
+  # the comma-joined catalog string the system prompt carries, because swift
+  # shipped a bundle with no python twin. The owner REMOVED the bundle from the
+  # swift kernel on 2026-09-21. Verified before deleting the rule: the swift tree
+  # carries 0 occurrences of `foundation_models`, and the 2026-09-21b acceptance
+  # capture of swift carries 0 occurrences of `foundation_models_backend` in any
+  # of its 2029 files — the catalogs are EQUAL, so there is nothing left to drop
+  # and a rule that fires on nothing is a rule that lies about what it hides.
+  # `residuals.yaml` R-C10-1, which recorded the same decision, went with it.
+  # C10 and C33 are now proved by the ordinary comparison: the bundle catalog and
+  # the paging envelope are compared whole, on both runtimes, with no exception.
+
+  - id: N14
+    name: harness_fields
+    why: >
+      Everything the harness owns — a wall-clock instant, a wait, a poll count, a
+      request ordinal — is written under a `harness` key by `record.py` and
+      dropped here by SCHEMA. Round 2 mixed them into the kernel's own reply and
+      every file then needed a per-key exception.
+    drops_key: harness
+    must_not_hide: []     # nothing the kernel said is under this key
+
+  - id: N15
+    name: unordered_where_declared
+    why: >
+      Order is a contract in most places and not in three, each MEASURED by the
+      python self-diff (two runs of the same immutable tree disagreed on 4270
+      lines, all of them one of these):
+        * `ai_paths/**` row arrays — the family runs two AI agents that call each
+          other, so the chains interleave differently every run and every row id
+          after the first crossing shifts. The items there are the content, the
+          cycle depth and whether a guard fired; none is positional. The messages
+          digest, where ORDER IS the item, lives in `store/s3` and is untouched.
+        * `ledger.json` and `messages.xml` — rewritten WHILE they are read (C47),
+          so the row count moves between two reads of one run.
+        * `http.json`, `peer_frames.json`, `relay_frames.json` — whole-family
+          transport logs. Every exchange is already recorded in its own case file;
+          these are dumps whose order follows whichever concurrent step answered
+          first.
+      The array LENGTH is kept as its own field, so a runtime that produced fewer
+      rows is still a diff line — only the interleaving is forgiven.
+    globs:
+      - {glob: "ai_paths/**", keys: [rows]}
+      - {glob: "**/store_files_*/**/ledger.json", keys: "*"}
+      - {glob: "**/store_files_*/**/messages.xml", keys: "*"}
+      - {glob: "**/http.json", keys: "*"}
+      - {glob: "**/relay_frames.json", keys: "*"}
+      - {glob: "**/peer_frames.json", keys: "*"}
+    must_not_hide:
+      - C63   # the messages digest ORDER — `store/s3`, outside every glob
+      - C64
+      - C65
+      - C66
+      - C67
+      - C68
+      - C18
+      - C76   # the state-stream order — per SOCKET in `wire/frames.jsonl` (N11)
+      - B2.13
+
+  - id: N16
+    name: digest_of_minted_bytes
+    why: >
+      A digest over bytes that embed a value the rules have already declared
+      incomparable can only ever differ, and it says nothing about the file.
+      `agent.json` is the case: the root's carries the kernel's minted guid (N3),
+      a web leg's its OS-chosen port and an ai leg's the stub endpoint (N8). The
+      BYTES ARE STILL COMPARED — normalised — everywhere the capture recorded
+      them: `store/*/raw/agent.json`, `store/*/disk_raw/agent.json`, the `utf8`
+      field beside the digest in `store/*/body/agent.json.json`, and the `text`
+      field beside it in the cli's before/after snapshots. Only the sha goes, and
+      only for that file.
+    files: [agent.json]
+    drops_keys: [sha256, __sha256__]
+    replacement: <DIGEST_OF_MINTED>
+    must_not_hide:
+      - C42   # the persisted record's keys and their order — compared as TEXT
+      - C45   # the readme bytes — a different file, digest untouched
+      - C15   # what `create_agent` persisted, which is the text, not the sha
+
+  - id: N17
+    name: terminal_output_coalescing
+    why: >
+      A PTY IS A BYTE STREAM, and where it is cut into `output` events is READ
+      TIMING, not behaviour. Python's single event loop runs the pty fd callback
+      only after the in-flight write dispatch has finished, so one shell turn's
+      echo + output + prompt arrive in ONE read and are coalesced BY ACCIDENT;
+      the ports read on their own thread and see each write as it lands. No
+      runtime has coalescing code, so there is nothing for a port to mirror.
+
+      MEASURED, 2026-09-21 acceptance captures (`wire/frames.jsonl`): python
+      emitted 3 `output` frames for the shell turn, rust 5 and then 4 after its
+      drain fix, swift 6-9 — and the CONCATENATED BYTES were identical in every
+      capture. The frame stream is diffed POSITIONALLY, so the one extra ctrl
+      frame cascaded into ~200 diff lines; the ws census read ctrl 175 (python)
+      vs 176 (rust) vs 179 (swift) with every other leg matching exactly.
+
+      So: before diffing, a RUN of consecutive terminal `output` events on ONE
+      leg becomes ONE frame whose `data` is the run's concatenation, byte order
+      preserved, and `frames_index.json`'s `total` is RECOMPUTED from the joined
+      stream rather than dropped. A run is consecutive after N11, i.e. within
+      its own leg and within one phase; the run key is (leg, direction, frame
+      kind, every payload field except `data`). Anything else breaks the run and
+      is emitted untouched — a reply, an error, another event type, another
+      leg's frame, a phase mark, and an `output` payload with NO `data` (python
+      writes one at PTY EOF). A run of length 1 is rebuilt the same way, so a
+      leg that never coalesced and one that did produce the same shape.
+
+      THE DECISION (owner, 2026-09-21): normalise in the HARNESS. The
+      alternatives were a kernel rule serialising the PTY reader against
+      in-flight dispatches — inventing latency to imitate python's accident —
+      and a coalescing timer, a new timing contract in three runtimes. Neither
+      is behaviour anyone wants.
+
+      COST, stated plainly: the RAW `text` of an output frame is no longer
+      compared byte for byte. It is re-rendered from the joined payload on BOTH
+      sides, so a JSON spacing or escaping difference INSIDE AN OUTPUT FRAME
+      ONLY would not show. Every other event frame still carries its recorded
+      `text`.
+
+      `diff.py rulecheck` is this rule's own test: same bytes with different
+      chunking must be 0 lines, and each of different bytes, an interleaved
+      reply, a second leg, a different payload field and a data-less payload
+      must still be a line.
+    files: [frames.jsonl, frames_index.json]
+    joins: {event_type: output, per: [sock, dir, kind, payload_fields_except_data]}
+    must_not_hide:
+      - A14.9    # the PTY output BYTES — the concatenation is compared, always
+      - A14.10
+      - C76      # the state-stream ORDER within one socket (N11), untouched
+      - B2.13    # a turn's token/status sequence — not `output`, never joined
+      - A13.17   # the frame TOTAL, recomputed rather than dropped
+
+  - id: N18
+    name: loader_own_persistence
+    why: >
+      THE LOADER'S OWN PERSISTENCE TRAFFIC IS A DEBOUNCE ARTEFACT. Before an
+      ON-DISK `ledger.json` or `messages.xml` snapshot is compared, that traffic
+      is dropped from BOTH sides: in the ledger, every row satisfying the
+      kernels' shared `_is_own_persistence` predicate (python
+      `kernel_state/tools.py`, rust `persistence.rs::is_own_persistence`) — a
+      `call` row with NO origin, addressed to the DISCOVERED store; in
+      `messages.xml`, the `ledger_flush` / `message_pump_flush` / `persist_writer`
+      task rows and any settle whose parent is one of them. (Own-persistence
+      CALLS never reach the message log at all — that is the first half of the
+      same predicate, inside the kernel.) The predicate is applied HERE to the
+      RECORDED JSON; no kernel code is imported. The store is DISCOVERED from the
+      document — the target of the no-origin rows whose result names
+      `ledger.json` / `messages.xml` — never hardcoded, and the id it discovered
+      is written into the compared document, so two sides that found DIFFERENT
+      stores are a diff line.
+
+      WHY THIS IS NOT HIDING A DIFFERENCE: python runs one event loop, so a batch
+      of rows is spread over more 150 ms debounce windows and each window writes;
+      the ports burst and one write covers the batch. The rows the kernel
+      EXECUTED are the same; only how many times they were written out differs.
+
+      MEASURED, 2026-09-21 acceptance captures, `store_files_final/disk_raw`:
+
+        |                             | python | rust | swift |
+        | `ledger.json` write rows    |   379  |  132 |  102  |
+        | `messages.xml` append rows  |    56  |   29 |   20  |
+        | own-persistence rows, total |   535  |  261 |  222  |
+        | NON-persistence ledger rows |   482  |  483 |  536  |
+        | persisted ledger rows       |  1017  |  744 |  758  |
+
+      On RUST the hypothesis holds exactly: 274 fewer rows on disk, ALL of them
+      the loader's own, and the non-persistence total lands inside the ±1 already
+      known (+1 = −1 `kernel_state`←`rest`, +1 `rest`←`web`, +1 `ws`←`web`). On
+      SWIFT it does NOT: swift carries 55 extra `kernel_state`←`ai` rows and 3
+      fewer `kernel_state`←`rest`. Those rows HAVE an origin, so this rule never
+      touches them — they are a real divergence and they stay in the diff. That
+      is the point of discovering the store and of the census below.
+
+      THE TAIL. `ledger.json` is rewritten WHILE the snapshot reads it (C47), so
+      the last rows may not be on disk yet. After the drop, if one side's row
+      list is a STRICT PREFIX of the other's, the surplus at the END of the
+      longer one is cut from BOTH — FOR THE SHAPE REDUCTION ONLY. It is NOT cut
+      from the census, because an on-disk file cannot tell an un-flushed tail
+      from a row that never happened: the rulecheck case "a MISSING
+      non-persistence row" FAILED (0 lines) while the census was taken after the
+      cut, and passes now that it is taken before. So a tail costs exactly one
+      census line instead of a shape cascade. A surplus in the MIDDLE is not a
+      tail and is never cut. Measured: on these three captures the clause is
+      INERT — the common prefix is 2 rows, the runtimes diverge at the `rest`
+      boot row.
+
+      WHAT REPLACES THE DROPPED ROWS: `__row_census__`, a DICT of row signature →
+      count, compared as VALUES (outside `shape_of`, which would turn a count of
+      55 into `"int"`). A ledger signature is (target, origin, named, name,
+      outcome status); a `messages.xml` signature is (kind, verb, agent, origin,
+      PARENT ROW's own kind/verb/agent, outcome status), the parent resolved
+      through the WHOLE log so a row re-parented onto a dropped flush task still
+      moves bucket. One line per signature, not one per row.
+
+      THE DECISION (owner, 2026-09-21): normalise in the HARNESS. The alternative
+      was to make the ports' debounce imitate python's event-loop turn
+      boundaries — a new timing contract in three runtimes, to make a write count
+      match that measures nothing but which thread read the rows.
+
+      NOT DECIDABLE, NOT GUESSED: a recorded row that does not CARRY an `origin`
+      field is left alone. The live `ledger` verb projection
+      (`*/final/kernel_ledger.json`) drops the field, and reading a missing key
+      as "no origin" would drop every store row there, including ones an operator
+      really sent. With no decidable row no store is discovered and the rule is
+      inert on that file — measured inert on all six `final/kernel_ledger.json`
+      captures, firing on the four `store_files_*/…/ledger.json` snapshots.
+    files: [ledger.json, kernel_ledger.json, messages.xml]
+    drops:
+      - 'ledger rows where kind in (absent, call) AND origin is recorded AND null
+         AND target == the discovered store'
+      - 'messages.xml `task` rows whose verb is ledger_flush / message_pump_flush
+         / persist_writer, plus settles whose parent is one of them'
+      - 'the un-flushed TAIL, for the shape reduction only, and only when the
+         shorter side is a strict PREFIX of the longer'
+    adds: [__store__, __row_census__]
+    self_check: diff.py rulecheck — 11 cases, both ways
+    must_not_hide:
+      - C42   # the persisted record's keys — the SHAPE comparison is unchanged
+      - C46
+      - C47   # the flusher's own contract: that it flushes, not how often
+      - C63   # a missing or extra NON-persistence row — the census counts it
+      - C18   # a differing outcome — the status is in every signature
+      - C12   # a row re-parented onto a different kind of row
+
+  - id: N19
+    name: row_id_order_within_a_turn
+    why: >
+      N4 numbers a minted row id `<ID#n>` BY FIRST APPEARANCE, i.e. by MINT
+      ORDER. This rule throws that numbering away and re-derives it from the ROWS
+      THEMSELVES: every dict whose `id` is an N4 placeholder is a row, each row
+      is keyed by (agent, kind, verb, PARENT'S canonical ordinal, hash of its own
+      content with every id placeholder masked), the rows are ranked by that key
+      with parents before children, and the ordinal an id gets is its row's rank.
+      A placeholder no row defines — an `expand` list, a `<pid>` in prompt text —
+      is numbered afterwards by first appearance in the ALREADY-CANONICALISED
+      document. The result is `<CID#k:type>`; the TYPE is still carried, so an int
+      id and a digit-string id stay a difference.
+
+      WHY: python's single event loop cannot run a spawned task body until the
+      handler that spawned it SUSPENDS; rust's runs concurrently on another
+      thread. Within one turn 2–3 ids are therefore handed out in a different
+      order, and the sequence RE-CONVERGES on the next row — the same rows, the
+      same parents, the same content, a permuted id assignment.
+
+      MEASURED (2026-09-21 acceptance captures, `ai_paths/**`): the SAME 408 ids
+      on both sides, 20 + 9 occurrences of the permutation, 1515 diff lines, row
+      bodies byte-identical apart from the ordinal (`"id": "<ID#36:int>"` on
+      python against `"<ID#34:int>"` on rust). The amplification is the numbering,
+      not the rows: one offset early in a file shifts every ordinal after it.
+
+      THE DECISION (owner, 2026-09-21): normalise in the HARNESS. THREE
+      kernel-side mirrors were built and measured, and ALL THREE made the diff
+      WORSE — the code was reverted. Making a port imitate python's suspension
+      point is inventing a scheduling contract nobody wants, to make a number
+      match that means nothing.
+
+      SUPERSEDES `renumber()` (v4), which re-numbered placeholders in the order
+      they appeared in the BAGGED document. That was circular: the bag is sorted
+      by strings still carrying the OLD numbering, so a permutation changed the
+      sort, which changed the new numbering. Deriving the ordinal from CONTENT
+      breaks the cycle, which is why this pass runs BEFORE `bagify` — the bag then
+      sorts strings that are already canonical.
+    replacement: <CID#k:int> / <CID#k:str> / <CID#u<n>:…> for an id no row defines
+    self_check: diff.py rulecheck — permutation → 0 lines; dropped row,
+      re-parented row and changed verb → lines
+    must_not_hide:
+      - C17   # the cursor TYPE — carried in the placeholder, as in N4
+      - A3.10
+      - A4.20
+      - B5.9
+      - C63   # a missing or extra row — fewer ordinals, different array length
+      - C12   # a WRONG PARENT — `parent` renders the parent's CANONICAL ordinal,
+              # derived from the parent's own content, so a re-parent is a line

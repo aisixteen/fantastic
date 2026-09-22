@@ -47,10 +47,10 @@ class WSWatcher:
         # ws face answers with `{type:"event", payload}` pushes.
         await self._send(json.dumps({"type": "watch", "src": self.agent_id}))
 
-    async def _send(self, text: str) -> None:
-        body = text.encode()
+    async def _send(self, text: str | bytes, opcode: int = 0x1) -> None:
+        body = text.encode() if isinstance(text, str) else text
         n = len(body)
-        head = bytearray([0x81])  # FIN + text
+        head = bytearray([0x80 | opcode])  # FIN + opcode (text by default)
         # A CLIENT FRAME IS ALWAYS MASKED (RFC 6455 §5.3) — a server must drop
         # an unmasked one, so this is not optional.
         if n < 126:
@@ -88,7 +88,15 @@ class WSWatcher:
             body = bytes(b ^ mask[i % 4] for i, b in enumerate(body))
         if opcode == 0x8:  # close
             return None
-        if opcode != 0x1:  # ping/pong/binary — not what we watch for
+        if opcode == 0x9:
+            # A PING MUST BE ANSWERED (RFC 6455 §5.5.2). Every kernel's ws face
+            # pings each 20 s and closes 20 s later with no pong: this watcher
+            # used to ignore pings, so it went deaf 40 s into every run and the
+            # probes scored only the events of the first 40 s (measured
+            # 2026-09-20: rust emitted 7 `compacted`, the probe counted 1).
+            await self._send(body, opcode=0xA)
+            return ""
+        if opcode != 0x1:  # pong/binary — not what we watch for
             return ""
         return body.decode(errors="replace")
 

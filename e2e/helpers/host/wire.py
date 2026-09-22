@@ -33,11 +33,13 @@ class WireRoot:
     #: The REST leg the driver arrives as. Seeded by `HostKernel.seed`.
     leg_id = "rest"
     #: The agents a `watch` frame may be dispatched AS — each needs the target's
-    #: ingress like anyone. Python (canonical) and swift dispatch it as the WS LEG
-    #: (`web_ws`'s own id, the record its ingress rule hangs on); rust dispatches
-    #: it as the web HOST (`fantastic-web/src/lib.rs`, `with_sender(host_agent_id)`)
-    #: — a rust deviation to fix, not a second contract. Until it is, the fixture
-    #: grants both so the SAME probe measures the model on every runtime.
+    #: ingress like anyone. Every runtime dispatches a ws frame as the WS LEG now
+    #: (`web_ws`'s own id, the record its ingress rule hangs on); rust used to
+    #: dispatch it as the web HOST (`fantastic-web/src/lib.rs`,
+    #: `with_sender(host_agent_id)`) and was brought in line by the python parity
+    #: port. `web` stays in the tuple because the host is still the sender for the
+    #: connect-time auto-watch on `/<id>/ws`, and granting an id that never calls
+    #: costs a map entry.
     watch_ids = ("ws", "web")
 
     def __init__(self, k: Any):

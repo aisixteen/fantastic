@@ -283,6 +283,92 @@ def _last_successful_job(jobs: list[dict]) -> dict | None:
     return max(done, key=lambda j: j.get("started_at", 0), default=None)
 
 
+async def discover_exec_agents(root) -> list[str]:
+    """Every `exec_bridge.tools` agent in the tree — the operator's leg AND any the model built.
+
+    The kernel's own root readme tells a model that a WORKER THAT COMPUTES is an
+    `exec_bridge.tools` agent owning a program file, and models follow it: measured
+    2026-09-21, 2 runs of 3 created their OWN exec agent (`totaller`), opened its
+    ingress, ran their program on it and stored the correct total — and scored
+    `jobs=0`, because the scorer only ever looked at the operator's pre-wired leg. A
+    model taking the route the kernel advertises has to be able to PASS, so the scorer
+    looks for the program on whatever exec agent actually ran it.
+
+    `handler_module` is the identity used here, NOT the `allowed` sniff
+    `discover_command_runner` uses. The two answer different questions: that one is
+    "who in this kernel MAY run commands", which is what a model discovers and must
+    stay a discovery; this one is "who DID run this one", which is scoring, and the
+    scorer is allowed to know the fixture's own handler name.
+    """
+    listing = (
+        (
+            (
+                await root.send(
+                    [{"target": "kernel", "payload": {"type": "list_agents"}}]
+                )
+            )[0]["result"]
+        ).get("agents")
+        or []
+    )
+    return [
+        rec["id"]
+        for rec in listing
+        if str(rec.get("handler_module") or "").split(".")[0] == "exec_bridge"
+    ]
+
+
+async def pick_program_runner(root) -> tuple[str, list[dict]]:
+    """WHICH exec agent ran the model's program, and that agent's job table.
+
+    The operator's leg WINS whenever it has jobs: the fixture pre-wires it, most runs
+    use it, and preferring it keeps every one of those runs scored exactly as before.
+    Only when it is idle does the model's own worker come into play, and then the one
+    that ran MOST RECENTLY is the artifact under test — a model may leave an abandoned
+    exec agent behind, and the last job is the demonstration it ended on.
+
+    An exec agent that REFUSES `status` is printed, never silently skipped. On a
+    spawned kernel the harness arrives as `rest`, and an authored agent that never
+    opened that ingress is a fact about the run worth seeing, not a hole in the scorer.
+    """
+    cands: list[tuple[str, list[dict]]] = []
+    for eid in await discover_exec_agents(root):
+        st = (await root.send([{"target": eid, "payload": {"type": "status"}}]))[0][
+            "result"
+        ]
+        if isinstance(st, dict) and st.get("error"):
+            print(f"       exec agent {eid!r} refused `status`: {st['error']}")
+            continue
+        cands.append((eid, (st or {}).get("jobs") or []))
+    busy = [c for c in cands if c[1]]
+    if not busy:
+        # Nothing ran anywhere. Name the operator's leg, so the NO line still points at
+        # the one exec agent the fixture guarantees exists.
+        return EXECUTOR_LEG, []
+    for eid, jobs in busy:
+        if eid == EXECUTOR_LEG:
+            return eid, jobs
+    return max(busy, key=lambda c: max(j.get("started_at") or 0 for j in c[1]))
+
+
+async def job_cwd(root, runner_id: str, job_id: str) -> str | None:
+    """The directory a job actually ran in — only `status job_id=…` carries it.
+
+    The canary re-issues the job VERBATIM, and `cwd` is part of that invocation: an
+    exec agent the model authored may sit in a different directory from the operator's
+    leg, and re-running its program from the wrong one reads the wrong `readings/`.
+    The summary rows `status` returns for ALL jobs deliberately omit it, so this is a
+    second, job-scoped call rather than a field read off the row already in hand.
+    """
+    js = (
+        await root.send(
+            [{"target": runner_id, "payload": {"type": "status", "job_id": job_id}}]
+        )
+    )[0]["result"]
+    for j in (js or {}).get("jobs") or []:
+        return j.get("cwd")
+    return None
+
+
 async def find_value(
     root, mem_id: str, want: int
 ) -> tuple[str | None, str | None, bool]:
@@ -694,13 +780,14 @@ async def run(
     # new agent (nothing carries `code` any more). The evidence is a job the runner
     # actually completed successfully, WHOSE COMMAND it records: that command IS the
     # artifact, and the canary re-issues it verbatim.
-    runner_id, _pats = await discover_command_runner(root)
-    st = (await root.send([{"target": runner_id, "payload": {"type": "status"}}]))[0][
-        "result"
-    ]
-    jobs = (st or {}).get("jobs") or []
+    # ON WHICHEVER EXEC AGENT RAN IT — the operator's leg when it was used, the agent
+    # the model built when it built one (see `pick_program_runner`). Before 2026-09-21
+    # this looked only at the operator's leg and failed runs that took the route the
+    # kernel's own readme advertises.
+    runner_id, jobs = await pick_program_runner(root)
     job = _last_successful_job(jobs)
     has_artifact = job is not None
+    cwd_of_job = None if job is None else await job_cwd(root, runner_id, job["job_id"])
     program = (
         None if job is None else shlex.join([job["command"], *(job.get("args") or [])])
     )
@@ -745,6 +832,9 @@ async def run(
                             "type": "start",
                             "command": job["command"],
                             "args": job.get("args") or [],
+                            # The job's OWN directory, when it recorded one — an authored
+                            # exec agent need not share the operator leg's cwd.
+                            **({"cwd": cwd_of_job} if cwd_of_job else {}),
                         },
                     }
                 ]

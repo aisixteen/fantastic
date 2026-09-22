@@ -26,6 +26,22 @@ from helpers.ai import Connected  # noqa: F401  (re-exported for probes)
 # folds, strips and recalls fire inside a run. 12k (2026-09-05) starved the multi-root
 # tests — 24 roots at 12k lost every deliverable, at 32k all three passed (2026-09-06).
 # Fillers scale with it (`plant_fillers`), so a read still dehydrates at any setting.
+
+def _self_stub(content: str, aid: str) -> bool:
+    """Did a reply FROM `aid` ITSELF arrive as a stub?
+
+    One user row can carry a whole batch: `[reply to N · <agent> <verb> · …]` tag lines,
+    each followed by that reply's body. The old check looked for the stub prefix anywhere
+    in the row's first 400 chars, so a SHORT inlined self-reply followed by some OTHER
+    agent's dehydrated reply scored as a dehydrated self-reply (measured 2026-09-21,
+    `recall_after_fold:rust`: an inlined 1-match grep + a 6950-byte `notes read` stub).
+    Judge each reply by its own tag."""
+    for seg in content.split("[reply to ")[1:]:
+        tag, _, body = seg.partition("]\n")
+        if f"· {aid} " in tag and body.startswith("(settled, "):
+            return True
+    return False
+
 WINDOW = int(os.environ.get("E2E_WINDOW", "32000"))
 SQUEEZE = WINDOW / 12000  # filler bodies are sized against the 12k baseline
 LOREM = "the quick brown fox jumps over the lazy dog " * 150
@@ -308,9 +324,9 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
         "recall_rows": sum(1 for m in msgs if m.get("kind") == "recall"),
         # a self-reply that came back as a STUB: the stub prefix right after the tag line —
         # not the phrase anywhere (a grep reply quoting another row's stub is not one)
-        "dehydrated_self": sum(1 for m in msgs if m.get("role") == "user" and f"· {aid} " in str(m.get("content")) and "\n(settled, " in str(m.get("content"))[:400]),
+        "dehydrated_self": sum(1 for m in msgs if m.get("role") == "user" and _self_stub(str(m.get("content")), aid)),
         # WHICH self-reply overflowed, so a failing run names the verb (kind, tag head)
-        "dehydrated_self_tags": [f"{m.get('kind') or m.get('role')}: {str(m.get('content'))[:110]}" for m in msgs if m.get("role") == "user" and f"· {aid} " in str(m.get("content")) and "\n(settled, " in str(m.get("content"))[:400]][:3],
+        "dehydrated_self_tags": [f"{m.get('kind') or m.get('role')}: {str(m.get('content'))[:110]}" for m in msgs if m.get("role") == "user" and _self_stub(str(m.get("content")), aid)][:3],
         "fold_levels": sorted({int(m.get("level") or 1) for m in msgs if m.get("kind") == "fold"}),
         "digested": sum(
             1 for m in msgs if m.get("role") == "user"
