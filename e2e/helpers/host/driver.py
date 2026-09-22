@@ -77,9 +77,11 @@ def _bytes_field(d: dict):
 
 #: The host runtimes this driver can spawn. Adding one is adding a ROW.
 #:
-#: `root_id` differs by runtime and is NOT cosmetic — python's root is the
-#: persistence loader (`kernel_state`), the compiled kernels' is `core`. The
-#: driver seeds and grants against whatever the row names.
+#: `root_id` is the same on every runtime now: the root IS the persistence
+#: loader, `kernel_state`. Rust and swift called it `core` until the python
+#: parity port (`bootstrap.rs DEFAULT_ROOT_ID`, `Kernel.swift ROOT_ID`); the row
+#: is what the driver seeds and grants against, so it must name what the binary
+#: actually writes into `.fantastic/agent.json` or every grant misses.
 RUNTIMES = {
     "python": {
         "cmd": ["src/lib/python/.venv/bin/python", "src/lib/python/main.py"],
@@ -92,14 +94,14 @@ RUNTIMES = {
     },
     "rust": {
         "cmd": ["src/lib/rust/target/debug/fantastic_kernel"],
-        "root_id": "core",
+        "root_id": "kernel_state",
         "build": ["cargo", "build", "--bin", "fantastic_kernel",
                   "--features", "scenario-probes"],
         "build_cwd": "src/lib/rust",
     },
     "swift": {
         "cmd": ["src/lib/swift/.build/debug/fantastic_kernel"],
-        "root_id": "core",
+        "root_id": "kernel_state",
         "build": ["swift", "build", "--product", "fantastic_kernel",
                   "-Xswiftc", "-DSCENARIO_PROBES"],
         "build_cwd": "src/lib/swift",
@@ -249,6 +251,13 @@ class HostKernel:
         # The WS leg — the EVENT face. REST cannot push, so a failed pass (which
         # announces itself as a `status` event on the agent's own stream) is
         # invisible without this; see `helpers/host/ws.py`.
+        #
+        # BOTH HALVES, ON THE LEG'S OWN RECORD. An io leg with no `ingress_rule`
+        # is SEALED on every runtime now, and EVERY ws frame — `call`, `watch`,
+        # `emit`, `state_subscribe` — is dispatched AS THIS LEG, not as the web
+        # host that carries it. So the leg needs the rule (or the upgrade answers
+        # and every frame is refused) and a `can_call` naming each id by literal
+        # id or `$token`: `"*"` as a grant-map KEY never matches a target.
         (w / "agents/web/agents/ws").mkdir(parents=True, exist_ok=True)
         (w / "agents/web/agents/ws/agent.json").write_text(json.dumps(
             {"id": "ws", "handler_module": "web_ws.tools", "parent_id": "web",

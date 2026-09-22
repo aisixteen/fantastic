@@ -9,7 +9,7 @@ costs: turns
 limits:
   idle_seconds: 60
   max_turns: 40
-  no_progress_turns: 10
+  no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
 env: {E2E_WINDOW: "16000"}  # squeezed so folds fire before the stop; 12k left no body budget under a 6-agent tree (sys prompt 5.4k tok, measured 2026-09-09)

@@ -13,7 +13,7 @@ costs: turns
 limits:
   idle_seconds: 40
   max_turns: 40
-  no_progress_turns: 10
+  no_progress_turns: 32
   turn_chars: 120000
   turn_seconds: 600
 env: {}

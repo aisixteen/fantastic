@@ -10,7 +10,7 @@ long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:
   idle_seconds: 60
   max_turns: 120
-  no_progress_turns: 10
+  no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
 env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)

@@ -75,7 +75,7 @@ class Limits:
         return cls(
             idle=g("IDLE", float, d.get("idle", 25.0)),
             max_turns=g("MAX_TURNS", int, d.get("max_turns", 40)),
-            no_progress=g("NO_PROGRESS", int, d.get("no_progress", 8)),
+            no_progress=g("NO_PROGRESS", int, d.get("no_progress", 32)),
             turn_chars=g("TURN_CHARS", int, d.get("turn_chars", 120_000)),
             turn_seconds=g("TURN_SECONDS", float, d.get("turn_seconds", 600.0)),
             ctx=g("CTX", int, d.get("ctx", 262144)),

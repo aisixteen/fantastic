@@ -1,0 +1,210 @@
+# plan item id → what proves it.
+#
+# `capture` selectors are `family/<file glob>`, optionally with a JSON path or a
+# text anchor. `unit` twins are `file::test` — a proof kind for items with NO
+# observable wire effect, where the proof is that the named twin exists, pins the
+# python text verbatim, and the §5.9 suites are green.
+#
+# `diff.py --check-proofs` reads every item id out of `tmp/py_parity_plan.md` and
+# reports:
+#   * an id with no entry here                → UNPROVEN (an item nothing measures)
+#   * an entry whose selector matches no file → STALE (a selector pointing nowhere)
+# Both are failures of the harness, not of the port.
+#
+# The maps below are §5.4's file → item maps, transcribed. Where §5.4 gives a
+# family a single list for a file, every id in that list selects that file.
+
+version: 3
+
+# ── families that own whole files ────────────────────────────────────────────
+by_selector:
+  tree/create_*.json: [C15]
+  tree/reflect_*.json:
+    [C1, C7, A1.1, A2.1, A2.16, A2.17, A2.20, A3.11, A3.14, A4.1, A4.2, A4.10,
+     A4.17, A4.26, A4.27, A5.1, A5.15, A6.6, A6.7, A6.8, A6.11, A6.28, A7.6,
+     A7.8, A7.9, A7.11, A7.12, A7.20, A7.21, A8.11, A8.15, A8.18, A9.1, A9.3,
+     A10.1, A10.2, A11.11, A11.12, A11.15, A11.16, A11.22, A11.25, A11.26,
+     B1.2, B1.12, B1.13, B1.14, B1.15, B1.16, B1.23, B1.24, B1.25, B2.15,
+     B4.3, B4.6, B4.7]
+  tree/reflect_full_*.json: [C4, C5, C11]
+  tree/root_reflect_full.json: [C2, C3, C4, C9, C10, C12]
+  tree/root_readme_*.json: [A12.1, A12.2, A12.3, A12.4]
+  tree/kernel_list_agents.json: [C6, C12, C15, C23]
+  tree/kernel_ps*.json: [C14, A6.25]
+  tree/kernel_ledger*.json: [C16, C24]
+  tree/reflect_absent_agent.json: [C24]
+  tree/refusal_*.json: [A2.3, C19]
+  tree/stub/req_*.bin: [B1.1, B1.3, B1.7, B1.20, B1.22, B1.23, C1, C5, C7, C9,
+                        C12, C14, C19, C20, A2.1, A2.6]
+  # §5.4's tree map names `reflect_<id>` and `root_readme_<key>` but not
+  # `readme_<id>`, which is where every bundle's own readme BODY lands.
+  tree/readme_*.json:
+    [A2.8, A3.12, A3.13, A4.18, A4.28, A5.2, A6.2, A7.1, A8.19, A8.23, A9.4,
+     A11.2, A11.6, B4.5, B4.9, C45, A12.1]
+  tree/ai_send_reply.json: [B3.4]
+  tree/ai_history.json: [B3.5, B1.5]
+  tree/ai_status.json: [B3.3]
+  tree/ai_recall.json: [B3.6]
+  tree/ai_grep.json: [B3.8]
+  tree/ai_rows_read.json: [B2.5, C36, B1.20, C7]
+  tree/kernel_log.txt: [A11.1, C54, A14.17]
+
+  store/s1/create_*.json: [C15]
+  store/s1/readme_true/*.json:
+    [A2.8, A3.12, A3.13, A4.18, A4.28, A5.2, A6.2, A7.1, A8.19, A8.23, A9.4,
+     A11.2, A11.6, B4.5, B4.9, C45]
+  store/s1/root_reflect_persistence.json: [C9, C12]
+  store/s1/sched_*.json: [A5.6]
+  store/store_files_after_create/**: [C14, C15, C16, C36, C42, C43, C44, C45,
+                                      C46, C47, C48, C49, C50, C51, C52, C55,
+                                      A5.10, A2.6, A13.1]
+  store/store_files_final/**: [C14, C15, C16, C36, C42, C43, C44, C45, C46,
+                               C47, C48, C49, C50, C51, C52, C55, A5.10, A13.1]
+  store/s2/**: [C1, C7, C8, C10, C17, C33, C58, C59, C60, C61, C62, A12.1]
+  store/s3/**: [C18, C39, C63, C64, C65, C66, C67, C68, C69]
+  store/s4/**: [B1.5, B3.3, B3.5, B3.6, B3.7, B3.8, B5.1, B5.2, B5.3, B5.4,
+                B5.5, B5.6, B5.7, B5.8, B5.9, B5.10, B5.11, C70]
+  store/s5/**: [B1.1, B1.3, B1.4, B1.9, B5.12, B5.13, B5.14, B5.15, B5.16,
+                B5.17, B5.18, B5.19, B5.20, C20, C30, C37, C38, C71, C72, C73,
+                C74, C75]
+  store/final/kernel_*.json: [C6, C14, C16, C17, C36, C37, C47, A13.20]
+
+  wire/frames.jsonl: [B2.6, B2.7, B2.13, B2.14, B2.17, A4.11, A4.12, A4.15,
+                      A4.30, A5.4, A5.8, A6.19, A6.30, A11.1, A13.14, C28, C29,
+                      C76, C77, C78, C86]
+  wire/protocol.jsonl: [A11.7, A11.8, A11.9, A11.19, A11.29, A13.15, A13.19,
+                        C30, C31, C40, C41, C77]
+  wire/handshakes.json: [A13.16, A13.17, A13.18]
+  wire/rest.jsonl: [A11.3, A11.4, A11.5, A11.10, A11.17, A11.20, A11.27,
+                    A11.28, A13.1, A13.2, A13.3, A13.4, A13.5, A13.6, A13.7,
+                    A13.8, A13.9, A13.10, A13.11, A13.12, A13.13, C22, C31,
+                    C34, C40, C41, C79]
+  wire/probes.json: [A4.34, A6.25, A11.7, A11.21, A11.31]
+  wire/written_files.json: [A2.7, A13.19]
+  wire/stub/req_*.bin: [B1.1, B2.7]
+  wire/kernel_log.txt: [A9.5, A9.6, A9.7, A11.1, A14.13, C57]
+
+  cli/cli/*.json: [A14.1, A14.2, A14.3, A14.4, A14.5, A14.6, A14.7, A14.8,
+                   A14.9, A14.10, A14.11, A14.12, A14.13, A14.14, A14.15,
+                   A14.16, A14.17, A14.18, A14.19, C12, C14, C50, C53, C54,
+                   C56, C74, C80, C81, C82, C83, C84, C85, A8.3, A8.9, A8.20,
+                   A9.2, C61]
+
+  ctx/req/*.json: [B1.4, B1.5, B1.9, B1.18, B1.19, B2.2, B5.1, B5.4, B5.5,
+                   B5.6, B5.21, B5.22, B3.6]
+  ctx/requests_index.json: [B1.4, B1.18, B1.19, B5.21, B5.22]
+  ctx/*/context_status_*.json: [B2.12, B5.5, B5.6]
+  ctx/*/rows_read_*.json: [B1.5, B5.2, B5.7, B5.8]
+  ctx/*/history_1.json: [B3.5]
+  ctx/*/recall_goal.json: [B3.6]
+  ctx/*/grep_marker.json: [B3.8]
+  ctx/*/status_1.json: [B3.3]
+  ctx/*/send_too_small_reply.json: [B2.2]
+  ctx/ai_tiny/*.json: [B2.2]
+  ctx/ws_events.json: [B2.13, B2.2, C76]
+  ctx/reboot/*.json: [C14, B5.4]
+
+  # ── the five new families ──
+  bundle_verbs/file_bridge/*.json:
+    [A1.2, A1.3, A2.2, A2.3, A2.4, A2.5, A2.9, A2.10, A2.11, A2.12, A2.13,
+     A2.14, A2.15, A2.18, A2.19, A2.21]
+  bundle_verbs/text_file/*.json:
+    [A3.1, A3.2, A3.3, A3.4, A3.5, A3.6, A3.7, A3.8, A3.9, A3.10, A3.15]
+  bundle_verbs/exec_bridge/*.json:
+    [A4.3, A4.4, A4.5, A4.6, A4.7, A4.8, A4.9, A4.13, A4.14, A4.16, A4.19,
+     A4.20, A4.21, A4.22, A4.23, A4.24, A4.25, A4.29, A4.31, A4.32, A4.33]
+  bundle_verbs/scheduler/*.json: [A5.3, A5.5, A5.7, A5.11, A5.13, A5.14, A5.16]
+  bundle_verbs/terminal/*.json:
+    [A6.1, A6.4, A6.5, A6.9, A6.10, A6.12, A6.14, A6.15, A6.16, A6.17, A6.18,
+     A6.20, A6.21, A6.22, A6.23, A6.24, A6.26, A6.27, A6.31]
+  bundle_verbs/static_loader/*.json:
+    [A8.1, A8.2, A8.4, A8.5, A8.6, A8.7, A8.8, A8.10, A8.12, A8.13, A8.14,
+     A8.16, A8.17, A8.21, A8.22]
+  bundle_verbs/probes/*.json:
+    [A10.3, A10.4, A10.5, A10.6, A10.7, A10.8, A10.9, A10.10, A10.11, A10.12,
+     A10.13, A10.14, A10.15]
+  bundle_verbs/web_cli_ai/*.json:
+    [A9.2, A9.6, A11.13, A11.14, A11.18, A11.23, A11.24, B3.1]
+
+  kernel_verbs/C13/*.json: [C13]
+  kernel_verbs/C17/*.json: [C17]
+  kernel_verbs/C18/*.json: [C18]
+  kernel_verbs/C19/*.json: [C19]
+  kernel_verbs/C20/*.json: [C20]
+  kernel_verbs/C21/*.json: [C21]
+  kernel_verbs/C22/*.json: [C22]
+  kernel_verbs/C25/*.json: [C25]
+  kernel_verbs/C26/*.json: [C26]
+  kernel_verbs/C27/*.json: [C27, C89]
+  kernel_verbs/C32/*.json: [C32]
+  kernel_verbs/C35/*.json: [C35]
+  kernel_verbs/C39/*.json: [C39, C90]
+  kernel_verbs/bare/*.json: [C19, C23, C26, C27]
+
+  bridges/bridges/peer_frames.json:
+    [A7.3, A7.4, A7.15, A7.17, A7.19, A7.26, A7.27, A7.28, A7.30, A7.32, A7.34]
+  bridges/bridges/relay_frames.json: [A7.7, A7.18, A7.22, A7.31]
+  bridges/ws_bridge/*.json: [A7.2, A7.5, A7.23, A7.25, A7.33]
+  bridges/relay/*.json: [A7.13, A7.14, A7.16, A7.29]
+
+  ai_paths/cases/*.json:
+    [B1.3, B1.6, B1.8, B1.10, B1.11, B1.17, B1.21, B1.26, B2.3, B2.4, B3.2,
+     B3.10, C30, C31, C38, B5.12, B5.13, B5.17, B5.19]
+  ai_paths/send_timeout/*.json: [B2.8, B2.18]
+  ai_paths/events.json: [B2.13, B2.14, B2.15]
+
+  providers/anthropic/**: [B1.7, B2.1, B2.16, B4.1, B4.2]
+  providers/openai/**: [B2.1, B2.9, B2.11, B4.3, B4.4, B4.7, B4.8]
+  providers/ollama/**: [B4.6]
+
+  # ── items this harness reaches that §5.4 did not assign a file ──
+  # (C86 / C89 / C90 are merged into the wire and kernel_verbs entries above; a
+  # repeated YAML key REPLACES the first and would have dropped their lists.)
+  ctx/*/update_strategy_bogus.json: [B3.9]
+  providers/anthropic/stream_cut_before_stop/**: [B4.10]
+  providers/anthropic/event_error_midstream/**: [A15.4]
+  cli/cli/reflect.json: [C88]
+
+# ── proof: unit — no observable wire effect ──────────────────────────────────
+# Pass = the named twin EXISTS, `diff.py` greps its name in its file, and the
+# §5.9 suites are green. These are the items §5.5 lists.
+unit:
+  A0.1: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_repr", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyRepr"}
+  A0.2: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_str", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyStr"}
+  A0.3: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_truthy", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyTruthy"}
+  A0.4: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_json_dumps", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyJSONDumps"}
+  A0.5: {rust: "crates/fantastic-bundle/src/pyfmt.rs::os_error_str", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::osErrorStr"}
+  A0.6: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_int", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyInt"}
+  A5.9: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs", swift: "Tests/FantasticSchedulerTests"}
+  A5.12: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs", swift: "Tests/FantasticSchedulerTests"}
+  A6.3: {rust: "crates/bundles/fantastic-terminal-backend/src/tests.rs", swift: "Tests/FantasticTerminalBackendTests"}
+  A6.13: {rust: "crates/bundles/fantastic-terminal-backend/src/tests.rs", swift: "Tests/FantasticTerminalBackendTests"}
+  A7.10: {rust: "crates/bundles/fantastic-bridge/src/tests.rs", swift: "Tests/FantasticBridgeTests"}
+  A7.24: {rust: "crates/bundles/fantastic-bridge/src/tests.rs", swift: "Tests/FantasticBridgeTests", note: "D9 — not capturable without an ssh endpoint"}
+  A11.30: {rust: "crates/bundles/fantastic-web/src/tests.rs", swift: "Tests/FantasticWebTests"}
+  B2.10: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs", swift: "Tests/FantasticAICoreTests"}
+  B2.19: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs", swift: "Tests/FantasticAICoreTests"}
+  C44: {rust: "crates/fantastic-kernel/src/tests.rs", swift: "Tests/FantasticKernelTests", note: "records under 64 KiB in every capture"}
+  C49: {rust: "crates/fantastic-kernel/src/tests.rs", swift: "Tests/FantasticKernelTests"}
+  C51: {rust: "crates/fantastic-kernel/src/tests.rs", swift: "Tests/FantasticKernelTests"}
+  C82: {rust: "crates/fantastic-cli/src/tests.rs", swift: "Tests/FantasticCliBundleTests"}
+
+# ── proof: capture+unit — the capture may not reach it every run ─────────────
+capture_and_unit:
+  A5.8: "a cancelled fire is best effort"
+  B1.18: "the ctx chain may not reach the backstop"
+  A13.18: "slow only (--slow)"
+
+# ── proof: none — open until the owner records a decision ────────────────────
+no_proof:
+  A6.29: "needs `ulimit -u 1` around a forkpty; open until the owner records `proof: none-accepted` (D12)"
+  # §9.2's "stderr lines of A15.1/A15.2/C87" row, unchanged: no capture drives a
+  # malformed bridge frame, a failing scheduler persist, a raising subscriber or a
+  # failing shutdown hook, and A15.3 is a LOG FORMAT the harness does not read as
+  # a comparable document. These need a family that can make the kernel fail
+  # INSIDE a hook; the harness has no such lever, so they are named open here
+  # rather than given a selector that would pass by never matching.
+  A15.1: "no capture drives a malformed inbound bridge frame (§9.2)"
+  A15.2: "no capture makes a scheduler persist fail (§9.2)"
+  A15.3: "rust log FORMAT; not a document this diff compares (§9.2)"
+  C87: "no capture makes a subscriber raise or a shutdown hook fail (§9.2)"

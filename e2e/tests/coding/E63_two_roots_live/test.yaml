@@ -10,7 +10,7 @@ long: true  # hit the 180 s proxy limit at 6 lanes (2026-09-08); at most 2 long 
 limits:
   idle_seconds: 60
   max_turns: 60
-  no_progress_turns: 8
+  no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
 env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)

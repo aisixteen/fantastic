@@ -836,8 +836,8 @@ async def run(
                 print(
                     f"\n  ** TOO_SMALL: window={d.get('context_window')} "
                     f"sys={d.get('system_tokens')} "
-                    f"last_turn_tokens={d.get('last_turn_tokens')} "
-                    f"head={d.get('last_turn_head')!r} **\n",
+                    f"last_message_tokens={d.get('last_message_tokens')} "
+                    f"head={d.get('last_message_head')!r} **\n",
                     flush=True,
                 )
             _d = ev.get("detail") or {}

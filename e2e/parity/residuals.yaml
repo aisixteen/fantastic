@@ -1,0 +1,503 @@
+# Known, DECIDED differences. A residual is not a waiver: it is a decision with
+# an owner, a shape and a blast radius.
+#
+#   state: accepted       — the owner decided; a line matching it does not stop a
+#                           run being CLEAN.
+#   state: pending-owner  — the decision is not made. A line matching it counts
+#                           OPEN, and the run is not clean while it does.
+#
+# Two rules make a residual honest:
+#   * every residual must MATCH AT LEAST ONCE on each runtime it names. One that
+#     matches nothing is stale and FAILS the run — a residual outliving its
+#     difference is how a real regression gets a place to hide.
+#   * a line matching a residual whose items are ALL in landed.yaml is a
+#     REGRESSION, not a residual.
+
+version: 5
+#
+# v5 (2026-09-22) — R-D4-10 widened from `bundle_verbs/**` to every family and
+# from `[rust]` to `[rust, swift]`: the request header NAME slot is the HTTP
+# CLIENT's, wherever a case records one, and scoping it to one family left the
+# identical lines scoring REGRESSION in `kernel_verbs` and on swift. The ANCHOR
+# is what keeps it narrow, and it is unchanged. Three new entries, each pinned
+# to ONE slot: R-N2-1 (the `runtime=` word inside a `budget`/`stdout_bytes`
+# COUNT), R-D13-2 (the lone surrogate `"\udcff"` — one ledger census bucket) and
+# R-D16-3 (`bytes` present-and-null against absent in a read outcome).
+#
+# v4 — the state this file was in on 2026-09-21b.
+
+residuals:
+  # ── D3: python names its exception classes; the ports have none ──
+  - id: R-D3-1
+    decision: D3
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/*"
+    anchor: "cannot be imported in this runtime: "
+    allowed_tail_regex: ".*"
+    items: [C24]
+    note: >
+      The tail is NOT pinned: round 1 measured `'yaml_state'` and round 2
+      `'yaml_state.tools'` for the same fault, so any residual that pinned it
+      would fail on the next module name.
+
+  - id: R-D3-2
+    decision: D3
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "providers/**"
+    anchor: '"raised": true'
+    allowed_tail_regex: "^(RuntimeError|ValueError|TypeError|KeyError|AttributeError|UnicodeDecodeError|BlockingIOError|ModuleNotFoundError): "
+    items: [B2.1, B4.2, B4.6]
+
+  - id: R-D3-3
+    decision: D3
+    state: pending-owner
+    runtimes: [rust, swift]
+    # The refusal is raised during CREATE, so it lands in the kernel log, not in
+    # the case file that later asks the agent to boot (measured 2026-09-20).
+    file_glob: "bundle_verbs/**"
+    anchor: "rec.port is required"
+    allowed_tail_regex: "^RuntimeError: "
+    items: [A11.14, A11.24]
+
+  - id: R-D3-4
+    decision: D3
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "bundle_verbs/probes/**"
+    anchor: "pump stalled"
+    allowed_tail_regex: "^RuntimeError: "
+    items: [A10.3]
+
+  - id: R-D3-5
+    decision: D3
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/*"
+    anchor: "KeyError: 'agent'|UnicodeDecodeError: |object is not iterable|invalid literal for int|has no len()|has no attribute 'get'"
+    allowed_tail_regex: ".*"
+    items: [C55, C60, B5.4, C69]
+
+  # ── D4: a library's own text, which cannot be reproduced without the library ──
+  - id: R-D4-1
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    # `allowed` is validated at CREATE, so the tail is in `bundle_verbs/create/`
+    # (measured 2026-09-20).
+    file_glob: "bundle_verbs/**"
+    anchor: "broken regex "
+    allowed_tail_regex: ".*"
+    items: [A4.5]
+
+  - id: R-D4-2
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/*"
+    anchor: " boot failed: "
+    allowed_tail_regex: ".*"
+    items: [A7.13]
+    note: "python: `[Errno 61] Connect call failed ('127.0.0.1', 9)`"
+
+  - id: R-D4-3
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "bundle_verbs/static_loader/**"
+    anchor: "manifest_bad_yaml"
+    allowed_tail_regex: ".*"
+    items: [A8.13]
+    note: "PyYAML MarkedYAMLError, with its line/column report."
+
+  - id: R-D4-4
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "providers/ollama/**"
+    anchor: "httpx|ollama"
+    allowed_tail_regex: ".*"
+    items: [B2.1]
+
+  - id: R-D4-5
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "bundle_verbs/terminal/resize_cols_70000*"
+    anchor: "struct.error"
+    allowed_tail_regex: ".*"
+    items: [A6.5]
+
+  - id: R-D4-6
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "ai_paths/**"
+    anchor: "timeout"
+    allowed_tail_regex: "^-1(\\.0)?$"
+    items: [C30]
+    note: "`-1` vs `-1.0`: a typed timeout rendered by two number formatters."
+
+  - id: R-D4-7
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/kernel_log.txt"
+    anchor: "ledger.json unreadable, starting empty: "
+    allowed_tail_regex: ".*"
+    items: [C46]
+
+  - id: R-D4-11
+    decision: D4
+    state: pending-owner
+    runtimes: [rust]
+    # BEFORE R-D4-8 on purpose: same text, narrower claim. R-D4-8 keeps the
+    # `skipping malformed frame` half (bridges/kernel_log.txt, measured
+    # 2026-09-21), so it does not go stale.
+    file_glob: "**/kernel_log*.txt"
+    # The three frame shapes of a uvicorn traceback ONLY — the malformed-frame
+    # alternative is deliberately not repeated here.
+    anchor: 'ERROR: +Exception in ASGI application|Traceback \(most recent call last\):|"(base|other)": "(  File |    )'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      PYTHON THROWS INSIDE ASGI and the ports do not, so the ORACLE's log carries
+      `ERROR:    Exception in ASGI application` plus a uvicorn/h11 traceback where
+      rust's line is empty. Measured 2026-09-21: 118 lines in `wire/kernel_log.txt`,
+      12 in `providers/openai/nim_429_twice/`, 32 across `providers/anthropic/**`.
+      R-D4-8 already owned the TEXT under D4 ("a library's own text"), but its
+      items are all in `landed.yaml`, so every one of those lines scored a
+      REGRESSION on a port that has nothing to regress. This entry says what the
+      difference actually is — a python-side fault, not a port behaviour — and
+      carries no items, so it counts OPEN until the owner rules on the fault
+      itself. Blast radius: a port that starts printing its OWN traceback into a
+      kernel log hides here.
+
+  - id: R-D4-8
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/kernel_log*.txt"
+    # The anchor is a REGEX. `Traceback (most recent call last):` was written
+    # unescaped in v3, so its parentheses were a group and it searched for
+    # `Traceback most recent call last:` — which matches nothing. Measured
+    # 2026-09-20: 120 lines in `wire/kernel_log.txt`, 68 in `store/`, and ~70
+    # across `providers/**` were python's traceback and were reported UNMAPPED
+    # because of the escaping.
+    # The traceback BODY is one diff line per FRAME, so the anchor has to name
+    # the frame shapes too: `  File "…"`, the 4-space-indented source line, and
+    # the caret row. Scoped to a kernel log, where nothing else is indented four
+    # spaces (the kernel's own lines are indented two).
+    anchor: 'skipping malformed frame: |Traceback \(most recent call last\):|ERROR: +Exception in ASGI application|"(base|other)": "(  File |    )'
+    allowed_tail_regex: ".*"
+    items: [A15.1, A15.2, B2.1]
+    note: >
+      Python's `logger.exception` prints a traceback body and
+      `ai_core/core.py:2329` calls `traceback.print_exc()` on stderr; rust and
+      swift print no traceback at all. `ERROR:    Exception in ASGI application`
+      is uvicorn's own header line for the same traceback — one difference, two
+      lines, measured 2026-09-20.
+
+  # ── D6: python quirks the ports mirror, or pin ──
+  - id: R-D6-1
+    decision: D6
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "store/final/kernel_ledger.json"
+    anchor: "__http_status__"
+    allowed_tail_regex: ".*"
+    items: [A13.20]
+    note: >
+      Python answers its own final ledger HTTP 500 — a reply with nested bytes is
+      not JSON serialisable. The ports answer 200 with a body.
+
+  - id: R-D6-2
+    decision: D6
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "cli/**"
+    anchor: "sigkill_needed"
+    allowed_tail_regex: ".*"
+    items: [A14.19]
+    note: "The python PTY daemon stays alive after SIGTERM and needs the SIGKILL."
+
+  - id: R-D6-3
+    decision: D6
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "wire/rest.jsonl"
+    anchor: "rest_self_get_routes"
+    allowed_tail_regex: ".*"
+    items: [A11.5]
+    note: >
+      `get_routes` replies carry a live `endpoint` callable, so python answers
+      HTTP 500 and drops the rows from `ledger.json`; rust and swift answer 200
+      and persist them (v3 D6, measured `SCR/r3/out/python/measure.json`).
+
+  - id: R-D6-4
+    decision: D6
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/*"
+    anchor: "ledger.json"
+    allowed_tail_regex: ".*"
+    items: [C47]
+    note: "Every ledger flush is an execution whose settle re-kicks the flusher."
+
+  - id: R-D6-5
+    decision: D6
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "tree/readme_olla.json"
+    # The bundle NAME appears in every prompt and every provider capture, so the
+    # anchor is the mojibake itself, not the agent id (measured 2026-09-20: the
+    # loose anchor matched 567 lines in five other families).
+    anchor: "ollama_backend|mojibake|Ã|â€"
+    allowed_tail_regex: ".*"
+    items: [B4.5]
+    note: "The ollama readme's mojibake, copied verbatim (was D8)."
+
+  # ── D13 / D14 / D16 ──
+  - id: R-D13-1
+    decision: D13
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/*"
+    anchor: "123456789012345678901234567890|NaN|nan|inf|udcff"
+    allowed_tail_regex: ".*"
+    items: [C74, C18, A13.11, A14.9]
+    note: >
+      `serde_json::Value` has no arbitrary precision and swift's JSON turns an
+      over-Int64 int into a double and a non-finite double into null.
+
+  - id: R-D14-1
+    decision: D14
+    state: pending-owner
+    runtimes: [swift]
+    file_glob: "**/*"
+    anchor: "canonical"
+    allowed_tail_regex: ".*"
+    items: [C75]
+    note: "Swift keys JSON objects by String canonical equivalence (U+212B vs U+00C5)."
+
+  - id: R-D16-1
+    decision: D16
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "wire/**"
+    anchor: "server|permessage-deflate|Sec-WebSocket-Extensions"
+    allowed_tail_regex: ".*"
+    items: [A13.17, A13.18, A13.7, A13.8]
+    note: >
+      uvicorn/websockets defaults python gets for free: `server: uvicorn` on
+      every response, permessage-deflate, 20s ping / 20s pong.
+
+  # ── already decided ──
+  - id: R-S7-1
+    decision: "§7"
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "tree/root_reflect.json"
+    anchor: ""     # THE WHOLE FILE. Python's side IS the error, so most lines
+                   # carry the port's reflect and not the error text; an anchor
+                   # would cover one line and leave the rest unmapped.
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      Python's `tree/root_reflect.json` IS this error. The ports' reflect is
+      compared against `root_readme_<key>` and source instead — there is nothing
+      on the python side to diff against.
+
+  # ── new in this harness ──
+  - id: R-D12-1
+    decision: D12
+    state: pending-owner
+    runtimes: [rust, swift]
+    file_glob: "**/*"
+    anchor: yaml_state
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      `src/lib/python/.venv` carries a STALE `fantastic_yaml_state` entry point
+      whose module does not import, so python's `bundles=` catalog lists a bundle
+      no kernel can load and the ports do not. `run.py preflight` fails on it and
+      does not repair it: the choice between `uv sync` and running the harness on
+      `e2e/dist/python` is the owner's (D12).
+
+  # ── new 2026-09-20: transport-library header sets, PTY chunk boundaries ──
+  - id: R-D4-9
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    # The stub writes one `requests.json` per provider family with the header
+    # table of every request it was sent (`e2e/parity/stubs/__init__.py:55-66`).
+    file_glob: "**/requests.json"
+    # Two alternatives, and the `where` slot decides which — nothing outside a
+    # recorded header table can match either.
+    #   1. The table's own SHAPE: its length (`headers · len`, 9 vs 6), a pair's
+    #      length, and the NAME slot `headers[i][0]`. Because the tables are
+    #      compared BY POSITION, one missing header slides every later name by
+    #      one, so `Accept-Encoding` lands opposite `x-api-key` and the name slot
+    #      of a credential header IS part of the census (94 such lines on rust,
+    #      measured 2026-09-21b) — the old lookahead dropped exactly those and
+    #      left them unmapped.
+    #   2. The VALUE slot, as before, and only when the line names no credential
+    #      header: a credential VALUE that differs is a kernel difference, not a
+    #      client default.
+    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization)(?!.*[Xx]-[Aa][Pp][Ii]-[Kk]ey).*headers\[[0-9]+\]'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      The model-endpoint REQUEST header block is the HTTP CLIENT's, not the
+      kernel's. python's providers run on httpx, which sends its own default set
+      (`Host`, `Accept`, `Accept-Encoding`, `Connection`, `User-Agent:
+      python-httpx/<ver>`) in its own order; rust runs on reqwest/hyper and swift
+      on its own client, both of which send a smaller set and, because
+      `http::HeaderName` is lowercase and hyper's writer emits it verbatim,
+      cannot write a capitalised name at all. Matching the set would mean
+      claiming httpx's User-Agent and pinning its version — a library identity,
+      not a behaviour. Blast radius: a genuinely missing REQUEST header (e.g. a
+      `content-type` the kernel chooses) hides here too, and — new with the name
+      slot — so does a request header NAME the port never sends at all.
+
+  - id: R-D4-12
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    # The SAME census, in the stub's OTHER record. `stubs/__init__.py` writes the
+    # header table twice: into `requests.json` (R-D4-9) and into the `index.json`
+    # summary beside it. Only `ai_paths/stub/` and `store/stub/` reach it — 400
+    # lines each on rust, 400 on swift, every one unmapped before this entry
+    # (measured 2026-09-21b) — and `index.json` exists nowhere else, so this is
+    # R-D4-9's file_glob widened by the one file it could not name (fnmatch has
+    # no alternation).
+    file_glob: "**/stub/index.json"
+    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization)(?!.*[Xx]-[Aa][Pp][Ii]-[Kk]ey).*headers\[[0-9]+\]'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      Same difference, same decision, same blast radius as R-D4-9 — see its note.
+      Kept as its own entry rather than a broader glob so neither selector can
+      reach a file that is not one of the stub's two header records.
+
+  # ── new 2026-09-22: three BY-DESIGN differences, each pinned to one slot ──
+  - id: R-N2-1
+    decision: N2
+    state: pending-owner
+    runtimes: [rust, swift]
+    # The COUNT SLOTS ONLY, by `where`, in the two families that record one.
+    # Not the text they count, not `bytes`, not `system_chars` (N10 drops those
+    # two in the request census because the body beside them is compared whole).
+    file_glob: "**/*"
+    anchor: '"where": "[^"]*\.(budget|stdout_bytes)"'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      THE `runtime=` WORD, which N2 declares incomparable BY DEFINITION — the
+      root reflect names the runtime it is, and that reflect is rendered into
+      every system prompt and every `cli` stdout. `runtime=python` is one byte
+      longer than `runtime=swift` and two longer than `runtime=rust`, so every
+      COUNT over a document carrying it is off by exactly that much. Measured
+      2026-09-21b: `ctx/ai_fold/rows_read_*.json $.rows[n].budget` 3870 vs 3871
+      (17 lines — python's budget is one token SMALLER because its system block
+      is one byte BIGGER), and `cli/**/*.json $.stdout_bytes` 661 vs 665, 3462
+      vs 3461 (16 lines). The window and the reserve those numbers are derived
+      from are compared EXACTLY, in `meta.json` and in the agent record, and the
+      text itself is compared everywhere it was recorded. Blast radius, stated
+      plainly: a budget or a stdout length that is wrong by a few bytes for some
+      OTHER reason hides here — which is why this is a residual (the line is
+      still reported) and not a rule.
+
+  - id: R-D13-2
+    decision: D13
+    state: pending-owner
+    runtimes: [rust, swift]
+    # ONE census bucket, named in full. Every other signature, and every other
+    # outcome in this one, is compared exactly.
+    file_glob: "kernel_verbs/**"
+    anchor: 'kernel_state <- None · named=False · name=None · errored'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      THE LONE SURROGATE `"\udcff"`. `kernel_verbs/C13/persist_non_utf8` posts a
+      body containing an unpaired UTF-16 surrogate. Python's json accepts it, so
+      the call reaches `persist_blob` and ERRORS there, leaving a row; the ports
+      reject the body at the HTTP layer (`web_rest: request body is not valid
+      JSON`, 400) and no row is ever made. One row, two ledger snapshots:
+      `kernel_verbs/bare/ledger.json` 37 vs 36 errored and
+      `kernel_verbs/final/kernel_ledger.json` 43 vs 42, identical on rust and
+      swift (measured 2026-09-21b and 2026-09-22). Blast radius: an extra or
+      missing errored row in THIS ONE bucket — no-origin, unnamed, on the root —
+      hides here. Every other signature, and the `completed` count of this one,
+      is untouched.
+
+  - id: R-D16-3
+    decision: D16
+    state: pending-owner
+    runtimes: [swift]
+    # The `bytes` slot of a recorded frame payload, and nothing else.
+    file_glob: "wire/**"
+    anchor: '"where": "[^"]*\.bytes", "base": "\[.{1,2}NoneType'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      `bytes` PRESENT-AND-NULL against ABSENT in a `read`/`read_stream` outcome.
+      Raw bytes ride OUT OF BAND (the io_bridge binary-frame codec), so the JSON
+      reply carries no byte payload on any runtime; python still emits the key
+      with a `null`, swift omits it. Measured 2026-09-21b/2026-09-22:
+      `wire/protocol.jsonl $[18]` and `$[22]`,
+      `frames.__by_sock__.proto[1].head.data.bytes` — 2 lines, and 0 on rust,
+      which emits the key. The anchor pins the NULL form, so a `bytes` slot that
+      ever carried a VALUE is a diff line on every runtime.
+
+  - id: R-D16-2
+    decision: D16
+    state: pending-owner
+    runtimes: [rust]
+    file_glob: "wire/**"
+    anchor: '"(Upgrade|upgrade|Sec-WebSocket-Accept|sec-websocket-accept)"'
+    allowed_tail_regex: ".*"
+    items: [A13.17, A13.7]
+    note: >
+      RESPONSE header NAME CASE on the 101 upgrade. python's `websockets` writes
+      `Upgrade`, `Connection`, `Sec-WebSocket-Accept`; rust builds exactly those
+      names in exactly that order
+      (`RB/fantastic-web/src/handlers.rs:702-728`) but hyper's writer lowercases
+      every `HeaderName` on the way out, and nothing short of replacing the
+      writer changes that. Values, order and the set already match. swift is NOT
+      named: it DROPS `Connection`, which is a real fix, not a residual.
+
+  # ── new 2026-09-21: the `http` census carries the client's header NAMES ──
+  - id: R-D4-10
+    decision: D4
+    state: pending-owner
+    runtimes: [rust, swift]
+    # EVERY family's `http` census, not just `bundle_verbs`: the census is
+    # written by the same recorder wherever a case records its HTTP exchange,
+    # and the difference is the CLIENT's, so scoping it to one family left the
+    # identical lines unmapped elsewhere (measured 2026-09-22 on the swift
+    # capture: 134 in `bundle_verbs`, 2 in `kernel_verbs`, and both scored
+    # REGRESSION because the files carry landed items). The ANCHOR, not the
+    # glob, is what keeps this narrow: `$.http[i].headers[j][0]` is the NAME
+    # slot of a recorded REQUEST header table and nothing else matches it.
+    file_glob: "**/*"
+    # The NAME slot of the recorded request header table (`headers[i][0]`) and
+    # nothing else. The VALUE slot is NOT covered: `headers[2][1]` is
+    # `content-length`, and 124 vs 109 there is a real body-size difference
+    # (`file_bridge/readonly_write`, `terminal/resize_cols_70000`,
+    # `terminal/write_invalid_bytes`, measured 2026-09-21) that must stay visible.
+    # Neither is the table's LENGTH (`$.http[i].headers · len`), so a request
+    # header a port never sends at all is still a diff line.
+    anchor: '\$\.http\[[0-9]+\]\.headers\[[0-9]+\]\[0\]'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      `Connection` vs `connection` on the HTTP census — 136 lines on swift, 5 on
+      rust, one physical difference. Same client-library class as R-D4-9 and
+      R-D16-2: `http::HeaderName` is lowercase by construction and hyper's
+      writer emits it verbatim, so rust cannot write a capitalised request
+      header name at all, while python's client sends httpx's own casing; swift
+      lowercases for its own reasons. The SET, the ORDER and the VALUES are
+      compared as before. Blast radius: a request header whose name the kernel
+      itself chooses hides here.

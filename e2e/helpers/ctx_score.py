@@ -95,4 +95,4 @@ def fired(conn) -> bool:
 
 
 def dropped_total(conn) -> int:
-    return sum(int(d.get("dropped_turns") or 0) for d in conn.compactions)
+    return sum(int(d.get("dropped_messages") or 0) for d in conn.compactions)
