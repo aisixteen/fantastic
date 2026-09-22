@@ -32,3 +32,6 @@ e2e/dist/
 
 # local model-proxy connections (one file per model)
 e2e/backends/local/
+
+# Release artifacts built by scripts/build/*.sh (tarballs, zips, unpacked kernels).
+dist/
