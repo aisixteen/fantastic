@@ -351,8 +351,8 @@ export const aiView: ViewBundle = {
         refreshBusy();
       } else {
         const strat = s(detail, "strategy");
-        const dropped = typeof detail["dropped_turns"] === "number" ? (detail["dropped_turns"] as number) : 0;
-        const kept = typeof detail["kept_turns"] === "number" ? (detail["kept_turns"] as number) : 0;
+        const dropped = typeof detail["dropped_messages"] === "number" ? (detail["dropped_messages"] as number) : 0;
+        const kept = typeof detail["kept_messages"] === "number" ? (detail["kept_messages"] as number) : 0;
         addMsg("notice", `context compacted · ${strat} · ${dropped} dropped → ${kept} kept (recall to page back)`, dialogEl);
       }
     });
