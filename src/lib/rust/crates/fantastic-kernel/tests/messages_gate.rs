@@ -860,3 +860,50 @@ async fn digest_counts_unsized_refs_and_non_object_outcome_like_python() {
     assert!(!d.as_object().unwrap().contains_key("refs"));
     assert!(!d.as_object().unwrap().contains_key("status"));
 }
+
+/// THE ROW EVENT (2026-09-23): a view learns "row <id> arrived" reactively on
+/// the state stream it already holds, and pulls the body on demand. DIGEST ONLY
+/// — and the digest is byte-identical to the one `messages` answers, because
+/// both come from `rows::row_digest`. Twin of python's
+/// `test_a_row_append_publishes_its_digest_and_never_its_body`.
+#[tokio::test]
+async fn a_row_append_publishes_its_digest_and_never_its_body() {
+    let k = kernel();
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    k.add_state_subscriber(Arc::new(move |e: &Value, _body| {
+        sink.lock().expect("seen poisoned").push(e.clone());
+    }));
+    let rid = k
+        .rows
+        .put(
+            &AgentId::from("kernel_state"),
+            json!({"kind": "body", "role": "user", "content": "SECRET line one\nline two"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let events: Vec<Value> = seen
+        .lock()
+        .expect("seen poisoned")
+        .iter()
+        .filter(|e| e["kind"] == json!("row"))
+        .cloned()
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["agent_id"], json!("kernel_state"));
+    let d = &events[0]["row"];
+    assert_eq!(d["id"], json!(rid));
+    assert_eq!(d["kind"], json!("body"));
+    assert_eq!(d["bytes"], json!(24));
+    assert_eq!(d["head"], json!("SECRET line one line two"));
+    assert!(!d.as_object().unwrap().contains_key("content"), "{d}");
+    // …and `messages` answers the IDENTICAL digest, key order included.
+    let out = ask(&k, json!({"type": "messages", "ids": [rid]})).await;
+    assert_eq!(out["rows"][0], *d);
+    assert_eq!(
+        serde_json::to_string(&out["rows"][0]).unwrap(),
+        serde_json::to_string(d).unwrap()
+    );
+}

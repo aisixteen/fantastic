@@ -781,7 +781,7 @@ extension Kernel {
 
 /// `len(x)` for a sized value, `1` for a scalar — a digest counts, it never
 /// raises on a row a caller wrote by hand (python, 2026-09-20).
-private func sizedLen(_ v: JSON) -> Int { (try? pyLen(v)) ?? 1 }
+func sizedLen(_ v: JSON) -> Int { (try? pyLen(v)) ?? 1 }
 
 /// A message id as an int: an int, or its digit string (a model may quote what
 /// it copied out of a tag). Anything else is not an id. Python `_as_id`.
@@ -854,23 +854,13 @@ extension Kernel {
         }
         var ids = parsed.map { $0! }
         let caller = KernelTaskLocals.currentOrigin
-        let loaderId = root?.id.value
         var decided: [String: Bool] = [:]
+        // ONE read gate, shared with the `row` state event (`mayReadRows`).
         func mayRead(_ ownerId: String) -> Bool {
-            guard let caller, caller.value != ownerId else { return true }
             if let d = decided[ownerId] { return d }
-            guard let owner = agent(AgentId(ownerId)) else {
-                decided[ownerId] = false
-                return false
-            }
-            let d = authorizeCall(
-                grant: owner.metaValue(forKey: "callable_by") ?? .null, verb: "messages",
-                otherId: caller.value, holderId: owner.id.value,
-                parentId: owner.parentId?.value,
-                childIds: Set(owner.childIds().map { $0.value }), loaderId: loaderId,
-                enforcePrivileged: false)
-            decided[ownerId] = d.allowed
-            return d.allowed
+            let d = mayReadRows(reader: caller?.value, owner: ownerId)
+            decided[ownerId] = d
+            return d
         }
         if let after = try asMessageId(payload["after"]), let i = ids.firstIndex(of: after) {
             ids = Array(ids[(i + 1)...])
@@ -887,48 +877,8 @@ extension Kernel {
                 refused.append(.integer(rid))
                 continue
             }
-            // `str(content)` — a row's content is whatever was written there, and
-            // a digest of a number, a list or `None` is python's rendering of it,
-            // not an empty head. CODE POINTS throughout: python slices and counts
-            // a str, so an emoji is one, not four bytes and not one grapheme.
-            let content = pyStr(row["content"] ?? .string(""))
-            let kind = row["kind"]?.asString
-            let kindRaw = row["kind"] ?? .null
-            var d: OrderedDictionary<String, JSON> = [
-                "id": .integer(rid),
-                "agent": row["agent"] ?? .null,
-                "parent": row["parent"] ?? .null,
-                "kind": pyTruthy(kindRaw) ? kindRaw : (row["role"] ?? .null),
-                "role": row["role"] ?? .null,
-                "head": .string(pyHead(content)),
-                "bytes": .integer(Int64(content.unicodeScalars.count)),
-            ]
-            // PYTHON TRUTHINESS decides every optional key, and the value copied
-            // is the RAW one — a `level` of `false` or `[]` is absent, a `level`
-            // of `2.5` is `2.5`.
-            if let t = row["title"], pyTruthy(t) { d["title"] = t }
-            if let l = row["level"], pyTruthy(l) { d["level"] = l }
-            if let refs = row["refs"], pyTruthy(refs) { d["refs"] = .integer(Int64(sizedLen(refs))) }
-            if kind == "call" || kind == "task" {
-                d["verb"] = row["verb"] ?? .null
-                if let n = row["name"], pyTruthy(n) { d["name"] = n }
-                // The status is the SETTLE's, read off the nested stamp — a
-                // top-level `status` is not one, and an empty stamp is no status
-                // at all. A non-dict stamp is no status either (python guards
-                // `.get` since 2026-09-20; it used to raise off the wire).
-                if let o = row["outcome"], pyTruthy(o) {
-                    if case .object = o { d["status"] = o["status"] ?? .null } else { d["status"] = .null }
-                }
-            } else if kind == "view" {
-                // a view digest says how much it holds, never the array itself
-                let viewIds = row["ids"] ?? .null
-                d["ids"] = .integer(Int64(pyTruthy(viewIds) ? sizedLen(viewIds) : 0))
-                d["budget"] = row["budget"] ?? .null
-                // LAST, and an assignment: a view that already carried a truthy
-                // `title` keeps that key's position and takes `why` as its value.
-                d["title"] = row["why"] ?? .null
-            }
-            out.append(.object(d))
+            // ONE digest function, shared with the `row` state event.
+            out.append(.object(rowDigest(rid: rid, row: row)))
         }
         // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
         // The cap measures `len(json.dumps(d))` — python's separators, its

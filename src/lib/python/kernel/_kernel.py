@@ -453,6 +453,47 @@ class Kernel:
         self.next_id = n + 1
         return n
 
+    @staticmethod
+    def row_digest(rid: int, row: dict) -> dict:
+        """The DIGEST of one row — what `messages` answers and what the `row` state
+        event carries: id, agent, parent, kind, role, a 120-char head and the byte
+        count, plus the per-kind extras. NEVER the content: bodies stay behind
+        `pull` / `rows_read`, so the gate is not bypassed by a stream."""
+        content = str(row.get("content", ""))
+        d = {
+            "id": rid,
+            "agent": row.get("agent"),
+            "parent": row.get("parent"),
+            "kind": row.get("kind") or row.get("role"),
+            "role": row.get("role"),
+            "head": content[:120].replace("\n", " "),
+            "bytes": len(content),
+        }
+        if row.get("title"):
+            d["title"] = row["title"]
+        if row.get("level"):
+            d["level"] = row["level"]
+        refs = row.get("refs")
+        if refs:
+            # A caller-written row may hold anything; a digest never raises.
+            d["refs"] = len(refs) if isinstance(refs, (list, tuple, dict, str)) else 1
+        if row.get("kind") in ("call", "task"):
+            d["verb"] = row.get("verb")
+            if row.get("name"):
+                d["name"] = row["name"]
+            outcome = row.get("outcome")
+            if outcome:
+                d["status"] = (
+                    outcome.get("status") if isinstance(outcome, dict) else None
+                )
+        elif row.get("kind") == "view":
+            # a view digest says how much it holds, never the array itself
+            ids = row.get("ids") or []
+            d["ids"] = len(ids) if isinstance(ids, (list, tuple, dict, str)) else 1
+            d["budget"] = row.get("budget")
+            d["title"] = row.get("why")
+        return d
+
     def rows_put(self, agent_id: str, row: dict) -> int:
         """Append one message for `agent_id`; mint its id when absent, accept a
         PRE-MINTED unused one, refuse anything else — the store is the only
@@ -482,6 +523,13 @@ class Kernel:
             self._view_by_agent[agent_id] = rid
         for q in self._tails:
             q.put_nowait(stored)
+        # THE ROW EVENT — a view learns "row <id> arrived" reactively and pulls the
+        # body when it needs it. Digest only, on the same state stream a
+        # `state_subscribe` already holds; hydration publishes nothing because no
+        # subscriber exists yet at bootstrap.
+        self.publish_state(
+            {"agent_id": agent_id, "kind": "row", "row": self.row_digest(rid, stored)}
+        )
         return rid
 
     async def rows_stream(self, after: int):

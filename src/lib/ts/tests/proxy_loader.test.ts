@@ -102,3 +102,27 @@ test("start persists the existing tree; mutations persist/forget over the bridge
 
   await loader.stop();
 });
+
+test("a host `row` event is relayed to subscribers untouched and never persists anything", async () => {
+  const k = new Kernel();
+  k.registerBundle("canvas.ts", () => null);
+  const fake = new FakeBridge();
+  k.bridge = fake;
+  k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
+  const loader = new ProxyLoader(k, "sess1", { debounceMs: 100000 });
+  loader.start();
+  await loader.flush();
+  const before = fake.calls.length;
+
+  const seen: unknown[] = [];
+  k.addStateSubscriber((e) => seen.push(e));
+  const row = { id: 42, agent: "ai", parent: null, kind: "body", role: "user", head: "SECRET line one line two", bytes: 24 };
+  k.publishState({ agent_id: "ai", kind: "row", row });
+  await loader.flush();
+
+  assert.equal(seen.length, 1);
+  assert.deepEqual((seen[0] as { row: unknown }).row, row);
+  assert.ok(!("content" in row));
+  // the loader ignores it: nothing persisted, nothing forgotten
+  assert.equal(fake.calls.length, before);
+});

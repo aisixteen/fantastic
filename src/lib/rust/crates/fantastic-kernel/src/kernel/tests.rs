@@ -362,9 +362,19 @@ async fn state_events_are_python_shape() {
         .iter()
         .map(|e| e["kind"].as_str().unwrap_or(""))
         .collect();
-    assert_eq!(kinds, vec!["send", "drain"], "{events:?}");
+    // THE ROW EVENT leads: the batch's `call` row is appended before dispatch,
+    // and every append publishes its digest on the same stream (2026-09-23).
+    assert_eq!(kinds, vec!["row", "send", "drain"], "{events:?}");
+    assert_eq!(events[0]["row"]["verb"], json!("nope"));
+    assert!(
+        !events[0]["row"]
+            .as_object()
+            .expect("digest")
+            .contains_key("content"),
+        "a row event carries the digest, never the body"
+    );
 
-    let send = &events[0];
+    let send = &events[1];
     let keys: Vec<&str> = send
         .as_object()
         .expect("object")
@@ -390,7 +400,7 @@ async fn state_events_are_python_shape() {
     assert_eq!(send["payload"], json!({"type": "nope"}));
     assert!(send["ts"].is_f64());
 
-    let drain = &events[1];
+    let drain = &events[2];
     let dkeys: Vec<&str> = drain
         .as_object()
         .expect("object")

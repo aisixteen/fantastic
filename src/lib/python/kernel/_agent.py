@@ -2010,8 +2010,74 @@ class Agent:
 
     # ─── public API: state stream ──────────────────────────────
 
-    def add_state_subscriber(self, callback: Callable[[dict], None]):
-        return self.ctx.add_state_subscriber(callback)
+    def may_read_rows(self, reader_id: str | None, owner_id: str) -> bool:
+        """THE ROW READ GATE — one rule for `messages` and for the `row` state event:
+        an operator (`None`) or the owner itself always; anyone else only if the
+        OWNER's `callable_by` names them for `messages`. A missing owner reads as
+        refused."""
+        if reader_id is None or reader_id == owner_id:
+            return True
+        owner = self.ctx.agents.get(owner_id)
+        if owner is None:
+            return False
+        d = authorize_call(
+            owner._meta.get("callable_by") or {},
+            "messages",
+            reader_id,
+            holder_id=owner.id,
+            holder_parent=owner.parent.id if owner.parent is not None else None,
+            holder_children=frozenset(owner._children),
+            loader_id=self._root().id,
+            enforce_privileged=False,
+        )
+        return bool(d.allowed)
+
+    def authorize_row_bodies(self, reader_id: str) -> dict | None:
+        """May `reader_id` receive row BODIES on the state stream? Bodies are what
+        `rows_read` guards — the privileged, kernel-wide read no wildcard carries —
+        so a body subscription is gated exactly as that verb on the ROOT, once, at
+        subscribe time. Refusal, or None. Operator (`sender=None`) ungated."""
+        if _current_sender.get() is None:
+            return None
+        return self._gate(reader_id, "rows_read", self._root(), {})
+
+    def add_state_subscriber(
+        self,
+        callback: Callable[[dict], None],
+        reader_id: str | None = None,
+        body: bool = False,
+    ):
+        """Tap the state stream. `reader_id` names WHO reads (a leg subscribing on
+        behalf of a client, after `authorize_state_subscribe`): `row` events are
+        then delivered only for agents that reader may read (`may_read_rows`) —
+        the stream cannot leak a digest the `messages` verb would refuse. An
+        operator tap (`None`) sees every event.
+
+        `body=True` (after `authorize_row_bodies` for a reader) adds the row's
+        `content` to every `row` event, so a view that renders every row skips
+        the pull round-trip; a `rows_read` holder reads every row whole already,
+        so no per-row filter applies to it."""
+        if not body and reader_id is None:
+            return self.ctx.add_state_subscriber(callback)
+
+        def gated(event: dict) -> None:
+            if event.get("kind") == "row":
+                if not body and not self.may_read_rows(
+                    reader_id, event.get("agent_id", "")
+                ):
+                    return
+                if body:
+                    row = self.ctx.rows.get(event["row"]["id"])
+                    event = {
+                        **event,
+                        "row": {
+                            **event["row"],
+                            "content": (row or {}).get("content", ""),
+                        },
+                    }
+            callback(event)
+
+        return self.ctx.add_state_subscriber(gated)
 
     def state_snapshot(self) -> list[dict]:
         return self.ctx.state_snapshot()
@@ -2236,29 +2302,11 @@ class Agent:
                 arg="ids",
             )
         caller = _current_origin.get()
-        root_id = self._root().id
         allowed_owner: dict[str, bool] = {}
 
         def may_read(owner_id: str) -> bool:
-            if caller is None or caller == owner_id:
-                return True
-            if owner_id in allowed_owner:
-                return allowed_owner[owner_id]
-            owner = self.ctx.agents.get(owner_id)
-            if owner is None:
-                allowed_owner[owner_id] = False
-                return False
-            d = authorize_call(
-                owner._meta.get("callable_by") or {},
-                "messages",
-                caller,
-                holder_id=owner.id,
-                holder_parent=owner.parent.id if owner.parent is not None else None,
-                holder_children=frozenset(owner._children),
-                loader_id=root_id,
-                enforce_privileged=False,
-            )
-            allowed_owner[owner_id] = bool(d.allowed)
+            if owner_id not in allowed_owner:
+                allowed_owner[owner_id] = self.may_read_rows(caller, owner_id)
             return allowed_owner[owner_id]
 
         after = _as_id(payload.get("after"))
@@ -2273,42 +2321,7 @@ class Agent:
             if not may_read(row.get("agent", "")):
                 refused.append(rid)
                 continue
-            content = str(row.get("content", ""))
-            d = {
-                "id": rid,
-                "agent": row.get("agent"),
-                "parent": row.get("parent"),
-                "kind": row.get("kind") or row.get("role"),
-                "role": row.get("role"),
-                "head": content[:120].replace("\n", " "),
-                "bytes": len(content),
-            }
-            if row.get("title"):
-                d["title"] = row["title"]
-            if row.get("level"):
-                d["level"] = row["level"]
-            refs = row.get("refs")
-            if refs:
-                # A caller-written row may hold anything; a digest never raises.
-                d["refs"] = (
-                    len(refs) if isinstance(refs, (list, tuple, dict, str)) else 1
-                )
-            if row.get("kind") in ("call", "task"):
-                d["verb"] = row.get("verb")
-                if row.get("name"):
-                    d["name"] = row["name"]
-                outcome = row.get("outcome")
-                if outcome:
-                    d["status"] = (
-                        outcome.get("status") if isinstance(outcome, dict) else None
-                    )
-            elif row.get("kind") == "view":
-                # a view digest says how much it holds, never the array itself
-                ids = row.get("ids") or []
-                d["ids"] = len(ids) if isinstance(ids, (list, tuple, dict, str)) else 1
-                d["budget"] = row.get("budget")
-                d["title"] = row.get("why")
-            out.append(d)
+            out.append(self.ctx.row_digest(rid, row))
         # DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
         try:
             limit = int(payload.get("limit") or 0)

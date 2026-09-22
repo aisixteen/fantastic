@@ -18,13 +18,15 @@
 //! persister tails it with [`RowStore::subscribe`]. Both are optional and
 //! interchangeable.
 
-use serde_json::{Map, Value};
+use fantastic_bundle::{py_str, py_truthy};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::agent::AgentId;
+use crate::kernel::StateSubs;
 
 /// One stored message. An OPEN map, as python's row is an open dict: `kind`,
 /// `role`, `parent`, `content`, `title`, `level`, `refs`, `verb`, `origin`,
@@ -48,6 +50,9 @@ struct Inner {
 /// `rows`.
 pub struct RowStore {
     inner: Mutex<Inner>,
+    /// The kernel's state taps, so an append can publish THE ROW EVENT. `None`
+    /// for a bare store (the store's own unit tests); every kernel wires it.
+    state: Option<Arc<StateSubs>>,
 }
 
 impl Default for RowStore {
@@ -65,6 +70,17 @@ impl RowStore {
                 next_id: 1,
                 ..Inner::default()
             }),
+            state: None,
+        }
+    }
+
+    /// The kernel's store: an empty store that PUBLISHES each append as a `row`
+    /// state event on the kernel's own registry.
+    #[must_use]
+    pub(crate) fn with_state(state: Arc<StateSubs>) -> Self {
+        Self {
+            state: Some(state),
+            ..Self::new()
         }
     }
 
@@ -139,12 +155,27 @@ impl RowStore {
             }
             _ => {}
         }
-        inner.rows.insert(rid, stored);
         inner.by_agent.entry(agent.clone()).or_default().push(rid);
         // A DROPPED TAIL LEAVES A DEAD SENDER. Python removes the queue in the
         // generator's `finally`; here the receiver's drop closes the channel and
         // the next append prunes it.
         inner.tails.retain(|tx| tx.send(rid).is_ok());
+        // THE ROW EVENT — a view learns "row <id> arrived" reactively on the
+        // state stream it already holds, and pulls the body when it needs it.
+        // DIGEST ONLY: the content stays behind `pull` / `rows_read`, so a
+        // stream never bypasses the gate. Published AFTER storing and after
+        // feeding the tails, and OUTSIDE the store lock — a subscriber runs
+        // arbitrary code on this thread and may read the store back.
+        let digest = self.state.is_some().then(|| row_digest(rid, &stored));
+        inner.rows.insert(rid, stored);
+        drop(inner);
+        if let (Some(subs), Some(digest)) = (self.state.as_ref(), digest) {
+            let mut event = Map::new();
+            event.insert("agent_id".to_string(), Value::from(agent.0.clone()));
+            event.insert("kind".to_string(), Value::from("row"));
+            event.insert("row".to_string(), digest);
+            crate::kernel::publish_state_to(subs, &Value::Object(event), None);
+        }
         Ok(rid)
     }
 
@@ -319,6 +350,122 @@ fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+/// THE DIGEST of one row — what the `messages` verb answers and what the `row`
+/// state event carries: id, agent, parent, kind, role, a 120-character head and
+/// the length, plus the per-kind extras. NEVER the content: bodies stay behind
+/// `pull` / `rows_read`, so the gate is not bypassed by a stream.
+///
+/// A rule-for-rule port of python's `Kernel.row_digest`. Three things about it
+/// are easy to get wrong and all three were:
+///
+/// * `content` is `str(row.get("content", ""))` — an ABSENT key is `""`, every
+///   other type is its python `str()` (`None` → `"None"`, `['a', 1, True]`), and
+///   `head`/`bytes` count CODE POINTS of that string, not UTF-8 bytes.
+/// * every optional key follows PYTHON TRUTHINESS (`if row.get(k):`), and the
+///   value copied in is the row's RAW value, whatever its type.
+/// * `status` comes from the nested `outcome`, never from a top-level `status`.
+///
+/// KEY ORDER IS PYTHON'S INSERTION ORDER — `serde_json::Map` is `preserve_order`
+/// here, and a view diffs these bytes.
+#[must_use]
+pub fn row_digest(rid: i64, row: &Row) -> Value {
+    let content = row.get("content").map_or_else(String::new, py_str);
+    let mut d = Map::new();
+    d.insert("id".to_string(), json!(rid));
+    d.insert(
+        "agent".to_string(),
+        row.get("agent").cloned().unwrap_or(Value::Null),
+    );
+    d.insert(
+        "parent".to_string(),
+        row.get("parent").cloned().unwrap_or(Value::Null),
+    );
+    let kind = row.get("kind").cloned().unwrap_or(Value::Null);
+    let role = row.get("role").cloned().unwrap_or(Value::Null);
+    d.insert(
+        "kind".to_string(),
+        if py_truthy(&kind) { kind } else { role.clone() },
+    );
+    d.insert("role".to_string(), role);
+    d.insert(
+        "head".to_string(),
+        Value::from(
+            content
+                .chars()
+                .take(120)
+                .collect::<String>()
+                .replace('\n', " "),
+        ),
+    );
+    d.insert("bytes".to_string(), json!(content.chars().count()));
+    if let Some(t) = row.get("title").filter(|v| py_truthy(v)) {
+        d.insert("title".to_string(), t.clone());
+    }
+    if let Some(l) = row.get("level").filter(|v| py_truthy(v)) {
+        d.insert("level".to_string(), l.clone());
+    }
+    if let Some(r) = row.get("refs").filter(|v| py_truthy(v)) {
+        d.insert("refs".to_string(), json!(sized_len(r)));
+    }
+    match row.get("kind").and_then(Value::as_str) {
+        Some("call" | "task") => {
+            d.insert(
+                "verb".to_string(),
+                row.get("verb").cloned().unwrap_or(Value::Null),
+            );
+            if let Some(n) = row.get("name").filter(|v| py_truthy(v)) {
+                d.insert("name".to_string(), n.clone());
+            }
+            if let Some(outcome) = row.get("outcome").filter(|v| py_truthy(v)) {
+                // A non-dict stamp is no status (python guards `.get` since
+                // 2026-09-20; it used to raise off the wire).
+                d.insert(
+                    "status".to_string(),
+                    outcome
+                        .as_object()
+                        .and_then(|o| o.get("status").cloned())
+                        .unwrap_or(Value::Null),
+                );
+            }
+        }
+        Some("view") => {
+            // A VIEW DIGEST SAYS HOW MUCH IT HOLDS, never the array itself.
+            let ids = row.get("ids").filter(|v| py_truthy(v));
+            d.insert(
+                "ids".to_string(),
+                json!(match ids {
+                    Some(v) => sized_len(v),
+                    None => 0,
+                }),
+            );
+            d.insert(
+                "budget".to_string(),
+                row.get("budget").cloned().unwrap_or(Value::Null),
+            );
+            // ASSIGNED LAST, and it overwrites a `title` the row already
+            // carried — python's plain `d["title"] = ...`, which keeps the
+            // earlier key's POSITION when there was one.
+            d.insert(
+                "title".to_string(),
+                row.get("why").cloned().unwrap_or(Value::Null),
+            );
+        }
+        _ => {}
+    }
+    Value::Object(d)
+}
+
+/// `len(x)` for a sized value, `1` for a scalar — a digest counts, it never
+/// raises on a row a caller wrote by hand (python, 2026-09-20).
+fn sized_len(v: &Value) -> usize {
+    match v {
+        Value::Array(a) => a.len(),
+        Value::Object(o) => o.len(),
+        Value::String(s) => s.chars().count(),
+        _ => 1,
+    }
 }
 
 #[cfg(test)]

@@ -601,3 +601,151 @@ struct MessagesGateTests {
         #expect((r["rows"].asArray ?? []).map { $0["content"].asString } == ["private"], "\(r.serialize())")
     }
 }
+
+// MARK: - THE ROW EVENT (2026-09-23)
+
+@Test("a row append publishes its digest and never its body")
+func aRowAppendPublishesItsDigestAndNeverItsBody() async {
+    // Twin of python `test_a_row_append_publishes_its_digest_and_never_its_body`:
+    // a view learns "row <id> arrived" reactively on the state stream it already
+    // holds, and pulls the body on demand. Digest only.
+    let k = bootKernel()
+    let box = Box()
+    let token = k.subscribe { ev, _ in box.append(ev) }
+    defer { k.unsubscribe(token) }
+    let rid = put(
+        k, "kernel_state",
+        ["kind": .string("body"), "role": .string("user"),
+         "content": .string("SECRET line one\nline two")])
+    let events = box.taken().filter { $0["kind"].asString == "row" }
+    #expect(events.count == 1)
+    guard let ev = events.first else { return }
+    #expect(ev["agent_id"].asString == "kernel_state")
+    let d = ev["row"]
+    #expect(d["id"].asInt == rid)
+    #expect(d["kind"].asString == "body")
+    #expect(d["bytes"].asInt == 24)
+    #expect(d["head"].asString == "SECRET line one line two")
+    #expect(d.asObject?["content"] == nil)
+    // the same digest `messages` answers, key ORDER included
+    let out = await send(
+        k, "kernel_state", .object(["type": .string("messages"), "ids": .array([.integer(rid)])]))
+    let fromVerb = out["rows"].asArray?.first ?? .null
+    #expect(fromVerb.serialize() == d.serialize(), "\(fromVerb.serialize()) != \(d.serialize())")
+}
+
+private final class Box: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [JSON] = []
+    func append(_ j: JSON) {
+        lock.lock()
+        items.append(j)
+        lock.unlock()
+    }
+    func taken() -> [JSON] {
+        lock.lock()
+        defer { lock.unlock() }
+        return items
+    }
+}
+
+@Test("row events reach only readers the owner names")
+func rowEventsReachOnlyReadersTheOwnerNames() async {
+    // THE ROW EVENT IS GATED LIKE `messages`: a leg that may tap the state
+    // stream still sees a row digest only for agents whose `callable_by` names
+    // it for `messages`; an operator tap sees every row. Twin of python
+    // `test_row_events_reach_only_readers_the_owner_names`.
+    let k = bootKernel()
+    await mk(k, "victim")
+    await mk(k, "nosy")
+    let seen = Box()
+    let everything = Box()
+    let t1 = k.subscribe(readerId: "nosy") { ev, _ in seen.append(ev) }
+    let t2 = k.subscribe { ev, _ in everything.append(ev) }
+    defer {
+        k.unsubscribe(t1)
+        k.unsubscribe(t2)
+    }
+    _ = put(
+        k, "victim",
+        ["kind": .string("body"), "role": .string("user"), "content": .string("x")])
+    #expect(
+        everything.taken().contains { $0["kind"].asString == "row" }, "operator tap lost the row")
+    #expect(
+        !seen.taken().contains { $0["kind"].asString == "row" }, "row digest leaked ungranted")
+    let r = await send(
+        k, "kernel_state",
+        .object([
+            "type": .string("update_agent"), "id": .string("victim"),
+            "callable_by": .object([
+                "$self": .string("*"), "$parent": .string("*"),
+                "nosy": .array([.string("messages")]),
+            ]),
+        ]))
+    #expect(r["error"].isNull, "\(r.serialize())")
+    _ = put(
+        k, "victim",
+        ["kind": .string("body"), "role": .string("user"), "content": .string("y")])
+    // the root's own call/settle rows for that update ALSO reach nosy — a child
+    // reads its parent's rows through the `$children` baseline — so scope to victim
+    let rows = seen.taken().filter {
+        $0["kind"].asString == "row" && $0["agent_id"].asString == "victim"
+    }
+    #expect(rows.count == 1)
+    #expect(rows.last?["row"]["head"].asString == "y")
+    _ = put(
+        k, "nosy",
+        ["kind": .string("body"), "role": .string("user"), "content": .string("mine")])
+    let mine = seen.taken().last { $0["kind"].asString == "row" }
+    #expect(mine?["row"]["head"].asString == "mine")
+}
+
+@Test("row bodies ride the stream only for a rows_read holder")
+func rowBodiesRideTheStreamOnlyForARowsReadHolder() async {
+    // `body:true` — the row event carries content, gated as `rows_read` on the
+    // root (privileged: a wildcard does not carry it); an operator tap gets
+    // bodies ungated; without the flag no event ever carries content. Twin of
+    // python `test_row_bodies_ride_the_stream_only_for_a_rows_read_holder`.
+    let k = bootKernel()
+    await mk(k, "secret")
+    await mk(k, "nosy")
+    await asSender("nosy") { @Sendable in
+        #expect(k.authorizeRowBodies(AgentId("nosy")) != nil, "bodies ungranted")
+    }
+    let r = await send(
+        k, "kernel_state",
+        .object([
+            "type": .string("update_agent"), "id": .string("nosy"),
+            "can_call": .object([
+                "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+                "kernel_state": .array([.string("state_subscribe"), .string("rows_read")]),
+            ]),
+        ]))
+    #expect(r["error"].isNull, "\(r.serialize())")
+    await asSender("nosy") { @Sendable in
+        #expect(k.authorizeRowBodies(AgentId("nosy")) == nil)
+    }
+    let full = Box()
+    let digest = Box()
+    let t1 = k.subscribe(readerId: "nosy", withBodies: true) { ev, _ in full.append(ev) }
+    let t2 = k.subscribe { ev, _ in digest.append(ev) }  // operator tap, no bodies asked
+    defer {
+        k.unsubscribe(t1)
+        k.unsubscribe(t2)
+    }
+    _ = put(
+        k, "secret",
+        ["kind": .string("body"), "role": .string("user"), "content": .string("the body")])
+    let got = full.taken().filter {
+        $0["kind"].asString == "row" && $0["agent_id"].asString == "secret"
+    }
+    #expect(got.count == 1)
+    #expect(got.first?["row"]["content"].asString == "the body")
+    #expect(got.first?["row"]["head"].asString == "the body")
+    #expect(got.first?["row"]["bytes"].asInt == 8)
+    let plain = digest.taken().filter {
+        $0["kind"].asString == "row" && $0["agent_id"].asString == "secret"
+    }
+    #expect(plain.count == 1)
+    #expect(plain.first?["row"].asObject?["content"] == nil)
+}

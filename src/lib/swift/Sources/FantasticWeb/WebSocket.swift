@@ -569,8 +569,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             // target, verb and payload summary, for every agent in the tree. So
             // it is gated on the ROOT — an ingress rule answers "may this client
             // reach this leg", never "what may it READ".
+            // `body:true` — row events carry content; gated as `rows_read` on
+            // the root (python `_on_state_subscribe`).
+            let wantsBodies = frame["body"].asBool == true
             let denial = KernelTaskLocals.$currentSender.withValue(legId) {
                 kernel.authorizeStateSubscribe(legId)
+                    ?? (wantsBodies ? kernel.authorizeRowBodies(legId) : nil)
             }
             if let d = denial {
                 outLock.sync {
@@ -597,7 +601,11 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             // could otherwise land between two events of one flush, or between a
             // flush and the reply it belongs with.
             let outLock = self.outLock
-            let token = kernel.subscribe { [weak kernel] event, body in
+            // GATED PER ROW: this leg reads on the client's behalf, as itself,
+            // so a `row` digest only reaches it for an agent whose `callable_by`
+            // names the leg for `messages` (python `reader_id=web_agent_id`).
+            let token = kernel.subscribe(readerId: legId.value, withBodies: wantsBodies) {
+                [weak kernel] (event: JSON, body: InboxBody?) in
                 guard case .object(let ev) = event else { return }
                 // `type` FIRST, then the event's own keys — python's
                 // `{"type": "state_event", **event}`, which is the byte order a

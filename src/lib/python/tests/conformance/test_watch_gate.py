@@ -161,3 +161,74 @@ async def test_the_state_stream_needs_an_explicit_edge_on_the_root(wired):
 
 async def test_an_operator_may_tap_the_state_stream(wired):
     assert wired.authorize_state_subscribe("cli") is None
+
+
+async def test_row_events_reach_only_readers_the_owner_names(wired):
+    """THE ROW EVENT IS GATED LIKE `messages`: a leg that may tap the state
+    stream still sees a row digest only for agents whose `callable_by` names it
+    for `messages`; an operator tap sees every row."""
+    seen: list[dict] = []
+    wired.add_state_subscriber(seen.append, reader_id="nosy")
+    everything: list[dict] = []
+    wired.add_state_subscriber(everything.append)  # operator tap
+    wired.ctx.rows_put("secret", {"kind": "body", "role": "user", "content": "x"})
+    assert [e for e in everything if e["kind"] == "row"], "operator tap lost the row"
+    assert not [e for e in seen if e["kind"] == "row"], "row digest leaked ungranted"
+    await wired.send(
+        [
+            {
+                "target": "kernel",
+                "payload": {
+                    "type": "update_agent",
+                    "id": "secret",
+                    "callable_by": {"$self": "*", "$parent": "*", "nosy": ["messages"]},
+                },
+            }
+        ]
+    )
+    wired.ctx.rows_put("secret", {"kind": "body", "role": "user", "content": "y"})
+    # the root's own call/settle rows for that update ALSO reach nosy — a child
+    # reads its parent's rows through the `$children` baseline — so scope to victim
+    rows = [e for e in seen if e["kind"] == "row" and e["agent_id"] == "secret"]
+    assert len(rows) == 1 and rows[0]["row"]["head"] == "y"
+    wired.ctx.rows_put("nosy", {"kind": "body", "role": "user", "content": "mine"})
+    assert [e for e in seen if e["kind"] == "row"][-1]["row"]["head"] == "mine"
+
+
+async def test_row_bodies_ride_the_stream_only_for_a_rows_read_holder(wired):
+    """`body:true` — the row event carries content, gated as `rows_read` on the
+    root (privileged: a wildcard does not carry it); an operator tap gets bodies
+    ungated; without the flag no event ever carries content."""
+    with sender_context("nosy"):
+        assert wired.authorize_row_bodies("nosy") is not None, "bodies ungranted"
+    await wired.send(
+        [
+            {
+                "target": "kernel",
+                "payload": {
+                    "type": "update_agent",
+                    "id": "nosy",
+                    "can_call": {
+                        "$self": "*",
+                        "$parent": "*",
+                        "$children": "*",
+                        wired.id: ["state_subscribe", "rows_read"],
+                    },
+                },
+            }
+        ]
+    )
+    with sender_context("nosy"):
+        assert wired.authorize_row_bodies("nosy") is None
+    full: list[dict] = []
+    wired.add_state_subscriber(full.append, reader_id="nosy", body=True)
+    digest: list[dict] = []
+    wired.add_state_subscriber(digest.append)  # operator tap, no bodies asked
+    wired.ctx.rows_put(
+        "secret", {"kind": "body", "role": "user", "content": "the body"}
+    )
+    got = [e for e in full if e["kind"] == "row" and e["agent_id"] == "secret"]
+    assert len(got) == 1 and got[0]["row"]["content"] == "the body"
+    assert got[0]["row"]["head"] == "the body" and got[0]["row"]["bytes"] == 8
+    plain = [e for e in digest if e["kind"] == "row" and e["agent_id"] == "secret"]
+    assert len(plain) == 1 and "content" not in plain[0]["row"]
