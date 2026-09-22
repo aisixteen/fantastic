@@ -201,6 +201,20 @@ public final class Kernel: @unchecked Sendable {
         self.storage = storage
         self.bundles = bundles
         self.inboxBound = inboxBound
+        // THE ROW EVENT — every appended row announces itself on the SAME state
+        // stream a `state_subscribe` already holds, at DIGEST resolution; the
+        // body stays behind `pull`/`rows_read`. Hydration publishes nothing
+        // because no subscriber exists yet at bootstrap (`hydrateMessages` runs
+        // before any bundle or client can subscribe), and `publishState` is a
+        // no-op with no subscribers anyway. Python `Kernel.rows_put`.
+        rows.onRow = { [weak self] rid, row in
+            self?.publishState(
+                .object([
+                    "agent_id": row["agent"] ?? .null,
+                    "kind": .string("row"),
+                    "row": .object(rowDigest(rid: rid, row: row)),
+                ]))
+        }
     }
 
     // ── Agent map ───────────────────────────────────────────────
@@ -502,6 +516,68 @@ public final class Kernel: @unchecked Sendable {
     }
 
     // ── State events ────────────────────────────────────────────
+
+    /// THE ROW READ GATE — one rule for `messages` and for the `row` state
+    /// event: an operator (`nil`) or the owner itself always; anyone else only
+    /// if the OWNER's `callable_by` names them for `messages`. A missing owner
+    /// reads as refused. Python `Agent.may_read_rows`.
+    public func mayReadRows(reader readerId: String?, owner ownerId: String) -> Bool {
+        guard let readerId, readerId != ownerId else { return true }
+        guard let owner = agent(AgentId(ownerId)) else { return false }
+        return authorizeCall(
+            grant: owner.metaValue(forKey: "callable_by") ?? .null, verb: "messages",
+            otherId: readerId, holderId: owner.id.value,
+            parentId: owner.parentId?.value,
+            childIds: Set(owner.childIds().map { $0.value }), loaderId: root?.id.value,
+            enforcePrivileged: false
+        ).allowed
+    }
+
+    /// May `readerId` receive row BODIES on the state stream? Bodies are what
+    /// `rows_read` guards — the privileged, kernel-wide read no wildcard
+    /// carries — so a body subscription is gated exactly as that verb on the
+    /// ROOT, once, at subscribe time. Refusal, or `nil`. Operator ungated.
+    /// Python `Agent.authorize_row_bodies`.
+    public func authorizeRowBodies(_ readerId: AgentId) -> JSON? {
+        guard KernelTaskLocals.currentSender != nil else { return nil }
+        guard let rootAgent = root else { return nil }
+        return gate(sender: readerId, verb: "rows_read", target: rootAgent, payload: .null)
+    }
+
+    /// Tap the state stream. `readerId` names WHO reads (a leg subscribing on
+    /// behalf of a client, after `authorizeStateSubscribe`): `row` events are
+    /// then delivered only for agents that reader may read (`mayReadRows`) —
+    /// the stream cannot leak a digest the `messages` verb would refuse. An
+    /// operator tap (`nil`) sees every event.
+    ///
+    /// `withBodies` (after `authorizeRowBodies` for a reader) adds the row's
+    /// `content` to every `row` event, so a view that renders every row skips
+    /// the pull round-trip; a `rows_read` holder reads every row whole already,
+    /// so no per-row filter applies to it. Python `add_state_subscriber`.
+    @discardableResult
+    public func subscribe(
+        readerId: String?, withBodies: Bool = false, _ cb: @escaping StateSubscriber
+    ) -> SubscriberToken {
+        if !withBodies, readerId == nil { return subscribe(cb) }
+        return subscribe { [weak self] event, body in
+            var event = event
+            if event["kind"].asString == "row" {
+                if !withBodies,
+                    self?.mayReadRows(reader: readerId, owner: event["agent_id"].asString ?? "")
+                        != true
+                {
+                    return
+                }
+                if withBodies, case .object(var o) = event, case .object(var r) = o["row"] ?? .null {
+                    let stored = (event["row"]["id"].asInt).flatMap { self?.rows.getOne($0) }
+                    r["content"] = stored?["content"] ?? .string("")
+                    o["row"] = .object(r)
+                    event = .object(o)
+                }
+            }
+            cb(event, body)
+        }
+    }
 
     @discardableResult
     public func subscribe(_ cb: @escaping StateSubscriber) -> SubscriberToken {

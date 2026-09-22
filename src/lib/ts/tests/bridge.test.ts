@@ -250,3 +250,23 @@ test("correlators stay unique across many calls on one socket", async () => {
   assert.equal(seen.size, 5, "a correlator was reused on one socket");
   bridge.close();
 });
+
+test("the state stream can be opened with bodies; the frame carries `body: true`", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+  });
+  bridge.forward("file_x", { type: "list", path: "." }).catch(() => undefined);
+  await until(() => (fk.forEndpoint("kernel_state")[0] ?? undefined) !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  const off = bridge.subscribeState(() => undefined, true);
+  await until(() => sock.sent.some((f) => f["type"] === "state_subscribe"));
+  const sub = sock.sent.find((f) => f["type"] === "state_subscribe")!;
+  assert.equal(sub["body"], true);
+  off();
+  await until(() => sock.sent.some((f) => f["type"] === "state_unsubscribe"));
+  bridge.close();
+});

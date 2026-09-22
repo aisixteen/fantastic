@@ -1328,6 +1328,59 @@ impl Kernel {
         self.gate(watcher_id, "state_subscribe", &root, &Value::Null)
     }
 
+    /// May `reader` receive row BODIES on the state stream? Bodies are what
+    /// `rows_read` guards — the privileged, kernel-wide read no wildcard carries
+    /// — so a body subscription is gated exactly as that verb on the ROOT, once,
+    /// at subscribe time. Refusal, or `None`. An OPERATOR tap is ungated.
+    pub fn authorize_row_bodies(self: &Arc<Self>, reader: &AgentId) -> Option<Value> {
+        current_sender()?;
+        let root = self.root()?;
+        self.gate(reader, "rows_read", &root, &Value::Null)
+    }
+
+    /// THE ROW READ GATE — one rule for the `messages` verb and for the `row`
+    /// state event: an operator (`None`) or the owner itself always; anyone else
+    /// only if the OWNER's `callable_by` names them for `messages`. A missing
+    /// owner reads as refused.
+    ///
+    /// A ROOT VERB SKIPS INGRESS, which is why this runs at all — but it is the
+    /// OWNER's ingress being re-checked, not an egress escalation, so
+    /// privileged-verb cover does not apply.
+    #[must_use]
+    pub fn may_read_rows(&self, reader: Option<&AgentId>, owner: &str) -> bool {
+        let Some(reader) = reader else { return true };
+        if reader.0 == owner {
+            return true;
+        }
+        let root_id = self.root().map(|r| r.id.0.clone());
+        self.agents
+            .get(&AgentId::from(owner))
+            .map(|e| {
+                let holder = e.value();
+                let grant = holder
+                    .meta
+                    .read()
+                    .expect("meta lock poisoned")
+                    .get("callable_by")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let children: std::collections::HashSet<String> =
+                    holder.child_ids().into_iter().map(|c| c.0).collect();
+                crate::authz::authorize_call(
+                    &grant,
+                    "messages",
+                    reader.0.as_str(),
+                    holder.id.0.as_str(),
+                    holder.parent_id.as_ref().map(|p| p.0.as_str()),
+                    &children,
+                    root_id.as_deref(),
+                    false,
+                )
+                .allowed
+            })
+            .unwrap_or(false)
+    }
+
     /// Detach a previously-registered watcher.
     pub async fn unwatch(&self, src_id: &AgentId, watcher_id: &AgentId) {
         if let Some(src) = self.agents.get(src_id) {

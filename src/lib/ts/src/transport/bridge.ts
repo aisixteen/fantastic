@@ -81,6 +81,8 @@ class Conn {
   private readonly lifecycle = new Set<(state: "connected" | "disconnected") => void>();
   // host state stream (telemetry) rides this conn when it's the control conn
   private wantsState = false;
+  /** `state_subscribe` with `body: true`: row events carry content (host-gated as `rows_read`). */
+  private wantsBodies = false;
   private onState: ((frame: Envelope) => void) | null = null;
   private readonly pending = new Map<string, Pending>();
   private ready!: Promise<void>;
@@ -118,7 +120,7 @@ class Conn {
       this.delay = 1000;
       // `/<endpoint>/ws` auto-watches `endpoint`; replay the state stream
       // subscription so a reconnect resyncs (a fresh snapshot follows).
-      if (this.wantsState) this.sendFrame({ type: "state_subscribe" });
+      if (this.wantsState) this.sendFrame(this.subscribeFrame());
       const r = this.resolveReady;
       this.resolveReady = null;
       if (r !== null) r();
@@ -239,11 +241,21 @@ class Conn {
     this.onState = sink;
   }
 
-  /** Turn the host state stream on/off on this conn (sends subscribe now if connected). */
-  setWantsState(on: boolean): void {
-    if (this.wantsState === on) return;
+  /** Turn the host state stream on/off on this conn (sends subscribe now if
+   *  connected). `bodies` asks for row CONTENT on every `row` event — the host
+   *  grants it only to a `rows_read` holder; a refusal comes back as an `error`
+   *  frame and the digest-only stream is not opened either. */
+  setWantsState(on: boolean, bodies = false): void {
+    if (this.wantsState === on && this.wantsBodies === bodies) return;
     this.wantsState = on;
-    this.sendFrame({ type: on ? "state_subscribe" : "state_unsubscribe" });
+    this.wantsBodies = bodies;
+    this.sendFrame(on ? this.subscribeFrame() : { type: "state_unsubscribe" });
+  }
+
+  private subscribeFrame(): Envelope {
+    return this.wantsBodies
+      ? { type: "state_subscribe", body: true }
+      : { type: "state_subscribe" };
   }
 
   close(): void {
@@ -350,8 +362,13 @@ export class WsBridge implements Bridge {
   }
 
   /** Subscribe to the host kernel state stream (telemetry). Rides the control
-   *  socket: first subscriber opens the stream, last one closes it. */
-  subscribeState(handler: (frame: Record<string, unknown>) => void): () => void {
+   *  socket: first subscriber opens the stream, last one closes it. `bodies`
+   *  opens it with `body: true` (row events carry content; host-gated as
+   *  `rows_read`) — the option of the FIRST subscriber decides for the stream. */
+  subscribeState(
+    handler: (frame: Record<string, unknown>) => void,
+    bodies = false,
+  ): () => void {
     const control = this.connFor(this.controlEndpoint);
     if (this.stateHandlers.size === 0) {
       control.setStateSink((frame) => {
@@ -363,7 +380,7 @@ export class WsBridge implements Bridge {
           }
         }
       });
-      control.setWantsState(true);
+      control.setWantsState(true, bodies);
     }
     this.stateHandlers.add(handler);
     return () => {

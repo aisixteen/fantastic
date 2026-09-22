@@ -34,7 +34,64 @@ public struct RowTail: Sendable {
     let continuation: AsyncStream<Int64>.Continuation
 }
 
+/// THE DIGEST of one row — what `messages` answers and what the `row` state
+/// event carries: id, agent, parent, kind, role, a 120-char head and the byte
+/// count, plus the per-kind extras. NEVER the content: bodies stay behind
+/// `pull` / `rows_read`, so the gate is not bypassed by a stream. ONE function,
+/// so the verb's answer and the event's payload cannot drift. Python
+/// `Kernel.row_digest`.
+///
+/// CODE POINTS throughout: python slices and counts a `str`, so an emoji is
+/// one, not four bytes and not one grapheme. `str(content)` — a row's content
+/// is whatever was written there, and a digest of a number, a list or `None` is
+/// python's rendering of it, not an empty head.
+public func rowDigest(rid: Int64, row: Row) -> Row {
+    let content = pyStr(row["content"] ?? .string(""))
+    let kind = row["kind"]?.asString
+    let kindRaw = row["kind"] ?? .null
+    var d: Row = [
+        "id": .integer(rid),
+        "agent": row["agent"] ?? .null,
+        "parent": row["parent"] ?? .null,
+        "kind": pyTruthy(kindRaw) ? kindRaw : (row["role"] ?? .null),
+        "role": row["role"] ?? .null,
+        "head": .string(pyHead(content)),
+        "bytes": .integer(Int64(content.unicodeScalars.count)),
+    ]
+    // PYTHON TRUTHINESS decides every optional key, and the value copied is the
+    // RAW one — a `level` of `false` or `[]` is absent, a `level` of `2.5` is
+    // `2.5`.
+    if let t = row["title"], pyTruthy(t) { d["title"] = t }
+    if let l = row["level"], pyTruthy(l) { d["level"] = l }
+    if let refs = row["refs"], pyTruthy(refs) { d["refs"] = .integer(Int64(sizedLen(refs))) }
+    if kind == "call" || kind == "task" {
+        d["verb"] = row["verb"] ?? .null
+        if let n = row["name"], pyTruthy(n) { d["name"] = n }
+        // The status is the SETTLE's, read off the nested stamp — a top-level
+        // `status` is not one, and an empty stamp is no status at all. A
+        // non-dict stamp is no status either (python guards `.get` since
+        // 2026-09-20; it used to raise off the wire).
+        if let o = row["outcome"], pyTruthy(o) {
+            if case .object = o { d["status"] = o["status"] ?? .null } else { d["status"] = .null }
+        }
+    } else if kind == "view" {
+        // a view digest says how much it holds, never the array itself
+        let viewIds = row["ids"] ?? .null
+        d["ids"] = .integer(Int64(pyTruthy(viewIds) ? sizedLen(viewIds) : 0))
+        d["budget"] = row["budget"] ?? .null
+        // LAST, and an assignment: a view that already carried a truthy `title`
+        // keeps that key's position and takes `why` as its value.
+        d["title"] = row["why"] ?? .null
+    }
+    return d
+}
+
 public final class RowStore: @unchecked Sendable {
+    /// THE ROW EVENT's outlet — fired by `put` once the row is stored and the
+    /// tails are fed, OUTSIDE the store lock. `Kernel.init` wires it to
+    /// `publishState`; a store with no kernel above it stays silent. Python
+    /// publishes inline at the end of `Kernel.rows_put`.
+    public var onRow: ((Int64, Row) -> Void)?
     private let lock = NSLock()
     private var nextIdValue: Int64 = 1
     private var rows: [Int64: Row] = [:]
@@ -80,6 +137,15 @@ public final class RowStore: @unchecked Sendable {
     /// allocator. Returns the id.
     @discardableResult
     public func put(_ agent: AgentId, _ row: Row) throws -> Int64 {
+        let (rid, stored) = try putLocked(agent, row)
+        // THE ROW EVENT — a view learns "row <id> arrived" reactively and pulls
+        // the body when it needs it. Digest only, and published OUTSIDE the
+        // store lock so a subscriber may read the store right back.
+        onRow?(rid, stored)
+        return rid
+    }
+
+    private func putLocked(_ agent: AgentId, _ row: Row) throws -> (Int64, Row) {
         lock.lock()
         defer { lock.unlock() }
         let rid: Int64
@@ -117,7 +183,7 @@ public final class RowStore: @unchecked Sendable {
             if case .terminated = c.yield(rid) { return true }
             return false
         }
-        return rid
+        return (rid, stored)
     }
 
     /// One agent's rows, oldest first. The list a reader treats as the

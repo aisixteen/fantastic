@@ -21,10 +21,33 @@ export interface Snapshot {
   records: AgentRecord[];
 }
 
-/** A local state-stream event (added/updated/removed + send/emit/drain). */
+/**
+ * A state-stream event: added/updated/removed (+ send/emit/drain), and — from a
+ * HOST kernel over the bridge — `row`: one conversation row was appended to
+ * `agent_id`'s store. It carries `row`, the DIGEST the host's `messages` verb
+ * answers (id, agent, parent, kind, role, head, bytes, …) and never the
+ * content; a view pulls the body on demand (`rows_read`, the AI's `pull`).
+ * The JS kernel keeps no row store, so it only relays and renders these.
+ */
 export interface StateEvent {
   agent_id: string;
   kind: string;
+  row?: RowDigest;
+  [key: string]: unknown;
+}
+
+/** The host's row digest, as the `row` state event and `messages` carry it. */
+export interface RowDigest {
+  id: number;
+  agent: string;
+  parent: number | null;
+  kind: string;
+  role: string | null;
+  head: string;
+  bytes: number;
+  /** Present only on a subscription opened with `body: true` (gated as the
+   *  host's privileged `rows_read`): the row's full content. */
+  content?: string;
   [key: string]: unknown;
 }
 

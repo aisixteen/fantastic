@@ -244,8 +244,11 @@ struct KernelSubscribeTests {
         #expect(!sendEvents.isEmpty)
         #expect(sendEvents.last?["payload"]["type"].asString == "list_agents")
         // Python pairs every `send` with a `drain` once the handler returns.
-        #expect(evs.last?["kind"].asString == "drain")
-        #expect(evs.last?["backlog"].asInt == 0)
+        // BY KIND, not by position: the settle row's own `row` event (2026-09-23)
+        // lands after the drain, exactly as python's `drains[-1]` reads it.
+        let drain = evs.last { $0["kind"].asString == "drain" }
+        #expect(drain != nil)
+        #expect(drain?["backlog"].asInt == 0)
     }
 
     @Test func unsubscribeStopsDelivery() async {
@@ -294,7 +297,7 @@ struct KernelSubscribeTests {
         // An OPERATOR send carries JSON null — never the target's own id.
         #expect(send?["sender"] == JSON.null)
         #expect(send?["summary"].asString == #"{"type": "list_agents"}"#)
-        let drain = evs.last
+        let drain = evs.last { $0["kind"].asString == "drain" }
         #expect(drain?.asObject?.keys.elements == ["agent_id", "kind", "backlog", "ts"])
         #expect(drain?["kind"].asString == "drain")
         #expect(drain?["backlog"].asInt == 0)

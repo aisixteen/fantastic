@@ -42,6 +42,58 @@ pub const DEFAULT_INBOX_BOUND: usize = 256;
 /// [`crate::inbox::InboxItem`]. `None` for every event with no bytes.
 pub type StateSubscriber = Arc<dyn Fn(&Value, Option<&(String, Vec<u8>)>) + Send + Sync>;
 
+/// The registry of state taps, SHARED. The kernel publishes through it — and so
+/// does the ROW STORE: an append is a state event (`kind: "row"`), and
+/// [`crate::rows::RowStore::put`] is the one choke point every append passes
+/// through, exactly as python's `Kernel.rows_put` is.
+pub(crate) type StateSubs = RwLock<Vec<(SubscriberToken, StateSubscriber)>>;
+
+/// [`Kernel::publish_state_with_body`]'s body, against a bare registry so a
+/// holder that is not the kernel (the row store) publishes the same way.
+///
+/// `ts` is stamped HERE and LAST (python `{**event, "ts": time.time()}`), so
+/// every event carries the moment it was published and no caller has to
+/// remember to add one. No subscribers = no work at all, as in python.
+pub(crate) fn publish_state_to(subs: &StateSubs, event: &Value, body: Option<&(String, Vec<u8>)>) {
+    let subs = subs.read().expect("state subs poisoned");
+    if subs.is_empty() {
+        return;
+    }
+    let mut stamped = match event {
+        Value::Object(m) => m.clone(),
+        other => {
+            for (_token, cb) in subs.iter() {
+                call_state_subscriber(cb, other, body);
+            }
+            return;
+        }
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    stamped.insert("ts".to_string(), json!(ts));
+    let stamped = Value::Object(stamped);
+    for (_token, cb) in subs.iter() {
+        call_state_subscriber(cb, &stamped, body);
+    }
+}
+
+/// One subscriber call, ISOLATED (C87) — python: `try: cb(event) except
+/// Exception as e: print(f"  [kernel] state subscriber raised: {e}",
+/// file=sys.stderr)`, and the loop moves on to the next subscriber. A
+/// rust callback has no `Result` to fail with — the equivalent of
+/// "raised" is a panic, caught here so one broken tap never silences
+/// every other subscriber for the rest of the process.
+fn call_state_subscriber(cb: &StateSubscriber, event: &Value, body: Option<&(String, Vec<u8>)>) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(event, body)));
+    if let Err(payload) = outcome {
+        eprintln!(
+            "  [kernel] state subscriber raised: {}",
+            crate::send::panic_message(&payload)
+        );
+    }
+}
+
 /// Opaque token returned by [`Kernel::add_state_subscriber`]; pass to
 /// [`Kernel::remove_state_subscriber`] to detach.
 ///
@@ -78,7 +130,7 @@ pub struct Kernel {
     pub inboxes: DashMap<AgentId, crate::inbox::InboxSender>,
     /// Active state-event taps (telemetry, debugging). Keyed by token
     /// for clean detach.
-    state_subscribers: RwLock<Vec<(SubscriberToken, StateSubscriber)>>,
+    state_subscribers: Arc<StateSubs>,
     /// Monotonic counter for [`SubscriberToken`].
     next_subscriber: AtomicU64,
     /// Compile-time bundle registry — caller fills before bootstrap.
@@ -173,12 +225,15 @@ impl Kernel {
     /// Empty kernel with both a [`StorageMode`] and a custom inbox
     /// bound — the underlying ctor every other variant funnels into.
     pub fn with_storage_and_inbox(storage: StorageMode, bound: usize) -> Self {
+        // ONE registry, two publishers: the kernel and the row store, which
+        // publishes the `row` event from inside its own append.
+        let state_subscribers: Arc<StateSubs> = Arc::new(RwLock::new(Vec::new()));
         Self {
             agents: DashMap::new(),
             agent_order: RwLock::new(Vec::new()),
             well_known: DashMap::new(),
             inboxes: DashMap::new(),
-            state_subscribers: RwLock::new(Vec::new()),
+            state_subscribers: Arc::clone(&state_subscribers),
             next_subscriber: AtomicU64::new(1),
             bundles: BundleRegistry::new(),
             root: ArcSwapOption::const_empty(),
@@ -190,7 +245,7 @@ impl Kernel {
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             tasks: TaskTable::new(),
             ledger: crate::ledger::Ledger::default(),
-            rows: crate::rows::RowStore::new(),
+            rows: crate::rows::RowStore::with_state(state_subscribers),
             ledger_flusher: Mutex::new(None),
         }
     }
@@ -578,47 +633,7 @@ impl Kernel {
     /// the raw body travels beside the event so a tap can rebuild the binary
     /// frame python sends.
     pub fn publish_state_with_body(&self, event: &Value, body: Option<&(String, Vec<u8>)>) {
-        let subs = self.state_subscribers.read().expect("state subs poisoned");
-        if subs.is_empty() {
-            return;
-        }
-        let mut stamped = match event {
-            Value::Object(m) => m.clone(),
-            other => {
-                for (_token, cb) in subs.iter() {
-                    Self::call_state_subscriber(cb, other, body);
-                }
-                return;
-            }
-        };
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0.0, |d| d.as_secs_f64());
-        stamped.insert("ts".to_string(), json!(ts));
-        let stamped = Value::Object(stamped);
-        for (_token, cb) in subs.iter() {
-            Self::call_state_subscriber(cb, &stamped, body);
-        }
-    }
-
-    /// One subscriber call, ISOLATED (C87) — python: `try: cb(event) except
-    /// Exception as e: print(f"  [kernel] state subscriber raised: {e}",
-    /// file=sys.stderr)`, and the loop moves on to the next subscriber. A
-    /// rust callback has no `Result` to fail with — the equivalent of
-    /// "raised" is a panic, caught here so one broken tap never silences
-    /// every other subscriber for the rest of the process.
-    fn call_state_subscriber(
-        cb: &StateSubscriber,
-        event: &Value,
-        body: Option<&(String, Vec<u8>)>,
-    ) {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(event, body)));
-        if let Err(payload) = outcome {
-            eprintln!(
-                "  [kernel] state subscriber raised: {}",
-                crate::send::panic_message(&payload)
-            );
-        }
+        publish_state_to(&self.state_subscribers, event, body);
     }
 
     /// Register a state-event tap. Returns a token the caller can
@@ -630,6 +645,60 @@ impl Kernel {
             .expect("state subs poisoned")
             .push((token, cb));
         token
+    }
+
+    /// [`Self::add_state_subscriber`] on behalf of a READER — a leg subscribing
+    /// for a client, after `authorize_state_subscribe`.
+    ///
+    /// `row` events are then delivered only for agents that reader may read
+    /// ([`Self::may_read_rows`]): the stream cannot leak a digest the `messages`
+    /// verb would refuse. Every other kind passes through unchanged, and an
+    /// operator tap ([`Self::add_state_subscriber`]) sees everything.
+    ///
+    /// `body` (after [`Self::authorize_row_bodies`] for that reader) adds the
+    /// stored row's `content` to every `row` event, looked up by id at publish
+    /// time, so a view that renders every row skips the pull round-trip. A
+    /// `rows_read` holder reads every row whole already, so NO per-row filter
+    /// applies to it.
+    ///
+    /// WEAK, not strong: the registry lives inside the kernel, so a gating
+    /// closure holding an `Arc<Kernel>` would keep the kernel alive forever.
+    pub fn add_state_subscriber_for(
+        self: &Arc<Self>,
+        cb: StateSubscriber,
+        reader: AgentId,
+        body: bool,
+    ) -> SubscriberToken {
+        let weak = Arc::downgrade(self);
+        self.add_state_subscriber(Arc::new(move |event: &Value, raw| {
+            if event.get("kind").and_then(Value::as_str) == Some("row") {
+                let Some(kernel) = weak.upgrade() else {
+                    return;
+                };
+                if body {
+                    let content = event
+                        .get("row")
+                        .and_then(|r| r.get("id"))
+                        .and_then(Value::as_i64)
+                        .and_then(|id| kernel.rows.get_one(id))
+                        .and_then(|row| row.get("content").cloned())
+                        .unwrap_or_else(|| Value::from(""));
+                    let mut event = event.clone();
+                    if let Some(row) = event.get_mut("row").and_then(Value::as_object_mut) {
+                        // LAST, as python's `{**row, "content": …}` — a view
+                        // diffs these bytes.
+                        row.insert("content".to_string(), content);
+                    }
+                    cb(&event, raw);
+                    return;
+                }
+                let owner = event.get("agent_id").and_then(Value::as_str).unwrap_or("");
+                if !kernel.may_read_rows(Some(&reader), owner) {
+                    return;
+                }
+            }
+            cb(event, raw);
+        }))
     }
 
     /// Detach a previously-registered subscriber. No-op if `token`

@@ -454,7 +454,6 @@ fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     }
 
     let caller = crate::send::current_origin();
-    let root_id = kernel.root().map(|r| r.id.0.clone());
     let mut decided: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     let mut out: Vec<Value> = Vec::new();
     let mut refused: Vec<i64> = Vec::new();
@@ -469,20 +468,16 @@ fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        if !may_read(
-            kernel,
-            caller.as_ref(),
-            &owner,
-            root_id.as_deref(),
-            &mut decided,
-        ) {
+        if !*decided
+            .entry(owner.clone())
+            .or_insert_with(|| kernel.may_read_rows(caller.as_ref(), &owner))
+        {
             refused.push(id);
             continue;
         }
-        match digest(id, &row) {
-            Ok(d) => out.push(d),
-            Err(raise) => return raise,
-        }
+        // ONE DIGEST FUNCTION, shared with the `row` state event the store
+        // publishes on every append (`rows::row_digest`).
+        out.push(crate::rows::row_digest(id, &row));
     }
 
     // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
@@ -530,17 +525,6 @@ fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
 /// base-10 parser rejects, so the verb dies with a `ValueError` instead of
 /// answering. The whole call is reported as a raised handler, as python's
 /// dispatch reports any exception out of a verb body.
-/// `len(x)` for a sized value, `1` for a scalar — a digest counts, it never
-/// raises on a row a caller wrote by hand (python, 2026-09-20).
-fn sized_len(v: &Value) -> usize {
-    match v {
-        Value::Array(a) => a.len(),
-        Value::Object(o) => o.len(),
-        Value::String(s) => s.chars().count(),
-        _ => 1,
-    }
-}
-
 fn as_id(v: &Value) -> Result<Option<i64>, Value> {
     match v {
         Value::Bool(_) => Ok(None),
@@ -570,157 +554,6 @@ fn raised(class: &str, message: &str) -> Value {
 /// honour it.
 fn py_limit(payload: &Value) -> i64 {
     fantastic_bundle::py_int_or(payload.get("limit").unwrap_or(&Value::Null), 0).unwrap_or(0)
-}
-
-/// May `caller` read a row owned by `owner`? Its own always; another's only when
-/// that owner's `callable_by` names it for `messages`; the operator sees all.
-fn may_read(
-    kernel: &Arc<Kernel>,
-    caller: Option<&AgentId>,
-    owner: &str,
-    root_id: Option<&str>,
-    decided: &mut std::collections::HashMap<String, bool>,
-) -> bool {
-    let Some(caller) = caller else { return true };
-    if caller.0 == owner {
-        return true;
-    }
-    if let Some(known) = decided.get(owner) {
-        return *known;
-    }
-    let allowed = kernel
-        .agents
-        .get(&AgentId::from(owner))
-        .map(|e| {
-            let holder = e.value();
-            let grant = holder
-                .meta
-                .read()
-                .expect("meta lock poisoned")
-                .get("callable_by")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let children: std::collections::HashSet<String> =
-                holder.child_ids().into_iter().map(|c| c.0).collect();
-            crate::authz::authorize_call(
-                &grant,
-                "messages",
-                caller.0.as_str(),
-                holder.id.0.as_str(),
-                holder.parent_id.as_ref().map(|p| p.0.as_str()),
-                &children,
-                root_id,
-                // A ROOT VERB SKIPS INGRESS, which is why this runs at all — but
-                // it is the OWNER's ingress being re-checked, not an egress
-                // escalation, so privileged-verb cover does not apply.
-                false,
-            )
-            .allowed
-        })
-        .unwrap_or(false);
-    decided.insert(owner.to_string(), allowed);
-    allowed
-}
-
-/// One row at DIGEST resolution — never its body.
-///
-/// A rule-for-rule port of python's digest block (`_verb_messages`). Three
-/// things about it are easy to get wrong and all three were:
-///
-/// * `content` is `str(row.get("content", ""))` — an ABSENT key is `""`, every
-///   other type is its python `str()` (`None` → `"None"`, `['a', 1, True]`), and
-///   `head`/`bytes` count CODE POINTS of that string, not UTF-8 bytes.
-/// * every optional key follows PYTHON TRUTHINESS (`if row.get(k):`), and the
-///   value copied in is the row's RAW value, whatever its type.
-/// * `status` comes from the nested `outcome`, never from a top-level `status`.
-///
-/// `Err` is a RAISE: python calls `len()` on a truthy `refs`/`ids` and `.get()`
-/// on a truthy `outcome`, so a scalar in either place kills the whole verb.
-fn digest(id: i64, row: &crate::rows::Row) -> Result<Value, Value> {
-    let content = row.get("content").map_or_else(String::new, py_str);
-    let mut d = Map::new();
-    d.insert("id".to_string(), json!(id));
-    d.insert(
-        "agent".to_string(),
-        row.get("agent").cloned().unwrap_or(Value::Null),
-    );
-    d.insert(
-        "parent".to_string(),
-        row.get("parent").cloned().unwrap_or(Value::Null),
-    );
-    let kind = row.get("kind").cloned().unwrap_or(Value::Null);
-    let role = row.get("role").cloned().unwrap_or(Value::Null);
-    d.insert(
-        "kind".to_string(),
-        if py_truthy(&kind) { kind } else { role.clone() },
-    );
-    d.insert("role".to_string(), role);
-    d.insert(
-        "head".to_string(),
-        Value::from(
-            content
-                .chars()
-                .take(120)
-                .collect::<String>()
-                .replace('\n', " "),
-        ),
-    );
-    d.insert("bytes".to_string(), json!(content.chars().count()));
-    if let Some(t) = row.get("title").filter(|v| py_truthy(v)) {
-        d.insert("title".to_string(), t.clone());
-    }
-    if let Some(l) = row.get("level").filter(|v| py_truthy(v)) {
-        d.insert("level".to_string(), l.clone());
-    }
-    if let Some(r) = row.get("refs").filter(|v| py_truthy(v)) {
-        d.insert("refs".to_string(), json!(sized_len(r)));
-    }
-    match row.get("kind").and_then(Value::as_str) {
-        Some("call" | "task") => {
-            d.insert(
-                "verb".to_string(),
-                row.get("verb").cloned().unwrap_or(Value::Null),
-            );
-            if let Some(n) = row.get("name").filter(|v| py_truthy(v)) {
-                d.insert("name".to_string(), n.clone());
-            }
-            if let Some(outcome) = row.get("outcome").filter(|v| py_truthy(v)) {
-                // A non-dict stamp is no status (python guards `.get` since
-                // 2026-09-20; it used to raise off the wire).
-                d.insert(
-                    "status".to_string(),
-                    outcome
-                        .as_object()
-                        .and_then(|o| o.get("status").cloned())
-                        .unwrap_or(Value::Null),
-                );
-            }
-        }
-        Some("view") => {
-            // A VIEW DIGEST SAYS HOW MUCH IT HOLDS, never the array itself.
-            let ids = row.get("ids").filter(|v| py_truthy(v));
-            d.insert(
-                "ids".to_string(),
-                json!(match ids {
-                    Some(v) => sized_len(v),
-                    None => 0,
-                }),
-            );
-            d.insert(
-                "budget".to_string(),
-                row.get("budget").cloned().unwrap_or(Value::Null),
-            );
-            // ASSIGNED LAST, and it overwrites a `title` the row already
-            // carried — python's plain `d["title"] = ...`, which keeps the
-            // earlier key's POSITION when there was one.
-            d.insert(
-                "title".to_string(),
-                row.get("why").cloned().unwrap_or(Value::Null),
-            );
-        }
-        _ => {}
-    }
-    Ok(Value::Object(d))
 }
 
 /// `rows_read` — one agent's conversation WHOLE, oldest first.

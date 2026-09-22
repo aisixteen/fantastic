@@ -585,6 +585,162 @@ async fn the_state_stream_is_not_covered_by_a_wildcard() {
         .is_none());
 }
 
+/// THE ROW EVENT IS GATED LIKE `messages` (2026-09-23): a leg that may tap the
+/// state stream still sees a row digest only for agents whose `callable_by`
+/// names it for `messages`; an operator tap sees every row. Twin of python's
+/// `test_row_events_reach_only_readers_the_owner_names`.
+#[tokio::test]
+async fn row_events_reach_only_readers_the_owner_names() {
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let victim = make_agent_under("victim", "kernel_state");
+    kernel.register(Arc::clone(&victim));
+    kernel.register(make_agent_under("nosy", "kernel_state"));
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&seen);
+    let _reader = kernel.add_state_subscriber_for(
+        Arc::new(move |e: &Value, _b| sink.lock().expect("sink").push(e.clone())),
+        AgentId::from("nosy"),
+        false,
+    );
+    let everything = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let all = Arc::clone(&everything);
+    let _operator = kernel.add_state_subscriber(Arc::new(move |e: &Value, _b| {
+        all.lock().expect("sink").push(e.clone());
+    }));
+
+    let body = |text: &str| {
+        json!({"kind": "body", "role": "user", "content": text})
+            .as_object()
+            .expect("object")
+            .clone()
+    };
+    let rows_of = |log: &Arc<std::sync::Mutex<Vec<Value>>>, owner: &str| -> Vec<Value> {
+        log.lock()
+            .expect("sink")
+            .iter()
+            .filter(|e| e["kind"] == json!("row") && e["agent_id"] == json!(owner))
+            .cloned()
+            .collect()
+    };
+
+    kernel
+        .rows
+        .put(&AgentId::from("victim"), body("x"))
+        .expect("put");
+    assert_eq!(
+        rows_of(&everything, "victim").len(),
+        1,
+        "operator tap lost the row"
+    );
+    assert!(
+        rows_of(&seen, "victim").is_empty(),
+        "row digest leaked ungranted"
+    );
+
+    // The OWNER names the reader for `messages` — the same grant the verb reads.
+    victim.meta.write().expect("meta").insert(
+        "callable_by".to_string(),
+        json!({"$self": "*", "$parent": "*", "nosy": ["messages"]}),
+    );
+    kernel
+        .rows
+        .put(&AgentId::from("victim"), body("y"))
+        .expect("put");
+    // SCOPED TO THE VICTIM: a child reads its PARENT's rows through the
+    // `$children` baseline, so the root's own rows reach nosy too.
+    let rows = rows_of(&seen, "victim");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["row"]["head"], json!("y"));
+
+    // Its OWN rows always reach it.
+    kernel
+        .rows
+        .put(&AgentId::from("nosy"), body("mine"))
+        .expect("put");
+    assert_eq!(rows_of(&seen, "nosy")[0]["row"]["head"], json!("mine"));
+}
+
+/// `body:true` — the row event carries CONTENT, gated as `rows_read` on the
+/// root (privileged: a wildcard does not carry it); without the flag no event
+/// ever carries content. Twin of python's
+/// `test_row_bodies_ride_the_stream_only_for_a_rows_read_holder`.
+#[tokio::test]
+async fn row_bodies_ride_the_stream_only_for_a_rows_read_holder() {
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    kernel.register(make_agent_under("victim", "kernel_state"));
+    let nosy = make_agent_under("nosy", "kernel_state");
+    kernel.register(Arc::clone(&nosy));
+
+    let refused = crate::send::with_sender(AgentId::from("nosy"), async {
+        kernel.authorize_row_bodies(&AgentId::from("nosy"))
+    })
+    .await;
+    assert!(refused.is_some(), "bodies ungranted");
+
+    nosy.meta.write().expect("meta").insert(
+        "can_call".to_string(),
+        json!({
+            "$self": "*", "$parent": "*", "$children": "*",
+            "kernel_state": ["state_subscribe", "rows_read"],
+        }),
+    );
+    assert!(crate::send::with_sender(AgentId::from("nosy"), async {
+        kernel.authorize_row_bodies(&AgentId::from("nosy"))
+    })
+    .await
+    .is_none());
+
+    let full = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&full);
+    let _reader = kernel.add_state_subscriber_for(
+        Arc::new(move |e: &Value, _b| sink.lock().expect("sink").push(e.clone())),
+        AgentId::from("nosy"),
+        true,
+    );
+    let digest = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let plain = Arc::clone(&digest);
+    // An operator tap, no bodies asked.
+    let _operator = kernel.add_state_subscriber(Arc::new(move |e: &Value, _b| {
+        plain.lock().expect("sink").push(e.clone());
+    }));
+
+    kernel
+        .rows
+        .put(
+            &AgentId::from("victim"),
+            json!({"kind": "body", "role": "user", "content": "the body"})
+                .as_object()
+                .expect("object")
+                .clone(),
+        )
+        .expect("put");
+
+    let rows_of = |log: &Arc<std::sync::Mutex<Vec<Value>>>| -> Vec<Value> {
+        log.lock()
+            .expect("sink")
+            .iter()
+            .filter(|e| e["kind"] == json!("row") && e["agent_id"] == json!("victim"))
+            .cloned()
+            .collect()
+    };
+    let got = rows_of(&full);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0]["row"]["content"], json!("the body"));
+    // The digest is untouched beside it.
+    assert_eq!(got[0]["row"]["head"], json!("the body"));
+    assert_eq!(got[0]["row"]["bytes"], json!(8));
+    let plain = rows_of(&digest);
+    assert_eq!(plain.len(), 1);
+    assert!(plain[0]["row"].get("content").is_none(), "{plain:?}");
+}
+
 // ─── C20: the gate's denial shapes are python's ────────────────
 
 fn make_agent_under(id: &str, parent: &str) -> Arc<Agent> {

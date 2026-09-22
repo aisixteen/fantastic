@@ -348,3 +348,24 @@ async def test_a_settled_get_routes_persists_into_the_ledger(kernel):
     assert row["outcome"]["result"] == {
         "routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]
     }
+
+
+async def test_a_row_append_publishes_its_digest_and_never_its_body(seeded_kernel):
+    """THE ROW EVENT (2026-09-23): a view learns "row <id> arrived" reactively on the
+    state stream it already holds, and pulls the body on demand. Digest only."""
+    k = seeded_kernel
+    seen: list[dict] = []
+    k.ctx.add_state_subscriber(seen.append)
+    rid = k.ctx.rows_put(
+        k.id, {"kind": "body", "role": "user", "content": "SECRET line one\nline two"}
+    )
+    ev = [e for e in seen if e.get("kind") == "row"]
+    assert len(ev) == 1 and ev[0]["agent_id"] == k.id
+    d = ev[0]["row"]
+    assert d["id"] == rid and d["kind"] == "body" and d["bytes"] == 24
+    assert d["head"] == "SECRET line one line two" and "content" not in d
+    # the same digest `messages` answers
+    out = await k.send(
+        [{"target": "kernel", "payload": {"type": "messages", "ids": [rid]}}]
+    )
+    assert out[0]["result"]["rows"][0] == d
