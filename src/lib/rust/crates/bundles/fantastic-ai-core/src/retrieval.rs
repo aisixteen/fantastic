@@ -115,7 +115,7 @@ pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     );
     if got.is_none() {
         // A fold id: its body is on the row itself.
-        for r in load_history(agent_id, kernel, DEFAULT_CLIENT_ID).await {
+        for r in load_history(agent_id, kernel, DEFAULT_CLIENT_ID, true).await {
             if r.get("kind").and_then(Value::as_str) == Some("fold") && row_id(&r) == Some(pid) {
                 // python `str(r.get("body") or "")` — a falsy body is the empty
                 // string, a non-string one is its `str()`.
@@ -233,7 +233,7 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         }
     };
 
-    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID).await;
+    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, true).await;
     // A fold id in `ids` is a DESCENT: it expands to the rows it collapsed. An
     // EMPTY list is falsy in python, so it means NO SCOPE — not "scope to
     // nothing", which scoped every row out.
@@ -397,6 +397,60 @@ async fn compose(provider: &Arc<dyn Provider>, prompt: &str) -> String {
     without_thinking(&parts.join(""))
 }
 
+/// `context_clear`: a NEW THREAD on the same store. A clear is a BOUNDARY, not a
+/// deletion — it writes a `clear` row, and [`load_history`] starts the model's
+/// conversation there. Every earlier row stays in the store, reachable by id.
+///
+/// args: `why?` (a sentence, whitespace-collapsed and capped at 200). Returns
+/// `{cleared, behind}`. Mirrors python `_context_clear`.
+pub async fn context_clear(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let meta = agent_meta(agent_id, kernel);
+    let behind = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, true)
+        .await
+        .len();
+    // python `" ".join(str(payload.get("why") or "").split())[:200]`.
+    let raw = payload.get("why").cloned().unwrap_or(Value::Null);
+    let text = if py_truthy(&raw) {
+        py_str(&raw)
+    } else {
+        String::new()
+    };
+    let why: String = py_split_whitespace(&text)
+        .join(" ")
+        .chars()
+        .take(200)
+        .collect();
+    let rid = kernel.rows.mint_id();
+    append_history(
+        agent_id,
+        kernel,
+        DEFAULT_CLIENT_ID,
+        &[json!({
+            "role": "user",
+            "id": rid,
+            "parent": Value::Null,
+            "kind": "clear",
+            "title": if why.is_empty() { "cleared" } else { why.as_str() },
+            "content": format!(
+                "[cleared {rid} · {behind} rows behind]{} — a new thread; earlier rows are in the store, reachable by id (grep, pull, recall).",
+                if why.is_empty() { String::new() } else { format!(" {why}") }
+            ),
+        })],
+    )
+    .await;
+    // The persisted view names rows behind the clear — empty it, so the view is the
+    // store from the clear on. RAM is scratch; the store is never cleared.
+    save_view(agent_id, kernel, &[], agent_budget(&meta), "cleared");
+    let st = crate::state::state_for(agent_id);
+    *st.projection.lock().expect("projection poisoned") = None;
+    *st.compaction_mark.lock().expect("mark poisoned") = None;
+    crate::strategies::strip::forget(agent_id.as_str());
+    *st.folds_since.lock().expect("folds_since poisoned") = 0;
+    *st.recall_due.lock().expect("recall_due poisoned") = false;
+    *st.view_source.lock().expect("view_source poisoned") = None;
+    json!({"cleared": rid, "behind": behind})
+}
+
 /// `context_recall`: rebuild this agent's VIEW from its store — fit the head to
 /// the budget at digest resolution, then ask the model which rows it wants in
 /// full, persist the id list, log the decision as a row, and drop RAM scratch.
@@ -411,7 +465,7 @@ pub async fn context_recall(
     provider: Option<&Arc<dyn Provider>>,
 ) -> Value {
     let meta = agent_meta(agent_id, kernel);
-    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID).await;
+    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, false).await;
     if rows.is_empty() {
         return json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "empty store", "degraded": false});
     }

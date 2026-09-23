@@ -213,6 +213,9 @@ public final class AIBackend: @unchecked Sendable {
             let provider = dry ? nil : await sideProvider(agent: agent, kernel: kernel)
             return try await contextRecall(
                 agent: agent, payload: payload, kernel: kernel, provider: provider)
+        // A new thread on the same store: the view starts here, nothing is deleted.
+        case "context_clear":
+            return contextClear(agent: agent, payload: payload, kernel: kernel)
         case "status":
             return statusVerb(agentId: agentId, payload: payload, kernel: kernel)
         default:
@@ -324,6 +327,7 @@ public final class AIBackend: @unchecked Sendable {
         "pull": .string("args: pid:str (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with `offset: next_offset` until `eof`."),
         "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something, wherever it is — a stored body you never pulled, a digest line, an old turn. Returns {matches:[{id, line, text}], total, truncated}."),
         "context_recall": .string("args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."),
+        "context_clear": .string("args: why:str? — start a NEW THREAD on the same store: the model's view begins at the `[cleared <id> · N rows behind]` line this writes; nothing is deleted — every earlier row stays in the store, reachable by id (grep, pull, recall, the kernel's messages/rows_read). Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, behind:N}."),
         "boot": .string("On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`. A fresh"),
     ]
 
@@ -1117,7 +1121,11 @@ public final class AIBackend: @unchecked Sendable {
                 setViewSource(agent.id.value, "array")
             } else {
                 messages.append(contentsOf: dropAnsweredReflects(dedupeStaleReads(hist)))
-                setViewSource(agent.id.value, view == nil ? "store" : "store (stale array)")
+                // AN EMPTY `ids` IS A CLEARED VIEW, not a stale one: `context_clear`
+                // empties the array so assembly renders the store from the clear on.
+                setViewSource(
+                    agent.id.value,
+                    view == nil || entries.isEmpty ? "store" : "store (stale array)")
             }
         }
         messages.append(.object(["role": .string("user"), "content": .string(userText)]))
@@ -1227,11 +1235,22 @@ public final class AIBackend: @unchecked Sendable {
     /// agent, so there is no client dimension here. Nothing is read from disk:
     /// persistence of the store is the kernel's concern (a loader hydrates it, a
     /// persister tails it), never this bundle's. Python `_load_history`.
-    func loadHistory(agent: Agent, kernel: Kernel) -> [JSON] {
-        kernel.rows.forAgent(agent.id).filter { r in
+    ///
+    /// A CLEAR IS A BOUNDARY, NOT A DELETION (`context_clear`): the conversation
+    /// the model sees starts at the LAST `clear` row — that row itself is its
+    /// first line. Rows behind it stay in the store, reachable by id;
+    /// `behind: true` (recall, grep, pull — the verbs that exist to reach what is
+    /// not in view) reads the whole store.
+    func loadHistory(agent: Agent, kernel: Kernel, behind: Bool = false) -> [JSON] {
+        let rows = kernel.rows.forAgent(agent.id).filter { r in
             guard let k = r["kind"]?.asString else { return true }
             return !Self.bookkeeping.contains(k)
         }.map { JSON.object($0) }
+        if behind { return rows }
+        if let i = rows.lastIndex(where: { $0["kind"].asString == "clear" }) {
+            return Array(rows[i...])
+        }
+        return rows
     }
 
     /// APPEND this turn's rows to the kernel row store. Bookkeeping from above —

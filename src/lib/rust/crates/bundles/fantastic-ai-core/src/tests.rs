@@ -232,6 +232,7 @@ impl Bundle for MockBundle {
                 });
                 crate::retrieval::context_recall(agent_id, payload, kernel, Some(&provider)).await
             }
+            "context_clear" => crate::retrieval::context_clear(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("mock_backend: unknown type {other:?}")}),
@@ -2799,7 +2800,7 @@ async fn delivery_is_a_deliver_reply_task_not_awaited() {
     assert_eq!(store[0]["id"], row["id"], "the task id is the row id");
     // …and it is BOOKKEEPING: the conversation reader never sees it.
     assert!(
-        crate::history::load_history(&peer, &kernel, "cli")
+        crate::history::load_history(&peer, &kernel, "cli", false)
             .await
             .iter()
             .all(|r| r.get("verb") != Some(&json!("deliver_reply"))),
@@ -3800,7 +3801,7 @@ async fn context_recall_fits_the_head_and_writes_the_view_it_chose() {
     );
 
     // The decision is a ROW — the next reload reads why the last recall chose.
-    let rows = crate::history::load_history(&backend, &kernel, "cli").await;
+    let rows = crate::history::load_history(&backend, &kernel, "cli", false).await;
     assert!(
         rows.iter()
             .any(|r| r.get("kind").and_then(Value::as_str) == Some("recall")),
@@ -3979,7 +3980,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             &provider, &backend, &state, &kernel, "cli", "mock", messages, store_len,
         )
         .await;
-        let rows: Vec<Value> = crate::history::load_history(&backend, &kernel, "cli").await;
+        let rows: Vec<Value> = crate::history::load_history(&backend, &kernel, "cli", false).await;
         let mut levels: Vec<i64> = rows
             .iter()
             .filter(|r| crate::folds::is_fold(r))
@@ -4044,6 +4045,7 @@ fn reflect_verbs_match_python_first_doc_lines() {
             "pull",
             "grep",
             "context_recall",
+            "context_clear",
             "boot",
         ]
         .into_iter()
@@ -4598,7 +4600,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     )
     .await;
     assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
-    let rows = crate::history::load_history(&backend, &kernel, "cli").await;
+    let rows = crate::history::load_history(&backend, &kernel, "cli", false).await;
     let last = rows.last().expect("a row");
     assert_eq!(last["kind"], "late");
     assert_eq!(
@@ -5035,7 +5037,7 @@ async fn history_hides_call_and_task_rows() {
         "the store must actually hold call rows: {raw_kinds:?}"
     );
 
-    let rows = crate::history::load_history(&backend, &kernel, "cli").await;
+    let rows = crate::history::load_history(&backend, &kernel, "cli", false).await;
     assert!(
         rows.iter().all(|r| !matches!(
             r.get("kind").and_then(Value::as_str),
@@ -5160,5 +5162,98 @@ async fn the_turns_row_ids_are_minted_after_the_assembly_reflects() {
         reflect < user && user < message_id,
         "assembly's reflect ({reflect}) must precede the user row ({user}) \
          and the assistant row ({message_id})"
+    );
+}
+
+#[tokio::test]
+async fn context_clear_starts_a_new_thread_without_deleting() {
+    // A CLEAR IS A BOUNDARY, NOT A DELETION: the view begins at the `[cleared …]`
+    // row; earlier rows stay in the store, reachable through recall/grep
+    // (behind=true) and by id. Python's twin
+    // `test_context_clear_starts_a_new_thread_without_deleting`.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ctxclear").await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "the codename is HALCYON"}),
+    );
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "assistant", "content": "noted"}),
+    );
+    assert_eq!(
+        crate::history::load_history(&backend, &kernel, "cli", false)
+            .await
+            .len(),
+        2
+    );
+
+    let out = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "context_clear", "why": "fresh start"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out.get("behind").and_then(Value::as_i64), Some(2), "{out}");
+    let rid = out
+        .get("cleared")
+        .and_then(Value::as_i64)
+        .expect("the clear row's id");
+
+    let hist = crate::history::load_history(&backend, &kernel, "cli", false).await;
+    assert_eq!(hist.len(), 1, "the view starts at the clear: {hist:?}");
+    assert_eq!(hist[0].get("kind").and_then(Value::as_str), Some("clear"));
+    let content = hist[0].get("content").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        content.starts_with(&format!("[cleared {rid} · 2 rows behind] fresh start")),
+        "{content}"
+    );
+    assert!(
+        !serde_json::to_string(&hist).unwrap().contains("HALCYON"),
+        "no old content in the new thread: {hist:?}"
+    );
+
+    // behind the boundary, everything is still there
+    assert_eq!(
+        crate::history::load_history(&backend, &kernel, "cli", true)
+            .await
+            .len(),
+        3
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "recall", "query": "codename"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r.get("total").and_then(Value::as_i64), Some(1), "{r}");
+
+    // the persisted view is emptied, so assembly renders the store from the clear on
+    let view = crate::view::load_view(&backend, &kernel).expect("the view must be persisted");
+    assert!(
+        view.get("ids")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.is_empty()),
+        "{view:?}"
+    );
+
+    // chatting on: the new thread grows after the mark
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "hello again"}),
+    );
+    let hist = crate::history::load_history(&backend, &kernel, "cli", false).await;
+    assert_eq!(
+        hist.last()
+            .and_then(|r| r.get("content"))
+            .and_then(Value::as_str),
+        Some("hello again")
     );
 }

@@ -675,4 +675,40 @@ struct ViewRecallTests {
                 == "mock_backend: unknown context_strategy None "
                 + "(valid: ['compact', 'truncate', 'strip', 'fold'])", "\(err.serialize())")
     }
+
+    // ── the clear boundary ───────────────────────────────────────────────
+
+    /// `context_clear`: the view begins at the `[cleared …]` row; earlier rows
+    /// stay in the store, reachable through recall/grep (behind: true) and by id.
+    /// python `test_context_clear_starts_a_new_thread_without_deleting`.
+    @Test func contextClearStartsANewThreadWithoutDeleting() async throws {
+        let (kernel, agent, f, backend) = await boot()
+        f.seed([
+            f.row("user", "the codename is HALCYON", "user:1"),
+            f.row("assistant", "noted", "ai:1"),
+        ])
+        #expect(backend.loadHistory(agent: agent, kernel: kernel).count == 2)
+        let out = backend.contextClear(
+            agent: agent, payload: .object(["why": .string("fresh start")]), kernel: kernel)
+        #expect(out["behind"].asInt == 2)
+        let hist = backend.loadHistory(agent: agent, kernel: kernel)
+        #expect(hist.count == 1 && hist[0]["kind"].asString == "clear")
+        #expect(
+            (hist[0]["content"].asString ?? "").hasPrefix(
+                "[cleared \(out["cleared"].asInt ?? 0) \u{b7} 2 rows behind] fresh start"),
+            "\(hist[0].serialize())")
+        #expect(!JSON.array(hist).serialize().contains("HALCYON"))
+        // behind the boundary, everything is still there
+        #expect(backend.loadHistory(agent: agent, kernel: kernel, behind: true).count == 3)
+        let r = backend.recallVerb(
+            agent: agent, payload: .object(["query": .string("codename")]), kernel: kernel)
+        #expect(r["total"].asInt == 1)
+        // the persisted view is emptied, so assembly renders the store from the clear on
+        #expect(try #require(loadView(agent.id, kernel: kernel))["ids"]?.asArray?.isEmpty == true)
+        // chatting on: the new thread grows after the mark
+        f.seed([f.row("user", "hello again", "user:2")])
+        #expect(
+            backend.loadHistory(agent: agent, kernel: kernel).last?["content"].asString
+                == "hello again")
+    }
 }

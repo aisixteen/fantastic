@@ -105,7 +105,7 @@ async def test_grep_finds_a_line_inside_a_stored_body_without_pulling_it(monkeyp
         },
     ]
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return rows
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -122,7 +122,7 @@ async def test_grep_scopes_to_ids_and_caps_matches(monkeypatch):
     await _store_reply("ai", k, 1, "\n".join(f"hit {i}" for i in range(50)))
     await _store_reply("ai", k, 2, "hit elsewhere")
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return [
             {
                 "role": "user",

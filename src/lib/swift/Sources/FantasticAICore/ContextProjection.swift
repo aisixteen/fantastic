@@ -363,7 +363,7 @@ extension AIBackend {
     /// to continue from. Returns {messages:[{index,role,content}], total,
     /// truncated, note?}. Python `_recall`.
     func recallVerb(agent: Agent, payload: JSON, kernel: Kernel) -> JSON {
-        let full = loadHistory(agent: agent, kernel: kernel)
+        let full = loadHistory(agent: agent, kernel: kernel, behind: true)
         let rawQ = payload["query"]
         let q = pyStrip((pyTruthy(rawQ) ? pyStr(rawQ) : "").lowercased())
         let limit = max(1, min((try? pyIntOr(payload["limit"], 20)) ?? 20, 100))

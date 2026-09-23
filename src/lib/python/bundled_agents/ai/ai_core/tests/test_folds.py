@@ -262,7 +262,7 @@ async def test_grep_and_pull_descend_into_a_fold(monkeypatch):
     f = _fold("ai", [r["id"] for r in rows], "done a", "summary of a", False)
     all_rows = rows + [f]
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return all_rows
 
     monkeypatch.setattr(core, "_load_history", fake_load)

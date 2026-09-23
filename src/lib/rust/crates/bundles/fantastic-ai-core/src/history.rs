@@ -35,8 +35,19 @@ const BOOKKEEPING: [&str; 5] = ["call", "task", "body", "view", "settle"];
 ///
 /// Nothing is read from disk here: persistence of the store is the kernel's
 /// concern (a loader hydrates it, a persister tails it), never this bundle's.
-pub async fn load_history(self_id: &AgentId, kernel: &Arc<Kernel>, _client_id: &str) -> Vec<Value> {
-    kernel
+///
+/// A CLEAR IS A BOUNDARY, NOT A DELETION (`context_clear`): the conversation the
+/// model sees starts at the LAST `clear` row — that row itself is its first
+/// line. Rows behind it stay in the store, reachable by id; `behind = true`
+/// (recall, grep, pull — the verbs that exist to reach what is not in view)
+/// reads the whole store.
+pub async fn load_history(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    _client_id: &str,
+    behind: bool,
+) -> Vec<Value> {
+    let mut rows: Vec<Value> = kernel
         .rows
         .for_agent(self_id)
         .into_iter()
@@ -46,7 +57,17 @@ pub async fn load_history(self_id: &AgentId, kernel: &Arc<Kernel>, _client_id: &
                 .is_some_and(|k| BOOKKEEPING.contains(&k))
         })
         .map(Value::Object)
-        .collect()
+        .collect();
+    if behind {
+        return rows;
+    }
+    match rows
+        .iter()
+        .rposition(|r| r.get("kind").and_then(Value::as_str) == Some("clear"))
+    {
+        Some(i) => rows.split_off(i),
+        None => rows,
+    }
 }
 
 /// Append this pass's turns to the conversation.

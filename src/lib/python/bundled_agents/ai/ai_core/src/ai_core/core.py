@@ -433,16 +433,27 @@ def _res_of(row: dict) -> str:
 _BOOKKEEPING = frozenset({"call", "task", "body", "view", "settle"})
 
 
-async def _load_history(self_id: str, kernel) -> list[dict]:
+async def _load_history(self_id: str, kernel, *, behind: bool = False) -> list[dict]:
     """The agent's conversation — every row, in order — from the KERNEL ROW STORE.
     AGENT ID IS CONVERSATION ID: a second conversation is a second agent. Nothing is
     read from disk here; persistence of the store is the kernel's concern (later, on
-    the ledger's own flush seam), never this bundle's."""
+    the ledger's own flush seam), never this bundle's.
+
+    A CLEAR IS A BOUNDARY, NOT A DELETION (`context_clear`): the conversation the model
+    sees starts at the LAST `clear` row — that row itself is its first line. Rows
+    behind it stay in the store, reachable by id; `behind=True` (recall, grep, pull —
+    the verbs that exist to reach what is not in view) reads the whole store."""
     # The store holds the kernel's own bookkeeping too — a `call` row per send, a
     # `task` row per fork. Those are the ledger's; the CONVERSATION is the rest.
-    return [
+    rows = [
         r for r in _ctx(kernel).rows_for(self_id) if r.get("kind") not in _BOOKKEEPING
     ]
+    if behind:
+        return rows
+    for i in range(len(rows) - 1, -1, -1):
+        if rows[i].get("kind") == "clear":
+            return rows[i:]
+    return rows
 
 
 async def _save_history(self_id: str, kernel, new_turns: list[dict]) -> None:
@@ -630,7 +641,9 @@ FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N
 look inside. After a fold, and on boot with a history, `context_recall` fits the head of
 your conversation to your budget and asks you what to keep in full; a `[recall …]` line
 is your own earlier decision and names the LIVE task. You may call
-`<type>context_recall</type>` on yourself any time.
+`<type>context_recall</type>` on yourself any time. `<type>context_clear</type>` on yourself
+starts a NEW THREAD: your view begins at the `[cleared …]` line; every earlier row stays in
+the store, reachable by id through grep, pull and recall.
 """
 
 
@@ -1623,7 +1636,9 @@ async def _assemble(
             _view_source[self_id] = "array"
         else:
             messages.extend(drop_answered_reflects(dedupe_stale_reads(hist)))
-            _view_source[self_id] = "store" if view is None else "store (stale array)"
+            _view_source[self_id] = (
+                "store" if view is None or not view["ids"] else "store (stale array)"
+            )
     messages.append({"role": "user", "content": user_text})
     return messages, store_len
 
@@ -2491,7 +2506,7 @@ def _recall_render(m: dict) -> str:
 
 async def _recall(id, payload, kernel):
     """args: query?:str (case-insensitive substring over the serialized turn — matches tool args/replies too), limit?:int (default 20, max 100), before?:int (store index — page backward). Pages turns back from the DURABLE store (the FULL conversation, never trimmed — so anything compaction dropped is one call away). Read-only. A page always fits INLINE (the cap); trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."""
-    full = await _load_history(id, kernel)
+    full = await _load_history(id, kernel, behind=True)
     q = str(payload.get("query") or "").lower().strip()
     try:
         limit = int(payload.get("limit") or 20)
@@ -2664,7 +2679,7 @@ async def _pull(id, payload, kernel):
     got = await _load_reply(id, kernel, pid, offset, max(1, length))
     if got is None:
         # A fold id: its body is on the row itself.
-        for r in await _load_history(id, kernel):
+        for r in await _load_history(id, kernel, behind=True):
             if r.get("kind") == "fold" and r.get("id") == pid:
                 text = str(r.get("body") or "")
                 return {
@@ -2765,7 +2780,7 @@ async def _grep(id, payload, kernel):
                 if len(matches) < limit:
                     matches.append({"id": rid, "line": n, "text": line.strip()[:width]})
 
-    rows = await _load_history(id, kernel)
+    rows = await _load_history(id, kernel, behind=True)
     # A fold id in `ids` is a DESCENT: it expands to the rows it collapsed.
     scope = set(expand_fold_ids(rows, ids)) if ids else None
     # The bodies in reach: the pids on the reply tags of the rows considered — every
@@ -3050,6 +3065,46 @@ async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
     }
 
 
+async def _context_clear(id, payload, kernel):
+    """args: why:str? — start a NEW THREAD on the same store: the model's view begins at the `[cleared <id> · N rows behind]` line this writes; nothing is deleted — every earlier row stays in the store, reachable by id (grep, pull, recall, the kernel's messages/rows_read). Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, behind:N}."""
+    rec = kernel.get(id) or {}
+    behind = len(await _load_history(id, kernel, behind=True))
+    why = " ".join(str(payload.get("why") or "").split())[:200]
+    rid = _mint_row_id(id, kernel)
+    await _save_history(
+        id,
+        kernel,
+        [
+            {
+                "role": "user",
+                "id": rid,
+                "parent": None,
+                "kind": "clear",
+                "title": why or "cleared",
+                "content": f"[cleared {rid} · {behind} rows behind]"
+                + (f" {why}" if why else "")
+                + " — a new thread; earlier rows are in the store, reachable by id (grep, pull, recall).",
+            }
+        ],
+    )
+    # The persisted view names rows behind the clear — empty it, so the view is the
+    # store from the clear on. RAM is scratch; the store is never cleared.
+    await _save_view(id, kernel, [], budget_=budget(rec), why="cleared")
+    _projection.pop(id, None)
+    _compaction_mark.pop(id, None)
+    _strip_state_pop(id)
+    _folds_since.pop(id, None)
+    _recall_due.discard(id)
+    _view_source.pop(id, None)
+    return {"cleared": rid, "behind": behind}
+
+
+def _strip_state_pop(id: str) -> None:
+    from ai_core.strategies.strip import _stripped as _strip_state
+
+    _strip_state.pop(id, None)
+
+
 async def _context_status(id, payload, kernel):
     """No args. The context-budget posture + the last overflow projection + the model's
     derived reaction to it. Returns {context_window, output_reserve, budget, strategy,
@@ -3178,6 +3233,8 @@ def build(
         "grep": _grep,
         # Rebuild the view from the store: on boot, after folds, on request.
         "context_recall": _make_context_recall(cfg),
+        # A new thread on the same store: the view starts here, nothing is deleted.
+        "context_clear": _context_clear,
         "boot": _make_boot(cfg),
     }
     cfg._verbs = verbs  # type: ignore[attr-defined]  # reflect lists these
