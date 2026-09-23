@@ -50,6 +50,7 @@ pub fn reflect_verbs() -> Value {
         "pull": "args: pid:str (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with `offset: next_offset` until `eof`.",
         "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something, wherever it is — a stored body you never pulled, a digest line, an old turn. Returns {matches:[{id, line, text}], total, truncated}.",
         "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}.",
+        "context_clear": "args: why:str? — start a NEW THREAD on the same store: the model's view begins at the `[cleared <id> · N rows behind]` line this writes; nothing is deleted — every earlier row stays in the store, reachable by id (grep, pull, recall, the kernel's messages/rows_read). Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, behind:N}.",
         "boot": "On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`. A fresh",
     })
 }
@@ -172,7 +173,7 @@ pub async fn on_cancel(agent_id: &AgentId, task_id: &str, kernel: &Arc<Kernel>) 
 /// got the full transcript back inside a verb whose whole point is that it does
 /// not.
 pub async fn history(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID).await;
+    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, false).await;
     let mut digest: Vec<Value> = rows
         .iter()
         .filter(|r| r.get("id").is_some())
@@ -254,7 +255,7 @@ fn recall_render(m: &Value) -> String {
 /// note]}`. There is no `client_id` — a model reading its own recall was handed
 /// a key python does not send.
 pub async fn recall(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let full = load_history(agent_id, kernel, DEFAULT_CLIENT_ID).await;
+    let full = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, true).await;
     let null = Value::Null;
     // python `str(payload.get("query") or "").lower().strip()`.
     let raw_q = payload.get("query").unwrap_or(&null);

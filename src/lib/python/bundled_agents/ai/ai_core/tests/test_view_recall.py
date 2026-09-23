@@ -82,7 +82,7 @@ async def test_grep_answers_under_the_inline_cap_for_a_broad_query(monkeypatch):
         )
     )
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return rows
 
     monkeypatch.setattr(core, "_load_history", fake_load)

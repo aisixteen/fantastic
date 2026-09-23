@@ -315,7 +315,7 @@ pub async fn derive_reaction(
         (true, Some(m)) => m,
         _ => return None,
     };
-    let store = load_history(self_id, kernel, &client_id).await;
+    let store = load_history(self_id, kernel, &client_id, false).await;
     Some(reaction_from(
         self_id.as_str(),
         store.get(idx..).unwrap_or_default(),

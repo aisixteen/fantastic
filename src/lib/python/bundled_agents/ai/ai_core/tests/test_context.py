@@ -310,7 +310,7 @@ async def test_recall_filters_paginates_and_caps(monkeypatch):
         _turn("user", "what about codename again"),
     ]
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -344,7 +344,7 @@ async def test_recall_empty_page_says_why(monkeypatch):
     "nothing has been compacted"."""
     store: list[dict] = []
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -380,7 +380,7 @@ async def test_derive_reaction_detects_recall_and_persist(monkeypatch):
         _turn("assistant", "It's HALCYON."),
     ]
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -398,7 +398,7 @@ async def test_reaction_counts_text_file_write_and_patch_not_dead_kv_verbs(monke
     `{type:'write', path:'facts.md'}` was scored as not having reacted at all."""
     thread: list[dict] = []
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return thread
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -438,7 +438,7 @@ async def test_the_reaction_cursor_is_the_store_index_not_the_deduped_view(monke
         _send_turn("notes", {"type": "write", "path": "facts.md", "text": "HALCYON"}),
     ]
 
-    async def fake_load(self_id, kernel):
+    async def fake_load(self_id, kernel, behind=False):
         return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -743,3 +743,31 @@ def test_a_stale_reflect_whose_body_has_a_bracket_still_dedupes():
     )
     kept = [m for m in out if body in (m.get("content") or "")]
     assert len(kept) == 1, f"the stale whole-state reflect was not dropped: {out}"
+
+
+async def test_context_clear_starts_a_new_thread_without_deleting(seeded_kernel):
+    """`context_clear`: the view begins at the `[cleared …]` row; earlier rows stay
+    in the store, reachable through recall/grep (behind=True) and by id."""
+    k = seeded_kernel
+    aid = "ai_clear"
+    ctx = core._ctx(k)
+    for role, text in (("user", "the codename is HALCYON"), ("assistant", "noted")):
+        ctx.rows_put(aid, {"role": role, "content": text})
+    assert len(await core._load_history(aid, k)) == 2
+    out = await core._context_clear(aid, {"why": "fresh start"}, k)
+    assert out["behind"] == 2
+    hist = await core._load_history(aid, k)
+    assert len(hist) == 1 and hist[0]["kind"] == "clear"
+    assert hist[0]["content"].startswith(
+        f"[cleared {out['cleared']} · 2 rows behind] fresh start"
+    )
+    assert "HALCYON" not in json.dumps(hist)
+    # behind the boundary, everything is still there
+    assert len(await core._load_history(aid, k, behind=True)) == 3
+    r = await core._recall(aid, {"query": "codename"}, k)
+    assert r["total"] == 1
+    # the persisted view is emptied, so assembly renders the store from the clear on
+    assert (await core._load_view(aid, k))["ids"] == []
+    # chatting on: the new thread grows after the mark
+    ctx.rows_put(aid, {"role": "user", "content": "hello again"})
+    assert [r["content"] for r in await core._load_history(aid, k)][-1] == "hello again"

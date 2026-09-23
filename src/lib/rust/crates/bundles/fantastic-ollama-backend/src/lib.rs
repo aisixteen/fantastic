@@ -321,6 +321,7 @@ impl Bundle for OllamaBackendBundle {
                     agent_id,
                     kernel,
                     helpers::DEFAULT_CLIENT_ID,
+                    false,
                 )
                 .await
                 .is_empty()
@@ -351,6 +352,8 @@ impl Bundle for OllamaBackendBundle {
                 let p = build_provider(agent_id, kernel);
                 retrieval::context_recall(agent_id, payload, kernel, Some(&p)).await
             }
+            // A new thread on the same store: the view starts here, nothing is deleted.
+            "context_clear" => retrieval::context_clear(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             // python's VERBS map has no `shutdown` — it is an unknown type like

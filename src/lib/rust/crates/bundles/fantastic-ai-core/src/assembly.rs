@@ -250,7 +250,9 @@ FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N
 look inside. After a fold, and on boot with a history, `context_recall` fits the head of
 your conversation to your budget and asks you what to keep in full; a `[recall …]` line
 is your own earlier decision and names the LIVE task. You may call
-`<type>context_recall</type>` on yourself any time.
+`<type>context_recall</type>` on yourself any time. `<type>context_clear</type>` on yourself
+starts a NEW THREAD: your view begins at the `[cleared …]` line; every earlier row stays in
+the store, reachable by id through grep, pull and recall.
 "#;
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
@@ -361,7 +363,7 @@ pub async fn assemble_messages(
     // and answered reflects reduced to a stub — the model's own distillation
     // carries the facts forward. Durable history keeps every turn, so the trace
     // stays complete and `recall` pages anything back.
-    let store = load_history(self_id, kernel, client_id).await;
+    let store = load_history(self_id, kernel, client_id, false).await;
     let store_len = store.len();
     // THE VIEW ARRAY IS THE STATE. When a projection (or a recall) has written
     // one, the body is exactly what it chose — each listed row at its recorded
@@ -393,10 +395,21 @@ pub async fn assemble_messages(
         }
         (!out.is_empty()).then_some(out)
     });
+    // An EMPTY ids list is a `context_clear`'s view, not a stale one: the body is
+    // the store from the clear row on. Python `view is None or not view["ids"]`.
     let source = match (&listed, &view) {
         (Some(_), _) => "array",
         (None, None) => "store",
-        (None, Some(_)) => "store (stale array)",
+        (None, Some(v)) => {
+            if v.get("ids")
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.is_empty())
+            {
+                "store"
+            } else {
+                "store (stale array)"
+            }
+        }
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
     match listed {

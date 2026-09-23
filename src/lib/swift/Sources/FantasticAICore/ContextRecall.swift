@@ -167,6 +167,51 @@ extension AIBackend {
         AIStripStrategy.forget(key)
     }
 
+    // MARK: - the clear
+
+    /// args: why:str? — start a NEW THREAD on the same store: the model's view
+    /// begins at the `[cleared <id> · N rows behind]` line this writes; nothing is
+    /// deleted — every earlier row stays in the store, reachable by id (grep,
+    /// pull, recall, the kernel's messages/rows_read). Empties the persisted view
+    /// and drops RAM scratch (projection, fold counters, pending recall). Returns
+    /// {cleared:id, behind:N}. Python `_context_clear`.
+    func contextClear(agent: Agent, payload: JSON, kernel: Kernel) -> JSON {
+        let key = agent.id.value
+        let behind = loadHistory(agent: agent, kernel: kernel, behind: true).count
+        // `" ".join(str(payload.get("why") or "").split())[:200]` — python
+        // TRUTHINESS, whitespace collapsed, cut on CODE POINTS.
+        let raw = payload["why"]
+        let collapsed = pySplitWhitespace(pyTruthy(raw) ? pyStr(raw) : "").joined(separator: " ")
+        let why = String(String.UnicodeScalarView(collapsed.unicodeScalars.prefix(200)))
+        let rid = kernel.rows.mintId()
+        appendRows(
+            agent.id, kernel: kernel,
+            [
+                .object([
+                    "role": .string("user"),
+                    "id": .integer(rid),
+                    "parent": .null,
+                    "kind": .string("clear"),
+                    "title": .string(why.isEmpty ? "cleared" : why),
+                    "content": .string(
+                        "[cleared \(rid) \u{b7} \(behind) rows behind]"
+                            + (why.isEmpty ? "" : " \(why)")
+                            + " \u{2014} a new thread; earlier rows are in the store, "
+                            + "reachable by id (grep, pull, recall)."),
+                ])
+            ])
+        // The persisted view names rows behind the clear — empty it, so the view is
+        // the store from the clear on. RAM is scratch; the store is never cleared.
+        saveView(agent.id, kernel: kernel, ids: [], budget: AIContext.budget(agent), why: "cleared")
+        dropScratch(key)
+        projectionLock.lock()
+        foldsSince[key] = nil
+        recallDue.remove(key)
+        viewSource[key] = nil
+        projectionLock.unlock()
+        return .object(["cleared": .integer(rid), "behind": .integer(Int64(behind))])
+    }
+
     // MARK: - the model call
 
     /// One plain completion, reasoning stripped (see `makeSummarizer`). Python

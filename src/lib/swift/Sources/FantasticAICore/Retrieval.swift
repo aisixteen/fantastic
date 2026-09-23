@@ -176,7 +176,8 @@ extension AIBackend {
                 pid, offset: offset, length: max(1, length))
         else {
             // A fold id: its body is on the row itself.
-            for r in loadHistory(agent: agent, kernel: kernel) where isFold(r) && rowId(r) == pid {
+            for r in loadHistory(agent: agent, kernel: kernel, behind: true)
+            where isFold(r) && rowId(r) == pid {
                 // ON CODE POINTS, as python's slice is (a negative `length` is
                 // refused above). `str(r.get("body") or "")` is the text.
                 let text = Array((pyTruthy(r["body"]) ? pyStr(r["body"]) : "").unicodeScalars)
@@ -257,7 +258,7 @@ extension AIBackend {
         // written as one long line lost its tail at 200 and the model concluded
         // grep could not reach it (measured 2026-09-08, python fold_long).
         let width = max(20, min((try? pyIntOr(payload["width"], 200)) ?? 200, 20_000))
-        let rows = loadHistory(agent: agent, kernel: kernel)
+        let rows = loadHistory(agent: agent, kernel: kernel, behind: true)
         // A fold id in `ids` is a DESCENT: it expands to the rows it collapsed.
         var scope: Set<Int64>? = nil
         // `list(scope)` is a python SET ordering, and it decides which row owns a

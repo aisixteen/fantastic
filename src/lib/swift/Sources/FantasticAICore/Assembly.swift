@@ -271,6 +271,8 @@ let ASYNC_HOWTO = #"""
     look inside. After a fold, and on boot with a history, `context_recall` fits the head of
     your conversation to your budget and asks you what to keep in full; a `[recall …]` line
     is your own earlier decision and names the LIVE task. You may call
-    `<type>context_recall</type>` on yourself any time.
+    `<type>context_recall</type>` on yourself any time. `<type>context_clear</type>` on yourself
+    starts a NEW THREAD: your view begins at the `[cleared …]` line; every earlier row stays in
+    the store, reachable by id through grep, pull and recall.
 
     """#
