@@ -20,7 +20,7 @@
 //!
 //! ### Verbs
 //!
-//! - `reflect` → identity, port, running, served_agent_count, surfaces, routes,
+//! - `reflect` → identity, port, host, allowed_origins, running, served_agent_count, surfaces, routes,
 //!   browser_reachable
 //! - `boot`    → `{running, surfaces}`. Idempotent; a missing `port` RAISES.
 //! - `stop`    → `{stopped}`
@@ -31,6 +31,7 @@
 mod handlers;
 pub(crate) mod mimetypes;
 mod mimetypes_table;
+pub(crate) mod origin;
 pub(crate) mod routes;
 pub(crate) mod ws;
 
@@ -44,7 +45,6 @@ use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -55,6 +55,8 @@ use routes::RouteTable;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "web.tools";
+
+pub use origin::DEFAULT_HOST;
 
 /// readme.md auto-seeded into the agent's dir on creation. Python's file, byte
 /// for byte (`PB/web/host/src/web/readme.md`).
@@ -210,6 +212,12 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         json!("HTTP host — rendering routes baked in; call surfaces mounted from sub-agents."),
     );
     out.insert("port".into(), port.map_or(Value::Null, |p| json!(p)));
+    let rec = read_rec(agent_id, kernel);
+    out.insert("host".into(), json!(origin::effective_host(&rec)));
+    out.insert(
+        "allowed_origins".into(),
+        json!(origin::reflect_origins(&rec)),
+    );
     out.insert("running".into(), json!(running));
     out.insert("served_agent_count".into(), json!(kernel.agents.len()));
     out.insert("surfaces".into(), Value::Object(surface_map));
@@ -424,10 +432,9 @@ async fn start_serving(
     {
         return;
     }
-    // Bind all interfaces (0.0.0.0) to match python's uvicorn host and to stay
-    // reachable through a container's published port.
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-    let listener = match tokio::net::TcpListener::bind(addr).await {
+    // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
+    let host = origin::effective_host(&read_rec(agent_id, &state.kernel));
+    let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
         Ok(l) => l,
         Err(e) => {
             // python `logger.error("webapp %s :%d serve failed: %s", …)`
@@ -540,6 +547,15 @@ fn read_port(agent_id: &AgentId, kernel: &Kernel) -> Option<u16> {
     py_int(raw).ok().and_then(|n| u16::try_from(n).ok())
 }
 
+/// The agent's record meta (python `kernel.get(id) or {}`).
+pub(crate) fn read_rec(agent_id: &AgentId, kernel: &Kernel) -> Map<String, Value> {
+    kernel
+        .agents
+        .get(agent_id)
+        .map(|e| e.meta.read().expect("meta poisoned").clone())
+        .unwrap_or_default()
+}
+
 // ─── the serving edge ───────────────────────────────────────────────
 
 /// `DynamicRouter` walks the live route table for each request. Mounting and
@@ -590,7 +606,14 @@ impl tower::Service<Request<Body>> for DynamicRouter {
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let state = self.state.clone();
         let table = Arc::clone(&self.table);
-        Box::pin(async move { Ok(handlers::dispatch(state, table, req).await) })
+        Box::pin(async move {
+            // python `_OriginGuard`: in front of EVERY route, the record read per request.
+            let rec = read_rec(&state.web_agent_id, &state.kernel);
+            if let Some(refused) = origin::guard(state.web_agent_id.as_str(), &rec, &req) {
+                return Ok(refused);
+            }
+            Ok(handlers::dispatch(state, table, req).await)
+        })
     }
 }
 

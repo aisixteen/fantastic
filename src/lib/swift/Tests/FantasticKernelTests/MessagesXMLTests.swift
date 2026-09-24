@@ -115,4 +115,56 @@ struct MessagesXMLTests {
         #expect(back[0]["tag"] == .string("a\rb"))
         #expect(back[0]["content"] == .string("x\ny"))
     }
+
+    /// ONE TAPE — a `call` row carries its PAYLOAD, so the writer meets map keys
+    /// the caller chose. A key that is not an XML name rides
+    /// `<entry key="…">value</entry>` and reads back AS THAT KEY (still a
+    /// string); raw bytes are `{"len": N}`, the one reduction. Twin of python's
+    /// `test_xml_rows_round_trip_every_shape_and_escape` additions.
+    @Test func callAndSettleRowsRoundTripEntryKeysAndByteLengths() throws {
+        let rows: [Row] = [
+            row([
+                "id": .integer(7), "agent": .string("ai"), "kind": .string("call"),
+                "verb": .string("write_stream"), "named": .bool(false),
+                "retries": .integer(0), "attempts": .integer(1),
+                "payload": .object([
+                    "type": .string("create_agent"),
+                    "callable_by": .object([
+                        "$parent": .string("*"),
+                        "rest": .array([.string("read"), .string("write")]),
+                        "7": .integer(3),
+                        "a b": .null,
+                    ]),
+                    "bytes": .object(["len": .integer(3)]),
+                ]),
+            ]),
+            row([
+                "id": .integer(8), "agent": .string("kernel_state"), "kind": .string("settle"),
+                "parent": .integer(7), "settled": .string("ai"), "attempts": .integer(2),
+                "outcome": .object([
+                    "status": .string("completed"),
+                    "result": .object(["chunk": .object(["len": .integer(9)])]),
+                ]),
+            ]),
+        ]
+        let text = MessagesXML.header + rows.map(MessagesXML.rowToXml).joined()
+        // `$parent` is not a tag; `rest` is.
+        #expect(text.contains("<entry key=\"$parent\">*</entry>"), "\(text)")
+        #expect(text.contains("<bytes len=\"3\" />"), "\(text)")
+        let back = try MessagesXML.parseMessages(text)
+        let cb = back[0]["payload"]?["callable_by"]
+        #expect(cb?["$parent"] == .string("*"))
+        #expect(cb?["rest"] == .array([.string("read"), .string("write")]))
+        // A NUMERIC-LOOKING KEY STAYS A STRING — it was a map key, not a scalar.
+        #expect(cb?["7"] == .integer(3), "\(back[0])")
+        // `null` is omitted, here as everywhere.
+        #expect(cb?.asObject?.keys.contains("a b") == false)
+        #expect(back[0]["payload"]?["bytes"] == .object(["len": .integer(3)]))
+        #expect(
+            back[1]["outcome"] == .object([
+                "status": .string("completed"),
+                "result": .object(["chunk": .object(["len": .integer(9)])]),
+            ]), "\(back[1])")
+        #expect(back[1]["attempts"] == .integer(2))
+    }
 }

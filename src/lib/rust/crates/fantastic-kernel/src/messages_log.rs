@@ -114,13 +114,63 @@ pub fn hydrate_messages(kernel: &Kernel, root_dir: &Path) -> Result<usize, Strin
     Ok(n)
 }
 
+/// REBUILD THE EXECUTION LEDGER FROM THE TAPE — the durable half of C9.
+///
+/// `ledger.json` is gone. A settled call is a `call` row (payload, retries, name,
+/// origin) plus its `settle` row (the full outcome, the final attempts), so the
+/// process side is a projection of the two: a DONE row holding the recorded
+/// outcome, exactly what a live kernel had. Dedup ("a completed step is never
+/// re-executed") therefore holds across reboots with no second file.
+///
+/// A call with NO settle row was in flight when the process died: it rebuilds
+/// NOTHING, and a re-send re-executes it — that work never completed, so running
+/// it again is the truth, not a loss.
+///
+/// Runs at the root loader's `boot`, BEFORE the pump subscribes: rebuilding mints
+/// nothing, and nothing rebuilt is re-appended. Returns the count. The COUNTER is
+/// restored by [`hydrate_messages`] (cold, before the first mint); nothing here
+/// may mint, so nothing here may lower it.
+pub fn hydrate_executions(kernel: &Arc<Kernel>) -> usize {
+    let mut n = 0;
+    for row in kernel.rows.all() {
+        if row.get("kind").and_then(Value::as_str) != Some("settle") {
+            continue;
+        }
+        let Some(parent) = row.get("parent").and_then(Value::as_i64) else {
+            continue;
+        };
+        let Some(call) = kernel.rows.get_one(parent) else {
+            continue;
+        };
+        if call.get("kind").and_then(Value::as_str) != Some("call") {
+            continue;
+        }
+        let Some(out) = row.get("outcome").and_then(Value::as_object) else {
+            continue;
+        };
+        let attempts = row
+            .get("attempts")
+            .and_then(Value::as_u64)
+            .or_else(|| call.get("attempts").and_then(Value::as_u64))
+            .unwrap_or(1) as u32;
+        if kernel.ledger.hydrate_settled(parent, &call, out, attempts) {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// What the pump carries between its two tasks — python `_MessagePump`'s
 /// instance fields.
 #[derive(Default)]
 struct PumpState {
-    /// Rows the tail accepted and the flusher has not landed yet. A REFUSED
-    /// append is prepended back here; rust used to drop it.
+    /// Rows the tail accepted and the flusher has not landed yet. A REFUSED —
+    /// or CANCELLED — append is prepended back here; rust used to drop it.
     pending: Vec<i64>,
+    /// The highest id the TAIL has looked at, skipped rows included. `catch_up`
+    /// converges when the tail has seen everything the counter minted and
+    /// nothing pends (python `_MessagePump.seen`).
+    seen: i64,
     /// Unknown until the FIRST flush asks the store whether the log exists: a
     /// NEW log opens with the root element, an existing one is appended to.
     /// Remembered, not re-probed per append (python `_header_needed`).
@@ -133,13 +183,63 @@ struct PumpState {
 pub struct MessagePump {
     state: Arc<std::sync::Mutex<PumpState>>,
     wake: Arc<tokio::sync::Notify>,
+    /// ONE WRITE AT A TIME. `catch_up` takes the same lock for its CHECK, so a
+    /// shutdown waits out an in-flight append instead of racing past it and
+    /// dropping the writer mid-write (the row was lost: measured 2026-09-24).
+    lock: Arc<tokio::sync::Mutex<()>>,
+    /// Stops the FLUSH LOOP — fired first at `stop`, because it is the task that
+    /// can be holding a half-written append. Dropping it there re-queues the
+    /// batch (see [`BatchGuard`]).
+    halt_flush: Arc<tokio::sync::Notify>,
+    /// Stops the TAIL — fired LAST, so a row minted during the catch-up is still
+    /// seen.
+    halt_read: Arc<tokio::sync::Notify>,
     tasks: Vec<crate::tasks::TaskId>,
 }
 
+/// THE BATCH GOES BACK IF THE WRITE DOES NOT LAND.
+///
+/// A flush takes its rows OUT of `pending` before awaiting the store, so a stop
+/// that drops the flush future between the take and the ack used to eat them.
+/// The guard is armed with the batch and disarmed only by a LANDED write; a
+/// cancel, a panic or a refused append all return the rows to the head of the
+/// queue, where the stop's own catch-up lands them.
+struct BatchGuard {
+    state: Arc<std::sync::Mutex<PumpState>>,
+    batch: Option<Vec<i64>>,
+}
+
+impl BatchGuard {
+    /// The write landed — nothing to put back.
+    fn landed(&mut self) {
+        self.batch = None;
+    }
+}
+
+impl Drop for BatchGuard {
+    fn drop(&mut self) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        let mut st = self.state.lock().expect("pump poisoned");
+        let rest = std::mem::take(&mut st.pending);
+        st.pending = batch;
+        st.pending.extend(rest);
+    }
+}
+
 impl MessagePump {
-    /// One append of everything pending. The flush loop's body AND the seam a
-    /// shutdown uses to land the last window.
+    /// One append of everything pending, UNDER THE LOCK. The flush loop's body
+    /// AND the seam a shutdown uses to land the last window.
     pub async fn flush(&self, kernel: &Arc<Kernel>) {
+        let _g = self.lock.lock().await;
+        self.flush_once(kernel).await;
+    }
+
+    /// One append. CANCELLATION PUTS THE BATCH BACK (see [`BatchGuard`]): a
+    /// shutdown that lands between taking the batch and the store's ack must not
+    /// eat it.
+    async fn flush_once(&self, kernel: &Arc<Kernel>) {
         let has_pending = !self.state.lock().expect("pump poisoned").pending.is_empty();
         if !has_pending {
             return;
@@ -156,6 +256,10 @@ impl MessagePump {
         let batch: Vec<i64> = {
             let mut st = self.state.lock().expect("pump poisoned");
             std::mem::take(&mut st.pending)
+        };
+        let mut guard = BatchGuard {
+            state: Arc::clone(&self.state),
+            batch: Some(batch.clone()),
         };
         // PROBE ONCE. The header question is answered the first time a flush
         // asks it and remembered; rust probed before EVERY append, which is one
@@ -182,7 +286,6 @@ impl MessagePump {
         if header_needed {
             // The root, once, at the head of a NEW log; never closed (a stream).
             lines.insert_str(0, HEADER);
-            self.state.lock().expect("pump poisoned").header_needed = Some(false);
         }
         let (reply, _) = crate::persistence::store_send_binary(
             kernel,
@@ -204,27 +307,53 @@ impl MessagePump {
             );
             use std::io::Write;
             let _ = std::io::stdout().flush();
-            // NOTHING LOST: the batch goes back in front of whatever the tail
-            // queued while we were writing, and the next flush retries it.
-            let mut st = self.state.lock().expect("pump poisoned");
-            let rest = std::mem::take(&mut st.pending);
-            st.pending = batch;
-            st.pending.extend(rest);
+            // NOTHING LOST: the guard puts the batch back in front of whatever
+            // the tail queued while we were writing, and the next flush retries.
+            return;
+        }
+        guard.landed();
+        // Only a LANDED write closes the header question: a refused or cancelled
+        // append that had cleared it would leave the next one headerless.
+        let mut st = self.state.lock().expect("pump poisoned");
+        st.header_needed = Some(false);
+    }
+
+    /// Land everything the tail has seen — the shutdown's own writing pass.
+    ///
+    /// The CHECK takes the flush lock, so it waits out an append still in
+    /// flight rather than reading an empty queue whose rows are in a flusher's
+    /// local batch and calling that "done" (python `_MessagePump.catch_up`).
+    pub async fn catch_up(&self, kernel: &Arc<Kernel>) {
+        for _ in 0..1000 {
+            tokio::task::yield_now().await;
+            {
+                let _g = self.lock.lock().await;
+                let done = {
+                    let st = self.state.lock().expect("pump poisoned");
+                    st.seen >= kernel.rows.next_id() - 1 && st.pending.is_empty()
+                };
+                if done {
+                    return;
+                }
+                self.flush_once(kernel).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
     /// Land every row minted so far, then stop both tasks. The kernel's
     /// shutdown seam (python `_MessagePump.stop`).
+    ///
+    /// ORDER MATTERS. The FLUSH LOOP dies first — it is the task that can be
+    /// holding a half-written append, and killing it there re-queues the batch;
+    /// then `catch_up` runs FROM THE STOPPING TASK (which nobody is stopping)
+    /// and lands everything; the reader goes last, so a row minted during the
+    /// catch-up is still seen.
     pub async fn stop(self, kernel: &Arc<Kernel>) {
-        for _ in 0..1000 {
-            tokio::task::yield_now().await;
-            let pending = !self.state.lock().expect("pump poisoned").pending.is_empty();
-            if !pending {
-                break;
-            }
-            self.flush(kernel).await;
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        self.halt_flush.notify_one();
+        tokio::task::yield_now().await;
+        self.catch_up(kernel).await;
+        self.halt_read.notify_one();
         for t in &self.tasks {
             kernel.tasks.forget(t);
         }
@@ -247,8 +376,14 @@ impl MessagePump {
 /// on (or cancelling) a loop that never ends — the pump has to be alive AFTER
 /// the shutdown verb to append what that verb just wrote.
 pub fn install_message_pump(kernel: &Arc<Kernel>, after: i64) -> MessagePump {
-    let state = Arc::new(std::sync::Mutex::new(PumpState::default()));
+    let state = Arc::new(std::sync::Mutex::new(PumpState {
+        seen: after,
+        ..PumpState::default()
+    }));
     let wake = Arc::new(tokio::sync::Notify::new());
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    let halt_flush = Arc::new(tokio::sync::Notify::new());
+    let halt_read = Arc::new(tokio::sync::Notify::new());
     let root = kernel
         .root()
         .map_or_else(|| AgentId::from("kernel"), |r| r.id.clone());
@@ -256,47 +391,78 @@ pub fn install_message_pump(kernel: &Arc<Kernel>, after: i64) -> MessagePump {
     let k_read = Arc::clone(kernel);
     let s_read = Arc::clone(&state);
     let w_read = Arc::clone(&wake);
+    let h_read = Arc::clone(&halt_read);
     let pump_agent = root.clone();
     let read = kernel.spawn_keepalive_task(&root, PUMP_VERBS[0], async move {
-        let mut tail = k_read.rows.subscribe(after);
-        loop {
-            let Some(id) = tail.recv().await else { return };
-            // SKIP AT ARRIVAL, like python's `_read`: the decision is about what
-            // the row IS (its kind, its agent, its verb), and a skipped row
-            // never joins the queue at all.
-            let store = find_store(&k_read);
-            let keep = k_read
-                .rows
-                .get_one(id)
-                .is_some_and(|row| !skips(&k_read, store.as_ref(), &pump_agent, &row));
-            if !keep {
-                continue;
+        let body = async {
+            let mut tail = k_read.rows.subscribe(after);
+            loop {
+                let Some(id) = tail.recv().await else { return };
+                // THE TAIL HAS SEEN IT either way — `catch_up` converges on this
+                // number, and a SKIPPED row still moves it (python `_read`).
+                {
+                    let mut st = s_read.lock().expect("pump poisoned");
+                    st.seen = st.seen.max(id);
+                }
+                // SKIP AT ARRIVAL, like python's `_read`: the decision is about
+                // what the row IS (its kind, its agent, its verb), and a skipped
+                // row never joins the queue at all.
+                let store = find_store(&k_read);
+                let keep = k_read
+                    .rows
+                    .get_one(id)
+                    .is_some_and(|row| !skips(&k_read, store.as_ref(), &pump_agent, &row));
+                if !keep {
+                    continue;
+                }
+                s_read.lock().expect("pump poisoned").pending.push(id);
+                w_read.notify_one();
             }
-            s_read.lock().expect("pump poisoned").pending.push(id);
-            w_read.notify_one();
+        };
+        tokio::select! {
+            () = h_read.notified() => {}
+            () = body => {}
         }
     });
 
     let k_flush = Arc::clone(kernel);
     let s_flush = Arc::clone(&state);
     let w_flush = Arc::clone(&wake);
+    let l_flush = Arc::clone(&lock);
+    let h_flush = Arc::clone(&halt_flush);
+    let hf_inner = Arc::clone(&halt_flush);
+    let hr_inner = Arc::clone(&halt_read);
     let flush = kernel.spawn_keepalive_task(&root, PUMP_VERBS[1], async move {
         let handle = MessagePump {
             state: s_flush,
             wake: Arc::clone(&w_flush),
+            lock: l_flush,
+            halt_flush: hf_inner,
+            halt_read: hr_inner,
             tasks: Vec::new(),
         };
-        loop {
-            w_flush.notified().await;
-            // DEBOUNCE: give the rest of this batch's rows a moment to land, so
-            // one batch is one append rather than one per row.
-            tokio::time::sleep(std::time::Duration::from_millis(DEBOUNCE_MS)).await;
-            handle.flush(&k_flush).await;
+        let body = async {
+            loop {
+                w_flush.notified().await;
+                // DEBOUNCE: give the rest of this batch's rows a moment to land,
+                // so one batch is one append rather than one per row.
+                tokio::time::sleep(std::time::Duration::from_millis(DEBOUNCE_MS)).await;
+                handle.flush(&k_flush).await;
+            }
+        };
+        // HALT DROPS THE FLUSH MID-APPEND, which is the point: the batch guard
+        // puts the rows back and the stopping task's `catch_up` lands them.
+        tokio::select! {
+            () = h_flush.notified() => {}
+            () = body => {}
         }
     });
     MessagePump {
         state,
         wake,
+        lock,
+        halt_flush,
+        halt_read,
         tasks: vec![read, flush],
     }
 }

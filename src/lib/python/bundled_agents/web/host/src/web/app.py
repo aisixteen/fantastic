@@ -29,6 +29,93 @@ from kernel import sender_context
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 
+#: The web host binds LOOPBACK unless its record names a `host` — a closed default,
+#: overridable by whoever creates the kernel (create_agent meta, a roster yaml,
+#: update_agent). `0.0.0.0` is an explicit choice, never a fallback.
+DEFAULT_HOST = "127.0.0.1"
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def own_origins(rec: dict) -> set[str]:
+    """The origins that ARE this web host: `http://<host>:<port>`, plus both loopback
+    spellings when it binds loopback. A browser Origin is compared against these (and
+    the record's `allowed_origins`) EXACTLY — never against the request's Host header,
+    which a DNS-rebinding page controls."""
+    host = rec.get("host") or DEFAULT_HOST
+    port = rec.get("port")
+    out = {f"http://{host}:{port}"}
+    if host in ("127.0.0.1", "localhost", "::1"):
+        out |= {
+            f"http://127.0.0.1:{port}",
+            f"http://localhost:{port}",
+            f"http://[::1]:{port}",
+        }
+    return out
+
+
+def origin_allowed(rec: dict, origin: str | None) -> bool:
+    """No Origin header ⇒ a non-browser client (CLI, curl, a bridge): allowed — the leg's
+    own `ingress_rule` still gates it. A browser Origin must be the host's own or listed
+    in the record's `allowed_origins` (exact strings)."""
+    if not origin:
+        return True
+    return origin in own_origins(rec) or origin in set(extra_origins(rec))
+
+
+def extra_origins(rec: dict) -> list[str]:
+    """The record's `allowed_origins` as a list — a bare string (what `k=v` on the CLI
+    yields) is ONE origin, never its characters."""
+    extra = rec.get("allowed_origins") or []
+    return [extra] if isinstance(extra, str) else list(extra)
+
+
+class _OriginGuard:
+    """ASGI guard in front of every route of this host: a websocket upgrade, or an HTTP
+    request that is not GET/HEAD/OPTIONS, from a FOREIGN browser origin is refused —
+    403 with a coded body on HTTP, a refused upgrade (403) on a websocket — and logged.
+    Reads the record per request, so `allowed_origins` edits apply without a restart."""
+
+    def __init__(self, app, web_agent_id: str, kernel):
+        self.app, self.web_agent_id, self.kernel = app, web_agent_id, kernel
+
+    async def __call__(self, scope, receive, send):
+        kind = scope.get("type")
+        if kind in ("http", "websocket"):
+            headers = dict(scope.get("headers") or [])
+            origin = headers.get(b"origin", b"").decode("latin-1") or None
+            gated = (
+                kind == "websocket" or scope.get("method", "GET") not in _SAFE_METHODS
+            )
+            rec = self.kernel.get(self.web_agent_id) or {}
+            if gated and not origin_allowed(rec, origin):
+                print(
+                    f"  [web] {self.web_agent_id}: refused {kind} {scope.get('path')} "
+                    f"from foreign origin {origin!r}",
+                    flush=True,
+                )
+                if kind == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                body = json.dumps(
+                    {
+                        "error": f"origin {origin!r} is not allowed on this host",
+                        "reason": "unauthorized",
+                        "hint": "add it to the web record's allowed_origins",
+                    }
+                ).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 403,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
 async def _index_page(kernel) -> str:
     """Render the root index — the substrate tree. Reads the HTML scaffold per
     request so editing `templates/index.html` hot-reloads (matches the
@@ -196,4 +283,5 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
             )
         return Response(status_code=404)
 
+    app.add_middleware(_OriginGuard, web_agent_id=web_agent_id, kernel=kernel)
     return app

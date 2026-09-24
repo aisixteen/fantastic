@@ -1,13 +1,17 @@
-//! #37 — the DURABLE LEDGER, through the REAL persistence path.
+//! ONE TAPE — the durable execution ledger IS `messages.xml`.
+//!
+//! `ledger.json` is gone (2026-09-24). A `call` row carries the dispatch payload
+//! verbatim, its retry budget and its attempt count; the `settle` row on the ROOT
+//! carries the WHOLE outcome body and the final attempts. At boot the loader
+//! rebuilds `executions` from those two rows, so dedup ("a completed step is
+//! never re-executed") holds across a restart out of ONE file.
 //!
 //! The unit tests in `ledger/tests.rs` prove the ring, the scoping and the
-//! snapshot shape in isolation. This one proves the part that only breaks when
-//! the pieces are joined: a settled execution written THROUGH the discovered
-//! provider, read back by a FRESH kernel, and deduping a re-send that would
-//! otherwise re-run the side effect.
-//!
-//! Uses `FakeStore` (the same stand-in `persistence_roundtrip` uses — the real
-//! `fantastic-file` bundle cannot be a dev-dep here without a cycle).
+//! rebuild in isolation. This one proves the part that only breaks when the
+//! pieces are joined: rows written THROUGH the discovered provider by the pump,
+//! read back by a FRESH kernel, and deduping a re-send that would otherwise
+//! re-run the side effect. Twin of python
+//! `tests/kernel/test_execution_ledger.py`'s persistence cases.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, StorageMode};
@@ -59,18 +63,37 @@ impl Bundle for CountingBundle {
                 let n = bump(id.as_str());
                 Ok(Some(json!({ "run": n })))
             }
+            "slow" => {
+                bump(id.as_str());
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(Some(json!({"never": true})))
+            }
             "boom" => Ok(Some(json!({"error": "always fails"}))),
             other => Ok(Some(json!({ "error": format!("unknown verb {other:?}") }))),
         }
     }
+    /// RAW BYTES BOTH WAYS — the tape's one reduction, in and out. The reply
+    /// keeps `bytes` at `null` in its python position (C37) and hands the body
+    /// back on the binary channel.
+    async fn handle_binary(
+        &self,
+        _id: &AgentId,
+        _header: Value,
+        blob: Vec<u8>,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
+        Ok((Some(json!({"note": "verbatim", "bytes": null})), Some(blob)))
+    }
 }
 
-struct FakeStore {
+/// A store that APPENDS, because the log is append-only — `write_stream` with no
+/// `truncate` continues the file, which is exactly what the pump relies on.
+struct AppendStore {
     root: PathBuf,
 }
 
 #[async_trait]
-impl Bundle for FakeStore {
+impl Bundle for AppendStore {
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -93,14 +116,21 @@ impl Bundle for FakeStore {
         let target = self.root.join(path);
         match header.get("type").and_then(Value::as_str).unwrap_or("") {
             "write_stream" => {
+                use std::io::Write;
                 if let Some(p) = target.parent() {
                     std::fs::create_dir_all(p).ok();
                 }
-                std::fs::write(&target, &blob).ok();
+                let truncate = header.get("truncate").and_then(Value::as_bool) == Some(true);
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .append(!truncate)
+                    .truncate(truncate)
+                    .open(&target)?;
+                f.write_all(&blob)?;
                 Ok((Some(json!({"written": blob.len()})), None))
             }
             "read_stream" => match std::fs::read(&target) {
-                // One whole file, `eof: true` — the pump stops on the first pass.
                 Ok(b) => Ok((
                     Some(json!({"path": path, "eof": true, "size": b.len()})),
                     Some(b),
@@ -111,7 +141,7 @@ impl Bundle for FakeStore {
                 )),
             },
             other => Ok((
-                Some(json!({"error": format!("FakeStore: {other:?}")})),
+                Some(json!({"error": format!("AppendStore: {other:?}")})),
                 None,
             )),
         }
@@ -124,7 +154,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
     reg.register("counting.tools", CountingBundle);
     reg.register(
         "file_bridge.tools",
-        FakeStore {
+        AppendStore {
             root: store_root.to_path_buf(),
         },
     );
@@ -168,15 +198,70 @@ async fn wire(kernel: &Arc<Kernel>, store_root: &Path, desk: &str) {
         .await;
 }
 
+/// A live kernel with the store wired AND the pump running — the tape is the
+/// only durable record now, so a restart test has to actually write it. The pump
+/// handle stays with the caller, which is what a `_reboot` needs to land the
+/// last window (the loader owns it in production).
+async fn boot_with_tape(
+    store: &Path,
+    desk: &str,
+) -> (Arc<Kernel>, fantastic_kernel::messages_log::MessagePump) {
+    let k = kernel_at(store);
+    // COLD HYDRATION FIRST, before any agent exists or any id is minted — the
+    // bootstrap's order, and the only way the counter continues correctly.
+    let after = match fantastic_kernel::messages_log::hydrate_messages(&k, store) {
+        Ok(_) => k.rows.next_id() - 1,
+        Err(e) => panic!("hydrate: {e}"),
+    };
+    wire(&k, store, desk).await;
+    // THE TAPE IS THE LEDGER: the settled calls become `executions` again.
+    fantastic_kernel::messages_log::hydrate_executions(&k);
+    let pump = fantastic_kernel::messages_log::install_message_pump(&k, after);
+    (k, pump)
+}
+
+/// Land everything, drop the process, come back up off `messages.xml`.
+async fn reboot(
+    k1: Arc<Kernel>,
+    pump: fantastic_kernel::messages_log::MessagePump,
+    store: &Path,
+    desk: &str,
+) -> (Arc<Kernel>, fantastic_kernel::messages_log::MessagePump) {
+    pump.stop(&k1).await;
+    drop(k1);
+    boot_with_tape(store, desk).await
+}
+
+/// Every row on the tape, parsed back off disk.
+fn tape(store: &Path) -> Vec<fantastic_kernel::Row> {
+    let text = std::fs::read_to_string(store.join("messages.xml")).unwrap_or_default();
+    fantastic_kernel::messages_xml::parse_messages(&text).expect("the tape parses")
+}
+
+async fn ledger_rows(kernel: &Arc<Kernel>) -> Vec<Value> {
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ledger"}),
+        )])
+        .await
+        .remove(0);
+    out.result["executions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_completed_execution_is_never_re_run_by_a_fresh_kernel() {
     const DESK: &str = "desk_a";
     // C9's full property: a completed step is not re-executed by a NEW process.
+    // The settled call rebuilds from its `call` + `settle` rows with its
+    // outcome; a re-send of the NAME returns it and the handler does not run.
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join(".fantastic");
 
-    let k1 = kernel_at(&store);
-    wire(&k1, &store, DESK).await;
+    let (k1, p1) = boot_with_tape(&store, DESK).await;
     let first = k1
         .send(vec![Item::new(
             AgentId::from(DESK),
@@ -189,22 +274,7 @@ async fn a_completed_execution_is_never_re_run_by_a_fresh_kernel() {
     assert_eq!(first.result["run"], 1);
     assert_eq!(runs(DESK), 1);
 
-    // Write the sidecar THROUGH the provider (what the debounced flusher does).
-    fantastic_kernel::persistence::flush_ledger(&k1).await;
-    assert!(
-        store.join("ledger.json").exists(),
-        "the sidecar never reached the store"
-    );
-    drop(k1);
-
-    // A FRESH kernel — a new process, as far as the ledger is concerned.
-    let k2 = kernel_at(&store);
-    wire(&k2, &store, DESK).await;
-    // LEDGER-ALL: every execution is a row, so the operator's own wiring sends
-    // are in there too. What matters is that the NAMED one came back.
-    let n = fantastic_kernel::persistence::rehydrate_ledger(&k2).await;
-    assert!(n >= 1, "nothing rehydrated");
-
+    let (k2, p2) = reboot(k1, p1, &store, DESK).await;
     let again = k2
         .send(vec![Item::new(
             AgentId::from(DESK),
@@ -215,61 +285,111 @@ async fn a_completed_execution_is_never_re_run_by_a_fresh_kernel() {
         .remove(0);
     assert_eq!(runs(DESK), 1, "a REBOOT re-executed a completed step");
     assert_eq!(again.result["run"], 1, "the recorded outcome must return");
+    assert_eq!(again.attempts, 1);
+    p2.stop(&k2).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn only_settled_rows_cross_the_restart() {
-    const DESK: &str = "desk_b";
-    // Work in flight at a crash never completed, so a post-reboot re-send
-    // re-running it is the TRUTH, not a loss.
+async fn the_tape_carries_the_payload_and_the_full_outcome() {
+    const DESK: &str = "desk_tape";
+    // ONE TAPE. `messages.xml` holds the call WITH its dispatch payload and the
+    // settle WITH the whole result body — no second file, nothing RAM-only.
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join(".fantastic");
 
-    let k1 = kernel_at(&store);
-    wire(&k1, &store, DESK).await;
-    let _ = k1
+    let (k1, p1) = boot_with_tape(&store, DESK).await;
+    let out = k1
         .send(vec![Item::new(
             AgentId::from(DESK),
             json!({"type": "work"}),
         )
-        .with_id("settled-1")])
-        .await;
-    fantastic_kernel::persistence::flush_ledger(&k1).await;
+        .with_id("tape-1")])
+        .await
+        .remove(0);
+    let (k2, p2) = reboot(k1, p1, &store, DESK).await;
 
-    let doc: Value =
-        serde_json::from_slice(&std::fs::read(store.join("ledger.json")).unwrap()).unwrap();
-    assert_eq!(doc["v"], 2, "the sidecar is version-stamped");
-    let rows = doc["rows"].as_array().expect("v2 rows are an array");
-    // v2 carries the KERNEL id as an int64 `id` field (an object key would
-    // stringify it) and the caller's name beside it — which is what lets that
-    // name still join its execution after the restart.
-    assert!(
-        rows.iter().any(|r| r["name"] == "settled-1"),
-        "the settled row is missing"
+    let rows = tape(&store);
+    let call = rows
+        .iter()
+        .find(|r| r.get("name") == Some(&json!("tape-1")))
+        .expect("the call row is on the tape");
+    assert_eq!(call["payload"], json!({"type": "work"}));
+    assert_eq!(call["named"], json!(true));
+    assert_eq!(call["retries"], json!(0));
+    assert_eq!(call["attempts"], json!(1));
+    let settle = rows
+        .iter()
+        .find(|r| r.get("parent") == call.get("id") && r.get("kind") == Some(&json!("settle")))
+        .expect("the settle row is on the tape");
+    assert_eq!(
+        settle["outcome"],
+        json!({"status": "completed", "result": out.result}),
     );
-    // EVERY persisted row carries a terminal outcome — nothing in flight
-    // crosses the restart. Work that never completed did not complete.
-    for r in rows {
-        let status = r["outcome"]["status"].as_str().unwrap_or("");
-        assert!(
-            ["completed", "errored", "failed", "cancelled", "timed_out"].contains(&status),
-            "row {:?} persisted as {status:?} — only settled rows may cross",
-            r["id"]
-        );
-    }
+    assert_eq!(settle["attempts"], json!(1));
+    assert_eq!(settle["settled"], DESK);
+
+    // ...and the `ledger` verb answers the FULL outcome after the restart.
+    let led = ledger_rows(&k2).await;
+    let row = led
+        .iter()
+        .find(|r| r.get("name") == Some(&json!("tape-1")))
+        .expect("the rebuilt execution is in the ledger");
+    assert_eq!(row["outcome"]["result"], out.result);
+    assert_eq!(row["status"], "completed");
+    p2.stop(&k2).await;
 }
 
-/// C46: an `errored` execution — a handler that RAN and said no — survives the
-/// reboot. Rust used to drop it on rehydrate, which re-armed exactly the call
-/// the ledger exists to never run twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_errored_execution_survives_reboot() {
-    const DESK: &str = "desk_err";
+async fn raw_bytes_on_the_tape_are_a_length_not_base64() {
+    const DESK: &str = "desk_blob";
+    // The ONE reduction: a raw body anywhere in a payload or a result is written
+    // as its LENGTH. Base64 is banned; text and JSON stay verbatim.
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join(".fantastic");
-    let k1 = kernel_at(&store);
-    wire(&k1, &store, DESK).await;
+
+    let (k1, p1) = boot_with_tape(&store, DESK).await;
     let out = k1
+        .send(vec![Item::new(
+            AgentId::from(DESK),
+            json!({"type": "write_stream", "path": "probe.bin"}),
+        )
+        .with_id("bin-1")
+        .with_binary(b"\x00\x01\x02\x03\x04".to_vec())])
+        .await
+        .remove(0);
+    assert!(out.is_completed(), "{:?}", out.result);
+    let (k2, p2) = reboot(k1, p1, &store, DESK).await;
+
+    let rows = tape(&store);
+    let call = rows
+        .iter()
+        .find(|r| r.get("name") == Some(&json!("bin-1")))
+        .expect("the call row is on the tape");
+    assert_eq!(call["payload"]["bytes"], json!({"len": 5}));
+    // everything else verbatim
+    assert_eq!(call["payload"]["path"], "probe.bin");
+    let settle = rows
+        .iter()
+        .find(|r| r.get("parent") == call.get("id") && r.get("kind") == Some(&json!("settle")))
+        .expect("the settle row is on the tape");
+    assert_eq!(
+        settle["outcome"]["result"],
+        json!({"note": "verbatim", "bytes": {"len": 5}}),
+    );
+    // NEVER THE BYTES, and never base64 of them.
+    let text = std::fs::read_to_string(store.join("messages.xml")).unwrap();
+    assert!(!text.contains("AAECAwQ="), "base64 reached the tape");
+    p2.stop(&k2).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_letter_survives_reboot_and_stays_dead() {
+    const DESK: &str = "desk_dead";
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+
+    let (k1, p1) = boot_with_tape(&store, DESK).await;
+    let dead = k1
         .send(vec![Item::new(
             AgentId::from(DESK),
             json!({"type": "boom"}),
@@ -277,15 +397,15 @@ async fn an_errored_execution_survives_reboot() {
         .with_id("bad-1")])
         .await
         .remove(0);
-    assert_eq!(out.status.as_str(), "errored", "{:?}", out.result);
-    fantastic_kernel::persistence::flush_ledger(&k1).await;
+    assert_eq!(dead.status.as_str(), "errored", "{:?}", dead.result);
 
-    let k2 = kernel_at(&store);
-    wire(&k2, &store, DESK).await;
-    assert!(
-        fantastic_kernel::persistence::rehydrate_ledger(&k2).await >= 1,
-        "the errored row must come back"
-    );
+    let (k2, p2) = reboot(k1, p1, &store, DESK).await;
+    let led = ledger_rows(&k2).await;
+    let row = led
+        .iter()
+        .find(|r| r.get("name") == Some(&json!("bad-1")))
+        .expect("the dead letter must come back");
+    assert_eq!(row["status"], "errored");
     // Re-sending the SAME name hands back the recorded outcome, not a re-run.
     let again = k2
         .send(vec![Item::new(
@@ -296,65 +416,66 @@ async fn an_errored_execution_survives_reboot() {
         .await
         .remove(0);
     assert_eq!(again.status.as_str(), "errored");
+    p2.stop(&k2).await;
 }
 
-/// C46: the rehydrate RAISES the row counter past every settled id, so a call
-/// the message log never saw cannot have its id re-minted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rehydrate_raises_the_id_counter() {
+async fn in_flight_work_does_not_survive_a_crash() {
+    const DESK: &str = "desk_crash";
+    // Only SETTLED calls rebuild an execution. Work in flight at the crash never
+    // completed; a re-send after reboot RE-EXECUTING it is the truth, not a
+    // loss. The call row is on the tape either way — with no settle after it.
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join(".fantastic");
-    std::fs::create_dir_all(&store).unwrap();
-    std::fs::write(
-        store.join("ledger.json"),
-        r#"{"v": 2, "rows": [{"id": 900, "target": "desk", "retries": 0, "attempts": 1,
-            "named": true, "name": "old", "origin": null,
-            "outcome": {"status": "completed", "result": {}, "attempts": 1}}]}"#,
-    )
-    .unwrap();
-    let kernel = kernel_at(&store);
-    wire(&kernel, &store, "desk").await;
-    assert_eq!(
-        fantastic_kernel::persistence::rehydrate_ledger(&kernel).await,
-        1
-    );
+
+    let (k1, p1) = boot_with_tape(&store, DESK).await;
+    let k = Arc::clone(&k1);
+    let batch = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            AgentId::from(DESK),
+            json!({"type": "slow"}),
+        )
+        .with_id("mid-1")])
+            .await
+    });
+    for _ in 0..200 {
+        if runs(DESK) > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(runs(DESK), 1, "the slow handler never started");
+    // THE "CRASH" happens with mid-1 unsettled: the window lands, the process
+    // goes.
+    p1.catch_up(&k1).await;
+    batch.abort();
+    let rows = tape(&store);
+    let call = rows
+        .iter()
+        .find(|r| r.get("name") == Some(&json!("mid-1")))
+        .expect("the call row is written at dispatch, settled or not");
     assert!(
-        kernel.rows.next_id() > 900,
-        "the counter must clear every rehydrated id: {}",
-        kernel.rows.next_id()
+        !rows
+            .iter()
+            .any(|r| r.get("parent") == call.get("id") && r.get("kind") == Some(&json!("settle"))),
+        "an unsettled call must have no settle row"
     );
-}
+    drop(k1);
 
-/// C54: a clean rehydrate says NOTHING. Only python's loud lines survive.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_clean_rehydrate_prints_nothing() {
-    let tmp = TempDir::new().unwrap();
-    let store = tmp.path().join(".fantastic");
-    std::fs::create_dir_all(&store).unwrap();
-    std::fs::write(
-        store.join("ledger.json"),
-        r#"{"v": 2, "rows": [{"id": 7, "target": "desk", "retries": 0, "attempts": 1,
-            "named": false, "name": null, "origin": null,
-            "outcome": {"status": "completed", "result": {}, "attempts": 1}}]}"#,
-    )
-    .unwrap();
-    let kernel = kernel_at(&store);
-    wire(&kernel, &store, "desk").await;
-    // The proof is the STORE, not a line: one row back, nothing announced.
-    assert_eq!(
-        fantastic_kernel::persistence::rehydrate_ledger(&kernel).await,
-        1
+    let (k2, p2) = boot_with_tape(&store, DESK).await;
+    let led = ledger_rows(&k2).await;
+    assert!(
+        led.iter().all(|r| r.get("name") != Some(&json!("mid-1"))),
+        "in-flight work crossed the restart: {led:?}"
     );
-    // Installing the write-through is likewise silent (the `rehydrated N` line
-    // is deleted).
-    fantastic_kernel::persistence::install_ledger_persistence(&kernel).await;
+    p2.stop(&k2).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_store_wired_means_ram_only_and_no_error() {
-    const DESK: &str = "desk_c";
+    const DESK: &str = "desk_ram";
     // The AUTO-FLUSH LAW: with nothing wired the tree does not persist either.
-    // The ledger follows the same rule rather than inventing a second surface.
+    // The tape follows the same rule rather than inventing a second surface.
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join(".fantastic");
 
@@ -369,221 +490,24 @@ async fn no_store_wired_means_ram_only_and_no_error() {
             }),
         )])
         .await;
-    let _ = kernel
+    let pump = fantastic_kernel::messages_log::install_message_pump(&kernel, 0);
+    let out = kernel
         .send(vec![Item::new(
             AgentId::from(DESK),
             json!({"type": "work"}),
         )
         .with_id("ram-1")])
-        .await;
-
-    // Does not panic, does not write, does not complain.
-    fantastic_kernel::persistence::flush_ledger(&kernel).await;
-    assert!(!store.join("ledger.json").exists());
-    assert_eq!(
-        fantastic_kernel::persistence::rehydrate_ledger(&kernel).await,
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_corrupt_sidecar_starts_empty_instead_of_half_loading() {
-    const DESK: &str = "desk_d";
-    // A ledger that silently half-loads would re-arm exactly the side effects it
-    // exists to prevent, so every failure is LOUD and starts empty.
-    let tmp = TempDir::new().unwrap();
-    let store = tmp.path().join(".fantastic");
-    std::fs::create_dir_all(&store).unwrap();
-
-    let kernel = kernel_at(&store);
-    wire(&kernel, &store, DESK).await;
-
-    std::fs::write(store.join("ledger.json"), b"{\"v\": 1, \"rows\": {broken").unwrap();
-    assert_eq!(
-        fantastic_kernel::persistence::rehydrate_ledger(&kernel).await,
-        0
-    );
-
-    // An unknown version is not a migration we can guess at.
-    std::fs::write(
-        store.join("ledger.json"),
-        br#"{"v": 99, "rows": {"x": {}}}"#,
-    )
-    .unwrap();
-    assert_eq!(
-        fantastic_kernel::persistence::rehydrate_ledger(&kernel).await,
-        0
-    );
-
-    // ...and the kernel is still perfectly usable.
-    let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(DESK),
-            json!({"type": "work"}),
-        )])
         .await
         .remove(0);
-    assert!(out.is_completed(), "a bad sidecar bricked the kernel");
-}
-
-/// THE LOADER'S OWN PERSISTENCE TRAFFIC DOES NOT DIRTY THE LEDGER (python
-/// `_is_own_persistence`, 2026-09-21). The flush writes `ledger.json` THROUGH
-/// the discovered store, and that write's settle used to reach the kick: settle
-/// -> `ledger_flush` task row -> store write -> settle -> kick -> ... forever,
-/// on an IDLE kernel. The mechanism, not a number: after a burst of real sends
-/// the `ledger_flush` task-row count must STOP GROWING across a quiet window,
-/// and a REAL settle after that window must still flush.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn own_persistence_settles_never_re_kick_the_flusher() {
-    const DESK: &str = "desk_ownkick";
-    let tmp = TempDir::new().unwrap();
-    let store = tmp.path().join(".fantastic");
-    let kernel = kernel_at(&store);
-    wire(&kernel, &store, DESK).await;
-    fantastic_kernel::persistence::install_ledger_persistence(&kernel).await;
-
-    let flushes = |k: &Arc<Kernel>| {
-        k.rows
-            .for_agent(&AgentId::from("kernel_state"))
-            .iter()
-            .filter(|r| r["kind"] == json!("task") && r["verb"] == json!("ledger_flush"))
-            .count()
-    };
-
-    for _ in 0..5 {
-        let _ = kernel
-            .send(vec![Item::new(
-                AgentId::from(DESK),
-                json!({"type": "work"}),
-            )])
-            .await;
-    }
-    // Let the burst's flushes drain, then hold the kernel QUIET and measure.
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-    let quiet_start = flushes(&kernel);
+    assert!(out.is_completed());
+    pump.stop(&kernel).await;
     assert!(
-        quiet_start > 0,
-        "the burst never flushed, so the window proves nothing"
+        !store.join("messages.xml").exists(),
+        "a tape was written with no store wired"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
     assert_eq!(
-        flushes(&kernel),
-        quiet_start,
-        "the flusher re-kicked itself on its OWN persistence settles"
-    );
-
-    // A REAL settle still flushes: one more send, and both the task row and the
-    // durable snapshot move.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(DESK),
-            json!({"type": "work"}),
-        )])
-        .await;
-    let mut grew = false;
-    for _ in 0..80 {
-        if flushes(&kernel) > quiet_start {
-            grew = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    assert!(grew, "a real settle must still flush the ledger");
-    let doc: Value =
-        serde_json::from_slice(&std::fs::read(store.join("ledger.json")).unwrap()).unwrap();
-    assert!(
-        doc["rows"].as_array().is_some_and(|r| !r.is_empty()),
-        "the flush wrote an empty ledger: {doc}"
-    );
-}
-
-/// C14 (RP-08): every flush pass is a REGISTERED kernel task on the root under
-/// the verb `ledger_flush` — python writes `<row kind="task"
-/// verb="ledger_flush" agent="kernel_state" />` for each one, so the writing is
-/// visible in `ps` and in the log. A bare `tokio::spawn` is invisible to both.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn each_flush_pass_is_a_ledger_flush_task() {
-    const DESK: &str = "desk_flushrow";
-    let tmp = TempDir::new().unwrap();
-    let store = tmp.path().join(".fantastic");
-    let kernel = kernel_at(&store);
-    wire(&kernel, &store, DESK).await;
-    fantastic_kernel::persistence::install_ledger_persistence(&kernel).await;
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(DESK),
-            json!({"type": "work"}),
-        )])
-        .await;
-    // The flusher's own task row lands on the ROOT under python's verb.
-    let mut saw = false;
-    for _ in 0..80 {
-        saw = kernel
-            .rows
-            .for_agent(&AgentId::from("kernel_state"))
-            .iter()
-            .any(|r| r["kind"] == json!("task") && r["verb"] == json!("ledger_flush"));
-        if saw {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    assert!(saw, "no `ledger_flush` task row on the root");
-}
-
-/// C47: PERSISTENCE IO RIDES THE BATCH. Every store write the substrate makes —
-/// the ledger flush here — is an ordinary execution: a `call` row on the store
-/// agent, a settle, and a ledger entry. `send_with_binary` minted none of them,
-/// so the one class of work that is always running left no trace at all.
-///
-/// The row carries NO `origin` (operator authority), which is exactly the test
-/// the message pump uses to skip its own traffic — assert it here so the two
-/// halves cannot drift apart.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn store_writes_are_ledger_executions() {
-    const DESK: &str = "desk_storerows";
-    let tmp = TempDir::new().unwrap();
-    let store = tmp.path().join(".fantastic");
-    let kernel = kernel_at(&store);
-    wire(&kernel, &store, DESK).await;
-    fantastic_kernel::persistence::install_ledger_persistence(&kernel).await;
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from(DESK),
-            json!({"type": "work"}),
-        )])
-        .await;
-
-    let mut writes = Vec::new();
-    for _ in 0..80 {
-        writes = kernel
-            .rows
-            .for_agent(&AgentId::from("store"))
-            .into_iter()
-            .filter(|r| r["kind"] == json!("call") && r["verb"] == json!("write_stream"))
-            .collect();
-        if !writes.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    let row = writes
-        .first()
-        .expect("a ledger flush must leave a `write_stream` call row on the store");
-    assert!(
-        row.get("origin").is_none() || row["origin"].is_null(),
-        "a substrate write runs as the operator: {row:?}"
-    );
-    let id = row["id"].as_i64().expect("a call row is named by its id");
-    assert!(
-        kernel.tasks.contains(&fantastic_kernel::TaskId(id))
-            || kernel
-                .rows
-                .for_agent(&AgentId::from("kernel_state"))
-                .iter()
-                .any(|r| r["kind"] == json!("settle") && r["parent"] == json!(id)),
-        "the write's execution neither ran nor settled"
+        fantastic_kernel::messages_log::hydrate_executions(&kernel),
+        0,
+        "nothing to rebuild, and no error saying so"
     );
 }

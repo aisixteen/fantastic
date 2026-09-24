@@ -1996,11 +1996,13 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The bundle's own frame, in python's key order; the kernel then appends
     // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
     assert_eq!(
-        obj.keys().map(String::as_str).take(9).collect::<Vec<_>>(),
+        obj.keys().map(String::as_str).take(11).collect::<Vec<_>>(),
         vec![
             "id",
             "sentence",
             "port",
+            "host",
+            "allowed_origins",
             "running",
             "served_agent_count",
             "surfaces",
@@ -2978,4 +2980,100 @@ fn ws_client_ids_are_pythons_token_hex_3_and_random() {
     let mut sorted = ids.clone();
     sorted.sort();
     assert_ne!(sorted, ids, "client ids ascend like a counter: {ids:?}");
+}
+
+/// python `test_foreign_post_is_403_own_and_originless_pass_get_is_not_gated`.
+#[tokio::test]
+async fn foreign_post_is_403_own_and_originless_pass_get_is_not_gated() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_og", "rest_og", "fb_og").await;
+    let c = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/rest_og/kernel_state");
+    let body = json!({"type": "reflect"});
+    let r = c
+        .post(&url)
+        .header("Origin", "http://evil.example")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.headers()["content-type"], "application/json");
+    assert_eq!(
+        r.text().await.unwrap(),
+        r#"{"error": "origin 'http://evil.example' is not allowed on this host", "reason": "unauthorized", "hint": "add it to the web record's allowed_origins"}"#
+    );
+    let own = format!("http://localhost:{port}");
+    let r = c
+        .post(&url)
+        .header("Origin", own)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = c.post(&url).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = c
+        .get(format!("http://127.0.0.1:{port}/"))
+        .header("Origin", "http://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    // Loopback by default, and reflect names it.
+    let reflect = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_og"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(reflect["host"], json!("127.0.0.1"));
+    assert_eq!(
+        reflect["allowed_origins"],
+        json!([
+            format!("http://127.0.0.1:{port}"),
+            format!("http://[::1]:{port}"),
+            format!("http://localhost:{port}")
+        ])
+    );
+    stop(&kernel, "web_og").await;
+}
+
+/// python `test_foreign_websocket_upgrade_is_refused_listed_origin_passes` —
+/// `allowed_origins` is read per request (no restart).
+#[tokio::test]
+async fn foreign_websocket_upgrade_is_refused_listed_origin_passes() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_web_with_ws(&tmp, port, "web_ow").await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": "web_ow",
+                   "allowed_origins": ["https://ui.example"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let url = format!("ws://127.0.0.1:{port}/web_ow/ws");
+    let mut req = url.as_str().into_client_request().unwrap();
+    req.headers_mut()
+        .insert("origin", "http://evil.example".parse().unwrap());
+    match tokio_tungstenite::connect_async(req).await {
+        Err(WsError::Http(resp)) => assert_eq!(resp.status(), 403),
+        other => panic!("expected a refused upgrade, got {:?}", other.map(|_| ())),
+    }
+    let mut req = url.as_str().into_client_request().unwrap();
+    req.headers_mut()
+        .insert("origin", "https://ui.example".parse().unwrap());
+    tokio_tungstenite::connect_async(req)
+        .await
+        .expect("listed origin upgrades");
+    stop(&kernel, "web_ow").await;
 }

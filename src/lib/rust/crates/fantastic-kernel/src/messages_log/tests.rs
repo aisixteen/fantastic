@@ -141,3 +141,224 @@ fn every_shape_survives_the_file() {
     assert_eq!(view["budget"], json!(12000));
     assert_eq!(view["ids"], json!([{"id": 1, "res": "full"}]));
 }
+
+// ── the two gated-pump repros (2026-09-24) ─────────────────────────────────
+//
+// The 0.15 s debounce boundary is a race a sleep only SAMPLES. These drive the
+// pump BY HAND — its flush loop halted and its append to `messages.xml` stalled
+// on a gate — so each half of the loss is deterministic.
+
+/// A store whose `write_stream` to the LOG blocks until it is released.
+struct GatedStore {
+    root: std::path::PathBuf,
+    entered: Arc<tokio::sync::Notify>,
+    hold: Arc<tokio::sync::Notify>,
+    gate: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::Bundle for GatedStore {
+    fn name(&self) -> &str {
+        "file_bridge"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        Ok(Some(json!({"ok": true})))
+    }
+    async fn handle_binary(
+        &self,
+        _id: &AgentId,
+        header: Value,
+        blob: Vec<u8>,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(crate::bundle::Reply, Option<Vec<u8>>), crate::bundle::BundleError> {
+        let path = header.get("path").and_then(Value::as_str).unwrap_or("");
+        let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
+        let target = self.root.join(path);
+        if verb == "write_stream" {
+            if path == MESSAGES_FILE && self.gate.load(std::sync::atomic::Ordering::SeqCst) {
+                self.entered.notify_waiters();
+                self.hold.notified().await;
+            }
+            use std::io::Write;
+            if let Some(p) = target.parent() {
+                std::fs::create_dir_all(p).ok();
+            }
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&target)
+                .expect("GatedStore: open");
+            f.write_all(&blob).expect("GatedStore: write");
+            return Ok((Some(json!({"written": blob.len()})), None));
+        }
+        match std::fs::read(&target) {
+            Ok(b) => Ok((Some(json!({"size": b.len()})), Some(b))),
+            Err(_) => Ok((Some(json!({"error": "not found"})), None)),
+        }
+    }
+}
+
+struct Gated {
+    kernel: Arc<Kernel>,
+    pump: MessagePump,
+    entered: Arc<tokio::sync::Notify>,
+    hold: Arc<tokio::sync::Notify>,
+    gate: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A root whose pump is DRIVEN BY HAND (its flush loop halted) and whose append
+/// to `messages.xml` stalls on an event — the deterministic seam for the two
+/// races a debounce sweep only samples.
+async fn gated_pump(store_root: &Path) -> Gated {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut kernel = Kernel::with_storage(crate::StorageMode::Disk(store_root.to_path_buf()));
+    let mut reg = crate::BundleRegistry::new();
+    reg.register(
+        "file_bridge.tools",
+        GatedStore {
+            root: store_root.to_path_buf(),
+            entered: Arc::clone(&entered),
+            hold: Arc::clone(&hold),
+            gate: Arc::clone(&gate),
+        },
+    );
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = crate::Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        serde_json::Map::new(),
+        store_root.to_path_buf(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    crate::test_support::wire_fake_store(&kernel, store_root).await;
+    let pump = install_message_pump(&kernel, kernel.rows.next_id() - 1);
+    // The header probe happens on the FIRST flush; run it before the gate, so
+    // the stall under test is the append itself.
+    kernel
+        .rows
+        .put(&AgentId::from("ai"), row(json!({"content": "warm"})))
+        .unwrap();
+    pump.catch_up(&kernel).await;
+    // HALT THE FLUSH LOOP: the test IS the flusher from here on.
+    pump.halt_flush.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    gate.store(true, std::sync::atomic::Ordering::SeqCst);
+    Gated {
+        kernel,
+        pump,
+        entered,
+        hold,
+        gate,
+    }
+}
+
+fn landed(store_root: &Path) -> Vec<i64> {
+    let text = std::fs::read_to_string(store_root.join(MESSAGES_FILE)).unwrap_or_default();
+    crate::messages_xml::parse_messages(&text)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+        .collect()
+}
+
+/// `catch_up` used to read `pending` while a flush held the batch in a LOCAL
+/// variable — empty queue, counter caught up, so it returned and the caller
+/// stopped the writer mid-append. It takes the flush lock for the check now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catch_up_waits_out_an_in_flight_append() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let g = gated_pump(&store).await;
+    let waiting = g.entered.notified();
+    tokio::pin!(waiting);
+
+    g.kernel
+        .rows
+        .put(&AgentId::from("ai"), row(json!({"content": "held"})))
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await; // the tail picks it up
+    let pump = Arc::new(g.pump);
+    let p2 = Arc::clone(&pump);
+    let k2 = Arc::clone(&g.kernel);
+    let flush = tokio::spawn(async move { p2.flush(&k2).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("the append never entered the store");
+    // The batch is OUT of the queue and not yet written.
+    assert!(pump.state.lock().unwrap().pending.is_empty());
+
+    let p3 = Arc::clone(&pump);
+    let k3 = Arc::clone(&g.kernel);
+    let catch_up = tokio::spawn(async move { p3.catch_up(&k3).await });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        !catch_up.is_finished(),
+        "catch_up walked past an append still in flight"
+    );
+    g.gate.store(false, std::sync::atomic::Ordering::SeqCst);
+    g.hold.notify_waiters();
+    tokio::time::timeout(std::time::Duration::from_secs(2), flush)
+        .await
+        .expect("the flush never finished")
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), catch_up)
+        .await
+        .expect("catch_up never converged")
+        .unwrap();
+}
+
+/// Cancellation between taking the batch and the store's ack dropped those rows
+/// on the floor. They return to the head of `pending`, and the stop's own
+/// catch-up lands them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_flush_puts_its_batch_back() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let g = gated_pump(&store).await;
+    let waiting = g.entered.notified();
+    tokio::pin!(waiting);
+
+    let rid = g
+        .kernel
+        .rows
+        .put(&AgentId::from("ai"), row(json!({"content": "requeued"})))
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let pump = Arc::new(g.pump);
+    let p2 = Arc::clone(&pump);
+    let k2 = Arc::clone(&g.kernel);
+    let flush = tokio::spawn(async move { p2.flush(&k2).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("the append never entered the store");
+    assert!(pump.state.lock().unwrap().pending.is_empty());
+
+    // THE CANCEL: the flush future is dropped mid-append.
+    flush.abort();
+    let _ = flush.await;
+    assert_eq!(
+        pump.state.lock().unwrap().pending,
+        vec![rid],
+        "a cancelled flush ate its batch"
+    );
+
+    // The store answers again, and the catch-up lands what came back.
+    g.gate.store(false, std::sync::atomic::Ordering::SeqCst);
+    g.hold.notify_waiters();
+    pump.catch_up(&g.kernel).await;
+    assert!(
+        landed(&store).contains(&rid),
+        "the requeued row never reached the log"
+    );
+}

@@ -1,9 +1,9 @@
 """Twins for the 2026-09-21 python fixes: the flusher loop and the one-shot spin.
 
-A. THE LOADER'S OWN PERSISTENCE TRAFFIC DOES NOT DIRTY THE LEDGER. A settle
-   kicked a ledger flush; the flush's `ledger_flush` task row was itself a row;
-   the pump appended it through the store; that append settled and kicked the
-   flusher again — 19 spawns in 3 idle seconds, measured live.
+A. THE LOADER'S OWN PERSISTENCE TRAFFIC NEVER ENTERS THE LOG. The pump appending
+   a row through the store is itself a call, and persisting THAT would mint
+   another, forever — 19 flushes in 3 idle seconds, measured live before the
+   skip rule (the ledger flusher it also guarded is gone: ONE TAPE, 2026-09-24).
 B. A ONE-SHOT SHUTS DOWN ON THE LOOP THAT RAN THE CALL. `atexit` started a fresh
    loop where the pump's tail had died, so `catch_up` never saw the counter catch
    up and burned its full bound: `kernel ps` took 11.5 s.
@@ -28,16 +28,8 @@ import time
 from pathlib import Path
 
 
-def _flush_rows(kernel) -> list[dict]:
-    return [
-        r
-        for r in kernel.rows.values()
-        if r.get("kind") == "task" and r.get("verb") == "ledger_flush"
-    ]
-
-
 async def test_own_persistence_is_one_predicate(seeded_kernel, store_agent):
-    """The pump's skip rule and the flusher's gate read the SAME function."""
+    """What the pump skips: the loader writing to its own store as itself."""
     from kernel_state.tools import _MessagePump, _is_own_persistence
 
     k = seeded_kernel
@@ -52,37 +44,42 @@ async def test_own_persistence_is_one_predicate(seeded_kernel, store_agent):
     assert pump._skip(own) and not pump._skip({**own, "origin": "tf1"})
 
 
-async def test_an_idle_kernel_with_a_store_never_re_kicks_the_flusher(
-    seeded_kernel, store_agent
+async def test_an_idle_kernel_with_a_store_writes_nothing(
+    seeded_kernel, store_agent, tmp_path
 ):
+    """The anti-spin property, re-keyed to the tape: with the pump running and
+    NOTHING happening, the log stops growing. An append that logged its own
+    append would never settle down."""
     k = seeded_kernel
     await k.send([{"target": k.id, "payload": {"type": "boot"}}])
     await asyncio.sleep(0.5)  # let the boot's own writes drain
-    base = len(_flush_rows(k.ctx))
+    f = tmp_path / ".fantastic" / "messages.xml"
+    base = f.stat().st_size if f.exists() else 0
     await asyncio.sleep(1.2)  # ≥ 8 pump debounce windows of pure idle
-    assert len(_flush_rows(k.ctx)) == base, "persistence traffic kicked the flusher"
+    now = f.stat().st_size if f.exists() else 0
+    assert now == base, f"persistence traffic logged itself: {base} → {now}"
 
 
-async def test_a_real_settle_still_flushes_the_ledger(
-    seeded_kernel, store_agent, tmp_path
-):
-    """Durability AT SETTLE TIME is the flusher's whole job — gating its own
-    writes must not gate anybody else's."""
+async def test_a_real_settle_reaches_the_tape(seeded_kernel, store_agent, tmp_path):
+    """Durability AT SETTLE TIME: skipping the loader's OWN writes must not skip
+    anybody else's. A real call lands as a `call` row and a `settle` row."""
+    from kernel_state.tools import read_messages
+
     k = seeded_kernel
     await k.send([{"target": k.id, "payload": {"type": "boot"}}])
     out = await k.send(
-        [{"target": "kernel", "payload": {"type": "ps"}, "name": "a-real-call"}]
+        [{"target": "kernel", "payload": {"type": "ps"}, "id": "a-real-call"}]
     )
     pid = out[0]["pid"]
-    f = tmp_path / ".fantastic" / "ledger.json"
     for _ in range(60):
         await asyncio.sleep(0.05)
-        if f.exists() and any(
-            r["id"] == pid for r in json.loads(f.read_text())["rows"]
-        ):
+        rows = read_messages(tmp_path / ".fantastic")[0]
+        if any(r.get("parent") == pid and r.get("kind") == "settle" for r in rows):
             break
-    doc = json.loads(f.read_text())
-    assert [r for r in doc["rows"] if r["id"] == pid], doc
+    call = [r for r in rows if r.get("id") == pid]
+    assert call and call[0]["name"] == "a-real-call", rows
+    settle = [r for r in rows if r.get("parent") == pid and r.get("kind") == "settle"]
+    assert settle and settle[0]["outcome"]["status"] == "completed", settle
 
 
 def test_a_one_shot_lands_every_row_and_does_not_spin(tmp_path):
@@ -309,11 +306,11 @@ def test_a_reply_with_no_json_form_is_still_named_not_raised():
         assert body["hint"]
 
 
-async def test_a_settled_get_routes_persists_into_the_ledger(kernel):
-    """`_ledger_dump` is STRICT — a row whose outcome does not round-trip JSON
-    stays RAM-only. With the callables gone, python persists the `get_routes`
-    row that rust and swift persist."""
-    from kernel_state.tools import _ledger_dump
+async def test_a_settled_get_routes_lands_on_the_tape(kernel):
+    """A settle row carries the FULL result body, and the tape's writer has to be
+    able to render it. With the callables gone from `get_routes`, python records
+    the row rust and swift record."""
+    from kernel_state import messages_xml
 
     await kernel.send(
         [
@@ -340,14 +337,18 @@ async def test_a_settled_get_routes_persists_into_the_ledger(kernel):
         )
     )[0]
     assert out["status"] == "completed", out
-    rows = json.loads(_ledger_dump(kernel.ctx))["rows"]
-    hits = [r for r in rows if r["name"] == "gr-1"]
-    assert hits, rows
-    row = hits[0]
-    assert row["target"] == "pyfix_ws"
-    assert row["outcome"]["result"] == {
-        "routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]
+    rows = kernel.ctx.rows
+    call = next(r for r in rows.values() if r.get("name") == "gr-1")
+    assert call["agent"] == "pyfix_ws"
+    settle = next(r for r in rows.values() if r.get("parent") == call["id"])
+    assert settle["outcome"] == {
+        "status": "completed",
+        "result": {"routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]},
     }
+    back = messages_xml.parse_messages(
+        messages_xml.HEADER + messages_xml.row_to_xml(settle)
+    )[0]
+    assert back["outcome"] == settle["outcome"]
 
 
 async def test_a_row_append_publishes_its_digest_and_never_its_body(seeded_kernel):

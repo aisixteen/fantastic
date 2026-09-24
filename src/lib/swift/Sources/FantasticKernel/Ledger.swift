@@ -9,7 +9,9 @@
 //   unknown id ⇒ dispatch and record (a name, not a new mechanism)
 //   in flight  ⇒ JOIN — no second run (C10: once-only under concurrency)
 //   settled    ⇒ the recorded outcome returns, the handler never runs
-//                (C11 idempotency; C9 in-process, and across restart once persisted)
+//                (C11 idempotency; C9 in-process, and across restart — ONE TAPE:
+//                 `hydrateExecutions` rebuilds these rows from `messages.xml`'s
+//                 `call`+`settle` pairs, there is no `ledger.json`)
 //
 // ONE ID SPACE. The caller's id IS the pid that `ps`/`cancel`/reply tags carry;
 // an UNNAMED execution is ledgered under its minted pid. So any reply is
@@ -33,12 +35,6 @@ import OrderedCollections
 /// Default ring size. Big enough that a normal session never evicts, bounded so
 /// a long-lived kernel cannot grow without limit.
 public let defaultLedgerCap = 1_000_000
-
-/// The `ledger.json` sidecar format. v2 (2026-09-08): ids are the kernel's int64
-/// message ids, so rows are an ARRAY — a JSON object key would stringify them —
-/// and a named row carries `name`. An unknown version starts empty LOUDLY; there
-/// is no migration.
-public let ledgerSidecarVersion = 2
 
 /// What ``ExecutionLedger/open(_:target:retries:named:origin:)`` decided.
 public enum Opened {
@@ -238,91 +234,35 @@ public final class ExecutionLedger: @unchecked Sendable {
         }
     }
 
-    /// Every SETTLED row, as the durable sidecar stores them — python's v2
-    /// document `{"v": 2, "rows": [...]}`.
+    /// REBUILD ONE SETTLED EXECUTION FROM THE TAPE — the durable half of C9.
     ///
-    /// AN ARRAY, not an object: the ids are the kernel's int64 message ids and a
-    /// JSON object key would stringify every one of them. Each row carries
-    /// python's key order `{id, target, retries, attempts, named, name, origin,
-    /// outcome}` — and NO `verb`: the joiner's gate question is sourced from the
-    /// ORIGINAL PAYLOAD a live row holds, and a rehydrated row has none.
+    /// `ledger.json` is gone. A settled call is a `call` row (payload, retries,
+    /// name, origin) plus its `settle` row (the full outcome, the final
+    /// attempts), so this side is a projection of the two: a row that is already
+    /// DONE, holding the recorded outcome, exactly what a live kernel had. Dedup
+    /// ("a completed step is never re-executed") therefore holds across reboots
+    /// with no second file.
     ///
-    /// In-flight rows are deliberately absent: work that never completed did not
-    /// complete, and a post-reboot re-send re-running it is the truth, not a
-    /// loss.
-    ///
-    /// AND SO IS A ROW WHOSE OUTCOME CARRIED RAW BYTES. Python's
-    /// `_ledger_dump` is a STRICT round-trip filter: an outcome that
-    /// `json.dumps` cannot encode — "bytes in a read_stream result" is the
-    /// case it names — stays RAM-only rather than persisting a `default=str`
-    /// repr that rehydrates as a confidently wrong recorded outcome. Swift
-    /// carries those bytes on the outcome's own binary channel instead of
-    /// inside `result`, so the JSON always encodes and this port kept every
-    /// such row: measured on `store_files_*/disk_raw/ledger.json`, swift
-    /// persisted `{path, offset, size, next_offset, eof}` rows python has
-    /// none of. The channel is the difference, not the rule — a settled
-    /// outcome with a `body` is exactly python's unencodable one.
-    public func settledSnapshot() -> JSON {
-        lock.lock()
-        defer { lock.unlock() }
-        var out: [JSON] = []
-        for id in order {
-            guard let r = rows[id], let outcome = r.outcome else { continue }
-            guard outcome.body == nil else { continue }
-            out.append(
-                .object([
-                    "id": .integer(id),
-                    "target": .string(r.target.value),
-                    "retries": .integer(Int64(r.retries)),
-                    "attempts": .integer(Int64(r.attempts)),
-                    "named": .bool(r.named),
-                    "name": r.name.map { JSON.string($0) } ?? .null,
-                    "origin": r.origin.map { JSON.string($0.value) } ?? .null,
-                    "outcome": outcome.asJSON,
-                ]))
-        }
-        return .object(["v": .integer(Int64(ledgerSidecarVersion)), "rows": .array(out)])
-    }
-
-    /// Restore SETTLED rows from a v2 sidecar, DONE, so dedup holds across a
-    /// reboot: a completed step is never re-executed by a fresh process and a
-    /// parked dead letter stays dead.
-    ///
-    /// EVERY terminal status comes back, `errored` included — a row read as
-    /// something else would re-arm the side effect the ledger exists to prevent.
-    /// A rehydrated row carries NO payload: it is settled, so there is nothing
-    /// left to re-run and a joiner is gated on an empty call (python's
-    /// `entry["payload"] = None`).
+    /// A LIVE ROW ALWAYS WINS: an id the ledger already holds is not overwritten
+    /// by the tape. Returns whether a row was added.
     @discardableResult
-    public func rehydrate(_ doc: JSON) -> Int {
-        guard let src = doc["rows"].asArray else { return 0 }
+    public func putSettled(
+        _ execId: Int64, target: AgentId, retries: UInt32, attempts: UInt32, name: String?,
+        origin: AgentId?, outcome: Outcome
+    ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        var n = 0
-        for r in src {
-            guard let id = r["id"].asInt, let target = r["target"].asString,
-                let statusText = r["outcome"]["status"].asString,
-                let status = Status(rawValue: statusText)
-            else { continue }
-            let outcome = Outcome(
-                pid: r["outcome"]["pid"].asInt.map { TaskId(Int64($0)) },
-                status: status,
-                result: r["outcome"]["result"],
-                attempts: UInt32(r["outcome"]["attempts"].asInt ?? 1))
-            rows[id] = LedgerRow(
-                target: AgentId(target),
-                payload: nil,
-                retries: UInt32(r["retries"].asInt ?? 0),
-                attempts: UInt32(r["attempts"].asInt ?? 1),
-                name: r["name"].asString,
-                origin: r["origin"].asString.map { AgentId($0) },
-                outcome: outcome)
-            if let nm = r["name"].asString { names[nm] = id }
-            order.append(id)
-            n += 1
-        }
+        if rows[execId] != nil { return false }
+        rows[execId] = LedgerRow(
+            target: target,
+            // SETTLED: nothing left to re-run, so a joiner is gated on an empty
+            // call — python stores `payload: None` for exactly that reason.
+            payload: nil,
+            retries: retries, attempts: attempts, name: name, origin: origin, outcome: outcome)
+        if let n = name { names[n] = execId }
+        order.append(execId)
         evict()
-        return n
+        return true
     }
 
     /// Set the ring's cap and immediately re-run eviction against it (C80).
@@ -337,14 +277,6 @@ public final class ExecutionLedger: @unchecked Sendable {
         defer { lock.unlock() }
         cap = newCap
         evict()
-    }
-
-    /// The highest execution id the ledger holds — what hydration raises the
-    /// row counter above, so a fresh mint never collides with a settled id.
-    public func highestId() -> Int64? {
-        lock.lock()
-        defer { lock.unlock() }
-        return rows.keys.max()
     }
 
     /// The ring: evict oldest SETTLED rows, unnamed before named, never
@@ -365,36 +297,5 @@ public final class ExecutionLedger: @unchecked Sendable {
             }
             if rows.count <= cap { return }
         }
-    }
-}
-
-extension Kernel {
-    /// Install the durable-ledger write-through. The kernel calls it after every
-    /// settle and knows NOTHING about what it does — the store owns the disk.
-    public func setLedgerFlusher(_ f: @escaping @Sendable () -> Void) {
-        ledgerFlusherLock.lock()
-        defer { ledgerFlusherLock.unlock() }
-        _ledgerFlusher = f
-    }
-
-    /// Fire the durable write-through, if one is installed. No flusher = no
-    /// persistence: settled outcomes live and die with the process. That is the
-    /// auto-flush law, not a fallback.
-    /// Is this settling dispatch the loader persisting ITSELF — an
-    /// operator-context call on the discovered store (no `origin`, because
-    /// nobody sent it)? Those are the flush's own `ledger.json` write and the
-    /// pump's `messages.xml` append; `MessagePump.skips` keeps them out of the
-    /// log and they stay out of the ledger's dirty set for the same reason.
-    func isOwnPersistence(target: AgentId, execId: Int64) -> Bool {
-        guard let store = findStore(), store == target else { return false }
-        guard let row = rows.getOne(execId) else { return false }
-        return (row["origin"] ?? .null) == .null
-    }
-
-    public func ledgerSettled() {
-        ledgerFlusherLock.lock()
-        let f = _ledgerFlusher
-        ledgerFlusherLock.unlock()
-        f?()
     }
 }

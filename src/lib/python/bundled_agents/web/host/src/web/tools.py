@@ -32,7 +32,7 @@ from fastapi import FastAPI
 
 from kernel._kernel import _current_task
 
-from .app import make_app
+from .app import DEFAULT_HOST, extra_origins, make_app, own_origins
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,8 @@ async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
     app = make_app(agent_id, kernel)
     config = uvicorn.Config(
         app,
-        host="0.0.0.0",
+        # LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
+        host=rec.get("host") or DEFAULT_HOST,
         port=port,
         log_level="warning",
         loop="asyncio",
@@ -285,6 +286,9 @@ async def _reflect(id, payload, kernel):
         "id": id,
         "sentence": "HTTP host — rendering routes baked in; call surfaces mounted from sub-agents.",
         "port": int(port_val) if port_val else None,
+        "host": rec.get("host") or DEFAULT_HOST,
+        "allowed_origins": sorted(own_origins(rec))
+        + [o for o in extra_origins(rec) if o not in own_origins(rec)],
         "running": id in _servers,
         "served_agent_count": len(kernel.list()),
         "surfaces": surfaces,

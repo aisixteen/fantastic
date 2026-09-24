@@ -324,15 +324,6 @@ async def test_a_long_line_does_not_end_the_pipe(seeded_kernel):
     assert "[pump error]" not in text and "x" * 1000 in text
 
 
-async def test_ledger_flush_does_not_rekick_itself(seeded_kernel, store_agent):
-    k = seeded_kernel
-    await k.send([{"target": k.id, "payload": {"type": "reflect"}}])
-    await asyncio.sleep(1.0)
-    ps = (await k.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]
-    live = [t for t in ps.get("tasks", []) if t.get("verb") == "ledger_flush"]
-    assert not live, live
-
-
 async def test_records_over_a_chunk_keep_every_key(tmp_path, monkeypatch):
     """2026-09-16: the merge read took ONE 64 KiB chunk, so a larger agent.json
     failed to parse and its unknown keys vanished on the next write."""

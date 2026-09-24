@@ -36,10 +36,11 @@ verbatim (an explicit `guid` always wins, a minted one is never regenerated)
 A relay peer advertises this value as its `owner_guid` (distinct from a relay
 LEG's own `guid` on a `relay_connector` record).
 
-## The message log — `messages.xml`
+## The message log — `messages.xml`, the ONE tape
 
 Every message the kernel makes — an AI reply, a delivered reply, a fold, a recall, a `body`
-(a reply too large to inline, its text merged in), a `view`, a `call` per send, a `task`
+(a reply too large to inline, its text merged in), a `view`, a `call` per send **with the
+dispatch payload verbatim**, a `settle` per ending **with the whole outcome body**, a `task`
 per fork — is one `<row>` element, appended in id order, in `.fantastic/messages.xml`:
 ONE XML document opened by `<messages v="1">` and never closed (a stream). Scalars are
 attributes, text (`content`, `title`, `why`) and lists are child elements; the stdlib
@@ -59,10 +60,24 @@ nothing is skipped or repaired; truncate at the last complete `</row>`.
   the discovered provider. Its own calls to the store — and every operator-context
   call on the store, i.e. this bundle's persistence traffic — never enter the log.
 - **Order, by contract:** hydrate → subscribe → only then children. The loader's `boot`
-  subscribes right after the ledger rehydrates and before anything that creates or
+  subscribes right after the executions rehydrate and before anything that creates or
   wakes agents.
+- **The execution ledger IS these rows.** There is no `ledger.json` (deleted 2026-09-24);
+  an old one is ignored, never migrated. A `call` row carries `payload`, `named`,
+  `retries`, `attempts`, `timeout`; its `settle` row (on the ROOT's list, `parent` = the
+  call's id) carries `{status, result}` and the final `attempts`. At boot the loader
+  rebuilds `executions` + the caller-name index from every SETTLED call, so a re-send of
+  a finished id returns the recorded outcome and never re-runs the handler (C9) — across
+  restarts, out of one file. A call with NO settle was in flight at the crash: nothing is
+  rebuilt for it and a re-send re-executes, which is the truth, not a loss.
+- **Raw bytes are a LENGTH.** XML text cannot carry them and base64 is banned, so a
+  `bytes` value anywhere in a payload or a result is written `<key len="N"/>` and reads
+  back as `{"len": N}`. That is the ONLY reduction the tape makes — all text and all JSON
+  are verbatim. Durable bytes live behind `file_bridge`, the one disk surface.
 - **No provider ⇒ RAM only**, said once on stderr. Swap the sink by wiring a provider
   that answers `write_stream`; a table-backed one later needs no kernel change.
 - **Stop:** `shutdown_agents` (drain, the `shutdown` verb, quiet) then the kernel awaits
-  `flush_pending` — the pump lands every message minted so far — before the teardown
-  walk. `shutdown_kernel` does all of it.
+  `flush_pending` — the pending RECORDS are written and the pump lands every message
+  minted so far — before the teardown walk, while the provider is still alive.
+  `shutdown_kernel` does all of it. Both writers close on that one hook: a record flushed
+  mid-walk, or a batch cancelled mid-append, is a row the operator never gets back.

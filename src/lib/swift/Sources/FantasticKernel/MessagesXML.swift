@@ -30,9 +30,18 @@
 // (`coerceScalar`); a text field (`content`, `title`, `why`, `text`, `summary`,
 // or any string holding a newline) is a child ELEMENT; a list is a child
 // element of `<item>`s; a nested object is a child element carrying its own
-// attributes/children. `null` is omitted (absent on read = null for every
-// reader that asks). A truncated last row (a crash mid-append) is a PARSE ERROR
-// naming the last good row — fail loud, no repair.
+// attributes/children; a key that is NOT an XML name is
+// `<entry key="…">value</entry>`. `null` is omitted (absent on read = null for
+// every reader that asks). A truncated last row (a crash mid-append) is a PARSE
+// ERROR naming the last good row — fail loud, no repair.
+//
+// RAW BYTES ARE A LENGTH. `<key len="N"/>`, read back as `{"len": N}` — the ONE
+// reduction the tape makes (base64 is banned and a length is the honest record).
+// Python holds those bytes INSIDE the payload/result dict and reduces them here;
+// swift carries them on the binary side channel (`Item.binary`, `Outcome.body`),
+// so the reduction happens where the ROW is built — `BatchSend.bytesLen` — and
+// the element this writer emits for the resulting `{"len": N}` object is
+// byte-for-byte python's.
 
 import FantasticJSON
 import Foundation
@@ -59,8 +68,39 @@ public enum MessagesXML {
         return children.isEmpty ? "<row\(attrs) />\n" : "<row\(attrs)>\(children)</row>\n"
     }
 
+    /// A MAP KEY IS NOT ALWAYS A TAG. Rows carry caller data now (a call's
+    /// payload, a settle's result), and those maps are keyed by whatever the
+    /// caller wrote — `callable_by: {"$parent": "*"}`, a grant map keyed by an
+    /// agent id. A key that is not an XML name goes through
+    /// `<entry key="…">value</entry>` instead of becoming an attribute or an
+    /// element; everything else is unchanged. Python `_is_xml_name`.
+    static func isXMLName(_ k: String) -> Bool {
+        // python's `[A-Za-z_][A-Za-z0-9_.\-]*`, ASCII by construction.
+        func alpha(_ c: Unicode.Scalar) -> Bool {
+            (c >= "A" && c <= "Z") || (c >= "a" && c <= "z")
+        }
+        func digit(_ c: Unicode.Scalar) -> Bool { c >= "0" && c <= "9" }
+        var first = true
+        for c in k.unicodeScalars {
+            let ok =
+                first
+                ? (alpha(c) || c == "_")
+                : (alpha(c) || digit(c) || c == "_" || c == "." || c == "-")
+            if !ok { return false }
+            first = false
+        }
+        return !first
+    }
+
     private static func fill(_ obj: Row, _ attrs: inout String, _ children: inout String) {
         for (k, v) in obj {
+            if !isXMLName(k) {
+                // `null` is omitted here too — python's `_fill` skips a None
+                // BEFORE it ever asks whether the key is a tag.
+                if v == .null { continue }
+                children += entryElement(k, v)
+                continue
+            }
             switch v {
             // `null` IS OMITTED. Absent on read is null for every reader that
             // asks, so writing it would only make the file bigger.
@@ -85,6 +125,31 @@ public enum MessagesXML {
                 children += openClose(k, a, c)
             }
         }
+    }
+
+    /// `<entry key="…">value</entry>` — the carrier for a map key that is not
+    /// an XML name. The VALUE renders by python's `_fill_value` rules, and `key`
+    /// is written FIRST so the attribute order matches ElementTree's.
+    private static func entryElement(_ key: String, _ v: JSON) -> String {
+        var attrs = " key=\"\(escapeAttr(key))\""
+        var children = ""
+        var text = ""
+        switch v {
+        case .null: attrs += " null=\"true\""
+        case .bool(let b): text = b ? "true" : "false"
+        case .integer(let n): text = String(n)
+        case .double(let d): text = pyRepr(d)
+        case .string(let s): text = escapeText(s)
+        case .array(let items): children = items.map(itemElement).joined()
+        case .object(let map):
+            var a = ""
+            var c = ""
+            fill(map, &a, &c)
+            attrs += a
+            children = c
+        }
+        let inner = children.isEmpty ? text : children
+        return inner.isEmpty ? "<entry\(attrs) />" : "<entry\(attrs)>\(inner)</entry>"
     }
 
     /// One `<item>` of a list.
@@ -226,6 +291,9 @@ public enum MessagesXML {
         var items: [JSON]? = nil
         /// A leaf's text.
         var text: String? = nil
+        /// `<entry>`'s `key`, RAW — a map key is a string, never coerced. `7`
+        /// as a key is the string "7", and python's `child.get("key")` says so.
+        var rawKey: String? = nil
     }
 
     /// One element starting at `at`: `(element, index just past its close)`.
@@ -238,6 +306,10 @@ public enum MessagesXML {
         let name = String(head[..<nameEnd])
         var elem = Element(name: name, fields: [:])
         for (k, v) in parseAttrs(String(head[nameEnd...])) {
+            if name == "entry" && k == "key" {
+                elem.rawKey = v
+                continue
+            }
             elem.fields[k] = coerceScalar(v)
         }
         if selfClosing { return (elem, headEnd + 1) }
@@ -258,6 +330,16 @@ public enum MessagesXML {
                 return (elem, tag + closer.count)
             }
             guard let (child, end) = parseElement(b, tag) else { return nil }
+            // `<entry key="…">` lands under the KEY IT NAMES, and the value is
+            // read by the ordinary rules with `key` stripped off first (python
+            // `_without_key`). Keys stay strings — a numeric-looking one is not
+            // coerced, because it was a map key, not a scalar field.
+            if child.name == "entry", let key = child.rawKey {
+                elem.fields[key] = valueOf(child)
+                textRun.removeAll(keepingCapacity: true)
+                i = end
+                continue
+            }
             let value = valueOf(child)
             if child.name == "item" {
                 elem.items = (elem.items ?? []) + [value]

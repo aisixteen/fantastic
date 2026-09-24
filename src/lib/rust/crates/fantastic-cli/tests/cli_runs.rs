@@ -1057,33 +1057,45 @@ fn post_rest(port: u16, path: &str, exec_id: &str, body: &str) -> String {
 
 /// #37 — a ONE-SHOT is DURABLE at exit. The ledger flusher is debounced and
 /// coalescing, so the execution the process just ran is only on disk if
-/// `Kernel::shutdown` lands the last window BEFORE the lock is released.
-/// Same for the message log: the call row and its settle row are both there
-/// once the process is gone.
+/// `Kernel::shutdown` lands the last window BEFORE the lock is released. ONE
+/// TAPE: the execution IS the `call` row and its `settle` row in
+/// `messages.xml`, there is no `ledger.json`.
 #[test]
-fn a_one_shot_flushes_its_ledger_and_message_log_before_exit() {
+fn a_one_shot_flushes_its_message_log_before_exit() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_store(tmp.path());
     run_cli(tmp.path(), &["kernel", "list_agents"]);
 
-    let ledger = std::fs::read_to_string(tmp.path().join(".fantastic/ledger.json"))
-        .expect(".fantastic/ledger.json must exist after a one-shot");
-    let doc: serde_json::Value = serde_json::from_str(&ledger).expect("the ledger is json");
-    let rows = doc["rows"].as_array().expect("the ledger has rows");
     assert!(
-        rows.iter().any(|r| r["target"] == "kernel_state"),
-        "the one-shot's own execution must be settled on disk: {ledger}"
+        !tmp.path().join(".fantastic/ledger.json").exists(),
+        "ledger.json is deleted — the tape is the only durable record"
     );
-
     let xml = std::fs::read_to_string(tmp.path().join(".fantastic/messages.xml"))
         .expect(".fantastic/messages.xml must exist after a one-shot");
     assert!(xml.contains("kind=\"call\""), "no call row: {xml}");
     assert!(xml.contains("kind=\"settle\""), "no settle row: {xml}");
+    // The one-shot's OWN execution is settled on disk, outcome body included.
+    let rows = fantastic_kernel::messages_xml::parse_messages(&xml).expect("the tape parses");
+    let call = rows
+        .iter()
+        .find(|r| {
+            r.get("kind") == Some(&serde_json::json!("call"))
+                && r.get("verb") == Some(&serde_json::json!("list_agents"))
+        })
+        .unwrap_or_else(|| panic!("no list_agents call row: {xml}"));
+    assert!(
+        rows.iter().any(|r| {
+            r.get("kind") == Some(&serde_json::json!("settle"))
+                && r.get("parent") == call.get("id")
+                && r["outcome"]["result"].get("agents").is_some()
+        }),
+        "the settle must carry the whole outcome body: {xml}"
+    );
 }
 
 /// #37 — a DAEMON is durable at SIGTERM. A live REST call names its own
 /// execution id; after the signal the process exits 0, `lock.json` is gone,
-/// and that LAST execution is in `ledger.json`. A debounced flusher that is
+/// and that LAST execution is on the tape. A pump that is
 /// not drained inside `Kernel::shutdown` loses it.
 #[test]
 fn a_daemon_flushes_its_last_execution_before_the_lock_goes() {
@@ -1172,10 +1184,10 @@ fn a_daemon_flushes_its_last_execution_before_the_lock_goes() {
         !tmp.path().join(".fantastic/lock.json").exists(),
         "the lock must be released"
     );
-    let ledger = std::fs::read_to_string(tmp.path().join(".fantastic/ledger.json"))
-        .expect(".fantastic/ledger.json must exist after a daemon stop");
+    let xml = std::fs::read_to_string(tmp.path().join(".fantastic/messages.xml"))
+        .expect(".fantastic/messages.xml must exist after a daemon stop");
     assert!(
-        ledger.contains(exec_id),
-        "the LAST execution must be flushed before exit: {ledger}"
+        xml.contains(exec_id),
+        "the LAST execution must be on the tape before exit: {xml}"
     );
 }

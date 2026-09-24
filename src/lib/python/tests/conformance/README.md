@@ -33,7 +33,7 @@ explicit design decision.**
 | C22 persisted state survives upgrade | openai run_state corpus | loader version-stamp tests |
 | C23 undeclared capability MUST error | a2a `@must` | sealed-by-default suite (`tests/agentic/`) |
 | C24 stream order, terminal close, fan-out | a2a `test_multi_stream.py`, DBOS offsets | `test_c24_stream_transport.py` + `test_c24_token_stream.py` — in-proc + wire events + token stream |
-| C25 round-trip fidelity incl. bytes/None | checkpoint-conformance `test_put.py` | ledger strict-JSON fidelity + `"v":1` stamp |
+| C25 round-trip fidelity incl. bytes/None | checkpoint-conformance `test_put.py` | `messages.xml` round-trip + the `v="1"` header (delta: raw bytes are recorded as `{len}` — base64 is banned) |
 | forge 1–2 emit-fake, provenance | (no exemplar — ours) | `test_forge_paths.py` |
 | forge 3 TOCTOU single-use | (no exemplar — ours) | `test_user_actions_topology.py` (two sockets, same frame id → ONE buy) |
 
@@ -50,7 +50,7 @@ explicit design decision.**
   question) is the behavior we reject — see the double-execution advancement
   test. Only immutable settled facts serialize here.
 - **C26 pending-writes idempotent / reserved channels** — dissolved: there is
-  no write-ahead concept; every call commits per-item through the ledger.
+  no write-ahead concept; every call commits per-item onto the message tape.
   The reserved-channel idea has no analogue in a message substrate.
 - **forge 4 content-binding (approve X, render Y)** — decided CLIENT scope:
   the execution id binds the click to one target and one run; what the client
@@ -58,7 +58,7 @@ explicit design decision.**
   the kernel.
 
 Deliberate deltas from the exemplars (documented divergences, not misses):
-no DLQ *status* (dead-letter is a ledger query), terminal re-send returns the
+no DLQ *status* (dead-letter is a query over the executions), terminal re-send returns the
 recorded outcome instead of erroring (ensure-semantics), and stream
 subscription is agent-level, not offset-cursor.
 

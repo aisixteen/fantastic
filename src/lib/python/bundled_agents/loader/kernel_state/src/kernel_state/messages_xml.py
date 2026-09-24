@@ -22,7 +22,10 @@ way back by the ONE scalar rule the CLI and the call grammar share
 (`kernel.modes.parse.coerce_scalar`: true/false, int, float, else str); a text field
 (`content`, `title`, `why`, or any string holding a newline) is a child ELEMENT; a
 list is a child element of `<item>`s; a nested object is a child element carrying
-its own attributes/children. `None` is omitted (absent on read = None for every
+its own attributes/children; a key that is not an XML name is
+`<entry key="…">value</entry>`; a raw `bytes` value is `<key len="N"/>` — the ONE
+reduction the tape makes (base64 is banned, and a length is the honest record).
+`None` is omitted (absent on read = None for every
 reader that `.get`s). A truncated last row (a crash mid-append) is a PARSE ERROR
 naming the byte offset — fail loud, no repair; the operator truncates at the last
 good row.
@@ -30,6 +33,7 @@ good row.
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -39,6 +43,18 @@ VERSION = "1"
 HEADER = f'<messages v="{VERSION}">\n'
 _TEXT_KEYS = frozenset({"content", "title", "why", "text", "summary"})
 
+# A MAP KEY IS NOT ALWAYS A TAG. Rows carry caller data now (a call's payload, a
+# settle's result), and those maps are keyed by whatever the caller wrote —
+# `callable_by: {"$parent": "*"}`, a grant map keyed by agent id. Keys that are
+# not XML names go through `<entry key="…">value</entry>` instead of becoming an
+# attribute or an element; everything else is unchanged.
+_XML_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")
+_ENTRY = "entry"
+
+
+def _is_xml_name(k: Any) -> bool:
+    return isinstance(k, str) and _XML_NAME.fullmatch(k) is not None
+
 
 # ── write ──────────────────────────────────────────────────────────────────────
 
@@ -46,6 +62,11 @@ _TEXT_KEYS = frozenset({"content", "title", "why", "text", "summary"})
 def _fill(elem: ET.Element, obj: dict) -> None:
     for k, v in obj.items():
         if v is None:
+            continue
+        if not _is_xml_name(k):
+            entry = ET.SubElement(elem, _ENTRY)
+            entry.set("key", str(k))
+            _fill_value(entry, v)
             continue
         if isinstance(v, bool):
             elem.set(k, "true" if v else "false")
@@ -57,6 +78,8 @@ def _fill(elem: ET.Element, obj: dict) -> None:
                 child.text = v
             else:
                 elem.set(k, v)
+        elif isinstance(v, (bytes, bytearray)):
+            _fill_bytes(ET.SubElement(elem, k), v)
         elif isinstance(v, (list, tuple)):
             child = ET.SubElement(elem, k)
             for item in v:
@@ -69,8 +92,20 @@ def _fill(elem: ET.Element, obj: dict) -> None:
             elem.set(k, str(v))
 
 
+def _fill_bytes(elem: ET.Element, v: "bytes | bytearray") -> None:
+    """THE ONE REDUCTION. XML text cannot carry raw bytes and base64 is banned, so a
+    `bytes`/`bytearray` value anywhere in a row — a `write_stream` body in a call's
+    payload, a `read_stream` chunk in a settle's result — is written as its LENGTH
+    (`<bytes len="N"/>`) and reads back as `{"len": N}`. Everything else (all text,
+    all JSON) is verbatim. Durable bytes live behind `file_bridge`, the one disk
+    surface; the tape records that N of them passed, not which."""
+    elem.set("len", str(len(v)))
+
+
 def _fill_value(elem: ET.Element, v: Any) -> None:
-    if isinstance(v, dict):
+    if isinstance(v, (bytes, bytearray)):
+        _fill_bytes(elem, v)
+    elif isinstance(v, dict):
         _fill(elem, v)
     elif isinstance(v, (list, tuple)):
         for item in v:
@@ -97,8 +132,19 @@ def row_to_xml(row: dict) -> str:
 def _read(elem: ET.Element) -> dict:
     out: dict = {k: coerce_scalar(v) for k, v in elem.attrib.items()}
     for child in elem:
-        out[child.tag] = _read_value(child)
+        if child.tag == _ENTRY and "key" in child.attrib:
+            out[child.get("key")] = _read_value(_without_key(child))
+        else:
+            out[child.tag] = _read_value(child)
     return out
+
+
+def _without_key(child: ET.Element) -> ET.Element:
+    """The `<entry>` minus its `key` — so the VALUE reads by the ordinary rules."""
+    bare = ET.Element(child.tag, {k: v for k, v in child.attrib.items() if k != "key"})
+    bare.text = child.text
+    bare.extend(list(child))
+    return bare
 
 
 def _read_value(child: ET.Element):

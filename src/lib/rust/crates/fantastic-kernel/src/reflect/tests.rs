@@ -997,7 +997,7 @@ async fn distilled_tree_reflect_echoes_to_node_watchers() {
     let row = &rows[0];
     assert_eq!(
         row.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["id", "kind", "verb", "parent", "origin", "internal", "agent", "ts"],
+        ["id", "kind", "verb", "parent", "origin", "payload", "internal", "agent", "ts"],
         "no outcome stamp: the internal dispatch opens no execution"
     );
     assert_eq!(row["kind"], "call");

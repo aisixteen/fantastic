@@ -455,8 +455,11 @@ async fn the_pump_skips_its_own_calls_tasks_and_their_settles() {
     }
 }
 
+/// ONE TAPE: the SETTLE row carries the FULL outcome (`{status, result}`) and
+/// the final attempts; the CALL row keeps the python digest STAMP, which the
+/// `messages` verb and the `ledger` verb read off it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn settle_row_outcome_is_the_python_stamp() {
+async fn a_settle_row_carries_the_whole_outcome_and_the_call_row_the_stamp() {
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join(".fantastic");
     let log = store.join("messages.xml");
@@ -483,15 +486,23 @@ async fn settle_row_outcome_is_the_python_stamp() {
         .expect("the settle reached disk");
     assert_eq!(
         settle["outcome"],
-        json!({"status": "errored", "error": "no such path 'x'", "reason": "not_found"}),
-        "the log carries python's stamp, not the ledger Outcome"
+        json!({
+            "status": "errored",
+            "result": {"error": "no such path 'x'", "reason": "not_found"},
+        }),
+        "the settle carries the whole body — it is the only record of it"
     );
-    // The call row it ended carries the SAME stamp, nested.
+    assert_eq!(settle["attempts"], json!(1));
+    // The call row it ended carries the DIGEST stamp, and its payload.
     let call = rows
         .iter()
         .find(|r| r.get("kind") == Some(&json!("call")) && r.get("id") == Some(&pid))
         .expect("the call row");
-    assert_eq!(call["outcome"], settle["outcome"]);
+    assert_eq!(
+        call["outcome"],
+        json!({"status": "errored", "error": "no such path 'x'", "reason": "not_found"})
+    );
+    assert_eq!(call["payload"], json!({"type": "nope"}));
 }
 
 /// C48: a store that REFUSES the append prints python's line and the batch goes

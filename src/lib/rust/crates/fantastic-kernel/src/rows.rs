@@ -204,6 +204,21 @@ impl RowStore {
             .collect()
     }
 
+    /// EVERY row, oldest id first — the whole tape, as hydration left it.
+    ///
+    /// The one reader is the boot-time rebuild of the execution ledger
+    /// (`messages_log::hydrate_executions`), which has to walk the settles.
+    /// Python iterates `kernel.rows.values()` for the same pass.
+    #[must_use]
+    pub fn all(&self) -> Vec<Row> {
+        let inner = self.lock();
+        let mut ids: Vec<i64> = inner.rows.keys().copied().collect();
+        ids.sort_unstable();
+        ids.iter()
+            .filter_map(|i| inner.rows.get(i).cloned())
+            .collect()
+    }
+
     /// One row by id.
     #[must_use]
     pub fn get_one(&self, id: i64) -> Option<Row> {

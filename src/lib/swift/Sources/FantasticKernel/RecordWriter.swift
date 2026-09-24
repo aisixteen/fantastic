@@ -126,14 +126,19 @@ public final class RecordWriter: @unchecked Sendable {
         }
     }
 
-    /// Unsubscribe, final flush, stop the task. A clean shutdown loses nothing.
+    /// Unsubscribe and stop the task.
+    ///
+    /// NO FINAL FLUSH HERE. `stop` runs mid-teardown, when the store may already
+    /// be down; the last write happens in the loader's `flushPending`, before
+    /// the walk and while the provider is alive. A `create_agent` +
+    /// `update_agent` followed straight away by `shutdown()` used to reach this
+    /// flush mid-walk and the update never landed (measured 2026-09-24).
     func stop() async {
         if let token { kernel.unsubscribe(token) }
         token = nil
         wakeUp.finish()
         if let task { _ = await kernel.cancelTask(task) }
         task = nil
-        await flush()
     }
 }
 
@@ -191,9 +196,12 @@ extension Kernel {
 
     /// The loader's `boot`, python `kernel_state._boot`:
     ///
-    /// 1. ROOT only — rehydrate the execution ledger, then install its flusher
-    ///    (that order, so hydration never rewrites the file it just read), then
-    ///    start the message pump at the highest id hydration saw.
+    /// 1. ROOT only — rebuild the execution ledger FROM THE TAPE
+    ///    (`hydrateExecutions`: the cold `hydrateMessages` put the rows back,
+    ///    here the settled calls become `executions` again so dedup survives the
+    ///    reboot), then start the message pump at the highest id hydration saw.
+    ///    Before the pump subscribes: rebuilding mints nothing, and nothing
+    ///    rebuilt is re-appended.
     /// 2. Unless `watch=false` (a loader serving a REMOTE kernel answers verbs
     ///    only) — subscribe the record writer to the kernel state stream.
     /// 3. ROOT only — mint the instance `guid` ONCE, AFTER the writer subscribes,
@@ -204,7 +212,7 @@ extension Kernel {
         var state = RootLoaderState()
         let isRoot = loader.parentId == nil
         if isRoot {
-            await installLedgerPersistence()
+            hydrateExecutions()
             state.pump = installMessagePump(after: rows.nextId - 1)
         }
         let watching = loader.metaValue(forKey: "watch").map { $0 != .bool(false) } ?? true

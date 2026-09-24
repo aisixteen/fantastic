@@ -224,16 +224,6 @@ extension Kernel {
                 }
             }
         }
-        // THE LEDGER'S LAST PASS, AWAITED — and before the walk, while the
-        // store is still mounted. The write-through is a debounced FORK
-        // (`ledger_flush`), and `shutdownAgents` cancels forks instead of
-        // waiting on them, so the pass that carried the FINAL settle died with
-        // them: the last execution of every run was missing from
-        // `ledger.json`. Measured 2026-09-21 over a daemon's REST leg, three
-        // named calls then SIGTERM — python landed 3/3, swift 2/3. Python has
-        // no such line because its own flush task wins that race; the awaited
-        // pass is how this runtime leaves the same bytes on disk.
-        await KernelTaskLocals.withShutdown { await self.flushLedger() }
         await shutdownWalk(root)
         // PROCESS-WIDE SIDE TABLES KEYED BY KERNEL IDENTITY (the AI core's
         // incarnation counters and per-agent run states) are dropped here. Swift

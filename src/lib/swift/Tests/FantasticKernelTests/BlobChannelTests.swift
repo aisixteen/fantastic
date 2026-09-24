@@ -78,7 +78,7 @@ private struct Store: AgentBundle {
     }
 }
 
-@Suite("Blob channel + durable ledger")
+@Suite("Blob channel")
 struct BlobChannelTests {
     private func makeKernel(_ files: Files) async -> Kernel {
         let reg = BundleRegistry()
@@ -89,8 +89,7 @@ struct BlobChannelTests {
         let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("blobtest-\(UUID().uuidString)")
             .appendingPathComponent(".fantastic")
-        // DISK mode: `flushLedger` deliberately no-ops in-memory (the auto-flush
-        // law), so the durable half needs a kernel that persists at all.
+        // DISK mode: the blob verbs need a kernel that persists at all.
         let k = Kernel(storage: .disk(storeRoot), bundles: reg)
         let root = Agent(
             id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil,
@@ -311,63 +310,6 @@ struct BlobChannelTests {
         #expect(forged["reason"].asString == "unauthorized")
         #expect(forged["side"] == .null, "python's loader refusal carries no side")
         #expect(forged["code"] == .null, "python's loader refusal carries no code")
-    }
-
-    @Test func aCompletedExecutionIsNeverReRunAfterRehydrate() async {
-        // C9's full property, through the REAL store: a settled row written out,
-        // read back by a fresh ledger, deduping a re-send.
-        let files = Files()
-        let k = await makeKernel(files)
-        _ = await k.send([
-            Item(AgentId("desk"), .object(["type": .string("read"), "path": .string("x")]), id: "job-1")
-        ])
-        await k.flushLedger()
-
-        let doc = files.get(ledgerBlob)
-        #expect(doc != nil, "the sidecar never reached the store")
-        let parsed = try! JSON.parse(doc!)
-        #expect(parsed["v"].asInt == 2, "the sidecar is version-stamped")
-        // v2: rows are an ARRAY (the ids are int64s a JSON key would stringify),
-        // each carrying its own `id`; the caller's name rides the row.
-        let named = (parsed["rows"].asArray ?? []).first { $0["name"].asString == "job-1" }
-        #expect(named != nil, "\(parsed.serialize())")
-        #expect(named?["id"].asInt != nil, "a v2 row carries its int id")
-
-        // Only SETTLED rows cross: every persisted row carries a terminal outcome.
-        for row in parsed["rows"].asArray ?? [] {
-            let st = row["outcome"]["status"].asString ?? ""
-            #expect(["completed", "errored", "failed", "cancelled", "timed_out"].contains(st))
-        }
-
-        // A FRESH ledger rehydrates it DONE.
-        let fresh = ExecutionLedger()
-        #expect(fresh.rehydrate(parsed) >= 1)
-        let jid = fresh.resolveName("job-1") ?? -1
-        if case .settled = fresh.open(
-            jid, target: AgentId("desk"), payload: .object(["type": .string("probe")]),
-            retries: 0, name: "job-1", origin: nil, callerId: .string("job-1"))
-        {
-        } else {
-            Issue.record("a rehydrated row must dedup a re-send")
-        }
-    }
-
-    @Test func aCorruptSidecarStartsEmptyInsteadOfHalfLoading() async {
-        // A ledger that silently half-loads would re-arm exactly the side
-        // effects it exists to prevent.
-        let files = Files()
-        let k = await makeKernel(files)
-        files.put(ledgerBlob, "{\"v\": 2, \"rows\": [broken")
-        #expect(await k.rehydrateLedger() == 0)
-        files.put(ledgerBlob, "{\"v\": 99, \"rows\": []}")
-        #expect(await k.rehydrateLedger() == 0)
-        // A v1 file — an OBJECT of rows keyed by a stringified id — is an
-        // unknown version, not a migration: it starts empty, loudly.
-        files.put(ledgerBlob, "{\"v\": 1, \"rows\": {\"7\": {}}}")
-        #expect(await k.rehydrateLedger() == 0)
-        // ...and the kernel is still perfectly usable.
-        let out = await k.send([Item(AgentId("desk"), .object(["type": .string("read")]))])[0]
-        #expect(out.status == .completed, "a bad sidecar bricked the kernel")
     }
 
     /// C47 — PERSISTENCE IO RIDES THE BATCH. Every store byte (a blob write, a
