@@ -34,6 +34,29 @@ fn open(l: &Ledger, name: &str, target: &str, retries: u32) -> (i64, Opened) {
     (id, opened)
 }
 
+/// A `call` ROW as the tape holds it — what `hydrate_settled` reads the target,
+/// the retry budget, the name and the origin off.
+fn call_row(id: i64, agent: &str, retries: u32, name: Option<&str>) -> crate::rows::Row {
+    let mut r = Map::new();
+    r.insert("id".to_string(), json!(id));
+    r.insert("agent".to_string(), json!(agent));
+    r.insert("kind".to_string(), json!("call"));
+    r.insert("retries".to_string(), json!(retries));
+    r.insert("named".to_string(), json!(name.is_some()));
+    if let Some(n) = name {
+        r.insert("name".to_string(), json!(n));
+    }
+    r
+}
+
+/// The `{status, result}` a `settle` row carries.
+fn settle_outcome(status: &str, result: Value) -> Map<String, Value> {
+    let mut o = Map::new();
+    o.insert("status".to_string(), json!(status));
+    o.insert("result".to_string(), result);
+    o
+}
+
 /// The id a name is bound to — for the tests that then `attempt`/`settle` it.
 fn id_of(l: &Ledger, name: &str) -> i64 {
     l.resolve_name(name).expect("no execution under that name")
@@ -271,61 +294,63 @@ fn an_unbounded_ledger_keeps_everything() {
 }
 
 #[test]
-fn only_settled_rows_persist_and_they_round_trip() {
-    // Work in flight at a crash never completed, so a post-reboot re-send
-    // re-running it is the TRUTH, not a loss.
+fn a_settled_call_rebuilds_from_its_tape_rows() {
+    // ONE TAPE. A `call` row plus its `settle` row IS the durable execution: the
+    // rebuilt row is DONE, so a re-send of the name returns the recorded outcome
+    // and the handler never runs again — across a reboot, out of one file.
     let l = Ledger::default();
-    let _ = l.open(
+    assert!(l.hydrate_settled(
         201,
-        &json!("done-1"),
-        &tid("desk"),
-        &json!({"type": "probe"}),
+        &call_row(201, "desk", 1, Some("done-1")),
+        &settle_outcome("completed", json!({"v": "kept"})),
         1,
-        Some("done-1"),
-        Some(tid("alice")),
-    );
-    l.attempt(id_of(&l, "done-1"));
-    l.settle(id_of(&l, "done-1"), done("kept"));
-    let _ = open(&l, "live-1", "desk", 0).1;
-
-    let live = id_of(&l, "live-1");
-    let snap = l.settled_snapshot();
-    assert_eq!(snap["v"], 2);
-    // v2: rows are an ARRAY carrying the kernel's int64 id (an object key would
-    // stringify it), and the caller's name as a field — which is what lets a
-    // name still join its execution after a reboot. NO `verb`.
-    let rows = snap["rows"].as_array().expect("v2 rows are an array");
-    let settled = rows.iter().find(|r| r["id"] == 201).expect("settled row");
-    assert_eq!(settled["name"], "done-1");
-    assert_eq!(
-        settled
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        vec!["id", "target", "retries", "attempts", "named", "name", "origin", "outcome"],
-        "python key order, no `verb`"
-    );
-    assert!(
-        rows.iter().all(|r| r["id"] != live),
-        "in-flight work must not persist"
-    );
-
-    // A FRESH ledger rehydrates it DONE, so dedup holds across the reboot.
-    let l2 = Ledger::default();
-    assert_eq!(l2.rehydrate(&snap), 1);
-    match open(&l2, "done-1", "desk", 0).1 {
-        Opened::Settled(o, _) => {
+    ));
+    match open(&l, "done-1", "desk", 0).1 {
+        Opened::Settled(o, payload) => {
             assert_eq!(o.result["v"], "kept");
             assert_eq!(o.status, Status::Completed);
+            // THE LIVE SHAPE: a joiner after a reboot is handed exactly what a
+            // joiner before it was handed.
+            assert_eq!(o.pid, Some(crate::tasks::TaskId(201)));
+            assert_eq!(o.attempts, 1);
+            // SETTLED means nothing is left to re-run, so no payload survives.
+            assert_eq!(payload, Value::Null);
         }
-        _ => panic!("a rehydrated row must dedup a re-send"),
+        _ => panic!("a rebuilt row must dedup a re-send"),
     }
-    // ...and its provenance survived.
-    let rows = l2.rows_for(Some(&tid("alice")));
-    assert_eq!(rows.len(), 1, "origin scoping survived the round-trip");
-    assert_eq!(rows[0]["retries"], 1);
+    // ...and its provenance came back with it.
+    let mut call = call_row(202, "desk", 2, Some("origin-1"));
+    call.insert("origin".to_string(), json!("alice"));
+    assert!(l.hydrate_settled(202, &call, &settle_outcome("completed", json!({})), 3));
+    let rows = l.rows_for(Some(&tid("alice")));
+    assert_eq!(rows.len(), 1, "origin scoping survived the rebuild");
+    assert_eq!(rows[0]["retries"], 2);
+    assert_eq!(rows[0]["attempts"], 3);
+}
+
+#[test]
+fn a_live_row_and_an_unknown_status_are_left_alone() {
+    let l = Ledger::default();
+    let (live, _) = open(&l, "live-1", "desk", 0);
+    // A LIVE ROW ALWAYS WINS over the tape — the process knows better than the
+    // file it booted from.
+    assert!(!l.hydrate_settled(
+        live,
+        &call_row(live, "elsewhere", 0, Some("live-1")),
+        &settle_outcome("completed", json!({})),
+        1
+    ));
+    assert!(matches!(open(&l, "live-1", "desk", 0).1, Opened::Join(..)));
+    // AN UNKNOWN STATUS IS NOT GUESSED AT.
+    assert!(!l.hydrate_settled(
+        900,
+        &call_row(900, "desk", 0, None),
+        &settle_outcome("in_flight", json!({})),
+        1
+    ));
+    // Neither is a row with no target.
+    assert!(!l.hydrate_settled(901, &Map::new(), &settle_outcome("completed", json!({})), 1));
+    assert!(!l.has(900) && !l.has(901));
 }
 
 #[test]
@@ -340,10 +365,15 @@ fn a_parked_dead_letter_stays_dead_across_a_reboot() {
     );
 
     let l2 = Ledger::default();
-    l2.rehydrate(&l.settled_snapshot());
+    assert!(l2.hydrate_settled(
+        id_of(&l, "dead-1"),
+        &call_row(id_of(&l, "dead-1"), "desk", 1, Some("dead-1")),
+        &settle_outcome("failed", json!({"error": "kaput"})),
+        2,
+    ));
     // Re-sending the SAME NAME returns the recorded failure — it is not retried
     // silently. A retry is an explicit NEW name. The name binding survives the
-    // sidecar, which is what makes that hold across a reboot.
+    // tape, which is what makes that hold across a reboot.
     match open(&l2, "dead-1", "desk", 5).1 {
         Opened::Settled(o, _) => {
             assert_eq!(o.status, Status::Failed);
@@ -353,26 +383,14 @@ fn a_parked_dead_letter_stays_dead_across_a_reboot() {
     }
 }
 
-#[test]
-fn a_rehydrate_of_garbage_keeps_the_kernel_alive() {
-    let l = Ledger::default();
-    // Rows missing their target/outcome are skipped, not fatal.
-    assert_eq!(l.rehydrate(&json!({"rows": {"x": {"target": "d"}}})), 0);
-    assert_eq!(l.rehydrate(&json!({"rows": []})), 0);
-    assert_eq!(l.rehydrate(&json!({})), 0);
-    assert!(l.rows_for(None).is_empty());
-}
-
-/// D10 — a reply with a BINARY BODY stays RAM-ONLY.
+/// D10 — a reply with a BINARY BODY is kept WHOLE in the ledger.
 ///
-/// Python's strict filter is `json.dumps(outcome)` raising on a `bytes` value
-/// (`kernel_state/tools.py:891-895`), and every `read_stream` reply it drops is
-/// one this kernel carries at `Outcome::body` with `"bytes": null` where the
-/// bytes sit. Checking only the JSON text let 88 read_stream rows per store run
-/// onto disk that python keeps in RAM — each one rehydrating a reply whose body
-/// is gone.
+/// The body never reached `ledger.json` and used to cost the whole row its
+/// durability. There is no sidecar now: the TAPE records the body as its LENGTH
+/// (`send::taped_payload`) and the live row keeps the bytes, so a joiner in this
+/// process still gets them.
 #[test]
-fn a_reply_with_a_binary_body_is_not_persisted() {
+fn a_reply_with_a_binary_body_stays_whole_in_the_ledger() {
     let l = Ledger::default();
     let (streamed, _) = open(&l, "read-1", "store", 0);
     l.attempt(streamed);
@@ -386,27 +404,26 @@ fn a_reply_with_a_binary_body_is_not_persisted() {
         )
         .with_body(Some(b"{\"id\": \"kernel_state\"}".to_vec())),
     );
-    let (plain, _) = open(&l, "read-2", "store", 0);
-    l.attempt(plain);
-    l.settle(plain, done("no body"));
 
-    // The row is LIVE — a joiner still gets the outcome, body included.
     match open(&l, "read-1", "store", 0).1 {
         Opened::Settled(o, _) => {
-            assert_eq!(o.body.as_deref(), Some(&b"{\"id\": \"kernel_state\"}"[..]))
+            assert_eq!(o.body.as_deref(), Some(&b"{\"id\": \"kernel_state\"}"[..]));
         }
         _ => panic!("expected the settled outcome"),
     }
-    let snap = l.settled_snapshot();
-    let ids: Vec<i64> = snap["rows"]
-        .as_array()
-        .expect("rows")
-        .iter()
-        .filter_map(|r| r["id"].as_i64())
-        .collect();
-    assert!(
-        !ids.contains(&streamed),
-        "the streamed row must stay RAM-only"
-    );
-    assert!(ids.contains(&plain), "a body-less reply still persists");
+    // A REBUILT row has no body: the tape kept the length, never the bytes.
+    let l2 = Ledger::default();
+    assert!(l2.hydrate_settled(
+        streamed,
+        &call_row(streamed, "store", 0, Some("read-1")),
+        &settle_outcome("completed", json!({"bytes": {"len": 22}})),
+        1,
+    ));
+    match open(&l2, "read-1", "store", 0).1 {
+        Opened::Settled(o, _) => {
+            assert!(o.body.is_none());
+            assert_eq!(o.result["bytes"]["len"], 22);
+        }
+        _ => panic!("expected the rebuilt outcome"),
+    }
 }

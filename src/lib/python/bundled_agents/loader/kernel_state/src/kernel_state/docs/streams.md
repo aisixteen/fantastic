@@ -28,6 +28,14 @@ what's behind it (a file, a socket, a generator). `file_bridge` is the
 reference SOURCE+SINK; the served `GET /<rest>/file/<path>` octet route is
 read_stream-only.
 
+## Bytes and the message log
+
+A stream call is a message like any other, so its `call` row holds the payload and its
+`settle` row the result. Raw bytes do NOT go on the tape: `messages.xml` is text, base64
+is banned, and a `write_stream` body or a `read_stream` chunk is recorded as its LENGTH
+(`{"len": N}`). The log says N bytes passed between which agents, under which verb, at
+which id — not what they were. The bytes themselves live wherever the SINK put them.
+
 ## The kernel's tail
 
 The kernel's row stream (every row after a cursor) is a SOURCE inside the process: every message with

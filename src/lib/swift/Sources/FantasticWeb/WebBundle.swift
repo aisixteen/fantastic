@@ -159,11 +159,20 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             surfaces[child.value] = .array(paths.map { .string($0) })
         }
         let portVal = agent.metaValue(forKey: "port") ?? .null
+        let rec: JSON = .object([
+            "host": agent.metaValue(forKey: "host") ?? .null, "port": portVal,
+            "allowed_origins": agent.metaValue(forKey: "allowed_origins") ?? .null,
+        ])
         var out: OrderedDictionary<String, JSON> = [
             "id": .string(agent.id.value),
             "sentence": .string(
                 "HTTP host — rendering routes baked in; call surfaces mounted from sub-agents."),
             "port": pyTruthy(portVal) ? .integer(Int64((try? pyInt(portVal)) ?? 0)) : .null,
+            "host": .string(webHost(rec)),
+            "allowed_origins": .array(
+                (webOwnOrigins(rec).sorted()
+                    + webExtraOrigins(rec).filter { !webOwnOrigins(rec).contains($0) })
+                    .map { .string($0) }),
             "running": .bool(server != nil),
             "served_agent_count": .integer(Int64(kernel.allAgents().count)),
             "surfaces": .object(surfaces),
@@ -315,7 +324,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     /// python `PB/web/host/src/web/readme.md`, byte for byte.
     static let readmeText = """
         # web — uvicorn HTTP host
-        Serves rendering only: `/` (tree), `/<id>/file/<path>` (static file proxy), favicon. No server-side `/<id>/` render route — frontend panels live in the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest): they DECLARE routes via the duck-typed `get_routes` verb (pure data — `{kind, method?, path}`) and hand the live endpoint for each path to this host through the duck-typed `route_endpoints(agent)` module hook. A leg declaring a route without that hook fails web boot. `port` field on the record is where it binds.
+        Serves rendering only: `/` (tree), `/<id>/file/<path>` (static file proxy), favicon. No server-side `/<id>/` render route — frontend panels live in the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest): they DECLARE routes via the duck-typed `get_routes` verb (pure data — `{kind, method?, path}`) and hand the live endpoint for each path to this host through the duck-typed `route_endpoints(agent)` module hook. A leg declaring a route without that hook fails web boot. `port` field on the record is where it binds; `host` is the bind address — absent ⇒ `127.0.0.1` (loopback), set `0.0.0.0` explicitly to publish (a container). Websocket upgrades and non-GET/HEAD/OPTIONS requests from a browser `Origin` that is not this host's own (`http://<host>:<port>`, both loopback spellings when loopback) nor listed in the record's `allowed_origins` (exact strings) are refused — 403 / refused upgrade, logged. No Origin header (CLI, curl, a bridge) passes; the leg's `ingress_rule` still gates it. Both fields are ordinary record meta: create_agent, a roster yaml, update_agent.
 
         """
 }

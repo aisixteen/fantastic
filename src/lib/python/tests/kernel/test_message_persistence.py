@@ -393,10 +393,41 @@ def test_xml_rows_round_trip_every_shape_and_escape():
             "content": "x" * 1_000_000,
         },
         {"id": 6, "agent": "ai", "kind": "late", "content": ""},
+        {
+            # ONE TAPE: the call carries its payload — keys the caller chose
+            # (`$parent` is not an XML name) and raw bytes (the ONE reduction).
+            "id": 7,
+            "agent": "ai",
+            "kind": "call",
+            "verb": "write_stream",
+            "named": False,
+            "retries": 0,
+            "attempts": 1,
+            "payload": {
+                "type": "create_agent",
+                "callable_by": {"$parent": "*", "rest": ["read", "write"]},
+                "bytes": b"\x00\x01\xff",
+            },
+        },
+        {
+            "id": 8,
+            "agent": "kernel_state",
+            "kind": "settle",
+            "parent": 7,
+            "settled": "ai",
+            "attempts": 2,
+            "outcome": {"status": "completed", "result": {"chunk": bytearray(9)}},
+        },
     ]
     text = messages_xml.HEADER + "".join(messages_xml.row_to_xml(r) for r in rows)
     back = messages_xml.parse_messages(text)
     want = [{k: v for k, v in r.items() if v is not None} for r in rows]
+    # raw bytes come back as their LENGTH — never base64, never the bytes
+    want[6]["payload"] = {**want[6]["payload"], "bytes": {"len": 3}}
+    want[7]["outcome"] = {
+        "status": "completed",
+        "result": {"chunk": {"len": 9}},
+    }
     assert back == want
 
 
@@ -463,3 +494,143 @@ async def test_a_slow_settle_still_reaches_the_log(seeded_kernel, store_agent):
         f"rows on disk: {[(r['id'], r.get('kind')) for r in lines]}"
     )
     assert settle["outcome"]["status"] == "completed", settle
+
+
+# ── the two shutdown-loss repros (2026-09-24) ───────────────────────────
+
+
+async def _root_with_store(monkeypatch, d: Path):
+    """A fresh root in `d` with a store wired and the pump + record loop running."""
+    from _testkit import boot_root
+
+    d.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(d)
+    k = boot_root()
+    await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": k.id,
+                    "handler_module": "file_bridge.tools",
+                    "id": "kernel_store",
+                    "root": ".fantastic",
+                    "ingress_rule": "allow_all_ingress",
+                },
+            }
+        ]
+    )
+    await k.send([{"target": k.id, "payload": {"type": "boot"}}])
+    return k
+
+
+@pytest.mark.parametrize("run", range(20))
+async def test_a_row_put_just_before_shutdown_always_lands(tmp_path, monkeypatch, run):
+    """A shutdown that lands ON the debounce boundary used to CANCEL the flush
+    loop mid-append and drop the batch with it. The flush now holds a lock the
+    catch-up waits on, and a cancelled flush re-queues its rows; 20 runs at the
+    exact 0.15 s boundary is what caught the loss."""
+    k = await _root_with_store(monkeypatch, tmp_path / f"r{run}")
+    rid = k.ctx.rows_put("ai", {"role": "user", "content": f"row {run}"})
+    # SWEEP the debounce boundary: the loss window is the handful of ms the
+    # flush spends inside the store's `write_stream`, and a fixed sleep either
+    # always misses it or always hits it.
+    await asyncio.sleep(0.150 + run * 0.0005)
+    await k.ctx.shutdown()
+    assert rid in [r["id"] for r in _lines(Path(".fantastic"))], (
+        f"run {run}: the last row before shutdown never reached the log"
+    )
+
+
+async def test_a_record_updated_just_before_shutdown_always_lands(
+    tmp_path, monkeypatch
+):
+    """The record writer's final flush used to run mid-teardown-walk, with the
+    store already gone. It runs in `flush_pending` now — before the walk, while
+    the provider is alive — so a create+update immediately followed by a
+    shutdown is on disk."""
+    k = await _root_with_store(monkeypatch, tmp_path / "rec")
+    await _mk(k, "sp_late")
+    await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "update_agent",
+                    "id": "sp_late",
+                    "grants": {"can_call": ["kernel_store"]},
+                },
+            }
+        ]
+    )
+    await k.ctx.shutdown()
+    import json
+
+    f = Path(".fantastic") / "agents" / "sp_late" / "agent.json"
+    assert f.exists(), "the record never reached disk"
+    assert json.loads(f.read_text())["grants"] == {"can_call": ["kernel_store"]}
+
+
+async def _gated_pump(monkeypatch, tmp_path, name):
+    """A root whose pump is DRIVEN BY HAND (its flush loop is cancelled) and whose
+    append to `messages.xml` stalls on an event — the deterministic seam for the
+    two races the 0.15 s sweep above only samples."""
+    k = await _root_with_store(monkeypatch, tmp_path / name)
+    pump = k._message_pump
+    await pump.catch_up()
+    pump._flusher.cancel()
+    await asyncio.sleep(0)
+    hold, entered = asyncio.Event(), asyncio.Event()
+    real_send = k.ctx.send
+
+    async def gate(batch, **kw):
+        p = (batch[0] or {}).get("payload") or {}
+        if p.get("type") == "write_stream" and p.get("path") == _MESSAGES_FILE:
+            entered.set()
+            await hold.wait()
+        return await real_send(batch, **kw)
+
+    monkeypatch.setattr(k.ctx, "send", gate)
+    return k, pump, hold, entered, real_send
+
+
+async def test_catch_up_waits_out_an_in_flight_append(tmp_path, monkeypatch):
+    """`catch_up` used to read `pending` while a flush held the batch in a LOCAL
+    variable — empty queue, counter caught up, so it returned and the caller
+    cancelled the writer mid-append. It takes the flush lock for the check now."""
+    k, pump, hold, entered, _real = await _gated_pump(monkeypatch, tmp_path, "lock")
+    k.ctx.rows_put("ai", {"role": "user", "content": "held"})
+    await asyncio.sleep(0.05)  # the reader picks it up
+    flush = asyncio.create_task(pump.flush())
+    await asyncio.wait_for(entered.wait(), 2)
+    assert pump.pending == []  # the batch is OUT of the queue and not yet written
+
+    catch_up = asyncio.create_task(pump.catch_up())
+    await asyncio.sleep(0.1)
+    assert not catch_up.done(), "catch_up walked past an append still in flight"
+    hold.set()
+    await asyncio.wait_for(flush, 2)
+    await asyncio.wait_for(catch_up, 5)
+
+
+async def test_a_cancelled_flush_puts_its_batch_back(tmp_path, monkeypatch):
+    """Cancellation between taking the batch and the store's ack dropped those
+    rows on the floor. They return to the head of `pending`, and the stop's own
+    catch-up lands them."""
+    k, pump, hold, entered, real = await _gated_pump(monkeypatch, tmp_path, "requeue")
+    rid = k.ctx.rows_put("ai", {"role": "user", "content": "requeued"})
+    await asyncio.sleep(0.05)
+    flush = asyncio.create_task(pump.flush())
+    await asyncio.wait_for(entered.wait(), 2)
+    assert pump.pending == []
+
+    flush.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flush
+    assert [r["id"] for r in pump.pending] == [rid], "a cancelled flush ate its batch"
+
+    monkeypatch.setattr(k.ctx, "send", real)  # the store answers again
+    hold.set()
+    await pump.catch_up()
+    assert rid in [r["id"] for r in _lines(Path(".fantastic"))]

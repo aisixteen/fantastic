@@ -659,6 +659,13 @@ impl Kernel {
                 // the message that made the call. Written under the id the
                 // ledger just opened, so the call, the task and the outcome are
                 // all one number. Python `Agent._ledger_open`.
+                //
+                // ONE TAPE. The row carries the WHOLE call — the dispatch
+                // payload verbatim, the retry budget, the attempt count as at
+                // dispatch, the deadline — because there is no second file:
+                // `messages.xml` is the only thing that outlives the process,
+                // and `attempts` is updated on this row at every retry (the
+                // kernel owns the row in RAM).
                 let mut row = Map::new();
                 row.insert("id".to_string(), Value::from(exec_id));
                 row.insert("kind".to_string(), Value::from("call"));
@@ -673,6 +680,17 @@ impl Kernel {
                 row.insert(
                     "origin".to_string(),
                     Value::from(origin.as_ref().map(|o| o.0.clone())),
+                );
+                row.insert(
+                    "payload".to_string(),
+                    taped_payload(&item.payload, item.binary.as_deref()),
+                );
+                row.insert("named".to_string(), Value::from(name.is_some()));
+                row.insert("retries".to_string(), Value::from(retries));
+                row.insert("attempts".to_string(), Value::from(1));
+                row.insert(
+                    "timeout".to_string(),
+                    timeout.map_or(Value::Null, Value::from),
                 );
                 if let Some(n) = name.as_deref() {
                     row.insert("name".to_string(), Value::from(n));
@@ -733,7 +751,15 @@ impl Kernel {
         // The pid of the attempt that actually SETTLED — a retry re-dispatches
         // under a fresh row, so the last one is what the outcome names.
         let (pid, reply, status, body) = loop {
-            self.ledger.attempt(exec_id);
+            let attempts = self.ledger.attempt(exec_id);
+            if attempts > 1 {
+                // THE TAPE COUNTS REAL RUNS. The call row went down with
+                // `attempts: 1`; every re-dispatch updates it in place, so a
+                // cold read of the log knows what the work actually cost.
+                let mut bump = Map::new();
+                bump.insert("attempts".to_string(), Value::from(attempts));
+                self.rows.stamp(exec_id, &bump);
+            }
             let mut this_pid: Option<TaskId> = None;
             let (mut reply, mut status, body) = self
                 .run_dispatch(
@@ -793,9 +819,6 @@ impl Kernel {
         // list is conversation to whichever reader was not. `settled` names the
         // agent as a FIELD, so the ending still says what it ended.
         self.stamp_call(pid, &out);
-        // The DURABLE half, if a loader installed one. The kernel does not know
-        // what this writes or where.
-        self.ledger_settled(pid);
         out
     }
 
@@ -828,6 +851,7 @@ impl Kernel {
             "origin".to_string(),
             Value::from(current_sender().map(|o| o.0)),
         );
+        row.insert("payload".to_string(), payload.clone());
         row.insert("internal".to_string(), Value::from(true));
         let _ = self.rows.put(&target.id, row);
         let (reply, status, _no_body) = self
@@ -846,12 +870,16 @@ impl Kernel {
 
     /// Settle the call: stamp the live row AND append a `settle` row.
     ///
-    /// The stamp is python's, not the ledger's `Outcome`: `{status, error?,
-    /// reason?}` — the error is `str(result.error)` cut to 200 CODE POINTS, and
-    /// both optional keys follow python truthiness. The full outcome (pid,
-    /// result, attempts) belongs to the ledger, not to the message log: writing
-    /// it here put every reply body — binary ones included — into
-    /// `messages.xml`.
+    /// The STAMP on the live call row is python's, not the ledger's `Outcome`:
+    /// `{status, error?, reason?}` — the error is `str(result.error)` cut to 200
+    /// CODE POINTS, and both optional keys follow python truthiness. Live readers
+    /// (`messages` digests, the `ledger` verb) read it there and must keep working.
+    ///
+    /// THE SETTLE ROW CARRIES THE FULL OUTCOME — `{status, result}`, the body
+    /// included, plus the final `attempts`. It is the only record of what a call
+    /// became: `ledger.json` is gone, and a boot rebuilds `executions` (dedup
+    /// across restart, C9) by reading these rows back. A RAW reply body is the
+    /// tape's one reduction: `{"len": N}` where the bytes sat.
     ///
     /// Nothing is written when the call row is absent (a refusal that never
     /// opened one, a hydrated id): python returns early on the same test, and
@@ -875,7 +903,7 @@ impl Kernel {
             }
         }
         let mut onto = Map::new();
-        onto.insert("outcome".to_string(), Value::Object(stamp.clone()));
+        onto.insert("outcome".to_string(), Value::Object(stamp));
         self.rows.stamp(pid.get(), &onto);
         if let Some(root) = self.root() {
             let mut settle = Map::new();
@@ -885,7 +913,14 @@ impl Kernel {
                 "settled".to_string(),
                 row.get("agent").cloned().unwrap_or(Value::Null),
             );
-            settle.insert("outcome".to_string(), Value::Object(stamp));
+            let mut full = Map::new();
+            full.insert("status".to_string(), Value::from(out.status.as_str()));
+            full.insert(
+                "result".to_string(),
+                taped_payload(&out.result, out.body.as_deref()),
+            );
+            settle.insert("outcome".to_string(), Value::Object(full));
+            settle.insert("attempts".to_string(), Value::from(out.attempts));
             let _ = self.rows.put(&root.id, settle);
         }
     }
@@ -1615,6 +1650,26 @@ fn dispatch(
             Err(e) => json!({ "error": e.to_string(), "raised": true }),
         }
     })
+}
+
+/// A payload or a result AS THE TAPE RECORDS IT — verbatim, except for the ONE
+/// reduction.
+///
+/// XML text cannot carry raw bytes and base64 is banned, so the binary channel's
+/// body is written as its LENGTH under the key it rides on (`bytes` — the key
+/// python's own payload dict holds it under, and the key a `read_stream` reply
+/// leaves `null` for it, C37). Everything else — all text, all JSON — is
+/// untouched. Durable bytes live behind `file_bridge`, the one disk surface; the
+/// tape records that N of them passed, not which.
+fn taped_payload(value: &Value, body: Option<&[u8]>) -> Value {
+    let Some(body) = body else {
+        return value.clone();
+    };
+    let mut out = value.clone();
+    if let Some(m) = out.as_object_mut() {
+        m.insert("bytes".to_string(), json!({"len": body.len()}));
+    }
+    out
 }
 
 /// Binary-frame dispatch: route to the target bundle's `handle_binary`.

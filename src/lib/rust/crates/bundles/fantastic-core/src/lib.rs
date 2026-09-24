@@ -482,41 +482,42 @@ impl Bundle for KernelStateBundle {
         Some(out)
     }
 
-    /// LAND THE LAST WINDOW while the provider child is still alive. The kernel
-    /// awaits this BEFORE the teardown walk (python `flush_pending`).
+    /// LAND EVERYTHING while the provider child is still alive. The kernel awaits
+    /// this BEFORE the teardown walk (python `flush_pending`).
     ///
-    /// THE LEDGER GOES FIRST. The ROOT loader owns the kernel-wide execution
-    /// ledger, and its write-through is DEBOUNCED: a settle kicks a coalescing
-    /// `ledger_flush` task. At a stop that task is either still in flight or
-    /// never got to run — `shutdown_agents` cancels the pending roots — so the
-    /// LAST execution of the process never reached `ledger.json` (measured
-    /// 2026-09-21: a live REST call, then SIGTERM, left the sidecar one window
-    /// behind; a 1.5 s grace before the signal hid it). One awaited pass here
-    /// makes the stop durable instead of timing-dependent. It runs BEFORE the
-    /// pump stops so the rows it mints still land, and the kernel already wraps
-    /// this hook in `shutdown_context` — a draining store would otherwise
-    /// refuse the write.
+    /// THE RECORD FLUSH LIVES HERE, not in `on_shutdown`. The record loop
+    /// debounces 150 ms; a `create_agent` + `update_agent` followed straight away
+    /// by a shutdown used to reach its final flush mid-teardown-walk, with the
+    /// store already gone, and the update never landed. Records first: their
+    /// writes mint rows, and the pump's own window has to close after them. The
+    /// kernel already wraps this hook in `shutdown_context` — a draining store
+    /// would otherwise refuse the write.
     async fn flush_pending(
         &self,
         agent_id: &AgentId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        persistence::flush_ledger(kernel).await;
-        let pump = {
+        let (writer, pump) = {
             let mut st = self.state.lock().expect("kernel_state poisoned");
-            st.get_mut(&agent_id.0)
-                .and_then(|s| s.installed.as_mut())
-                .and_then(|i| i.pump.take())
+            let installed = st.get_mut(&agent_id.0).and_then(|s| s.installed.as_mut());
+            match installed {
+                Some(i) => (i.writer.clone(), i.pump.take()),
+                None => (None, None),
+            }
         };
+        if let Some(w) = writer {
+            w.flush(kernel).await;
+        }
         if let Some(p) = pump {
             p.stop(kernel).await;
         }
         Ok(())
     }
 
-    /// Final record flush + unsubscribe — a graceful shutdown loses nothing.
-    /// `flush_pending` normally ran already (the kernel calls it before the
-    /// walk); a path that skipped it still lands the last window here.
+    /// Unsubscribe + stop the loops. `flush_pending` normally ran already (the
+    /// kernel calls it before the walk, while the provider is alive) and is what
+    /// WRITES; a path that skipped it (a bare shutdown) still lands the last
+    /// message window here, through the pump's own catch-up.
     async fn on_shutdown(
         &self,
         agent_id: &AgentId,

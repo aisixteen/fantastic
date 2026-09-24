@@ -638,6 +638,9 @@ extension Kernel {
         ]
         row["parent"] = KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null
         row["origin"] = KernelTaskLocals.currentSender.map { JSON.string($0.value) } ?? .null
+        // ONE TAPE: the internal variant carries its payload too — key order
+        // `id, kind, verb, parent, origin, payload, internal`.
+        row["payload"] = payload
         row["internal"] = .bool(true)
         _ = try? rows.put(target.id, row)
         let (reply, _) = await runDispatch(

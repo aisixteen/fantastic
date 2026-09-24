@@ -9,7 +9,9 @@
 //! - unknown id ⇒ dispatch and record (a name, not a new mechanism)
 //! - in flight  ⇒ JOIN — no second run (C10: once-only under concurrency)
 //! - settled    ⇒ the recorded outcome returns, the handler never runs
-//!   (C11 idempotency; C9 in-process, and across restart once persisted)
+//!   (C11 idempotency; C9 in-process, and across restart — the ROOT LOADER
+//!   rebuilds these rows from the `call`/`settle` rows on `messages.xml`,
+//!   the ONE tape; there is no second ledger file)
 //!
 //! ONE ID SPACE. The caller's id IS the pid that `ps`/`cancel`/reply tags carry;
 //! an UNNAMED execution is ledgered under its minted pid. So any reply is
@@ -60,25 +62,11 @@ struct Row {
     /// execution does not settle its intermediate attempts, so a joiner never
     /// sees an answer that was later retried away.
     outcome: Option<Outcome>,
-    /// Does this row survive a JSON round-trip? Decided ONCE, at settle, because
-    /// a settled row never changes again.
-    ///
-    /// It used to be re-decided for EVERY row on EVERY snapshot, and a snapshot
-    /// is taken on every settle — so an agentic run re-serialized and re-parsed
-    /// its whole history each time a call completed. Sampled on `agentic.plan`:
-    /// the kernel sat at ~125% CPU with a single send in flight, and half the
-    /// samples were in this check.
-    json_ok: bool,
     /// How joiners wait. `watch` (not `Notify`) because it carries the value and
     /// cannot miss an edge: a joiner that subscribes after the settle still
     /// reads it immediately.
     tx: watch::Sender<Option<Outcome>>,
 }
-
-/// The sidecar format this kernel reads and writes. v2 (2026-09-08): ids are the
-/// kernel's int64 message ids and rows are an ARRAY (JSON object keys are
-/// strings and would stringify them); a named row carries `name`.
-pub const LEDGER_VERSION: u64 = 2;
 
 /// What [`Ledger::open`] decided for one item.
 pub enum Opened {
@@ -106,7 +94,8 @@ struct Inner {
 }
 
 /// The kernel's execution ledger. Session-lifetime; the durable half is the
-/// root loader's job (the kernel never touches disk).
+/// TAPE — the root loader rebuilds these rows at boot from the `call` + `settle`
+/// rows of `messages.xml` (the kernel never touches disk).
 pub struct Ledger {
     inner: Mutex<Inner>,
 }
@@ -200,8 +189,6 @@ impl Ledger {
                 name: name.map(str::to_string),
                 origin,
                 outcome: None,
-                // Decided at settle; an in-flight row is never snapshotted.
-                json_ok: false,
                 tx,
             },
         );
@@ -259,28 +246,10 @@ impl Ledger {
     /// Record the FINAL outcome and wake every joiner. Stamps `attempts`, so a
     /// caller can see what its work actually cost.
     pub fn settle(&self, exec_id: i64, mut outcome: Outcome) -> Outcome {
-        // STRICT-JSON FIDELITY, decided HERE: a row that does not survive a
-        // round-trip is skipped by the snapshot rather than silently mangled —
-        // rehydrating a lie is worse than rehydrating less. The verdict cannot
-        // change afterwards, so it is taken once instead of on every flush.
-        let json_ok = {
-            // A BINARY BODY IS BYTES IN THE RESULT. Python's filter is
-            // `json.dumps(outcome)` raising `TypeError` on a `bytes` value
-            // (`kernel_state/tools.py:891-895`), and every read_stream reply it
-            // drops is one this kernel carries at `Outcome::body` with a `null`
-            // where the `bytes` key sits (C37). Checking only the JSON text
-            // persisted 88 read_stream rows per store run that python keeps
-            // RAM-only, each rehydrating a reply whose body is gone.
-            outcome.body.is_none() && {
-                let v = outcome.to_value();
-                serde_json::from_str::<Value>(&v.to_string()).ok().as_ref() == Some(&v)
-            }
-        };
         let mut g = self.inner.lock().expect("ledger poisoned");
         if let Some(row) = g.rows.get_mut(&exec_id) {
             outcome.attempts = row.attempts.max(1);
             row.outcome = Some(outcome.clone());
-            row.json_ok = json_ok;
             // Ignore the send error: no subscribers is the normal case.
             let _ = row.tx.send(Some(outcome.clone()));
         }
@@ -312,9 +281,8 @@ impl Ledger {
                 // retries, named, name?, status, outcome?} — KEY ORDER (C16),
                 // and `name` is OMITTED (not `null`) when the execution is
                 // unnamed, exactly like python's `if row.get("name"): entry["name"]
-                // = …`. The verb is not lost — it is what the SIDECAR stores
-                // (`settled_snapshot`), where it authorizes a joiner after a
-                // reboot; the read verb never needed it.
+                // = …`. The verb is not lost — the TAPE's `call` row carries it,
+                // beside the payload; the read verb never needed it.
                 let mut o = Map::new();
                 o.insert("id".to_string(), json!(id));
                 o.insert("target".to_string(), json!(r.target.0));
@@ -339,129 +307,79 @@ impl Ledger {
             .collect()
     }
 
-    /// Every SETTLED row, as the durable sidecar stores them. In-flight rows are
-    /// deliberately absent: work that never completed did not complete, and a
-    /// post-reboot re-send re-running it is the truth, not a loss.
-    pub fn settled_snapshot(&self) -> Value {
-        let g = self.inner.lock().expect("ledger poisoned");
-        let mut rows: Vec<Value> = Vec::new();
-        for id in &g.order {
-            let Some(r) = g.rows.get(id) else { continue };
-            let Some(out) = &r.outcome else { continue };
-            // Fidelity was decided when the row settled (see `settle`); a
-            // settled row never changes, so the snapshot only assembles.
-            if !r.json_ok {
-                continue;
-            }
-            // PYTHON'S KEY ORDER, and no `verb`: the sidecar is
-            // `{id, target, retries, attempts, named, name, origin, outcome}`.
-            // A rehydrated join is gated from the ORIGINAL payload, which a
-            // settled row no longer has (nothing is left to re-run).
-            rows.push(json!({
-                "id": id,
-                "target": r.target.0,
-                "retries": r.retries,
-                "attempts": r.attempts,
-                "named": r.name.is_some(),
-                "name": r.name,
-                "origin": r.origin.as_ref().map(|o| o.0.clone()),
-                "outcome": out.to_value(),
-            }));
-        }
-        json!({ "v": LEDGER_VERSION, "rows": rows })
-    }
-
-    /// Restore SETTLED rows from a sidecar, DONE, so dedup holds across a
-    /// reboot: a completed step is never re-executed by a fresh process and a
-    /// parked dead letter stays dead.
-    pub fn rehydrate(&self, doc: &Value) -> usize {
-        let Some(rows) = doc.get("rows").and_then(Value::as_array) else {
-            return 0;
+    /// REBUILD ONE SETTLED EXECUTION FROM THE TAPE — the durable half of C9.
+    ///
+    /// `call` is the `call` row (it carries the target at `agent`, the retry
+    /// budget, the caller's name and the origin) and `outcome` is its `settle`
+    /// row's body (`{status, result}`); `attempts` is the settle's final count.
+    /// Together they ARE the row a live kernel held, so it comes back DONE and a
+    /// re-send of the id returns the recorded outcome instead of running the
+    /// handler again — across a restart, out of one file.
+    ///
+    /// A LIVE ROW ALWAYS WINS: an id already open is left alone. An unknown
+    /// status is not guessed at — the row is skipped and `false` comes back.
+    pub fn hydrate_settled(
+        &self,
+        exec_id: i64,
+        call: &crate::rows::Row,
+        outcome: &Map<String, Value>,
+        attempts: u32,
+    ) -> bool {
+        let Some(target) = call.get("agent").and_then(Value::as_str) else {
+            return false;
+        };
+        let status = match outcome.get("status").and_then(Value::as_str) {
+            Some("completed") => Status::Completed,
+            // A HANDLER THAT SAID NO IS A SETTLED ROW TOO. Dropping `errored`
+            // re-arms exactly the call the ledger exists to never run twice.
+            Some("errored") => Status::Errored,
+            Some("failed") => Status::Failed,
+            Some("cancelled") => Status::Cancelled,
+            Some("timed_out") => Status::TimedOut,
+            _ => return false,
         };
         let mut g = self.inner.lock().expect("ledger poisoned");
-        let mut n = 0;
-        let mut top: i64 = 0;
-        for r in rows {
-            // v2 ids are the kernel's int64 message ids (v1 keyed rows by a
-            // decimal STRING, which is why the version bumped).
-            let Some(id) = r.get("id").and_then(Value::as_i64) else {
-                continue;
-            };
-            let Some(target) = r.get("target").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(out) = r.get("outcome") else {
-                continue;
-            };
-            let status = match out.get("status").and_then(Value::as_str) {
-                Some("completed") => Status::Completed,
-                // A HANDLER THAT SAID NO IS A SETTLED ROW TOO. Dropping
-                // `errored` re-armed exactly the call the ledger exists to
-                // never run twice.
-                Some("errored") => Status::Errored,
-                Some("failed") => Status::Failed,
-                Some("cancelled") => Status::Cancelled,
-                Some("timed_out") => Status::TimedOut,
-                _ => continue,
-            };
-            let outcome = Outcome {
-                pid: out
-                    .get("pid")
-                    .and_then(Value::as_i64)
-                    .map(crate::tasks::TaskId),
-                status,
-                result: out.get("result").cloned().unwrap_or(Value::Null),
-                attempts: out.get("attempts").and_then(Value::as_u64).unwrap_or(1) as u32,
-                // A REHYDRATED outcome has no binary body: the durable row is
-                // the JSON wire shape (`to_value`), which never carried one.
-                body: None,
-            };
-            let (tx, _rx) = watch::channel(Some(outcome.clone()));
-            let name = r.get("name").and_then(Value::as_str).map(str::to_string);
-            if let Some(n) = &name {
-                g.names.insert(n.clone(), id);
-            }
-            g.rows.insert(
-                id,
-                Row {
-                    target: AgentId::from(target),
-                    // SETTLED: nothing is left to re-run, so the row keeps no
-                    // payload. A joiner of a rehydrated row is gated against
-                    // exactly that — no verb, no fields (python stores `None`).
-                    payload: Value::Null,
-                    retries: r.get("retries").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    attempts: r.get("attempts").and_then(Value::as_u64).unwrap_or(1) as u32,
-                    name,
-                    origin: r.get("origin").and_then(Value::as_str).map(AgentId::from),
-                    outcome: Some(outcome),
-                    // It was READ from the sidecar, so it round-trips by
-                    // construction — re-proving that would be the same wasted
-                    // work this field exists to remove.
-                    json_ok: true,
-                    tx,
-                },
-            );
-            g.order.push(id);
-            top = top.max(id);
-            n += 1;
+        if g.rows.contains_key(&exec_id) {
+            return false;
         }
+        // THE LIVE SHAPE, rebuilt: a joiner after a reboot must receive exactly
+        // what a joiner before it received — {pid, status, result, attempts}.
+        let out = Outcome {
+            pid: Some(crate::tasks::TaskId(exec_id)),
+            status,
+            result: outcome.get("result").cloned().unwrap_or(Value::Null),
+            attempts,
+            // A REHYDRATED outcome has no binary body: the tape records raw
+            // bytes as their LENGTH, never the bytes.
+            body: None,
+        };
+        let (tx, _rx) = watch::channel(Some(out.clone()));
+        let name = call.get("name").and_then(Value::as_str).map(str::to_string);
+        if let Some(n) = &name {
+            g.names.insert(n.clone(), exec_id);
+        }
+        g.rows.insert(
+            exec_id,
+            Row {
+                target: AgentId::from(target),
+                // SETTLED: nothing is left to re-run, so the row keeps no
+                // payload. A joiner of a rehydrated row is gated against exactly
+                // that — no verb, no fields (python stores `None`).
+                payload: Value::Null,
+                retries: call.get("retries").and_then(Value::as_u64).unwrap_or(0) as u32,
+                attempts,
+                name,
+                origin: call
+                    .get("origin")
+                    .and_then(Value::as_str)
+                    .map(AgentId::from),
+                outcome: Some(out),
+                tx,
+            },
+        );
+        g.order.push(exec_id);
         Self::evict(&mut g);
-        let _ = top;
-        n
-    }
-
-    /// The highest settled id a v2 sidecar carries — what the counter must be
-    /// RAISED past. The counter itself is restored by `hydrate_messages` (cold,
-    /// before the first mint); the ledger only raises it, because a settled call
-    /// whose id the message log never saw (a log that stopped short) must still
-    /// stay below the next mint.
-    #[must_use]
-    pub fn sidecar_top_id(doc: &Value) -> Option<i64> {
-        doc.get("rows")
-            .and_then(Value::as_array)?
-            .iter()
-            .filter_map(|r| r.get("id").and_then(Value::as_i64))
-            .max()
+        true
     }
 
     /// The ring: evict oldest SETTLED rows, unnamed before named, never

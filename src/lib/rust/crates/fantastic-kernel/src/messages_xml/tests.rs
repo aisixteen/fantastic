@@ -166,3 +166,91 @@ fn a_carriage_return_normalizes_the_way_every_xml_reader_does() {
     let rows = parse_messages("<row tag=\"a&#13;b\" />\n").expect("parses");
     assert_eq!(rows[0]["tag"], json!("a\rb"));
 }
+
+/// ONE TAPE, BYTE FOR BYTE. A `call` row carries the dispatch payload and a
+/// `settle` row the whole outcome; the payload's map keys are whatever the
+/// CALLER wrote (`$parent` is not an XML name → `<entry key="…">`) and a raw
+/// body is its LENGTH (`<bytes len="N" />`, the ONE reduction — base64 is
+/// banned). Pinned against `kernel_state.messages_xml` run on the same maps
+/// (2026-09-24), because both runtimes append to the same file.
+#[test]
+fn a_call_and_its_settle_are_python_byte_for_byte() {
+    let call = json!({
+        "id": 11, "kind": "call", "verb": "write_stream", "parent": null, "origin": null,
+        "payload": {
+            "type": "create_agent",
+            "callable_by": {"$parent": "*", "rest": ["read", "write"]},
+            "bytes": {"len": 3},
+        },
+        "named": false, "retries": 0, "attempts": 1, "timeout": null,
+        "agent": "ai", "ts": 1.5,
+    });
+    assert_eq!(
+        row_to_xml(call.as_object().unwrap()),
+        "<row id=\"11\" kind=\"call\" verb=\"write_stream\" named=\"false\" retries=\"0\" \
+         attempts=\"1\" agent=\"ai\" ts=\"1.5\"><payload type=\"create_agent\"><callable_by>\
+         <entry key=\"$parent\">*</entry><rest><item>read</item><item>write</item></rest>\
+         </callable_by><bytes len=\"3\" /></payload></row>\n"
+    );
+    let settle = json!({
+        "kind": "settle", "parent": 11, "settled": "ai",
+        "outcome": {"status": "completed", "result": {"chunk": {"len": 9}}},
+        "attempts": 2, "id": 12, "agent": "kernel_state", "ts": 1.5,
+    });
+    assert_eq!(
+        row_to_xml(settle.as_object().unwrap()),
+        "<row kind=\"settle\" parent=\"11\" settled=\"ai\" attempts=\"2\" id=\"12\" \
+         agent=\"kernel_state\" ts=\"1.5\"><outcome status=\"completed\"><result>\
+         <chunk len=\"9\" /></result></outcome></row>\n"
+    );
+    // ...and both read back as the maps python reads back: the entry key is the
+    // KEY (a string, never coerced), and a raw body is `{"len": N}`.
+    let doc = format!(
+        "{HEADER}{}{}",
+        row_to_xml(call.as_object().unwrap()),
+        row_to_xml(settle.as_object().unwrap())
+    );
+    let back = parse_messages(&doc).expect("round trip");
+    assert_eq!(
+        Value::Object(back[0].clone()),
+        json!({
+            "id": 11, "kind": "call", "verb": "write_stream", "named": false, "retries": 0,
+            "attempts": 1, "agent": "ai", "ts": 1.5,
+            "payload": {
+                "type": "create_agent",
+                "callable_by": {"$parent": "*", "rest": ["read", "write"]},
+                "bytes": {"len": 3},
+            },
+        })
+    );
+    assert_eq!(
+        Value::Object(back[1].clone()),
+        json!({
+            "kind": "settle", "parent": 11, "settled": "ai", "attempts": 2, "id": 12,
+            "agent": "kernel_state", "ts": 1.5,
+            "outcome": {"status": "completed", "result": {"chunk": {"len": 9}}},
+        })
+    );
+}
+
+/// A KEY THAT IS NOT AN XML NAME rides `<entry>` wherever it sits — nested, in a
+/// list, and as the whole value — and comes back as a STRING key.
+#[test]
+fn non_xml_name_keys_round_trip_through_entry() {
+    let row = json!({
+        "id": 1, "agent": "ai", "kind": "call",
+        "payload": {
+            "1": "a digit is not an XML name",
+            "": "neither is empty",
+            "a b": {"$deep": [1, {"$in": true}]},
+            "ok.key-1": "a plain name still rides as an attribute",
+        },
+    });
+    let text = format!("{HEADER}{}", row_to_xml(row.as_object().unwrap()));
+    assert!(
+        text.contains("<entry key=\"1\">") && text.contains("ok.key-1=\""),
+        "{text}"
+    );
+    let back = parse_messages(&text).expect("round trip");
+    assert_eq!(Value::Object(back[0].clone()), row);
+}

@@ -12,17 +12,13 @@ use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::state::{KernelState, CURRENT_VERSION};
 use crate::storage::StorageMode;
-use crate::tasks::{TaskId, TaskTable};
-
-/// The loader's durable write-through, kicked on every settle with that
-/// execution's CALL ROW id (python passes `d.pid`).
-pub type LedgerFlusher = Box<dyn Fn(Option<TaskId>) + Send + Sync>;
+use crate::tasks::TaskTable;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use tokio::sync::Notify;
 
 /// Bounded inbox capacity per agent — matches Python's `INBOX_BOUND`.
@@ -180,11 +176,6 @@ pub struct Kernel {
     /// one stream carries everything. Starts EMPTY, always: a hydrator fills it
     /// from above and a persister tails it; the kernel never knows disk.
     pub rows: crate::rows::RowStore,
-
-    /// Installed by the ROOT LOADER at boot. `None` = no persistence (no store
-    /// wired, or a test kernel): settled outcomes live and die with the process,
-    /// exactly like the tree's own auto-flush law. Called at every settle.
-    ledger_flusher: Mutex<Option<LedgerFlusher>>,
 }
 
 /// One bound for every agent's `shutdown` dispatch. Python
@@ -246,7 +237,6 @@ impl Kernel {
             tasks: TaskTable::new(),
             ledger: crate::ledger::Ledger::default(),
             rows: crate::rows::RowStore::with_state(state_subscribers),
-            ledger_flusher: Mutex::new(None),
         }
     }
 
@@ -474,26 +464,6 @@ impl Kernel {
             }
         }
         json!({"drained": true, "shut": shut, "cancelled": cancelled})
-    }
-
-    /// Install the durable-ledger write-through. The kernel calls it after every
-    /// settle and knows NOTHING about what it does — the loader owns the disk,
-    /// exactly as it owns the `.fantastic` layout.
-    pub fn set_ledger_flusher(&self, f: LedgerFlusher) {
-        *self.ledger_flusher.lock().expect("flusher poisoned") = Some(f);
-    }
-
-    /// Fire the durable write-through, if one is installed. No flusher = no
-    /// persistence: settled outcomes live and die with the process. That is the
-    /// auto-flush law, not a fallback.
-    /// `pid` is the settled execution's CALL ROW id — python passes `d.pid`.
-    /// The loader's kick reads that row to tell its OWN persistence traffic from
-    /// real work; the kernel still knows nothing about what persistence is.
-    pub fn ledger_settled(&self, pid: Option<TaskId>) {
-        let g = self.ledger_flusher.lock().expect("flusher poisoned");
-        if let Some(f) = g.as_ref() {
-            f(pid);
-        }
     }
 
     /// Register an agent in the flat index. NO INBOX.

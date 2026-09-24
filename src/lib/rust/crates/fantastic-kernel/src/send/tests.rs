@@ -1107,11 +1107,24 @@ async fn a_dispatch_writes_a_call_row_with_outcome() {
     let call = &rows[0];
     // PYTHON'S KEY ORDER: the row as it was written, then the two keys the store
     // adds (`{**row, "id": rid, "agent": agent_id}` — `id` keeps its place).
+    // ONE TAPE: the whole call goes down — the payload verbatim, the retry
+    // budget, the attempt count, the deadline.
     assert_eq!(
         call.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["id", "kind", "verb", "parent", "origin", "name", "agent", "ts", "outcome"],
+        vec![
+            "id", "kind", "verb", "parent", "origin", "payload", "named", "retries", "attempts",
+            "timeout", "name", "agent", "ts", "outcome"
+        ],
         "…and `outcome` is stamped onto the end at settle"
     );
+    assert_eq!(call["payload"], json!({"type": "work"}));
+    assert_eq!(call["named"], json!(true));
+    assert_eq!(call["retries"], json!(0));
+    assert_eq!(call["attempts"], json!(1));
+    // NO DEADLINE ⇒ `null` in RAM, and the tape's writer omits it (as it omits
+    // every `None`) — python's row carries the key the same way.
+    assert_eq!(call["timeout"], Value::Null);
+    assert!(!crate::messages_xml::row_to_xml(call).contains("timeout"));
     assert_eq!(call["kind"], json!("call"));
     assert_eq!(call["verb"], json!("work"));
     assert_eq!(
@@ -1249,8 +1262,11 @@ async fn a_falsy_non_string_error_settles_completed() {
     }
 }
 
+/// ONE TAPE: the settle row carries the FULL outcome body and the final
+/// attempts — it is the only record of what a call became, and a boot rebuilds
+/// `executions` out of it. The live call row keeps the python STAMP.
 #[tokio::test]
-async fn the_settle_row_carries_the_stamp_not_the_outcome() {
+async fn the_settle_row_carries_the_whole_outcome() {
     let (kernel, worker) = c36_kernel();
     kernel
         .send(vec![Item::new(worker.id.clone(), json!({"type": "work"}))])
@@ -1264,12 +1280,28 @@ async fn the_settle_row_carries_the_stamp_not_the_outcome() {
     assert_eq!(settles.len(), 1);
     let s = &settles[0];
     assert_eq!(s["settled"], json!("w"), "the agent the call was on");
-    assert_eq!(s["outcome"], json!({"status": "completed"}));
+    assert_eq!(
+        s["outcome"],
+        json!({"status": "completed", "result": {"ok": true}})
+    );
+    assert_eq!(s["attempts"], json!(1));
+    assert_eq!(
+        s.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["kind", "parent", "settled", "outcome", "attempts", "id", "agent", "ts"],
+        "python's key order"
+    );
     let o = s["outcome"].as_object().unwrap();
     assert!(
-        !o.contains_key("pid") && !o.contains_key("result") && !o.contains_key("attempts"),
-        "the ledger's Outcome never enters the message log: {o:?}"
+        !o.contains_key("pid"),
+        "the pid is the parent id, not a second copy: {o:?}"
     );
+    // The LIVE call row keeps the digest STAMP, which `messages` and the
+    // `ledger` verb read off it.
+    let call = kernel
+        .rows
+        .get_one(s["parent"].as_i64().unwrap())
+        .expect("the call row");
+    assert_eq!(call["outcome"], json!({"status": "completed"}));
 }
 
 #[tokio::test]

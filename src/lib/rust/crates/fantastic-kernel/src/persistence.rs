@@ -33,7 +33,6 @@ use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::kernel::Kernel;
 use crate::outcome::Item;
-use crate::tasks::TaskId;
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -672,12 +671,15 @@ impl PersistWriter {
         flush_records(kernel, &self.dirty).await;
     }
 
-    /// Unsubscribe, final flush, stop the task. A clean shutdown loses nothing.
+    /// Unsubscribe and stop the task. NO FINAL FLUSH HERE: `stop` runs
+    /// mid-teardown, when the store may already be down — a `create_agent` +
+    /// `update_agent` followed straight away by a shutdown reached this flush with
+    /// the provider gone and the update never landed. The last write happens in
+    /// the root's `flush_pending`, before the walk.
     pub async fn stop(self, kernel: &Arc<Kernel>) {
         kernel.clear_record_writer();
         kernel.remove_state_subscriber(self.token);
         self.wake.notify_waiters();
-        flush_records(kernel, &self.dirty).await;
         kernel.tasks.forget(&self.task);
     }
 }
@@ -814,9 +816,10 @@ pub struct RootLoaderState {
 
 /// The loader's `boot`, python `kernel_state._boot`:
 ///
-/// 1. ROOT only — rehydrate the execution ledger, then install its flusher
-///    (that order, so hydration never rewrites the file it just read), then
-///    start the message pump at the highest id hydration saw.
+/// 1. ROOT only — REBUILD the execution ledger from the tape (the `call` +
+///    `settle` rows the cold hydration already put back), then start the message
+///    pump at the highest id hydration saw. That order: rebuilding mints nothing,
+///    and nothing rebuilt is re-appended.
 /// 2. Unless `watch=false` (a loader serving a REMOTE kernel answers verbs
 ///    only) — subscribe the record writer to the kernel state stream.
 /// 3. ROOT only — mint the instance `guid` ONCE, AFTER the writer subscribes,
@@ -826,7 +829,10 @@ pub async fn boot_root_loader(kernel: &Arc<Kernel>, agent: &Arc<Agent>) -> RootL
     let mut state = RootLoaderState::default();
     let is_root = agent.parent_id.is_none();
     if is_root {
-        install_ledger_persistence(kernel).await;
+        // THE TAPE IS THE LEDGER. `hydrate_messages` put the rows back cold; here
+        // the settled calls become `executions` again, so dedup survives the
+        // reboot out of one file.
+        let _ = crate::messages_log::hydrate_executions(kernel);
         state.pump = Some(crate::messages_log::install_message_pump(
             kernel,
             kernel.rows.next_id() - 1,
@@ -865,8 +871,8 @@ pub async fn boot_root_loader(kernel: &Arc<Kernel>, agent: &Arc<Agent>) -> RootL
     state
 }
 
-/// Land the last window and unsubscribe — python `_MessagePump.stop` +
-/// `_FlushLoop.stop`.
+/// Unsubscribe and stop both loops — python `_MessagePump.stop` +
+/// `_FlushLoop.stop`. The WRITING happened in `flush_pending`, before the walk.
 pub async fn shutdown_root_loader(state: RootLoaderState, kernel: &Arc<Kernel>) {
     if let Some(w) = state.writer {
         w.stop(kernel).await;
@@ -874,190 +880,6 @@ pub async fn shutdown_root_loader(state: RootLoaderState, kernel: &Arc<Kernel>) 
     if let Some(p) = state.pump {
         p.stop(kernel).await;
     }
-}
-
-// ─── the DURABLE LEDGER (#37) ────────────────────────────────────────
-
-/// The sidecar holding SETTLED executions, store-relative at the root.
-pub const LEDGER_BLOB: &str = "ledger.json";
-
-/// Write every settled row through the discovered store.
-///
-/// No store ⇒ RAM only. That is the AUTO-FLUSH LAW, not a fallback: with
-/// nothing wired the tree does not persist either, and the ledger follows the
-/// same rule rather than inventing a second disk surface.
-pub async fn flush_ledger(kernel: &Arc<Kernel>) {
-    if kernel.storage.is_in_memory() {
-        return;
-    }
-    let Some(store_id) = find_store(kernel) else {
-        return;
-    };
-    // python `json.dumps(...)` defaults: ensure_ascii, no indent, `", "`/`": "`
-    // separators are not used because python's default compact form is
-    // `{"a": 1}` — which is what `py_json_dumps(_, true, None)` writes.
-    let doc = fantastic_bundle::py_json_dumps(&kernel.ledger.settled_snapshot(), true, None);
-    // THE FLUSH IS AN EXECUTION, but its call is an operator-context send to the
-    // DISCOVERED store — own persistence by `is_own_persistence`, so its settle
-    // never reaches the kick and no credit is needed.
-    store_send_binary(
-        kernel,
-        &store_id,
-        serde_json::json!({"type": "write_stream", "path": LEDGER_BLOB, "truncate": true}),
-        doc.into_bytes(),
-    )
-    .await;
-}
-
-/// Restore settled executions at boot, so dedup holds across a restart: a
-/// completed step is never re-executed by a fresh process and a parked dead
-/// letter stays dead.
-///
-/// Runs BEFORE the flusher is installed, so hydration never rewrites what it
-/// just read. Every failure is LOUD and starts empty — a ledger that silently
-/// half-loads would re-arm exactly the side effects it exists to prevent.
-pub async fn rehydrate_ledger(kernel: &Arc<Kernel>) -> usize {
-    let Some(store_id) = find_store(kernel) else {
-        return 0;
-    };
-    let bytes = read_via_store(kernel, &store_id, LEDGER_BLOB).await;
-    if bytes.is_empty() {
-        return 0;
-    }
-    let doc: Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            println!("  [ledger] {LEDGER_BLOB} unreadable, starting empty: {e}");
-            return 0;
-        }
-    };
-    // THE UPGRADE CONTRACT, from day one: an unknown version starts empty
-    // LOUDLY — never guessed at, never silently reinterpreted. A v1 file (the
-    // object-keyed shape) lands here. python prints the value's `repr`.
-    let v = doc.get("v").cloned().unwrap_or(Value::Null);
-    if v.as_u64() != Some(crate::ledger::LEDGER_VERSION) {
-        println!(
-            "  [ledger] {LEDGER_BLOB} is version {}, this kernel reads {} \
-             — starting empty (no migration written)",
-            fantastic_bundle::py_repr_value(&v),
-            crate::ledger::LEDGER_VERSION
-        );
-        return 0;
-    }
-    let n = kernel.ledger.rehydrate(&doc);
-    // RAISE THE COUNTER past every settled id the sidecar carries: the message
-    // log may have stopped short of one, and a re-minted id would collide.
-    if let Some(top) = crate::ledger::Ledger::sidecar_top_id(&doc) {
-        if kernel.rows.next_id() <= top {
-            kernel.rows.set_next_id(top + 1);
-        }
-    }
-    n
-}
-
-/// THE LOADER'S OWN PERSISTENCE TRAFFIC — python `_is_own_persistence`.
-///
-/// An OPERATOR-CONTEXT `call` row (no origin: nobody sent it) addressed to the
-/// DISCOVERED store is bookkeeping, not work: the pump's `read_stream` probe and
-/// `messages.xml` appends, the record flusher's writes, and the blob verbs that
-/// write `ledger.json` itself. It is exactly the traffic `messages_log::skips`
-/// keeps out of the log, read here by the second reader: its settle must not
-/// kick the ledger flusher. No store wired => there is no own traffic.
-fn is_own_persistence(kernel: &Arc<Kernel>, pid: Option<TaskId>) -> bool {
-    let Some(pid) = pid else {
-        return false;
-    };
-    let Some(row) = kernel.rows.get_one(pid.0) else {
-        return false;
-    };
-    if row.get("kind").and_then(Value::as_str) != Some("call") {
-        return false;
-    }
-    if !matches!(row.get("origin"), None | Some(Value::Null)) {
-        return false;
-    }
-    let Some(store) = find_store(kernel) else {
-        return false;
-    };
-    row.get("agent").and_then(Value::as_str) == Some(store.0.as_str())
-}
-
-/// Rehydrate, then install the debounced write-through.
-///
-/// Debounced because a batch settles many rows in a burst and each one would
-/// otherwise rewrite the whole sidecar; settles that land mid-write coalesce
-/// into ONE follow-up pass.
-pub async fn install_ledger_persistence(kernel: &Arc<Kernel>) {
-    // SILENT ON SUCCESS. Only python's loud lines survive (the version /
-    // unreadable refusals above, the pump's append-refused and no-store lines).
-    let _ = rehydrate_ledger(kernel).await;
-    let k = Arc::clone(kernel);
-    // ONE flush at a time, and always one AFTER the last settle.
-    //
-    // `dirty` says the ledger changed since the last snapshot; `running` says a
-    // worker owns the writing. The worker loops until it observes a clean
-    // ledger, so any number of settles arriving mid-flush fold into exactly one
-    // follow-up pass.
-    //
-    // This used to clear its `pending` flag as the FIRST thing the spawned task
-    // did, before awaiting the flush — so the flag only covered the gap before
-    // the task started, not the write itself. Every settle that landed while a
-    // flush was in flight therefore spawned ANOTHER concurrent full-map
-    // rewrite. On an agentic run that is a fan-out of O(n) rewrites of an
-    // O(n) snapshot, all at once: measured on `agentic.plan`, the kernel
-    // saturated multiple cores (199% CPU) with a single send in flight.
-    let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let k_kick = Arc::clone(kernel);
-    kernel.set_ledger_flusher(Box::new(move |pid| {
-        use std::sync::atomic::Ordering;
-        // THE LOADER'S OWN PERSISTENCE TRAFFIC DOES NOT DIRTY THE LEDGER. The
-        // flush writes `ledger.json` THROUGH the store, and that write's settle
-        // used to kick the flusher again: settle -> `ledger_flush` task row ->
-        // pump append -> settle -> kick -> ... at the pump's debounce. The rule
-        // is the predicate, not a credit counter (python 2026-09-21).
-        if is_own_persistence(&k_kick, pid) {
-            return;
-        }
-        dirty.store(true, Ordering::SeqCst);
-        // A worker already owns the writing — it will see `dirty` and loop.
-        if running.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let k2 = Arc::clone(&k);
-        let d2 = Arc::clone(&dirty);
-        let r2 = Arc::clone(&running);
-        // A REGISTERED KERNEL TASK, not a bare `tokio::spawn`: python writes
-        // `<row kind="task" verb="ledger_flush" agent="kernel_state" />` for
-        // every flush pass, so the writing is visible in `ps` and in the log
-        // exactly as the pump's own tasks are. The pending/running coalescing
-        // is unchanged — one task per burst, not one per settle.
-        let flush_agent = k2
-            .root()
-            .map_or_else(|| AgentId::from("kernel"), |r| r.id.clone());
-        k2.clone()
-            .spawn_task(&flush_agent, "ledger_flush", async move {
-                loop {
-                    // Clear BEFORE snapshotting: a settle that lands during this
-                    // pass re-dirties and is caught by the next lap, never dropped.
-                    d2.store(false, Ordering::SeqCst);
-                    flush_ledger(&k2).await;
-                    if !d2.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
-                r2.store(false, Ordering::SeqCst);
-                // A settle can land between the break and releasing `running`; it
-                // set `dirty` and saw us still running, so nobody is coming for it.
-                // Take it ourselves rather than leave it unwritten until the next
-                // settle — the ledger's whole job is to be durable at settle time.
-                if d2.load(Ordering::SeqCst) && !r2.swap(true, Ordering::SeqCst) {
-                    d2.store(false, Ordering::SeqCst);
-                    flush_ledger(&k2).await;
-                    r2.store(false, Ordering::SeqCst);
-                }
-            });
-    }));
 }
 
 pub mod blob;

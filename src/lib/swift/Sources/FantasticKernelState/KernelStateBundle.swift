@@ -18,8 +18,9 @@
 //   persist_blob / load_blob                          the sidecar byte channel
 //
 // The ROOT loader also owns the kernel-wide bookkeeping python's `_boot`
-// installs: the execution-ledger rehydrate + flusher, the message pump and the
-// record `persist_writer` (`Kernel.bootRootLoader`).
+// installs: the execution-ledger rebuild FROM THE TAPE (`hydrateExecutions` —
+// there is no `ledger.json`), the message pump and the record `persist_writer`
+// (`Kernel.bootRootLoader`).
 
 import FantasticJSON
 import FantasticKernel
@@ -212,7 +213,13 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
 
     /// LAND THE LAST WINDOW while the provider child is still alive. The kernel
     /// awaits this BEFORE the teardown walk (python `flush_pending`).
+    ///
+    /// RECORDS FIRST, then the pump: their writes mint rows, and the pump's own
+    /// window has to close after them. The record writer's final flush LIVES
+    /// HERE — it used to sit in `stop()`, which runs mid-teardown-walk with the
+    /// store already gone, and the last update never landed.
     public func flushPending(agentId: AgentId, kernel: Kernel) async throws {
+        await kernel.flushRecords()
         let pump: MessagePump? = withLock {
             guard var e = state[agentId.value], var i = e.installed else { return nil }
             let p = i.pump
@@ -224,9 +231,10 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         if pump != nil { await kernel.flushPendingMessages() }
     }
 
-    /// Final record flush + unsubscribe — a graceful shutdown loses nothing.
-    /// `flushPending` normally ran already (the kernel calls it before the walk);
-    /// a path that skipped it still lands the last window here.
+    /// Unsubscribe + stop the loops. `flushPending` normally ran already (the
+    /// kernel calls it before the walk, while the provider is alive) and is what
+    /// WRITES; a path that skipped it still lands the last MESSAGE window here,
+    /// through the pump's own catch-up.
     public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
         let installed: RootLoaderState? = withLock {
             let e = state.removeValue(forKey: agentId.value)

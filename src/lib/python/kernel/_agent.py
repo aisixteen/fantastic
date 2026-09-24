@@ -915,12 +915,22 @@ class Agent:
         # EVERY SEND IS A MESSAGE. The row names the call — who was asked what,
         # by which message — and takes the outcome's status at settle; the reply
         # body stays with the reply. `parent` is the message that made the call.
+        # ONE TAPE. The row carries the WHOLE call — the dispatch payload
+        # verbatim, the retry budget, the attempt count as at dispatch, the
+        # deadline — because there is no second file: `messages.xml` is the only
+        # thing that outlives the process, and `attempts` is updated on this dict
+        # at every retry (the kernel owns the row in RAM).
         row = {
             "id": exec_id,
             "kind": "call",
             "verb": payload.get("type"),
             "parent": _current_task.get(),
             "origin": origin,
+            "payload": payload,
+            "named": name is not None,
+            "retries": retries,
+            "attempts": 1,
+            "timeout": timeout,
         }
         if name is not None:
             row["name"] = name
@@ -987,6 +997,9 @@ class Agent:
                 return out
             row = self.ctx.executions[d.pid]
             row["attempts"] += 1
+            call = self.ctx.rows.get(d.pid)
+            if call is not None:
+                call["attempts"] = row["attempts"]  # the tape counts real runs
             # forget_task has already dropped the previous attempt's row, so the
             # SAME task id is free to register again — one id, one `cancel`
             # handle, attempt after attempt.
@@ -1086,7 +1099,6 @@ class Agent:
                     out = outcome(d.pid, CANCELLED, {"cancelled": True})
                     d.exec_fut.set_result(out)
                     self._stamp_call(d.pid, out)
-                    self.ctx.ledger_settled(d.pid)
                 raise
             if d.task.cancelled():
                 return self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
@@ -1129,7 +1141,6 @@ class Agent:
                 out["attempts"] = row["attempts"]
             d.exec_fut.set_result(out)
             self._stamp_call(d.pid, out)
-            self.ctx.ledger_settled(d.pid)
         return out
 
     def _stamp_call(self, pid: int | None, out: dict) -> None:
@@ -1145,9 +1156,14 @@ class Agent:
         append-only by contract (`Kernel.rows_put`), so the ending has to be
         an append, not an edit.
 
-        The stamp stays: live readers (`messages` digests, the `ledger` verb)
-        read it off the call row and must keep working. Hydration replays the
-        settle rows onto their parents to rebuild exactly that state."""
+        THE SETTLE ROW CARRIES THE FULL OUTCOME — `{status, result}`, the body
+        included, plus the final `attempts`. It is the only record of what a
+        call became: `ledger.json` is gone, and a boot rebuilds `executions`
+        (dedup across restart, C9) by reading these rows back.
+
+        The stamp stays on the LIVE call row: live readers (`messages` digests,
+        the `ledger` verb) read it there and must keep working. Hydration
+        replays the settle rows onto their parents."""
         row = self.ctx.rows.get(pid) if pid is not None else None
         if row is None:
             return
@@ -1158,6 +1174,10 @@ class Agent:
             if res.get("reason"):
                 stamp["reason"] = res.get("reason")
         row["outcome"] = stamp
+        exe = self.ctx.executions.get(pid)
+        attempts = out.get("attempts")
+        if attempts is None and exe is not None:
+            attempts = exe["attempts"]
         # ON THE ROOT, not on the settled call's agent. A settle is KERNEL
         # bookkeeping — the ledger's half of a dispatch — and an agent's row
         # list is read as its CONVERSATION by everything from the model's own
@@ -1175,7 +1195,8 @@ class Agent:
                 "kind": "settle",
                 "parent": pid,
                 "settled": row.get("agent") or self.id,
-                "outcome": stamp,
+                "outcome": {"status": out.get("status"), "result": out.get("result")},
+                "attempts": attempts,
             },
         )
 
@@ -1502,6 +1523,7 @@ class Agent:
                 "verb": payload.get("type"),
                 "parent": _current_task.get(),
                 "origin": _current_sender.get(),
+                "payload": payload,
                 "internal": True,
             },
         )

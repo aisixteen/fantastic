@@ -44,6 +44,9 @@ async def _handler(id, payload, kernel):
         _runs.append(id)
         await asyncio.sleep(payload.get("secs", 0.05))
         return {"run": len(_runs)}
+    if verb == "blob":
+        # raw bytes BOTH ways — the tape's one reduction, in and out
+        return {"echo": payload.get("bytes"), "note": "verbatim"}
     if verb == "slow":
         _flag(id).set()
         await asyncio.sleep(30)
@@ -627,28 +630,45 @@ async def _wire_store(kernel):
     )
 
 
-async def test_a_completed_execution_survives_reboot(tmp_path, monkeypatch):
-    """C9, the full property: a completed step is NEVER re-executed — not even
-    by a fresh process. The settled row rehydrates with its outcome; a re-send
-    of the id returns it and the handler does not run."""
-    from _testkit import boot_root, persist
-    from kernel_state.tools import flush_ledger_now
+async def _boot_with_tape(tmp_path, monkeypatch):
+    """A live root with a store wired AND the pump running — the tape is the
+    only durable record now, so a restart test has to actually write it."""
+    from _testkit import boot_root
 
     monkeypatch.chdir(tmp_path)
+    k = boot_root()
+    await _wire_store(k)
+    await k.send([{"target": k.id, "payload": {"type": "boot"}}])
+    return k
+
+
+async def _reboot(k1):
+    """Land everything, drop the process, come back up off `messages.xml`."""
+    from _testkit import boot_root, persist
+    from kernel_state.tools import flush_pending
+
+    persist(k1)
+    await flush_pending(k1)
+    del k1
+    k2 = boot_root()
+    await k2.send([{"target": k2.id, "payload": {"type": "boot"}}])
+    return k2
+
+
+async def test_a_completed_execution_survives_reboot(tmp_path, monkeypatch):
+    """C9, the full property: a completed step is NEVER re-executed — not even
+    by a fresh process. The settled call rehydrates from its `call` + `settle`
+    rows with its outcome; a re-send of the id returns it and the handler does
+    not run."""
     _runs.clear()
-    k1 = boot_root()
-    await _wire_store(k1)
+    k1 = await _boot_with_tape(tmp_path, monkeypatch)
     a = await _mk(k1, "lp_reboot")
     first = (
         await k1.send([{"target": a, "payload": {"type": "work"}, "id": "boot-1"}])
     )[0]
     assert first["status"] == "completed" and len(_runs) == 1
-    persist(k1)
-    await flush_ledger_now(k1)
 
-    del k1
-    k2 = boot_root()
-    await k2.send([{"target": k2.id, "payload": {"type": "boot"}}])
+    k2 = await _reboot(k1)
     again = (
         await k2.send([{"target": a, "payload": {"type": "work"}, "id": "boot-1"}])
     )[0]
@@ -657,14 +677,69 @@ async def test_a_completed_execution_survives_reboot(tmp_path, monkeypatch):
     assert again["attempts"] == 1
 
 
-async def test_a_dead_letter_survives_reboot_and_stays_dead(tmp_path, monkeypatch):
-    from _testkit import boot_root, persist
-    from kernel_state.tools import flush_ledger_now
+async def test_the_tape_carries_the_payload_and_the_full_outcome(tmp_path, monkeypatch):
+    """ONE TAPE. `messages.xml` holds the call WITH its dispatch payload and the
+    settle WITH the whole result body — no second file, nothing RAM-only."""
+    from kernel_state.tools import read_messages
 
-    monkeypatch.chdir(tmp_path)
     _runs.clear()
-    k1 = boot_root()
-    await _wire_store(k1)
+    k1 = await _boot_with_tape(tmp_path, monkeypatch)
+    a = await _mk(k1, "lp_tape")
+    out = (
+        await k1.send(
+            [{"target": a, "payload": {"type": "work", "secs": 0}, "id": "tape-1"}]
+        )
+    )[0]
+    k2 = await _reboot(k1)
+
+    rows, _nxt = read_messages(tmp_path / ".fantastic")
+    call = next(r for r in rows if r.get("name") == "tape-1")
+    assert call["payload"] == {"type": "work", "secs": 0}
+    assert call["named"] is True and call["retries"] == 0 and call["attempts"] == 1
+    settle = next(r for r in rows if r.get("parent") == call["id"])
+    assert settle["outcome"] == {"status": "completed", "result": out["result"]}
+    assert settle["attempts"] == 1
+    # and the `ledger` verb answers the FULL outcome after the restart
+    led = (await k2.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
+        "result"
+    ]
+    row = next(r for r in led["executions"] if r.get("name") == "tape-1")
+    assert row["outcome"]["result"] == out["result"]
+
+
+async def test_raw_bytes_on_the_tape_are_a_length_not_base64(tmp_path, monkeypatch):
+    """The ONE reduction: a `bytes` value anywhere in a payload or a result is
+    written as its LENGTH. Base64 is banned; text and JSON stay verbatim."""
+    from kernel_state.tools import read_messages
+
+    k1 = await _boot_with_tape(tmp_path, monkeypatch)
+    a = await _mk(k1, "lp_blob")
+    await k1.send(
+        [
+            {
+                "target": a,
+                "payload": {
+                    "type": "blob",
+                    "path": "probe.bin",
+                    "bytes": b"\x00\x01\x02\x03\x04",
+                },
+                "id": "bin-1",
+            }
+        ]
+    )
+    await _reboot(k1)
+
+    rows, _nxt = read_messages(tmp_path / ".fantastic")
+    call = next(r for r in rows if r.get("name") == "bin-1")
+    assert call["payload"]["bytes"] == {"len": 5}
+    assert call["payload"]["path"] == "probe.bin"  # everything else verbatim
+    settle = next(r for r in rows if r.get("parent") == call["id"])
+    assert settle["outcome"]["result"] == {"echo": {"len": 5}, "note": "verbatim"}
+
+
+async def test_a_dead_letter_survives_reboot_and_stays_dead(tmp_path, monkeypatch):
+    _runs.clear()
+    k1 = await _boot_with_tape(tmp_path, monkeypatch)
     a = await _mk(k1, "lp_rdead")
     dead = (
         await k1.send(
@@ -672,12 +747,8 @@ async def test_a_dead_letter_survives_reboot_and_stays_dead(tmp_path, monkeypatc
         )
     )[0]
     assert dead["status"] == "failed" and dead["attempts"] == 2
-    persist(k1)
-    await flush_ledger_now(k1)
 
-    del k1
-    k2 = boot_root()
-    await k2.send([{"target": k2.id, "payload": {"type": "boot"}}])
+    k2 = await _reboot(k1)
     led = (await k2.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
         "result"
     ]
@@ -695,24 +766,23 @@ async def test_a_dead_letter_survives_reboot_and_stays_dead(tmp_path, monkeypatc
 
 
 async def test_in_flight_work_does_not_survive_a_crash(tmp_path, monkeypatch):
-    """Only SETTLED rows persist. Work in flight at the crash never completed;
-    a re-send after reboot RE-EXECUTING it is the truth, not a loss."""
+    """Only SETTLED calls rebuild an execution. Work in flight at the crash
+    never completed; a re-send after reboot RE-EXECUTING it is the truth, not a
+    loss. The call row is on the tape either way — with no settle after it."""
     import asyncio as _a
 
     from _testkit import boot_root, persist
-    from kernel_state.tools import flush_ledger_now
+    from kernel_state.tools import flush_pending
 
-    monkeypatch.chdir(tmp_path)
     _runs.clear()
-    k1 = boot_root()
-    await _wire_store(k1)
+    k1 = await _boot_with_tape(tmp_path, monkeypatch)
     a = await _mk(k1, "lp_crash")
     batch = _a.create_task(
         k1.send([{"target": a, "payload": {"type": "slow"}, "id": "mid-1"}])
     )
     await _a.wait_for(_flag(a).wait(), timeout=2)
     persist(k1)
-    await flush_ledger_now(k1)  # the "crash" happens with mid-1 unsettled
+    await flush_pending(k1)  # the "crash" happens with mid-1 unsettled
     batch.cancel()
     try:
         await batch
@@ -725,27 +795,25 @@ async def test_in_flight_work_does_not_survive_a_crash(tmp_path, monkeypatch):
     led = (await k2.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
         "result"
     ]
-    assert all(r["id"] != "mid-1" for r in led["executions"])
+    assert all(r.get("name") != "mid-1" for r in led["executions"])
 
 
 async def test_no_store_means_ram_only_and_no_error(tmp_path, monkeypatch):
-    """The auto-flush law: no discovered store ⇒ the ledger lives in RAM,
+    """The auto-flush law: no discovered store ⇒ the tape lives in RAM,
     nothing errors, nothing is written."""
     from _testkit import boot_root
-    from kernel_state.tools import flush_ledger_now
+    from kernel_state.tools import flush_pending
 
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
+    await k1.send([{"target": k1.id, "payload": {"type": "boot"}}])
     a = await _mk(k1, "lp_ram")
     out = (await k1.send([{"target": a, "payload": {"type": "work"}, "id": "ram-1"}]))[
         0
     ]
     assert out["status"] == "completed"
-    r = await flush_ledger_now(k1)
-    assert r == {"skipped": "no store wired"}
-    assert not (tmp_path / ".fantastic" / "agents").exists() or not list(
-        (tmp_path / ".fantastic" / "agents").rglob("ledger.json")
-    )
+    await flush_pending(k1)
+    assert not (tmp_path / ".fantastic" / "messages.xml").exists()
 
 
 # ─── uncovered branches of the EXISTING engine (no new code) ─────

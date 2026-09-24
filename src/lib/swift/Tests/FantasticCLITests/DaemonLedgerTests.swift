@@ -1,20 +1,23 @@
-// LEDGER DURABILITY AT SHUTDOWN — subprocess level, the real binary.
+// TAPE DURABILITY AT SHUTDOWN — subprocess level, the real binary.
 //
-// Python flushes the ledger before the process exits: the LAST execution a
-// run performed is on disk in `.fantastic/ledger.json` when the process is
-// gone, and `messages.xml` holds that call's rows. Both CLI shapes are
-// pinned here because each has its own exit path:
+// ONE TAPE (2026-09-24): there is no `ledger.json`. The LAST execution a run
+// performed is on disk in `.fantastic/messages.xml` when the process is gone —
+// its `call` row WITH the dispatch payload, its `settle` row WITH the whole
+// outcome body — and the execution ledger is rebuilt from exactly those rows at
+// the next boot. Both CLI shapes are pinned here because each has its own exit
+// path:
 //
 //   - the DAEMON: `[kernel] up`, live calls over the REST leg, SIGTERM →
 //     `Kernel.shutdown()` → exit 0.
 //   - the ONE-SHOT: one call, then the process returns from `main`.
 //
-// In-process tests cannot see either: the flush is a SPAWNED task and what
-// matters is whether the process waits for it before the lock is released.
+// In-process tests cannot see either: what matters is whether the process lands
+// the pump's last window before the lock is released.
 
 #if os(macOS)
 
     import FantasticJSON
+    import FantasticKernel
     import Foundation
     import Testing
 
@@ -37,7 +40,7 @@
         try proc.run()
     }
 
-    @Suite("daemon + one-shot: the ledger survives exit", .serialized)
+    @Suite("daemon + one-shot: the tape survives exit", .serialized)
     struct DaemonLedgerTests {
 
         // ── harness ────────────────────────────────────────────────
@@ -170,11 +173,16 @@
             Issue.record("timed out waiting for \(what): \(detail())")
         }
 
-        private func ledgerRows(_ dir: URL) throws -> [JSON] {
-            let f = dir.appendingPathComponent(".fantastic/ledger.json")
-            #expect(FileManager.default.fileExists(atPath: f.path), "no ledger.json at \(f.path)")
-            let doc = try JSON.parse(try Data(contentsOf: f))
-            return doc["rows"].asArray ?? []
+        /// Every row of the ONE TAPE. `ledger.json` must not exist — an old one
+        /// is ignored and nothing ever writes it again.
+        private func tapeRows(_ dir: URL) throws -> [Row] {
+            #expect(
+                !FileManager.default.fileExists(
+                    atPath: dir.appendingPathComponent(".fantastic/ledger.json").path),
+                "ledger.json is deleted — nothing may write it")
+            let f = dir.appendingPathComponent(".fantastic/messages.xml")
+            #expect(FileManager.default.fileExists(atPath: f.path), "no messages.xml at \(f.path)")
+            return try MessagesXML.parseMessages(try String(contentsOf: f, encoding: .utf8))
         }
 
         // ── the daemon path ────────────────────────────────────────
@@ -233,22 +241,22 @@
             proc.waitUntilExit()
             #expect(proc.terminationStatus == 0, "exit \(proc.terminationStatus): \(tail.text)")
 
-            // THE LAST EXECUTION IS ON DISK.
-            let rows = try ledgerRows(dir)
-            let landed = rows.compactMap { $0["name"].asString }
+            // THE LAST EXECUTION IS ON THE TAPE — call AND settle, both whole.
+            let rows = try tapeRows(dir)
+            let landed = rows.compactMap { $0["name"]?.asString }
             for name in names {
-                #expect(landed.contains(name), "\(name) never reached ledger.json: \(landed)")
+                #expect(landed.contains(name), "\(name) never reached messages.xml: \(landed)")
             }
-            let last = try #require(rows.last { $0["name"].asString == "daemon-call-3" })
-            #expect(last["target"].asString == "store", "\(last.serialize())")
-            #expect(last["named"].asBool == true, "\(last.serialize())")
-
-            // ... and so are that call's message rows.
-            let xml = try String(
-                contentsOf: dir.appendingPathComponent(".fantastic/messages.xml"),
-                encoding: .utf8)
-            #expect(xml.contains("daemon-call-3"), "no call row for the last call:\n\(xml)")
-            #expect(xml.contains("settle"), "no settle row:\n\(xml)")
+            let last = try #require(rows.last { $0["name"]?.asString == "daemon-call-3" })
+            #expect(last["agent"]?.asString == "store", "\(last)")
+            #expect(last["named"] == .bool(true), "\(last)")
+            #expect(last["payload"]?["type"] == .string("list"), "the payload verbatim: \(last)")
+            #expect(last["attempts"] == .integer(1) && last["retries"] == .integer(0))
+            let settle = try #require(
+                rows.last { $0["kind"]?.asString == "settle" && $0["parent"] == last["id"] })
+            #expect(settle["outcome"]?["status"] == .string("completed"), "\(settle)")
+            #expect(settle["outcome"]?["result"] != nil, "the whole outcome body: \(settle)")
+            #expect(settle["attempts"] == .integer(1))
         }
 
         // ── the one-shot path ──────────────────────────────────────
@@ -269,11 +277,29 @@
             #expect(code == 0, "\(out)")
             #expect(!out.contains("\"error\""), "\(out)")
 
-            // The process is GONE — everything it executed is on disk.
-            let rows = try ledgerRows(dir)
-            #expect(
-                rows.contains { $0["target"].asString == "store" },
-                "the one-shot's own execution is missing: \(rows.map { $0["target"].asString ?? "?" })")
+            // The process is GONE — everything it executed is on the tape.
+            //
+            // NOT the `store list` itself: an OPERATOR call on the discovered
+            // store is the loader's own persistence traffic, which never enters
+            // the log (`MessagePump.skips`, python's `_is_own_persistence`) —
+            // ledger.json used to keep it, the tape deliberately does not. What
+            // is pinned is the execution the one-shot performed BEFORE the store
+            // was the store: the `create_agent`, with its payload and its
+            // settle, landed by the exit path.
+            let rows = try tapeRows(dir)
+            let call = try #require(
+                rows.last {
+                    $0["kind"]?.asString == "call"
+                        && $0["payload"]?["type"] == .string("create_agent")
+                },
+                "the one-shot's own execution is missing: \(rows.count) rows")
+            #expect(call["payload"]?["id"] == .string("store"), "the payload verbatim: \(call)")
+            #expect(call["attempts"] == .integer(1) && call["named"] == .bool(false))
+            let settle = try #require(
+                rows.last { $0["kind"]?.asString == "settle" && $0["parent"] == call["id"] },
+                "no settle row for the one-shot's call")
+            #expect(settle["outcome"]?["status"] == .string("completed"), "\(settle)")
+            #expect(settle["outcome"]?["result"]["id"] == .string("store"), "\(settle)")
         }
     }
 

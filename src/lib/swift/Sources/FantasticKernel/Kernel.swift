@@ -164,16 +164,11 @@ public final class Kernel: @unchecked Sendable {
     public var recordWriter: RecordWriter?
 
     /// EVERY execution and what it became — named (a caller's dedup contract) or
-    /// unnamed (under its minted pid). Session lifetime, retention-ringed; the
-    /// DURABLE half is written through the discovered store, because the kernel
-    /// never touches disk itself.
+    /// unnamed (under its minted pid). Session lifetime, retention-ringed. The
+    /// DURABLE half is the TAPE: each row's `call`+`settle` pair in
+    /// `messages.xml`, replayed by `hydrateExecutions` at the root's boot. There
+    /// is no second file and no write-through flusher.
     public let ledger = ExecutionLedger()
-
-    /// Installed by the boot seam once a store can be discovered. `nil` = no
-    /// persistence (nothing wired, or a test kernel): settled outcomes live and
-    /// die with the process, exactly like the tree's own auto-flush law.
-    let ledgerFlusherLock = NSLock()
-    var _ledgerFlusher: (@Sendable () -> Void)?
 
     /// LIFECYCLE STATE — the methods live in `Lifecycle.swift`.
     /// DRAINING: the first phase of a graceful stop (`shutdownAgents`). New

@@ -85,6 +85,83 @@ public func hydrateMessages(_ kernel: Kernel, rootDir: URL) throws -> Int {
     return rows.count
 }
 
+extension Kernel {
+    /// REBUILD THE EXECUTION LEDGER FROM THE TAPE — the durable half of C9.
+    ///
+    /// `ledger.json` is gone. A settled call is a `call` row (payload, retries,
+    /// name, origin) plus its `settle` row (the full outcome, the final
+    /// attempts), so the ledger is a projection of the two: a DONE row holding
+    /// the recorded outcome, exactly what a live kernel had. Dedup ("a
+    /// completed step is never re-executed") therefore holds across reboots
+    /// with no second file.
+    ///
+    /// A call with NO settle row was in flight when the process died: it
+    /// rebuilds NOTHING, and a re-send re-executes it — that work never
+    /// completed, so running it again is the truth, not a loss. Runs at the
+    /// root's `boot`, after the cold `hydrateMessages` and before the pump
+    /// subscribes: rebuilding mints nothing, and nothing rebuilt is re-appended.
+    /// Returns the count.
+    @discardableResult
+    public func hydrateExecutions() -> Int {
+        var n = 0
+        for row in rows.all() {
+            guard row["kind"]?.asString == "settle",
+                let parent = row["parent"]?.asInt,
+                case .object(let out)? = row["outcome"],
+                let call = rows.getOne(parent),
+                call["kind"]?.asString == "call",
+                let eid = call["id"]?.asInt,
+                let target = call["agent"]?.asString,
+                let statusText = out["status"]?.asString,
+                let status = Status(rawValue: statusText)
+            else { continue }
+            let attempts = UInt32(row["attempts"]?.asInt ?? call["attempts"]?.asInt ?? 1)
+            // THE LIVE SHAPE, rebuilt: a joiner after a reboot must receive
+            // exactly what a joiner before it received — {pid, status, result,
+            // attempts}.
+            let added = ledger.putSettled(
+                eid,
+                target: AgentId(target),
+                retries: UInt32(call["retries"]?.asInt ?? 0),
+                attempts: attempts,
+                name: call["name"]?.asString,
+                origin: call["origin"]?.asString.map { AgentId($0) },
+                outcome: Outcome(
+                    pid: TaskId(eid), status: status, result: out["result"] ?? .null,
+                    attempts: attempts))
+            if added { n += 1 }
+        }
+        // THE COUNTER is restored by `hydrateMessages` (cold, before the first
+        // mint); nothing here may mint, so nothing here may lower it.
+        return n
+    }
+}
+
+/// ONE WRITE AT A TIME. A FIFO async mutex — swift has no built-in async lock.
+/// `catchUp` takes the SAME lock for its check, so a shutdown waits out an
+/// in-flight append instead of racing past it and cancelling mid-write (the row
+/// was lost: measured 2026-09-24).
+actor PumpLock {
+    private var locked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if !locked {
+            locked = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            locked = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 /// PERSIST THE MESSAGE STORE — a tail of the kernel, appended to the provider.
 ///
 /// The kernel exposes `rows.subscribe(after:)`; this pump is one consumer of
@@ -115,6 +192,11 @@ public final class MessagePump: @unchecked Sendable {
     /// NEW log opens with the root element, an existing one is appended to.
     private var headerNeeded: Bool? = nil
     private var tasks: [TaskId] = []
+    /// The two halves, kept apart: `stop` cancels the FLUSHER first (the task
+    /// that can be holding a half-written append) and the READER last.
+    private var reader: TaskId? = nil
+    private var flusher: TaskId? = nil
+    private let flushLock = PumpLock()
     private let wake: AsyncStream<Void>
     private let wakeUp: AsyncStream<Void>.Continuation
 
@@ -160,10 +242,19 @@ public final class MessagePump: @unchecked Sendable {
             for await _ in wake {
                 if Task.isCancelled { return }
                 try? await Task.sleep(nanoseconds: Self.debounceNanos)
+                // CANCELLED DURING THE DEBOUNCE ⇒ nothing more from THIS task.
+                // `Task.sleep` throws on cancel and the `try?` swallows it, so
+                // without this line the loop went on to flush from a cancelled
+                // task: the header probe read the dispatch's `cancelled` reply
+                // as "no error", decided the log already had its root, and the
+                // stop's own catch-up then appended rows to a headerless file.
+                if Task.isCancelled { return }
                 await flush()
             }
         }
         tasks = [reader, flusher]
+        self.reader = reader
+        self.flusher = flusher
     }
 
     /// Does this row stay out of the log? The pump's own task rows, the store's
@@ -191,12 +282,29 @@ public final class MessagePump: @unchecked Sendable {
     /// not when it was queued — an outcome stamped onto a `call` row inside
     /// the debounce window belongs in the line about to be written.
     public func flush() async {
+        await flushLock.acquire()
+        await flushOnce()
+        await flushLock.release()
+    }
+
+    /// One append, called WITH the flush lock held. CANCELLATION PUTS THE BATCH
+    /// BACK: a shutdown that lands between taking the batch and the store's ack
+    /// must not eat it — the rows return to the head of `pending` and the next
+    /// pass (the stop's own `catchUp`, which runs from the task nobody is
+    /// cancelling) lands them.
+    private func flushOnce() async {
         let batch: [Int64] = withLock {
             let b = pending
             pending = []
             return b
         }
         if batch.isEmpty { return }
+        // ALREADY CANCELLED: take nothing further — not even the header probe,
+        // whose answer a cancelled dispatch would falsify.
+        if Task.isCancelled {
+            withLock { pending = batch + pending }
+            return
+        }
         guard let store = kernel.findStore() else {
             if !saidNoStore {
                 // FLUSHED, like python's `print(..., flush=True)`: stdout is
@@ -226,16 +334,44 @@ public final class MessagePump: @unchecked Sendable {
                     "type": .string("read_stream"), "path": .string(MESSAGES_FILE),
                     "offset": .integer(0), "length": .integer(1),
                 ]), Data())
+            // A CANCELLED PROBE ANSWERS NOTHING. The kernel settles a cancelled
+            // dispatch with `{cancelled: true}` and no `error`, which reads as
+            // "the log already has its root" — and the next flush then appended
+            // rows to a HEADERLESS file (measured 2026-09-24, 11 of 20 runs of
+            // the shutdown sweep). The flag stays `nil` and the batch goes back.
+            if Task.isCancelled {
+                withLock { pending = batch + pending }
+                return
+            }
             headerNeeded = probe["error"].asString != nil
         }
-        if headerNeeded == true {
+        let withHeader = headerNeeded == true
+        if withHeader {
             // The root, once, at the head of a NEW log; never closed (a stream).
+            // The FLAG IS NOT CLEARED HERE: only a LANDED write closes the
+            // header question, or a refused/cancelled append that had cleared it
+            // would leave the next one headerless.
             lines = MessagesXML.header + lines
-            headerNeeded = false
+        }
+        // CANCELLED BEFORE THE WRITE — the batch goes back and nothing is lost.
+        if Task.isCancelled {
+            withLock { pending = batch + pending }
+            return
         }
         let (reply, _) = await kernel.storeBookkeepingBinary(
             store, .object(["type": .string("write_stream"), "path": .string(MESSAGES_FILE)]),
             Data(lines.utf8))
+        // CANCELLED MID-APPEND. Python's `flush` takes a `CancelledError` at
+        // this very await and puts the batch back before re-raising; swift's
+        // cancellation does not throw here, and worse, the kernel answers a
+        // cancelled dispatch with a CANCELLED outcome that carries no `error` —
+        // so the refusal check below would read it as a landed write and eat
+        // the rows. The batch goes back instead, and the stop's own `catchUp`
+        // (running from the task nobody is cancelling) lands it.
+        if Task.isCancelled {
+            withLock { pending = batch + pending }
+            return
+        }
         // PYTHON TRUTHINESS, and python's own rendering. `res.get("error")`
         // decides, so an `error` of `""`, `0`, `[]` or `{}` is NOT a refusal;
         // a non-string one (a dict the leg composed) is, and prints as
@@ -246,6 +382,8 @@ public final class MessagePump: @unchecked Sendable {
             withLock { pending = batch + pending }  // nothing lost; retried next flush
             return
         }
+        // Only a LANDED write closes the header question.
+        if withHeader { headerNeeded = false }
         withLock { written = max(written, top) }
     }
 
@@ -255,19 +393,53 @@ public final class MessagePump: @unchecked Sendable {
     public func catchUp() async {
         for _ in 0..<1000 {
             await Task.yield()
+            // THE CHECK IS UNDER THE FLUSH LOCK. It used to read `pending` while
+            // a flush held the batch in a LOCAL variable — empty queue, counter
+            // caught up, so it returned and the caller cancelled the writer
+            // mid-append.
+            await flushLock.acquire()
             let done: Bool = withLock { seen >= kernel.rows.nextId - 1 && pending.isEmpty }
-            if done { return }
-            await flush()
+            if done {
+                await flushLock.release()
+                return
+            }
+            await flushOnce()
+            await flushLock.release()
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
     }
 
+    /// THE IDS STILL QUEUED — the seam the two gated-pump repros read (python
+    /// asserts on `pump.pending` directly).
+    public var pendingIds: [Int64] { withLock { pending } }
+
+    /// Cancel ONLY the flush loop, leaving the reader alive — the seam that
+    /// drives the pump BY HAND in the gated repros, exactly as python's
+    /// `pump._flusher.cancel()` does.
+    public func cancelFlushLoop() async {
+        let f = flusher
+        flusher = nil
+        tasks = tasks.filter { $0 != f }
+        if let f { _ = await kernel.cancelTask(f) }
+    }
+
     /// The kernel's shutdown hook: land every message minted so far, then stop.
+    ///
+    /// ORDER MATTERS. The FLUSH LOOP dies first — it is the task that can be
+    /// holding a half-written append, and killing it there re-queues the batch;
+    /// then `catchUp` runs FROM THE STOPPING TASK (which nobody is cancelling)
+    /// and lands everything; the reader goes last, so a row minted during the
+    /// catch-up is still seen.
     public func stop() async {
-        await catchUp()
-        wakeUp.finish()
-        for t in tasks { _ = await kernel.cancelTask(t) }
+        let r = reader
+        let f = flusher
         tasks = []
+        reader = nil
+        flusher = nil
+        wakeUp.finish()
+        if let f { _ = await kernel.cancelTask(f) }
+        await catchUp()
+        if let r { _ = await kernel.cancelTask(r) }
     }
 }
 

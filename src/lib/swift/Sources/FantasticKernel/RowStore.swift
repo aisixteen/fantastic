@@ -201,6 +201,14 @@ public final class RowStore: @unchecked Sendable {
         return ids.compactMap { rows[$0] }
     }
 
+    /// EVERY row, insertion order — the walk `hydrateExecutions` rebuilds the
+    /// execution ledger from (python iterates `kernel.rows.values()`).
+    public func all() -> [Row] {
+        lock.lock()
+        defer { lock.unlock() }
+        return order.compactMap { rows[$0] }
+    }
+
     public func getOne(_ id: Int64) -> Row? {
         lock.lock()
         defer { lock.unlock() }

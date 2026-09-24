@@ -391,7 +391,10 @@ class Kernel:
     # is the SAME identifier `ps`/`cancel`/reply tags carry — one id space.
     # THE MESSAGE IS THE ROW; this dict is the PROCESS side of a call: its
     # future, the payload a retry re-issues, the attempt count. The call's
-    # message row (`kind:"call"`, in `rows`) carries what outlives the process.
+    # message row (`kind:"call"`, in `rows`) carries what outlives the process —
+    # the payload verbatim, the retry budget, the attempts — and its `settle`
+    # row carries the full outcome. ONE TAPE: a loader rebuilds this dict from
+    # those rows at boot (there is no second ledger file).
     # Entry: {"target", "fut": Future[outcome], "payload", "timeout",
     #         "retries", "attempts", "named", "name", "origin"}.
     executions: dict[int, dict] = field(default_factory=dict)
@@ -408,14 +411,6 @@ class Kernel:
     # work is live. None = unbounded (the operator's explicit choice).
     # Set at kernel start: `--ledger-cap N|inf` / FANTASTIC_LEDGER_CAP.
     ledger_cap: int | None = 1_000_000
-
-    # Installed by the ROOT LOADER at boot (kernel_state) — the substrate never
-    # touches disk itself. None = no persistence (no store wired, or a test
-    # kernel): settled outcomes live and die with the process, exactly like the
-    # tree's own auto-flush law. Called (sync, cheap) at every settle, with the
-    # id of the execution that settled: the loader decides whether that row is
-    # worth persisting for (its OWN persistence traffic is not).
-    ledger_flusher: "Callable[[int | None], None] | None" = None
 
     # THE MESSAGE STORE — every message the kernel ever made, id-addressed by the
     # one counter, append-only: a row is never edited or removed by this API. An
@@ -601,13 +596,6 @@ class Kernel:
         return {
             k: v for k, v in row.items() if k not in ("kind", "agent", "id", "parent")
         }
-
-    def ledger_settled(self, exec_id: int | None) -> None:
-        """One execution settled. The id goes through: the loader's own
-        persistence writes settle too, and a flush kicked by them would write
-        the file its own write just dirtied, forever."""
-        if self.ledger_flusher is not None:
-            self.ledger_flusher(exec_id)
 
     def resolve_name(self, name: str) -> int | None:
         """The message id a caller's name stands for, while its execution is held."""

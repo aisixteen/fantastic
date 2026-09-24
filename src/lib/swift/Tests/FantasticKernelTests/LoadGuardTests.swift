@@ -7,9 +7,8 @@
 //   set) and passed validation, then hydrated nothing — silently dropping every
 //   record in the cycle after the old tree was already wiped.
 // - More than one root was never checked at all.
-// - `loadBlob` and `rehydrateLedger` issued ONE `read_stream` and used the first
-//   chunk, so any sidecar past the 64 KiB default came back truncated and a
-//   larger ledger always "started empty".
+// - `loadBlob` issued ONE `read_stream` and used the first chunk, so any sidecar
+//   past the 64 KiB default came back truncated.
 
 import FantasticJSON
 import Foundation

@@ -172,6 +172,79 @@ private func lines(_ root: URL) throws -> [Row] {
     return try MessagesXML.parseMessages(try String(contentsOf: p, encoding: .utf8))
 }
 
+/// A one-bit cross-task flag — swift-testing has no "is this task done".
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() {
+        lock.lock()
+        flag = true
+        lock.unlock()
+    }
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
+    }
+}
+
+/// A store whose `write_stream` to `messages.xml` STALLS until released — the
+/// deterministic seam for the two shutdown races (python monkeypatches
+/// `kernel.send` for the same purpose). Cancellation-aware: a cancelled append
+/// answers an error, which is what a write that never landed looks like.
+private final class GatedStore: AgentBundle, @unchecked Sendable {
+    let name = "file_bridge"
+    let root: URL
+    private let lock = NSLock()
+    private var _held = true
+    private var _entered = false
+    init(root: URL) { self.root = root }
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+    var entered: Bool { withLock { _entered } }
+    func release() { withLock { _held = false } }
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        .object(["ok": .bool(true)])
+    }
+    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel) async throws
+        -> (JSON?, Data?)
+    {
+        let path = root.appendingPathComponent(header["path"].asString ?? "")
+        let isLog = header["path"].asString == MESSAGES_FILE
+        switch header["type"].asString ?? "" {
+        case "write_stream":
+            if isLog {
+                withLock { _entered = true }
+                while withLock({ _held }) {
+                    if Task.isCancelled {
+                        return (.object(["error": .string("cancelled")]), nil)
+                    }
+                    try? await Task.sleep(nanoseconds: 2_000_000)
+                }
+            }
+            try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            if let h = try? FileHandle(forWritingTo: path) {
+                try h.seekToEnd()
+                try h.write(contentsOf: blob)
+                try h.close()
+            } else {
+                try blob.write(to: path)
+            }
+            return (.object(["written": .bool(true)]), nil)
+        case "read_stream":
+            guard let data = try? Data(contentsOf: path) else {
+                return (.object(["error": .string("not found")]), nil)
+            }
+            return (.object(["eof": .bool(true)]), data)
+        default:
+            return (.object(["error": .string("unknown verb")]), nil)
+        }
+    }
+}
+
 @Suite("messages log — cold hydrate, the pump, the last window")
 struct MessagesLogTests {
     @Test func readMessagesRoundTripsAndSetsTheCounter() throws {
@@ -412,7 +485,7 @@ struct MessagesLogTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let k = Kernel(storage: .inMemory, bundles: BundleRegistry())
         #expect(try hydrateMessages(k, rootDir: root) == 0)
-        #expect(await k.rehydrateLedger() == 0)
+        #expect(k.hydrateExecutions() == 0)
     }
 
     @Test func aSlowSettleStillReachesTheLog() async throws {
@@ -488,8 +561,94 @@ struct MessagesLogTests {
         #expect(s["error"] == nil && s["reason"] == nil, "\(JSON.object(s).serialize())")
         s = try await stamp(.object(["error": .integer(7), "reason": .integer(0)]))
         #expect(s["error"] == .string("7") && s["reason"] == nil, "\(JSON.object(s).serialize())")
-        // …and the settle row on the ROOT carries the same stamp.
+        // …and the settle row on the ROOT carries the FULL outcome (ONE TAPE),
+        // not the stamp: `{status, result}` with the reply body verbatim.
         let settles = k.rows.forAgent(AgentId("kernel_state")).filter { $0["kind"]?.asString == "settle" }
-        #expect(settles.last?["outcome"]?["error"].asString == "7", "\(settles.count) settle rows")
+        #expect(settles.last?["outcome"]?["result"]["error"] == .integer(7), "\(settles.count) settle rows")
+        #expect(settles.last?["outcome"]?["status"].asString == "errored")
+        #expect(settles.last?["attempts"]?.asInt == 1)
+    }
+
+    // ── the two gated-pump repros (2026-09-24) ─────────────────────────────
+
+    /// A pump DRIVEN BY HAND: its flush loop is cancelled and the store's append
+    /// stalls, so both races are deterministic rather than sampled.
+    private func gatedPump(_ dir: String) async -> (Kernel, MessagePump, GatedStore) {
+        let root = tmpRoot()
+        let reg = BundleRegistry()
+        let store = GatedStore(root: root)
+        reg.register("file_bridge.tools", store)
+        let k = Kernel(storage: .inMemory, bundles: reg)
+        let core = Agent(id: "kernel_state", handlerModule: nil, parentId: nil, rootPath: root)
+        k.register(core)
+        k.setRoot(core)
+        _ = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel"),
+                    "handler_module": .string("file_bridge.tools"), "id": .string("store"),
+                    "root": .string(root.path),
+                ]))
+        ])
+        let pump = k.installMessagePump(after: k.rows.nextId - 1)
+        await pump.cancelFlushLoop()
+        return (k, pump, store)
+    }
+
+    /// `catchUp` used to read `pending` while a flush held the batch in a LOCAL
+    /// variable — empty queue, counter caught up, so it returned and the caller
+    /// cancelled the writer mid-append. It takes the flush lock for the check now.
+    @Test func catchUpWaitsOutAnInFlightAppend() async throws {
+        let (k, pump, store) = await gatedPump("lock")
+        _ = try k.rows.put(AgentId("ai"), ["role": .string("user"), "content": .string("held")])
+        try await Task.sleep(nanoseconds: 60_000_000)  // the reader picks it up
+        let flush = Task { await pump.flush() }
+        for _ in 0..<200 where !store.entered {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(store.entered, "the append never entered the store")
+        #expect(pump.pendingIds.isEmpty, "the batch is OUT of the queue and not yet written")
+
+        // THE CATCH-UP MUST BLOCK on the flush lock while the append is in
+        // flight — that is the whole fix.
+        let finished = Flag()
+        let catchUp = Task {
+            await pump.catchUp()
+            finished.set()
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!finished.value, "catchUp walked past an append still in flight")
+
+        store.release()
+        await flush.value
+        await catchUp.value
+        #expect(finished.value)
+        await pump.stop()
+    }
+
+    /// Cancellation between taking the batch and the store's ack dropped those
+    /// rows on the floor. They return to the head of `pending`, and the stop's
+    /// own catch-up lands them.
+    @Test func aCancelledFlushPutsItsBatchBack() async throws {
+        let (k, pump, store) = await gatedPump("requeue")
+        let rid = try k.rows.put(
+            AgentId("ai"), ["role": .string("user"), "content": .string("requeued")])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        let flush = Task { await pump.flush() }
+        for _ in 0..<200 where !store.entered {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(pump.pendingIds.isEmpty)
+
+        flush.cancel()
+        await flush.value
+        #expect(pump.pendingIds == [rid], "a cancelled flush ate its batch: \(pump.pendingIds)")
+
+        store.release()  // the store answers again
+        await pump.catchUp()
+        let root = k.root!.rootPath
+        #expect(try lines(root).contains { $0["id"]?.asInt == rid }, "the requeued row never landed")
+        await pump.stop()
     }
 }

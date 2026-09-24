@@ -1,7 +1,8 @@
-// THE BLOB CHANNEL + the DURABLE LEDGER — sidecars, persisted through the store.
+// THE BLOB CHANNEL — sidecars, persisted through the store.
 //
-// Port of python `kernel_state._persist_blob`/`_load_blob` (#10) and the durable
-// ledger (#37).
+// Port of python `kernel_state._persist_blob`/`_load_blob` (#10). There is no
+// `ledger.json` any more (deleted 2026-09-24): the execution ledger IS the
+// `call`+`settle` rows of `messages.xml`, rebuilt by `hydrateExecutions`.
 //
 // The blob channel is a dumb BYTE authority: no data semantics — the caller owns
 // its format. What the consumer gets is that it never computes a path and never
@@ -18,9 +19,6 @@ import OrderedCollections
 
 /// Files the KERNEL manages. A sidecar may not overwrite them.
 private let reservedBlobNames: Set<String> = ["agent.json", "readme.md"]
-
-/// The sidecar holding SETTLED executions, store-relative at the root.
-public let ledgerBlob = "ledger.json"
 
 extension Kernel {
     /// A store I/O send made as the KERNEL'S OWN BOOKKEEPING.
@@ -42,8 +40,7 @@ extension Kernel {
     /// verbs like any other file (mirrors python `persist_blob`/`load_blob`).
     ///
     /// THROUGH THE BATCH (C47): ONE binary item, so the blob verbs, the message
-    /// log and the ledger flush are ledger executions with call, task and settle
-    /// rows — python's `persist_blob` is a plain `kernel.send([...])` and leaves
+    /// log are ledger executions with call, task and settle rows — python's `persist_blob` is a plain `kernel.send([...])` and leaves
     /// exactly those. `sendWithBinary` minted none of them.
     func storeBookkeepingBinary(_ store: AgentId, _ header: JSON, _ blob: Data) async
         -> (JSON, Data?)
@@ -316,150 +313,5 @@ extension Kernel {
             i += len
         }
         return i
-    }
-
-    // ── the DURABLE LEDGER (#37) ──────────────────────────────────
-
-    /// Write every settled row through the discovered store.
-    ///
-    /// No store ⇒ RAM only. That is the AUTO-FLUSH LAW, not a fallback: with
-    /// nothing wired the tree does not persist either, and the ledger follows the
-    /// same rule rather than inventing a second disk surface.
-    public func flushLedger() async {
-        if storage.isInMemory { return }
-        guard let store = findStore() else { return }
-        // python `json.dumps(...)` DEFAULTS: ensure_ascii, compact separators —
-        // `_ledger_dump` passes nothing else, so the bytes on disk are the same
-        // on every runtime.
-        let doc = pyJsonDumps(ledger.settledSnapshot())
-        // THE FLUSH IS AN EXECUTION, and its settle re-kicks the flusher (D6 /
-        // C47). Python behaves exactly so — `flush_ledger_now` writes through
-        // `_persist_blob`, which is `kernel.send([...])`, whose settle calls the
-        // flusher's `kick` — so with a store wired `ledger.json` is rewritten
-        // continuously and a `ledger_flush` task stays in `ps`. That loop is the
-        // measured python behaviour, not an accident of this port.
-        _ = await storeBookkeepingBinary(
-            store,
-            .object([
-                "type": .string("write_stream"), "path": .string(ledgerBlob),
-                "truncate": .bool(true),
-            ]),
-            Data(doc.utf8))
-    }
-
-    /// Restore settled executions at boot, so dedup holds across a restart: a
-    /// completed step is never re-executed by a fresh process and a parked dead
-    /// letter stays dead.
-    ///
-    /// Runs BEFORE the flusher is installed, so hydration never rewrites what it
-    /// just read. Every failure is LOUD and starts empty — a ledger that silently
-    /// half-loads would re-arm exactly the side effects it exists to prevent.
-    @discardableResult
-    public func rehydrateLedger() async -> Int {
-        guard let store = findStore() else { return 0 }
-        guard case .bytes(let data) = await readWholeViaStore(store, ledgerBlob),
-            let text = String(data: data, encoding: .utf8), !text.isEmpty
-        else { return 0 }
-        let doc: JSON
-        do {
-            doc = try JSON.parse(text)
-        } catch {
-            // The tail is this parser's own message; python prints its
-            // `json.JSONDecodeError` str, which no other parser reproduces.
-            print("  [ledger] \(ledgerBlob) unreadable, starting empty: \(error)")
-            return 0
-        }
-        // THE UPGRADE CONTRACT, from day one: an unknown version starts empty
-        // LOUDLY — never guessed at, never silently reinterpreted. A v1 file (an
-        // object of rows keyed by a stringified id) is one of those.
-        guard doc["v"].asInt == Int64(ledgerSidecarVersion) else {
-            print(
-                "  [ledger] \(ledgerBlob) is version \(pyRepr(doc["v"])), this kernel "
-                    + "reads \(ledgerSidecarVersion) — starting empty (no migration written)")
-            return 0
-        }
-        let n = ledger.rehydrate(doc)
-        // ONE ID SPACE: a settled execution's id is a row id too, so the
-        // counter must start above every one of them. Never lowered.
-        if let top = ledger.highestId() { rows.setNextId(top + 1) }
-        return n
-    }
-
-    /// Rehydrate, then install the write-through.
-    ///
-    /// SILENT ON SUCCESS. A clean rehydrate prints nothing — python says nothing
-    /// either, and only its loud lines (an unknown version, an unreadable file)
-    /// survive here.
-    public func installLedgerPersistence() async {
-        _ = await rehydrateLedger()
-        let gate = LedgerFlushGate()
-        setLedgerFlusher { [weak self] in
-            guard let self else { return }
-            // THE WRITER IS CHOSEN BEFORE THE TASK IS SPAWNED, as python does
-            // (`kick` returns under `if state["running"]` and only then reaches
-            // `spawn_task`). Deciding INSIDE the task minted a `ledger_flush`
-            // task row per settle; each row is a row the message pump logs, the
-            // log write is an execution, its settle kicks the flusher again —
-            // 127 `ledger_flush` rows against python's 7 for the same four
-            // commands (measured 2026-09-20).
-            guard gate.mark() else { return }
-            // EACH FLUSH PASS IS A REGISTERED KERNEL TASK on the root, verb
-            // `ledger_flush`, parented to the settling dispatch — python spawns
-            // it through `spawn_task` (`tools.py:977-1000`), so it is in `ps`,
-            // it is cancellable, and the message pump can recognise and skip its
-            // own persistence traffic. A bare `Task` was invisible to all three.
-            // NOT keepalive: a pass ends.
-            let root = self.root?.id ?? AgentId("kernel")
-            self.spawnTask(agent: root, verb: "ledger_flush") {
-                // ONE writer, and always a pass AFTER the last settle.
-                repeat {
-                    gate.beginPass()
-                    await self.flushLedger()
-                } while gate.needsAnother()
-            }
-        }
-    }
-}
-
-/// Serialises ledger flushing: one writer at a time, and a final pass after the
-/// last settle.
-///
-/// `flushLedger` rewrites the WHOLE settled map, so spawning one per settle —
-/// which is what `Task { await flushLedger() }` did — means an agentic run
-/// stacks O(n) concurrent rewrites of an O(n) snapshot. Rust had the same shape
-/// with a flag it cleared before awaiting, and it saturated multiple cores on
-/// `agentic.plan` until the writer was serialised.
-///
-/// One lock rather than two atomics: `mark` and `needsAnother` must decide
-/// together — a settle observed after `needsAnother` releases the writer starts
-/// a fresh one, and one observed before it is caught by the next lap. A LOCK and
-/// not an actor, because `mark` is python's synchronous `kick`: the writer has
-/// to be chosen before the flush task is spawned, or the spawn itself is a row.
-final class LedgerFlushGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var dirty = false
-    private var running = false
-
-    /// Record a change. Returns true if THIS caller becomes the writer.
-    func mark() -> Bool {
-        lock.withLock {
-            dirty = true
-            if running { return false }
-            running = true
-            return true
-        }
-    }
-
-    /// Clear the flag BEFORE snapshotting, so a settle landing during the pass
-    /// re-dirties and is caught rather than dropped.
-    func beginPass() { lock.withLock { dirty = false } }
-
-    /// True if more arrived during the pass. When false, the writer is released.
-    func needsAnother() -> Bool {
-        lock.withLock {
-            if dirty { return true }
-            running = false
-            return false
-        }
     }
 }

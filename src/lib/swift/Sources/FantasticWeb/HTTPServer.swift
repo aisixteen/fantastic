@@ -119,6 +119,51 @@ func matchTemplate(_ template: [PathSegment], _ segments: [String]) -> [String: 
     return i == segments.count ? params : nil
 }
 
+// MARK: - host bind + Origin guard (python `web/app.py` — 2026-09-24)
+
+/// The web host binds LOOPBACK unless its record names a `host` — a closed default,
+/// overridable by whoever creates the kernel (create_agent meta, a roster yaml,
+/// update_agent). `0.0.0.0` is an explicit choice, never a fallback.
+public let WEB_DEFAULT_HOST = "127.0.0.1"
+
+let webSafeMethods: Set<String> = ["GET", "HEAD", "OPTIONS"]
+
+/// python `rec.get("host") or DEFAULT_HOST`.
+public func webHost(_ rec: JSON) -> String {
+    let v = rec["host"]
+    return pyTruthy(v) ? (v.asString ?? pyStr(v)) : WEB_DEFAULT_HOST
+}
+
+/// python `own_origins(rec)`: `http://<host>:<port>`, plus both loopback spellings
+/// when it binds loopback. Never derived from the request's Host header (a
+/// DNS-rebinding page controls it).
+public func webOwnOrigins(_ rec: JSON) -> Set<String> {
+    let host = webHost(rec)
+    let port = pyStr(rec["port"])
+    var out: Set<String> = ["http://\(host):\(port)"]
+    if ["127.0.0.1", "localhost", "::1"].contains(host) {
+        out.formUnion([
+            "http://127.0.0.1:\(port)", "http://localhost:\(port)", "http://[::1]:\(port)",
+        ])
+    }
+    return out
+}
+
+/// The record's `allowed_origins` as a list — a bare string counts as one item
+/// (`k=v` on the CLI yields a string).
+func webExtraOrigins(_ rec: JSON) -> [String] {
+    let v = rec["allowed_origins"]
+    if case .string(let s) = v { return s.isEmpty ? [] : [s] }
+    return v.asArray?.compactMap { $0.asString } ?? []
+}
+
+/// python `origin_allowed(rec, origin)`: no Origin ⇒ a non-browser client, allowed
+/// (the leg's `ingress_rule` still gates it); else own or listed, exact strings.
+public func webOriginAllowed(_ rec: JSON, _ origin: String?) -> Bool {
+    guard let origin = origin, !origin.isEmpty else { return true }
+    return webOwnOrigins(rec).contains(origin) || webExtraOrigins(rec).contains(origin)
+}
+
 /// What a matched route runs.
 enum RouteTarget: Sendable {
     case index
@@ -260,7 +305,8 @@ public final class WebServer: @unchecked Sendable {
             }
         // `.wait()` blocks the calling thread (WebBundle.boot's task thread,
         // never an event-loop thread) until the bind resolves or throws.
-        let bound = try bootstrap.bind(host: "0.0.0.0", port: Int(port)).wait()
+        // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
+        let bound = try bootstrap.bind(host: webHost(record()), port: Int(port)).wait()
         lock.lock()
         channel = bound
         lock.unlock()
@@ -284,6 +330,24 @@ public final class WebServer: @unchecked Sendable {
         kernel.setHttpPort(0)
     }
 
+    /// The live record's guard-relevant fields, read PER REQUEST so an
+    /// `allowed_origins` edit applies without a restart.
+    func record() -> JSON {
+        guard let a = kernel.agent(agentId) else { return .object([:]) }
+        return .object([
+            "host": a.metaValue(forKey: "host") ?? .null,
+            "port": a.metaValue(forKey: "port") ?? .null,
+            "allowed_origins": a.metaValue(forKey: "allowed_origins") ?? .null,
+        ])
+    }
+
+    /// python `_OriginGuard`: a websocket upgrade, or an HTTP request that is not
+    /// GET/HEAD/OPTIONS, from a FOREIGN browser origin is refused. `true` = refused.
+    func originRefused(websocket: Bool, method: String, origin: String?) -> Bool {
+        let gated = websocket || !webSafeMethods.contains(method)
+        return gated && !webOriginAllowed(record(), origin)
+    }
+
     // MARK: - Pipeline
 
     /// Configure a child connection's pipeline: HTTP server + a WebSocket
@@ -295,6 +359,12 @@ public final class WebServer: @unchecked Sendable {
             maxFrameSize: 1 << 24,  // 16 MiB: room for raw read_stream/write_stream chunks
             shouldUpgrade: { [weak self] channel, head in
                 guard let self = self else {
+                    return channel.eventLoop.makeSucceededFuture(nil)
+                }
+                // A foreign origin never upgrades: the request falls through to
+                // the HTTP dispatch, which logs it and answers the 403.
+                let origin = head.headers["origin"].first.flatMap { $0.isEmpty ? nil : $0 }
+                if self.originRefused(websocket: true, method: "GET", origin: origin) {
                     return channel.eventLoop.makeSucceededFuture(nil)
                 }
                 let segs = rawSegments(decodePath(head.uri))
@@ -356,6 +426,34 @@ public final class WebServer: @unchecked Sendable {
         // MATCHING (A13.10) — uvicorn hands the app a decoded, query-less path.
         let (_, query) = splitQuery(request.path)
         let pathOnly = decodePath(request.path)
+        // THE ORIGIN GUARD, in front of every route (python `_OriginGuard`).
+        var origin: String?
+        var websocket = false
+        for (k, v) in request.headers {
+            switch k.lowercased() {
+            case "origin": origin = v.isEmpty ? nil : v
+            case "upgrade": websocket = websocket || v.lowercased() == "websocket"
+            default: break
+            }
+        }
+        if originRefused(websocket: websocket, method: request.method, origin: origin) {
+            let kind = websocket ? "websocket" : "http"
+            let shown = pyRepr(origin.map { JSON.string($0) } ?? .null)
+            FileHandle.standardOutput.write(
+                Data(
+                    "  [web] \(agentId.value): refused \(kind) \(pathOnly) from foreign origin \(shown)\n"
+                        .utf8))
+            // A websocket is refused on the handshake (python closes 1008 before
+            // accept ⇒ uvicorn answers 403, no body).
+            if websocket { return HTTPResponse(status: 403, contentType: nil, body: Data()) }
+            let body: JSON = .object([
+                "error": .string("origin \(shown) is not allowed on this host"),
+                "reason": .string("unauthorized"),
+                "hint": .string("add it to the web record's allowed_origins"),
+            ])
+            return HTTPResponse(
+                status: 403, contentType: "application/json", body: Data(pyJsonDumps(body).utf8))
+        }
         let segments = rawSegments(pathOnly)
         let table = routeTable()
 

@@ -120,10 +120,10 @@ struct WebBundleTests {
         let r = await call(kernel, "web", .object(["type": .string("reflect")]))
         // The kernel appends its own reflect tail (can_call/callable_by/
         // kernel_verbs/tree) after the bundle's body — pin the bundle's half.
-        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(9))
+        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(11))
         #expect(
             keys == [
-                "id", "sentence", "port", "running", "served_agent_count", "surfaces", "routes",
+                "id", "sentence", "port", "host", "allowed_origins", "running", "served_agent_count", "surfaces", "routes",
                 "browser_reachable", "verbs",
             ], "\(keys)")
         #expect(

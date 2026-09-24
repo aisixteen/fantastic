@@ -89,7 +89,11 @@ def read_messages(root_dir: Path) -> tuple[list[dict], int]:
 
 def hydrate_messages(kernel, root_dir: Path) -> int:
     """Apply `read_messages` to a kernel FROM ABOVE, before its first mint. Sets the
-    counter first so every hydrated id is a pre-minted one. Returns the row count."""
+    counter first so every hydrated id is a pre-minted one. Returns the row count.
+
+    THE ROWS ARE THE ONLY TAPE. This is a cold, synchronous read with no event loop
+    yet, so it rebuilds the STORE; `hydrate_executions` rebuilds the process side
+    (futures need a loop) from the same rows, at `_boot`."""
     rows, next_id = read_messages(root_dir)
     kernel.next_id = max(kernel.next_id, next_id)
     for r in rows:
@@ -106,6 +110,63 @@ def hydrate_messages(kernel, root_dir: Path) -> int:
         if call is not None and r.get("outcome") is not None:
             call["outcome"] = r["outcome"]
     return len(rows)
+
+
+def hydrate_executions(kernel) -> int:
+    """REBUILD THE EXECUTION LEDGER FROM THE TAPE — the durable half of C9.
+
+    `ledger.json` is gone. A settled call is a `call` row (payload, retries, name,
+    origin) plus its `settle` row (the full outcome, the final attempts), so the
+    process side is a projection of the two: a DONE future holding the recorded
+    outcome, exactly what a live kernel had. Dedup ("a completed step is never
+    re-executed") therefore holds across reboots with no second file.
+
+    A call with NO settle row was in flight when the process died: it rebuilds
+    NOTHING, and a re-send re-executes it — that work never completed, so running
+    it again is the truth, not a loss. Needs a running loop (the futures are bound
+    to it), so it runs at `_boot`, not in the cold bootstrap. Returns the count."""
+    loop = asyncio.get_event_loop()
+    n = 0
+    for row in list(kernel.rows.values()):
+        if row.get("kind") != "settle":
+            continue
+        call = kernel.rows.get(row.get("parent"))
+        out = row.get("outcome")
+        if call is None or call.get("kind") != "call" or not isinstance(out, dict):
+            continue
+        eid = call["id"]
+        if eid in kernel.executions:
+            continue  # a live row always wins over the tape
+        attempts = row.get("attempts") or call.get("attempts") or 1
+        fut = loop.create_future()
+        # THE LIVE SHAPE, rebuilt: a joiner after a reboot must receive exactly
+        # what a joiner before it received — {pid, status, result, attempts}.
+        fut.set_result(
+            {
+                "pid": eid,
+                "status": out.get("status"),
+                "result": out.get("result"),
+                "attempts": attempts,
+            }
+        )
+        kernel.ledger_put(
+            eid,
+            {
+                "target": call.get("agent"),
+                "fut": fut,
+                "payload": None,  # settled: nothing left to re-run
+                "timeout": None,
+                "retries": call.get("retries", 0),
+                "attempts": attempts,
+                "named": bool(call.get("named")),
+                "name": call.get("name"),
+                "origin": call.get("origin"),
+            },
+        )
+        n += 1
+    # THE COUNTER is restored by `hydrate_messages` (cold, before the first mint);
+    # nothing here may mint, so nothing here may lower it.
+    return n
 
 
 ROOT_ID = "kernel_state"
@@ -522,16 +583,13 @@ async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
 
 
 def _is_own_persistence(agent, row: dict | None) -> bool:
-    """THE LOADER'S OWN PERSISTENCE TRAFFIC — one definition, two readers.
+    """THE LOADER'S OWN PERSISTENCE TRAFFIC — what never enters the log.
 
     An operator-context call (`origin` is None: nobody sent it, the loader is
     writing as itself) addressed to the DISCOVERED store is bookkeeping of
     persisting: the pump's appends, the record flusher's writes, the blob verbs.
-    It never enters the message log, and — the same law, one settle later — it
-    never dirties the ledger. Without the second half the kernel spun on itself:
-    a settle kicked a ledger flush, the flush's `ledger_flush` task row was a row,
-    the pump appended it through the store, and THAT append's settle kicked the
-    flusher again (measured 2026-09-21: 19 flushes in 3 idle seconds).
+    Persisting a row must not itself produce a row to persist, so it is skipped —
+    otherwise the kernel spins on itself, appending its own appends forever.
     """
     return (
         isinstance(row, dict)
@@ -573,6 +631,12 @@ class _MessagePump:
         self.written = 0  # the highest id landed on the provider
         self._wake = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+        self._reader: asyncio.Task | None = None
+        self._flusher: asyncio.Task | None = None
+        # ONE WRITE AT A TIME. `catch_up` takes the same lock for its CHECK, so a
+        # shutdown waits out an in-flight append instead of racing past it and
+        # cancelling mid-write (the row was lost: measured 2026-09-24).
+        self._lock = asyncio.Lock()
         self._said_no_store = False
         # Unknown until the first flush asks the store whether the log exists: a
         # NEW log opens with the root element, an existing one is appended to.
@@ -586,6 +650,7 @@ class _MessagePump:
             for verb, coro in zip(self.VERBS, (self._read(after), self._flush_loop()))
         ]
         self._tasks = [self.kernel.tasks[i]["_task"] for i in ids]
+        self._reader, self._flusher = self._tasks
 
     def _skip(self, row: dict) -> bool:
         if row.get("kind") == "task" and row.get("agent") == self.agent.id:
@@ -623,6 +688,13 @@ class _MessagePump:
             pass
 
     async def flush(self) -> None:
+        async with self._lock:
+            await self._flush_once()
+
+    async def _flush_once(self) -> None:
+        """One append. CANCELLATION PUTS THE BATCH BACK: a shutdown that lands
+        between taking the batch and the store's ack must not eat it — the rows
+        return to the head of `pending` and the re-raise leaves the loop."""
         if not self.pending:
             return
         store_id = _find_store(self.agent)
@@ -633,46 +705,52 @@ class _MessagePump:
             self.pending.clear()
             return
         batch, self.pending = self.pending, []
-        if self._header_needed is None:
+        try:
+            if self._header_needed is None:
+                with operator_context():
+                    probe = await self.kernel.send(
+                        [
+                            {
+                                "target": store_id,
+                                "payload": {
+                                    "type": "read_stream",
+                                    "path": _MESSAGES_FILE,
+                                    "offset": 0,
+                                    "length": 1,
+                                },
+                            }
+                        ]
+                    )
+                pres = (probe[0] or {}).get("result") or {}
+                self._header_needed = bool(isinstance(pres, dict) and pres.get("error"))
+            lines = "".join(messages_xml.row_to_xml(r) for r in batch)
+            if self._header_needed:
+                # The root, once, at the head of a NEW log; never closed (a stream).
+                lines = messages_xml.HEADER + lines
             with operator_context():
-                probe = await self.kernel.send(
+                out = await self.kernel.send(
                     [
                         {
                             "target": store_id,
                             "payload": {
-                                "type": "read_stream",
+                                "type": "write_stream",
                                 "path": _MESSAGES_FILE,
-                                "offset": 0,
-                                "length": 1,
+                                "bytes": lines.encode("utf-8"),
                             },
                         }
                     ]
                 )
-            pres = (probe[0] or {}).get("result") or {}
-            self._header_needed = bool(isinstance(pres, dict) and pres.get("error"))
-        lines = "".join(messages_xml.row_to_xml(r) for r in batch)
-        if self._header_needed:
-            # The root, once, at the head of a NEW log; never closed (a stream).
-            lines = messages_xml.HEADER + lines
-            self._header_needed = False
-        with operator_context():
-            out = await self.kernel.send(
-                [
-                    {
-                        "target": store_id,
-                        "payload": {
-                            "type": "write_stream",
-                            "path": _MESSAGES_FILE,
-                            "bytes": lines.encode("utf-8"),
-                        },
-                    }
-                ]
-            )
+        except asyncio.CancelledError:
+            self.pending = batch + self.pending  # nothing lost; re-flushed at stop
+            raise
         res = (out[0] or {}).get("result") or {}
         if isinstance(res, dict) and res.get("error"):
             print(f"  [messages] append refused: {res.get('error')}", flush=True)
             self.pending = batch + self.pending  # nothing lost; retried next flush
             return
+        # Only a LANDED write closes the header question: a refused or cancelled
+        # append that had cleared it would leave the next one headerless.
+        self._header_needed = False
         self.written = max(self.written, max(r["id"] for r in batch))
 
     async def catch_up(self) -> None:
@@ -680,16 +758,25 @@ class _MessagePump:
         the loop converges when the tail has seen everything and nothing pends."""
         for _ in range(1000):
             await asyncio.sleep(0)
-            if self.seen >= self.kernel.next_id - 1 and not self.pending:
-                return
-            await self.flush()
+            async with self._lock:
+                if self.seen >= self.kernel.next_id - 1 and not self.pending:
+                    return
+                await self._flush_once()
             await asyncio.sleep(0.01)
 
     async def stop(self) -> None:
+        """ORDER MATTERS. The FLUSH LOOP dies first — it is the task that can be
+        holding a half-written append, and killing it there re-queues the batch;
+        then `catch_up` runs FROM THE STOPPING TASK (which nobody is cancelling)
+        and lands everything; the reader goes last, so a row minted during the
+        catch-up is still seen."""
+        reader, flusher = self._reader, self._flusher
+        self._tasks, self._reader, self._flusher = [], None, None
+        if flusher is not None:
+            flusher.cancel()
         await self.catch_up()
-        for t in self._tasks:
-            t.cancel()
-        self._tasks = []
+        if reader is not None:
+            reader.cancel()
 
 
 class _FlushLoop:
@@ -781,7 +868,8 @@ class _FlushLoop:
         if self._task is not None:
             self._task.cancel()
             self._task = None
-        await self.aflush()  # final flush — a clean shutdown loses nothing
+        # NO FINAL FLUSH HERE. `stop` runs mid-teardown, when the store may already
+        # be down; the last write happens in `flush_pending`, before the walk.
 
 
 # ─── verbs ─────────────────────────────────────────────────────────
@@ -912,157 +1000,6 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
     }
 
 
-# ─── the DURABLE execution ledger (C9 across restart) ───────────
-#
-# Settled rows persist as ONE sidecar (`agents/<root>/ledger.json`) through the
-# SAME discovered store the tree flushes through — no store wired ⇒ RAM only,
-# the auto-flush law, not a fallback. Only SETTLED rows persist: work in flight
-# at a crash never completed, so a re-send after reboot re-executing it is the
-# truth, not a loss. Rehydration rebuilds each row with a DONE future, so dedup
-# ("a completed step is never re-executed") holds ACROSS REBOOTS — the dbos
-# `test_recovery_workflow` property, re-keyed to guarded calls.
-
-_LEDGER_BLOB = "ledger.json"
-
-
-# v2 (2026-09-08): ids are the kernel's int64 message ids; rows are an ARRAY
-# (JSON object keys are strings and would stringify them); a named row carries
-# `name`.
-_LEDGER_VERSION = 2
-
-
-def _ledger_dump(kernel) -> str:
-    """STRICT serialization — fidelity over completeness (C25). A row whose
-    outcome does not survive an exact JSON round-trip (bytes in a read_stream
-    result, non-string keys) stays RAM-ONLY rather than persisting corrupted:
-    `default=str` used to turn bytes into their repr and rehydrate it as a
-    confidently WRONG recorded outcome — worse than no dedup. A caller that
-    wants durable bytes stores them through `file_bridge`, the one disk
-    surface."""
-    rows = []
-    for eid, row in kernel.executions.items():
-        if not row["fut"].done():
-            continue
-        outcome = row["fut"].result()
-        try:
-            if json.loads(json.dumps(outcome)) != outcome:
-                continue  # round-trips but not EXACTLY (tuples, int keys)
-        except (TypeError, ValueError):
-            continue  # not JSON-serializable at all (bytes): RAM-only
-        rows.append(
-            {
-                "id": eid,
-                "target": row["target"],
-                "retries": row["retries"],
-                "attempts": row["attempts"],
-                "named": row["named"],
-                "name": row.get("name"),
-                "origin": row.get("origin"),
-                "outcome": outcome,
-            }
-        )
-    return json.dumps({"v": _LEDGER_VERSION, "rows": rows})
-
-
-async def flush_ledger_now(agent) -> dict:
-    """One full write of the settled ledger. Test seam AND the flusher's body."""
-    if _find_store(agent) is None:
-        return {"skipped": "no store wired"}
-    return await _persist_blob(
-        agent.id,
-        {
-            "agent_id": agent.id,
-            "name": _LEDGER_BLOB,
-            "content": _ledger_dump(agent.ctx),
-        },
-        agent,
-    )
-
-
-async def _rehydrate_ledger(agent) -> None:
-    if _find_store(agent) is None:
-        return
-    got = await _load_blob(
-        agent.id, {"agent_id": agent.id, "name": _LEDGER_BLOB}, agent
-    )
-    content = (got or {}).get("content")
-    if not content:
-        return
-    try:
-        doc = json.loads(content)
-    except json.JSONDecodeError as e:
-        print(f"  [ledger] {_LEDGER_BLOB} unreadable, starting empty: {e}")
-        return
-    # THE UPGRADE CONTRACT (C22), from day one: an unknown version starts empty
-    # LOUDLY — never guessed at, never silently reinterpreted. A future format
-    # change adds a migration branch here, keyed on `v`.
-    if doc.get("v") != _LEDGER_VERSION:
-        print(
-            f"  [ledger] {_LEDGER_BLOB} is version {doc.get('v')!r}, this kernel "
-            f"reads {_LEDGER_VERSION} — starting empty (no migration written)"
-        )
-        return
-    rows = doc["rows"]
-    loop = asyncio.get_event_loop()
-    for r in rows:
-        eid = int(r["id"])
-        fut = loop.create_future()
-        fut.set_result(r["outcome"])
-        agent.ctx.ledger_put(
-            eid,
-            {
-                "target": r["target"],
-                "fut": fut,
-                "payload": None,  # settled: nothing left to re-run
-                "timeout": None,
-                "retries": r["retries"],
-                "attempts": r["attempts"],
-                "named": r["named"],
-                "name": r.get("name"),
-                "origin": r.get("origin"),
-            },
-        )
-    # THE COUNTER is restored by `hydrate_messages` (the bootstrap, cold, before the
-    # first mint). The ledger only RAISES it: a settled call whose id the message log
-    # never saw (a log that stopped short) must still stay below the next mint.
-    if rows:
-        ids = [int(r["id"]) for r in rows]
-        agent.ctx.next_id = max(agent.ctx.next_id, max(ids) + 1)
-
-
-def _install_ledger_flusher(agent) -> None:
-    """Debounced write-through: a settle kicks one flush task; settles landing
-    mid-write coalesce into exactly one follow-up pass."""
-    state = {"pending": False, "running": False}
-
-    def kick(exec_id: int | None) -> None:
-        # PERSISTENCE DOES NOT DIRTY THE LEDGER. The flush's own write settles
-        # here, and so does every append the pump makes of the rows this flush
-        # minted; flushing for those rewrites the file the write just wrote.
-        # `_is_own_persistence` is the same predicate the pump keeps out of the
-        # log — one rule, both halves.
-        if _is_own_persistence(agent, agent.ctx.rows.get(exec_id)):
-            return
-        if state["running"]:
-            state["pending"] = True
-            return
-        state["running"] = True
-
-        async def run() -> None:
-            try:
-                while True:
-                    state["pending"] = False
-                    await flush_ledger_now(agent)
-                    if not state["pending"]:
-                        return
-            finally:
-                state["running"] = False
-
-        agent.ctx.spawn_task(agent.id, "ledger_flush", run())
-
-    agent.ctx.ledger_flusher = kick
-
-
 async def _boot(id, payload, agent):
     """Start the auto-flush loop unless `watch=false` (a loader serving a
     remote kernel only answers verbs). Subscribes AFTER the bootstrap's
@@ -1078,11 +1015,11 @@ async def _boot(id, payload, agent):
         write_record(root_dir, agent.record)
     rec = agent.record
     if agent.parent is None:
-        # The ROOT loader owns the kernel-wide execution ledger. Rehydrate
-        # BEFORE installing the flusher so hydration never rewrites the file
-        # it just read.
-        await _rehydrate_ledger(agent)
-        _install_ledger_flusher(agent)
+        # THE TAPE IS THE LEDGER. `hydrate_messages` put the rows back cold; here,
+        # on a live loop, the settled calls become `executions` again so dedup
+        # survives the reboot. Before the pump subscribes: rebuilding mints
+        # nothing, and nothing rebuilt is re-appended.
+        hydrate_executions(agent.ctx)
         # THE PUMP SUBSCRIBES HERE: after hydration (the bootstrap did it, cold),
         # before anything below creates or wakes children.
         if getattr(agent, "_message_pump", None) is None:
@@ -1432,13 +1369,18 @@ async def _load_blob(id, payload, agent):
 
 
 async def flush_pending(agent):
-    """The kernel's shutdown hook (awaited before the teardown walk, provider still
-    alive): write the settled ledger once, land every message minted so far, then
-    stop the pump. The ledger write is EXPLICIT — the debounced flusher is a fork,
-    and the quiet phase does not wait for forks, so the last settle before a
-    shutdown had no guaranteed write. Ledger first: its own rows are persistence
-    rows the pump skips, so the pump's final window is unchanged by it."""
-    await flush_ledger_now(agent)
+    """The kernel's shutdown hook (awaited before the teardown walk, PROVIDER STILL
+    ALIVE): write the pending RECORDS, then land every message minted so far and
+    stop the pump.
+
+    THE RECORD FLUSH LIVES HERE, not in `on_shutdown`. The record loop debounces
+    0.15 s; a `create_agent` + `update_agent` followed straight away by
+    `shutdown()` used to reach its final flush mid-teardown-walk, with the store
+    already gone, and the update never landed. Records first: their writes mint
+    rows, and the pump's own window has to close after them."""
+    loop = getattr(agent, "_fs_flush_loop", None)
+    if loop is not None:
+        await loop.aflush()
     await _stop_pump(agent)
 
 
@@ -1450,10 +1392,10 @@ async def _stop_pump(agent):
 
 
 async def on_shutdown(agent):
-    """Final flush + unsubscribe — a graceful shutdown loses nothing. `flush_pending`
-    normally ran already (the kernel calls it before the walk); a path that skipped
-    it (a bare `Agent.shutdown`) still lands the last window here. The ledger is
-    NOT rewritten here: mid-walk the store may already be down."""
+    """Unsubscribe + stop the loops. `flush_pending` normally ran already (the
+    kernel calls it before the walk, while the provider is alive) and is what
+    WRITES; a path that skipped it (a bare `Agent.shutdown`) still lands the last
+    message window here, through the pump's own catch-up."""
     loop = getattr(agent, "_fs_flush_loop", None)
     if loop is not None:
         await loop.stop()

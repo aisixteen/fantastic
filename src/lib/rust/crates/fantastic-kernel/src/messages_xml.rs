@@ -31,9 +31,12 @@
 //! ([`crate::coerce_scalar`]); a text field (`content`, `title`, `why`, `text`,
 //! `summary`, or any string holding a newline) is a child ELEMENT; a list is a
 //! child element of `<item>`s; a nested object is a child element carrying its
-//! own attributes/children. `None` is omitted (absent on read = None for every
-//! reader that asks). A truncated last row (a crash mid-append) is a PARSE ERROR
-//! naming the last good row — fail loud, no repair.
+//! own attributes/children; a key that is not an XML name is
+//! `<entry key="…">value</entry>`; a raw `bytes` value is `<key len="N"/>` — the ONE
+//! reduction the tape makes (base64 is banned, and a length is the honest record).
+//! `None` is omitted (absent on read = None for every reader that asks). A truncated
+//! last row (a crash mid-append) is a PARSE ERROR naming the last good row — fail
+//! loud, no repair.
 
 use serde_json::{Map, Value};
 
@@ -48,6 +51,24 @@ pub const HEADER: &str = "<messages v=\"1\">\n";
 
 /// The field names that are always a child ELEMENT, whatever they hold.
 const TEXT_KEYS: [&str; 5] = ["content", "title", "why", "text", "summary"];
+
+/// A MAP KEY IS NOT ALWAYS A TAG. Rows carry caller data now (a call's payload, a
+/// settle's result), and those maps are keyed by whatever the caller wrote —
+/// `callable_by: {"$parent": "*"}`, a grant map keyed by agent id. Keys that are not
+/// XML names go through `<entry key="…">value</entry>` instead of becoming an
+/// attribute or an element; everything else is unchanged.
+const ENTRY: &str = "entry";
+
+/// Python `_XML_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")`, fullmatch — the
+/// subset of XML names the writer will emit as a tag or an attribute.
+fn is_xml_name(k: &str) -> bool {
+    let mut cs = k.chars();
+    match cs.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    cs.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
 
 // ── write ───────────────────────────────────────────────────────────────────
 
@@ -68,6 +89,16 @@ pub fn row_to_xml(row: &Row) -> String {
 
 fn fill(obj: &Map<String, Value>, attrs: &mut String, children: &mut String) {
     for (k, v) in obj {
+        if !is_xml_name(k) {
+            // `key` FIRST, then the value's own attributes — python sets it
+            // before `_fill_value` runs, and attribute order is byte parity.
+            let mut a = String::new();
+            let mut c = String::new();
+            attr(&mut a, "key", k);
+            fill_value(v, &mut a, &mut c);
+            children.push_str(&open_close(ENTRY, &a, &c));
+            continue;
+        }
         match v {
             // `None` IS OMITTED. Absent on read is None for every reader that
             // asks, so writing it would only make the file bigger.
@@ -97,24 +128,30 @@ fn fill(obj: &Map<String, Value>, attrs: &mut String, children: &mut String) {
 
 /// One `<item>` of a list.
 fn item_element(v: &Value) -> String {
+    let mut a = String::new();
+    let mut c = String::new();
+    fill_value(v, &mut a, &mut c);
+    open_close("item", &a, &c)
+}
+
+/// A VALUE onto an element that already exists (an `<item>`, an `<entry>`) —
+/// python `_fill_value`. `children` doubles as the element's text: the writer never
+/// mixes text and children, so one buffer is the whole body.
+///
+/// `null` is the ONE place None is representable — an element that SAYS so, because
+/// a missing `<item>` would change a list's length.
+fn fill_value(v: &Value, attrs: &mut String, children: &mut String) {
     match v {
-        Value::Object(map) => {
-            let mut a = String::new();
-            let mut c = String::new();
-            fill(map, &mut a, &mut c);
-            open_close("item", &a, &c)
-        }
+        Value::Object(map) => fill(map, attrs, children),
         Value::Array(items) => {
-            let inner: String = items.iter().map(item_element).collect();
-            element("item", &inner)
+            for it in items {
+                children.push_str(&item_element(it));
+            }
         }
-        // `null` inside a list is the ONE place None is representable: an
-        // element that says so, because a missing `<item>` would change the
-        // list's length.
-        Value::Null => "<item null=\"true\" />".to_string(),
-        Value::Bool(b) => element("item", if *b { "true" } else { "false" }),
-        Value::Number(n) => element("item", &number(n)),
-        Value::String(s) => element("item", &escape_text(s)),
+        Value::Null => attr(attrs, "null", "true"),
+        Value::Bool(b) => children.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => children.push_str(&number(n)),
+        Value::String(s) => children.push_str(&escape_text(s)),
     }
 }
 
@@ -255,7 +292,14 @@ fn parse_element(text: &str, at: usize) -> Option<((String, Row), usize)> {
     let name = head[..name_end].to_string();
     let mut out: Row = Map::new();
     for (k, v) in parse_attrs(&head[name_end..]) {
-        out.insert(k, coerce_scalar(&v));
+        // AN `<entry>`'s KEY IS A MAP KEY, not a scalar field: it comes back as the
+        // string the writer wrote (python `child.get("key")`), never coerced into an
+        // int — `{"1": …}` is not `{1: …}`.
+        if name == ENTRY && k == "key" {
+            out.insert(k, Value::String(v));
+        } else {
+            out.insert(k, coerce_scalar(&v));
+        }
     }
     if self_closing {
         return Some(((name, out), head_end + 1));
@@ -271,7 +315,9 @@ fn parse_element(text: &str, at: usize) -> Option<((String, Row), usize)> {
             // A LEAF holds text; a BRANCH holds children. The writer never
             // mixes them, so whitespace between child elements is layout and
             // anything else is a leaf's value.
-            let keep = if out.is_empty() {
+            let bare =
+                out.is_empty() || (name == ENTRY && out.len() == 1 && out.contains_key("key"));
+            let keep = if bare {
                 !body.is_empty()
             } else {
                 !body.trim().is_empty()
@@ -290,7 +336,16 @@ fn parse_element(text: &str, at: usize) -> Option<((String, Row), usize)> {
 
 /// One child, folded into its parent by the same rules the writer used: a run of
 /// `<item>`s is a list, anything else is a field.
-fn merge_child(out: &mut Row, name: &str, child: Row) {
+fn merge_child(out: &mut Row, name: &str, mut child: Row) {
+    // `<entry key="…">` IS ITS KEY. The key attribute comes off first, so the VALUE
+    // reads by the ordinary rules (python `_without_key`).
+    if name == ENTRY {
+        if let Some(Value::String(key)) = child.shift_remove("key") {
+            let value = value_of(name, child);
+            out.insert(key, value);
+            return;
+        }
+    }
     let value = value_of(name, child);
     if name == "item" {
         match out

@@ -212,8 +212,15 @@ extension Kernel {
             return .joining(jid, timeout)
         case .fresh:
             // THE CALL ROW, on the TARGET, under the pre-minted id — the trace of
-            // who was asked what, parented to the dispatch that asked. Python
-            // `rows_put(target, {id, kind:"call", verb, parent})`.
+            // who was asked what, parented to the dispatch that asked.
+            //
+            // ONE TAPE. The row carries the WHOLE call — the dispatch payload
+            // verbatim, the retry budget, the attempt count as at dispatch, the
+            // deadline — because there is no second file: `messages.xml` is the
+            // only thing that outlives the process, and `attempts` is updated on
+            // this row at every retry (the kernel owns it in RAM).
+            // KEY ORDER IS PYTHON'S: id, kind, verb, parent, origin, payload,
+            // named, retries, attempts, timeout[, name].
             var callRow: Row = [
                 "id": .integer(execId), "kind": .string("call"), "verb": .string(verb),
             ]
@@ -221,6 +228,17 @@ extension Kernel {
             // `origin` says who asked; absent (an operator's call) is what the
             // loader's message pump keys its own-traffic skip on.
             callRow["origin"] = origin.map { JSON.string($0.value) } ?? .null
+            callRow["payload"] = Kernel.tapeValue(item.payload, bytes: item.binary?.count)
+            callRow["named"] = .bool(name != nil)
+            callRow["retries"] = .integer(Int64(retries))
+            callRow["attempts"] = .integer(1)
+            // The RAW timeout when the caller forwarded one (an int stays an
+            // int, as python's row does); the typed seconds otherwise.
+            if let raw = item.rawTimeout, raw != .null {
+                callRow["timeout"] = raw
+            } else {
+                callRow["timeout"] = timeout.map { JSON.double($0) } ?? .null
+            }
             if let name { callRow["name"] = .string(name) }
             _ = try? rows.put(target.id, callRow)
         }
@@ -345,7 +363,11 @@ extension Kernel {
             // that minted none of them.
             var body: Data? = nil
             while true {
-                ledger.attempt(d.execId)
+                let n = ledger.attempt(d.execId)
+                // THE TAPE COUNTS REAL RUNS. The call row was written with
+                // `attempts: 1`; every re-dispatch updates it in place, so a
+                // cold read of the log says what the work actually cost.
+                if n > 1 { rows.stamp(d.execId, ["attempts": .integer(Int64(n))]) }
                 let box = TaskIdBox()
                 let (r, s, b) = await runDispatchOutcome(
                     target: d.target, payload: d.payload, verb: d.verb,
@@ -434,26 +456,42 @@ extension Kernel {
         }
         rows.stamp(execId, ["outcome": .object(stamp)])
         if let r = root {
+            // THE SETTLE ROW CARRIES THE FULL OUTCOME — `{status, result}`, the
+            // body included, plus the final `attempts`. It is the only record of
+            // what a call became: `ledger.json` is gone, and a boot rebuilds
+            // `executions` (dedup across restart, C9) by reading these rows
+            // back. The SHORT stamp above stays on the live call row, where
+            // `messages` digests and the `ledger` verb read it.
             let settleRow: Row = [
                 "kind": .string("settle"), "parent": .integer(execId),
-                "settled": .string(target.value), "outcome": .object(stamp),
+                "settled": .string(target.value),
+                "outcome": .object([
+                    "status": .string(status.rawValue),
+                    "result": Kernel.tapeValue(reply, bytes: body?.count),
+                ]),
+                "attempts": .integer(Int64(out.attempts)),
             ]
             _ = try? rows.put(r.id, settleRow)
         }
-        // The DURABLE half, if a store was wired. The kernel does not know
-        // what this writes or where.
-        //
-        // THE LOADER'S OWN PERSISTENCE TRAFFIC NEVER DIRTIES THE LEDGER —
-        // the same rule `MessagePump.skips` applies to the log, for the same
-        // reason: persisting a row must not mint a row to persist. A flush
-        // pass is a kernel task, its task row IS logged, the pump appends it,
-        // that append settles — and kicking there re-arms the flusher
-        // forever. Measured 2026-09-21 on four CLI commands: 35 `ledger_flush`
-        // task rows against python's 4, `ledger.json` 84 rows against 18.
-        if !isOwnPersistence(target: target, execId: execId) {
-            ledgerSettled()
-        }
+        // NO DURABLE HALF TO KICK. The settle row IS the durable record now;
+        // the pump appends it like any other row, and its own appends stay out
+        // of the log by `MessagePump.skips`.
         return out
+    }
+
+    /// A row value with RAW BYTES reduced to their LENGTH.
+    ///
+    /// THE ONE REDUCTION. XML text cannot carry raw bytes and base64 is banned,
+    /// so a `write_stream` body in a call's payload and a `read_stream` chunk in
+    /// a settle's result are recorded as `{"len": N}` — python reduces the
+    /// `bytes` value it holds INSIDE the dict, swift carries those bytes on the
+    /// binary side channel (`Item.binary`, `Outcome.body`) and puts the same
+    /// `bytes` key back on the tape here. Everything else is verbatim; the
+    /// durable bytes live behind `file_bridge`, the one disk surface.
+    public static func tapeValue(_ value: JSON, bytes: Int?) -> JSON {
+        guard let n = bytes, case .object(var map) = value else { return value }
+        map["bytes"] = .object(["len": .integer(Int64(n))])
+        return .object(map)
     }
 
     /// Wait for an execution someone else owns.

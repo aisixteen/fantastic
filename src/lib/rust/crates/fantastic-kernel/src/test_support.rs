@@ -176,6 +176,31 @@ impl Bundle for RootLoader {
             }))),
         }
     }
+    /// THE SHIPPED BUNDLE'S HOOK, stood in for: the pending RECORDS are written
+    /// and the pump lands every message minted so far — before the teardown walk,
+    /// while the provider is still alive. Both writers close here and nowhere
+    /// else (`fantastic-core`'s `flush_pending`).
+    async fn flush_pending(
+        &self,
+        _agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        let (writer, pump) = {
+            let mut g = self.installed.lock().expect("loader poisoned");
+            match g.as_mut() {
+                Some(i) => (i.writer.clone(), i.pump.take()),
+                None => (None, None),
+            }
+        };
+        if let Some(w) = writer {
+            w.flush(kernel).await;
+        }
+        if let Some(p) = pump {
+            p.stop(kernel).await;
+        }
+        Ok(())
+    }
+
     async fn on_shutdown(
         &self,
         _agent_id: &AgentId,
