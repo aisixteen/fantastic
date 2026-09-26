@@ -71,8 +71,8 @@ class Conn {
    * silently JOINED the other tab's execution and returned that tab's result.
    *
    * A correlator must therefore be unique across every socket, tab and reload
-   * that can reach one host. The colon namespace is kernel-minted-only, so the
-   * dash form `{prefix}-{n}` is what a bridge mints.
+   * that can reach one host. It is a STRING — on the host, the execution's
+   * NAME (message ids are the kernel's ints) — minted as `{prefix}-{n}`.
    */
   private readonly idPrefix = mintPrefix();
   private nextId = 1;
@@ -81,8 +81,6 @@ class Conn {
   private readonly lifecycle = new Set<(state: "connected" | "disconnected") => void>();
   // host state stream (telemetry) rides this conn when it's the control conn
   private wantsState = false;
-  /** `state_subscribe` with `body: true`: row events carry content (host-gated as `rows_read`). */
-  private wantsBodies = false;
   private onState: ((frame: Envelope) => void) | null = null;
   private readonly pending = new Map<string, Pending>();
   private ready!: Promise<void>;
@@ -120,7 +118,7 @@ class Conn {
       this.delay = 1000;
       // `/<endpoint>/ws` auto-watches `endpoint`; replay the state stream
       // subscription so a reconnect resyncs (a fresh snapshot follows).
-      if (this.wantsState) this.sendFrame(this.subscribeFrame());
+      if (this.wantsState) this.sendFrame({ type: "state_subscribe" });
       const r = this.resolveReady;
       this.resolveReady = null;
       if (r !== null) r();
@@ -193,16 +191,16 @@ class Conn {
     }
   }
 
-  async call(envelopePayload: Envelope, target: string): Promise<Json> {
+  async call(envelopePayload: Envelope, target: string, caller?: string): Promise<Json> {
     await this.ready;
     if (!this.connected || this.ws === null) throw new Error("disconnected");
     const id = `${this.idPrefix}-${this.nextId++}`;
-    const frame = encodeFrame({
-      type: "call",
-      target,
-      payload: envelopePayload,
-      id,
-    });
+    // WHO IS CALLING, QUALIFIED: `<this kernel's guid>|<the agent that asked>`
+    // (`kernel` for the operator) — the far side keys what the call writes by
+    // it. Absent until this kernel has a guid (its root has booted).
+    const env: Envelope = { type: "call", target, payload: envelopePayload, id };
+    if (caller !== undefined) env["caller"] = caller;
+    const frame = encodeFrame(env);
     return new Promise<Json>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       try {
@@ -242,20 +240,12 @@ class Conn {
   }
 
   /** Turn the host state stream on/off on this conn (sends subscribe now if
-   *  connected). `bodies` asks for row CONTENT on every `row` event — the host
-   *  grants it only to a `rows_read` holder; a refusal comes back as an `error`
-   *  frame and the digest-only stream is not opened either. */
-  setWantsState(on: boolean, bodies = false): void {
-    if (this.wantsState === on && this.wantsBodies === bodies) return;
+   *  connected). Conversation rows are not on that stream: an AI agent announces
+   *  its own rows to its watchers (`watch` on that agent, gated there). */
+  setWantsState(on: boolean): void {
+    if (this.wantsState === on) return;
     this.wantsState = on;
-    this.wantsBodies = bodies;
-    this.sendFrame(on ? this.subscribeFrame() : { type: "state_unsubscribe" });
-  }
-
-  private subscribeFrame(): Envelope {
-    return this.wantsBodies
-      ? { type: "state_subscribe", body: true }
-      : { type: "state_subscribe" };
+    this.sendFrame(on ? { type: "state_subscribe" } : { type: "state_unsubscribe" });
   }
 
   close(): void {
@@ -323,15 +313,15 @@ export class WsBridge implements Bridge {
   }
 
   /** Forward a call to `target`: its own socket if watched, else the control one. */
-  forward(target: string, payload: Payload): Promise<Json> {
+  forward(target: string, payload: Payload, caller?: string): Promise<Json> {
     const conn = this.conns.get(target) ?? this.connFor(this.controlEndpoint);
-    return conn.call(payload, target);
+    return conn.call(payload, target, caller);
   }
 
   /** Forward a call whose payload carries a binary blob (e.g. paste_image). */
-  forwardBinary(target: string, payload: Envelope): Promise<Json> {
+  forwardBinary(target: string, payload: Envelope, caller?: string): Promise<Json> {
     const conn = this.conns.get(target) ?? this.connFor(this.controlEndpoint);
-    return conn.call(payload, target);
+    return conn.call(payload, target, caller);
   }
 
   /** Fire-and-forget emit to a host agent's inbox (e.g. reload_html). */
@@ -362,13 +352,8 @@ export class WsBridge implements Bridge {
   }
 
   /** Subscribe to the host kernel state stream (telemetry). Rides the control
-   *  socket: first subscriber opens the stream, last one closes it. `bodies`
-   *  opens it with `body: true` (row events carry content; host-gated as
-   *  `rows_read`) — the option of the FIRST subscriber decides for the stream. */
-  subscribeState(
-    handler: (frame: Record<string, unknown>) => void,
-    bodies = false,
-  ): () => void {
+   *  socket: first subscriber opens the stream, last one closes it. */
+  subscribeState(handler: (frame: Record<string, unknown>) => void): () => void {
     const control = this.connFor(this.controlEndpoint);
     if (this.stateHandlers.size === 0) {
       control.setStateSink((frame) => {
@@ -380,7 +365,7 @@ export class WsBridge implements Bridge {
           }
         }
       });
-      control.setWantsState(true, bodies);
+      control.setWantsState(true);
     }
     this.stateHandlers.add(handler);
     return () => {

@@ -26,6 +26,9 @@ export const LOCKED = "locked"; // `delete_lock` (carries `id`)
 export const NOT_HERE = "not_here"; // right verb, wrong agent — kernel verbs are root-only
 export const EXISTS = "exists"; // an id already taken (carries `id`)
 export const UNHANDLED = "unhandled"; // the agent has no such verb (carries `verb`)
+export const NOT_FOUND = "not_found"; // the named THING is absent — a row, a grant, an execution
+export const DRAINING = "draining"; // the kernel is stopping; no new roots are accepted
+export const NO_CONSUMER = "no_consumer"; // watch: the watcher has no registered inbox
 
 // Transport codes — a leg that could not carry the call at all. Listed here
 // because they share the field: a caller branching on `reason` must be able to
@@ -37,7 +40,7 @@ export const TIMEOUT = "timeout";
 
 export const CODES: ReadonlySet<string> = new Set([
   UNAUTHORIZED, UNKNOWN_AGENT, MISSING_ARG, BAD_ARG, INVALID_META,
-  LOCKED, NOT_HERE, EXISTS, UNHANDLED,
+  LOCKED, NOT_HERE, EXISTS, UNHANDLED, NOT_FOUND, DRAINING, NO_CONSUMER,
   NOT_CONNECTED, TRANSPORT_ERROR, TRANSPORT_CLOSED, TIMEOUT,
 ]);
 

@@ -12,17 +12,24 @@ import type { Json, Payload } from "./json.ts";
 /** `pid is null` ⟺ the item never reached the task table. */
 export type Status = "completed" | "failed" | "cancelled" | "timed_out";
 
+/** THE DEAD ENDINGS. An execution that settled one of these is a DEAD LETTER: it
+ *  is announced (`on_deadletter`), listed by `ledger`, never retried silently,
+ *  and retired by `ack_deadletter`. */
+export const DEAD_STATUSES: ReadonlySet<string> = new Set(["failed", "timed_out", "cancelled"]);
+
 export interface Item {
   target: string;
   payload: Payload;
   /**
-   * NAMES the execution (ensure-semantics). Unknown ⇒ dispatch; in flight ⇒
-   * JOIN, no second run; settled ⇒ the recorded outcome, handler never runs.
+   * A STRING NAMES the execution (ensure-semantics). Unknown ⇒ dispatch; in
+   * flight ⇒ JOIN, no second run; settled ⇒ the recorded outcome, handler never
+   * runs. The name is the caller's; the execution's id is the kernel's counter.
    *
-   * ONE ID SPACE: this is the same id `ps`/`cancel`/reply tags carry. A caller
-   * id may not contain ":" — that namespace is kernel-minted.
+   * An INT is a message id the kernel minted: it JOINS that execution and never
+   * creates one — the kernel is the only allocator. ONE ID SPACE: the same int
+   * `ps`/`cancel`/store rows carry.
    */
-  id?: string;
+  id?: string | number;
   /** Seconds. The kernel NEVER defaults this; absent = wait forever. */
   timeout?: number;
   /** Re-dispatch budget for a terminal failure under the SAME id. */
@@ -30,10 +37,12 @@ export interface Item {
 }
 
 export interface Outcome {
-  pid: string | null;
+  pid: number | null;
   status: Status;
   result: Json;
   attempts: number;
+  /** The caller's NAME for this execution, echoed when the item named one. */
+  name?: string;
 }
 
 /** A refusal never reached the task table, so it carries no pid. */
@@ -41,20 +50,17 @@ export function refused(result: Json): Outcome {
   return { pid: null, status: "failed", result, attempts: 1 };
 }
 
-export function completed(pid: string | null, result: Json, attempts = 1): Outcome {
-  return { pid, status: "completed", result, attempts };
-}
-
 export function isTerminalFailure(status: Status): boolean {
   return status === "failed" || status === "timed_out";
 }
 
-/** The wire/`ledger`-verb view of one execution. */
-export interface LedgerRow extends Payload {
-  id: string;
-  target: string;
-  status: string;
-  attempts: number;
-  retries: number;
-  named: boolean;
+/** A message id as an int: a positive integer, or its decimal string (a model
+ *  quotes what it copied out of a reply). Anything else is not an id. */
+export function asId(x: unknown): number | null {
+  if (typeof x === "number") return Number.isInteger(x) && x > 0 ? x : null;
+  if (typeof x === "string" && /^\d+$/.test(x.trim())) {
+    const n = Number(x.trim());
+    return n > 0 ? n : null;
+  }
+  return null;
 }

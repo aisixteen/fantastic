@@ -141,25 +141,29 @@ test("a NAMED execution is forwarded, so a repeat does not re-run the side effec
   assert.equal(dispensed, 1, "the named repeat dispensed a second time");
 });
 
-test("an id in the KERNEL-MINTED namespace is not forwarded", async () => {
-  // A caller id may not contain ":" — that namespace belongs to the kernel. It
-  // is dropped rather than sent, so the turn is not refused mid-flight.
+test("the model's id rides through UNTOUCHED — the kernel validates it", async () => {
+  // Ids are the kernel's ints; a name is a string. The loop forwards whatever
+  // the model wrote and the KERNEL owns the semantics: an int it never minted
+  // comes back as a refusal the model reads, and nothing runs.
   let ran = 0;
   const k = new Kernel();
   k.setRoot(new Agent({ id: "kernel_state" }));
   k.registerBundle("p.tools", () => ({ ok: ++ran }));
   k.register(new Agent({ id: "p", parentId: "kernel_state", handlerModule: "p.tools" }));
+  const hist: any[] = [];
   const out = await runLoop(
     "ai",
     k,
     scripted([
-      '<tool_call>{"name":"send","arguments":{"target_id":"p","id":"ai:stolen","payload":{"type":"go"}}}</tool_call>',
+      '<tool_call>{"name":"send","arguments":{"target_id":"p","id":424242,"payload":{"type":"go"}}}</tool_call>',
       "done",
     ]),
-    [],
+    hist,
   );
   assert.equal(out.calls, 1);
-  assert.equal(ran, 1, "the call should still have run, just unnamed");
+  assert.equal(ran, 0, "an invented int id must not create an execution");
+  const resp = hist.find((m) => m.content.startsWith("<tool_response>"));
+  assert.match(resp.content, /never created/);
 });
 
 test("maxPasses bounds a model that calls forever", async () => {

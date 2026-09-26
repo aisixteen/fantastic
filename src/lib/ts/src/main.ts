@@ -4,6 +4,7 @@ import { WsBridge } from "./transport/bridge.ts";
 import { ProxyLoader } from "./bundles/loader/proxy_loader.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
+import { registerRamStore } from "./bundles/memory/ram_store.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
 
 // The frontend kernel boots as a PEER of the host. It dials the host's
@@ -23,6 +24,11 @@ const kernel = new Kernel();
 // else (e.g. a `*.tools` host record that strays in) weak-loads + skips.
 registerGlAgent(kernel);
 registerHtmlAgent(kernel);
+// The memory store bundle, so a `ram_store.ts` record the operator persisted runs
+// here — the store `kernel_start` needs (the root's `memory_store_id`). The page
+// never starts the kernel itself: an unstarted kernel keeps its execution rows in
+// RAM, bounded by the ledger's ring; `kernel_start` is the operator's act.
+registerRamStore(kernel);
 kernel.registerBundle("canvas.ts", () => null); // the compositor root (rendered, not a verb agent)
 // View bundles that front a host backend are real frontend agents too — a
 // no-op handler makes their records load-able; the ViewBundle renders them.
