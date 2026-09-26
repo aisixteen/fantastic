@@ -69,7 +69,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     let tmp = tempfile::TempDir::new().unwrap();
     let deletes = Arc::new(AtomicUsize::new(0));
     // Disk-backed kernel so persistence::persist actually writes per-agent
-    // agent.json files (the assertions below rely on that).
+    // agent.yaml files (the assertions below rely on that).
     let kernel = mk_kernel_with_storage(
         Arc::clone(&deletes),
         crate::storage::StorageMode::Disk(tmp.path().to_path_buf()),
@@ -98,7 +98,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     assert!(kernel.agents.contains_key(&AgentId::from("kid_1")));
     // DEBOUNCED: the record reaches disk through the root loader's writer.
     crate::test_support::settle_records().await;
-    assert!(tmp.path().join("agents/kid_1/agent.json").exists());
+    assert!(tmp.path().join("agents/kid_1/agent.yaml").exists());
 
     // Delete it.
     let v = kernel

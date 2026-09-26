@@ -3,7 +3,7 @@
 // full, persist the id list, log the decision as a row, and drop RAM scratch.
 // Runs on boot, after a fold batch, or on request.
 //
-// Plus the two pieces of RAM that gate it: the fold-count debounce
+// Plus the pieces of RAM that gate it: the fold-count debounce
 // (`RECALL_EVERY`) and the per-agent INCARNATION a late reply is checked
 // against. Python `ai_core/core.py` (`_context_recall`, `_RECALL_PROMPT`,
 // `_first_json`, `_recall_due`, `_folds_since`, `_incarnation`, `_make_boot`);
@@ -97,6 +97,8 @@ enum AISideTables {
         Kernel.onTeardown { kernel in
             AIIncarnation.forget(kernel)
             AIRunStates.forget(kernel)
+            AIMemory.forget(kernel)
+            AICalibration.forget(kernel)
         }
     }
 }
@@ -124,6 +126,23 @@ extension AIBackend {
         projectionLock.lock()
         defer { projectionLock.unlock() }
         return recallDue.remove(key) != nil
+    }
+
+    /// `_recall_due.add(id)` — the next turn opens with `context_recall` (a boot,
+    /// or enough folds).
+    func markRecallDue(_ key: String) {
+        projectionLock.lock()
+        recallDue.insert(key)
+        projectionLock.unlock()
+    }
+
+    /// A clear drops the fold counter, the owed recall and the view source.
+    private func forgetClearState(_ key: String) {
+        projectionLock.lock()
+        foldsSince[key] = nil
+        recallDue.remove(key)
+        viewSource[key] = nil
+        projectionLock.unlock()
     }
 
     /// TEST SEAM: is a recall owed at the start of the next turn?
@@ -169,47 +188,51 @@ extension AIBackend {
 
     // MARK: - the clear
 
-    /// args: why:str? — start a NEW THREAD on the same store: the model's view
-    /// begins at the `[cleared <id> · N rows behind]` line this writes; nothing is
-    /// deleted — every earlier row stays in the store, reachable by id (grep,
-    /// pull, recall, the kernel's messages/rows_read). Empties the persisted view
-    /// and drops RAM scratch (projection, fold counters, pending recall). Returns
-    /// {cleared:id, behind:N}. Python `_context_clear`.
-    func contextClear(agent: Agent, payload: JSON, kernel: Kernel) -> JSON {
+    /// args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one
+    /// row whose members are every row since the previous clear (no summary) — and
+    /// the model's view begins at its `[cleared <id> · N rows]` line. Nothing is
+    /// deleted or forgotten: grep, recall and `history {fold: <id>}` reach every
+    /// member. Empties the persisted view and drops RAM scratch (projection, fold
+    /// counters, pending recall). Returns {cleared:id, rows:N}. Python
+    /// `_context_clear`.
+    func contextClear(agent: Agent, payload: JSON, kernel: Kernel) async throws -> JSON {
         let key = agent.id.value
-        let behind = loadHistory(agent: agent, kernel: kernel, behind: true).count
+        let head = try await loadHead(key, kernel).filter {
+            !BOOKKEEPING.contains($0["kind"].asString ?? "")
+        }
+        let members: [JSON] = head.compactMap { r in
+            let id = r["id"]
+            return id == .null ? nil : id
+        }
         // `" ".join(str(payload.get("why") or "").split())[:200]` — python
         // TRUTHINESS, whitespace collapsed, cut on CODE POINTS.
         let raw = payload["why"]
         let collapsed = pySplitWhitespace(pyTruthy(raw) ? pyStr(raw) : "").joined(separator: " ")
         let why = String(String.UnicodeScalarView(collapsed.unicodeScalars.prefix(200)))
-        let rid = kernel.rows.mintId()
-        appendRows(
-            agent.id, kernel: kernel,
+        let rid = kernel.mintId()
+        try await saveHistory(
+            key, kernel,
             [
                 .object([
                     "role": .string("user"),
                     "id": .integer(rid),
                     "parent": .null,
                     "kind": .string("clear"),
+                    "refs": .array(members),
                     "title": .string(why.isEmpty ? "cleared" : why),
                     "content": .string(
-                        "[cleared \(rid) \u{b7} \(behind) rows behind]"
+                        "[cleared \(rid) \u{b7} \(members.count) rows]"
                             + (why.isEmpty ? "" : " \(why)")
-                            + " \u{2014} a new thread; earlier rows are in the store, "
-                            + "reachable by id (grep, pull, recall)."),
+                            + " \u{2014} a new thread; the rows before it are this clear's members, "
+                            + "reachable by id (grep, recall, history fold=\(rid))."),
                 ])
             ])
         // The persisted view names rows behind the clear — empty it, so the view is
         // the store from the clear on. RAM is scratch; the store is never cleared.
-        saveView(agent.id, kernel: kernel, ids: [], budget: AIContext.budget(agent), why: "cleared")
+        try await saveView(key, kernel, ids: [], budget: AIContext.budget(agent), why: "cleared")
         dropScratch(key)
-        projectionLock.lock()
-        foldsSince[key] = nil
-        recallDue.remove(key)
-        viewSource[key] = nil
-        projectionLock.unlock()
-        return .object(["cleared": .integer(rid), "behind": .integer(Int64(behind))])
+        forgetClearState(key)
+        return .object(["cleared": .integer(rid), "rows": .integer(Int64(members.count))])
     }
 
     // MARK: - the model call
@@ -248,7 +271,7 @@ extension AIBackend {
         agent: Agent, payload: JSON, kernel: Kernel, provider: (any AIProvider)?
     ) async throws -> JSON {
         let key = agent.id.value
-        let rows = loadHistory(agent: agent, kernel: kernel)
+        let rows = try await loadHistory(key, kernel)
         if rows.isEmpty {
             return .object([
                 "kept": .integer(0), "expanded": .integer(0), "dropped": .integer(0),
@@ -378,9 +401,9 @@ extension AIBackend {
             }
             ids.append(.object(["id": .integer(id), "res": .string(res)]))
         }
-        saveView(agent.id, kernel: kernel, ids: ids, budget: bodyBudget, why: why)
+        try await saveView(key, kernel, ids: ids, budget: bodyBudget, why: why)
         // the decision is a ROW — the next reload reads why the last recall chose as it did
-        let rid = kernel.rows.mintId()
+        let rid = kernel.mintId()
         // THE LIVE TASK IS NAMED. The view keeps the first root (the goal) at the
         // top, and after a recall a model with several roots re-answered the FIRST
         // one and called done (measured 2026-09-06, python fold_paging: TASK 0
@@ -410,8 +433,8 @@ extension AIBackend {
                 let text = String(String.UnicodeScalarView(collapsed.unicodeScalars.prefix(100)))
                 return " \u{b7} live task: \(rowId(l) ?? 0) \"\(text)\""
             } ?? ""
-        appendRows(
-            agent.id, kernel: kernel,
+        try await saveHistory(
+            key, kernel,
             [
                 .object([
                     "role": .string("user"),

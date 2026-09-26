@@ -25,10 +25,14 @@ fn agent_id_for(tmp: &TempDir) -> String {
 }
 
 /// Kernel + root + this bundle's agent. No file leg: the conversation lives in
-/// the kernel's row store, and `reflect` touches neither.
+/// the agent's memory store (a `ram_store`, wired both ways).
 async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, LlamaCppBundle);
+    kernel.bundles.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -41,17 +45,19 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let id = agent_id_for(tmp);
+    let memory =
+        fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({ "cli": "*" })).await;
+    let mut create = json!({
+        "type": "create_agent",
+        "parent_id": "kernel",
+        "handler_module": HANDLER_MODULE,
+        "id": id,
+    });
+    for (k, v) in memory {
+        create[k] = v;
+    }
     let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({
-                "type": "create_agent",
-                "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
-                "id": id,
-                "can_call": { "cli": "*" },
-            }),
-        )])
+        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -83,6 +89,7 @@ fn the_unset_model_is_pythons_sentinel() {
         max_tokens: None,
         temperature: DEFAULT_TEMPERATURE,
         think: None,
+        report: Default::default(),
     };
     assert_eq!(p.model(), "(server-loaded)");
 }
@@ -155,7 +162,7 @@ async fn reflect_extras_match_python() {
         .await
         .remove(0)
         .result;
-    let keys: Vec<String> = r.as_object().unwrap().keys().take(15).cloned().collect();
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(16).cloned().collect();
     assert_eq!(
         keys,
         vec![
@@ -165,6 +172,7 @@ async fn reflect_extras_match_python() {
             "endpoint",
             "context_window",
             "context_strategy",
+            "memory_store_id",
             "verbs",
             "generating",
             "cancel",

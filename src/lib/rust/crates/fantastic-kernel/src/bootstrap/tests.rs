@@ -42,8 +42,8 @@ fn bootstrap_creates_root_on_virgin_workdir() {
         bootstrap(BundleRegistry::new(), BootstrapOptions::daemon(tmp.path())).expect("boot");
     assert!(booted.kernel.root().is_some());
     assert_eq!(booted.kernel.root().unwrap().id.0, "kernel_state");
-    assert!(tmp.path().join(".fantastic/agent.json").exists());
-    assert!(tmp.path().join(".fantastic/lock.json").exists());
+    assert!(tmp.path().join(".fantastic/agent.yaml").exists());
+    assert!(tmp.path().join(".fantastic/lock.yaml").exists());
     shutdown(tmp.path()).unwrap();
 }
 
@@ -108,7 +108,7 @@ fn bootstrap_weak_loads_unknown_handler_modules() {
     let ghost = tmp.path().join(".fantastic/agents/ghost_1");
     std::fs::create_dir_all(&ghost).unwrap();
     std::fs::write(
-        ghost.join("agent.json"),
+        ghost.join("agent.yaml"),
         r#"{"id":"ghost_1","handler_module":"unknown.tools","parent_id":"kernel_state"}"#,
     )
     .unwrap();
@@ -117,7 +117,7 @@ fn bootstrap_weak_loads_unknown_handler_modules() {
     // Skipped — ghost_1 not registered.
     assert!(!booted.kernel.agents.contains_key(&AgentId::from("ghost_1")));
     // Record still on disk for the next runtime.
-    assert!(ghost.join("agent.json").exists());
+    assert!(ghost.join("agent.yaml").exists());
     shutdown(tmp.path()).unwrap();
 }
 
@@ -163,8 +163,8 @@ fn boot_mints_a_32hex_guid_and_persists_it_stably() {
         .chars()
         .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     // Guid is persisted on the root record.
-    let raw = std::fs::read_to_string(tmp.path().join(".fantastic/agent.json")).unwrap();
-    assert!(raw.contains(&g1), "guid must be persisted to agent.json");
+    let raw = std::fs::read_to_string(tmp.path().join(".fantastic/agent.yaml")).unwrap();
+    assert!(raw.contains(&g1), "guid must be persisted to agent.yaml");
     // Second boot of the SAME dir reads it back verbatim — minted ONCE.
     let g2 = {
         let mut reg = with_loader(BundleRegistry::new());
@@ -213,8 +213,8 @@ fn root_is_the_kernel_state_loader_and_the_seed_is_the_constructed_record() {
     let root = booted.kernel.root().expect("root");
     assert_eq!(root.id.0, "kernel_state");
     assert_eq!(root.handler_module.as_deref(), Some("kernel_state.tools"));
-    let raw = std::fs::read_to_string(tmp.path().join(".fantastic/agent.json")).unwrap();
-    let rec: Value = serde_json::from_str(&raw).unwrap();
+    let raw = std::fs::read_to_string(tmp.path().join(".fantastic/agent.yaml")).unwrap();
+    let rec: Value = crate::yaml_io::load(&raw).unwrap();
     assert_eq!(rec["id"], json!("kernel_state"));
     assert_eq!(rec["handler_module"], json!("kernel_state.tools"));
     let keys: Vec<&str> = rec
@@ -264,12 +264,12 @@ fn a_missing_or_corrupt_root_record_reseeds_and_keeps_children() {
     let fdir = tmp.path().join(".fantastic");
     std::fs::create_dir_all(fdir.join("agents/child_a")).unwrap();
     std::fs::write(
-        fdir.join("agents/child_a/agent.json"),
+        fdir.join("agents/child_a/agent.yaml"),
         r#"{"id":"child_a","handler_module":"noop.tools"}"#,
     )
     .unwrap();
     // Not JSON at all — python swallows the decode error and returns `[]`.
-    std::fs::write(fdir.join("agent.json"), "{").unwrap();
+    std::fs::write(fdir.join("agent.yaml"), "{").unwrap();
     let mut reg = with_loader(BundleRegistry::new());
     reg.register("noop.tools", Noop);
     let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
@@ -281,32 +281,36 @@ fn a_missing_or_corrupt_root_record_reseeds_and_keeps_children() {
     );
     assert!(booted.kernel.agents.contains_key(&AgentId::from("child_a")));
     // The file was OVERWRITTEN with the fresh root, not left corrupt.
-    let raw = std::fs::read_to_string(fdir.join("agent.json")).unwrap();
-    let rec: Value = serde_json::from_str(&raw).expect("reseeded record parses");
+    let raw = std::fs::read_to_string(fdir.join("agent.yaml")).unwrap();
+    let rec: Value = crate::yaml_io::load(&raw).expect("reseeded record parses");
     assert_eq!(rec["id"], json!("kernel_state"));
     shutdown(tmp.path()).unwrap();
 }
 
-/// C54: hydration is SILENT on success — nothing on stdout for a clean boot.
+/// THE COUNTER COMES BACK WITH THE GUID: a root record's reserved bound
+/// (`next_id`) is where the next run starts, a block is reserved in memory, and
+/// the load writes nothing (save → load → save is identical). There is no
+/// message tape to hydrate.
 #[test]
-fn hydration_and_rehydrate_print_nothing_on_success() {
+fn the_root_records_next_id_resumes_the_counter_and_the_load_writes_nothing() {
     let tmp = TempDir::new().unwrap();
     let fdir = tmp.path().join(".fantastic");
     std::fs::create_dir_all(&fdir).unwrap();
-    std::fs::write(
-        fdir.join("messages.xml"),
-        format!(
-            "{}<row id=\"1\" agent=\"kernel_state\" kind=\"message\" />\n",
-            crate::messages_xml::HEADER
-        ),
-    )
-    .unwrap();
+    let body = "id: kernel_state\nhandler_module: kernel_state.tools\nguid: g-1\nnext_id: 5000\n";
+    std::fs::write(fdir.join("agent.yaml"), body).unwrap();
     let booted = bootstrap(
         with_loader(BundleRegistry::new()),
         BootstrapOptions::daemon(tmp.path()),
     )
     .expect("boot");
-    // The rows landed, and the only proof anyone needs is the store — not a line.
-    assert_eq!(booted.kernel.rows.next_id(), 2);
+    assert_eq!(booted.kernel.rows.next_id(), 5000);
+    assert_eq!(booted.kernel.rows.id_reserved(), 5000 + crate::rows::ID_BLOCK);
+    assert!(booted.kernel.mint_id() >= 5000, "ids never repeat across a restart");
+    assert_eq!(
+        std::fs::read_to_string(fdir.join("agent.yaml")).unwrap(),
+        body,
+        "load never edits a record"
+    );
+    assert!(!fdir.join("messages.yaml").exists(), "no tape is ever written");
     shutdown(tmp.path()).unwrap();
 }

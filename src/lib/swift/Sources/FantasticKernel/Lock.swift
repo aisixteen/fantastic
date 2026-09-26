@@ -12,8 +12,8 @@
 // check always runs BEFORE any flock attempt, and a flock failure can only
 // make acquisition MORE conservative, never less.
 //
-// Writes `<workdir>/.fantastic/lock.json` with `{"pid": <pid>}` — python's
-// own `json.dumps` bytes (`pyJsonDumps`, WITH the space after `:`; C50). And
+// Writes `<workdir>/.fantastic/lock.yaml` with `pid: <pid>` — python's own
+// `yaml.dump({"pid": pid})` bytes (`YamlIO.dump`). And
 // `release()` removes the file only when it still names OUR pid (python's
 // `release_lock`) — a second kernel that reclaimed a stale lock now owns
 // the file, and this process's release must not delete THAT lock.
@@ -41,7 +41,7 @@ public final class WorkdirLock: @unchecked Sendable {
         self.lockFile =
             workdir
             .appendingPathComponent(".fantastic")
-            .appendingPathComponent("lock.json")
+            .appendingPathComponent("lock.yaml")
     }
 
     /// Acquire the lock. Throws `.alreadyRunning` if a live process
@@ -78,11 +78,10 @@ public final class WorkdirLock: @unchecked Sendable {
         }
         self.fileDescriptor = fd
 
-        // Write our pid into the file — python's own `json.dumps({"pid": N})`
-        // bytes (C50: WITH the space after `:`, `pyJsonDumps`'s compact
-        // separators, not this runtime's serde-shaped `serialize()`).
+        // Write our pid into the file — python's own `yaml.dump({"pid": N})`
+        // bytes (`pid: N\n`).
         let pid = getpid()
-        let body = pyJsonDumps(.object(["pid": .integer(Int64(pid))]))
+        let body = YamlIO.dump(.object(["pid": .integer(Int64(pid))]))
         // Truncate then write so old contents (from a stale-lock takeover)
         // don't trail off the end.
         ftruncate(fileDescriptor, 0)
@@ -123,9 +122,9 @@ public final class WorkdirLock: @unchecked Sendable {
     /// trapping cast: a malformed huge value reads as absent-of-a-valid-pid
     /// (dead) rather than crashing the acquiring process.
     private func readExistingPid() -> pid_t? {
-        guard let data = try? Data(contentsOf: lockFile),
-            let json = try? JSON.parse(data),
-            let pid = json["pid"].asInt
+        guard let text = try? String(contentsOf: lockFile, encoding: .utf8),
+            case .object(let doc)? = try? YamlIO.load(text),
+            let pid = doc["pid"]?.asInt
         else {
             return nil
         }

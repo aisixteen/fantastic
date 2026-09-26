@@ -23,6 +23,7 @@ import FantasticAnthropicBackend
 import FantasticLlamaCppBackend
 import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
+import FantasticRamStore
 import FantasticScheduler
 import FantasticStaticLoader
 
@@ -66,6 +67,9 @@ public func defaultBundleRegistry() -> BundleRegistry {
         r.registerUnlisted(ORACLE_MODULE, OracleProbe())
     #endif
     r.register("text_file.tools", TextFileBundle())
+    // THE MEMORY STORE in RAM — what the root's `memory_store_id` and every AI
+    // agent's name (python `memory/ram_store`).
+    r.register(RamStoreBundle.handlerModule, RamStoreBundle())
     // The render sink the AI backends stream their output to (python `cli`).
     r.register(CliBundle.handlerModule, CliBundle())
     r.register("scheduler.tools", SchedulerBundle())
@@ -129,7 +133,7 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
 }
 
 /// Boot a disk-backed kernel that hydrates from
-/// `<workdir>/.fantastic/agents/<id>/agent.json` files written by
+/// `<workdir>/.fantastic/agents/<id>/agent.yaml` files written by
 /// any Fantastic implementation (Python is canonical; Swift writes
 /// the same shape via `Persistence.persist`).
 ///
@@ -159,19 +163,16 @@ public func startKernel(
     let dotFantastic = url.appendingPathComponent(".fantastic")
     try? fm.createDirectory(at: dotFantastic, withIntermediateDirectories: true)
     // THE ROOT RECORD, or a fresh seed. Python's `read_tree` returns `[]` when
-    // `.fantastic/agent.json` is MISSING **or not JSON**, and `_bootstrap` then
+    // `.fantastic/agent.yaml` is MISSING **or not a YAML mapping**, and `_bootstrap` then
     // seeds a fresh root, overwrites the file, and hydrates NO CHILDREN on that
     // boot — a tree whose root is unreadable has no walk to start from. A corrupt
     // root used to be overwritten here while the children were hydrated anyway.
-    let rootRecordFile = dotFantastic.appendingPathComponent("agent.json")
+    let rootRecordFile = dotFantastic.appendingPathComponent(RECORD_FILE)
     var rootId = ROOT_ID
     var rootHandler: String? = ROOT_HANDLER_MODULE
     var rootMeta: OrderedDictionary<String, JSON> = [:]
     var seeded = true
-    if let data = try? Data(contentsOf: rootRecordFile),
-        let parsed = try? JSON.parse(data),
-        case .object(let obj) = parsed
-    {
+    if let obj = Persistence.readRecord(rootRecordFile) {
         seeded = false
         // A PERSISTED RECORD IS AUTHORITATIVE, id and handler_module included —
         // the tree on disk says what its root is called and what answers for it.
@@ -203,7 +204,7 @@ public func startKernel(
     // order (`can_call, callable_by`), and the loader's `boot` appends `guid`
     // after them. COLD primitive — it runs before any provider exists.
     if seeded {
-        try? Data(JSON.object(root.record().ordered).serializePretty(indent: 2).utf8)
+        try? Persistence.recordBytes(root.record().ordered)
             .write(to: rootRecordFile, options: .atomic)
         // ONLY ON THE SEED, as python does: `_bootstrap` calls `write_record`
         // (which is what seeds `readme.md` + the keyed `docs/` tree) under `if
@@ -217,14 +218,14 @@ public func startKernel(
     }
 
     // Hydrate persisted children. Reads every
-    // <workdir>/.fantastic/agents/<id>/agent.json into an AgentRecord, wraps them
+    // <workdir>/.fantastic/agents/<id>/agent.yaml into an AgentRecord, wraps them
     // in a KernelState, and calls `kernel.load(_:)`, which already implements
     // weak-load — agents whose handler_module isn't in the current bundle
     // registry are skipped silently. A RESEEDED ROOT KEEPS ITS CHILDREN (python
     // `read_tree`, 2026-09-20): the walk runs whether or not the root parsed.
     var records = Persistence.readTree(rootDir: dotFantastic, fallbackRootId: rootId)
     if !records.isEmpty {
-        // `readTree` yields the root record first when `.fantastic/agent.json`
+        // `readTree` yields the root record first when `.fantastic/agent.yaml`
         // parsed; a reseeded root is not on disk as a record it yields, so the
         // one `parent_id == nil` entry `kernel.load` requires is prepended
         // (python `main.py`, 2026-09-20).

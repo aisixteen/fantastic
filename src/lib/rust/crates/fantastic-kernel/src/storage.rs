@@ -8,7 +8,7 @@
 //!   `<workdir>/.fantastic/state.json` (atomic write via tmp+rename).
 //!   On boot, [`crate::bootstrap::bootstrap`] reads `state.json` if
 //!   present; otherwise it starts virgin and writes on first
-//!   mutation. The workdir lock (`lock.json`) lives in the same
+//!   mutation. The workdir lock (`lock.yaml`) lives in the same
 //!   `.fantastic/` directory.
 //! - [`StorageMode::InMemory`] — no filesystem I/O ever. The
 //!   consumer extracts a snapshot on demand via

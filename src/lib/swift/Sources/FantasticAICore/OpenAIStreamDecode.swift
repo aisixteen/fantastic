@@ -60,3 +60,37 @@ public func decodeOpenAISSELine(_ line: String, wrap: inout ThinkingWrap) -> Ope
     tokens += wrap.content(delta["content"].asString ?? "")
     return OpenAIDecoded(tokens: tokens, done: false)
 }
+
+/// What ONE `data:` line REPORTS about the pass, beside its text: the prompt
+/// size the endpoint counted (`usage.prompt_tokens`, on the last chunk when the
+/// request asked `stream_options.include_usage`) and why the stream ended
+/// (`choices[0].finish_reason`, `length` → `max_tokens`). `nil` fields: not on
+/// this line. Python `NvidiaNimProvider.chat` / `LlamaCppProvider.chat`.
+public func openAIReport(_ line: String) -> (promptTokens: Int?, stopReason: String?) {
+    guard line.hasPrefix("data:") else { return (nil, nil) }
+    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !payload.isEmpty, payload != "[DONE]", let data = payload.data(using: .utf8),
+        let parsed = try? JSON.parse(data)
+    else { return (nil, nil) }
+    var tokens: Int? = nil
+    if case .object = parsed["usage"], pyTruthy(parsed["usage"]["prompt_tokens"]),
+        let n = parsed["usage"]["prompt_tokens"].asInt
+    {
+        tokens = Int(n)
+    }
+    var stop: String? = nil
+    if let choices = parsed["choices"].asArray, !choices.isEmpty,
+        pyTruthy(choices[0]["finish_reason"])
+    {
+        let fr = pyStr(choices[0]["finish_reason"])
+        stop = fr == "length" ? "max_tokens" : fr
+    }
+    return (tokens, stop)
+}
+
+/// Record what a line reported onto the provider's usage report.
+public func recordOpenAIReport(_ line: String, into usage: AIUsage) {
+    let (tokens, stop) = openAIReport(line)
+    if let tokens { usage.lastPromptTokens = tokens }
+    if let stop { usage.lastStopReason = stop }
+}

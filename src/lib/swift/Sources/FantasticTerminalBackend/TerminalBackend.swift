@@ -120,7 +120,11 @@
                 let maxBytes = try pyInt(
                     payload.asObject?["max_bytes"] ?? .integer(Int64(MAX_SCROLLBACK)))
                 let text = sessionFor(agent.id)?.scrollbackText() ?? ""
-                return .object(["output": .string(pySliceTail(text, maxBytes))])
+                return .object([
+                    "output": .string(pySliceTail(text, maxBytes)),
+                    // HOW TO GET THIS AGAIN — python `_output`'s `origin`.
+                    "origin": .string("\(agent.id.value) output — the scrollback NOW; re-send, it moves"),
+                ])
             case "restart":
                 cleanup(agentId: agent.id)
                 try spawn(agent: agent, kernel: kernel)

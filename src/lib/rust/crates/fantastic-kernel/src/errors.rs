@@ -30,14 +30,13 @@ pub enum KernelError {
         source: std::io::Error,
     },
 
-    /// `agent.json` exists but doesn't parse as JSON.
-    #[error("corrupt agent.json at {path}: {source}")]
+    /// `agent.yaml` exists but doesn't parse as a YAML mapping.
+    #[error("corrupt agent.yaml at {path}: {reason}")]
     CorruptRecord {
         /// The file we tried to read.
         path: PathBuf,
-        /// Underlying JSON cause.
-        #[source]
-        source: serde_json::Error,
+        /// What the parse said.
+        reason: String,
     },
 
     /// Another daemon holds the lock file in this workdir.
@@ -48,14 +47,14 @@ pub enum KernelError {
     /// NOT through the generic `fantastic_kernel: {e}` wrapper every other
     /// error takes.
     #[error(
-        "another fantastic owns this dir: pid={pid}\n  -> kill it:  kill {pid}\n  -> or, if stale, remove the lock:  rm .fantastic/lock.json"
+        "another fantastic owns this dir: pid={pid}\n  -> kill it:  kill {pid}\n  -> or, if stale, remove the lock:  rm .fantastic/lock.yaml"
     )]
     LockHeld {
         /// PID of the owning daemon.
         pid: u32,
     },
 
-    /// Reading or writing `.fantastic/lock.json` failed.
+    /// Reading or writing `.fantastic/lock.yaml` failed.
     #[error("lock file at {path}: {source}")]
     LockIo {
         /// The lock file path.

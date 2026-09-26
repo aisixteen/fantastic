@@ -38,14 +38,12 @@ pub const DEFAULT_INBOX_BOUND: usize = 256;
 /// [`crate::inbox::InboxItem`]. `None` for every event with no bytes.
 pub type StateSubscriber = Arc<dyn Fn(&Value, Option<&(String, Vec<u8>)>) + Send + Sync>;
 
-/// The registry of state taps, SHARED. The kernel publishes through it — and so
-/// does the ROW STORE: an append is a state event (`kind: "row"`), and
-/// [`crate::rows::RowStore::put`] is the one choke point every append passes
-/// through, exactly as python's `Kernel.rows_put` is.
+/// The registry of state taps. Agent lifecycle + traffic telemetry only:
+/// conversation rows are NOT on it — the kernel holds none; an AI agent announces
+/// its own rows to its watchers (`watch`, gated by that agent).
 pub(crate) type StateSubs = RwLock<Vec<(SubscriberToken, StateSubscriber)>>;
 
-/// [`Kernel::publish_state_with_body`]'s body, against a bare registry so a
-/// holder that is not the kernel (the row store) publishes the same way.
+/// [`Kernel::publish_state_with_body`]'s body, against the bare registry.
 ///
 /// `ts` is stamped HERE and LAST (python `{**event, "ts": time.time()}`), so
 /// every event carries the moment it was published and no caller has to
@@ -141,7 +139,7 @@ pub struct Kernel {
     /// [`Self::save`] / [`Self::load`] for the on-demand API both
     /// modes share.
     pub storage: StorageMode,
-    /// Graceful-shutdown signal. The root-only `shutdown_kernel` verb
+    /// Graceful-shutdown signal. The root-only `kernel_stop` verb
     /// calls [`Self::request_shutdown`] AFTER returning its ack; the CLI
     /// daemon awaits [`Self::shutdown_requested`] alongside SIGINT/SIGTERM
     /// and runs the SAME drain + lock-release + `exit 0` path. Lets an
@@ -165,17 +163,22 @@ pub struct Kernel {
     /// subtree. See [`crate::tasks`].
     pub tasks: TaskTable,
 
-    /// EVERY execution and what it became — named (a caller's dedup contract)
-    /// or unnamed (under its minted pid). Session lifetime, retention-ringed;
-    /// the DURABLE half is installed by the root loader, because the kernel
-    /// never touches disk itself.
+    /// THE EXECUTION LEDGER, process side — every execution still in RAM (in
+    /// flight, or settled and not yet flushed), named (a caller's dedup contract)
+    /// or unnamed (under its minted pid). Retention-ringed; the DURABLE half is
+    /// the `call` + `settle` rows the kernel flushes into its memory store.
     pub ledger: crate::ledger::Ledger,
-    /// THE MESSAGE STORE — every message the kernel ever made, id-addressed by
-    /// the one counter. Conversations, reply bodies, agent views and the
-    /// kernel's own `call`/`task` bookkeeping share one append-only table, so
-    /// one stream carries everything. Starts EMPTY, always: a hydrator fills it
-    /// from above and a persister tails it; the kernel never knows disk.
+    /// THE EXECUTION ROWS — `call`, `settle`, `task`, `ack` rows the kernel minted
+    /// and has NOT YET FLUSHED to its memory store, plus the ONE COUNTER every id
+    /// comes from. The kernel keeps NO conversation.
     pub rows: crate::rows::RowStore,
+    /// The kernel's memory store: which one (`kernel_start`), the flusher, the
+    /// flush bookkeeping. See [`crate::executions`].
+    pub(crate) exec: crate::executions::ExecState,
+    /// Per-KERNEL state a bundle keeps ON the kernel's context, by key — python's
+    /// `ctx._ai_memory` attribute: two kernels in one process (tests, a
+    /// multi-kernel host) never share it. See [`Self::extension`].
+    extensions: DashMap<&'static str, Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// One bound for every agent's `shutdown` dispatch. Python
@@ -184,6 +187,9 @@ const SHUTDOWN_VERB_TIMEOUT: f64 = 30.0;
 /// How long in-flight work may take to settle before it is cancelled. Python
 /// `Kernel.QUIET_TIMEOUT`.
 const QUIET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a cancelled batch may take to record its ending. Python
+/// `Kernel.SETTLE_TIMEOUT`.
+const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Default for Kernel {
     fn default() -> Self {
@@ -216,15 +222,13 @@ impl Kernel {
     /// Empty kernel with both a [`StorageMode`] and a custom inbox
     /// bound — the underlying ctor every other variant funnels into.
     pub fn with_storage_and_inbox(storage: StorageMode, bound: usize) -> Self {
-        // ONE registry, two publishers: the kernel and the row store, which
-        // publishes the `row` event from inside its own append.
         let state_subscribers: Arc<StateSubs> = Arc::new(RwLock::new(Vec::new()));
         Self {
             agents: DashMap::new(),
             agent_order: RwLock::new(Vec::new()),
             well_known: DashMap::new(),
             inboxes: DashMap::new(),
-            state_subscribers: Arc::clone(&state_subscribers),
+            state_subscribers,
             next_subscriber: AtomicU64::new(1),
             bundles: BundleRegistry::new(),
             root: ArcSwapOption::const_empty(),
@@ -236,12 +240,58 @@ impl Kernel {
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             tasks: TaskTable::new(),
             ledger: crate::ledger::Ledger::default(),
-            rows: crate::rows::RowStore::with_state(state_subscribers),
+            rows: crate::rows::RowStore::new(),
+            exec: crate::executions::ExecState::default(),
+            extensions: DashMap::new(),
         }
     }
 
+    /// The bundle state kept ON this kernel under `key`, created on first use.
+    /// One kernel's value is never another kernel's, even in one process.
+    ///
+    /// # Panics
+    /// When `key` was first created with a different type — a programming error.
+    pub fn extension<T: Default + Send + Sync + 'static>(&self, key: &'static str) -> Arc<T> {
+        let any = self
+            .extensions
+            .entry(key)
+            .or_insert_with(|| Arc::new(T::default()) as Arc<dyn std::any::Any + Send + Sync>)
+            .clone();
+        any.downcast::<T>()
+            .unwrap_or_else(|_| panic!("kernel extension {key:?} holds another type"))
+    }
+
+    /// Patch an agent's meta — python `Agent.update(agent_id, **meta)`: the meta
+    /// is merged, and the `updated` state event (the CHANGED KEYS) is what drives
+    /// a loader to re-persist the record. No disk write here. `None` when no such
+    /// agent.
+    pub fn update(&self, id: &AgentId, patch: serde_json::Map<String, Value>) -> Option<crate::agent::AgentRecord> {
+        let agent = self.agents.get(id).map(|e| Arc::clone(&e))?;
+        let changed: Vec<Value> = patch.keys().map(|k| Value::String(k.clone())).collect();
+        let rec = agent.update_meta(patch);
+        let mut ev = serde_json::Map::new();
+        ev.insert("agent_id".to_string(), Value::String(id.0.clone()));
+        ev.insert("kind".to_string(), Value::String("updated".to_string()));
+        ev.insert("changed".to_string(), Value::Array(changed));
+        self.publish_state(&Value::Object(ev));
+        Some(rec)
+    }
+
+    /// THE COUNTER COMES BACK WITH THE GUID: the root record's reserved bound
+    /// (`next_id`) is where this run starts, and this run's first block is
+    /// reserved in memory. Never edits a record (save → load → save is
+    /// identical); `kernel_start` writes the bound, and a started kernel persists
+    /// every later block. Python `Kernel.load`'s tail.
+    pub fn restore_counter(&self, root_meta: &serde_json::Map<String, Value>) {
+        let nid = root_meta
+            .get("next_id")
+            .filter(|v| !v.is_boolean())
+            .and_then(Value::as_i64);
+        self.rows.restore_counter(nid);
+    }
+
     /// Signal the daemon serve loop to begin a graceful shutdown. Called
-    /// by the root-only `shutdown_kernel` verb AFTER it has produced its
+    /// by the root-only `kernel_stop` verb AFTER it has produced its
     /// ack reply, so the reply flushes over the web surface before the
     /// process exits. Idempotent — extra calls collapse to one shutdown
     /// (the serve loop awaits this once, then unwinds straight-line).
@@ -251,7 +301,7 @@ impl Kernel {
 
     /// Resolves once [`Self::request_shutdown`] has been called. The CLI
     /// daemon awaits this in its `tokio::select!` next to SIGINT/SIGTERM;
-    /// when it fires, the daemon drains agents, releases `lock.json`, and
+    /// when it fires, the daemon drains agents, releases `lock.yaml`, and
     /// returns `ExitCode::SUCCESS`.
     pub async fn shutdown_requested(&self) {
         self.shutdown.notified().await;
@@ -309,12 +359,18 @@ impl Kernel {
             .and_then(|hm| self.bundles.get(hm))
         {
             // Its writes are the kernel's own traffic (python wraps the hook in
-            // `shutdown_context()`): probed or written while draining, the
-            // store would answer "draining" — read as "no log" — and the header
-            // was never written.
+            // `shutdown_context()`): written while draining, the store would
+            // answer "draining" and the last records would never land.
             if let Err(e) = crate::send::with_shutdown(bundle.flush_pending(&root.id, self)).await {
                 eprintln!("  [shutdown] flush_pending raised: {e}");
             }
+        }
+        if self.started() {
+            // THE LAST EXECUTION ROWS, while the store is still alive: everything
+            // settled by the drain (done, or cancelled into the dead letters)
+            // lands.
+            let _ = crate::send::with_shutdown(self.flush_executions()).await;
+            self.stop_flusher().await;
         }
         self.shutdown_walk(&root).await;
     }
@@ -394,7 +450,7 @@ impl Kernel {
     ///    so `on_cancel` hooks run and subtrees die with their roots.
     ///
     /// Idempotent: a second call answers the same shape and shuts nothing new.
-    /// The kernel keeps serving afterwards — reads, `messages`, the persister —
+    /// The kernel keeps serving afterwards — reads, `ledger`, the flusher —
     /// until the process exits.
     ///
     /// WHO GETS TOLD is python's `advertises("shutdown")`: does this agent's
@@ -458,10 +514,25 @@ impl Kernel {
             if !self.tasks.is_root(&tid) {
                 continue;
             }
-            let out = self.cancel_task(&tid).await;
+            let out = crate::send::with_operator(self.cancel_task(&tid)).await;
             if let Some(killed) = out.get("killed").and_then(Value::as_array) {
                 cancelled.extend(killed.iter().cloned());
             }
+        }
+        // EVERY CALL SETTLES before this returns. A killed dispatch's batch records
+        // its `cancelled` outcome (and its settle row) a few turns after the abort;
+        // the stop that follows flushes the last rows, so it must not start before
+        // those endings exist. Bounded: a batch that never settles is not waited
+        // on forever.
+        let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+        while std::time::Instant::now() < deadline
+            && self
+                .ledger
+                .unsettled()
+                .iter()
+                .any(|eid| !self.tasks.contains(&crate::tasks::TaskId(*eid)))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         json!({"drained": true, "shut": shut, "cancelled": cancelled})
     }
@@ -615,60 +686,6 @@ impl Kernel {
             .expect("state subs poisoned")
             .push((token, cb));
         token
-    }
-
-    /// [`Self::add_state_subscriber`] on behalf of a READER — a leg subscribing
-    /// for a client, after `authorize_state_subscribe`.
-    ///
-    /// `row` events are then delivered only for agents that reader may read
-    /// ([`Self::may_read_rows`]): the stream cannot leak a digest the `messages`
-    /// verb would refuse. Every other kind passes through unchanged, and an
-    /// operator tap ([`Self::add_state_subscriber`]) sees everything.
-    ///
-    /// `body` (after [`Self::authorize_row_bodies`] for that reader) adds the
-    /// stored row's `content` to every `row` event, looked up by id at publish
-    /// time, so a view that renders every row skips the pull round-trip. A
-    /// `rows_read` holder reads every row whole already, so NO per-row filter
-    /// applies to it.
-    ///
-    /// WEAK, not strong: the registry lives inside the kernel, so a gating
-    /// closure holding an `Arc<Kernel>` would keep the kernel alive forever.
-    pub fn add_state_subscriber_for(
-        self: &Arc<Self>,
-        cb: StateSubscriber,
-        reader: AgentId,
-        body: bool,
-    ) -> SubscriberToken {
-        let weak = Arc::downgrade(self);
-        self.add_state_subscriber(Arc::new(move |event: &Value, raw| {
-            if event.get("kind").and_then(Value::as_str) == Some("row") {
-                let Some(kernel) = weak.upgrade() else {
-                    return;
-                };
-                if body {
-                    let content = event
-                        .get("row")
-                        .and_then(|r| r.get("id"))
-                        .and_then(Value::as_i64)
-                        .and_then(|id| kernel.rows.get_one(id))
-                        .and_then(|row| row.get("content").cloned())
-                        .unwrap_or_else(|| Value::from(""));
-                    let mut event = event.clone();
-                    if let Some(row) = event.get_mut("row").and_then(Value::as_object_mut) {
-                        // LAST, as python's `{**row, "content": …}` — a view
-                        // diffs these bytes.
-                        row.insert("content".to_string(), content);
-                    }
-                    cb(&event, raw);
-                    return;
-                }
-                let owner = event.get("agent_id").and_then(Value::as_str).unwrap_or("");
-                if !kernel.may_read_rows(Some(&reader), owner) {
-                    return;
-                }
-            }
-            cb(event, raw);
-        }))
     }
 
     /// Detach a previously-registered subscriber. No-op if `token`
@@ -984,6 +1001,9 @@ impl Kernel {
                 "could not resolve {} agents during load (cycle?)",
                 pending.len()
             )));
+        }
+        if let Some(root) = state.agents.iter().find(|r| r.parent_id.is_none()) {
+            self.restore_counter(&root.meta);
         }
 
         Ok(())

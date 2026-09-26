@@ -100,31 +100,18 @@ func deliverTurn(
     systemPrompt: String?,
     born: Int? = nil
 ) async {
-    if let born, AIIncarnation.of(kernel, target) != born {
-        // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real
-        // data, in the ledger and in the store — but it does not wake a turn: the
-        // agent that made the call is gone, and the one that replaced it is on
-        // other work. Python `_deliver`.
-        let rid = kernel.rows.mintId()
-        appendRows(
-            AgentId(target), kernel: kernel,
-            [
-                .object([
-                    "role": .string("user"),
-                    "id": .integer(rid),
-                    "parent": .null,
-                    "kind": .string("late"),
-                    "content": .string(
-                        "[late reply — answered a call made before this agent last "
-                            + "booted; recorded, not acted on]\n" + text),
-                ])
-            ])
-        return
-    }
     var payload: OrderedDictionary<String, JSON> = [:]
     payload["type"] = .string("send")
     payload["text"] = .string(text)
     payload["client_id"] = .string(clientId)
+    if let born, AIIncarnation.of(kernel, target) != born {
+        // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real
+        // data — but it does not wake a turn: the agent that made the call is
+        // gone, and the one that replaced it is on other work. The TARGET writes
+        // it (a store keys every row by its writer), so it rides a `send` marked
+        // `late`. Python `_deliver`.
+        payload["late"] = .bool(true)
+    }
     if let systemPrompt = systemPrompt {
         payload["system_prompt"] = .string(systemPrompt)
     }
@@ -164,6 +151,24 @@ func deliverTurn(
             kernel: kernel, agentId: AgentId(target), clientId: clientId, phase: "done",
             detail: [("reason", .string("error")), ("error", why)])
     }
+}
+
+/// How to get a reply's body again, in ONE line: the replying agent's own
+/// `origin` when it wrote one (a text_file read names path, range and version);
+/// otherwise the call that produced it — re-sending it may not give the same
+/// bytes, and the line says so. Python `_origin_line`.
+func originLine(_ result: JSON, target: String, verb: String, payload: JSON) -> String {
+    if case .string(let o) = result["origin"], !pyStrip(o).isEmpty {
+        let flat = pySplitWhitespace(o).joined(separator: " ")
+        return String(String.UnicodeScalarView(flat.unicodeScalars.prefix(300)))
+    }
+    var args: OrderedDictionary<String, JSON> = [:]
+    for (k, v) in payload.asObject ?? [:] where !["type", "client_id", "_call_stack"].contains(k) {
+        args[k] = v
+    }
+    let dumped = pyJsonDumps(.object(args), ensureAscii: false)
+    let shown = String(String.UnicodeScalarView(dumped.unicodeScalars.prefix(200)))
+    return "\(target) \(verb) \(shown) — re-send it; the output may differ"
 }
 
 /// Hand `text` to `target` as a fresh turn, stamped with the incarnation the
@@ -555,6 +560,20 @@ func routeReply(
     if hadItems { await inFlightTurns.bump(selfId.value, 1) }
     let outcomes = items.isEmpty ? [] : await kernel.send(items)
     if hadItems { await inFlightTurns.bump(selfId.value, -1) }
+    // THE GRANTS CACHE IS WRITE-THROUGH: a share/unshare this turn made on its
+    // own store changes who may read row bodies — reload before the next row
+    // event. A store that fails the reload leaves the cache empty: the next body
+    // event simply carries none — no grant is assumed. Python `_route_reply`.
+    let myStore = kernel.agent(selfId)?.metaValue(forKey: "memory_store_id")
+    if let myStore,
+        items.contains(where: {
+            JSON.string($0.target.value) == myStore
+                && ["share", "unshare"].contains($0.payload["type"].asString ?? "")
+        })
+    {
+        forgetGrants(selfId.value, kernel)
+        _ = try? await myGrants(selfId.value, kernel)
+    }
 
     // The result — INCLUDING an error — goes back. A call that failed silently is
     // the one thing a model can never debug.
@@ -568,7 +587,6 @@ func routeReply(
     // A bare test kernel has no record: python reads `{}` there and `context_async`
     // is simply off.
     let me = kernel.agent(selfId)
-    let asyncOn = pyTruthy(me?.metaValue(forKey: "context_async") ?? .null)
     let cap = me.map(AIContext.inlineCap) ?? 0
     var blocks: [RouteBlock] = []
     for u in units {
@@ -584,26 +602,30 @@ func routeReply(
             // Only reflect bodies are dropped later, so only they carry the
             // distillation notice.
             if u.verb == "reflect" { body += REFLECT_NUDGE }
-            // FULL ASYNC. A reply is DATA, not a question — the model needs to be
-            // able to see it, not forced to swallow it whole as its next turn.
-            // Anything over the inline cap is stored under its pid and replaced
-            // by its digest; the model pulls pages when it wants them. This is
-            // what makes an unbounded reply (a 240KB ledger dump) non-fatal: it
-            // becomes a row to page, never a turn to fit. Measured AFTER the
+            // A reply is DATA, not a question — the model needs to be able to see
+            // it, not forced to swallow it whole as its next turn. Anything over
+            // the inline cap is held in RAM under its pid and replaced by its
+            // digest; this is what makes an unbounded reply (a 240KB ledger dump)
+            // non-fatal. SYNC OR ASYNC ALIKE (decided 2026-09-26): a body is never
+            // persisted. Over the inline cap it waits in RAM and the stored turn
+            // carries its origin line; under it, it is inline. Measured AFTER the
             // nudge rode on, exactly where python counts it.
-            if asyncOn, let p = outcome.pid,
+            if let p = outcome.pid,
                 AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)])) > cap
             {
                 // `len(body)` — code points, as python counts a str.
                 let size = body.unicodeScalars.count
-                if (try? kernel.rows.bodyPut(selfId, pid: p.value, text: body)) != nil {
-                    // THE STUB NAMES GREP FIRST. It used to offer only `pull`, and a
-                    // model hunting one line paged 16 bodies (measured 2026-09-06,
-                    // python recall_after_fold: 24 pulls, 0 greps, marker not found).
+                if storeReply(selfId.value, kernel, pid: p.value, body: body) {
+                    // THE STUB IS THE ORIGIN. The body is held in RAM for this
+                    // incarnation only and never persisted; what survives is the
+                    // one line saying how to get it again — the reply's own
+                    // `origin` when its agent wrote one, else the call itself.
                     body =
-                        "(settled, \(size) bytes \u{2014} NOT inlined. To find a line in it: "
-                        + "send yourself <type>grep</type> <query>substring</query> <ids><item>\(p.value)</item></ids>. "
-                        + "To read it: <type>pull</type> <pid>\(p.value)</pid> <offset>0</offset>)"
+                        "(settled, \(size) bytes \u{2014} NOT inlined, held in memory only "
+                        + "until this agent restarts. origin: "
+                        + originLine(outcome.result, target: u.target, verb: u.verb, payload: items[i].payload)
+                        + ". To find a line in it: send yourself <type>grep</type> "
+                        + "<query>substring</query> <ids><item>\(p.value)</item></ids>)"
                 }
             }
         }

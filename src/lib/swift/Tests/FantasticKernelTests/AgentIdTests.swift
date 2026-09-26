@@ -19,7 +19,7 @@ struct AgentIdTests {
             ("noop", "noop"),
             ("a.", "a"),
         ] {
-            let id = mintId(module)
+            let id = mintAgentId(module)
             #expect(id.hasPrefix(prefix + "_"), "\(module) → \(id)")
             let hex = id.dropFirst(prefix.count + 1)
             #expect(hex.count == 6)

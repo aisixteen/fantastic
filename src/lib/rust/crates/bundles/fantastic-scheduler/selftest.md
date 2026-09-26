@@ -40,7 +40,7 @@ $FANTASTIC kernel_state update_agent id=$SC file_agent_id=$FA
 SCH=$($FANTASTIC $SC schedule target=core payload='{"type":"reflect"}' interval_seconds=60 \
   | jq -r .schedule_id)
 $FANTASTIC $SC list | jq -e --arg s "$SCH" '[.schedules[].id] | contains([$s])'
-test -f /tmp/sc_test/.fantastic/agents/$SC/schedules.json && echo "OK persisted via file agent"
+test -f /tmp/sc_test/.fantastic/agents/$SC/schedules.yaml && echo "OK persisted via file agent"
 ```
 
 Expect: `OK persisted via file agent`; the file routes through the file agent.
@@ -50,8 +50,8 @@ Expect: `OK persisted via file agent`; the file routes through the file agent.
 ```bash
 $FANTASTIC $SC tick_now schedule_id=$SCH | jq -e '.fired == true'
 $FANTASTIC $SC history limit=10 | jq -e '.count >= 1 and (.history[-1].schedule_id == $SCH)' --arg SCH "$SCH"
-test -f /tmp/sc_test/.fantastic/agents/$SC/history.jsonl && grep -q "schedule_fired" \
-  /tmp/sc_test/.fantastic/agents/$SC/history.jsonl
+test -f /tmp/sc_test/.fantastic/agents/$SC/schedule_events.yaml && grep -q "schedule_fired" \
+  /tmp/sc_test/.fantastic/agents/$SC/schedule_events.yaml
 ```
 
 ### Test 4: pause + resume toggle, then unschedule removes

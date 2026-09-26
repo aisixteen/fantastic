@@ -852,7 +852,10 @@ async fn a_child_that_exits_drops_the_state() {
     assert_eq!(refl["scrollback_bytes"], json!(0));
     assert_eq!(
         call(&kernel, &term, json!({"type": "output"})).await,
-        json!({"output": ""})
+        json!({
+            "output": "",
+            "origin": format!("{term} output — the scrollback NOW; re-send, it moves"),
+        })
     );
     assert_eq!(
         call(&kernel, &term, json!({"type": "write", "data": "x"})).await,
@@ -957,9 +960,7 @@ async fn pty_reader_rows_follow_python_holder_lifecycle() {
         "the holder ends with the attachment"
     );
     // C36 — one `task` row per attach, and every live pid in `ps` is one of them.
-    let store: Vec<_> = kernel
-        .rows
-        .for_agent(&term)
+    let store: Vec<_> = fantastic_kernel::test_support::rows_about(&kernel, &term)
         .into_iter()
         .filter(|r| {
             r.get("kind") == Some(&json!("task")) && r.get("verb") == Some(&json!("pty_reader"))

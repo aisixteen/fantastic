@@ -383,7 +383,8 @@ async fn dispatch_binary(
         .get("timeout")
         .and_then(Value::as_f64)
         .unwrap_or(DEFAULT_FORWARD_TIMEOUT_SECS);
-    let (v, body) = forward_core(agent_id, &target, inner, blob, true, timeout_secs).await;
+    let (v, body) =
+        forward_core(kernel, agent_id, &target, inner, blob, true, timeout_secs).await;
     Ok((Some(v), body))
 }
 
@@ -915,11 +916,10 @@ async fn forward_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
         .get("timeout")
         .and_then(Value::as_f64)
         .unwrap_or(DEFAULT_FORWARD_TIMEOUT_SECS);
-    let _ = kernel; // peer_id no longer wraps the frame (asymmetric raw call)
-                    // TEXT forward — no request body; the reply body (if any) is dropped here
-                    // because the text channel can't carry it (a binary forward uses
-                    // `handle_binary`, which preserves the reply body).
-    forward_core(agent_id, target, inner, Vec::new(), false, timeout_secs)
+    // TEXT forward — no request body; the reply body (if any) is dropped here
+    // because the text channel can't carry it (a binary forward uses
+    // `handle_binary`, which preserves the reply body).
+    forward_core(kernel, agent_id, target, inner, Vec::new(), false, timeout_secs)
         .await
         .0
 }
@@ -930,6 +930,7 @@ async fn forward_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
 /// `Some(chunk)` when it answered a binary one — empty chunk included (C37).
 /// Errors surface as `{error}` in the reply.
 async fn forward_core(
+    kernel: &Arc<Kernel>,
     agent_id: &AgentId,
     target: &str,
     inner: Value,
@@ -977,6 +978,12 @@ async fn forward_core(
         "target": target,
         "payload": inner,
     });
+    // WHO IS CALLING, QUALIFIED: `<this kernel's guid>|<the agent that asked>`
+    // (`kernel` for the operator). The far side keys store rows by it.
+    if let Some(guid) = local_guid(kernel) {
+        let who = fantastic_kernel::current_origin().map_or_else(|| "kernel".to_string(), |o| o.0);
+        frame["caller"] = json!(format!("{guid}|{who}"));
+    }
     // Stamp this leg's EGRESS credential on the envelope, if its rule presents one
     // (password ⇒ the group token; silent ⇒ None ⇒ no field, wire unchanged). The
     // dispatched `payload` stays clean — the target never sees the token.
@@ -1119,17 +1126,34 @@ async fn serve_inbound_call(
         // the `auth_token` rides the frame envelope, not the payload
         token: frame.get("auth_token").and_then(Value::as_str),
     });
+    // THE QUALIFIED CALLER, checked on INGRESS before the kernel sees it.
+    let caller = frame.get("caller").cloned().filter(|c| !c.is_null());
+    let bad_caller = check_caller(&kernel, caller.as_ref());
+    let leg = fantastic_kernel::current_sender().unwrap_or_else(|| AgentId::from(""));
     if let Decision::Deny(denial) = decision {
         let _ = state
             .transport
             .send_frame(json!({"type":"reply","id":corr_id,"data":deny_reply(&denial)}))
             .await;
+    } else if let Some(bad) = bad_caller {
+        let _ = state
+            .transport
+            .send_frame(json!({"type":"reply","id":corr_id,"data":bad}))
+            .await;
     } else if is_binary {
         // Binary call — the body is the request chunk. Dispatch on the binary
         // channel; the reply may carry a body (read_stream).
-        let (data, reply_body) = kernel
-            .send_with_binary(&AgentId::from(target.as_str()), inner, body)
-            .await;
+        let target_id = AgentId::from(target.as_str());
+        let send = kernel.send_with_binary(&target_id, inner, body);
+        let (data, reply_body) = match caller.as_ref().and_then(Value::as_str) {
+            // THE QUALIFIED CALLER rides into the dispatch: a memory store keys
+            // what this call writes by `<remote guid>|<remote agent>`, not by
+            // this leg.
+            Some(c) if !c.is_empty() => {
+                fantastic_kernel::with_remote_caller(leg.clone(), c.to_string(), send).await
+            }
+            _ => send.await,
+        };
         match reply_body {
             None => {
                 let _ = state
@@ -1149,20 +1173,69 @@ async fn serve_inbound_call(
         // NAMES the execution, so a reconnect that replays its queue joins the
         // original instead of running the side effect twice. No second `exec_id`
         // field exists.
-        let reply = kernel
-            .send(vec![Item::from_frame(
-                AgentId::from(target.as_str()),
-                inner,
-                corr_id.as_str(),
-            )])
-            .await
-            .remove(0)
-            .result;
+        let send = kernel.send(vec![Item::from_frame(
+            AgentId::from(target.as_str()),
+            inner,
+            corr_id.as_str(),
+        )]);
+        let reply = match caller.as_ref().and_then(Value::as_str) {
+            // THE QUALIFIED CALLER rides into the dispatch: a memory store keys
+            // what this call writes by `<remote guid>|<remote agent>`, not by
+            // this leg.
+            Some(c) if !c.is_empty() => {
+                fantastic_kernel::with_remote_caller(leg.clone(), c.to_string(), send).await
+            }
+            _ => send.await,
+        }
+        .remove(0)
+        .result;
         let _ = state
             .transport
             .send_frame(json!({"type":"reply","id":corr_id,"data":reply}))
             .await;
     }
+}
+
+/// This kernel's instance guid — the root record's `guid`, once the root loader
+/// minted it.
+fn local_guid(kernel: &Arc<Kernel>) -> Option<String> {
+    kernel.root().and_then(|r| {
+        r.meta
+            .read()
+            .ok()
+            .and_then(|m| m.get("guid").and_then(Value::as_str).map(str::to_string))
+            .filter(|g| !g.is_empty())
+    })
+}
+
+/// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it: it
+/// must read `<guid>|<agent id>`, and the guid must NOT be this kernel's own — a
+/// remote cannot pose as a local agent. (A remote naming some THIRD kernel's guid
+/// is not detectable here; accepted.) `None` = no claim, or a good one. Python
+/// `io_bridge._engine._check_caller`.
+pub fn check_caller(kernel: &Arc<Kernel>, caller: Option<&Value>) -> Option<Value> {
+    let caller = caller?;
+    let well_formed = caller.as_str().is_some_and(|c| {
+        let parts: Vec<&str> = c.split('|').collect();
+        parts.len() == 2 && parts.iter().all(|p| !p.is_empty())
+    });
+    if !well_formed {
+        return Some(json!({
+            "error": format!(
+                "bridge: frame caller {} is not `<guid>|<agent id>`",
+                fantastic_bundle::py_repr_value(caller)
+            ),
+            "reason": "unauthorized",
+        }));
+    }
+    let guid = caller.as_str().and_then(|c| c.split('|').next());
+    if guid.is_some() && guid.map(str::to_string) == local_guid(kernel) {
+        return Some(json!({
+            "error": "bridge: a remote frame claims THIS kernel's guid as its caller — refused",
+            "reason": "unauthorized",
+        }));
+    }
+    None
 }
 
 async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kernel>) {
@@ -1293,7 +1366,7 @@ fn take_injected(agent_id: &AgentId) -> Option<Arc<dyn BridgeTransport>> {
 /// injection table.
 ///
 /// Test-only helper; real WS / HTTP bridges build their transport
-/// from agent.json fields at boot time.
+/// from agent.yaml fields at boot time.
 pub fn inject_pair(a_id: &AgentId, b_id: &AgentId) {
     let (a, b) = MemoryTransport::pair();
     let mut map = injected_map();

@@ -10,7 +10,7 @@ frontend kernel served from `ts/dist` is what hydrates + renders them.
 Reflect that frontend over the bridge to discover its compositor root and
 view-agent kinds. The store holds ONE compositor root the frontend renders,
 seeded once at setup — `load_tree` and look for it. Panels are its children.
-(A child of a dir with no `agent.json` is unreachable, so the compositor root
+(A child of a dir with no `agent.yaml` is unreachable, so the compositor root
 record MUST exist before you parent to it — that's why setup seeds it.) Then
 persist a frontend view record (a `.ts` `handler_module`) parented to that
 root — e.g.:

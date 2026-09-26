@@ -37,8 +37,8 @@ struct RootGuidTests {
         // record carries it — with no store wired the writer keeps it in RAM,
         // which is the auto-flush law, not a gap.
         try Persistence.persist(agent: kernel.root!, storage: .disk(tmp))
-        let recFile = tmp.appendingPathComponent(".fantastic/agent.json")
-        let parsed = try JSON.parse(try Data(contentsOf: recFile))
+        let recFile = tmp.appendingPathComponent(".fantastic/agent.yaml")
+        let parsed = try YamlIO.load(String(decoding: try Data(contentsOf: recFile), as: UTF8.self))
         #expect(parsed["guid"].asString == guid)
     }
 
@@ -68,7 +68,7 @@ struct RootGuidTests {
         // Pre-seed a root record WITHOUT a guid (as an older impl would write).
         let dot = tmp.appendingPathComponent(".fantastic")
         try FileManager.default.createDirectory(at: dot, withIntermediateDirectories: true)
-        let recFile = dot.appendingPathComponent("agent.json")
+        let recFile = dot.appendingPathComponent("agent.yaml")
         let legacy: JSON = .object([
             "id": .string("kernel_state"), "handler_module": .string("kernel_state.tools"),
             "parent_id": .null,
@@ -83,7 +83,7 @@ struct RootGuidTests {
 
         // And it lands on disk for the next boot.
         try Persistence.persist(agent: kernel.root!, storage: .disk(tmp))
-        let reparsed = try JSON.parse(try Data(contentsOf: recFile))
+        let reparsed = try YamlIO.load(String(decoding: try Data(contentsOf: recFile), as: UTF8.self))
         #expect(reparsed["guid"].asString == guid)
     }
 
@@ -93,7 +93,7 @@ struct RootGuidTests {
 
         let dot = tmp.appendingPathComponent(".fantastic")
         try FileManager.default.createDirectory(at: dot, withIntermediateDirectories: true)
-        let recFile = dot.appendingPathComponent("agent.json")
+        let recFile = dot.appendingPathComponent("agent.yaml")
         let explicit = "deadbeefdeadbeefdeadbeefdeadbeef"
         let rec: JSON = .object([
             "id": .string("kernel_state"), "handler_module": .null, "parent_id": .null,

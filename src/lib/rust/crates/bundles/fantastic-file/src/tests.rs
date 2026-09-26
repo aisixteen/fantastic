@@ -5,6 +5,11 @@ use fantastic_kernel::{Agent, Item};
 use serde_json::json;
 
 /// A clamped root, as `handle` hands one to a verb.
+/// The agent a reply's `origin` names — any id will do for the pure helpers.
+fn fb() -> AgentId {
+    AgentId::from("fb")
+}
+
 fn at(root: &Path) -> Result<PathBuf, String> {
     Ok(fs::realpath(root))
 }
@@ -42,7 +47,7 @@ fn resolve_refuses_absolute_path() {
     let err = fs::resolve(tmp.path(), "/etc/passwd").unwrap_err();
     assert_eq!(err, "fs: path '/etc/passwd' escapes root");
     // The agent layer answers the same shape with `bad_arg` BEFORE reaching fs.
-    let r = read_stream_reply(&at(tmp.path()), &json!({"path": "/etc/passwd"}), true).0;
+    let r = read_stream_reply(&fb(), &at(tmp.path()), &json!({"path": "/etc/passwd"}), true).0;
     assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "path");
 }
@@ -72,7 +77,7 @@ fn write_stream_then_read_stream_round_trips_raw_bytes() {
     assert_eq!(w["size"], payload.len());
     assert!(w.get("error").is_none(), "{w}");
     // SOURCE: read it all back off the binary channel.
-    let (meta, body) = read_stream_reply(&root, &json!({"path": "blob.bin"}), false);
+    let (meta, body) = read_stream_reply(&fb(), &root, &json!({"path": "blob.bin"}), false);
     assert!(meta.get("error").is_none(), "{meta}");
     assert_eq!(
         body,
@@ -97,6 +102,7 @@ fn read_stream_chunks_with_offset_and_eof() {
     );
     // First 100 bytes.
     let (m1, b1) = read_stream_reply(
+        &fb(),
         &root,
         &json!({"path": "big.bin", "offset": 0, "length": 100}),
         false,
@@ -107,6 +113,7 @@ fn read_stream_chunks_with_offset_and_eof() {
     assert_eq!(m1["next_offset"], 100);
     // Resume from next_offset to the end.
     let (m2, b2) = read_stream_reply(
+        &fb(),
         &root,
         &json!({"path": "big.bin", "offset": 100, "length": 1000}),
         false,
@@ -132,7 +139,7 @@ fn write_stream_appends_when_offset_omitted() {
     let w = write_stream_reply(&root, &json!({"path": "a.bin"}), Some(b"BBBB"), false);
     assert_eq!(w["offset"], 4); // appended at end
     assert_eq!(w["size"], 8);
-    let (_m, body) = read_stream_reply(&root, &json!({"path": "a.bin"}), false);
+    let (_m, body) = read_stream_reply(&fb(), &root, &json!({"path": "a.bin"}), false);
     assert_eq!(body, Some(b"AAAABBBB".to_vec()));
 }
 
@@ -287,7 +294,7 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
         ("write_stream", json!({"path": "a.txt", "offset": -5})),
     ] {
         let r = if verb == "read_stream" {
-            read_stream_reply(&root, &header, true).0
+            read_stream_reply(&fb(), &root, &header, true).0
         } else {
             write_stream_reply(&root, &header, Some(b"z"), false)
         };
@@ -296,6 +303,7 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
     }
     // the legal shape still streams
     let (m, b) = read_stream_reply(
+        &fb(),
         &root,
         &json!({"path": "a.txt", "offset": 1, "length": 1}),
         false,
@@ -307,27 +315,33 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
 #[test]
 fn text_read_stream_reply_key_order() {
     // A2.6 — python's key order, measured: path, offset, bytes, next_offset,
-    // eof, size. The binary channel carries the chunk in the body instead.
+    // eof, size, origin (how to get these bytes again — what a caller's memory
+    // keeps instead of the body). The binary channel carries the chunk in the
+    // body instead.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = at(&served(&tmp));
     std::fs::write(served(&tmp).join("a.txt"), b"abc").unwrap();
-    let (m, _) = read_stream_reply(&root, &json!({"path": "a.txt"}), true);
+    let (m, _) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt"}), true);
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["path", "offset", "bytes", "next_offset", "eof", "size"]
+        ["path", "offset", "bytes", "next_offset", "eof", "size", "origin"]
     );
     assert_eq!(m["bytes"], "abc");
+    assert_eq!(
+        m["origin"],
+        "fb a.txt bytes 0-3 of 3 — read_stream {path: a.txt, offset: 0, length: 3}"
+    );
     // A11.9 — the BINARY channel keeps the same dict, `bytes` nulled IN PLACE:
     // python's codec lifts the value onto the wire and leaves a `null` behind,
     // so the two channels hand a reader the same shape. Omitting the key gave
     // the browser a different dict per channel, and the WS layer had nothing to
     // pick the frame kind from.
-    let (m, body) = read_stream_reply(&root, &json!({"path": "a.txt"}), false);
+    let (m, body) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt"}), false);
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["path", "offset", "bytes", "next_offset", "eof", "size"]
+        ["path", "offset", "bytes", "next_offset", "eof", "size", "origin"]
     );
     assert_eq!(m["bytes"], Value::Null);
     assert_eq!(body, Some(b"abc".to_vec()));
@@ -340,13 +354,14 @@ fn huge_length_reads_only_what_exists() {
     std::fs::write(served(&tmp).join("a.txt"), b"abc").unwrap();
     // 1 PB used to be `vec![0u8; length]` — an allocation abort of the kernel.
     let (m, b) = read_stream_reply(
+        &fb(),
         &root,
         &json!({"path": "a.txt", "length": 1_000_000_000_000_000u64}),
         false,
     );
     assert_eq!(b, Some(b"abc".to_vec()), "{m}");
     assert_eq!(m["eof"], true);
-    let (m, b) = read_stream_reply(&root, &json!({"path": "a.txt", "length": i64::MAX}), false);
+    let (m, b) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt", "length": i64::MAX}), false);
     assert_eq!(b, Some(b"abc".to_vec()), "{m}");
 }
 
@@ -360,11 +375,11 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     std::os::unix::fs::symlink(&outside, root.join("docs")).unwrap();
     let r = at(&root);
     // The lexical form is in-root; the canonical form is not.
-    let (m, b) = read_stream_reply(&r, &json!({"path": "docs/secret.txt"}), false);
+    let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "docs/secret.txt"}), false);
     assert_eq!(m["reason"], "transport_error", "{m}");
     assert_eq!(m["error"], "fs: path 'docs/secret.txt' escapes root");
     assert_eq!(b, None);
-    let l = list_reply(&r, &json!({"path": "docs"}), &[]);
+    let l = list_reply(&fb(), &r, &json!({"path": "docs"}), &[]);
     assert_eq!(l["reason"], "transport_error", "{l}");
     let w = write_stream_reply(&r, &json!({"path": "docs/new.txt"}), Some(b"x"), false);
     assert_eq!(w["reason"], "transport_error", "{w}");
@@ -372,7 +387,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     // An in-root symlink still serves.
     std::fs::write(root.join("real.txt"), b"r").unwrap();
     std::os::unix::fs::symlink(root.join("real.txt"), root.join("alias.txt")).unwrap();
-    let (m, b) = read_stream_reply(&r, &json!({"path": "alias.txt"}), false);
+    let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "alias.txt"}), false);
     assert!(m.get("error").is_none(), "{m}");
     assert_eq!(b, Some(b"r".to_vec()));
 }
@@ -392,7 +407,7 @@ fn dangling_symlink_pointing_outside_root_refuses() {
     assert_eq!(w["reason"], "transport_error", "{w}");
     assert_eq!(w["error"], "fs: path 'dangling' escapes root");
     assert!(!outside.join("gone.txt").exists());
-    let (m, _) = read_stream_reply(&r, &json!({"path": "dangling"}), false);
+    let (m, _) = read_stream_reply(&fb(), &r, &json!({"path": "dangling"}), false);
     assert_eq!(m["error"], "fs: path 'dangling' escapes root", "{m}");
     // A dangling link pointing INSIDE the root is still a deletable name.
     std::os::unix::fs::symlink(root.join("gone.txt"), root.join("inside")).unwrap();
@@ -554,9 +569,9 @@ fn absolute_path_is_refused_with_bad_arg() {
     std::fs::write(root.join("README.md"), b"r").unwrap();
     let r = at(&root);
     let replies = [
-        read_stream_reply(&r, &json!({"path": "/README.md"}), true).0,
+        read_stream_reply(&fb(), &r, &json!({"path": "/README.md"}), true).0,
         write_stream_reply(&r, &json!({"path": "/x"}), Some(b"b"), false),
-        list_reply(&r, &json!({"path": "/"}), &[]),
+        list_reply(&fb(), &r, &json!({"path": "/"}), &[]),
         delete_reply(&r, &json!({"path": "/README.md"}), false),
         mkdir_reply(&r, &json!({"path": "/x"}), false),
         rename_reply(
@@ -582,11 +597,11 @@ fn refusal_texts_use_python_repr() {
     let root = served(&tmp);
     std::fs::write(root.join("f.txt"), b"f").unwrap();
     let r = at(&root);
-    let reply = list_reply(&r, &json!({"path": "nope"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "nope"}), &[]);
     assert_eq!(reply["error"], "path 'nope' does not exist");
     assert_eq!(reply["reason"], "not_found");
     assert_eq!(reply["path"], "nope");
-    let reply = list_reply(&r, &json!({"path": "f.txt"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "f.txt"}), &[]);
     assert_eq!(
         reply["error"],
         "list: path must be a directory; 'f.txt' is not one"
@@ -597,11 +612,11 @@ fn refusal_texts_use_python_repr() {
     assert_eq!(reply["reason"], "not_found");
     let reply = delete_reply(&r, &json!({"path": "nope"}), false);
     assert_eq!(reply["error"], "path 'nope' does not exist");
-    let (reply, _) = read_stream_reply(&r, &json!({"path": "nope"}), true);
+    let (reply, _) = read_stream_reply(&fb(), &r, &json!({"path": "nope"}), true);
     assert_eq!(reply["error"], "file 'nope' not found");
     assert_eq!(reply["reason"], "not_found");
     // a path holding a quote quotes python's way
-    let reply = list_reply(&r, &json!({"path": "it's"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "it's"}), &[]);
     assert_eq!(reply["error"], "path \"it's\" does not exist");
 }
 
@@ -616,7 +631,7 @@ fn list_paths_are_relative_to_resolved_root() {
     std::fs::write(root.join("x/a.txt"), b"ab").unwrap();
     std::os::unix::fs::symlink(root.join("x/gone.txt"), root.join("x/dangling")).unwrap();
     let r = at(&root);
-    let reply = list_reply(&r, &json!({"path": "sub/../x"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "sub/../x"}), &[]);
     let files = reply["files"].as_array().unwrap();
     assert_eq!(
         files
@@ -627,7 +642,7 @@ fn list_paths_are_relative_to_resolved_root() {
     );
     assert_eq!(files[0]["size"], 2);
     assert_eq!(files[1]["size"], -1, "a dangling link stats as -1");
-    let reply = list_reply(&r, &json!({"path": "."}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "."}), &[]);
     let names: Vec<&str> = reply["files"]
         .as_array()
         .unwrap()

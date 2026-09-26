@@ -140,17 +140,16 @@ struct KernelStateTests {
                 ]))
         ])
         await k.flushRecords()
-        #expect(files.paths.contains("agents/early/agent.json"), "\(files.paths)")
+        #expect(files.paths.contains("agents/early/agent.yaml"), "\(files.paths)")
         // The drained write seeded the bundle's readme too.
         #expect(files.paths.contains("agents/early/readme.md"), "\(files.paths)")
     }
 
-    /// C42: persisted `agent.json` bytes are python's `json.dumps(record,
-    /// indent=2)` — `,`+newline / `: ` separators, no trailing newline,
-    /// non-ASCII as LOWERCASE `\uXXXX` (an astral scalar as a surrogate
-    /// PAIR), never the rust-mirroring `serializePretty` used to write (raw
-    /// UTF-8, no ensure_ascii escaping).
-    @Test func testPersistedRecordBytesArePythonJsonDumps() async throws {
+    /// C42: persisted `agent.yaml` bytes are python's `messages_yaml.dump(record)`
+    /// — block style, BMP text verbatim (`allow_unicode`), a non-BMP scalar
+    /// forces a double-quoted scalar with an uppercase `\UXXXXXXXX` escape, and
+    /// the document ends in a newline.
+    @Test func testPersistedRecordBytesArePythonYamlDump() async throws {
         let (k, files) = try await makeWriterKernel()
         _ = await k.send([
             Item(
@@ -162,19 +161,12 @@ struct KernelStateTests {
                 ]))
         ])
         await k.flushRecords()
-        let bytes = try #require(files.get("agents/sensor/agent.json"))
-        // The em dash and the emoji escape to lowercase hex (the emoji as a
-        // SURROGATE PAIR) — built by calling `pyJsonDumps` on each scalar,
-        // its own JSON string escaper, rather than hand-typing the escaped
-        // form into this file. Strip the wrapping quotes `pyJsonDumps` adds
-        // for a bare string.
-        let dashEscaped = pyJsonDumps(.string("\u{2014}")).dropFirst().dropLast()
-        let emojiEscaped = pyJsonDumps(.string("\u{1F600}")).dropFirst().dropLast()
-        #expect(bytes.contains(dashEscaped), "\(bytes) does not contain \(dashEscaped)")
-        #expect(bytes.contains(emojiEscaped), "\(bytes) does not contain \(emojiEscaped)")
-        #expect(!bytes.hasSuffix("\n"), "\(bytes)")
-        #expect(bytes.contains("\"id\": \"sensor\""), "\(bytes)")
-        #expect(bytes.contains(",\n  "), "comma+newline+indent separators: \(bytes)")
+        let bytes = try #require(files.get("agents/sensor/agent.yaml"))
+        #expect(
+            bytes.contains("sentence: \"Sensor readings \u{2014} one integer per file \\U0001F600.\"\n"),
+            "\(bytes)")
+        #expect(bytes.hasPrefix("id: sensor\n"), "\(bytes)")
+        #expect(bytes.hasSuffix("\n"), "\(bytes)")
     }
 
     /// A14.15/A14.16: `composeEphemeralChild` wires a child exactly like
@@ -207,7 +199,7 @@ struct KernelStateTests {
 
     /// C43: a record commits through a `<af>.tmp.<8 hex>` write + `rename`,
     /// never a direct `write_stream` onto the live path — so a clean commit
-    /// leaves no tmp debris beside the final `agent.json`.
+    /// leaves no tmp debris beside the final `agent.yaml`.
     @Test func testRecordCommitsViaTmpAndRename() async throws {
         let (k, files) = try await makeWriterKernel()
         _ = await k.send([
@@ -219,7 +211,7 @@ struct KernelStateTests {
                 ]))
         ])
         await k.flushRecords()
-        #expect(files.paths.contains("agents/late/agent.json"), "\(files.paths)")
+        #expect(files.paths.contains("agents/late/agent.yaml"), "\(files.paths)")
         #expect(
             !files.paths.contains { $0.contains(".tmp.") },
             "no tmp debris survives a clean commit: \(files.paths)")

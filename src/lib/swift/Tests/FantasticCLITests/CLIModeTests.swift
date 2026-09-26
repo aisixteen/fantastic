@@ -87,7 +87,7 @@ struct CLIModeTests {
             FantasticCLI.daemonLockRefusal(pid: 99) == """
                 [kernel] another fantastic owns this dir: pid=99
                   -> kill it:  kill 99
-                  -> or, if stale, remove the lock:  rm .fantastic/lock.json
+                  -> or, if stale, remove the lock:  rm .fantastic/lock.yaml
                 """)
     }
 
@@ -171,16 +171,19 @@ struct CLIModeTests {
     }
 
     // A14.13 — the daemon lifecycle banner texts, pinned as python spells
-    // them (`longrun.py:62,79-83,124,129,207`).
+    // them (`longrun.py`).
     @Test func daemonBannersArePythonText() {
         #expect(DaemonMode.upLine == "[kernel] up")
         #expect(DaemonMode.tearingDownLine == "[kernel] tearing down agents...")
         #expect(DaemonMode.downLine == "[kernel] down")
         #expect(DaemonMode.stopSignalLine("SIGTERM") == "\n[kernel] SIGTERM — shutting down...")
         #expect(DaemonMode.stopSignalLine("SIGINT") == "\n[kernel] SIGINT — shutting down...")
+        // A root that does not start: python raises `RuntimeError(f"{error}\n
+        // hint: {hint}")` out of `_default` and `main_dispatch` prints `[kernel] <e>`.
         #expect(
-            DaemonMode.bootRaisedLine(id: AgentId("np"), error: .string("No module named 'nope'"))
-                == "  [kernel] boot 'np' raised: No module named 'nope'")
+            DaemonMode.startRefusedLine(
+                .object(["error": .string("no store"), "hint": .string("create one")]))
+                == "[kernel] no store\n  hint: create one")
     }
 
     // A14.15 — web composes by `handler_module == "web.tools"`, never by the
@@ -302,10 +305,10 @@ struct CLIBootstrapTests {
         try
             #"{"id": "kernel_state", "handler_module": null, "parent_id": null, "guid": "deadbeef"}"#
             .write(
-                to: dot.appendingPathComponent("agent.json"), atomically: true, encoding: .utf8)
+                to: dot.appendingPathComponent("agent.yaml"), atomically: true, encoding: .utf8)
         try #"{"id": "memo", "handler_module": "cli.tools", "parent_id": "kernel_state"}"#
             .write(
-                to: memo.appendingPathComponent("agent.json"), atomically: true, encoding: .utf8)
+                to: memo.appendingPathComponent("agent.yaml"), atomically: true, encoding: .utf8)
 
         let kernel = try await FantasticCLI.bootDiskBacked(cwd: dir.path)
         #expect(kernel.agent(AgentId("memo")) != nil)
@@ -321,7 +324,7 @@ struct CLIBootstrapTests {
         _ = try await FantasticCLI.bootDiskBacked(cwd: dir.path)
         #expect(
             FileManager.default.fileExists(
-                atPath: dir.appendingPathComponent(".fantastic/agent.json").path))
+                atPath: dir.appendingPathComponent(".fantastic/agent.yaml").path))
     }
 
     // A14.6: a one-shot boots the ROOT LOADER before the call — the
@@ -429,7 +432,7 @@ struct CLIBootstrapTests {
         }
         #expect(seeded.count == 19, "\(seeded.sorted())")
         for p in [
-            ".fantastic/agent.json", ".fantastic/readme.md", ".fantastic/docs/reflect.md",
+            ".fantastic/agent.yaml", ".fantastic/readme.md", ".fantastic/docs/reflect.md",
             ".fantastic/docs/frontend/routing.md",
         ] {
             #expect(seeded.contains(p), "\(p) missing from \(seeded.sorted())")

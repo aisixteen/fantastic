@@ -2,7 +2,7 @@
 //!
 //! These are the parts of the Context Protocol that only python carried until
 //! now: a fold is a MARK (not a deletion), a strip drops reply BODIES (not
-//! turns), and `grep`/`pull` are how the model reaches what left its view. Each
+//! turns), and `grep`/`recall` are how the model reaches what left its view. Each
 //! test states the claim as a failure, because the failure is what the mechanism
 //! exists to prevent.
 

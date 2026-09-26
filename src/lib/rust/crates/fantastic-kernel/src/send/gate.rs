@@ -315,7 +315,7 @@ impl Kernel {
                     // NOT relative: `$loader` resolves to the ROOT for whoever
                     // holds it, so conferring it hands over real reach on the
                     // kernel's control surface (ps, cancel, ledger,
-                    // shutdown_kernel). Subset-probe it like any lateral edge —
+                    // kernel_stop). Subset-probe it like any lateral edge —
                     // skipping it let a grandchild grant its own child root
                     // reach it did not hold (measured 2026-09-02).
                     "$loader" => match loader_id {

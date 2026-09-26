@@ -141,13 +141,16 @@ fn halve(body: &[Value]) -> Vec<Value> {
 
 /// SEEDED FROM THE VIEW ARRAY on first use — stubs survive a restart, and the
 /// prefix bytes are the same before and after it.
-fn seed(ctx: &ProjectionCtx<'_>, body: &[Value]) -> HashSet<String> {
+async fn seed(
+    ctx: &ProjectionCtx<'_>,
+    body: &[Value],
+) -> Result<HashSet<String>, crate::memory::MemoryStoreError> {
     let mut out = HashSet::new();
-    let Some(view) = ctx.kernel.rows.view_get(ctx.self_id) else {
-        return out;
+    let Some(view) = crate::memory::load_view(ctx.self_id, ctx.kernel).await? else {
+        return Ok(out);
     };
     let Some(ids) = view.get("ids").and_then(Value::as_array) else {
-        return out;
+        return Ok(out);
     };
     let stubbed: HashSet<i64> = ids
         .iter()
@@ -168,25 +171,33 @@ fn seed(ctx: &ProjectionCtx<'_>, body: &[Value]) -> HashSet<String> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Reduce delivered reply BODIES to their stubs, oldest first, down to the low
 /// watermark; cut only when the prose alone still overflows.
-pub async fn strip(body: &[Value], ctx: &ProjectionCtx<'_>) -> Projection {
+pub async fn strip(
+    body: &[Value],
+    ctx: &ProjectionCtx<'_>,
+) -> Result<Projection, crate::memory::MemoryStoreError> {
     if body.len() <= 1 {
-        return Projection {
+        return Ok(Projection {
             body: fit_tail(body, ctx.budget),
             ..Default::default()
-        };
+        });
     }
     let key = ctx.self_id.as_str().to_string();
-    {
-        let mut st = stripped_state().lock().expect("strip state poisoned");
-        if !st.contains_key(&key) {
-            let s = seed(ctx, body);
-            st.insert(key.clone(), s);
-        }
+    let seeded = stripped_state()
+        .lock()
+        .expect("strip state poisoned")
+        .contains_key(&key);
+    if !seeded {
+        let s = seed(ctx, body).await?;
+        stripped_state()
+            .lock()
+            .expect("strip state poisoned")
+            .entry(key.clone())
+            .or_insert(s);
     }
     let mut done: HashSet<String> = stripped_state()
         .lock()
@@ -235,12 +246,13 @@ pub async fn strip(body: &[Value], ctx: &ProjectionCtx<'_>) -> Projection {
         rendered = out;
         cut = true;
     }
-    Projection {
+    Ok(Projection {
         body: rendered,
         summary: None,
         omitted_marker: cut,
         stripped: n,
         stripped_bytes: saved,
         folded: 0,
-    }
+        fold_refused: 0,
+    })
 }

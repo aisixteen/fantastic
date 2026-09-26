@@ -476,7 +476,7 @@
                 }, "no pty_reader row: \(ps.serialize())")
             // C36 — the attachment is a `task` ROW too, under the same id, so
             // the reader survives in the message log and not only in `ps`.
-            let stored = kernel.rows.forAgent(AgentId("term_ps"))
+            let stored = kernel.rows.all().filter { $0["agent"]?.asString == "term_ps" }
             #expect(
                 stored.contains {
                     $0["kind"]?.asString == "task" && $0["verb"]?.asString == "pty_reader"

@@ -45,7 +45,7 @@ pub type BundleError = Box<dyn std::error::Error + Send + Sync>;
 /// Bundle trait. Every Rust bundle implements this.
 #[async_trait]
 pub trait Bundle: Send + Sync {
-    /// Stable bundle name. Matches what's stored in agent.json's
+    /// Stable bundle name. Matches what's stored in agent.yaml's
     /// `handler_module` (e.g. `"file_bridge.tools"`, `"web.tools"`).
     fn name(&self) -> &str;
 
@@ -216,7 +216,7 @@ pub trait Bundle: Send + Sync {
 }
 
 /// Compile-time bundle registry. Maps `handler_module` strings (as
-/// stored in agent.json) to the implementing bundle.
+/// stored in agent.yaml) to the implementing bundle.
 ///
 /// Populated by the binary's `main()` before kernel bootstrap. Cloned
 /// `Arc<dyn Bundle>` references go into the kernel's lookup table.
@@ -241,7 +241,7 @@ impl BundleRegistry {
     /// Register an INSTALLED bundle under its `handler_module` key — it
     /// dispatches and is listed in the `bundles` catalog.
     ///
-    /// The key is what appears in `agent.json` — e.g. `"file_bridge.tools"`
+    /// The key is what appears in `agent.yaml` — e.g. `"file_bridge.tools"`
     /// for the file bundle. Bundle authors choose this string; the
     /// substrate doesn't enforce a naming scheme.
     pub fn register<B: Bundle + 'static>(&mut self, handler_module: &str, bundle: B) {

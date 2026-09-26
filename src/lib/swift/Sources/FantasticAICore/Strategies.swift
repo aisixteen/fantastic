@@ -41,9 +41,14 @@ public struct AIProjection: Sendable {
     public var strippedBytes: Int
     /// `fold`: fold rows written this projection.
     public var folded: Int
+    /// `fold`: spans NOT folded because the summary stayed over its budget after
+    /// the one re-summarise — the span stays in view, reported, never a degraded
+    /// fold. Python `Projection.fold_refused`.
+    public var foldRefused: Int
     public init(
         body: [JSON], summary: String? = nil, omittedMarker: Bool = false,
-        pinned: [String] = [], stripped: Int = 0, strippedBytes: Int = 0, folded: Int = 0
+        pinned: [String] = [], stripped: Int = 0, strippedBytes: Int = 0, folded: Int = 0,
+        foldRefused: Int = 0
     ) {
         self.body = body
         self.summary = summary
@@ -52,8 +57,17 @@ public struct AIProjection: Sendable {
         self.stripped = stripped
         self.strippedBytes = strippedBytes
         self.folded = folded
+        self.foldRefused = foldRefused
     }
 }
+
+/// The side call that writes a summary: a plain text completion over the backend
+/// provider (no tools — providers stream raw text). `maxTokens` bounds the output
+/// (the fold's summary budget); `cut` says whether the provider stopped AT that
+/// bound, so a cut-off summary is never kept as if it were whole. Python
+/// `_Summarizer` (`__call__(msgs, max_tokens)` + `last_cut`).
+public typealias AISummarizer =
+    @Sendable ([JSON], Int?) async throws -> (text: String, cut: Bool)
 
 /// Everything a strategy needs, WITHOUT importing the seam. Python
 /// `context.ProjectionCtx`.
@@ -67,13 +81,15 @@ public struct AIProjection: Sendable {
 public struct ProjectionCtx: Sendable {
     public var budget: Int64
     public var recentN: Int
-    public var summarize: (@Sendable ([JSON]) async throws -> String)?
+    public var summarize: AISummarizer?
     public var selfId: AgentId
-    public var kernel: Kernel
+    /// `nil` for a strategy exercised with no kernel behind it (python's
+    /// `kernel=None`): `strip` then starts unseeded and `fold` refuses to write.
+    public var kernel: Kernel?
     public var clientId: String?
     public init(
-        budget: Int64, recentN: Int, summarize: (@Sendable ([JSON]) async throws -> String)?,
-        selfId: AgentId, kernel: Kernel, clientId: String? = nil
+        budget: Int64, recentN: Int, summarize: AISummarizer?,
+        selfId: AgentId, kernel: Kernel?, clientId: String? = nil
     ) {
         self.budget = budget
         self.recentN = recentN
@@ -85,8 +101,11 @@ public struct ProjectionCtx: Sendable {
 }
 
 /// `(body, system_block, rec, ctx) -> Projection` (body excludes the system
-/// block). Python `STRATEGY`.
-public typealias AIStrategy = @Sendable ([JSON], [JSON], JSON, ProjectionCtx) async -> AIProjection
+/// block). Python `STRATEGY`. THROWS: `fold` writes its fold rows to the agent's
+/// memory store, and a store that refuses fails the turn fast
+/// (`MemoryStoreError`).
+public typealias AIStrategy =
+    @Sendable ([JSON], [JSON], JSON, ProjectionCtx) async throws -> AIProjection
 
 public enum AIStrategies {
     /// The stub used when a summarizer is unavailable / fails — a degraded
@@ -142,8 +161,8 @@ public enum AIStrategies {
     /// beginning `<think>The user wants me to summarize…` — the summary was
     /// buried under the reasoning and every fold read as noise. Side calls strip
     /// like the main turn.
-    public static func makeSummarizer(_ provider: any AIProvider) -> @Sendable ([JSON]) async throws -> String {
-        { msgs in
+    public static func makeSummarizer(_ provider: any AIProvider) -> AISummarizer {
+        { msgs, maxTokens in
             let rendered = msgs.map { m -> String in
                 let role = m["role"].asString ?? "?"
                 let content = m["content"].asString ?? m["content"].serialize()
@@ -159,11 +178,15 @@ public enum AIStrategies {
                 ]),
                 .object(["role": .string("user"), "content": .string(rendered)]),
             ]
+            // A FRESH reading: a provider that reports nothing this time must not
+            // leave last call's stop reason standing.
+            provider.usage?.lastStopReason = nil
             var parts = ""
-            for try await chunk in provider.chat(messages: prompt) {
+            for try await chunk in provider.chat(messages: prompt, maxTokens: maxTokens) {
                 if case .token(let t) = chunk { parts += t }
             }
-            return withoutThinking(parts)
+            let cut = provider.usage?.lastStopReason == "max_tokens"
+            return (withoutThinking(parts), cut)
         }
     }
 
@@ -173,7 +196,7 @@ public enum AIStrategies {
     public static func safeSummary(_ ctx: ProjectionCtx, _ overflow: [JSON]) async -> String {
         guard let summarize = ctx.summarize else { return stubSummary }
         let s: String
-        do { s = try await summarize(overflow) } catch { return stubSummary }
+        do { s = try await summarize(overflow, nil).text } catch { return stubSummary }
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? stubSummary : t
     }

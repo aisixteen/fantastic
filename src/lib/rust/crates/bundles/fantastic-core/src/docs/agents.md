@@ -7,7 +7,7 @@ handler_module=<bundle>.tools parent_id=<owner>` spawns one under the agent
 you NAME (your own id to grow your own subtree; `kernel_state` for a
 top-level agent). `parent_id` is required — placement is stated, never
 inferred from who sent the call. `delete_agent` cascades depth-first. On disk each agent is
-`<dir>/agent.json` with children nested under
+`<dir>/agent.yaml` with children nested under
 `<dir>/<children_dir>/<child>/`. The container name is declared config (the
 root record's `children_dir`, default `agents`) — set `host_agents` here /
 `web_agents` on a `web_loader` for a self-describing layout.

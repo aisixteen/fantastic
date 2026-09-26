@@ -23,8 +23,9 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
-use fantastic_ai_core::retrieval;
+use fantastic_ai_core::provider::{
+    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+};
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_float, py_int, py_repr_value, py_truthy};
@@ -102,6 +103,10 @@ struct OllamaProvider {
     /// on the record. `None` = don't send it (model default) — non-thinking models
     /// reject the field, so it is opt-in.
     think: Option<bool>,
+    /// What the endpoint reported about the last pass — `prompt_eval_count`
+    /// (ai_core calibrates its estimate with it) and `done_reason` (`length` ⇒
+    /// the output stopped at its bound).
+    report: ReportCell,
 }
 
 #[async_trait]
@@ -110,7 +115,23 @@ impl Provider for OllamaProvider {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
+    fn report(&self) -> ProviderReport {
+        self.report.lock().expect("report poisoned").clone()
+    }
+
+    fn clear_prompt_tokens(&self) {
+        self.report.lock().expect("report poisoned").prompt_tokens = None;
+    }
+
+    fn clear_stop_reason(&self) {
+        self.report.lock().expect("report poisoned").stop_reason = None;
+    }
+
+    async fn chat(
+        &self,
+        messages: &[Value],
+        max_tokens: Option<i64>,
+    ) -> Result<ProviderStream, ProviderError> {
         // NO guessy default: fail loud before the wire if no model is named.
         if self.model.is_empty() || self.model == DEFAULT_MODEL {
             return Err(ProviderError::raised(
@@ -123,7 +144,10 @@ impl Provider for OllamaProvider {
         if let Some(n) = self.num_ctx {
             options.insert("num_ctx".to_string(), json!(n));
         }
-        if let Some(n) = self.num_predict {
+        // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the record's.
+        if let Some(n) = max_tokens {
+            options.insert("num_predict".to_string(), json!(n));
+        } else if let Some(n) = self.num_predict {
             options.insert("num_predict".to_string(), json!(n));
         }
         let mut body = json!({
@@ -152,7 +176,7 @@ impl Provider for OllamaProvider {
             )));
         }
 
-        Ok(consume_ndjson(resp))
+        Ok(consume_ndjson(resp, std::sync::Arc::clone(&self.report)))
     }
 }
 
@@ -164,11 +188,11 @@ impl Provider for OllamaProvider {
 /// completion was already finished, and a long turn was indistinguishable from
 /// a stalled request. Python's provider is an async generator over the response
 /// lines; this yields on the same boundary.
-fn consume_ndjson(resp: reqwest::Response) -> ProviderStream {
+fn consume_ndjson(resp: reqwest::Response, report: ReportCell) -> ProviderStream {
     let inner = resp.bytes_stream();
     // `pending` holds the events decoded from ONE chunk: a chunk can carry
     // several lines, and each line several tokens.
-    let init = (inner, NdjsonState::new(), VecDeque::new(), false);
+    let init = (inner, NdjsonState::new(report), VecDeque::new(), false);
     Box::pin(futures_util::stream::unfold(
         init,
         |(mut inner, mut st, mut pending, mut finished)| async move {
@@ -184,6 +208,7 @@ fn consume_ndjson(resp: reqwest::Response) -> ProviderStream {
                     // A trailing line with no newline is still a chunk.
                     if !st.buf.is_empty() {
                         if let Ok(parsed) = serde_json::from_slice::<Value>(&st.buf) {
+                            note_usage(&parsed, &st.report);
                             decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
                         }
                         st.buf.clear();
@@ -219,6 +244,7 @@ fn consume_ndjson(resp: reqwest::Response) -> ProviderStream {
                     let Ok(parsed) = serde_json::from_slice::<Value>(trimmed) else {
                         continue;
                     };
+                    note_usage(&parsed, &st.report);
                     decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
                 }
             }
@@ -230,14 +256,40 @@ fn consume_ndjson(resp: reqwest::Response) -> ProviderStream {
 struct NdjsonState {
     buf: Vec<u8>,
     wrap: ThinkWrap,
+    report: ReportCell,
 }
 
 impl NdjsonState {
-    fn new() -> Self {
+    fn new(report: ReportCell) -> Self {
         Self {
             buf: Vec::new(),
             wrap: ThinkWrap::new(),
+            report,
         }
+    }
+}
+
+/// PROVIDER-REPORTED USAGE off one NDJSON chunk — `prompt_eval_count` (ai_core
+/// calibrates its estimate with it) and `done_reason` (`length` ⇒ `max_tokens`:
+/// the output stopped at its bound). Python `OllamaProvider.chat`.
+fn note_usage(chunk: &Value, report: &ReportCell) {
+    let mut r = report.lock().expect("report poisoned");
+    if let Some(n) = chunk
+        .get("prompt_eval_count")
+        .filter(|v| fantastic_bundle::py_truthy(v))
+        .and_then(Value::as_i64)
+    {
+        r.prompt_tokens = Some(n);
+    }
+    if let Some(dr) = chunk
+        .get("done_reason")
+        .filter(|v| fantastic_bundle::py_truthy(v))
+    {
+        r.stop_reason = Some(if dr.as_str() == Some("length") {
+            "max_tokens".to_string()
+        } else {
+            fantastic_bundle::py_str(dr)
+        });
     }
 }
 
@@ -307,65 +359,22 @@ impl Bundle for OllamaBackendBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel)?,
-            // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`: an
-            // agent hydrated with a history rebuilds its view before its first
-            // turn, so a rebooted process sees the same head the last one saw.
-            "boot" => {
-                // A BOOT IS A NEW INCARNATION (python `_make_boot`): a reply
-                // answering a call the PREVIOUS one made is recorded as a row
-                // and wakes no turn.
-                state::bump_incarnation(agent_id);
-                if fantastic_ai_core::history::load_history(
-                    agent_id,
-                    kernel,
-                    helpers::DEFAULT_CLIENT_ID,
-                    false,
-                )
-                .await
-                .is_empty()
-                {
-                    Value::Null
-                } else {
-                    let p = build_provider(agent_id, kernel);
-                    retrieval::context_recall(agent_id, &json!({}), kernel, Some(&p)).await
-                }
-            }
-            // A LIFECYCLE NO-OP, as in python's `ollama_backend` (`return None`):
-            // process state drops in `on_delete`, never behind a verb.
-            "send" => send_reply(agent_id, payload, kernel).await?,
-            // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
-            // record, this agent answers it by THINKING, and the asker writes
-            // the same call either way.
-            "inquiry" => match verbs::inquiry_open(payload) {
-                Err(refusal) => refusal,
-                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await?, payload),
-            },
-            "history" => verbs::history(agent_id, payload, kernel).await,
-            "recall" => verbs::recall(agent_id, payload, kernel).await,
-            // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
-            "pull" => retrieval::pull(agent_id, payload, kernel).await,
-            "grep" => retrieval::grep(agent_id, payload, kernel).await,
-            // Rebuild the view from the store: on boot, after folds, on request.
-            "context_recall" => {
-                let p = build_provider(agent_id, kernel);
-                retrieval::context_recall(agent_id, payload, kernel, Some(&p)).await
-            }
-            // A new thread on the same store: the view starts here, nothing is deleted.
-            "context_clear" => retrieval::context_clear(agent_id, payload, kernel).await,
-            "context_status" => verbs::context_status(agent_id, kernel).await,
-            "status" => verbs::status(agent_id, payload),
-            // python's VERBS map has no `shutdown` — it is an unknown type like
-            // any other, and the value is rendered with python's `repr`.
-            _ => json!({
-                "error": format!(
-                    "ollama_backend: unknown type {}",
-                    py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
-                )
-            }),
-        };
-        Ok(Some(reply))
+        if verb == "reflect" {
+            return Ok(Some(reflect_reply(agent_id, kernel)?));
+        }
+        // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
+        let provider = |_client: &str| Some(build_provider(agent_id, kernel));
+        if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
+            return Ok(Some(reply));
+        }
+        // python's VERBS map has no `shutdown` — it is an unknown type like any
+        // other, and the value is rendered with python's `repr`.
+        Ok(Some(json!({
+            "error": format!(
+                "ollama_backend: unknown type {}",
+                py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
+            )
+        })))
     }
 
     async fn on_delete(
@@ -407,23 +416,10 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         num_ctx: meta.get("num_ctx").and_then(Value::as_u64),
         num_predict: meta.get("num_predict").and_then(Value::as_u64),
         think: meta.get("think").and_then(Value::as_bool),
+        report: ReportCell::default(),
     })
 }
 
-async fn send_reply(
-    agent_id: &AgentId,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-) -> Result<Value, BundleError> {
-    verbs::send(
-        Some(build_provider(agent_id, kernel)),
-        agent_id,
-        payload,
-        kernel,
-        CFG,
-    )
-    .await
-}
 
 /// `reflect` — python `_make_reflect` + `ollama_backend/tools.py`'s
 /// `_reflect_extra`: the shared base body, then the sampling knobs. The rust-only

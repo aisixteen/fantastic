@@ -122,14 +122,11 @@ struct HTTPServerTests {
         defer { Task { await stopWeb(kernel) } }
         _ = try await URLSession(configuration: .ephemeral)
             .data(from: URL(string: "http://127.0.0.1:\(port)/")!)
-        let rows = await kernel.send([
-            Item(
-                AgentId("kernel"),
-                .object([
-                    "type": .string("rows_read"), "agent": .string("kernel_state"),
-                    "limit": .integer(500),
-                ]))
-        ])[0].result
+        // THE EXECUTION ROWS still in RAM (no memory store is wired, so nothing
+        // flushed them).
+        let rows: JSON = .object([
+            "rows": .array(kernel.rows.all().map { .object($0) })
+        ])
         // The walk's own reads: `internal: true` call rows the kernel minted
         // while rendering the page.
         let walk = (rows["rows"].asArray ?? []).filter {
@@ -139,8 +136,8 @@ struct HTTPServerTests {
         #expect(!walk.isEmpty, "the index page left no roster-walk rows: \(rows.serialize())")
         // EVERY one of them is the web agent's, never a null origin (operator).
         #expect(
-            walk.allSatisfy { $0["origin"].asString == "web" },
-            "the index route dispatched as the operator: \(walk.map { $0["origin"].serialize() })")
+            walk.allSatisfy { $0["caller"].asString == "web" },
+            "the index route dispatched as the operator: \(walk.map { $0["caller"].serialize() })")
     }
 
     /// A11.3 (D11) — the swift-only extras are gone; the favicon routes are

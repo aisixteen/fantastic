@@ -56,6 +56,40 @@ pub(crate) fn record_value(rec: &AgentRecord) -> Value {
     Value::Object(out)
 }
 
+/// How a raw reply BODY is written where python's reply dict holds the bytes
+/// natively (the `bytes` key — C37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyAs {
+    /// `{len: N}` — what a memory store holds (python `_store_safe`; base64 is
+    /// banned, a length is the honest record).
+    Len,
+    /// `"<bytes:N>"` — what a JSON wire carries (python `_json_safe`).
+    Marker,
+}
+
+/// `value` with the raw `body` written at its `bytes` key, per `how`. No body ⇒
+/// the value verbatim. A rust `Value` never holds bytes itself — the body rides
+/// beside it — so this is the whole of python's `_store_safe`/`_json_safe`.
+#[must_use]
+pub fn with_body(value: &Value, body: Option<&[u8]>, how: BodyAs) -> Value {
+    let Some(body) = body else {
+        return value.clone();
+    };
+    let mut out = value.clone();
+    if let Some(m) = out.as_object_mut() {
+        let v = match how {
+            BodyAs::Len => {
+                let mut len = Map::new();
+                len.insert("len".to_string(), Value::from(body.len()));
+                Value::Object(len)
+            }
+            BodyAs::Marker => Value::String(format!("<bytes:{}>", body.len())),
+        };
+        m.insert("bytes".to_string(), v);
+    }
+    out
+}
+
 #[cfg(test)]
 #[path = "jsonsafe/tests.rs"]
 mod tests;

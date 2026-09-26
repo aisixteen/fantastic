@@ -234,6 +234,12 @@ extension Kernel {
             if let rootAgent = registry[AgentId(rootRec.id)] {
                 setRoot(rootAgent)
             }
+            // THE COUNTER COMES BACK WITH THE GUID: the root record's reserved
+            // bound is where this run starts, and this run's first block is
+            // reserved in memory. `load` never edits a record (save → load → save
+            // is identical); `start` writes the bound, and a started kernel
+            // persists every later block. Python `Kernel.load`.
+            restoreCounter(from: rootRec.meta)
         }
 
         // Wire parent-child relationships now that every agent has a

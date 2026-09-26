@@ -174,15 +174,25 @@ public final class AIBackend: @unchecked Sendable {
         case "reflect":
             return reflectReply(agent: agent, kernel: kernel)
         case "boot":
-            // On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`.
-            // A fresh agent has nothing to recall and returns nothing. The
-            // incarnation is bumped FIRST: a reply dispatched under the previous
-            // one must not become a live turn of this one. Python `_make_boot`.
+            // LAZY: never touches the memory store. Checks the record names one
+            // (fail loud otherwise), starts a new incarnation, and marks the view
+            // for rebuilding — the first turn reads the head from the store and
+            // runs `context_recall`. The incarnation is bumped FIRST: a reply
+            // dispatched under the previous one must not become a live turn of
+            // this one. Python `_make_boot`.
             AIIncarnation.bump(kernel, agent.id.value)
-            if loadHistory(agent: agent, kernel: kernel).isEmpty { return nil }
-            let provider = await sideProvider(agent: agent, kernel: kernel)
-            return try await contextRecall(
-                agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
+            do {
+                _ = try storeOf(agent.id.value, kernel)
+            } catch let e as MemoryStoreError {
+                return .object([
+                    "error": .string(e.message), "reason": .string("missing_arg"),
+                    "arg": .string("memory_store_id"),
+                ])
+            }
+            // A new incarnation reads its store afresh; bodies are this run's only.
+            forgetHead(agent.id.value, kernel)
+            markRecallDue(agent.id.value)
+            return nil
         case "send":
             return try await sendVerb(agent: agent, payload: payload, kernel: kernel)
         // ONE INQUIRY VERB, WHOEVER RECEIVES IT: a person answers `inquiry` from a
@@ -194,16 +204,14 @@ public final class AIBackend: @unchecked Sendable {
             let out = try await sendVerb(agent: agent, payload: opened.send!, kernel: kernel)
             return inquiryClose(out, payload)
         case "history":
-            return historyVerb(agent: agent, payload: payload, kernel: kernel)
+            return try await historyVerb(agent: agent, payload: payload, kernel: kernel)
         case "recall":
-            return recallVerb(agent: agent, payload: payload, kernel: kernel)
-        // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
-        case "pull":
-            return pullVerb(agent: agent, payload: payload, kernel: kernel)
+            return try await recallVerb(agent: agent, payload: payload, kernel: kernel)
+        // FIND the line anywhere in memory — rows, shared rows, bodies held this run.
         case "grep":
-            return grepVerb(agent: agent, payload: payload, kernel: kernel)
+            return try await grepVerb(agent: agent, payload: payload, kernel: kernel)
         case "context_status":
-            return await contextStatusVerb(agent: agent, kernel: kernel)
+            return try await contextStatusVerb(agent: agent, kernel: kernel)
         // Rebuild the view from the store: on boot, after folds, on request.
         case "context_recall":
             // PYTHON TRUTHINESS: `dry:1`, `"false"` and `[0]` are all dry.
@@ -215,7 +223,17 @@ public final class AIBackend: @unchecked Sendable {
                 agent: agent, payload: payload, kernel: kernel, provider: provider)
         // A new thread on the same store: the view starts here, nothing is deleted.
         case "context_clear":
-            return contextClear(agent: agent, payload: payload, kernel: kernel)
+            return try await contextClear(agent: agent, payload: payload, kernel: kernel)
+        // CONTEXT BY GRANT: start from another agent's shared rows; ask an owner.
+        case "fork_from":
+            return try await forkFrom(agent: agent, payload: payload, kernel: kernel)
+        case "request_share":
+            return requestShare(agent: agent, payload: payload, kernel: kernel)
+        // THE ROW EVENT: this agent announces its own rows to its watchers.
+        case "watch":
+            return try await watchVerb(agent: agent, payload: payload, kernel: kernel)
+        case "unwatch":
+            return unwatchVerb(agent: agent, payload: payload, kernel: kernel)
         case "status":
             return statusVerb(agentId: agentId, payload: payload, kernel: kernel)
         default:
@@ -318,17 +336,20 @@ public final class AIBackend: @unchecked Sendable {
     /// backend: the wording never differed per provider in python.
     static let VERBS: OrderedDictionary<String, JSON> = [
         "reflect": .string("Identity + model + endpoint + generating flag + context posture. No args."),
-        "send": .string("args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}."),
+        "send": .string("args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here). The conversation is always this agent's own (its memory store). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}."),
         "inquiry": .string("args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?, client_id:str?. Sends THIS agent an inquiry and returns {answer, request_id} — the answer is the one it emits with the `answer` tool. The same verb a human answers; a sender writes one call for either."),
-        "history": .string("args: limit:int? (default: as many as fit inline), after:str? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. Bodies are behind `pull`; a row's text is behind `recall`. Returns {rows, next, total}."),
+        "history": .string("args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}."),
         "status": .string("args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}."),
         "context_status": .string("No args. The context-budget posture + the last overflow projection + the model's"),
         "recall": .string("args: query?:str (case-insensitive substring over the serialized turn — matches tool args/replies too), limit?:int (default 20, max 100), before?:int (store index — page backward). Pages turns back from the DURABLE store (the FULL conversation, never trimmed — so anything compaction dropped is one call away). Read-only. A page always fits INLINE (the cap); trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."),
-        "pull": .string("args: pid:str (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with `offset: next_offset` until `eof`."),
-        "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something, wherever it is — a stored body you never pulled, a digest line, an old turn. Returns {matches:[{id, line, text}], total, truncated}."),
+        "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), the rows other agents SHARED with you, and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}."),
         "context_recall": .string("args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."),
-        "context_clear": .string("args: why:str? — start a NEW THREAD on the same store: the model's view begins at the `[cleared <id> · N rows behind]` line this writes; nothing is deleted — every earlier row stays in the store, reachable by id (grep, pull, recall, the kernel's messages/rows_read). Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, behind:N}."),
-        "boot": .string("On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`. A fresh"),
+        "context_clear": .string("args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}."),
+        "fork_from": .string("args: owner:str (req), grant:int (req — the grant `owner` gave you), message:str (req — the task this fork starts on), client_id:str?. Makes THIS agent a fork of `owner`'s thread: the granted rows become read-only context in your view — read back under the grant every turn, so a revoked grant fails your next turn — followed by the framing line and `message`, and the turn STARTS AT ONCE. Returns {forked:true, fork:<row id>, rows:N}."),
+        "request_share": .string("args: row:int (req), why:str?. Asks THIS agent — the OWNER of `row` — to share it with the caller. The owner's model decides: it calls its store's `share`, or declines. Arrives as a turn; returns {requested:true} at once."),
+        "watch": .string("args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too, but only for rows a live grant from this agent gives you (share). Needs a registered inbox. Returns {watching:true, watcher, body}."),
+        "unwatch": .string("args: watcher:str? (operator only). Stop announcing rows to you. Returns {watching:false}."),
+        "boot": .string("LAZY: never touches the memory store. Checks the record names one (fail loud otherwise), starts a new incarnation, and marks the view for rebuilding — the first turn reads the head from the store and runs `context_recall`."),
     ]
 
     /// `VERBS.keys` — what every ai_core bundle advertises statically (python
@@ -473,6 +494,34 @@ public final class AIBackend: @unchecked Sendable {
                 "client_id": .string(guardClientId),
             ])
         }
+        // NO STORE, NO TURN — said up front, not discovered mid-generation.
+        do {
+            _ = try storeOf(agent.id.value, kernel)
+        } catch let e as MemoryStoreError {
+            return .object([
+                "error": .string(e.message), "reason": .string("missing_arg"),
+                "client_id": .string(guardClientId),
+            ])
+        }
+        if pyTruthy(payload["late"]) {
+            // A reply to a call a PREVIOUS incarnation made (see `deliverTurn`):
+            // recorded in this agent's own store, never a turn. The TARGET writes
+            // it — a store keys every row by its writer.
+            let lateText = payload.asObject?["text"].map { pyStr($0) } ?? ""
+            try await saveHistory(
+                agent.id.value, kernel,
+                [
+                    .object([
+                        "role": .string("user"),
+                        "parent": .null,
+                        "kind": .string("late"),
+                        "content": .string(
+                            "[late reply — answered a call made before this agent last "
+                                + "booted; recorded, not acted on]\n" + lateText),
+                    ])
+                ])
+            return .object(["late": .bool(true), "client_id": .string(guardClientId)])
+        }
         // MISSING `text` IS THE EMPTY STRING, not a refusal: python's
         // `payload.get("text", "")` and rust's `unwrap_or("")` both run the turn, so
         // a caller-driven agent kicking off from its system prompt alone worked on
@@ -495,13 +544,6 @@ public final class AIBackend: @unchecked Sendable {
         // A caller-supplied `system_prompt` REPLACES the default system block
         // (the caller teaches its own role/context there). Mirrors py/rust.
         let systemPrompt = payload["system_prompt"].asString
-        // A caller-supplied `messages` list REPLACES the persisted history: the
-        // turn is FULLY STATELESS — no recall-due, no projection, nothing saved.
-        // An empty list is not an override (python's `bool(messages_override)`).
-        let messagesOverride: [JSON]? = {
-            guard let list = payload["messages"].asArray, !list.isEmpty else { return nil }
-            return list
-        }()
         // Where this pass's TEXT goes when the model issues no call of its own.
         // A one-shot handoff for the CALLER; the MODEL routes its own work with
         // `reply_to` inside its `<call>`s. Mirrors python's `send_to`.
@@ -612,10 +654,20 @@ public final class AIBackend: @unchecked Sendable {
                     st: st,
                     userText: userText,
                     systemPrompt: systemPrompt,
-                    messagesOverride: messagesOverride,
                     kernel: kernel
                 )
             }
+        } catch let e as MemoryStoreError {
+            // FAIL FAST: the store refused or is gone — no turn, said so.
+            await emitStatus(
+                kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+                detail: [("reason", .string("error")), ("error", .string(e.message))])
+            st.clearCurrent()
+            await st.fifo.release()
+            return .object([
+                "error": .string(e.message), "reason": .string("memory_store"),
+                "client_id": .string(clientId),
+            ])
         } catch {
             // AN UNMAPPED PROVIDER FAILURE RAISES (see `runStream`). The lock is
             // python's `finally`: it is released on the way out, or the agent is
@@ -716,71 +768,49 @@ public final class AIBackend: @unchecked Sendable {
         st: AIAgentRunState,
         userText: String,
         systemPrompt: String?,
-        messagesOverride: [JSON]?,
         kernel: Kernel
     ) async throws -> AIPassOutcome {
-        // STATELESS: the caller owns this conversation, so none of the state
-        // machinery runs — no owed recall, no projection, no persistence.
-        let stateless = messagesOverride != nil
         let agentId = agent.id
         defer { bumpInFlight(-1) }
 
-        // A RECALL OWED FROM THE LAST FOLD BATCH runs first, so this turn is
-        // assembled over the head the recall chose — python `_recall_due`.
-        if !stateless, takeRecallDue(agentId.value) {
+        // A RECALL OWED FROM THE LAST FOLD BATCH (or the boot) runs first, so this
+        // turn is assembled over the head the recall chose — python `_recall_due`.
+        if takeRecallDue(agentId.value) {
             _ = try await contextRecall(
                 agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
         }
         // The message list UNDER the FIFO lock (we hold it here), so serialized
         // sends can't race load→save: the system block rebuilt from the live
         // substrate (or the caller's override), the VIEW of the store, the live
-        // turn. `storeLen` is the durable store's length behind it.
+        // turn. `storeLen` is how many turns the head held behind it.
         //
         // The user turn is NOT persisted here. It is persisted ONCE, with the
-        // assistant turn, after the stream completes — matching python
-        // (`ai_core.core._save_history`, one call site) and rust
-        // (`agent_loop.rs`, one call site). Saving it early made a cancelled or
-        // errored turn leave a user row with no answer, which python and rust
-        // never produce: there, an interrupted turn persists NOTHING, because
-        // the exchange it was part of never happened.
-        let (assembled, storeLen) = await assemble(
-            agent: agent, userText: userText, systemPrompt: systemPrompt,
-            messagesOverride: messagesOverride, kernel: kernel)
+        // assistant turn, after the stream completes — an interrupted turn
+        // persists NOTHING, because the exchange it was part of never happened.
+        let (assembled, storeLen) = try await assemble(
+            agent: agent, userText: userText, systemPrompt: systemPrompt, kernel: kernel)
         var messages = assembled
 
-        // ROW IDS for this turn: the incoming row (a root, or a delivered reply
-        // turn that names its parent on its tag) and the assistant row that
-        // answers it. The batch token on this turn's reply tags is the assistant
-        // row's own id, so `↑` on every reply points at something the model can
-        // see. Python `core.py` (`_row_ids_for_incoming` + `_mint_row_id`).
-        let (inId, inParent) = rowIdsForIncoming(userText, kernel: kernel)
-        let messageId = kernel.rows.mintId()
-
         // Context-Protocol seam: shape what the MODEL sees this turn to fit the
-        // window (prepending the canonical [context-notice]), ONCE at entry.
-        // `messages` is the model view; persistence APPENDS this turn to the chat
-        // store (the full conversation), so the durable store is never trimmed and
-        // the notice is never persisted.
-        if !stateless {
-            switch await projectContext(
-                provider: provider, agent: agent, clientId: clientId, messages: messages,
-                // THE DURABLE STORE'S LENGTH, not the view's: `messages` carries the
-                // deduped/trimmed history, so counting it puts the reaction cursor
-                // short by exactly the turns the trimmers dropped.
-                storeLen: storeLen,
-                kernel: kernel)
-            {
-            case .projected(let projected):
-                messages = projected
-            case .failed(let err):
-                // too_small failsafe / unknown-strategy — the model is NOT
-                // called, so there is no generation to close out: python returns
-                // the refusal body VERBATIM and emits NOTHING here (the seam
-                // already emitted `context:too_small`). Swift announced a
-                // `status(done, reason:error)` for a turn that never started and
-                // bolted `client_id` onto a body python leaves alone.
-                return .refused(err)
-            }
+        // window (prepending the canonical [context-notice]), ONCE at entry. The
+        // window is read off the record EVERY turn, so a model switched to a
+        // smaller one (`update_agent`) is fitted — folded — on its very next turn.
+        switch try await projectContext(
+            provider: provider, agent: agent, clientId: clientId, messages: messages,
+            // THE STORE'S LENGTH, not the view's: `messages` carries the
+            // deduped/trimmed history, so counting it puts the reaction cursor
+            // short by exactly the turns the trimmers dropped.
+            storeLen: storeLen,
+            kernel: kernel)
+        {
+        case .projected(let projected):
+            messages = projected
+        case .failed(let err):
+            // too_small failsafe / unknown-strategy — the model is NOT called, so
+            // there is no generation to close out: python returns the refusal body
+            // VERBATIM and emits NOTHING here (the seam already emitted
+            // `context:too_small`).
+            return .refused(err)
         }
 
         // ONE provider pass — stream tokens straight to the caller. What happens
@@ -798,6 +828,9 @@ public final class AIBackend: @unchecked Sendable {
             // does — and it is handed this backend's own status emitter so the
             // wait it takes is an ordinary `status` event.
             let model = renderForModel(messages)
+            // A FRESH reading per pass: a provider that reports nothing this time
+            // must not leave last pass's number standing.
+            provider.usage?.lastPromptTokens = nil
             let stream: AsyncThrowingStream<AIChunk, Error>
             if let wrapper = config.streamWrapper {
                 let emitter = AIStatusEmitter { phase, detail in
@@ -893,23 +926,49 @@ public final class AIBackend: @unchecked Sendable {
         // A subscriber that watches the store and the events together sees the
         // same sequence on every runtime; swift persisted first, so its two rows
         // landed before the event that announces them.
+        // THE CALIBRATION: what the endpoint REPORTED for this prompt, against our
+        // own estimate of what we sent.
+        if let reported = provider.usage?.lastPromptTokens, reported > 0 {
+            AICalibration.record(
+                kernel, agentId.value, reported: reported,
+                estimate: AIContext.estimateTokens(renderForModel(messages)))
+        }
         await emitStatus(
             kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
             detail: [("reason", .string("ok"))])
 
-        if !stateless {
-            let newTurns: [Row] = [
-                [
+        // ROW IDS for this turn: the incoming row (a root, or a delivered reply
+        // turn that names its parent on its tag) and the assistant row that
+        // answers it. The batch token on this turn's reply tags is the assistant
+        // row's own id, so `↑` on every reply points at something the model can
+        // see.
+        //
+        // MINTED HERE, AT THE APPEND — not at turn start. The store returns an
+        // owner's rows in ID order and the head cache keeps APPEND order; the two
+        // agree only while ids are minted as rows are appended. Minted at turn
+        // start, a fold or view row saved mid-turn (the projection) took a higher
+        // id yet landed first, and after a restart the conversation came back in a
+        // different order than the agent had lived it (python, E78).
+        let (inId, inParent) = rowIdsForIncoming(userText, kernel: kernel)
+        let messageId = kernel.mintId()
+        // APPEND this send's user + assistant turns to the memory store. NOT the
+        // projected view: the store keeps the FULL conversation so context
+        // management (compaction/recall) works next turn. PARSE THE RAW TEXT,
+        // PERSIST THE STRIPPED TEXT — the deliberation is not part of the
+        // conversation.
+        try await saveHistory(
+            agentId.value, kernel,
+            [
+                .object([
                     "role": .string("user"), "content": .string(userText),
                     "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
-                ],
-                [
-                    "role": .string("assistant"), "content": .string(withoutThinking(accumulated)),
+                ]),
+                .object([
+                    "role": .string("assistant"),
+                    "content": .string(withoutThinking(accumulated)),
                     "id": .integer(messageId), "parent": .integer(inId),
-                ],
-            ]
-            saveHistory(agent: agent, kernel: kernel, newTurns: newTurns)
-        }
+                ]),
+            ])
 
         // The RAW completion — markers in — is what routing parses: a call the
         // model wrote mid-thought still dispatches. Only the DURABLE turn above
@@ -1039,11 +1098,14 @@ public final class AIBackend: @unchecked Sendable {
                     ]))
             ])[0].result
             let me = await kernel.send([Item(selfId, .object(["type": .string("reflect"), "tree": .string("none")]))])[0].result
+            let store = agent.metaValue(forKey: "memory_store_id")
             blocks = [
                 renderReflect(primer),
                 "You are `\(selfId.value)`. " + renderReflect(me),
                 SEND_TO_HOWTO,
                 CONTEXT_HOWTO,
+                // `rec0.get("memory_store_id") or "(none)"` — python truthiness.
+                memoryHowto(store: store.map { pyTruthy($0) ? pyStr($0) : "(none)" } ?? "(none)"),
             ]
             // OPT-IN, on the record. Both verbs exist on every AI, but teaching
             // them costs every agent prompt tokens for a discipline most runs
@@ -1063,70 +1125,68 @@ public final class AIBackend: @unchecked Sendable {
     }
 
     /// Build the message list: the system block, the MODEL VIEW of the store,
-    /// the live user turn. Returns `(messages, storeLen)` — `storeLen` is how
-    /// many turns the DURABLE store held when this view was built. The view is
-    /// deduped and trimmed, so its length is NOT a store index; `projectContext`
-    /// needs the store one to mark where this turn's reaction will land. Python
-    /// `_assemble`.
+    /// the live user turn. A caller-supplied `systemPrompt` REPLACES the
+    /// deterministic substrate prompt. The conversation is ALWAYS this agent's
+    /// own (its memory store): there is no caller-supplied history — a one-off
+    /// completion is a disposable agent with its own store; context for another
+    /// agent travels in the text, or by grant (`share` → `fork_from`).
+    ///
+    /// Returns `(messages, storeLen)` — `storeLen` is how many turns the head held
+    /// when this view was built. The view is deduped and trimmed, so its length
+    /// is NOT a store index; `projectContext` needs the store one to mark where
+    /// this turn's reaction will land. Python `_assemble`.
     func assemble(
-        agent: Agent, userText: String, systemPrompt: String?, messagesOverride: [JSON]? = nil,
-        kernel: Kernel
-    ) async -> ([JSON], Int) {
+        agent: Agent, userText: String, systemPrompt: String?, kernel: Kernel
+    ) async throws -> ([JSON], Int) {
         let sysContent = await assembleSystemPrompt(
             agent: agent, systemPrompt: systemPrompt, kernel: kernel)
         // The system block is rebuilt on EVERY user turn; the store holds only the
         // user/assistant turns. The howto is not persisted — it always reflects
         // the latest state at send-time.
         var messages: [JSON] = [.object(["role": .string("system"), "content": .string(sysContent)])]
-        var storeLen = 0
-        if let override = messagesOverride {
-            // STATELESS: the caller supplies the conversation, so there is no
-            // store behind it — `storeLen` stays 0 and nothing is loaded.
-            messages.append(contentsOf: override)
+        let hist = try await loadHistory(agent.id.value, kernel)
+        let storeLen = hist.count
+        // THE VIEW ARRAY IS THE STATE. When one exists and every id it names still
+        // resolves, the model sees exactly those rows at exactly those resolutions
+        // — the same bytes before and after a restart. Otherwise (no array yet, or
+        // an id that no longer resolves) the view is the trimmed store: stale
+        // whole-state reads deduped, repeated bodies stubbed, answered reflects
+        // reduced to a stub (see `HistoryView.swift`).
+        let view = try await loadView(agent.id.value, kernel)
+        var byId: [Int64: JSON] = [:]
+        var idx: [Int64: Int] = [:]
+        for (i, r) in hist.enumerated() {
+            if let id = rowId(r), id != 0 {
+                byId[id] = r
+                idx[id] = i
+            }
+        }
+        let entries = view?["ids"].asArray ?? []
+        let resolves = !entries.isEmpty
+            && entries.allSatisfy { e in e["id"].asInt.map { byId[$0] != nil } ?? false }
+        if view != nil && resolves {
+            for e in entries {
+                messages.append(applyRes(byId[e["id"].asInt!]!, e["res"].asString ?? "full"))
+            }
+            // THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every
+            // row appended since — the model's own turns, the replies that landed —
+            // rides behind it in full. Measured 2026-09-06 (python,
+            // recall_after_fold): served the array alone, the model never saw the
+            // read it had just made and restarted the survey from filler_0, sixty
+            // turns in a circle.
+            let newest = entries.map { idx[$0["id"].asInt!]! }.max()!
+            messages.append(
+                contentsOf: dropAnsweredReflects(
+                    dedupeStaleReads(dedupeRepeatBodies(Array(hist[(newest + 1)...])))))
+            setViewSource(agent.id.value, "array")
         } else {
-            let hist = loadHistory(agent: agent, kernel: kernel)
-            storeLen = hist.count
-            // THE VIEW ARRAY IS THE STATE. When one exists and every id it names
-            // still resolves, the model sees exactly those rows at exactly those
-            // resolutions — the same bytes before and after a restart. Otherwise
-            // (no array yet, or an id that no longer resolves) the view is the
-            // trimmed store, as before: stale whole-state reads deduped and answered
-            // reflects reduced to a stub — the model's own distillation carries the
-            // facts (see `HistoryView.swift`).
-            let view = loadView(agent.id, kernel: kernel)
-            var byId: [Int64: JSON] = [:]
-            var idx: [Int64: Int] = [:]
-            for (i, r) in hist.enumerated() {
-                if let id = rowId(r), id != 0 {
-                    byId[id] = r
-                    idx[id] = i
-                }
-            }
-            let entries = view?["ids"]?.asArray ?? []
-            let resolves = !entries.isEmpty
-                && entries.allSatisfy { e in e["id"].asInt.map { byId[$0] != nil } ?? false }
-            if view != nil && resolves {
-                for e in entries {
-                    messages.append(applyRes(byId[e["id"].asInt!]!, e["res"].asString ?? "full"))
-                }
-                // THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every
-                // row appended since — the model's own turns, the replies that
-                // landed — rides behind it in full. Measured 2026-09-06 (python,
-                // recall_after_fold): served the array alone, the model never saw the
-                // read it had just made and restarted the survey from filler_0, sixty
-                // turns in a circle.
-                let newest = entries.map { idx[$0["id"].asInt!]! }.max()!
-                messages.append(
-                    contentsOf: dropAnsweredReflects(dedupeStaleReads(Array(hist[(newest + 1)...]))))
-                setViewSource(agent.id.value, "array")
-            } else {
-                messages.append(contentsOf: dropAnsweredReflects(dedupeStaleReads(hist)))
-                // AN EMPTY `ids` IS A CLEARED VIEW, not a stale one: `context_clear`
-                // empties the array so assembly renders the store from the clear on.
-                setViewSource(
-                    agent.id.value,
-                    view == nil || entries.isEmpty ? "store" : "store (stale array)")
-            }
+            messages.append(
+                contentsOf: dropAnsweredReflects(dedupeStaleReads(dedupeRepeatBodies(hist))))
+            // AN EMPTY `ids` IS A CLEARED VIEW, not a stale one: `context_clear`
+            // empties the array so assembly renders the store from the clear on.
+            setViewSource(
+                agent.id.value,
+                view == nil || entries.isEmpty ? "store" : "store (stale array)")
         }
         messages.append(.object(["role": .string("user"), "content": .string(userText)]))
         return (messages, storeLen)
@@ -1153,33 +1213,63 @@ public final class AIBackend: @unchecked Sendable {
 
     // MARK: - history
 
-    /// The conversation at DIGEST resolution — {id, parent, kind, role, head,
-    /// bytes} per row, oldest first, paged; `{rows, next, total}`. Bodies are
-    /// behind `pull`; a row's text is behind `recall`. Python `_make_history`.
-    private func historyVerb(agent: Agent, payload: JSON, kernel: Kernel) -> JSON {
-        let rows = loadHistory(agent: agent, kernel: kernel)
-        var digest: [JSON] = rows.compactMap { r in
-            guard let id = r["id"].asInt else { return nil }
-            // `str(r.get("content", ""))` — an ABSENT content is the empty
-            // string, a null one is the word `None`, and a dict is its python
-            // repr. Reading `asString ?? ""` gave every caller-written row a head
-            // of '' and a size of 0.
-            let content = pyStr(r.asObject?["content"] ?? .string(""))
-            // `kind` FALLS BACK TO `role` on python TRUTHINESS — ''/null/0 fall
-            // through, a non-string kind is kept RAW. 120 CODE POINTS, newlines
-            // flattened: a head is for recognising a row, not for reading it.
-            let scalars = content.unicodeScalars
-            var head = String.UnicodeScalarView()
-            for c in scalars.prefix(120) { head.append(c == "\n" ? " " : c) }
-            return .object([
-                "id": .integer(id),
-                "parent": r["parent"],
-                "kind": pyTruthy(r["kind"]) ? r["kind"] : r["role"],
-                "role": r["role"],
-                "head": .string(String(head)),
-                "bytes": .integer(Int64(scalars.count)),
+    /// One row at DIGEST resolution — `{id, parent, kind, role, head, bytes}`.
+    /// Python `_digest`.
+    static func digest(_ r: JSON) -> JSON {
+        // `str(r.get("content", ""))` — an ABSENT content is the empty string, a
+        // null one is the word `None`, and a dict is its python repr.
+        let content = pyStr(r.asObject?["content"] ?? .string(""))
+        // `kind` FALLS BACK TO `role` on python TRUTHINESS. 120 CODE POINTS,
+        // newlines flattened: a head is for recognising a row, not for reading it.
+        let scalars = content.unicodeScalars
+        var head = String.UnicodeScalarView()
+        for c in scalars.prefix(120) { head.append(c == "\n" ? " " : c) }
+        return .object([
+            "id": r["id"],
+            "parent": r["parent"],
+            "kind": pyTruthy(r["kind"]) ? r["kind"] : r["role"],
+            "role": r["role"],
+            "head": .string(String(head)),
+            "bytes": .integer(Int64(scalars.count)),
+        ])
+    }
+
+    /// args: fold:int? (a fold or clear id — list ITS members instead),
+    /// limit:int?, after:int?. The conversation at DIGEST resolution, oldest
+    /// first, paged; `{rows, next, total, fold?}`. With `fold`, that fold's title
+    /// + summary and its members (one level down). Python `_make_history`.
+    private func historyVerb(agent: Agent, payload: JSON, kernel: Kernel) async throws -> JSON {
+        var head: JSON? = nil
+        let rows: [JSON]
+        if payload["fold"] != .null {
+            guard let foldId = aiAsId(payload["fold"]) else {
+                return .object([
+                    "error": .string("history: `fold` must be a fold id (int)"),
+                    "reason": .string("bad_arg"), "arg": .string("fold"),
+                ])
+            }
+            let everything = try await loadHistory(agent.id.value, kernel, behind: true)
+            var byId: [Int64: JSON] = [:]
+            for r in everything { if let id = rowId(r), id != 0 { byId[id] = r } }
+            guard let f = byId[foldId], ["fold", "clear"].contains(f["kind"].asString ?? "") else {
+                return .object([
+                    "error": .string("history: \(foldId) is not a fold in your conversation"),
+                    "reason": .string("not_found"), "arg": .string("fold"),
+                ])
+            }
+            let refs = f["refs"].asArray ?? []
+            rows = refs.compactMap { m in m.asInt.flatMap { byId[$0] } }
+            head = .object([
+                "id": .integer(foldId),
+                "kind": f["kind"],
+                "title": f["title"],
+                "summary": pyTruthy(f["body"]) ? f["body"] : .string(""),
+                "members": .integer(Int64(refs.count)),
             ])
+        } else {
+            rows = try await loadHistory(agent.id.value, kernel)
         }
+        var digest: [JSON] = rows.filter { pyTruthy($0["id"]) }.map(Self.digest)
         // python `int(payload.get("limit") or 0)`, a bad value reading as 0.
         let limit = (try? pyIntOr(payload["limit"], 0)) ?? 0
         if let after = aiAsId(payload["after"]) {
@@ -1188,28 +1278,18 @@ public final class AIBackend: @unchecked Sendable {
             digest.removeFirst(at)
         }
         // THE CAP INVARIANT: a digest page must answer UNDER the inline cap or it
-        // is stored and dehydrated and the model pulls its own history. `limit`
-        // bounds the count; the cap bounds the bytes.
-        // `limit or None` — only ZERO is "no limit". A NEGATIVE limit is an empty
-        // page (`len(kept) >= -1` on the first item), where `limit > 0` handed
-        // back every row that fit.
+        // is digested to its origin line. `limit` bounds the count; the cap bounds
+        // the bytes. `limit or None` — only ZERO is "no limit".
         let (kept, truncated) = AIContext.fitReply(
             digest, capTokens: AIContext.inlineCap(agent), limit: limit != 0 ? limit : nil)
-        return .object([
+        var out: OrderedDictionary<String, JSON> = [
             "rows": .array(kept),
             "next": truncated ? (kept.last?["id"] ?? .null) : .null,
             "total": .integer(Int64(rows.count)),
-        ])
+        ]
+        if let head { out["fold"] = head }
+        return .object(out)
     }
-
-    // MARK: - the conversation: rows in the KERNEL's message store
-
-    /// The kernel's own bookkeeping kinds. In the same table, never the
-    /// conversation. WHAT IS NOT CONVERSATION: an allow-list of kinds to HIDE, so
-    /// a kind added to the kernel and forgotten here lands in the model's prompt
-    /// — which is how `settle` first arrived as a turn reading `null` (python,
-    /// 2026-09-11). Python `_BOOKKEEPING`, rust `history.rs`.
-    static let bookkeeping: Set<String> = ["call", "task", "body", "view", "settle"]
 
     /// Trim + sanitise a client id — the status/queue axis, never a store key.
     /// Python `_safe_client`: `(client_id or "cli").strip() or "cli"`, then every
@@ -1230,50 +1310,12 @@ public final class AIBackend: @unchecked Sendable {
         return String(out)
     }
 
-    /// The agent's conversation — every row, in order — from the KERNEL ROW
-    /// STORE. AGENT ID IS CONVERSATION ID: a second conversation is a second
-    /// agent, so there is no client dimension here. Nothing is read from disk:
-    /// persistence of the store is the kernel's concern (a loader hydrates it, a
-    /// persister tails it), never this bundle's. Python `_load_history`.
-    ///
-    /// A CLEAR IS A BOUNDARY, NOT A DELETION (`context_clear`): the conversation
-    /// the model sees starts at the LAST `clear` row — that row itself is its
-    /// first line. Rows behind it stay in the store, reachable by id;
-    /// `behind: true` (recall, grep, pull — the verbs that exist to reach what is
-    /// not in view) reads the whole store.
-    func loadHistory(agent: Agent, kernel: Kernel, behind: Bool = false) -> [JSON] {
-        let rows = kernel.rows.forAgent(agent.id).filter { r in
-            guard let k = r["kind"]?.asString else { return true }
-            return !Self.bookkeeping.contains(k)
-        }.map { JSON.object($0) }
-        if behind { return rows }
-        if let i = rows.lastIndex(where: { $0["kind"].asString == "clear" }) {
-            return Array(rows[i...])
-        }
-        return rows
-    }
-
-    /// APPEND this turn's rows to the kernel row store. Bookkeeping from above —
-    /// the same standing as the ledger's own put; no grant, no gate, no disk. A
-    /// pre-minted `id` is accepted, which is what lets a turn name itself in the
-    /// reply tags it sends before its own row exists. Python `_save_history`.
-    func saveHistory(agent: Agent, kernel: Kernel, newTurns: [Row]) {
-        for turn in newTurns {
-            do { try kernel.rows.put(agent.id, turn) } catch {
-                // A refused row is the hydrator's mistake, not the model's — say
-                // it and keep the rest of the turn, rather than dropping a
-                // conversation.
-                FileHandle.standardError.write(Data("  [history] \(agent.id.value): \(error)\n".utf8))
-            }
-        }
-    }
-
     /// (id, parent) for an incoming turn. A delivered reply turn names the
     /// assistant turn that made the calls (`↑`) on its first tag; anything else
     /// is a ROOT — a fresh message from a person or a peer. Python
     /// `_row_ids_for_incoming` + `_TAG_LINKS`.
     func rowIdsForIncoming(_ text: String, kernel: Kernel) -> (Int64, Int64?) {
-        let rid = kernel.rows.mintId()
+        let rid = kernel.mintId()
         return (rid, incomingParent(text))
     }
 

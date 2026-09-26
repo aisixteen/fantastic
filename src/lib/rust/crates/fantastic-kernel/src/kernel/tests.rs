@@ -362,19 +362,11 @@ async fn state_events_are_python_shape() {
         .iter()
         .map(|e| e["kind"].as_str().unwrap_or(""))
         .collect();
-    // THE ROW EVENT leads: the batch's `call` row is appended before dispatch,
-    // and every append publishes its digest on the same stream (2026-09-23).
-    assert_eq!(kinds, vec!["row", "send", "drain"], "{events:?}");
-    assert_eq!(events[0]["row"]["verb"], json!("nope"));
-    assert!(
-        !events[0]["row"]
-            .as_object()
-            .expect("digest")
-            .contains_key("content"),
-        "a row event carries the digest, never the body"
-    );
+    // NO ROW EVENT: the kernel holds no conversation, and its execution rows are
+    // not on the state stream (an AI agent announces its own rows to watchers).
+    assert_eq!(kinds, vec!["send", "drain"], "{events:?}");
 
-    let send = &events[1];
+    let send = &events[0];
     let keys: Vec<&str> = send
         .as_object()
         .expect("object")
@@ -400,7 +392,7 @@ async fn state_events_are_python_shape() {
     assert_eq!(send["payload"], json!({"type": "nope"}));
     assert!(send["ts"].is_f64());
 
-    let drain = &events[2];
+    let drain = &events[1];
     let dkeys: Vec<&str> = drain
         .as_object()
         .expect("object")
@@ -630,12 +622,23 @@ async fn declaring_tree(shutdown: bool, calls: &Arc<AtomicUsize>) -> Arc<Kernel>
     kernel
 }
 
+/// How many execution rows (still in RAM — this kernel never started) are ABOUT
+/// `agent`.
+fn rows_about(kernel: &Arc<Kernel>, agent: &str) -> usize {
+    kernel
+        .rows
+        .all()
+        .iter()
+        .filter(|r| r.get("agent").and_then(Value::as_str) == Some(agent))
+        .count()
+}
+
 #[tokio::test]
 async fn the_shutdown_sweep_mints_no_id_and_writes_no_row() {
     let calls = Arc::new(AtomicUsize::new(0));
     let kernel = declaring_tree(false, &calls).await;
     let before_id = kernel.rows.next_id();
-    let before_rows = kernel.rows.for_agent(&AgentId::from("node")).len();
+    let before_rows = rows_about(&kernel, "node");
     let seen = calls.load(Ordering::SeqCst);
 
     let reply = kernel.shutdown_agents().await;
@@ -646,7 +649,7 @@ async fn the_shutdown_sweep_mints_no_id_and_writes_no_row() {
         "the advertises read mints no message id"
     );
     assert_eq!(
-        kernel.rows.for_agent(&AgentId::from("node")).len(),
+        rows_about(&kernel, "node"),
         before_rows,
         "python's VERBS lookup leaves no call row and no internal roster row"
     );
@@ -661,7 +664,7 @@ async fn the_shutdown_sweep_mints_no_id_and_writes_no_row() {
 async fn a_bundle_that_declares_shutdown_is_still_the_one_told() {
     let calls = Arc::new(AtomicUsize::new(0));
     let kernel = declaring_tree(true, &calls).await;
-    let before_rows = kernel.rows.for_agent(&AgentId::from("node")).len();
+    let before_rows = rows_about(&kernel, "node");
 
     let reply = kernel.shutdown_agents().await;
 
@@ -669,7 +672,7 @@ async fn a_bundle_that_declares_shutdown_is_still_the_one_told() {
     // The `shutdown` verb IS a dispatch and keeps its row; only the discovery
     // read is silent, so exactly one row was added.
     assert_eq!(
-        kernel.rows.for_agent(&AgentId::from("node")).len(),
+        rows_about(&kernel, "node"),
         before_rows + 1,
         "the shutdown call itself is a call like any other"
     );

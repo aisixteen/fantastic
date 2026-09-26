@@ -1,11 +1,9 @@
-// FULL ASYNC: a reply is a row, not a turn.
+// A reply is a row, not a turn.
 //
-// A settled call's body is inlined only if it is small; otherwise it is stored
-// under its pid and the model is handed the digest. Then a 240KB ledger dump is
-// a row to page, never a turn that has to fit — which is the difference between
-// "the model can look" and "the chain is dead". These tests are the store, the
-// cap, and the paging. Twins of python `ai_core/tests/test_async_replies.py`,
-// case for case.
+// A settled call's body is inlined only if it is small; otherwise it is held in
+// RAM under its pid (never persisted) and the model is handed the digest + its
+// origin line; `grep` finds the line. These tests are the RAM body, the cap, and
+// grep. Twins of python `ai_core/tests/test_async_replies.py`, case for case.
 
 import FantasticJSON
 import FantasticKernel
@@ -32,7 +30,7 @@ private func boot() async -> (Kernel, Agent, FoldFixture) {
 /// python `_store_reply`.
 @discardableResult
 private func storeReply(_ kernel: Kernel, _ agent: Agent, _ pid: Int64, _ body: String) -> Bool {
-    (try? kernel.rows.bodyPut(agent.id, pid: pid, text: body)) != nil
+    FantasticAICore.storeReply(agent.id.value, kernel, pid: pid, body: body)
 }
 
 private func verb(
@@ -51,83 +49,34 @@ private func asUserTurn(_ r: JSON) -> JSON {
 
 @Suite("async replies: a reply is a row", .serialized)
 struct AsyncRepliesTests {
-    /// THE INVARIANT that closes the recursion. If a page could be larger than
-    /// what inlines, the page itself would be stored and digested, and the model
-    /// would pull the pull forever (measured in review before it reached a live
-    /// run).
-    @Test func aPullPageCanNeverExceedTheInlineCap() {
+    @Test func theInlineCapIsAnEighthOfTheBudget() {
         for window: Int64 in [8000, 12000, 32000, 131072] {
             let rec = Agent(
                 id: AgentId("x"), handlerModule: nil, parentId: nil,
                 meta: ["context_window": .integer(window), "output_reserve": .integer(0)])
             #expect(AIContext.inlineCap(rec) == max(256, AIContext.budget(rec) / 8))
-            #expect(
-                Int64(AIContext.pullCapChars(rec) / AIContext.charsPerToken)
-                    <= AIContext.inlineCap(rec))
         }
     }
 
-    @Test func storeThenPullPagesThroughTheBody() async throws {
+    /// BODIES ARE NEVER PERSISTED: a large reply is kept in RAM under its pid
+    /// for this incarnation, and after a restart only its origin line remains.
+    @Test func aBodyIsHeldInRamForThisRunOnly() async throws {
         let (kernel, agent, _) = await boot()
-        let body = (0..<8000).map { "line \($0)\n" }.joined()  // ~70KB, cap is 6KB chars
-        let pid = kernel.rows.mintId()
-        #expect(storeReply(kernel, agent, pid, body))
-        let cap = AIContext.pullCapChars(agent)
-        var got = ""
-        var off: Int64 = 0
-        var pages = 0
-        while true {
-            let r = await verb(
-                kernel, agent, "pull", ["pid": .integer(pid), "offset": .integer(off)])
-            #expect(r["error"] == .null, Comment(rawValue: r.serialize()))
-            let text = r["text"].asString ?? ""
-            #expect(text.count <= cap)
-            got += text
-            pages += 1
-            if r["eof"].asBool == true { break }
-            off = r["next_offset"].asInt ?? 0
-            if pages > 100 {
-                Issue.record("no eof after 100 pages")
-                break
-            }
-        }
-        #expect(got == body)
-        #expect(pages > 1, "the body should have needed more than one page")
-    }
-
-    @Test func aPullCanNeverReturnMoreThanTheCap() async throws {
-        let (kernel, agent, _) = await boot()
-        let pid = kernel.rows.mintId()
-        storeReply(kernel, agent, pid, String(repeating: "z", count: 100_000))
-        let cap = AIContext.pullCapChars(agent)
-        var r = await verb(
-            kernel, agent, "pull", ["pid": .integer(pid), "length": .integer(Int64(cap + 1))])
-        #expect(r["reason"].asString == "bad_arg" && r["arg"].asString == "length")
-        r = await verb(kernel, agent, "pull", ["pid": .integer(pid)])
-        // a page is sized so the SERIALIZED reply fits inline — never more than
-        // the cap in chars, and shorter when escaping would push the reply over
-        let n = r["text"].asString?.count ?? 0
-        #expect(64 < n && n <= cap && r["eof"].asBool == false)
-        #expect(AIContext.estimateOne(asUserTurn(r)) <= AIContext.inlineCap(agent))
-    }
-
-    @Test func pullingAnUnknownPidIsAReadableRefusal() async throws {
-        let (kernel, agent, _) = await boot()
-        var r = await verb(kernel, agent, "pull", ["pid": .integer(999_999)])
-        #expect(r["reason"].asString == "not_found")
-        r = await verb(kernel, agent, "pull")
-        #expect(r["reason"].asString == "bad_arg" && r["arg"].asString == "pid")
-    }
-
-    @Test func noFileLegMeansTheBodyCannotBeStored() {
-        #expect(Kernel().rows.bodyGet(1, offset: 0, length: 10) == nil)
+        let body = (0..<800).map { "line \($0)\n" }.joined()
+        #expect(storeReply(kernel, agent, 1001, body))
+        #expect(heldBodies(agent.id.value, kernel)[1001] == body)
+        #expect(
+            !storeRows(kernel: kernel, id: agent.id).contains { ($0["content"].asString ?? "").contains("line 799") },
+            "nothing of the body reached the store")
+        AIMemory.forget(kernel)  // the process restarts
+        #expect(heldBodies(agent.id.value, kernel)[1001] == nil)
     }
 
     // ── grep: find the line, don't page for it ───────────────────────────
 
     @Test func grepFindsALineInsideAStoredBodyWithoutPullingIt() async throws {
         let (kernel, agent, f) = await boot()
-        let pid = kernel.rows.mintId()
+        let pid = kernel.mintId()
         let fox = String(repeating: "the quick brown fox ", count: 40)
         let body =
             (["chunk 5: " + fox, "chunk 5: " + fox, "chunk 5: " + fox] + [
@@ -153,8 +102,8 @@ struct AsyncRepliesTests {
 
     @Test func grepScopesToIdsAndCapsMatches() async throws {
         let (kernel, agent, f) = await boot()
-        let p1 = kernel.rows.mintId()
-        let p2 = kernel.rows.mintId()
+        let p1 = kernel.mintId()
+        let p2 = kernel.mintId()
         storeReply(kernel, agent, p1, (0..<50).map { "hit \($0)" }.joined(separator: "\n"))
         storeReply(kernel, agent, p2, "hit elsewhere")
         f.seed([f.row("user", "[reply to \(p1) · n r]\nx\n\n[reply to \(p2) · n r]\ny", "u:0")])
@@ -180,7 +129,7 @@ struct AsyncRepliesTests {
         for _ in 0..<6 {
             f.seed([plainTurn("user", "find the audit marker in the files")])
         }
-        let pid = kernel.rows.mintId()
+        let pid = kernel.mintId()
         f.seed([
             plainTurn("user", "[reply to \(pid) · notes read]\n(settled, 9 bytes — NOT inlined)")
         ])
@@ -194,16 +143,17 @@ struct AsyncRepliesTests {
     /// A descent: `ids:[fold]` must reach the bodies behind the member replies.
     @Test func grepScopedToAFoldSearchesItsMembersBodies() async throws {
         let (kernel, agent, f) = await boot()
-        let call = kernel.rows.mintId()
-        let pid = kernel.rows.mintId()
-        let reply = try kernel.rows.put(
-            agent.id,
-            [
-                "role": .string("user"), "parent": .integer(call),
+        let call = kernel.mintId()
+        let pid = kernel.mintId()
+        let reply = kernel.mintId()
+        f.seed([
+            .object([
+                "role": .string("user"), "parent": .integer(call), "id": .integer(reply),
                 "content": .string(
                     "[reply to \(pid) · notes read · \"read filler_1\" · ↑\(call)]\n(settled, 9 bytes — NOT inlined)"
                 ),
             ])
+        ])
         storeReply(kernel, agent, pid, "chunk 1\n>> audit marker: cafebabe\nchunk 1")
         let fold = f.fold([call, reply], "read filler_1", "plain filler", false)
         f.seed([fold])
@@ -221,7 +171,7 @@ struct AsyncRepliesTests {
 
     @Test func grepWidthIsTheModelsToRaise() async throws {
         let (kernel, agent, f) = await boot()
-        let pid = kernel.rows.mintId()
+        let pid = kernel.mintId()
         f.seed([
             plainTurn("user", "[reply to \(pid) · notes read]\n(settled, 9 bytes — NOT inlined)")
         ])
@@ -237,23 +187,9 @@ struct AsyncRepliesTests {
 
     // ── code points, not graphemes (B5.1) ────────────────────────────────
 
-    // A CRLF is ONE Character and TWO code points, so a grapheme-counted page
-    // and a grapheme-counted width both return more than python returns.
-    //
-    // The STORED-BODY branch's page (`kernel.rows.bodyGet`) counts code points
-    // too as of C70 — pinned separately in
-    // `ViewRecallTests.pullPagesACrlfBodyByCodePoints`. What is pinned here is
-    // the FOLD branch and the grep width.
-    @Test func pullAndGrepWidthCountCodePoints() async throws {
-        let (kernel, agent, f) = await boot()
-        let fold = f.fold([], "t", String(repeating: "a\r\nb", count: 3), false)
-        f.seed([fold])
-        let pid = try #require(rowId(fold))
-        let r = await verb(kernel, agent, "pull", ["pid": .integer(pid), "length": .integer(5)])
-        #expect(r["text"].asString == "a\r\nba", "\(r.serialize())")
-        #expect(r["next_offset"].asInt == 5)
-
-        // `line.strip()[:width]` counts code points too.
+    // `line.strip()[:width]` counts code points: a CRLF is ONE Character and TWO
+    // code points, so a grapheme-counted width returns more than python returns.
+    @Test func grepWidthCountsCodePoints() async throws {
         let (k2, a2, f2) = await boot()
         f2.seed([f2.row("user", String(repeating: "a\r\n", count: 8) + "needle", "u:1")])
         let g = await verb(k2, a2, "grep", ["query": .string("needle"), "width": .integer(20)])

@@ -34,7 +34,7 @@ private func ctx(
     summarize: (@Sendable ([JSON]) async throws -> String)? = fakeSummaryS,
     selfId: String = AI
 ) -> ProjectionCtx {
-    ProjectionCtx(budget: bud, recentN: recentN, summarize: summarize, selfId: AgentId(selfId), kernel: Kernel())
+    ProjectionCtx(budget: bud, recentN: recentN, summarize: summarize.map(summarizer), selfId: AgentId(selfId), kernel: nil)
 }
 
 /// python `_FakeKernel` + the record: a booted kernel whose `ai_c` agent carries
@@ -117,9 +117,9 @@ struct ContextSeamTests {
 
     // ── strategies (return a Projection, NOT a fabricated turn) ─────────
 
-    @Test func compactReturnsProjectionWithSummary() async {
+    @Test func compactReturnsProjectionWithSummary() async throws {
         let b = body(10)
-        let proj = await AIStrategies.getStrategy("compact")!(b, [turn("system", "S")], .object([:]), ctx(1_000_000))
+        let proj = try await AIStrategies.getStrategy("compact")!(b, [turn("system", "S")], .object([:]), ctx(1_000_000))
         #expect(proj.summary == "SUMMARY")  // artifact, not a fabricated turn
         // The task-framing turn is PINNED ahead of the recent window (see
         // `everyStrategyKeepsTheGoalWhenTheBodyOverflows` for why). Everything after
@@ -129,11 +129,11 @@ struct ContextSeamTests {
         #expect(!proj.body.contains { ($0["content"].asString ?? "").contains("[Earlier conversation summary]") })
     }
 
-    @Test func truncateReturnsProjectionNoSummarizer() async {
+    @Test func truncateReturnsProjectionNoSummarizer() async throws {
         final class Spy: @unchecked Sendable { var called = 0 }
         let spy = Spy()
         let b = body(10)
-        let proj = await AIStrategies.getStrategy("truncate")!(
+        let proj = try await AIStrategies.getStrategy("truncate")!(
             b, [], .object([:]),
             ctx(1_000_000, summarize: { _ in
                 spy.called += 1
@@ -146,7 +146,7 @@ struct ContextSeamTests {
         #expect(spy.called == 0, "truncate must NOT call the summarizer")
     }
 
-    @Test func toolPairingNeverOrphansRoleTool() async {
+    @Test func toolPairingNeverOrphansRoleTool() async throws {
         let b: [JSON] = [
             turn("user", "u0"),
             .object(["role": .string("assistant"), "content": .string("a"), "tool_calls": .array([.object(["id": .string("1")])])]),
@@ -155,19 +155,19 @@ struct ContextSeamTests {
             turn("user", "u-live"),
         ]
         // recent_n=3 would start the recent window on the role:tool (idx 2); must snap back.
-        let proj = await AIStrategies.getStrategy("compact")!(b, [], .object([:]), ctx(1_000_000, recentN: 3))
+        let proj = try await AIStrategies.getStrategy("compact")!(b, [], .object([:]), ctx(1_000_000, recentN: 3))
         #expect(proj.body.first?["role"].asString != "tool")
     }
 
-    @Test func summarizerFailureDegradesToStub() async {
-        let proj = await AIStrategies.getStrategy("compact")!(
+    @Test func summarizerFailureDegradesToStub() async throws {
+        let proj = try await AIStrategies.getStrategy("compact")!(
             body(10), [], .object([:]), ctx(1_000_000, summarize: { _ in throw MockError.boom }))
         #expect(proj.summary == AIStrategies.stubSummary)
     }
 
-    @Test func tightBudgetKeepsLiveUserTurn() async {
+    @Test func tightBudgetKeepsLiveUserTurn() async throws {
         let b = body(10)
-        let proj = await AIStrategies.getStrategy("truncate")!(b, [], .object([:]), ctx(80))
+        let proj = try await AIStrategies.getStrategy("truncate")!(b, [], .object([:]), ctx(80))
         #expect(proj.body.last == b.last)
     }
 
@@ -177,14 +177,20 @@ struct ContextSeamTests {
         let (kernel, agent, backend, sink, pump) = await seam()
         defer { pump.cancel() }
         let m = [turn("system", "S"), turn("user", "hi")]
-        let out = await backend.projectContext(
+        let out = try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "cli", messages: m, storeLen: m.count - 1, kernel: kernel)
         guard case .projected(let got) = out else {
             Issue.record("must not failfast")
             return
         }
         #expect(got == m)  // unchanged
-        #expect(backend.getProjection(AI) == .object(["fired": .bool(false)]))
+        // python's `{fired: False, trigger, calibration}` — the calibrated trigger
+        // it was measured against rides the posture.
+        #expect(
+            backend.getProjection(AI)
+                == .object([
+                    "fired": .bool(false), "trigger": .double(0.8), "calibration": .double(1.0),
+                ]))
         try? await Task.sleep(nanoseconds: 50_000_000)
         #expect(contextEvents(sink).isEmpty)  // no context event when nothing compacts
     }
@@ -194,7 +200,7 @@ struct ContextSeamTests {
             window: 500, meta: ["output_reserve": .integer(0), "context_strategy": .string("compact")])
         defer { pump.cancel() }
         let m = msgs(20)  // big history
-        let out = await backend.projectContext(
+        let out = try await backend.projectContext(
             provider: MockProvider(tokens: ["FAKESUMMARY"]), agent: agent, clientId: "cli",
             messages: m, storeLen: m.count - 1, kernel: kernel)
         guard case .projected(let got) = out else {
@@ -228,7 +234,7 @@ struct ContextSeamTests {
         defer { pump.cancel() }
         let m = msgs(20)
         #expect(!JSON.array(m).serialize().contains("[context-notice]"))
-        _ = await backend.projectContext(
+        _ = try await backend.projectContext(
             provider: MockProvider(tokens: ["FAKESUMMARY"]), agent: agent, clientId: "web1",
             messages: m, storeLen: m.count - 1, kernel: kernel)
         // the input list itself was not mutated to contain the notice
@@ -240,7 +246,7 @@ struct ContextSeamTests {
         defer { pump.cancel() }
         let bigSystem = turn("system", String(repeating: "S", count: 8000))  // ~2000 tok, bigger than the window
         let m = [bigSystem, turn("user", "hi")]
-        let out = await backend.projectContext(
+        let out = try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "cli", messages: m, storeLen: m.count - 1, kernel: kernel)
         guard case .failed(let err) = out else {
             Issue.record("the failsafe must refuse")
@@ -262,7 +268,7 @@ struct ContextSeamTests {
             window: 500, meta: ["output_reserve": .integer(0), "context_strategy": .string("bogus")])
         defer { pump.cancel() }
         let m = msgs(20)
-        let out = await backend.projectContext(
+        let out = try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "cli", messages: m, storeLen: m.count - 1, kernel: kernel)
         guard case .failed(let err) = out else {
             Issue.record("an unknown strategy is a config error")
@@ -291,12 +297,12 @@ struct ContextSeamTests {
     // `truncate` already gets this right, which is what made the diagnosis
     // obvious. This test is deliberately GENERAL over the strategy registry: a new
     // strategy inherits the guarantee by being registered.
-    @Test func everyStrategyKeepsTheGoalWhenTheBodyOverflows() async {
+    @Test func everyStrategyKeepsTheGoalWhenTheBodyOverflows() async throws {
         let goal = "GOAL-SENTINEL: seal the secrets bridge and open the assets bridge."
         let b = [turn("user", goal)] + body(40, size: 400)
         for name in AIStrategies.strategyNames() {
             let strategy = AIStrategies.getStrategy(name)!
-            let proj = await strategy(b, [], .object([:]), ctx(1200, selfId: "\(AI)_\(name)"))
+            let proj = try await strategy(b, [], .object([:]), ctx(1200, selfId: "\(AI)_\(name)"))
             // The projection is what the model actually sees. The goal must be
             // reachable from it — carried verbatim in the body, or preserved in the
             // summary the seam turns into the context notice.
@@ -332,7 +338,7 @@ struct ContextSeamTests {
                     meta: ["output_reserve": .integer(0), "context_strategy": .string(strategy)])
                 defer { pump.cancel() }
                 let m = [turn("system", "sys"), turn("user", goal)] + body(40)
-                let out = await backend.projectContext(
+                let out = try await backend.projectContext(
                     provider: MockProvider(tokens: ["FAKESUMMARY"]), agent: agent, clientId: "cli",
                     messages: m, storeLen: m.count - 1, kernel: kernel)
                 guard case .projected(let got) = out else {

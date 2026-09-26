@@ -531,11 +531,20 @@
                 if let want = jobArg(payload) {
                     guard let jid = want.asString, let j = jobs[jid], j.agent == agentId
                     else { return noJob(want) }
-                    return .object(["jobs": .array([snap(jid, j, full: true)])])
+                    return .object([
+                        "jobs": .array([snap(jid, j, full: true)]),
+                        // HOW TO GET THIS AGAIN — python `_status`'s `origin`.
+                        "origin": .string(
+                            "\(agentId.value) status {job_id: \(jid)} — a live job; re-send for "
+                                + "its output NOW, which may differ"),
+                    ])
                 }
                 let rows = jobs.filter { $0.value.agent == agentId }
                     .map { snap($0.key, $0.value, full: false) }
-                return .object(["jobs": .array(rows)])
+                return .object([
+                    "jobs": .array(rows),
+                    "origin": .string("\(agentId.value) status — the job table NOW; re-send, it changes"),
+                ])
             }
         }
 

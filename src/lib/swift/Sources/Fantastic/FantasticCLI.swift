@@ -17,7 +17,7 @@
 //
 // Every mode runs the same two preludes python's `main_dispatch` runs before
 // argv is looked at: the `.env` autoload, then the disk-backed bootstrap that
-// seeds a virgin `.fantastic/` and hydrates the cold message log. `reflect`
+// seeds a virgin `.fantastic/` and hydrates the persisted tree. `reflect`
 // takes no lock; it still reads the persisted tree.
 //
 // There is no `install` / `install-bundle` command in any kernel:
@@ -107,7 +107,7 @@ struct FantasticCLI {
         """
         [kernel] another fantastic owns this dir: pid=\(pid)
           -> kill it:  kill \(pid)
-          -> or, if stale, remove the lock:  rm .fantastic/lock.json
+          -> or, if stale, remove the lock:  rm .fantastic/lock.yaml
         """
     }
 
@@ -221,16 +221,13 @@ struct FantasticCLI {
     // MARK: - bootstrap
 
     /// Python `main.py:_build_kernel` — the disk-backed bootstrap every mode
-    /// runs: seed a virgin `.fantastic/`, hydrate the persisted tree, then the
-    /// cold message log. NO lock: `reflect` is read-only and the one-shot takes
+    /// runs: seed a virgin `.fantastic/` and hydrate the persisted tree (the
+    /// kernel keeps no message log). NO lock: `reflect` is read-only and the one-shot takes
     /// the lock itself, before this.
     static func bootDiskBacked(cwd: String = FileManager.default.currentDirectoryPath)
         async throws -> Kernel
     {
         let kernel = try await startKernel(workdir: cwd, portHint: 0)
-        try hydrateMessages(
-            kernel,
-            rootDir: URL(fileURLWithPath: cwd).appendingPathComponent(".fantastic"))
         // C80: applied after EVERY kernel construction, python's own
         // `if cap_set: kernel.ledger_cap = cap` right after `_build_kernel()`.
         // A no-op in tests, which never touch `ledgerCap` (stays `wasSet:
@@ -384,7 +381,7 @@ struct FantasticCLI {
     /// A14.3's USAGE branch, factored out like `dispatchInit` so a test can
     /// pin the ORDER without the process-level `exit(2)`: python builds the
     /// kernel in `main` BEFORE `dispatch_argv` runs, so even `init`'s usage
-    /// error leaves the SEEDED root behind — `.fantastic/` + `agent.json` +
+    /// error leaves the SEEDED root behind — `.fantastic/` + `agent.yaml` +
     /// `readme.md` + `docs/**` (19 paths, measured). Same shape as the
     /// `.usage` branch; NO lock — python's `init` probes the lock only once
     /// it has both arguments. Rust mirrors it in

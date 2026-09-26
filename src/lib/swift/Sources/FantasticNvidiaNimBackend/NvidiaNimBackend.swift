@@ -34,7 +34,7 @@ public let DEFAULT_ENDPOINT = "https://integrate.api.nvidia.com/v1"
 public let KEY_VAR = "NVIDIA_API_KEY"
 
 /// The key, from the ENVIRONMENT. Nothing else is consulted — not a sidecar, and
-/// NOT the agent record: a key on the record is a key written into `agent.json`
+/// NOT the agent record: a key on the record is a key written into `agent.yaml`
 /// on disk, which is how it leaks through a reflect or a store copy.
 func readApiKey() -> String? {
     let raw = pyStrip(ProcessInfo.processInfo.environment[KEY_VAR] ?? "")
@@ -115,62 +115,69 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     /// kernel and a python one hand a reader the same document. A swift-written
     /// summary of it was a second, shorter truth about the same bundle.
     static let readmeText = #"""
-        # nvidia_nim_backend — NVIDIA NIM, a context-managed completion agent
-        OpenAI-compatible LLM backend. The api key comes from the ENVIRONMENT (`NVIDIA_API_KEY`) and is never stored; rate-limit retry; automatic context management. **No agentic loop** — one provider pass per `send`. Same surface as ollama_backend.
+    # nvidia_nim_backend — NVIDIA NIM, a context-managed completion agent
+    OpenAI-compatible LLM backend. The api key comes from the ENVIRONMENT (`NVIDIA_API_KEY`) and is never stored; rate-limit retry; automatic context management. **No agentic loop** — one provider pass per `send`. Same surface as ollama_backend.
 
-        ## Implementation
-        This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `NvidiaNimProvider` builder and the NIM-specific extras below, and `ai_core.build()` wires the rest into `(VERBS, handler)`.
+    ## Implementation
+    This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `NvidiaNimProvider` builder and the NIM-specific extras below, and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
-        ## Bare completion — the tool loop is the CALLER's
-        This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-        provider pass. It NEVER sends the OpenAI `tools`/`tool_choice` fields nor reads
-        `delta.tool_calls`; the `NvidiaNimProvider` streams plain `content` text, returned
-        verbatim. Any tool convention is the caller's — an authored agent teaches it in the
-        prompt (via `system_prompt`), reads the completion, dispatches, and feeds the result
-        back as the next `{send, text}` turn.
+    ## Bare completion — the tool loop is the CALLER's
+    This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
+    provider pass. It NEVER sends the OpenAI `tools`/`tool_choice` fields nor reads
+    `delta.tool_calls`; the `NvidiaNimProvider` streams plain `content` text, returned
+    verbatim. Any tool convention is the caller's — an authored agent teaches it in the
+    prompt (via `system_prompt`), reads the completion, dispatches, and feeds the result
+    back as the next `{send, text}` turn.
 
-        ## Context management — owned HERE
-        Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
-        (`context_strategy`, default `compact`, + `[context-notice]`), and the `recall` /
-        `context_status` verbs. The conversation's owner owns its context.
+    ## Context management — owned HERE
+    The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
+    is REQUIRED (a `send` fails loud naming it): every turn, fold and view is a row under
+    this agent's key. Reply BODIES are never stored — a reply row keeps its one-line
+    `origin`, and after a restart the model re-reads from it. Compaction fires at 0.8 of
+    the budget (calibrated by the endpoint's reported prompt size when it reports one)
+    with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
+    `[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
+    `context_clear` (a boundary, nothing deleted) inspect and page it. Sharing is by
+    GRANT, by the owner's own choice: it `share`s a scope of its rows through the store;
+    another agent starts from it with `fork_from {owner, grant, message}` and asks for a
+    third agent's row with `request_share`. `watch {body?}` / `unwatch` subscribe to this
+    agent's row events (a digest; bodies only for a watcher the rows are shared with).
+    ## NIM-specific verbs
+    - THE API KEY COMES FROM THE ENVIRONMENT (`NVIDIA_API_KEY`), read at call time. There is no key-storage verb and no sidecar: this bundle writes the key nowhere, so it is never in agent.yaml and never returned by reflect.
 
-        ## NIM-specific verbs
-        - THE API KEY COMES FROM THE ENVIRONMENT (`NVIDIA_API_KEY`), read at call time. There is no key-storage verb and no sidecar: this bundle writes the key nowhere, so it is never in agent.json and never returned by reflect.
+    `reflect` reports `has_api_key:bool` (never the key value itself).
 
-        `reflect` reports `has_api_key:bool` (never the key value itself).
+    ## Rate-limit and failfast behavior
+    - **No key → failfast**: with `NVIDIA_API_KEY` unset, `send` returns an error immediately, NAMING the variable (`"no api key — set NVIDIA_API_KEY"`). The provider builder returns `None` when no key is present, and `ai_core` with `require_provider=True` surfaces this as a clean caller-facing error.
+    - **HTTP 429 → retry once**: on a rate-limit response received before any chunk is yielded, the bundle waits `Retry-After` seconds (clamped to [1, 60]; default 5s if the header is absent) and retries the request once. Mid-stream 429 or any non-429 HTTP error propagates unchanged.
 
-        ## Rate-limit and failfast behavior
-        - **No key → failfast**: with `NVIDIA_API_KEY` unset, `send` returns an error immediately, NAMING the variable (`"no api key — set NVIDIA_API_KEY"`). The provider builder returns `None` when no key is present, and `ai_core` with `require_provider=True` surfaces this as a clean caller-facing error.
-        - **HTTP 429 → retry once**: on a rate-limit response received before any chunk is yielded, the bundle waits `Retry-After` seconds (clamped to [1, 60]; default 5s if the header is absent) and retries the request once. Mid-stream 429 or any non-429 HTTP error propagates unchanged.
+    ## Calling this agent as a workflow unit
+    `send {type:'send', text, client_id?}` runs ONE inference turn (per-backend FIFO
+    lock) and returns `{response, final}`. It is a first-class peer of
+    `exec_bridge`: a scheduler, a host job, a peer kernel, or another AI can
+    call it by id. Optional `system_prompt:str` REPLACES the auto-built prompt
+    (caller-supplied role/context — read it from a state agent yourself; the AI has NO
+    yaml coupling). There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
 
-        ## Calling this agent as a workflow unit
-        `send {type:'send', text, client_id?}` runs ONE inference turn (per-backend FIFO
-        lock) and returns `{response, final}`. It is a first-class peer of
-        `exec_bridge`: a scheduler, a host job, a peer kernel, or another AI can
-        call it by id. Optional `system_prompt:str` REPLACES the auto-built prompt
-        (caller-supplied role/context — read it from a state agent yourself; the AI has NO
-        yaml coupling). Optional `messages:list` REPLACES persisted history (fully
-        stateless — though `api_key` is still required to reach the provider).
+    ## Streaming
+    You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
+    consumes the same stream (the driving caller, a browser tab filtering by `client_id`, a
+    peer). You do not route your own output — you complete; the caller reads it and decides
+    what to do next.
 
-        ## Streaming
-        You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
-        consumes the same stream (the driving caller, a browser tab filtering by `client_id`, a
-        peer). You do not route your own output — you complete; the caller reads it and decides
-        what to do next.
+    ## Recursion guard
+    A `send` carrying a reserved `_call_stack` that already contains this agent (a cycle)
+    or exceeds depth 8 is refused BEFORE the FIFO lock — so an authored agent's AI→AI chain can
+    neither deadlock nor run away. Don't set `_call_stack` yourself.
 
-        ## Recursion guard
-        A `send` carrying a reserved `_call_stack` that already contains this agent (a cycle)
-        or exceeds depth 8 is refused BEFORE the FIFO lock — so an authored agent's AI→AI chain can
-        neither deadlock nor run away. Don't set `_call_stack` yourself.
+    ## Meta-possibility — any routine orchestrates the whole substrate
+    Every routine (this AI, a host job, a peer kernel, or any out-of-process caller)
+    reaches every agent by id. From any of them you can read memory anywhere (`send(<state>,
+    {read})`), run an inference turn (`send(<ai>, {send, ...})`), and/or spawn compute
+    (`send(<py>, {start, code})`) — regardless of which kernel owns the target. Code
+    steps and LLM-call steps are interchangeable, both directions.
 
-        ## Meta-possibility — any routine orchestrates the whole substrate
-        Every routine (this AI, a host job, a peer kernel, or any out-of-process caller)
-        reaches every agent by id. From any of them you can read memory anywhere (`send(<state>,
-        {read})`), run an inference turn (`send(<ai>, {send, ...})`), and/or spawn compute
-        (`send(<py>, {start, code})`) — regardless of which kernel owns the target. Code
-        steps and LLM-call steps are interchangeable, both directions.
-
-        """#
+    """#
 
     public func handle(
         agentId: AgentId,
@@ -212,11 +219,19 @@ struct NvidiaNimProvider: AIProvider {
     let endpoint: String
     let model: String
     let apiKey: String
+    /// What the endpoint REPORTED for the last pass — the prompt size (ai_core
+    /// calibrates its own estimate with it) and the stop reason.
+    let usage: AIUsage? = AIUsage()
 
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
+        chat(messages: messages, maxTokens: nil)
+    }
+
+    func chat(messages: [JSON], maxTokens: Int?) -> AsyncThrowingStream<AIChunk, Error> {
         let endpoint = endpoint
         let model = model
         let apiKey = apiKey
+        let usage = usage
         return AsyncThrowingStream { continuation in
             let task = Task {
                 if model.isEmpty || model == DEFAULT_MODEL {
@@ -244,6 +259,10 @@ struct NvidiaNimProvider: AIProvider {
                 body["model"] = .string(model)
                 body["messages"] = .array(messages)
                 body["stream"] = .bool(true)
+                // PROVIDER-REPORTED USAGE on the last chunk (`usage.prompt_tokens`).
+                body["stream_options"] = .object(["include_usage": .bool(true)])
+                // A SIDE CALL'S OWN BOUND (a fold summary's budget).
+                if let maxTokens { body["max_tokens"] = .integer(Int64(maxTokens)) }
                 req.body = .bytes(ByteBuffer(string: JSON.object(body).serialize()))
 
                 // NO RETRY LOOP HERE. `raise_for_status()` is all python's
@@ -265,6 +284,7 @@ struct NvidiaNimProvider: AIProvider {
                     // open and close once, not per chunk (`ThinkingWrap`).
                     var wrap = ThinkingWrap()
                     for try await line in bytesToLines(response.body) {
+                        if let usage { recordOpenAIReport(line, into: usage) }
                         let decoded = decodeNimSSELine(line, wrap: &wrap)
                         for token in decoded.tokens { continuation.yield(.token(token)) }
                         if decoded.done { break }

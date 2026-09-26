@@ -13,7 +13,7 @@ title: composed + computed + stored — the answer cannot come from weights
 # `$NONCE` is substituted by the runner with a value minted for THIS run.
 task: >-
   Compute the SHA-256 hex digest of the exact string '$NONCE' and store its
-  FIRST 12 CHARACTERS in a document named exactly 'digest' (no extension) in this kernel's memory.
+  FIRST 12 CHARACTERS in a document named exactly 'digest' (no extension) in the `yaml_store` agent.
   You cannot know this value without computing it. Then say DONE.
 
 limits:

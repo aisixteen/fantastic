@@ -334,7 +334,7 @@ async fn unknown_type_refusal_is_verbatim() {
 }
 
 /// C12: `load_tree` reads the subtree back and `persist_record` writes one
-/// agent.json — the explicit verb contract a session/remote loader uses.
+/// agent.yaml — the explicit verb contract a session/remote loader uses.
 #[tokio::test]
 async fn load_tree_persist_record_round_trip() {
     let tmp = TempDir::new().unwrap();
@@ -353,7 +353,7 @@ async fn load_tree_persist_record_round_trip() {
     assert_eq!(wrote["ok"], json!(true));
     assert!(tmp
         .path()
-        .join(".fantastic/agents/noted/agent.json")
+        .join(".fantastic/agents/noted/agent.yaml")
         .exists());
 
     let tree = kernel
@@ -401,14 +401,14 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
     let v = kernel
         .send(vec![Item::new(
             root.clone(),
-            json!({"type": "persist_blob", "agent_id": "kernel_state", "name": "agent.json", "content": "a"}),
+            json!({"type": "persist_blob", "agent_id": "kernel_state", "name": "agent.yaml", "content": "a"}),
         )])
         .await
         .remove(0)
         .result;
     assert_eq!(
         v["error"],
-        json!("persist_blob: name 'agent.json' is reserved (kernel-managed)")
+        json!("persist_blob: name 'agent.yaml' is reserved (kernel-managed)")
     );
 
     let v = kernel
@@ -433,4 +433,97 @@ fn the_catalog_name_is_pythons_entry_point_name() {
     use fantastic_kernel::Bundle;
     assert_eq!(KernelStateBundle::default().name(), "kernel_state");
     assert_eq!(HANDLER_MODULE, "kernel_state.tools");
+}
+
+/// Build a host agent + a SESSION loader (a `kernel_state` child with a `root`
+/// meta) on `kernel`, the shape a web canvas session opens.
+async fn open_session(kernel: &Arc<Kernel>, sess_root: &std::path::Path) {
+    let root = kernel.root().expect("root").id.clone();
+    for (id, parent, extra) in [
+        ("web", root.0.as_str(), json!({})),
+        ("sess", "web", json!({"root": sess_root.to_string_lossy()})),
+    ] {
+        let mut payload = json!({
+            "type": "create_agent", "parent_id": parent,
+            "handler_module": HANDLER_MODULE, "id": id, "watch": false,
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            payload[k] = v.clone();
+        }
+        let r = kernel
+            .send(vec![Item::new(root.clone(), payload)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["id"], json!(id), "{r}");
+        kernel
+            .send(vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
+            .await;
+    }
+}
+
+/// §6–7 (rust-only fixes, python `_resolve_path` + `_boot`): a session loader
+/// SEEDS its anchor `<root>/agent.yaml` at boot, a record it persists nests
+/// directly under its own root (the parent chain stops at the LOADER, not at the
+/// kernel root through `web`), and after a restart `load_tree` returns it.
+#[tokio::test]
+async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let sess_root = tmp.path().join(".fantastic/web/s1");
+
+    // ── life 1 ─────────────────────────────────────────────────────────
+    let kernel = booted(&tmp);
+    open_session(&kernel, &sess_root).await;
+    let anchor = sess_root.join("agent.yaml");
+    assert!(anchor.is_file(), "boot seeds the session anchor");
+    assert!(std::fs::read_to_string(&anchor)
+        .unwrap()
+        .starts_with("id: sess\n"));
+    for (id, parent) in [("canvas", "sess"), ("term1", "canvas")] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("sess"),
+                json!({"type": "persist_record", "record": {
+                    "id": id, "handler_module": "canvas.tools", "parent_id": parent,
+                }}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["ok"], json!(true), "{r}");
+    }
+    let canvas = sess_root.join("agents/canvas/agent.yaml");
+    assert!(
+        canvas.is_file(),
+        "under the LOADER's root, not the host chain"
+    );
+    assert!(sess_root
+        .join("agents/canvas/agents/term1/agent.yaml")
+        .is_file());
+    assert!(
+        !sess_root.join("agents/web").exists(),
+        "the host chain is not joined in"
+    );
+    kernel.shutdown().await;
+    fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
+    drop(kernel);
+
+    // ── life 2: a fresh kernel, the session re-opened on the same root ────
+    let kernel = booted(&tmp);
+    open_session(&kernel, &sess_root).await;
+    let tree = kernel
+        .send(vec![Item::new(
+            AgentId::from("sess"),
+            json!({"type": "load_tree"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let recs = tree["records"].as_array().expect("records");
+    let ids: Vec<&str> = recs.iter().filter_map(|r| r["id"].as_str()).collect();
+    assert_eq!(ids, ["sess", "canvas", "term1"], "{tree}");
+    assert_eq!(recs[1]["parent_id"], json!("sess"));
+    assert_eq!(recs[2]["parent_id"], json!("canvas"));
+    kernel.shutdown().await;
+    fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
 }

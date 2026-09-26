@@ -95,7 +95,7 @@ struct BundleSmokeTests {
         // No store wired ⇒ the create stays in RAM (NO direct-fs fallback).
         _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "cli.tools", "id": "ram_only"])])[0].result
         await kernel.flushRecords()
-        #expect(!fm.fileExists(atPath: file("agents/ram_only/agent.json")))
+        #expect(!fm.fileExists(atPath: file("agents/ram_only/agent.yaml")))
         #expect(kernel.agent("ram_only") != nil)  // live in RAM
 
         // Wire the store (file_bridge @ .fantastic, open) — it self-persists.
@@ -104,7 +104,7 @@ struct BundleSmokeTests {
                 "root": ".fantastic", "ingress_rule": "allow_all_ingress",
             ])])[0].result
         #expect(
-            await settle("agents/store/agent.json", exists: true),
+            await settle("agents/store/agent.yaml", exists: true),
             "the store must persist itself through itself")
 
         // Now a created agent persists THROUGH the provider.
@@ -112,9 +112,9 @@ struct BundleSmokeTests {
                 "type": "create_agent", "parent_id": "kernel_state", "handler_module": "cli.tools", "id": "foo",
                 "display_name": "Foo",
             ])])[0].result
-        #expect(await settle("agents/foo/agent.json", exists: true))
-        let content = try String(contentsOf: URL(fileURLWithPath: file("agents/foo/agent.json")))
-        #expect(content.contains("\"foo\"") && content.contains("Foo"))
+        #expect(await settle("agents/foo/agent.yaml", exists: true))
+        let content = try String(contentsOf: URL(fileURLWithPath: file("agents/foo/agent.yaml")))
+        #expect(content.hasPrefix("id: foo\n") && content.contains("display_name: Foo\n"), "\(content)")
 
         // Delete removes the record THROUGH the provider's recursive delete.
         _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "foo"])])[0].result
@@ -173,7 +173,7 @@ struct BundleSmokeTests {
     @Test func schedulerScheduleListUnschedule() async throws {
         // py/rust contract: schedule {target, payload, interval_seconds} → mints a
         // schedule_id, persisted THROUGH the loader (store-relative
-        // agents/<id>/schedules.json); a WRITE failfasts until a store is wired.
+        // agents/<id>/schedules.yaml); a WRITE failfasts until a store is wired.
         let fm = FileManager.default
         let rel = "fantastic-sched-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
@@ -199,7 +199,7 @@ struct BundleSmokeTests {
         #expect(sid != nil, "\(r)")
         // store-relative sidecar landed under the store root.
         #expect(
-            fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/schedules.json").path))
+            fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/schedules.yaml").path))
         let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
         #expect((list["schedules"].asArray ?? []).count == 1)
         // The sidecar landed where the LOADER put it — this bundle named only a
@@ -214,7 +214,7 @@ struct BundleSmokeTests {
     @Test func schedulerTickNowFiresAndHistory() async throws {
         // The FIRE path: tick_now dispatches the schedule's payload to its
         // target, bumps run_count, appends a `schedule_fired` event to the
-        // history.jsonl sidecar (through the provider), and `history` reads it
+        // schedule_events.yaml sidecar (through the provider), and `history` reads it
         // back. Mirrors the py/rust contract.
         let fm = FileManager.default
         let rel = "fantastic-schedfire-\(UUID().uuidString)"
@@ -252,9 +252,9 @@ struct BundleSmokeTests {
         #expect(ev["scheduler_id"].asString == "sched")
         #expect(ev["error"].isNull, "\(ev)")
         #expect(!ev["result"]["agents"].isNull, "fire must carry the target's reply: \(ev)")
-        // The history sidecar landed store-relative, next to schedules.json.
+        // The history sidecar landed store-relative, next to schedules.yaml.
         #expect(
-            fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/history.jsonl").path))
+            fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/schedule_events.yaml").path))
     }
 
     // ── #82 / #145: boot needs no store; one concurrent batch per tick,
@@ -388,16 +388,16 @@ struct BundleSmokeTests {
     }
 
     @Test func nextRunIsPersistedBeforeTheFire() async throws {
-        // The probe reads schedules.json the moment it is hit: the store must
+        // The probe reads schedules.yaml the moment it is hit: the store must
         // already hold the bumped run_count/next_run (persist-BEFORE-fire).
         let fm = FileManager.default
         let rel = "fantastic-schedpersist-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
-        let capture = dir.appendingPathComponent("agents/sched/schedules.json")
+        let capture = dir.appendingPathComponent("agents/sched/schedules.yaml")
         // SCHEDULED WHILE THE SWEEP IS OFF, then released: `create_agent` boots
-        // the scheduler, so its loop was reading `schedules.json` while
+        // the scheduler, so its loop was reading `schedules.yaml` while
         // `schedule` wrote it and the stale read landed on the cache after the
         // write — the schedule was lost and the probe was never hit under the
         // full parallel run. `paused` is checked before the loop reads.
@@ -414,7 +414,7 @@ struct BundleSmokeTests {
         _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
         #expect(hit, "probe must be hit")
         let seen = try #require(probe.hit("p_cap"))
-        let doc = try #require(seen.doc, "store had no schedules.json at fire time")
+        let doc = try #require(seen.doc, "store had no schedules.yaml at fire time")
         let rec = try #require((doc.asArray ?? []).first { $0["id"].asString == sid })
         #expect(rec["run_count"].asInt == 1, "\(rec)")
         #expect((rec["next_run"].asDouble ?? 0) > seen.at - 0.5, "\(rec) at \(seen.at)")
@@ -427,7 +427,7 @@ struct BundleSmokeTests {
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
         // THE SWEEP IS OFF for this one: `create_agent` boots the scheduler, so
-        // its loop is already reading `schedules.json` while `schedule` below
+        // its loop is already reading `schedules.yaml` while `schedule` below
         // writes it, and the loop's in-flight read landed on the cache AFTER
         // the write — `tick_now` then answered `schedule '…' not found` under
         // the full parallel run. The test is about `tick_now` and its timeout
@@ -779,7 +779,7 @@ struct BundleSmokeTests {
 }
 
 /// A probe target for the scheduler tests: `hit` records when it ran (and the
-/// scheduler's persisted `schedules.json` at that instant when `capture` is
+/// scheduler's persisted `schedules.yaml` at that instant when `capture` is
 /// set), optionally blocking `block` seconds.
 final class SchedProbe: AgentBundle, @unchecked Sendable {
     struct Seen {
@@ -816,7 +816,7 @@ final class SchedProbe: AgentBundle, @unchecked Sendable {
         case "hit":
             var doc: JSON? = nil
             if let capture, let raw = try? String(contentsOf: capture, encoding: .utf8) {
-                doc = try? JSON.parse(raw)
+                doc = try? YamlIO.load(raw)
             }
             record(agentId.value, Seen(at: Date().timeIntervalSince1970, doc: doc))
             if let block = payload["block"].asDouble {
@@ -1004,9 +1004,9 @@ struct SchedulerParityTests {
             kernel, target: "kernel_state", payload: ["type": "list_agents"], timeout: .integer(5))
         #expect(r["schedule"]["timeout"] == .integer(5), "\(r.serialize())")
         let raw = try String(
-            contentsOf: dir.appendingPathComponent("agents/sched/schedules.json"),
+            contentsOf: dir.appendingPathComponent("agents/sched/schedules.yaml"),
             encoding: .utf8)
-        #expect(raw.contains("\"timeout\": 5"), "widened on disk: \(raw)")
+        #expect(raw.contains("  timeout: 5\n"), "widened on disk: \(raw)")
     }
 
     /// A5.7 — every `schedule_id` read is python TRUTHINESS, and the value is
@@ -1072,31 +1072,31 @@ struct SchedulerParityTests {
         #expect(bad["result"].isNull, "\(bad.serialize())")
     }
 
-    /// A5.10 — the sidecars are python's `json.dumps`: the history line is
-    /// COMPACT with `', '`/`': '` separators, `schedules.json` is `indent=2`, and
-    /// both are `ensure_ascii` so a non-ASCII value is escaped.
-    @Test func historyLineUsesPythonJsonLayout() async throws {
+    /// A5.10 — the sidecars are python's `messages_yaml.dump`: `schedules.yaml`
+    /// is a block-style YAML sequence, `schedule_events.yaml` a YAML stream of
+    /// one `---` document per fire, BMP text verbatim (`allow_unicode`).
+    @Test func sidecarsUsePythonYamlLayout() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedjson")
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await addSchedule(
             kernel, target: "kernel_state", payload: ["type": "list_agents", "note": "héllo"])
         let sid = try #require(r["schedule_id"].asString)
         let sched = try String(
-            contentsOf: dir.appendingPathComponent("agents/sched/schedules.json"),
+            contentsOf: dir.appendingPathComponent("agents/sched/schedules.yaml"),
             encoding: .utf8)
-        #expect(sched.hasPrefix("[\n  {\n    \"id\": \""), "indent=2: \(sched.prefix(40))")
-        #expect(sched.contains("h\\u00e9llo"), "ensure_ascii: \(sched)")
+        #expect(sched.hasPrefix("- id: \(sid)\n  target: kernel_state\n"), "block sequence: \(sched.prefix(60))")
+        #expect(sched.contains("    note: héllo\n"), "allow_unicode: \(sched)")
 
         _ = await ask(kernel, "sched", ["type": "tick_now", "schedule_id": .string(sid)])
         let hist = try String(
-            contentsOf: dir.appendingPathComponent("agents/sched/history.jsonl"),
+            contentsOf: dir.appendingPathComponent("agents/sched/schedule_events.yaml"),
             encoding: .utf8)
-        let line = String(try #require(hist.split(separator: "\n").first))
         #expect(
-            line.hasPrefix("{\"type\": \"schedule_fired\", \"schedule_id\": \"\(sid)\", "),
-            "compact python separators: \(line.prefix(120))")
-        #expect(line.contains("h\\u00e9llo"), "ensure_ascii on the history line: \(line)")
-        #expect(hist.hasSuffix("\n"), "one line per fire, newline-terminated")
+            hist.hasPrefix("---\ntype: schedule_fired\nschedule_id: \(sid)\n"),
+            "one `---` document per fire: \(hist.prefix(120))")
+        #expect(hist.contains("note: héllo\n"), "allow_unicode on the event: \(hist)")
+        #expect(hist.hasSuffix("\n"), "every document newline-terminated")
+        #expect(try YamlIO.loadAll(hist).count == 1, "\(hist)")
     }
 
     /// A5.11 — `paused` is read with python TRUTHINESS, on the record and on each
@@ -1192,7 +1192,7 @@ struct SchedulerParityTests {
         _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "sched"])
         // The sidecar is gone from disk, so only the PROCESS cache could answer
         // — and it went with the deleted agent.
-        try FileManager.default.removeItem(at: dir.appendingPathComponent("agents/sched/schedules.json"))
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("agents/sched/schedules.yaml"))
         await newScheduler(kernel, "sched")
         let list = await ask(kernel, "sched", ["type": "list"])
         #expect((list["schedules"].asArray ?? []).count == 0, "\(list.serialize())")

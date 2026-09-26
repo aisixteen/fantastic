@@ -127,11 +127,15 @@ public enum AIStripStrategy {
 
     /// SEEDED FROM THE VIEW ARRAY on first use — stubs survive a restart, and the
     /// prefix bytes are the same before and after it.
-    private static func seed(_ ctx: ProjectionCtx, _ body: [JSON]) -> Set<String> {
+    private static func seed(_ ctx: ProjectionCtx, _ body: [JSON]) async throws -> Set<String> {
         var out: Set<String> = []
-        guard let view = loadView(ctx.selfId, kernel: ctx.kernel) else { return out }
+        // No kernel behind the projection (python `ctx.kernel is None`): nothing
+        // to seed from.
+        guard let kernel = ctx.kernel,
+            let view = try await loadView(ctx.selfId.value, kernel)
+        else { return out }
         let stubbed: Set<Int64> = Set(
-            (view["ids"]?.asArray ?? []).compactMap { e in
+            (view["ids"].asArray ?? []).compactMap { e in
                 e["res"].asString == "stub" ? e["id"].asInt : nil
             })
         for m in body {
@@ -147,12 +151,17 @@ public enum AIStripStrategy {
     /// low watermark; cut only when the prose alone still overflows. Python `strip`.
     public static func strip(
         _ body: [JSON], _ systemBlock: [JSON], _ rec: JSON, _ ctx: ProjectionCtx
-    ) async -> AIProjection {
+    ) async throws -> AIProjection {
         if body.count <= 1 {
             return AIProjection(body: AIStrategies.fitTail(body, ctx.budget))
         }
         let key = ctx.selfId.value
-        var done: Set<String> = stored(key) ?? setDefault(key, seed(ctx, body))
+        var done: Set<String>
+        if let s = stored(key) {
+            done = s
+        } else {
+            done = setDefault(key, try await seed(ctx, body))
+        }
         let budget = ctx.budget - AIContext.noticeEnvelopeReserve
         var (rendered, n, saved) = render(body, done)
         if AIContext.estimateTokens(rendered) > budget {

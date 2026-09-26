@@ -227,7 +227,7 @@ async fn persist_through_provider_writes_record() {
     // DEBOUNCED (python's 150 ms `_FlushLoop` rhythm).
     fantastic_kernel::test_support::settle_records().await;
     let rec =
-        fantastic_kernel::persistence::read_record_at(&store_root.join("agents/test_1/agent.json"))
+        fantastic_kernel::persistence::read_record_at(&store_root.join("agents/test_1/agent.yaml"))
             .expect("read ok")
             .expect("file exists — persisted through the provider");
     assert_eq!(rec.id, "test_1");
@@ -236,7 +236,7 @@ async fn persist_through_provider_writes_record() {
     assert_eq!(rec.meta["port"], json!(18181));
     assert_eq!(rec.meta["display_name"], json!("Testy"));
     // The provider also persisted its OWN record through itself (self-persist).
-    assert!(store_root.join("agents/store/agent.json").exists());
+    assert!(store_root.join("agents/store/agent.yaml").exists());
 }
 
 #[tokio::test]
@@ -261,7 +261,7 @@ async fn persist_with_no_provider_is_ram_noop() {
     fantastic_kernel::test_support::settle_records().await;
     // No provider ⇒ nothing written (RAM). NO FALLBACK to direct fs.
     assert!(
-        !store_root.join("agents/test_1/agent.json").exists(),
+        !store_root.join("agents/test_1/agent.yaml").exists(),
         "no provider wired ⇒ record must stay in RAM (no direct-fs fallback)"
     );
     // But the agent IS live in RAM.
@@ -281,7 +281,7 @@ async fn delete_removes_record_through_provider() {
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "noop.tools", "id": "doomed"}))])
         .await.remove(0).result;
     fantastic_kernel::test_support::settle_records().await;
-    assert!(store_root.join("agents/doomed/agent.json").exists());
+    assert!(store_root.join("agents/doomed/agent.yaml").exists());
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -307,12 +307,12 @@ fn load_children_hydrates_registered_agents() {
     let grand_dir = known_dir.join("agents/grandchild");
     std::fs::create_dir_all(&grand_dir).unwrap();
     std::fs::write(
-        known_dir.join("agent.json"),
+        known_dir.join("agent.yaml"),
         r#"{"id":"known","handler_module":"noop.tools","parent_id":"kernel_state"}"#,
     )
     .unwrap();
     std::fs::write(
-        grand_dir.join("agent.json"),
+        grand_dir.join("agent.yaml"),
         r#"{"id":"grandchild","handler_module":"noop.tools","parent_id":"known"}"#,
     )
     .unwrap();
@@ -350,12 +350,12 @@ fn load_children_weak_load_skips_unknown_handler_module_and_subtree() {
     let ghost_child = ghost_dir.join("agents/ghost_child");
     std::fs::create_dir_all(&ghost_child).unwrap();
     std::fs::write(
-        ghost_dir.join("agent.json"),
+        ghost_dir.join("agent.yaml"),
         r#"{"id":"ghost_1","handler_module":"unknown.tools","parent_id":"kernel_state"}"#,
     )
     .unwrap();
     std::fs::write(
-        ghost_child.join("agent.json"),
+        ghost_child.join("agent.yaml"),
         r#"{"id":"ghost_child","handler_module":"noop.tools","parent_id":"ghost_1"}"#,
     )
     .unwrap();
@@ -363,7 +363,7 @@ fn load_children_weak_load_skips_unknown_handler_module_and_subtree() {
     let real_dir = root.join("agents/real_1");
     std::fs::create_dir_all(&real_dir).unwrap();
     std::fs::write(
-        real_dir.join("agent.json"),
+        real_dir.join("agent.yaml"),
         r#"{"id":"real_1","handler_module":"noop.tools","parent_id":"kernel_state"}"#,
     )
     .unwrap();
@@ -391,8 +391,8 @@ fn load_children_weak_load_skips_unknown_handler_module_and_subtree() {
 
     // On-disk records survived untouched (Reboot under a runtime with
     // unknown.tools and ghost_1 rehydrates intact).
-    assert!(ghost_dir.join("agent.json").exists());
-    assert!(ghost_child.join("agent.json").exists());
+    assert!(ghost_dir.join("agent.yaml").exists());
+    assert!(ghost_child.join("agent.yaml").exists());
 }
 
 #[test]
@@ -401,7 +401,7 @@ fn load_children_tolerates_corrupt_agent_json() {
     let root = tmp.path();
     let bad = root.join("agents/broken");
     std::fs::create_dir_all(&bad).unwrap();
-    std::fs::write(bad.join("agent.json"), "{NOT_JSON").unwrap();
+    std::fs::write(bad.join("agent.yaml"), "{NOT_JSON").unwrap();
 
     let kernel = Kernel::new();
     let reg = BundleRegistry::new();
@@ -435,14 +435,14 @@ async fn records_created_before_the_store_persist_once_it_is_wired() {
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"early"}))])
         .await.remove(0).result;
     fantastic_kernel::test_support::settle_records().await;
-    assert!(!store_root.join("agents/early/agent.json").exists());
+    assert!(!store_root.join("agents/early/agent.yaml").exists());
 
     // Wire one — the queued record drains on the next pass.
     wire_store(&kernel, store_root).await;
     fantastic_kernel::test_support::settle_records().await;
     kernel.flush_records().await;
     assert!(
-        store_root.join("agents/early/agent.json").exists(),
+        store_root.join("agents/early/agent.yaml").exists(),
         "the dirty set must survive a no-store flush"
     );
 }
@@ -451,7 +451,7 @@ async fn records_created_before_the_store_persist_once_it_is_wired() {
 /// newline, non-ASCII escaped as lowercase `\uXXXX` (surrogate pairs above the
 /// BMP), never raw UTF-8.
 #[tokio::test]
-async fn persisted_record_bytes_are_python_json_dumps() {
+async fn persisted_record_bytes_are_python_yaml_dump() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
     let kernel = kernel_at(store_root);
@@ -472,25 +472,21 @@ async fn persisted_record_bytes_are_python_json_dumps() {
         .result;
     fantastic_kernel::test_support::settle_records().await;
 
-    let bytes = std::fs::read(store_root.join("agents/readings/agent.json")).expect("on disk");
+    let bytes = std::fs::read(store_root.join("agents/readings/agent.yaml")).expect("on disk");
     let text = String::from_utf8(bytes).expect("utf-8");
-    assert!(!text.ends_with('\n'), "no trailing newline: {text:?}");
+    // python `yaml_io.dump(record)`: block mapping, record key order,
+    // BMP text verbatim (`allow_unicode`), non-BMP escaped in a double-quoted
+    // scalar, a final newline.
+    assert!(text.starts_with("id: readings\n"), "{text}");
+    assert!(text.ends_with('\n'), "{text:?}");
     assert!(
-        text.contains("{\n  \"id\": \"readings\","),
-        "2-space indent, `: ` after the key: {text}"
-    );
-    assert!(
-        text.contains("Sensor readings \\u2014 one integer per file. \\ud83d\\ude00"),
-        "em dash + emoji as lowercase \\uXXXX, the emoji as a surrogate pair: {text}"
-    );
-    assert!(
-        !text.contains('\u{2014}') && !text.contains('\u{1F600}'),
-        "no raw non-ASCII byte on the wire: {text}"
+        text.contains("\nnote: \"Sensor readings \u{2014} one integer per file. \\U0001F600\"\n"),
+        "em dash verbatim, emoji as \\U0001F600: {text}"
     );
 }
 
 /// C43: the merged bytes land at a `<af>.tmp.<8 hex>` sibling first, then a
-/// `rename` onto `agent.json` — never a direct truncating write onto the live
+/// `rename` onto `agent.yaml` — never a direct truncating write onto the live
 /// name (a crash mid-write must never leave a torn or half-written record).
 #[tokio::test]
 async fn a_record_commits_via_tmp_and_rename() {
@@ -514,7 +510,7 @@ async fn a_record_commits_via_tmp_and_rename() {
     fantastic_kernel::test_support::settle_records().await;
 
     let dir = store_root.join("agents/committed");
-    assert!(dir.join("agent.json").exists(), "the final name exists");
+    assert!(dir.join("agent.yaml").exists(), "the final name exists");
     let tmp_debris: Vec<_> = std::fs::read_dir(&dir)
         .expect("dir")
         .filter_map(Result::ok)
@@ -649,7 +645,7 @@ async fn record_merge_reads_one_chunk_like_python() {
     let dir = store_root.join("agents/big");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("agent.json"),
+        dir.join("agent.yaml"),
         format!(
             "{{\n  \"id\": \"big\",\n  \"handler_module\": \"noop.tools\",\n  \"padding\": \"{}\",\n  \"sidecar_beyond_the_cap\": true\n}}",
             "x".repeat(64)
@@ -671,7 +667,7 @@ async fn record_merge_reads_one_chunk_like_python() {
         .result;
     fantastic_kernel::test_support::settle_records().await;
 
-    let text = std::fs::read_to_string(dir.join("agent.json")).expect("on disk");
+    let text = std::fs::read_to_string(dir.join("agent.yaml")).expect("on disk");
     assert!(
         !text.contains("sidecar_beyond_the_cap"),
         "a key past the one-chunk read must not survive the merge: {text}"
@@ -681,7 +677,7 @@ async fn record_merge_reads_one_chunk_like_python() {
         .lock()
         .expect("lock")
         .iter()
-        .filter(|p| p.as_str() == "agents/big/agent.json")
+        .filter(|p| p.as_str() == "agents/big/agent.yaml")
         .count();
     assert_eq!(
         reads_of_big, 1,

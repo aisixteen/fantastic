@@ -80,6 +80,15 @@ pub struct BackendState {
     /// `"store"` (no view yet) or `"store (stale array)"`. Python `_view_source`,
     /// reported by `context_status`.
     pub view_source: Mutex<Option<String>>,
+    /// TOKEN CALIBRATION — python `_calib`: the prompt size the endpoint
+    /// REPORTED for the last pass divided by our own estimate of what we sent.
+    /// The estimate is chars/4 over the rendered messages; a real tokenizer
+    /// disagrees with it, per model and per language. The budget is measured in
+    /// ESTIMATE units scaled by this ratio, so what triggers a compaction is what
+    /// the window really holds. `None` (read as 1.0) until an endpoint reports.
+    pub calib: Mutex<Option<f64>>,
+    /// The endpoint's last reported prompt size — python `_reported`.
+    pub reported: Mutex<Option<i64>>,
 }
 
 impl BackendState {
@@ -93,6 +102,8 @@ impl BackendState {
             folds_since: Mutex::new(0),
             recall_due: Mutex::new(false),
             view_source: Mutex::new(None),
+            calib: Mutex::new(None),
+            reported: Mutex::new(None),
         })
     }
 }

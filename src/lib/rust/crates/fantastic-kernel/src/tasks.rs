@@ -227,7 +227,7 @@ impl TaskTable {
     // trade: ONE int64 counter allocates every id in the kernel, so `ps`,
     // `cancel`, the ledger, a reply tag and the message log all name the same
     // number — and a number that names one thing everywhere is worth more than
-    // one that hides its order. The allocator is `kernel.rows.mint_id()`; the
+    // one that hides its order. The allocator is `kernel.mint_id()`; the
     // caller mints, and this table only registers.
 
     /// Put one in-flight task in the table.
@@ -532,8 +532,7 @@ impl Kernel {
         row.insert("verb".to_string(), Value::from(verb));
         row.insert("parent".to_string(), Value::from(parent.map(TaskId::get)));
         let task_id = TaskId(
-            self.rows
-                .put(agent_id, row)
+            self.rows_put(agent_id, row)
                 .expect("a minted task row id is unused"),
         );
         let handle = TaskHandle::new();
@@ -550,6 +549,7 @@ impl Kernel {
         // that has to be remembered rather than one that holds.
         let sender = crate::send::current_sender();
         let origin = crate::send::current_origin();
+        let remote = crate::send::current_remote_caller();
         let guard = ForgetOnDrop {
             kernel: Arc::clone(self),
             id: task_id,
@@ -564,13 +564,16 @@ impl Kernel {
                         killed,
                         crate::send::CURRENT_SENDER.scope(
                             sender,
-                            crate::send::CURRENT_ORIGIN.scope(origin, async move {
-                                tokio::select! {
-                                    biased;
-                                    _ = cancel.notified() => {}
-                                    _ = work => {}
-                                }
-                            }),
+                            crate::send::CURRENT_ORIGIN.scope(
+                                origin,
+                                crate::send::CURRENT_REMOTE.scope(remote, async move {
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel.notified() => {}
+                                        _ = work => {}
+                                    }
+                                }),
+                            ),
                         ),
                     ),
                 )

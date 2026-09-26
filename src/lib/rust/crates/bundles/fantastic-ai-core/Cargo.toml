@@ -17,9 +17,13 @@ tokio = { workspace = true }
 futures-util = { workspace = true }
 # `getentropy` — the OS CSPRNG behind python's `secrets` module.
 libc = { workspace = true }
+# The fold's MECHANICAL INDEX — python's `_PATH` / `_IDENT` patterns.
+regex = "1"
 
 [dev-dependencies]
 fantastic-file = { path = "../fantastic-file" }
+# Every AI agent keeps its conversation in a memory store; the tests wire one.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 # The author tests allowlist a REAL interpreter — the test acting as operator.
 which = "6"

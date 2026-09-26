@@ -25,18 +25,20 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             // AGENT can call them on another agent's work.
             | "ps"
             | "cancel"
-            // NAMED and unnamed executions and what they became. Terminal
-            // non-completed rows ARE the dead-letter queue.
+            // The EXECUTION LEDGER's read surface — every execution, live and
+            // settled. Terminal non-completed rows ARE the dead-letter queue:
+            // parked, inspectable, never silently retried; `ack_deadletter`
+            // retires one. (NOT `ack`: kernel verbs shadow bundle verbs, and
+            // `terminal_backend` owns `ack` for flow control.)
             | "ledger"
-            // CONVERSATION ROWS BY ID, gated INSIDE against each row's owner.
-            | "messages"
-            // THE ROW STORE's whole surface — hydration's pair, PRIVILEGED.
-            | "rows_read"
-            | "rows_write"
-            // Root-only control verbs — gated inside `handle_system_verb`
-            // to the tree root; a non-root target answers with an error.
+            | "ack_deadletter"
+            // The kernel's LIFECYCLE. `kernel_start` is the one start sequence
+            // (the root's memory store first, then everyone); `kernel_stop` the
+            // graceful stop of the process. `shutdown_agents` stops the agents,
+            // not the process. Root-only — gated inside `handle_kernel_verb`.
+            | "kernel_start"
             | "shutdown_agents"
-            | "shutdown_kernel"
+            | "kernel_stop"
     )
 }
 
@@ -74,22 +76,20 @@ pub fn kernel_verb_docs() -> Value {
         // while the reply carried every minted-pid row beside them.
         "ledger": "No args. EVERY execution and what it became — named under its id, \
     unnamed under its minted pid — {executions:[{id, target, status, attempts, \
-    retries, named, outcome?}]}, paged, scoped to what YOU originated. \
-    Failed/timed_out/cancelled rows are the dead-letter queue: inspect, then \
-    retry with a NEW id if you choose — nothing is retried silently.",
-        "messages": "args: ids:list[str] (req), limit:int?, after:str?. Conversation \
-    rows by id, at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, \
-    bytes, title?, level?, refs?}], refused:[ids], next?}. Your own rows always; \
-    another agent's only if its callable_by names you for `messages`. Bodies are \
-    behind that agent's `pull`.",
-        "rows_read": "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a \
-    wildcard does not carry it). \
-    That agent's rows WHOLE (content included), oldest first — {rows:[…], next?}. \
-    The hydration read; agents read digests through `messages` instead.",
-        "rows_write": "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a \
-    wildcard does not carry it). \
-    Appends rows to that agent's conversation, each under a FRESH id — {ids:[int]}. \
-    A row may not carry an `id`; re-ids are the caller's to remap.",
+    retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read \
+    from the kernel's memory store plus what is not yet flushed. `outcome` keeps the \
+    RESULT only for a named call; a dead letter keeps its error; anything else is \
+    {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled \
+    rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, \
+    retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried \
+    silently.",
+        "ack_deadletter": "args: id:int|str (req — an execution id, or its name). \
+    Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded \
+    in the kernel's store, it may then be pruned. Returns {acked:true, id}.",
+        "kernel_start": "No args. THE START SEQUENCE — the root must name \
+    `memory_store_id` (fail loud otherwise): boots the root, then that store, starts \
+    flushing the kernel's execution rows into it, then boots every other agent in \
+    registration order. Idempotent. Returns {started, store, booted:[ids]}.",
         "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its \
     own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's \
     batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}.",
@@ -97,7 +97,9 @@ pub fn kernel_verb_docs() -> Value {
         "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new \
     roots refused), sends `shutdown` to every agent advertising it, waits for \
     in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}.",
-        "shutdown_kernel": "No args. Stops the kernel PROCESS — under env:'container', the container.",
+        "kernel_stop": "No args. Stops the kernel PROCESS gracefully — drain, every call \
+    settles (done, or cancelled into the dead letters), the last rows flush, agents \
+    shut down, exit. Under env:'container', the container.",
     })
 }
 
@@ -172,35 +174,41 @@ pub(super) async fn handle_kernel_verb(
         "create_agent" => crate::lifecycle::create_from_payload(kernel, target, payload).await,
         "delete_agent" => crate::lifecycle::delete_from_payload(kernel, target, payload).await,
         "update_agent" => update_from_payload(kernel, target, payload).await,
-        // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
-        // one row per in-flight dispatch, `parent` chaining them into the send
-        // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
-        // The EXECUTION LEDGER, ORIGIN-SCOPED: an agent sees only what it
-        // originated, the operator sees all. Unscoped this would be a
-        // side-channel around `callable_by` — reading other agents' result
-        // bodies without ever being granted an edge to them.
+        // The EXECUTION LEDGER — a PROJECTION, not a table: the executions still
+        // in RAM (in flight, or settled and not yet flushed) merged with the
+        // `call`/`settle`/`ack` rows the kernel flushed into its memory store —
+        // each call paired with its settle. CALLER-SCOPED: an agent sees what IT
+        // originated, the operator sees all. Unscoped this would be a side-channel
+        // around `callable_by`.
         "ledger" => {
             let viewer = crate::send::current_origin();
-            let rows = kernel.ledger.rows_for(viewer.as_ref());
+            let entries = match kernel.ledger_entries().await {
+                Ok(e) => e,
+                Err(e) => return crate::executions::raised("RuntimeError", &e),
+            };
+            let rows: Vec<Value> = entries
+                .into_iter()
+                .filter_map(|mut e| {
+                    let caller = e.shift_remove("_caller").unwrap_or(Value::Null);
+                    match &viewer {
+                        None => Some(Value::Object(e)),
+                        Some(v) if caller.as_str() == Some(v.0.as_str()) => {
+                            Some(Value::Object(e))
+                        }
+                        Some(_) => None,
+                    }
+                })
+                .collect();
             let (rows, next) = crate::paging::page(rows, payload, |r| {
                 r.get("id")
                     .map_or_else(String::new, fantastic_bundle::py_str)
             });
             json!({ "executions": rows, "next": next })
         }
-        // CONVERSATION ROWS BY ID. Gated INSIDE, per row, against the OWNER's
-        // `callable_by` — a root verb skips ingress, so the same check `gate`
-        // runs is re-run here or this would be a side channel around it. Refused
-        // ids are LISTED, never silently dropped: a caller must be able to tell
-        // "not yours" from "not there".
-        "messages" => messages(kernel, payload),
-        // THE ROW STORE's whole surface. `messages` is the read an owner may
-        // GRANT per row (digests, no bodies); these two are hydration — reading
-        // a conversation whole and writing one into an agent — which is what a
-        // loader does from above. PRIVILEGED, so a wildcard never carries them:
-        // saying yes takes a grant that NAMES them.
-        "rows_read" => rows_read(kernel, payload),
-        "rows_write" => rows_write(kernel, payload),
+        "ack_deadletter" => ack_deadletter(kernel, payload).await,
+        // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
+        // one row per in-flight dispatch, `parent` chaining them into the send
+        // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
         "ps" => {
             // PAGED like `list_agents` — same cursor law: the id of the last row
             // handed over. Over a LIVE table a cursor may miss a row that
@@ -251,9 +259,11 @@ pub(super) async fn handle_kernel_verb(
                 None => json!({"cancelled": false, "killed": []}),
             }
         }
+        // THE START SEQUENCE — see `Kernel::start`. Idempotent.
+        "kernel_start" => kernel.start(true).await,
         "shutdown_agents" => {
             // Privileged: root control surface only, gated on rootness like
-            // `shutdown_kernel` so it holds whether the verb was addressed to
+            // `kernel_stop` so it holds whether the verb was addressed to
             // the literal root id or via the `kernel` alias.
             if target.parent_id.is_some() {
                 return json!({
@@ -263,33 +273,31 @@ pub(super) async fn handle_kernel_verb(
             }
             return kernel.shutdown_agents().await;
         }
-        "shutdown_kernel" => {
+        "kernel_stop" => {
             // Privileged: root control surface only. Gate on rootness
             // (parent_id is None) so it holds whether the verb was
             // addressed to the literal root id or via the `kernel` alias —
             // never an arbitrary child agent.
             if target.parent_id.is_some() {
                 return json!({
-                    "error": "shutdown_kernel: root control surface only; \
+                    "error": "kernel_stop: root control surface only; \
                               address the kernel root (alias 'kernel')"
                 });
             }
-            // DEFER the shutdown signal so this ack is enqueued onto the WS
-            // out-channel / written as the HTTP body and flushed to the
-            // caller BEFORE the daemon serve loop begins teardown — mirrors
-            // the Python side's `call_later(0.1, ev.set)`. The verb returns
-            // the ack synchronously here (running inside a web task); ~100ms
-            // later `request_shutdown()` fires and the CLI serve loop (which
-            // adds its own short grace) drains agents, releases lock.json,
-            // and exits 0. Never exit inline / signal before the ack is even
-            // enqueued — that would risk truncating the ack mid-flush. Wire
-            // shape mirrors Python exactly (`type` before `ok`).
+            // Order: (1) ack and let it flush; (2) AFTER the reply is on the wire,
+            // trigger the daemon's graceful path — drain, every call settles
+            // (done, or cancelled into the dead letters), the last execution rows
+            // flush into the kernel's store, agents shut down, the lock releases —
+            // (3) exit 0. DEFERRED ~100ms (python `call_later(0.1, ev.set)`) so
+            // the in-flight REST body / WS frame is written before the listeners
+            // drain. With no serve loop (one-shot) there is nothing to stop — it
+            // still acks.
             let k = Arc::clone(kernel);
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 k.request_shutdown();
             });
-            json!({ "type": "shutdown_kernel", "ok": true })
+            json!({ "type": "kernel_stop", "ok": true })
         }
         _ => unreachable!("is_kernel_verb gate"),
     }
@@ -411,101 +419,6 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     ])
 }
 
-/// The `messages` verb — conversation rows by id, at digest resolution.
-///
-/// A port of python's `_verb_messages`. Bodies never appear here: a `head` is
-/// 120 characters and the whole thing is behind the owning agent's `pull`.
-fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
-    // THE IDS ARE READ FIRST, and reading one can RAISE: python's `_as_id`
-    // calls `int(x)` on any string `str.isdigit()` accepts, and `'²'` is a digit
-    // that is not a decimal. The whole call fails as a raised handler, before
-    // any refusal is composed.
-    let ids: Vec<Option<i64>> = match payload.get("ids") {
-        Some(Value::Array(a)) => {
-            let mut parsed = Vec::with_capacity(a.len());
-            for x in a {
-                match as_id(x) {
-                    Ok(v) => parsed.push(v),
-                    Err(raise) => return raise,
-                }
-            }
-            parsed
-        }
-        _ => Vec::new(),
-    };
-    if ids.is_empty() || ids.iter().any(Option::is_none) {
-        let mut r = crate::refusal::refusal(
-            crate::refusal::BAD_ARG,
-            "messages: `ids` must be a non-empty list of message ids (ints)",
-        );
-        crate::refusal::with(&mut r, "arg", json!("ids"));
-        return r;
-    }
-    let mut ids: Vec<i64> = ids.into_iter().flatten().collect();
-    let after = match payload.get("after").map(as_id) {
-        Some(Err(raise)) => return raise,
-        Some(Ok(v)) => v,
-        None => None,
-    };
-    if let Some(after) = after {
-        if let Some(at) = ids.iter().position(|i| *i == after) {
-            ids.drain(..=at);
-        }
-    }
-
-    let caller = crate::send::current_origin();
-    let mut decided: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    let mut out: Vec<Value> = Vec::new();
-    let mut refused: Vec<i64> = Vec::new();
-
-    for id in ids {
-        let Some(row) = kernel.rows.get_one(id) else {
-            refused.push(id);
-            continue;
-        };
-        let owner = row
-            .get("agent")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if !*decided
-            .entry(owner.clone())
-            .or_insert_with(|| kernel.may_read_rows(caller.as_ref(), &owner))
-        {
-            refused.push(id);
-            continue;
-        }
-        // ONE DIGEST FUNCTION, shared with the `row` state event the store
-        // publishes on every append (`rows::row_digest`).
-        out.push(crate::rows::row_digest(id, &row));
-    }
-
-    // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
-    let limit = py_limit(payload);
-    const CAP_BYTES: usize = 32 * 1024;
-    let mut kept: Vec<Value> = Vec::new();
-    let mut used = 0usize;
-    for d in &out {
-        if limit != 0 && kept.len() as i64 >= limit {
-            break;
-        }
-        // THE CAP IS PYTHON'S `len(json.dumps(d))` — `ensure_ascii` escapes, a
-        // space after every separator. A compact UTF-8 measurement lands the
-        // page and its cursor somewhere else entirely (300 cyrillic rows: 39
-        // kept against python's 72).
-        let n = fantastic_bundle::py_json_dumps(d, true, None).len();
-        if used + n > CAP_BYTES {
-            break;
-        }
-        used += n;
-        kept.push(d.clone());
-    }
-    let next = (kept.len() < out.len())
-        .then(|| kept.last().and_then(|d| d["id"].as_i64()))
-        .flatten();
-    json!({"rows": kept, "refused": refused, "next": next})
-}
-
 /// A message id from whatever the caller wrote: a POSITIVE int, or the
 /// decimal string a URL or a form carries. A bool is not an id (C18).
 ///
@@ -548,113 +461,77 @@ fn raised(class: &str, message: &str) -> Value {
     json!({"error": format!("{class}: {message}"), "raised": true})
 }
 
-/// `int(payload.get("limit") or 0)` — python's coercion, with its two
-/// exceptions swallowed to 0 exactly where python swallows them. A negative
-/// limit is NOT clamped: it is a python slice bound, and the pagers below
-/// honour it.
-fn py_limit(payload: &Value) -> i64 {
-    fantastic_bundle::py_int_or(payload.get("limit").unwrap_or(&Value::Null), 0).unwrap_or(0)
-}
-
-/// `rows_read` — one agent's conversation WHOLE, oldest first.
-fn rows_read(kernel: &Arc<Kernel>, payload: &Value) -> Value {
-    let Some(agent) = payload
-        .get("agent")
-        .and_then(Value::as_str)
-        .map(crate::scalar::py_strip)
-        .filter(|s| !s.is_empty())
-    else {
+/// `ack_deadletter` — acknowledge a DEAD LETTER the caller originated (the
+/// operator: any). The ack is a row in the kernel's store (`kind: ack`); an acked
+/// dead letter may be pruned. Python `_verb_ack_deadletter`.
+async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+    let raw = payload.get("id").cloned().unwrap_or(Value::Null);
+    let usable = match &raw {
+        Value::Null | Value::Bool(_) => false,
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    };
+    if !usable {
+        return crate::refusal::missing("ack_deadletter", "id");
+    }
+    let viewer = crate::send::current_origin();
+    let entries = match kernel.ledger_entries().await {
+        Ok(e) => e,
+        Err(e) => return crate::executions::raised("RuntimeError", &e),
+    };
+    let eid = match as_id(&raw) {
+        Ok(v) => v,
+        Err(raise) => return raise,
+    };
+    let hit = entries.into_iter().find(|e| match eid {
+        Some(n) => e.get("id").and_then(Value::as_i64) == Some(n),
+        None => e.get("name") == Some(&raw),
+    });
+    let mine = hit.filter(|e| match &viewer {
+        None => true,
+        Some(v) => e.get("_caller").and_then(Value::as_str) == Some(v.0.as_str()),
+    });
+    let Some(hit) = mine else {
         let mut r = crate::refusal::refusal(
-            crate::refusal::BAD_ARG,
-            "rows_read: `agent` must be an agent id",
+            crate::refusal::NOT_FOUND,
+            format!(
+                "ack_deadletter: no execution {} of yours in the ledger",
+                fantastic_bundle::py_repr_value(&raw)
+            ),
         );
-        crate::refusal::with(&mut r, "arg", json!("agent"));
+        crate::refusal::with(&mut r, "arg", json!("id"));
         return r;
     };
-    let mut rows: Vec<Value> = kernel
-        .rows
-        .for_agent(&AgentId::from(agent))
-        .into_iter()
-        .map(Value::Object)
-        .collect();
-    let after = match payload.get("after").map(as_id) {
-        Some(Err(raise)) => return raise,
-        Some(Ok(v)) => v,
-        None => None,
-    };
-    if let Some(after) = after {
-        // AN UNKNOWN CURSOR PAGES NOTHING, never the head again.
-        let at = rows
-            .iter()
-            .position(|r| r["id"].as_i64() == Some(after))
-            .map(|i| i + 1)
-            .unwrap_or(rows.len());
-        rows.drain(..at);
-    }
-    let limit = py_limit(payload);
-    let truncated = limit != 0 && rows.len() as i64 > limit;
-    if truncated {
-        // PYTHON'S SLICE `rows[:limit]`, negative bound included: a caller who
-        // asks for −2 drops the last two rows rather than getting the head.
-        let keep = if limit < 0 {
-            usize::try_from((rows.len() as i64).saturating_add(limit).max(0)).unwrap_or(0)
-        } else {
-            limit as usize
-        };
-        rows.truncate(keep);
-    }
-    let next = truncated
-        .then(|| rows.last().and_then(|r| r["id"].as_i64()))
-        .flatten();
-    json!({"rows": rows, "next": next})
-}
-
-/// `rows_write` — append rows to an agent's conversation, each under a fresh id.
-fn rows_write(kernel: &Arc<Kernel>, payload: &Value) -> Value {
-    let Some(agent) = payload
-        .get("agent")
-        .and_then(Value::as_str)
-        .map(crate::scalar::py_strip)
-        .filter(|s| !s.is_empty())
-    else {
+    let hid = hit.get("id").and_then(Value::as_i64).unwrap_or(0);
+    let status = hit.get("status").cloned().unwrap_or(Value::Null);
+    if !matches!(
+        status.as_str(),
+        Some("failed" | "timed_out" | "cancelled")
+    ) {
         let mut r = crate::refusal::refusal(
             crate::refusal::BAD_ARG,
-            "rows_write: `agent` must be an agent id",
+            format!(
+                "ack_deadletter: execution {hid} is {}, not a dead letter — only \
+                 failed / timed_out / cancelled work is acknowledged",
+                fantastic_bundle::py_repr_value(&status)
+            ),
         );
-        crate::refusal::with(&mut r, "arg", json!("agent"));
+        crate::refusal::with(&mut r, "arg", json!("id"));
         return r;
-    };
-    let bad_rows = |msg: &str| {
-        let mut r = crate::refusal::refusal(crate::refusal::BAD_ARG, msg);
-        crate::refusal::with(&mut r, "arg", json!("rows"));
-        r
-    };
-    let Some(rows) = payload.get("rows").and_then(Value::as_array) else {
-        return bad_rows("rows_write: `rows` must be a non-empty list of rows");
-    };
-    if rows.is_empty() || !rows.iter().all(Value::is_object) {
-        return bad_rows("rows_write: `rows` must be a non-empty list of rows");
     }
-    // THE STORE IS THE ONLY ALLOCATOR. A caller that could name an id could
-    // collide with a pre-minted one, or overwrite a row it does not own — and a
-    // COPY is a new row, not the same row twice.
-    if rows
-        .iter()
-        .any(|r| r.get("id").is_some_and(|v| !v.is_null()))
-    {
-        return bad_rows(
-            "rows_write: a row may not carry an `id` — the store mints every id, \
-             and a copy is a NEW row",
+    if hit.get("acked").is_some_and(fantastic_bundle::py_truthy) {
+        return json!({"acked": true, "id": hid, "already": true});
+    }
+    if let Some(root) = kernel.root() {
+        let mut row = Map::new();
+        row.insert("kind".to_string(), Value::from("ack"));
+        row.insert("parent".to_string(), Value::from(hid));
+        row.insert(
+            "caller".to_string(),
+            viewer.as_ref().map_or(Value::Null, |v| Value::from(v.0.clone())),
         );
+        let _ = kernel.rows_put(&root.id, row);
     }
-    let agent = AgentId::from(agent);
-    let mut ids = Vec::with_capacity(rows.len());
-    for r in rows {
-        let row = r.as_object().expect("checked above").clone();
-        match kernel.rows.put(&agent, row) {
-            Ok(id) => ids.push(id),
-            Err(e) => return bad_rows(&format!("rows_write: {e}")),
-        }
-    }
-    json!({"ids": ids})
+    kernel.ledger.mark_acked(hid);
+    json!({"acked": true, "id": hid})
 }

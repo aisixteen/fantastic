@@ -1,9 +1,9 @@
-// Per-agent agent.json persistence (merge-only).
+// Per-agent agent.yaml persistence (merge-only).
 //
 // Mirrors Rust's `persistence.rs`. Critical invariants:
 //
 //   - InMemory mode → no-op
-//   - Disk mode → read existing agent.json (if any), overlay
+//   - Disk mode → read existing agent.yaml (if any), overlay
 //     kernel-managed fields, write back. NEVER wholesale-overwrite
 //     because bundles may have written sidecar fields the kernel
 //     doesn't know about.
@@ -12,12 +12,29 @@ import FantasticJSON
 import Foundation
 import OrderedCollections
 
+/// The record file every agent's dir carries (python `_RECORD_FILE`).
+public let RECORD_FILE = "agent.yaml"
+
 public enum Persistence {
     public enum PersistenceError: Error {
         case ioFailure(String)
     }
 
-    /// Write `agent`'s record to disk, merging into any existing agent.json.
+    /// One record file → its mapping, or nil when absent / corrupt / not a
+    /// mapping. Python `_read_record`.
+    public static func readRecord(_ file: URL) -> OrderedDictionary<String, JSON>? {
+        guard let text = try? String(contentsOf: file, encoding: .utf8),
+            case .object(let d)? = try? YamlIO.load(text)
+        else { return nil }
+        return d
+    }
+
+    /// A record's bytes — python `messages_yaml.dump(record)`.
+    public static func recordBytes(_ record: OrderedDictionary<String, JSON>) -> Data {
+        Data(YamlIO.dump(.object(record)).utf8)
+    }
+
+    /// Write `agent`'s record to disk, merging into any existing agent.yaml.
     /// Ephemeral agents and InMemory mode skip silently.
     ///
     /// THE COLD PRIMITIVE, python's `_testkit.persist`: the ONE direct write,
@@ -25,7 +42,7 @@ public enum Persistence {
     /// rides the root loader's debounced `RecordWriter` through the discovered
     /// store — persisting at the verb is what C14 removed.
     ///
-    /// The record persists AS-IS — a single `agent.json`. There is no `code`/
+    /// The record persists AS-IS — a single `agent.yaml`. There is no `code`/
     /// `main.py` split: exec_bridge is a general-purpose COMMAND runner now, not a
     /// code runner, so no bundle persists program text as a record field. Mirrors
     /// python + rust.
@@ -37,13 +54,7 @@ public enum Persistence {
             at: agent.rootPath, withIntermediateDirectories: true)
         let file = agent.agentFile
 
-        var existing: OrderedDictionary<String, JSON> = [:]
-        if let data = try? Data(contentsOf: file),
-            let parsed = try? JSON.parse(data),
-            case let .object(d) = parsed
-        {
-            existing = d
-        }
+        var existing = readRecord(file) ?? [:]
 
         // Overlay kernel-managed fields. `id` + `handler_module` +
         // `parent_id` get refreshed; meta keys flatten on top.
@@ -62,25 +73,17 @@ public enum Persistence {
             existing[k] = v
         }
 
-        let merged: JSON = .object(existing)
-        // On-disk format matches Python's
-        //   `self._agent_file().write_text(json.dumps(self.record, indent=2))`
-        // so cross-runtime workdir handoff produces byte-identical
-        // agent.json files. Compact form is reserved for the wire
-        // protocol (`.serialize()`).
-        let serialized = merged.serializePretty(indent: 2)
-        guard let bytes = serialized.data(using: .utf8) else {
-            throw PersistenceError.ioFailure("non-UTF-8 serialization")
-        }
-        try bytes.write(to: file, options: .atomic)
+        // On-disk format is python's `messages_yaml.dump(record)`, byte for
+        // byte, so a cross-runtime workdir handoff reads the same file.
+        try recordBytes(existing).write(to: file, options: .atomic)
     }
 
     /// Walk a `.fantastic` tree → a flat list of records (root first, then
     /// descendants depth-first). Port of python `kernel_state.read_tree`.
     ///
-    ///   <rootDir>/agent.json                      ← the root record
-    ///   <rootDir>/<children_dir>/<id>/agent.json
-    ///   <rootDir>/<children_dir>/<id>/<children_dir>/<child>/agent.json
+    ///   <rootDir>/agent.yaml                      ← the root record
+    ///   <rootDir>/<children_dir>/<id>/agent.yaml
+    ///   <rootDir>/<children_dir>/<id>/<children_dir>/<child>/agent.yaml
     ///
     /// THE DISK POSITION IS AUTHORITATIVE: each record's `parent_id` is
     /// overwritten with the id of the agent whose children dir it sits in (the
@@ -91,7 +94,7 @@ public enum Persistence {
     /// default `agents`) — a self-describing tree may call it `host_agents`.
     ///
     /// Pure read; the bootstrap calls it BEFORE any agent exists. An entry with
-    /// no `agent.json`, or one that does not parse, is skipped SILENTLY and is
+    /// no `agent.yaml`, or one that does not parse, is skipped SILENTLY and is
     /// NOT descended into — a corrupt record takes its subtree with it, exactly
     /// as python's `_walk` does, rather than orphaning children onto a parent
     /// that failed to load. Entries are visited in sorted order (`fs.list_dir`).
@@ -101,12 +104,9 @@ public enum Persistence {
     public static func readTree(rootDir: URL, fallbackRootId: String = "kernel_state") -> [AgentRecord]
     {
         let fm = FileManager.default
-        let rootFile = rootDir.appendingPathComponent("agent.json")
+        let rootFile = rootDir.appendingPathComponent(RECORD_FILE)
         var rootRec: AgentRecord? = nil
-        if let data = try? Data(contentsOf: rootFile),
-            let parsed = try? JSON.parse(data),
-            let rec = try? AgentRecord(json: parsed)
-        {
+        if let obj = readRecord(rootFile), let rec = try? AgentRecord(json: .object(obj)) {
             rootRec = rec
         }
         let declared = rootRec?.meta["children_dir"]?.asString
@@ -121,10 +121,8 @@ public enum Persistence {
                     at: dir, includingPropertiesForKeys: nil, options: [])
             else { return }
             for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-                let agentFile = entry.appendingPathComponent("agent.json")
-                guard let data = try? Data(contentsOf: agentFile),
-                    let parsed = try? JSON.parse(data),
-                    var rec = try? AgentRecord(json: parsed)
+                guard let obj = readRecord(entry.appendingPathComponent(RECORD_FILE)),
+                    var rec = try? AgentRecord(json: .object(obj))
                 else { continue }
                 rec.parentId = parentId
                 records.append(rec)

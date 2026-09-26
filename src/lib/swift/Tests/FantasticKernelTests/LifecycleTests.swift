@@ -15,6 +15,7 @@ import Testing
 import FantasticKernelState
 
 @testable import FantasticKernel
+import FantasticRamStore
 
 // MARK: - shared recorder
 
@@ -123,8 +124,7 @@ private struct QuietProbe: AgentBundle {
 
 /// Every call row the kernel holds, oldest first — the ledger a reader sees.
 private func allRows(_ kernel: Kernel) -> [Row] {
-    kernel.allAgents().flatMap { kernel.rows.forAgent($0.id) }
-        .sorted { ($0["id"]?.asInt ?? 0) < ($1["id"]?.asInt ?? 0) }
+    kernel.rows.all()
 }
 
 /// Python's `_stub_bundle`: a handler that answers nothing, carrying whatever
@@ -369,8 +369,8 @@ struct DrainTests {
     }
 
     /// C32: EVERY system verb on a non-root answers the SAME generic
-    /// `not_here` — `shutdown_agents`/`shutdown_kernel` carry no special
-    /// case (python `_agent.py:2036-2044` generalises the old shutdown_kernel-
+    /// `not_here` — `shutdown_agents`/`kernel_stop` carry no special
+    /// case (python `_agent.py:2036-2044` generalises the old kernel_stop-
     /// only refusal to all seven system verbs).
     /// `shutdown_agents` READS THE BUNDLE'S STATIC VERBS TABLE — python's
     /// `advertises("shutdown")` imports the module and looks at `VERBS`,
@@ -420,19 +420,19 @@ struct DrainTests {
                 == "address the kernel root (alias 'kernel'); name the agent you mean in "
                 + "`parent_id` / `id`")
         #expect(r["verb"].asString == "shutdown_agents")
-        let k = await send(kernel, a.value, "shutdown_kernel").result
+        let k = await send(kernel, a.value, "kernel_stop").result
         #expect(
-            k["error"].asString == "shutdown_kernel is a kernel verb — sp_c does not answer it",
+            k["error"].asString == "kernel_stop is a kernel verb — sp_c does not answer it",
             "\(k.serialize())")
         #expect(k["reason"].asString == "not_here")
-        #expect(k["verb"].asString == "shutdown_kernel")
+        #expect(k["verb"].asString == "kernel_stop")
     }
 
-    @Test func shutdownKernelAcksThenRequestsTheStop() async throws {
+    @Test func kernelStopAcksThenRequestsTheStop() async throws {
         let kernel = makeKernel([])
-        let r = await send(kernel, "kernel", "shutdown_kernel").result
+        let r = await send(kernel, "kernel", "kernel_stop").result
         #expect(
-            r == .object(["type": .string("shutdown_kernel"), "ok": .bool(true)]),
+            r == .object(["type": .string("kernel_stop"), "ok": .bool(true)]),
             "\(r.serialize())")
         // The trigger is deferred so the ack flushes first; the waiter wakes.
         let woke = Task {
@@ -454,34 +454,40 @@ struct DrainTests {
         await kernel.shutdownRequested()
     }
 
-    @Test func kernelShutdownRunsTheFlushHookBeforeTheWalk() async throws {
-        // THE HOOK IS THE ROOT LOADER'S, not the kernel's own branch: `shutdown`
-        // offers `flushPending` to every loaded agent's bundle, and
-        // `kernel_state` is the one that lands the last message window there
-        // (python `flush_pending`).
+    @Test func kernelShutdownLandsTheLastExecutionRowsBeforeTheWalk() async throws {
+        // THE FINAL FLUSH RUNS BEFORE THE WALK, while the memory store is alive:
+        // by the time the walk reaches an agent, every execution row minted
+        // before the stop is in the store — RAM holds only the final flush's own
+        // call and settle (already recorded by its flush row). Python
+        // `Kernel.shutdown`.
         let log = Log()
         let kernel = makeKernel(
             [
                 (ROOT_HANDLER_MODULE, KernelStateBundle()),
+                ("ram_store.tools", RamStoreBundle()),
                 (
                     "walk.tools",
                     HookProbe(
                         name: "walk", log: log,
                         shutdownHook: { _, k in
                             log.append("walk")
-                            // The pump was landed + forgotten BEFORE the walk reached us.
-                            log.notePump(gone: k.messagePump == nil)
+                            let unflushed = k.rows.all().filter {
+                                $0["kind"]?.asString == "call"
+                                    && $0["agent"]?.asString != "memory"
+                            }
+                            log.notePump(gone: unflushed.isEmpty)
                         }, deleteHook: nil)
                 ),
             ], rootHandler: ROOT_HANDLER_MODULE)
         _ = await create(kernel, "w", "walk.tools")
-        // The ROOT'S boot is what installs the pump (and the ledger flusher and
-        // the record writer) — python `kernel_state._boot`.
-        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
-        #expect(kernel.messagePump != nil, "the root loader's boot installs the pump")
+        _ = await create(
+            kernel, "memory", "ram_store.tools", meta: ["operator": .bool(true)])
+        kernel.update(AgentId(ROOT_ID), ["memory_store_id": .string("memory")])
+        let started = await kernel.start(bootAll: false)
+        #expect(started["started"].asBool == true, "\(started.serialize())")
         await kernel.shutdown()
         #expect(log.all() == ["walk"], "\(log.all())")
-        #expect(log.pumpGone() == true, "the flush hook ran before the walk")
+        #expect(log.pumpGone() == true, "the final flush ran before the walk")
         #expect(kernel.draining && kernel.shutdownComplete)
     }
 
@@ -798,7 +804,7 @@ struct ForkParentageTests {
         try await Task.sleep(nanoseconds: 100_000_000)  // let the row settle
 
         // THE ROW THE PROGRAM'S SEND WROTE.
-        let rows = kernel.rows.forAgent(mailbox).filter {
+        let rows = kernel.rows.all().filter { $0["agent"]?.asString == mailbox.value }.filter {
             $0["kind"]?.asString == "call" && $0["verb"]?.asString == "note"
         }
         #expect(!rows.isEmpty, "no row for the program's send")

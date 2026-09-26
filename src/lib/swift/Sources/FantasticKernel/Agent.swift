@@ -21,7 +21,7 @@ public final class Agent: @unchecked Sendable {
     public let handlerModule: String?
     /// Parent agent's id, or `nil` for the root.
     public let parentId: AgentId?
-    /// Filesystem path where this agent's `agent.json` lives.
+    /// Filesystem path where this agent's `agent.yaml` lives.
     /// Computed regardless of StorageMode — Disk uses it, InMemory
     /// ignores it.
     public let rootPath: URL
@@ -128,7 +128,7 @@ public final class Agent: @unchecked Sendable {
     }
 
     public var agentFile: URL {
-        rootPath.appendingPathComponent("agent.json")
+        rootPath.appendingPathComponent(RECORD_FILE)
     }
 
     /// Where this agent's children live on disk. The container's NAME is

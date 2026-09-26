@@ -361,7 +361,12 @@ public struct FileBundle: AgentBundle {
             }
             files.append(.object(record))
         }
-        return .object(["path": .string(relative), "files": .array(files)])
+        return .object([
+            "path": .string(relative), "files": .array(files),
+            // HOW TO GET THIS AGAIN — python `_list`'s `origin`.
+            "origin": .string(
+                "\(agent.id.value) list \(relative) — list {path: \(relative)}; changes as files change"),
+        ])
     }
 
     /// `delete path recursive?` — a file, an EMPTY dir, or (`recursive:true`) a
@@ -522,6 +527,10 @@ public struct FileBundle: AgentBundle {
                 "next_offset": .integer(nextOffset),
                 "eof": .bool(nextOffset >= size),
                 "size": .integer(size),
+                // HOW TO GET THIS CHUNK AGAIN — python `_read_stream`'s `origin`.
+                "origin": .string(
+                    "\(agent.id.value) \(path) bytes \(offset)-\(nextOffset) of \(size) — "
+                        + "read_stream {path: \(path), offset: \(offset), length: \(chunk.count)}"),
             ]), chunk
         )
     }

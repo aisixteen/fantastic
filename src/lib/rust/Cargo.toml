@@ -15,6 +15,7 @@ members = [
     "crates/bundles/fantastic-web-ws",
     "crates/bundles/fantastic-web-rest",
     "crates/bundles/fantastic-file",
+    "crates/bundles/fantastic-ram-store",
     "crates/bundles/fantastic-text-file",
     "crates/bundles/fantastic-static-loader",
     "crates/bundles/fantastic-scheduler",
@@ -46,7 +47,7 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` so `serde_json::Map` round-trips JSON object key
 # order — matches Python's `dict` insertion-order semantics. Without
-# it, agent.json fields shuffle to alphabetical (BTreeMap), making
+# it, agent.yaml fields shuffle to alphabetical (BTreeMap), making
 # cross-runtime byte-for-byte parity flaky.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 
@@ -55,6 +56,11 @@ serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision
 # future and tokio task-locals do not cross that move — the sender/task/origin
 # scopes would be silently lost at every item.
 futures-util = "0.3"
+
+# The on-disk YAML (records, the message tape, lock, sidecars) is READ through
+# yaml-rust2's event parser (pure rust, YAML 1.2, key order kept); the WRITER is
+# hand-rolled in `fantastic_kernel::yaml` to match python's libyaml bytes.
+yaml-rust2 = { version = "0.13", default-features = false }
 
 # Concurrent maps for kernel.agents + kernel.inboxes.
 dashmap = "6"

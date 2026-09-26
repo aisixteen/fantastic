@@ -6,10 +6,11 @@
 // `fantastic-kernel/src/kernel.rs` (`shutdown_agents`, `request_shutdown`).
 //
 // A graceful stop has TWO halves. `shutdownAgents` stops the AGENTS and keeps
-// the kernel serving (reads, `messages`, the persister); `shutdown` stops the
-// PROCESS: it drains, lands the last message window, then walks the tree
-// calling each bundle's teardown hook — without touching records, disk, or
-// tree membership, so the next boot rehydrates the same tree.
+// the kernel serving (reads, the flusher); `shutdown` stops the PROCESS: it
+// drains, every call settles (done, or cancelled into the dead letters), the
+// last records and execution rows land, then it walks the tree calling each
+// bundle's teardown hook — without touching records, disk, or tree membership,
+// so the next boot rehydrates the same tree.
 
 import FantasticJSON
 import Foundation
@@ -41,6 +42,9 @@ extension Kernel {
     /// How long in-flight work may take to settle before it is cancelled.
     /// Python `Kernel.QUIET_TIMEOUT`.
     public static let QUIET_TIMEOUT: Double = 10.0
+    /// How long a cancelled batch may take to record its ending. Python
+    /// `Kernel.SETTLE_TIMEOUT`.
+    public static let SETTLE_TIMEOUT: Double = 2.0
 
     /// Is the kernel draining? New ROOT sends are refused while it is.
     public var draining: Bool {
@@ -65,7 +69,7 @@ extension Kernel {
     // ── the stop signal ─────────────────────────────────────────
 
     /// Signal the daemon serve loop to begin a graceful shutdown. Called by
-    /// the root-only `shutdown_kernel` verb AFTER it has produced its ack, so
+    /// the root-only `kernel_stop` verb AFTER it has produced its ack, so
     /// the reply flushes over the web surface before the process exits.
     /// Idempotent — extra calls collapse to one shutdown.
     public func requestShutdown() {
@@ -90,7 +94,7 @@ extension Kernel {
     /// CANCELLATION-AWARE. It parked on a bare `withCheckedContinuation`, so the
     /// LOSER of that race — this leg, whenever a signal won — was never resumed
     /// and `cancelAll()` waited on it forever: the daemon printed nothing on
-    /// SIGTERM/SIGINT, never tore down, and had to be SIGKILLed with `lock.json`
+    /// SIGTERM/SIGINT, never tore down, and had to be SIGKILLed with `lock.yaml`
     /// left behind. A cancelled wait now resolves exactly like a fired one; the
     /// caller is already past the point where it cares which.
     public func shutdownRequested() async {
@@ -129,8 +133,8 @@ extension Kernel {
     ///    `onCancel` hooks).
     ///
     /// Idempotent: a second call answers the same shape and shuts nothing new.
-    /// The kernel keeps serving afterwards — reads, `messages`, the persister —
-    /// until `shutdown()` tears it down.
+    /// The kernel keeps serving afterwards — reads, the flusher — until
+    /// `shutdown()` tears it down.
     ///
     /// WHO GETS TOLD: every agent whose bundle DECLARES `shutdown` in its
     /// static `verbs` table — python's `advertises("shutdown")`, read with NO
@@ -184,6 +188,17 @@ extension Kernel {
             }
             cancelled += (out["killed"].asArray ?? []).compactMap { $0.asInt }
         }
+        // EVERY CALL SETTLES before this returns. A killed dispatch's batch
+        // records its `cancelled` outcome (and its settle row) a few scheduling
+        // passes after the abort; the stop that follows flushes the last rows, so
+        // it must not start before those endings exist. Bounded: a batch that
+        // never settles is not waited on forever.
+        let settleBy = Date().addingTimeInterval(Kernel.SETTLE_TIMEOUT)
+        while Date() < settleBy
+            && ledger.inFlightIds().contains(where: { !tasks.contains(TaskId($0)) })
+        {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         return .object([
             "drained": .bool(true),
             "shut": .array(shut.map { .string($0) }),
@@ -194,9 +209,10 @@ extension Kernel {
     // ── shutdown ────────────────────────────────────────────────
 
     /// Graceful tree-wide process-shutdown: `shutdownAgents()` (drain, the
-    /// `shutdown` verb, quiet), then the loader's `flushPendingMessages` —
-    /// awaited BEFORE the teardown walk, so the persister can write its last
-    /// window while its provider child is still alive — then the depth-first
+    /// `shutdown` verb, quiet, every call settled), then each bundle's
+    /// `flushPending` (the loader's record writer) and the kernel's FINAL
+    /// EXECUTION FLUSH — both awaited BEFORE the teardown walk, while the
+    /// provider and the memory store are still alive — then the depth-first
     /// `onShutdown`/`onDelete` walk that frees OS resources (PTYs, subprocesses,
     /// sockets) without touching records or disk. The tree survives so the
     /// next boot rehydrates cleanly. Idempotent: guarded by `shutdownComplete`,
@@ -205,8 +221,8 @@ extension Kernel {
         guard !shutdownComplete, let root = root else { return }
         _ = await shutdownAgents()
         // THE LOADER'S OWN HOOK, before the walk and while its provider child is
-        // still alive: the root's `kernel_state` bundle lands the last message
-        // window here (python `flush_pending`). Its writes are the kernel's own
+        // still alive: the root's `kernel_state` bundle lands the last records
+        // here (python `flush_pending`). Its writes are the kernel's own
         // traffic. Every loaded agent is offered it — a bundle with nothing to
         // land has a no-op default.
         await KernelTaskLocals.withShutdown {
@@ -223,6 +239,13 @@ extension Kernel {
                     RuntimeLog.warn("  [shutdown] flush_pending raised: \(pyErrorText(error))")
                 }
             }
+        }
+        if started {
+            // THE LAST EXECUTION ROWS, while the store is still alive: everything
+            // settled by the drain (done, or cancelled into the dead letters)
+            // lands. Then the flush loop stops.
+            _ = await KernelTaskLocals.withShutdown { await self.flushExecutions() }
+            await stopFlusher()
         }
         await shutdownWalk(root)
         // PROCESS-WIDE SIDE TABLES KEYED BY KERNEL IDENTITY (the AI core's

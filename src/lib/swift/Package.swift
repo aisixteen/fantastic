@@ -56,6 +56,7 @@ let package = Package(
             "FantasticNvidiaNimBackend",
             "FantasticAnthropicBackend",
             "FantasticLlamaCppBackend",
+            "FantasticRamStore",
         ]),
         .library(name: "FantasticKernelStartup", targets: ["FantasticKernelStartup"]),
 
@@ -70,7 +71,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
-        .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
+        // Yams: the YAML PARSER for every kernel-written file (`MessagesYAML`);
+        // pinned EXACT — the on-disk bytes are a cross-runtime contract.
+        .package(url: "https://github.com/jpsim/Yams.git", exact: "5.4.0"),
         // swift-nio: the cross-platform (macOS + Linux) event-driven networking
         // core — the `FantasticWeb` HTTP + WS server AND the relay/WS bridge
         // clients run on it. swift-nio-ssl vendors BoringSSL for TLS on the
@@ -95,12 +98,14 @@ let package = Package(
             dependencies: [
                 "FantasticJSON",
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                .product(name: "Yams", package: "Yams"),
             ],
             resources: [.copy("Resources/root_readme.md"), .copy("Resources/docs")]
         ),
         .testTarget(
             name: "FantasticKernelTests",
-            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticKernelState"]
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticKernelState",
+                           "FantasticRamStore"]
         ),
 
         // ── Trivially-portable bundles (Phase 3) ─────────────────
@@ -124,6 +129,14 @@ let package = Package(
         // the kernel (`RecordWriter.swift`), which the kernel's own tests drive.
         .target(
             name: "FantasticKernelState",
+            dependencies: ["FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections")]
+        ),
+        // The MEMORY STORE in RAM (python `memory/ram_store`): rows per owner,
+        // fold refs, grants with FK cascade, a text index; inject/dump. The root's
+        // `memory_store_id` and every AI agent's name one.
+        .target(
+            name: "FantasticRamStore",
             dependencies: ["FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
@@ -290,6 +303,7 @@ let package = Package(
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticTextFile",
+                "FantasticRamStore",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
                 "FantasticLlamaCppBackend",
@@ -362,7 +376,8 @@ let package = Package(
         .testTarget(
             name: "FantasticAICoreTests",
             dependencies: [
-                "FantasticAICore", "FantasticKernel", "FantasticJSON",
+                "FantasticAICore", "FantasticKernel", "FantasticJSON", "FantasticRamStore",
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ]
         ),
 
@@ -389,7 +404,7 @@ let package = Package(
                 "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticTextFile", "FantasticKernelStartup",
+                "FantasticTextFile", "FantasticKernelStartup", "FantasticRamStore",
                 // The scenario fixtures are unit-tested here; only their
                 // REGISTRATION is behind -DSCENARIO_PROBES.
                 "FantasticScenarioProbes",

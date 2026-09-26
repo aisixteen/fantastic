@@ -12,14 +12,14 @@
 //! Contract (duck-typed; any agent answering these is a loader):
 //! ```text
 //!   load_tree                 -> {records, version}   read the subtree (direct)
-//!   persist_record {record}   -> {ok}                 write one agent.json
+//!   persist_record {record}   -> {ok}                 write one agent.yaml
 //!   forget_record {id}        -> {ok}                 remove one agent's dir
 //!   persist_blob / load_blob                          the sidecar byte channel
 //! ```
 //!
-//! The ROOT loader also owns the kernel-wide bookkeeping python's `_boot`
-//! installs: the execution-ledger rehydrate + flusher, the message pump and the
-//! record `persist_writer`.
+//! The ROOT loader also mints the kernel's instance `guid` at `boot` and installs
+//! the record `persist_writer`. There is no message tape: the kernel keeps no
+//! conversation, and flushes its own execution rows into the root's memory store.
 
 #![deny(missing_docs)]
 
@@ -157,8 +157,8 @@ reflect each, send). CREATE/DELETE plain agents (create_agent with a \
 handler_module and grants, delete_agent) work as before.";
 
 /// Per-loader process state — what `boot` installed, so a second `boot` is a
-/// no-op and `on_shutdown` can tear it down. Python keeps these on the agent
-/// object (`_fs_flush_loop`, `_message_pump`).
+/// no-op and `on_shutdown` can tear it down. Python keeps it on the agent
+/// object (`_fs_flush_loop`).
 /// The bundle's per-loader handles. The `boot` SEQUENCE lives in the kernel
 /// (`persistence::boot_root_loader`); what the bundle owns is the verb surface
 /// and remembering what to tear down.
@@ -200,6 +200,16 @@ impl KernelStateBundle {
                 return Value::Null;
             }
             entry.booted = true;
+        }
+        // A SESSION loader (a `root` meta pointing at a sub-namespace like
+        // `.fantastic/web/<session>/`) seeds its namespace ANCHOR
+        // (`<root>/agent.yaml`) so `load_tree` has a root to walk from after a
+        // restart — python `_boot`.
+        let root_dir = loader_root(agent);
+        if root_dir != agent.root_path && !root_dir.join(persistence::RECORD_FILE).exists() {
+            if let Value::Object(rec) = fantastic_kernel::persistence::record_map(&agent.record()) {
+                write_record(&root_dir, &rec);
+            }
         }
         let installed = persistence::boot_root_loader(kernel, agent).await;
         self.state
@@ -286,48 +296,64 @@ impl KernelStateBundle {
     }
 }
 
-/// Merge-write one record's `agent.json` at `root_path` (the agent's own dir) —
+/// Merge-write one record's `agent.yaml` at `root_path` (the agent's own dir) —
 /// python `write_record`. Reads any existing file and overlays only the
 /// kernel-managed keys, preserving unknown fields + sidecars.
 fn write_record(root_path: &Path, record: &Map<String, Value>) {
-    let file = root_path.join("agent.json");
+    let file = root_path.join(persistence::RECORD_FILE);
     let mut on_disk: Map<String, Value> = fs::read_to_string(&file)
         .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|v| match v {
-            Value::Object(m) => Some(m),
-            _ => None,
-        })
+        .and_then(|raw| persistence::parse_record(&raw))
         .unwrap_or_default();
     for (k, v) in record {
         on_disk.insert(k.clone(), v.clone());
     }
     let _ = fs::create_dir_all(root_path);
-    let body = fantastic_bundle::py_json_dumps(&Value::Object(on_disk), false, Some(2));
+    let body = fantastic_kernel::yaml_io::dump(&Value::Object(on_disk));
     let _ = fs::write(&file, body);
 }
 
-/// An absolute dir for a record under THIS loader's root (a session loader's
-/// `root` meta moves the whole namespace). Python `_resolve_path`.
+/// An absolute dir for a record under THIS loader's root — python
+/// `_resolve_path`. The record's parent chain is walked in the kernel and STOPS
+/// AT THE LOADER (not at the kernel root): a session loader's records nest
+/// directly under its own `root`, whatever host agents sit above the loader.
+/// The chain starts at the record's OWN `parent_id` (none ⇒ directly under the
+/// loader), and a link's parent is the live agent's.
 fn resolve_under(
     agent: &Arc<Agent>,
     kernel: &Arc<Kernel>,
     id: &str,
     parent_id: Option<&str>,
 ) -> std::path::PathBuf {
-    let base = loader_root(agent);
-    let under_root = persistence::resolve_record_path(kernel, id, parent_id);
-    match kernel.root() {
-        Some(root) if base != root.root_path => {
-            let rel = persistence::store_reldir(&root.root_path, &under_root);
-            if rel.is_empty() {
-                base
-            } else {
-                base.join(rel)
-            }
+    let mut parts: Vec<String> = vec![id.to_string()];
+    let mut pid: Option<String> = parent_id.filter(|p| !p.is_empty()).map(str::to_string);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(p) = pid {
+        if p == agent.id.0 || !seen.insert(p.clone()) {
+            break;
         }
-        _ => under_root,
+        parts.push(p.clone());
+        pid = kernel
+            .agents
+            .get(&AgentId::from(p.as_str()))
+            .and_then(|a| a.parent_id.as_ref().map(|q| q.0.clone()));
     }
+    let children_dir = agent
+        .meta
+        .read()
+        .ok()
+        .and_then(|m| {
+            m.get("children_dir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "agents".to_string());
+    let mut path = loader_root(agent);
+    for part in parts.iter().rev() {
+        path = path.join(&children_dir).join(part);
+    }
+    path
 }
 
 /// Refuse a RECORD verb that names an agent outside the caller's own subtree —
@@ -488,36 +514,29 @@ impl Bundle for KernelStateBundle {
     /// THE RECORD FLUSH LIVES HERE, not in `on_shutdown`. The record loop
     /// debounces 150 ms; a `create_agent` + `update_agent` followed straight away
     /// by a shutdown used to reach its final flush mid-teardown-walk, with the
-    /// store already gone, and the update never landed. Records first: their
-    /// writes mint rows, and the pump's own window has to close after them. The
-    /// kernel already wraps this hook in `shutdown_context` — a draining store
-    /// would otherwise refuse the write.
+    /// store already gone, and the update never landed. The kernel already wraps
+    /// this hook in `shutdown_context` — a draining store would otherwise refuse
+    /// the write.
     async fn flush_pending(
         &self,
         agent_id: &AgentId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        let (writer, pump) = {
-            let mut st = self.state.lock().expect("kernel_state poisoned");
-            let installed = st.get_mut(&agent_id.0).and_then(|s| s.installed.as_mut());
-            match installed {
-                Some(i) => (i.writer.clone(), i.pump.take()),
-                None => (None, None),
-            }
+        let writer = {
+            let st = self.state.lock().expect("kernel_state poisoned");
+            st.get(&agent_id.0)
+                .and_then(|s| s.installed.as_ref())
+                .and_then(|i| i.writer.clone())
         };
         if let Some(w) = writer {
             w.flush(kernel).await;
         }
-        if let Some(p) = pump {
-            p.stop(kernel).await;
-        }
         Ok(())
     }
 
-    /// Unsubscribe + stop the loops. `flush_pending` normally ran already (the
-    /// kernel calls it before the walk, while the provider is alive) and is what
-    /// WRITES; a path that skipped it (a bare shutdown) still lands the last
-    /// message window here, through the pump's own catch-up.
+    /// Unsubscribe + stop the record loop. `flush_pending` normally ran already
+    /// (the kernel calls it before the walk, while the provider is alive) and is
+    /// what WRITES.
     async fn on_shutdown(
         &self,
         agent_id: &AgentId,
@@ -541,7 +560,7 @@ fn verbs_view() -> Value {
         "reflect": "Identity + the disk root it owns. No args.",
         "boot": "Start the auto-flush loop unless `watch=false` (a loader serving a",
         "load_tree": "args: none. Read this loader's subtree from disk → {records, version}.",
-        "persist_record": "args: record:dict (req). Merge-write one agent.json. Location is the",
+        "persist_record": "args: record:dict (req). Merge-write one agent.yaml. Location is the",
         "forget_record": "args: id:str (req), parent_id:str (opt). rmtree the agent's dir. For a",
         "persist_blob": "args: agent_id:str (req), name:str (req), content:str (req). Persist an",
         "load_blob": "args: agent_id:str (req), name:str (req). Read an agent's sidecar THROUGH the",

@@ -492,7 +492,10 @@ fn output(agent_id: &AgentId, payload: &Value) -> Result<Value, BundleError> {
     } else {
         text
     };
-    Ok(json!({ "output": out }))
+    Ok(json!({
+        "output": out,
+        "origin": format!("{agent_id} output — the scrollback NOW; re-send, it moves"),
+    }))
 }
 
 /// python `_restart`.

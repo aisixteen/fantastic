@@ -248,7 +248,7 @@ public final class TaskTable: @unchecked Sendable {
     // per-agent counter, hashed so a visible sequence could not be read as an
     // ordering. Python reversed that trade: ONE int64 counter allocates every id
     // in the kernel, so `ps`, `cancel`, the ledger, a reply tag and the message
-    // log all name the same number. The allocator is `kernel.rows.mintId()`;
+    // store all name the same number. The allocator is `kernel.mintId()`;
     // the caller mints, and this table only registers.
 
     /// Put one in-flight task in the table.
@@ -455,7 +455,7 @@ extension Kernel {
         // none, so the fork's id IS its row id, the way python's `spawn_task`
         // returns what `rows_put` minted. Minting a second id on a failure that
         // cannot happen would name a task no row describes.
-        let taskId = TaskId(try! rows.put(agent, row))
+        let taskId = TaskId(try! rowsPut(agent, row))
         let handle = TaskHandle()
         tasks.register(
             id: taskId, agent: agent, verb: verb,

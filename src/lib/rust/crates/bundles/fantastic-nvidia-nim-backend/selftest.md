@@ -11,7 +11,7 @@ NVIDIA NIM LLM agent (OpenAI-compatible). Same surface as
 `ollama_backend` (send/history/status; an in-flight `send` is cancelled
 with the kernel's `ps` + `cancel`, not a bundle `interrupt`). The api key comes
 from the ENVIRONMENT (`NVIDIA_API_KEY`), read at call time — there is no
-key-storage verb and nothing on disk, so it is never in `agent.json` and never
+key-storage verb and nothing on disk, so it is never in `agent.yaml` and never
 returned by reflect. The failfast guards below run as one-shot CLI; AI
 generation needs a live daemon + WS.
 

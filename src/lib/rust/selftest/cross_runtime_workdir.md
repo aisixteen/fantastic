@@ -37,7 +37,7 @@ fantastic core create_agent handler_module=exec_bridge.tools id=py \
     interpreters="[\"$(command -v python3)\"]" ingress_rule=allow_all_ingress >/dev/null
 
 # Confirm the interpreter allowlist landed on disk:
-grep '"interpreters"' "$PYWORKDIR/.fantastic/agents/py/agent.json"
+grep '"interpreters"' "$PYWORKDIR/.fantastic/agents/py/agent.yaml"
 ```
 Expected: a line like `"interpreters": ["/path/to/python3"]` — the
 operator's explicit choice. There is no default and no PATH probing:
@@ -71,8 +71,8 @@ runtimes.
 # Schedule a fire via Rust.
 "$RUSTBIN" sch schedule target=core payload='{"type":"list_agents"}' interval_seconds=60 >/dev/null
 
-# Verify schedules.json exists + has the schedule.
-cat "$PYWORKDIR/.fantastic/agents/sch/schedules.json" | head -5
+# Verify schedules.yaml exists + has the schedule.
+cat "$PYWORKDIR/.fantastic/agents/sch/schedules.yaml" | head -5
 ```
 Expected: JSON list containing the new schedule with `interval_seconds:60`.
 
@@ -89,7 +89,7 @@ is identical.
 ```bash
 # Stage a record with a bundle handler that neither runtime ships.
 mkdir -p "$PYWORKDIR/.fantastic/agents/ghost"
-cat > "$PYWORKDIR/.fantastic/agents/ghost/agent.json" <<'JSON'
+cat > "$PYWORKDIR/.fantastic/agents/ghost/agent.yaml" <<'JSON'
 {"id":"ghost","handler_module":"made_up_bundle.tools","meta":{}}
 JSON
 
@@ -106,7 +106,7 @@ match). Same wire shape for the warn line.
 ```bash
 # Stage a terminal_backend record (Rust requires --features full).
 mkdir -p "$PYWORKDIR/.fantastic/agents/tb"
-cat > "$PYWORKDIR/.fantastic/agents/tb/agent.json" <<'JSON'
+cat > "$PYWORKDIR/.fantastic/agents/tb/agent.yaml" <<'JSON'
 {"id":"tb","handler_module":"terminal_backend.tools","meta":{"cmd":["bash"]}}
 JSON
 

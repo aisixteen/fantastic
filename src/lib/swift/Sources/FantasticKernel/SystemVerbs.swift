@@ -26,10 +26,10 @@ extension Kernel {
         // asserting a denial `side` for a non-root privileged send stay valid.
         if target.parentId != nil {
             // C32: EVERY system verb on a non-root — `shutdown_agents` and
-            // `shutdown_kernel` included — answers the SAME generic
+            // `kernel_stop` included — answers the SAME generic
             // `Refusal.notHere`. Python has no special case here: `if self.
             // parent is not None: return refusal(NOT_HERE, ...)` covers all
-            // seven verbs uniformly ("shutdown_kernel already refused this
+            // seven verbs uniformly ("kernel_stop already refused this
             // way; this generalises it to all seven" — `_agent.py:2036-2044`).
             // The two-stop-verbs special case this used to carry answered a
             // DIFFERENT, uncoded `{error}` with no `reason`/`hint`/`verb`.
@@ -47,23 +47,26 @@ extension Kernel {
         // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
         // one row per in-flight dispatch, `parent` chaining them into the send
         // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
-        // The EXECUTION LEDGER, ORIGIN-SCOPED: an agent sees only what it
-        // originated, the operator sees all. Unscoped this would be a
-        // side-channel around `callable_by` — reading other agents' result
-        // bodies without ever being granted an edge to them.
+        // The EXECUTION LEDGER — a PROJECTION over the kernel's memory store plus
+        // what is still in RAM. CALLER-SCOPED: the ledger carries other agents'
+        // result digests; an unscoped read would be a side-channel around
+        // `callable_by`. An agent sees the executions IT originated; the
+        // operator (sender=None) sees all. Python `_verb_ledger`.
         case "ledger":
-            let rows = ledger.rows(for: KernelTaskLocals.currentOrigin)
+            let viewer = KernelTaskLocals.currentOrigin?.value
+            var rows: [JSON] = []
+            for var e in try await ledgerEntries() {
+                let c = e.removeValue(forKey: "_caller") ?? .null
+                if let v = viewer, c.asString != v { continue }
+                rows.append(.object(e))
+            }
             let (paged, next) = page(rows, payload) { $0["id"].asInt.map(String.init) ?? ($0["id"].asString ?? "") }
             return .object([
                 "executions": .array(paged),
                 "next": next.map { JSON.string($0) } ?? .null,
             ])
-        case "messages":
-            return try messagesReply(payload)
-        case "rows_read":
-            return try rowsReadReply(payload)
-        case "rows_write":
-            return try rowsWriteReply(payload)
+        case "ack_deadletter":
+            return try await ackDeadletterReply(payload)
         case "ps":
             // PAGED like `list_agents` — same cursor law: the id of the last row
             // handed over. Over a LIVE table a cursor may miss a row that
@@ -108,26 +111,30 @@ extension Kernel {
                 return .object(["cancelled": .bool(false), "killed": .array([])])
             }
             return await cancelTask(TaskId(tid))
+        // THE START SEQUENCE — see `Kernel.start`. Idempotent.
+        case "kernel_start":
+            return await start(bootAll: true)
         // The agent half of a graceful stop: drain, the `shutdown` verb to
         // every agent that advertises it, quiet, cancel the rest. The kernel
-        // keeps serving; the persister catches up. Root control surface only.
+        // keeps serving; the flusher catches up. Root control surface only.
         case "shutdown_agents":
             return await shutdownAgents()
         // Gracefully stop the whole kernel PROCESS. Order: (1) ack
-        // `{type:"shutdown_kernel", ok:true}`; (2) AFTER the reply is on the
-        // wire, trigger the daemon's normal graceful path; (3) exit 0. The
-        // trigger is DEFERRED 100 ms so the in-flight REST body / WS frame is
-        // fully written before the serve loop tears the listeners down —
-        // never signal synchronously here or the caller sees a dropped
-        // socket, not an ack. Idempotent: `requestShutdown` collapses a racing
-        // signal to one shutdown. With no serve loop there is nothing to stop
-        // — it still acks. Python `_verb_shutdown_kernel`.
-        case "shutdown_kernel":
+        // `{type:"kernel_stop", ok:true}`; (2) AFTER the reply is on the wire,
+        // trigger the daemon's graceful path — drain, every call settles (done,
+        // or cancelled into the dead letters), the last execution rows flush
+        // into the kernel's store, agents shut down, the lock releases; (3) exit
+        // 0. The trigger is DEFERRED 100 ms so the in-flight REST body / WS frame
+        // is fully written before the serve loop tears the listeners down.
+        // Idempotent: `requestShutdown` collapses a racing signal to one
+        // shutdown. With no serve loop there is nothing to stop — it still acks.
+        // Python `_verb_kernel_stop`.
+        case "kernel_stop":
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 self?.requestShutdown()
             }
-            return .object(["type": .string("shutdown_kernel"), "ok": .bool(true)])
+            return .object(["type": .string("kernel_stop"), "ok": .bool(true)])
         default:
             return Refusal.make(
                 Refusal.unhandled, "unhandled system verb \(pyRepr(verb))",
@@ -180,26 +187,22 @@ extension Kernel {
             "ledger": .string(
                 "No args. EVERY execution and what it became — named under its id, "
                     + "unnamed under its minted pid — {executions:[{id, target, status, "
-                    + "attempts, retries, named, outcome?}]}, paged, scoped to what YOU "
-                    + "originated. Failed/timed_out/cancelled rows are the dead-letter "
-                    + "queue: inspect, then retry with a NEW id if you choose — nothing "
-                    + "is retried silently."),
-            "messages": .string(
-                "args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, "
-                    + "at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, bytes, "
-                    + "title?, level?, refs?}], refused:[ids], next?}. Your own rows always; another "
-                    + "agent's only if its callable_by names you for `messages`. Bodies are behind "
-                    + "that agent's `pull`."),
-            "rows_read": .string(
-                "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a wildcard does "
-                    + "not carry it). That agent's "
-                    + "rows WHOLE (content included), oldest first — {rows:[…], next?}. The "
-                    + "hydration read; agents read digests through `messages` instead."),
-            "rows_write": .string(
-                "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a wildcard does "
-                    + "not carry it). Appends rows "
-                    + "to that agent's conversation, each under a FRESH id — {ids:[int]}. A row "
-                    + "may not carry an `id`; re-ids are the caller's to remap."),
+                    + "attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU "
+                    + "originated; read from the kernel's memory store plus what is not yet "
+                    + "flushed. `outcome` keeps the RESULT only for a named call; a dead letter "
+                    + "keeps its error; anything else is {status, bytes} — the reply itself went "
+                    + "to its caller. Failed/timed_out/cancelled rows are the dead-letter queue "
+                    + "(announced by the `on_deadletter` event): inspect, retry with a NEW id "
+                    + "if you choose, then `ack_deadletter` it — nothing is retried silently."),
+            "ack_deadletter": .string(
+                "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD "
+                    + "LETTER (failed/timed_out/cancelled) you originated: recorded in the "
+                    + "kernel's store, it may then be pruned. Returns {acked:true, id}."),
+            "kernel_start": .string(
+                "No args. THE START SEQUENCE — the root must name `memory_store_id` (fail "
+                    + "loud otherwise): boots the root, then that store, starts flushing the "
+                    + "kernel's execution rows into it, then boots every other agent in "
+                    + "registration order. Idempotent. Returns {started, store, booted:[ids]}."),
             "cancel": .string(
                 "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
                     + "own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's "
@@ -210,8 +213,10 @@ extension Kernel {
                     + "sends `shutdown` to every agent advertising it, waits for in-flight work, "
                     + "cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
             ),
-            "shutdown_kernel": .string(
-                "No args. Stops the kernel PROCESS — under env:'container', the container."
+            "kernel_stop": .string(
+                "No args. Stops the kernel PROCESS gracefully — drain, every call settles "
+                    + "(done, or cancelled into the dead letters), the last rows flush, agents "
+                    + "shut down, exit. Under env:'container', the container."
             ),
         ])
     }
@@ -383,7 +388,7 @@ extension Kernel {
         if case .object(let o) = payload, let supplied = o["id"], supplied != .null {
             id = supplied.asString ?? ""
         } else {
-            id = mintId(hm)
+            id = mintAgentId(hm)
         }
         // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
         // the mint, so every consumer inherits it rather than each remembering.
@@ -671,7 +676,7 @@ func recordToJSON(_ rec: AgentRecord) -> JSON { rec.json }
 /// is no dot — python's own branch (`_agent.py::create`:
 /// `handler_module.split(".")[-2] if "." in handler_module else handler_module`),
 /// not an `IndexError`.
-func mintId(_ bundle: String) -> String {
+func mintAgentId(_ bundle: String) -> String {
     let parts = bundle.components(separatedBy: ".")
     let prefix = parts.count > 1 ? parts[parts.count - 2] : bundle
     let hex = String(format: "%06x", Int.random(in: 0..<0x100_0000))
@@ -777,11 +782,7 @@ extension Kernel {
 
 }
 
-// MARK: - THE ROW STORE's verbs (python `_verb_messages`/`_verb_rows_read`/`_verb_rows_write`)
-
-/// `len(x)` for a sized value, `1` for a scalar — a digest counts, it never
-/// raises on a row a caller wrote by hand (python, 2026-09-20).
-func sizedLen(_ v: JSON) -> Int { (try? pyLen(v)) ?? 1 }
+// MARK: - ack_deadletter
 
 /// A message id as an int: an int, or its digit string (a model may quote what
 /// it copied out of a tag). Anything else is not an id. Python `_as_id`.
@@ -798,186 +799,52 @@ public func asMessageId(_ v: JSON?) throws(PyError) -> Int64? {
     }
 }
 
-/// Python's `int(x or 0)` for a page limit, with python's own `except
-/// (TypeError, ValueError): limit = 0`. A magnitude python holds and `Int`
-/// cannot SATURATES with its sign, because that is what the comparisons below
-/// mean against an unbounded int: a huge positive limit caps nothing, a huge
-/// negative one keeps nothing.
-func pyLimit(_ v: JSON) -> Int {
-    do {
-        return try pyIntOr(v, 0)
-    } catch {
-        guard error.type == "OverflowError" else { return 0 }
-        return pyLimitIsNegative(v) ? Int.min : Int.max
-    }
-}
-
-/// `content[:120].replace("\n", " ")` — python slices and substitutes CODE
-/// POINTS. Both halves are walked scalar by scalar because swift's own
-/// `prefix`/`replacingOccurrences` work on GRAPHEMES, where `\r\n` is one
-/// character: the prefix would hand back 240 scalars and the substitution
-/// would not find the `\n` inside a CRLF at all.
-func pyHead(_ content: String) -> String {
-    var head = ""
-    for u in content.unicodeScalars.prefix(120) {
-        head.unicodeScalars.append(u == "\n" ? " " : u)
-    }
-    return head
-}
-
-private func pyLimitIsNegative(_ v: JSON) -> Bool {
-    switch v {
-    case .integer(let n): return n < 0
-    case .double(let d): return d < 0
-    case .string(let s): return s.unicodeScalars.drop(while: pyIsSpace).first == "-"
-    default: return false
-    }
-}
-
 extension Kernel {
-    /// Rows by id at DIGEST resolution, gated INSIDE: the caller's own rows
-    /// always; another agent's only when that owner's `callable_by` names the
-    /// caller for `messages` (the same ingress check the call gate runs, re-run
-    /// here against the OWNER because a root verb skips ingress); the operator
-    /// sees all. Refused ids are LISTED, never silently dropped. Bodies stay
-    /// behind the owner's `pull`.
-    func messagesReply(_ payload: JSON) throws(PyError) -> JSON {
-        let raw = payload["ids"].asArray ?? []
-        // The parse runs over the WHOLE list before the shape guard, like
-        // python's comprehension: a `'²'` in position 3 raises, it does not
-        // reach the `bad_arg`.
-        let parsed = try raw.map { (x) throws(PyError) in try asMessageId(x) }
-        guard !parsed.isEmpty, !parsed.contains(where: { $0 == nil }) else {
+    /// args: id:int|str (req — an execution id, or its name). Acknowledge a DEAD
+    /// LETTER you originated (the operator: any). The ack is a row in the
+    /// kernel's store; an acked dead letter may be pruned. Returns {acked, id}.
+    /// Python `_verb_ack_deadletter`.
+    func ackDeadletterReply(_ payload: JSON) async throws(PyError) -> JSON {
+        let raw = payload["id"]
+        switch raw {
+        case .null, .bool: return Refusal.missing("ack_deadletter", "id")
+        case .string(let s) where s.isEmpty: return Refusal.missing("ack_deadletter", "id")
+        default: break
+        }
+        let viewer = KernelTaskLocals.currentOrigin?.value
+        let entries = try await ledgerEntries()
+        let eid = try asMessageId(raw)
+        let hit = entries.first { e in
+            if let eid { return e["id"]?.asInt == eid }
+            return e["name"] == raw
+        }
+        guard let hit, viewer == nil || hit["_caller"]?.asString == viewer else {
             return Refusal.make(
-                Refusal.badArg, "messages: `ids` must be a non-empty list of message ids (ints)",
-                extra: [("arg", .string("ids"))])
+                Refusal.notFound,
+                "ack_deadletter: no execution \(pyRepr(raw)) of yours in the ledger",
+                extra: [("arg", .string("id"))])
         }
-        var ids = parsed.map { $0! }
-        let caller = KernelTaskLocals.currentOrigin
-        var decided: [String: Bool] = [:]
-        // ONE read gate, shared with the `row` state event (`mayReadRows`).
-        func mayRead(_ ownerId: String) -> Bool {
-            if let d = decided[ownerId] { return d }
-            let d = mayReadRows(reader: caller?.value, owner: ownerId)
-            decided[ownerId] = d
-            return d
-        }
-        if let after = try asMessageId(payload["after"]), let i = ids.firstIndex(of: after) {
-            ids = Array(ids[(i + 1)...])
-        }
-        var out: [JSON] = []
-        var refused: [JSON] = []
-        for rid in ids {
-            guard let row = rows.getOne(rid) else {
-                refused.append(.integer(rid))
-                continue
-            }
-            let ownerId = row["agent"]?.asString ?? ""
-            guard mayRead(ownerId) else {
-                refused.append(.integer(rid))
-                continue
-            }
-            // ONE digest function, shared with the `row` state event.
-            out.append(.object(rowDigest(rid: rid, row: row)))
-        }
-        // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
-        // The cap measures `len(json.dumps(d))` — python's separators, its
-        // `ensure_ascii` escapes and its float repr, counted in CODE POINTS, so
-        // the page boundary lands on the same row python's does.
-        let limit = pyLimit(payload["limit"])
-        let capBytes = 32 * 1024
-        var kept: [JSON] = []
-        var used = 0
-        for d in out {
-            if limit != 0 && kept.count >= limit { break }
-            let n = pyJsonDumps(d).unicodeScalars.count
-            if used + n > capBytes { break }
-            kept.append(d)
-            used += n
-        }
-        let next: JSON = kept.count < out.count ? (kept.last?["id"] ?? .null) : .null
-        return .object(["rows": .array(kept), "refused": .array(refused), "next": next])
-    }
-
-    /// That agent's rows WHOLE — content included, oldest first —
-    /// {rows:[…], next:int|None}. PRIVILEGED: a wildcard grant never carries
-    /// it; this is hydration's read, the one `messages` deliberately is not.
-    func rowsReadReply(_ payload: JSON) throws(PyError) -> JSON {
-        guard let agentArg = payload["agent"].asString,
-            !pyStrip(agentArg).isEmpty
-        else {
-            return Refusal.make(
-                Refusal.badArg, "rows_read: `agent` must be an agent id",
-                extra: [("arg", .string("agent"))])
-        }
-        var list = rows.forAgent(AgentId(pyStrip(agentArg)))
-        if let after = try asMessageId(payload["after"]) {
-            if let i = list.firstIndex(where: { $0["id"]?.asInt == after }) {
-                list = Array(list[(i + 1)...])
-            } else {
-                list = []
-            }
-        }
-        // `rows[:limit]` is a PYTHON SLICE: any non-zero limit truncates, and a
-        // negative one drops that many from the END instead of capping the head.
-        let limit = pyLimit(payload["limit"])
-        let truncated = limit != 0 && list.count > limit
-        let end: Int
-        if limit >= 0 {
-            end = min(limit, list.count)
-        } else if limit < -list.count {
-            end = 0
-        } else {
-            end = list.count + limit
-        }
-        let kept = truncated ? Array(list.prefix(end)) : list
-        return .object([
-            "rows": .array(kept.map { JSON.object($0) }),
-            "next": truncated ? (kept.last?["id"] ?? .null) : .null,
-        ])
-    }
-
-    /// Append rows to that agent's conversation, each under a FRESH id —
-    /// {ids:[int]}, in the order given. A row may not carry its own `id`: the
-    /// store is the only allocator; re-ids are the CALLER's to remap.
-    func rowsWriteReply(_ payload: JSON) throws(PyError) -> JSON {
-        guard let agentArg = payload["agent"].asString,
-            !pyStrip(agentArg).isEmpty
-        else {
-            return Refusal.make(
-                Refusal.badArg, "rows_write: `agent` must be an agent id",
-                extra: [("arg", .string("agent"))])
-        }
-        guard let list = payload["rows"].asArray, !list.isEmpty,
-            list.allSatisfy({ if case .object = $0 { return true } else { return false } })
-        else {
-            return Refusal.make(
-                Refusal.badArg, "rows_write: `rows` must be a non-empty list of rows",
-                extra: [("arg", .string("rows"))])
-        }
-        if list.contains(where: { $0["id"] != .null }) {
+        let hid = hit["id"]?.asInt ?? 0
+        let status = hit["status"]?.asString ?? ""
+        guard DEAD_STATUSES.contains(status) else {
             return Refusal.make(
                 Refusal.badArg,
-                "rows_write: a row may not carry an `id` — the store mints every "
-                    + "id, and a copy is a NEW row",
-                extra: [("arg", .string("rows"))])
+                "ack_deadletter: execution \(hid) is \(pyRepr(hit["status"] ?? .null)), not a dead "
+                    + "letter — only failed / timed_out / cancelled work is acknowledged",
+                extra: [("arg", .string("id"))])
         }
-        let aid = AgentId(pyStrip(agentArg))
-        var ids: [JSON] = []
-        for r in list {
-            var row = r.asObject ?? [:]
-            row.removeValue(forKey: "id")
-            // `put` refuses only a present id; a null one was stripped above.
-            // NO FALLBACK: a refused put used to report `0` as a minted id, so
-            // the caller learned nothing and kept a row number that names no row.
-            // Python's `rows_put` RAISES here, and the one dispatch `except`
-            // turns that into `{error, raised}` — the refusal IS the answer.
-            do {
-                ids.append(.integer(try rows.put(aid, row)))
-            } catch {
-                throw PyError("ValueError", "\(error)")
-            }
+        if hit["acked"] == .bool(true) {
+            return .object(["acked": .bool(true), "id": .integer(hid), "already": .bool(true)])
         }
-        return .object(["ids": .array(ids)])
+        if let r = root {
+            _ = try? rowsPut(
+                r.id,
+                [
+                    "kind": .string("ack"), "parent": .integer(hid),
+                    "caller": viewer.map { JSON.string($0) } ?? .null,
+                ])
+        }
+        ledger.markAcked(hid)
+        return .object(["acked": .bool(true), "id": .integer(hid)])
     }
 }

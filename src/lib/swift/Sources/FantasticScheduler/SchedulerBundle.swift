@@ -4,11 +4,11 @@
 // verb-for-verb. State persists THROUGH the loader (`load_blob`/`persist_blob`)
 // — nothing to wire; this bundle owns NO disk surface of its own and never
 // touches FileManager. Sidecars are store-relative (`agents/<id>/…`, next to
-// the agent's own agent.json — one store, no `.fantastic/.fantastic/…` nest):
+// the agent's own agent.yaml — one store, no `.fantastic/.fantastic/…` nest):
 //
-//   - `schedules.json` — `[{id, target, payload, interval_seconds, next_run,
+//   - `schedules.yaml` — `[{id, target, payload, interval_seconds, next_run,
 //                          paused, run_count, created_at, timeout?}, …]`
-//   - `history.jsonl`  — append-only, one event per fire, ring-trimmed to HISTORY_MAX.
+//   - `schedule_events.yaml`  — append-only, one event per fire, ring-trimmed to HISTORY_MAX.
 //
 // `boot` never needs a store; a WRITE failfasts (`scheduler.<verb>: …`) only
 // when the loader has no store — reads are empty until then. A tick collects
@@ -81,7 +81,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? {
         """
         # scheduler — recurring tasks
-        Verbs: schedule, unschedule, list, pause, resume, tick_now, history. Persistence (schedules.json, history.jsonl) is automatic THROUGH the loader (`kernel_state`) — nothing to wire; a write failfasts only when no store is wired at the root.
+        Verbs: schedule, unschedule, list, pause, resume, tick_now, history. Persistence (schedules.yaml, schedule_events.yaml) is automatic THROUGH the loader (`kernel_state`) — nothing to wire; a write failfasts only when no store is wired at the root.
 
         """
     }
@@ -162,9 +162,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     // ── persistence (THROUGH the loader) ────────────────────────
 
     // THE LOADER OWNS THE PATH. This bundle names only a FILENAME; the sidecar
-    // lands beside the agent's own agent.json in whatever store was discovered.
-    private static let schedulesBlob = "schedules.json"
-    private static let historyBlob = "history.jsonl"
+    // lands beside the agent's own agent.yaml in whatever store was discovered.
+    private static let schedulesBlob = "schedules.yaml"
+    private static let historyBlob = "schedule_events.yaml"
 
     /// Python's shape for a failed write inside a verb:
     /// `{error: "scheduler.<verb>: <loader error>", reason?}`.
@@ -230,9 +230,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             setCache(id, [])
             return []
         }
-        // Unreadable JSON is an EMPTY list, not a crash — python's
-        // `except json.JSONDecodeError: _cache[sid] = []`.
-        let parsed = (try? JSON.parse(raw))?.asArray ?? []
+        // Unreadable YAML (or a document that is not a list) is an EMPTY list,
+        // not a crash — python's `_cache[sid] = doc if isinstance(doc, list) else []`.
+        let parsed = (try? YamlIO.load(raw))?.asArray ?? []
         setCache(id, parsed)
         return parsed
     }
@@ -245,7 +245,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         setCache(id, schedules)
         return await fileWrite(
             id, kernel, Self.schedulesBlob,
-            pyJsonDumps(.array(schedules), indent: 2))
+            YamlIO.dump(.array(schedules)))
     }
 
     /// Returns the persist error, if any — python's `_append_history` hands it
@@ -253,26 +253,27 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     @discardableResult
     private func appendHistory(_ id: AgentId, _ kernel: Kernel, _ event: JSON) async -> JSON? {
         let prev = await fileRead(id, kernel, Self.historyBlob) ?? ""
-        // python `json.dumps(event, default=str)` — compact, ensure_ascii.
-        var combined = prev + pyJsonDumps(event) + "\n"
-        // Ring-trim past 2× MAX.
-        let lines = combined.split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-        // `split` on a trailing "\n" yields a final "" element — drop it for counting.
-        let real = lines.last == "" ? Array(lines.dropLast()) : lines
-        if real.count > 2 * HISTORY_MAX {
-            combined = real.suffix(HISTORY_MAX).joined(separator: "\n") + "\n"
+        // One `---` document per event (python `messages_yaml.row_to_doc`).
+        var combined = prev + YamlIO.rowToDoc(event.asObject ?? [:])
+        // Ring-trim if oversize: keep the newest HISTORY_MAX documents.
+        let events = Self.parseEvents(combined)
+        if events.count > 2 * HISTORY_MAX {
+            combined = events.suffix(HISTORY_MAX).map(YamlIO.rowToDoc).joined()
         }
         return await fileWrite(id, kernel, Self.historyBlob, combined)
     }
 
     private func readHistory(_ id: AgentId, _ kernel: Kernel, _ limit: Int) async -> [JSON] {
-        guard let raw = await fileRead(id, kernel, Self.historyBlob) else { return [] }
-        let lines = raw.split(separator: "\n").map(String.init).suffix(limit)
-        return lines.compactMap { line -> JSON? in
-            let t = line.trimmingCharacters(in: .whitespaces)
-            return t.isEmpty ? nil : try? JSON.parse(t)
-        }
+        guard let raw = await fileRead(id, kernel, Self.historyBlob), !raw.isEmpty else { return [] }
+        return Self.parseEvents(raw).suffix(limit).map { .object($0) }
+    }
+
+    /// The event stream's documents that are mappings. A malformed stream reads
+    /// empty (reads are lenient, as they were for the JSON-lines file). Python
+    /// `_parse_events`.
+    private static func parseEvents(_ raw: String) -> [OrderedDictionary<String, JSON>] {
+        guard let docs = try? YamlIO.loadAll(raw) else { return [] }
+        return docs.compactMap { $0.asObject }
     }
 
     // ── tick loop ───────────────────────────────────────────────
@@ -376,7 +377,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
             // `schedule_fired` doubled every delivery to a live program's
             // on_message — the payload send IS the tick; telemetry rides the
-            // scheduler's own inbox and history.jsonl.
+            // scheduler's own inbox and schedule_events.yaml.
             await kernel.emit(agentId, event)
         }
     }
@@ -543,7 +544,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     private func listReply(_ agentId: AgentId, kernel: Kernel) async -> JSON {
-        .object(["schedules": .array(await loadSchedules(agentId, kernel))])
+        .object([
+            "schedules": .array(await loadSchedules(agentId, kernel)),
+            // HOW TO GET THIS AGAIN — python `_list`'s `origin`.
+            "origin": .string("\(agentId.value) list — re-send; changes as schedules change"),
+        ])
     }
 
     private func pauseReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
@@ -622,6 +627,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         if pyTruthy(sid) {
             entries = entries.filter { $0["schedule_id"] == sid }
         }
-        return .object(["history": .array(entries), "count": .integer(Int64(entries.count))])
+        return .object([
+            "history": .array(entries), "count": .integer(Int64(entries.count)),
+            "origin": .string("\(agentId.value) history — re-send; grows as schedules fire"),
+        ])
     }
 }

@@ -1,7 +1,7 @@
 // On-disk shape of a single agent.
 //
 // Mirrors `fantastic_kernel::AgentRecord` — the per-agent
-// `agent.json` file in `.fantastic/agents/<id>/`. Kernel-managed
+// `agent.yaml` file in `.fantastic/agents/<id>/`. Kernel-managed
 // fields (`id`, `handler_module`, `parent_id`) live at the top
 // level; everything else (display_name, port, custom bundle config)
 // is flattened into `meta` so the same JSON round-trips between
@@ -132,13 +132,13 @@ extension AgentRecord {
     /// `ordered` as a JSON object.
     public var json: JSON { .object(ordered) }
 
-    /// Build a record from an on-disk `agent.json` object PRESERVING ITS KEY
+    /// Build a record from an on-disk `agent.yaml` object PRESERVING ITS KEY
     /// ORDER. `Codable`'s keyed container hands its keys over in hash order, so
     /// hydrating through it scrambled every record's meta (and every nested
     /// grant map) on each boot. `JSON.parse` keeps the file's own order.
     public init(json: JSON) throws {
         guard case .object(let obj) = json, let id = obj["id"]?.asString else {
-            throw KernelError.invalidPayload("agent.json: missing required field `id`")
+            throw KernelError.invalidPayload("agent.yaml: missing required field `id`")
         }
         var meta: OrderedDictionary<String, JSON> = [:]
         for (k, v) in obj where !AgentRecord.reservedKeys.contains(k) { meta[k] = v }

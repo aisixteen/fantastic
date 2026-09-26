@@ -5,8 +5,8 @@
 //! identical:
 //!
 //! - **Disk mode** ([`StorageMode::Disk`]):
-//!   1. Acquire `.fantastic/lock.json` (PID-keyed; stale → overwritten).
-//!   2. Read `.fantastic/agent.json` (the root record); auto-create
+//!   1. Acquire `.fantastic/lock.yaml` (PID-keyed; stale → overwritten).
+//!   2. Read `.fantastic/agent.yaml` (the root record); auto-create
 //!      on a virgin workdir.
 //!   3. Hydrate `<workdir>/.fantastic/agents/**` via
 //!      [`crate::persistence::load_children`] (weak-load: unknown
@@ -24,9 +24,9 @@
 //! ship in this binary.
 //!
 //! **Dirty-binding contract**: on Disk mode the on-disk tree
-//! (`.fantastic/agents/<id>/agent.json` + sidecars) is loosely
+//! (`.fantastic/agents/<id>/agent.yaml` + sidecars) is loosely
 //! coupled to the in-RAM [`crate::state::KernelState`]. Persistence
-//! merges kernel-managed fields into existing `agent.json` files
+//! merges kernel-managed fields into existing `agent.yaml` files
 //! (see [`crate::persistence::persist`]) — never wholesale
 //! overwrites, never touches sidecar files. The in-RAM state can
 //! drift from disk; bundles reconcile their own slices on next
@@ -102,11 +102,6 @@ pub struct BootedKernel {
     /// Ids of every agent loaded during hydration (excluding root).
     /// Useful for boot-time `boot` verb dispatch.
     pub loaded: Vec<AgentId>,
-    /// The highest message id the log held at hydration — where a persister
-    /// should subscribe. Everything minted after this point (the roster's own
-    /// boot traffic included) is REPLAYED to it, so the pump can be installed
-    /// later without losing what happened in between.
-    pub messages_after: i64,
 }
 
 /// Drives the boot sequence. Caller fills `bundles` first.
@@ -135,10 +130,10 @@ fn boot_disk(
         lock::acquire(workdir)?;
     }
 
-    // THE ROOT RECORD, or a fresh seed. A missing or unparseable `agent.json`
+    // THE ROOT RECORD, or a fresh seed. A missing or unparseable `agent.yaml`
     // reseeds the root like a virgin dir; the children under `agents/` are
     // walked either way (python `read_tree`, 2026-09-20).
-    let root_record_path = fantastic_dir.join("agent.json");
+    let root_record_path = fantastic_dir.join(persistence::RECORD_FILE);
     let (root_rec, seeded) = match read_record_at(&root_record_path) {
         Some(rec) => (rec, false),
         None => (
@@ -174,21 +169,10 @@ fn boot_disk(
         persistence::write_record_at(&root_record_path, &root.record())?;
     }
 
-    // THE MESSAGE LOG, COLD — before any child exists, so a hydrated id can
-    // never collide with one a booting agent mints. A cut or foreign log is
-    // LOUD: half a conversation is worse than none, and the operator truncates
-    // at the last complete row rather than the kernel guessing. Success is
-    // SILENT (python prints nothing).
-    let messages_after = match crate::messages_log::hydrate_messages(kernel, &fantastic_dir) {
-        Ok(0) => 0,
-        Ok(_) => kernel.rows.next_id() - 1,
-        Err(e) => {
-            return Err(KernelError::Persistence {
-                path: fantastic_dir.join(crate::messages_log::MESSAGES_FILE),
-                source: std::io::Error::other(e),
-            })
-        }
-    };
+    // THE KERNEL KEEPS NO CONVERSATION and hydrates no rows: the load restores
+    // the tree and the id counter (the root record's reserved bound, `next_id`);
+    // execution rows live in the root's memory store, which `kernel_start` wires.
+    kernel.restore_counter(&root_rec.meta);
 
     // A RESEEDED ROOT STILL HYDRATES ITS CHILDREN: python's `read_tree` walks
     // `agents/` under the default layout when the root record is missing or
@@ -197,7 +181,6 @@ fn boot_disk(
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
         loaded,
-        messages_after,
     })
 }
 
@@ -223,19 +206,18 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
         loaded: Vec::new(),
-        // In memory: nothing was read, so a persister starts at the beginning.
-        messages_after: 0,
     })
 }
 
 /// Read the ROOT [`AgentRecord`] from `path`, or `None` when there is nothing
-/// usable there — absent, unreadable, or not JSON. python's `read_tree`
+/// usable there — absent, unreadable, or not a YAML mapping. python's `read_tree`
 /// swallows all three the same way (`json.JSONDecodeError, OSError,
 /// ValueError` → `[]`) and the caller reseeds; a corrupt root is NOT a fatal
 /// error, and nothing is migrated or repaired.
 fn read_record_at(path: &Path) -> Option<AgentRecord> {
     let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    let map = persistence::parse_record(&raw)?;
+    serde_json::from_value(serde_json::Value::Object(map)).ok()
 }
 
 /// Release the lock the bootstrap call acquired. Idempotent.

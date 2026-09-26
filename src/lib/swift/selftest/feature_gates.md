@@ -124,7 +124,7 @@ use a one-shot RPC here, not `reflect core`.
 ```bash
 BIN=/Users/oleksandr/Projects/fantastic_canvas/swift/.build/debug/fantastic
 rm -rf /tmp/fa_weak && mkdir -p /tmp/fa_weak/.fantastic/agents/tb
-cat > /tmp/fa_weak/.fantastic/agents/tb/agent.json <<'JSON'
+cat > /tmp/fa_weak/.fantastic/agents/tb/agent.yaml <<'JSON'
 {"id":"tb","handler_module":"made_up_embedded_excluded.tools","parent_id":"core","meta":{}}
 JSON
 cd /tmp/fa_weak

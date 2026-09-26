@@ -231,7 +231,7 @@ struct BlobChannelTests {
     @Test func reservedAndEscapingNamesAreRefused() async {
         let files = Files()
         let k = await makeKernel(files)
-        for bad in ["agent.json", "readme.md", "a/b.yaml", ".hidden", "x..y"] {
+        for bad in ["agent.yaml", "readme.md", "a/b.yaml", ".hidden", "x..y"] {
             let r = await k.send([
                 Item(
                     AgentId("kernel"),
@@ -331,14 +331,11 @@ struct BlobChannelTests {
                 ]))
         ])[0].result
         #expect(w["ok"].asBool == true, "\(w)")
-        let rows = await k.send([
-            Item(
-                AgentId("kernel"),
-                .object([
-                    "type": .string("rows_read"), "agent": .string("store"),
-                    "limit": .integer(200),
-                ]))
-        ])[0].result
+        // THE EXECUTION ROWS still in RAM (this kernel was never started, so
+        // nothing flushed them) — the store's own call rows.
+        let rows: JSON = .object([
+            "rows": .array(k.rows.all().filter { $0["agent"]?.asString == "store" }.map { .object($0) })
+        ])
         let calls = (rows["rows"].asArray ?? []).filter { $0["kind"].asString == "call" }
         #expect(
             calls.contains { $0["verb"].asString == "write_stream" },
@@ -355,14 +352,9 @@ struct BlobChannelTests {
                     "name": .string("rows.yaml"),
                 ]))
         ])[0].result
-        let after = await k.send([
-            Item(
-                AgentId("kernel"),
-                .object([
-                    "type": .string("rows_read"), "agent": .string("store"),
-                    "limit": .integer(200),
-                ]))
-        ])[0].result
+        let after: JSON = .object([
+            "rows": .array(k.rows.all().filter { $0["agent"]?.asString == "store" }.map { .object($0) })
+        ])
         #expect(
             (after["rows"].asArray ?? []).contains {
                 $0["kind"].asString == "call" && $0["verb"].asString == "read_stream"
@@ -372,8 +364,8 @@ struct BlobChannelTests {
         #expect(
             (after["rows"].asArray ?? [])
                 .filter { $0["kind"].asString == "call" && $0["verb"].asString == "write_stream" }
-                .allSatisfy { $0["origin"].isNull },
-            "a store write carried an agent origin: \(after.serialize())")
+                .allSatisfy { $0["caller"].isNull },
+            "a store write carried an agent caller: \(after.serialize())")
     }
 
     /// C79 — the AgentBundle DEFAULT `handleBinary` dispatches the HEADER

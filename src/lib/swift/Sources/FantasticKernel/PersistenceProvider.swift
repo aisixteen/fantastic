@@ -76,7 +76,7 @@ extension Kernel {
     }
 
     /// A `secrets.token_hex(4)`-shaped tmp-file suffix: 4 random bytes as 8 lowercase
-    /// hex digits (`agent.json.tmp.361406e7`, python's own spelling).
+    /// hex digits (`agent.yaml.tmp.361406e7`, python's own spelling).
     private static func randomHex8() -> String {
         (0..<4).map { _ -> String in
             let h = String(UInt8.random(in: 0...255), radix: 16)
@@ -181,7 +181,7 @@ extension Kernel {
         return String(data: body ?? Data(), encoding: .utf8) ?? ""
     }
 
-    /// Persist an agent's record onto its per-agent `agent.json` THROUGH the
+    /// Persist an agent's record onto its per-agent `agent.yaml` THROUGH the
     /// discovered provider's `write` (merge-not-overwrite: read existing, overlay
     /// the kernel-managed keys, write back — sidecar fields survive). No-op in
     /// InMemory / ephemeral / no-provider-wired (RAM). If the provider is sealed
@@ -190,13 +190,11 @@ extension Kernel {
         if storage.isInMemory || agent.ephemeral { return }
         guard let storeId = findStore(), let rootAgent = root else { return }
         let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: agent.rootPath)
-        let af = reldir.isEmpty ? "agent.json" : "\(reldir)/agent.json"
+        let af = reldir.isEmpty ? RECORD_FILE : "\(reldir)/\(RECORD_FILE)"
         // Merge: read existing through the provider, overlay kernel-managed keys.
         var existing: OrderedDictionary<String, JSON> = [:]
         if let content = await readViaStore(storeId, af),
-            let data = content.data(using: .utf8),
-            let parsed = try? JSON.parse(data),
-            case .object(let d) = parsed
+            case .object(let d)? = try? YamlIO.load(content)
         {
             existing = d
         }
@@ -207,11 +205,11 @@ extension Kernel {
         // Assigning `nil` here DELETED such a key instead.
         for (k, v) in agent.record().ordered { existing[k] = v }
         // The record persists AS-IS — a single stream, no `code`/`main.py` split.
-        let serialized = JSON.object(existing).serializePretty(indent: 2)
+        let serialized = YamlIO.dump(.object(existing))
         // ATOMIC COMMIT (C43): stream into a tmp beside the target, then
         // RENAME — never `write_stream` the live path directly. A
         // `write_stream` that dies after truncating `af` itself would leave a
-        // half-written or empty `agent.json`: the record gone, the next boot
+        // half-written or empty `agent.yaml`: the record gone, the next boot
         // hydrating a tree with a hole in it. `rename` is the leg's own
         // single atomic op (and creates parents), so the only two outcomes
         // are "the old record survives" or "the new one is complete" — never
@@ -268,7 +266,7 @@ extension Kernel {
         guard let storeId = findStore(), let rootAgent = root else { return }
         let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: dir)
         if reldir.isEmpty { return }  // never remove the root
-        // `recursive` is REQUIRED: an agent's dir holds `agent.json` (and any
+        // `recursive` is REQUIRED: an agent's dir holds `agent.yaml` (and any
         // sidecars), and a bare `delete` on a populated dir refuses — py parity
         // (`kernel_state._forget_via_store` has always passed it).
         _ = await storeSend(

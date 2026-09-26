@@ -24,6 +24,9 @@ struct AnthropicDecoded: Equatable {
     var stopReason: String? = nil
     /// The stream carried an `error` event; the message it named.
     var error: String? = nil
+    /// `message_start`'s PROVIDER-REPORTED USAGE — what the context window really
+    /// held, cache reads included (`nil` when the event reports nothing).
+    var promptTokens: Int? = nil
 }
 
 /// State carried ACROSS lines within one turn.
@@ -86,6 +89,16 @@ func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)
             break
         }
 
+    case "message_start":
+        // PROVIDER-REPORTED USAGE — what the context window really held, cache
+        // reads included. ai_core calibrates its own estimate with it.
+        let u = obj["message"]["usage"]
+        var n: Int64 = 0
+        for k in ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] {
+            n += pyTruthy(u[k]) ? (u[k].asInt ?? 0) : 0
+        }
+        out.promptTokens = n > 0 ? Int(n) : nil
+
     case "message_delta":
         if let reason = obj["delta"]["stop_reason"].asString {
             state.stopReason = reason
@@ -105,7 +118,7 @@ func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)
         out.done = true
 
     default:
-        break  // message_start, ping
+        break  // content_block_stop, ping
     }
     return out
 }

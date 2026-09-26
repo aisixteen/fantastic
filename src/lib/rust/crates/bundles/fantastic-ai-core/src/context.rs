@@ -139,18 +139,6 @@ pub fn inline_cap(meta: &Map<String, Value>) -> i64 {
     (budget(meta) / 8).max(BUDGET_FLOOR)
 }
 
-/// The most a single `pull` may return — EXACTLY the inline cap, in chars.
-///
-/// It was half the window, and that ate its own tail: a full page was larger
-/// than the inline cap, so the page itself got stored and digested, so the model
-/// pulled the pull, forever, and never saw a byte. A pull page must ALWAYS
-/// inline; making the two caps one number makes that arithmetic rather than a
-/// special case. Python `_pull_cap_chars`.
-#[must_use]
-pub fn pull_cap_chars(meta: &Map<String, Value>) -> usize {
-    inline_cap(meta) as usize * CHARS_PER_TOKEN
-}
-
 /// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER the
 /// inline cap, or its answer is stored and digested and the model pulls its own
 /// reply (measured 2026-09-06, python: a 4788-byte grep result came back as a

@@ -1,7 +1,7 @@
 # ollama_backend — local LLM, a context-managed completion agent
 Talks to a local ollama. Per-client chat threads, FIFO lock, and automatic
-context management (compaction / recall / context_status). Persistence via
-`file_bridge_id`. **No agentic loop** — one provider pass per `send`.
+context management (compaction / recall / context_status). Conversation in its
+memory store (`memory_store_id`). **No agentic loop** — one provider pass per `send`.
 
 ## Implementation
 A thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt
@@ -18,24 +18,25 @@ prompt (via `system_prompt`), reads the completion, dispatches, and feeds the
 result back as the next `{send, text}` turn. The `OllamaProvider` never receives a
 `tools` array and no `message.tool_calls` are read — model-agnostic.
 
-## Context management — owned HERE (the conversation's owner owns its context)
-Because this backend owns the per-client conversation, it owns the context:
-- **history** — every `send` loads + appends the per-client `chat.json` thread;
-- **auto-compaction** — when the assembled prompt overflows the model's window,
-  the configured `context_strategy` (default `compact`) summarizes / elides older
-  turns ONCE at turn entry and inserts a `[context-notice]`; the durable
-  transcript is never trimmed;
-- **`recall {query?, limit?}`** — page dropped turns back from the durable store;
-- **`context_status`** — inspect budget + last compaction + the model's reaction.
-
+## Context management — owned HERE
+The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
+is REQUIRED (a `send` fails loud naming it): every turn, fold and view is a row under
+this agent's key. Reply BODIES are never stored — a reply row keeps its one-line
+`origin`, and after a restart the model re-reads from it. Compaction fires at 0.8 of
+the budget (calibrated by the endpoint's reported prompt size when it reports one)
+with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
+`[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
+`context_clear` (a boundary, nothing deleted) inspect and page it. Sharing is by
+GRANT, by the owner's own choice: it `share`s a scope of its rows through the store;
+another agent starts from it with `fork_from {owner, grant, message}` and asks for a
+third agent's row with `request_share`. `watch {body?}` / `unwatch` subscribe to this
+agent's row events (a digest; bodies only for a watcher the rows are shared with).
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
 and returns `{response, final}`. A first-class peer of `exec_bridge`: a
 scheduler, a host job, a peer kernel, or a routine can call it by id. Optional
 `system_prompt:str` REPLACES the default system block (the caller supplies its own
-role / tool convention / whatever menu it built). Optional `messages:list`
-REPLACES persisted history (fully stateless — no `file_bridge_id` needed, and no
-compaction — the caller owns the context in that mode).
+role / tool convention / whatever menu it built). There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
 
 ## Recursion guard
 A `send` carrying a reserved `_call_stack` that already contains this agent (a

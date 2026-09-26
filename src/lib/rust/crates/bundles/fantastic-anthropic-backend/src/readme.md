@@ -1,5 +1,5 @@
 # anthropic_backend — Claude, a context-managed completion agent
-Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Persistence via `file_bridge_id`.
+Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
 
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
@@ -13,17 +13,24 @@ Any tool convention is the caller's — an authored agent teaches it in the prom
 next `{send, text}` turn.
 
 ## Context management — owned HERE
-Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
-(`context_strategy`, default `compact`, + `[context-notice]`), and the `recall` /
-`context_status` verbs. The conversation's owner owns its context.
-
+The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
+is REQUIRED (a `send` fails loud naming it): every turn, fold and view is a row under
+this agent's key. Reply BODIES are never stored — a reply row keeps its one-line
+`origin`, and after a restart the model re-reads from it. Compaction fires at 0.8 of
+the budget (calibrated by the endpoint's reported prompt size when it reports one)
+with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
+`[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
+`context_clear` (a boundary, nothing deleted) inspect and page it. Sharing is by
+GRANT, by the owner's own choice: it `share`s a scope of its rows through the store;
+another agent starts from it with `fork_from {owner, grant, message}` and asks for a
+third agent's row with `request_share`. `watch {body?}` / `unwatch` subscribe to this
+agent's row events (a digest; bodies only for a watcher the rows are shared with).
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
 and returns `{response, final}`. A first-class peer of `exec_bridge`: a scheduler,
 a host job, a peer kernel, or a routine can call it by id. Optional `system_prompt:str`
 REPLACES the default system block (the caller supplies its own role / tool convention).
-Optional `messages:list` REPLACES persisted history (fully stateless — no compaction;
-the caller owns the context in that mode).
+There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
 
 ## Streaming
 You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
