@@ -28,6 +28,8 @@ dependencies = [
   "fantastic-exec-bridge",
   "fantastic-ai-core",
   "fantastic-static-loader",
+  "fantastic-ram-store",
+  "pyyaml>=6",
 ]
 
 [project.scripts]
@@ -77,6 +79,7 @@ testpaths = [
   "bundled_agents/io/ws_bridge/tests",
   "bundled_agents/io/relay_connector/tests",
   "bundled_agents/io/exec_bridge/tests",
+  "bundled_agents/memory/ram_store/tests",
 ]
 # `-n auto` — xdist across every core BY DEFAULT. It used to live only in
 # run_checks.sh, so a bare `pytest` ran the whole suite on one core while the
@@ -105,6 +108,7 @@ members = [
   "bundled_agents/text_file",
   "bundled_agents/loader/kernel_state",
   "bundled_agents/loader/static_loader",
+  "bundled_agents/memory/ram_store",
   "installed_agents/*",
 ]
 
@@ -128,3 +132,4 @@ fantastic-exec-bridge = { workspace = true }
 fantastic-ai-core = { workspace = true }
 fantastic-kernel-state = { workspace = true }
 fantastic-static-loader = { workspace = true }
+fantastic-ram-store = { workspace = true }

@@ -40,6 +40,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend  # noqa: E402
+from helpers import memory
 from helpers import verdict  # noqa: E402
 from helpers.kernel import open_kernel  # noqa: E402
 
@@ -159,8 +160,11 @@ def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], des
             oracle: "*",
             "notes": "*",
             store["id"]: "*",
+            memory.MEMORY: "*",
             **{p: "*" for p in peers},
         },
+        # ITS MEMORY: the conversation lives in the kernel's `memory` store.
+        "memory_store_id": memory.MEMORY,
         "callable_by": {
             "$self": "*",
             "$parent": "*",
@@ -254,19 +258,17 @@ async def build(root):
         )
     for out in await root.send(batch):
         assert not (out.get("result") or {}).get("error"), out
+    for sid in SOLVERS:  # the store's half of each memory wire
+        await memory.open_ingress(root, memory.MEMORY, sid)
     return store
 
 
-def _rows(root, aid):
-    return [
-        r
-        for r in root.ctx.rows_for(aid)
-        if r.get("kind") not in ("call", "task", "body", "view")
-    ]
+async def _rows(root, aid):
+    return await memory.rows_of(root, aid, conversation_only=True)
 
 
-def _turns(root, aid) -> int:
-    return sum(1 for r in _rows(root, aid) if r.get("role") == "assistant")
+async def _turns(root, aid) -> int:
+    return sum(1 for r in await _rows(root, aid) if r.get("role") == "assistant")
 
 
 async def main() -> None:
@@ -303,13 +305,13 @@ async def main() -> None:
                 first = (p.read_text(errors="ignore").strip().splitlines() or [""])[0].strip()
                 if re.fullmatch(r"\d{3}", first):
                     answer = first
-            turns = {s: _turns(root, s) for s in SOLVERS}
+            turns = {s: (await _turns(root, s)) for s in SOLVERS}
             live = len(root.ctx.tasks) if hasattr(root.ctx, "tasks") else "?"
             print(f"  · {time.monotonic() - t0:5.0f}s turns={turns} tasks={live} answer={answer!r}", flush=True)
             # THE TAILS, live: every NEW row of every solver since the last tick —
             # a storm you can only count is a storm you cannot understand.
             for s in SOLVERS:
-                for r in _rows(root, s):
+                for r in (await _rows(root, s)):
                     rid = r.get("id")
                     if rid in seen_rows:
                         continue
@@ -331,14 +333,14 @@ async def main() -> None:
         print(f"    1. the code is right                {'OK' if c1 else 'NO'} answer={answer!r} want={CODE}")
         asked = {}
         for k, s in enumerate(SOLVERS):
-            text = " ".join(str(r.get("content") or "") for r in _rows(root, s) if r.get("role") == "assistant")
+            text = " ".join(str(r.get("content") or "") for r in (await _rows(root, s)) if r.get("role") == "assistant")
             asked[s] = len(re.findall(rf"<target_id>\s*{ORACLES[k]}\s*</target_id>", text))
         c2 = all(v >= 1 for v in asked.values())
         print(f"    2. each solver asked its oracle     {'OK' if c2 else 'NO'} asks={asked}")
         talked = set()
         peer_msgs = 0
         for s in SOLVERS:
-            text = " ".join(str(r.get("content") or "") for r in _rows(root, s) if r.get("role") == "assistant")
+            text = " ".join(str(r.get("content") or "") for r in (await _rows(root, s)) if r.get("role") == "assistant")
             for t in SOLVERS:
                 if t != s:
                     n = len(re.findall(rf"<target_id>\s*{t}\s*</target_id>", text))
@@ -350,7 +352,7 @@ async def main() -> None:
         print(f"    3. every pair talked                {'OK' if c3 else 'NO'} pairs={len(talked)}/{len(pairs)} peer_messages={peer_msgs}")
         agrees = candidates = 0
         for s in SOLVERS:
-            text = " ".join(str(r.get("content") or "") for r in _rows(root, s) if r.get("role") == "assistant")
+            text = " ".join(str(r.get("content") or "") for r in (await _rows(root, s)) if r.get("role") == "assistant")
             agrees += len(re.findall(r"\bAGREE\b", text))
             candidates += len(re.findall(r"\bCANDIDATE\b", text))
         c4 = candidates >= 1 and agrees >= N - 1
@@ -360,7 +362,7 @@ async def main() -> None:
         print("\n  ── the exchange (peer messages, in send order) ──")
         sent: list[tuple[float, str, str, str]] = []
         for s in SOLVERS:
-            for r in _rows(root, s):
+            for r in (await _rows(root, s)):
                 if r.get("role") != "assistant":
                     continue
                 body = str(r.get("content") or "")
@@ -378,8 +380,8 @@ async def main() -> None:
                         sent.append((float(r.get("ts") or 0), s, tgt.group(1), " ".join(txt.group(1).split())))
         for ts, frm, to, txt in sorted(sent):
             print(f"  {ts - (sent[0][0] if sent else ts):6.0f}s {frm} → {to}: {txt[:150]}")
-        turns = {s: _turns(root, s) for s in SOLVERS}
-        received = {s: sum(1 for r in _rows(root, s) if r.get("role") == "user") for s in SOLVERS}
+        turns = {s: (await _turns(root, s)) for s in SOLVERS}
+        received = {s: sum(1 for r in (await _rows(root, s)) if r.get("role") == "user") for s in SOLVERS}
         print(f"\n  observed — turns per solver     : {turns}  (storm: {sum(turns.values())} turns)")
         print(f"  observed — messages received    : {received}")
         print(f"  observed — wall                 : {time.monotonic() - t0:.0f}s")

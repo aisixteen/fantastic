@@ -91,6 +91,27 @@ class ProxyReader:
     reader says "cut the run and name why".
     """
 
+    @property
+    def last_prompt_tokens(self):
+        """What the WRAPPED endpoint reported — ai_core calibrates its estimate with
+        it, so the wrapper must not hide it."""
+        return getattr(self.inner, "last_prompt_tokens", None)
+
+    @last_prompt_tokens.setter
+    def last_prompt_tokens(self, value) -> None:
+        if hasattr(self.inner, "last_prompt_tokens"):
+            self.inner.last_prompt_tokens = value
+
+    @property
+    def last_stop_reason(self):
+        """Why the WRAPPED stream ended — a fold refuses a summary cut at its bound."""
+        return getattr(self.inner, "last_stop_reason", None)
+
+    @last_stop_reason.setter
+    def last_stop_reason(self, value) -> None:
+        if hasattr(self.inner, "last_stop_reason"):
+            self.inner.last_stop_reason = value
+
     def __init__(self, inner, limits: Limits, *, trips: list[str], watch=None):
         self.inner = inner
         self.limits = limits
@@ -101,7 +122,7 @@ class ProxyReader:
         self.transcript: list[str] = []
         self._seen = 0  # messages already printed
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         # A FOLD IS NOT A TURN. The agent summarises a span through the same
         # provider (`ai_core.core._make_summarizer`); it carries no call and is
         # not a chain step. Counted as a turn it inflated `n`, fed NO_PROGRESS
@@ -112,7 +133,7 @@ class ProxyReader:
         ).startswith("Summarize the conversation excerpt"):
             self.folds += 1
             out: list[str] = []
-            async for chunk in self.inner.chat(messages):
+            async for chunk in self.inner.chat(messages, max_tokens=max_tokens):
                 out.append(chunk if isinstance(chunk, str) else "")
                 yield chunk
             box(f"── fold {self.folds} · SUMMARY ←", "".join(out), "▌")
@@ -134,7 +155,7 @@ class ProxyReader:
 
         out: list[str] = []
         grew, began = 0, time.monotonic()
-        async for chunk in self.inner.chat(messages):
+        async for chunk in self.inner.chat(messages, max_tokens=max_tokens):
             piece = chunk if isinstance(chunk, str) else ""
             out.append(piece)
             grew += len(piece)

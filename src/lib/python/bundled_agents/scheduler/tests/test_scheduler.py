@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import yaml
 import asyncio
-import json
 import sys
 import time
 import types
@@ -114,7 +114,7 @@ async def test_schedule_persists_through_loader(seeded_kernel, store_agent, tmp_
     )[0]["result"]
     assert "schedule_id" in r
     persisted = (
-        tmp_path / ".fantastic" / "agents" / sid / "schedules.json"
+        tmp_path / ".fantastic" / "agents" / sid / "schedules.yaml"
     ).read_text()
     assert r["schedule_id"] in persisted
 
@@ -259,8 +259,8 @@ async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
         )
     )[0]["result"]
     assert out["fired"] is True
-    # history.jsonl now exists
-    hist_path = tmp_path / ".fantastic" / "agents" / sid / "history.jsonl"
+    # schedule_events.yaml now exists
+    hist_path = tmp_path / ".fantastic" / "agents" / sid / "schedule_events.yaml"
     assert hist_path.exists()
     assert "schedule_fired" in hist_path.read_text()
 
@@ -367,7 +367,7 @@ async def _probe_handler(id, payload, kernel):
         doc = None
         p = _probe.capture_path
         if p is not None and p.exists():
-            doc = json.loads(p.read_text())
+            doc = yaml.safe_load(p.read_text())
         _probe.hits[id] = {"at": time.time(), "doc": doc}
         if payload.get("block"):
             await asyncio.sleep(float(payload["block"]))
@@ -475,17 +475,17 @@ async def test_due_schedules_fire_as_one_concurrent_batch(seeded_kernel, store_a
 async def test_next_run_is_persisted_before_the_fire(
     seeded_kernel, store_agent, tmp_path
 ):
-    # The probe reads schedules.json the moment it is hit: the store must
+    # The probe reads schedules.yaml the moment it is hit: the store must
     # already hold the bumped run_count/next_run (persist-BEFORE-fire).
     sid = await _make_probed_scheduler(seeded_kernel, "sch_persist", ["p_cap"])
-    _probe.capture_path = tmp_path / ".fantastic" / "agents" / sid / "schedules.json"
+    _probe.capture_path = tmp_path / ".fantastic" / "agents" / sid / "schedules.yaml"
     r = await _schedule(seeded_kernel, sid, "p_cap", interval=1)
     sch_id = r["schedule_id"]
     (await seeded_kernel.send([{"target": sid, "payload": {"type": "boot"}}]))[0]
     assert await _wait_for(lambda: "p_cap" in _probe.hits, 3.0)
     (await seeded_kernel.send([{"target": sid, "payload": {"type": "pause"}}]))[0]
     hit = _probe.hits["p_cap"]
-    assert hit["doc"] is not None, "store had no schedules.json at fire time"
+    assert hit["doc"] is not None, "store had no schedules.yaml at fire time"
     rec = next(s for s in hit["doc"] if s["id"] == sch_id)
     assert rec["run_count"] == 1, rec
     assert rec["next_run"] > hit["at"] - 0.5, (rec, hit["at"])

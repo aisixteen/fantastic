@@ -2,9 +2,9 @@
 # or a backend name — those live in e2e/backends/.
 id: thread_fork
 group: coding
-title: a forked agent inherits the pre-fork thread via a sidecar copy
+title: a forked agent starts from the original's head by grant (share → fork_from), nothing copied
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python]
 costs: turns
 limits:
   idle_seconds: 60

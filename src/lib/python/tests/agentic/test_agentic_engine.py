@@ -296,5 +296,5 @@ async def test_dehydrate_reports_the_persisted_tree_when_asked(hydrate_scenario)
     d = await dehydrate(h.kernel, disk=True)
     assert {"static_loader", "memory", "store"} <= set(d["disk_ids"])
     # Namespacing is POSITIONAL: a roster agent's record lives under its loader.
-    assert "agents/static_loader/agents/memory/agent.json" in d["disk_files"]
+    assert "agents/static_loader/agents/memory/agent.yaml" in d["disk_files"]
     assert all("docs/" not in f for f in d["disk_files"])

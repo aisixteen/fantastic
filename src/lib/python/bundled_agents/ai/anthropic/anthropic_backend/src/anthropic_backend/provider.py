@@ -73,6 +73,11 @@ def _to_anthropic(messages: list[dict]) -> tuple[str | None, list[dict]]:
 
 
 class AnthropicProvider:
+    #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
+    #: ai_core calibrates its own token estimate with it.
+    last_prompt_tokens: int | None = None
+    last_stop_reason: str | None = None
+
     def __init__(
         self,
         endpoint: str = DEFAULT_ENDPOINT,
@@ -94,7 +99,9 @@ class AnthropicProvider:
         # client. None = the real network.
         self._transport = transport
 
-    async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
+    async def chat(
+        self, messages: list[dict], max_tokens: int | None = None
+    ) -> AsyncIterator[str]:
         """Stream raw text tokens. ai_core parses any `<call>` element out
         of the text stream — including the ones this provider synthesises from
         `tool_use` blocks when the `tool_use` route is on.
@@ -121,7 +128,8 @@ class AnthropicProvider:
         system, anth_messages = _to_anthropic(messages)
         body: dict = {
             "model": self._model,
-            "max_tokens": self._max_tokens,
+            # A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the record's.
+            "max_tokens": max_tokens or self._max_tokens,
             "messages": anth_messages,
             "stream": True,
         }
@@ -254,6 +262,20 @@ class AnthropicProvider:
                                         "call, which this kernel does not parse — calls are "
                                         "`<call name=…>` text"
                                     )
+                            elif etype == "message_start":
+                                # PROVIDER-REPORTED USAGE — what the context window
+                                # really held, cache reads included. ai_core calibrates
+                                # its own estimate with it (`last_prompt_tokens`).
+                                u = (evt.get("message") or {}).get("usage") or {}
+                                n = sum(
+                                    int(u.get(k) or 0)
+                                    for k in (
+                                        "input_tokens",
+                                        "cache_read_input_tokens",
+                                        "cache_creation_input_tokens",
+                                    )
+                                )
+                                self.last_prompt_tokens = n or None
                             elif etype == "message_delta":
                                 stop_reason = (evt.get("delta") or {}).get(
                                     "stop_reason"
@@ -261,7 +283,7 @@ class AnthropicProvider:
                             elif etype == "error":
                                 err = evt.get("error") or {}
                                 raise RuntimeError(f"anthropic stream error: {err}")
-                            # message_start / content_block_start/stop / ping: ignored
+                            # content_block_stop / ping: ignored
                         # A turn spent ENTIRELY reasoning ends inside the think block —
                         # close it so the marker pair is always balanced for the parser.
                         if thinking:
@@ -293,6 +315,12 @@ class AnthropicProvider:
                         terminal = ("end_turn", "stop_sequence") + (
                             ("tool_use",) if "tool_use" in blocks else ()
                         )
+                        self.last_stop_reason = stop_reason
+                        # A BOUNDED SIDE CALL that stopped at its bound is an ANSWER,
+                        # not a fault: the caller asked for at most `max_tokens` and
+                        # reads `last_stop_reason` (a fold refuses a cut summary).
+                        if max_tokens is not None and stop_reason == "max_tokens":
+                            return
                         if stop_reason not in terminal:
                             raise RuntimeError(
                                 "anthropic stream ended without end_turn: "

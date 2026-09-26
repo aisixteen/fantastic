@@ -202,7 +202,11 @@ async def _list(id, payload, kernel):
             except OSError:
                 sz = -1
             files.append({"name": entry.name, "path": rel, "type": "file", "size": sz})
-    return {"path": path, "files": files}
+    return {
+        "path": path,
+        "files": files,
+        "origin": f"{id} list {path} — list {{path: {path}}}; changes as files change",
+    }
 
 
 async def _delete(id, payload, kernel):
@@ -300,6 +304,8 @@ async def _read_stream(id, payload, kernel):
         "next_offset": next_offset,
         "eof": next_offset >= size,
         "size": size,
+        "origin": f"{id} {path} bytes {offset}-{next_offset} of {size} — "
+        f"read_stream {{path: {path}, offset: {offset}, length: {len(chunk)}}}",
     }
 
 

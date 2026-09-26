@@ -7,7 +7,7 @@ import json
 
 from ai_core import folds
 from ai_core.context import ProjectionCtx, estimate_tokens
-from ai_core.core import _grep, _pull, dedupe_stale_reads, drop_answered_reflects
+from ai_core.core import _grep, dedupe_stale_reads, drop_answered_reflects
 from ai_core.strategies import get_strategy
 from ai_core.strategies.strip import _stripped
 
@@ -108,7 +108,7 @@ def _interleave(*chains):
     return out
 
 
-async def _fake_summary(msgs):
+async def _fake_summary(msgs, max_tokens=None):
     return "TITLE of the fold\n\nBody of the fold: what happened."
 
 
@@ -232,7 +232,7 @@ async def test_a_fold_is_monotone_across_projections():
 
 
 async def test_a_failed_summarizer_still_writes_a_fold_and_says_so():
-    async def boom(_msgs):
+    async def boom(_msgs, max_tokens=None):
         raise RuntimeError("provider down")
 
     k = _K()
@@ -253,27 +253,22 @@ async def test_a_failed_summarizer_still_writes_a_fold_and_says_so():
 # ── descent through the verbs ───────────────────────────────────────
 
 
-async def test_grep_and_pull_descend_into_a_fold(monkeypatch):
+async def test_grep_and_history_descend_into_a_fold():
+    """Descent without `pull`: grep scoped to a fold id searches its members (the
+    store expands the fold); `history {fold}` lists them with the fold's summary."""
     from ai_core import core
 
     k = _K()
     rows = _chain("a", 1, big=False)
     rows[2]["content"] = rows[2]["content"].replace("ok", "the secret is 9f3a")
     f = _fold("ai", [r["id"] for r in rows], "done a", "summary of a", False)
-    all_rows = rows + [f]
-
-    async def fake_load(self_id, kernel, behind=False):
-        return all_rows
-
-    monkeypatch.setattr(core, "_load_history", fake_load)
+    for r in rows + [f]:
+        k.rows_put("ai", r)
     r = await _grep("ai", {"query": "secret", "ids": [f["id"]]}, k)
     assert r["total"] == 1 and r["matches"][0]["id"] == rows[2]["id"]
-    p = await _pull("ai", {"pid": f["id"]}, k)
-    assert (
-        p["text"] == "summary of a"
-        and p["refs"] == f["refs"]
-        and p["title"] == "done a"
-    )
+    h = await core._make_history(None)("ai", {"fold": f["id"]}, k)
+    assert h["fold"]["title"] == "done a" and h["fold"]["summary"] == "summary of a"
+    assert [d["id"] for d in h["rows"]] == [r["id"] for r in rows]
 
 
 # ── the prerequisite: views keep row keys ───────────────────────────

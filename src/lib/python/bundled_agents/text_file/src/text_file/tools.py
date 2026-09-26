@@ -318,7 +318,7 @@ async def _boot(id, payload, kernel):
 
 
 async def _read(id, payload, kernel):
-    """args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary."""
+    """args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version, origin}; refuses binary."""
     fb = _target(id, payload, kernel)
     if not fb:
         return _unwired("read")
@@ -347,12 +347,17 @@ async def _read(id, payload, kernel):
     if all_lines and all_lines[-1] == "":
         all_lines.pop()
     page = all_lines[off : off + limit]
+    ver = _version(data)
     return {
         "path": path,
         "lines": [{"n": off + i + 1, "text": t} for i, t in enumerate(page)],
         "total": len(all_lines),
         "eof": off + limit >= len(all_lines),
-        "version": _version(data),
+        "version": ver,
+        # HOW TO GET THIS BODY AGAIN — one line; a reader that keeps no body keeps this.
+        "origin": f"{id} {path} lines {off + 1}-{off + len(page)} version {ver} — "
+        f"read {{path: {path}, offset: {off}, limit: {limit}}}; a different version "
+        "means the file changed since",
     }
 
 

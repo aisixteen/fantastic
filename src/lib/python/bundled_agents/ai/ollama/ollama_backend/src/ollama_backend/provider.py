@@ -18,6 +18,11 @@ DEFAULT_MODEL = "(no default — set the `model` meta)"
 
 
 class OllamaProvider:
+    #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
+    #: ai_core calibrates its own token estimate with it.
+    last_prompt_tokens: int | None = None
+    last_stop_reason: str | None = None
+
     def __init__(
         self,
         endpoint: str = DEFAULT_ENDPOINT,
@@ -59,7 +64,9 @@ class OllamaProvider:
             self._client = ollama.AsyncClient(host=self._endpoint)
         return self._client
 
-    async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
+    async def chat(
+        self, messages: list[dict], max_tokens: int | None = None
+    ) -> AsyncIterator[str]:
         """Stream raw text tokens from ollama — NO tools array. ai_core parses
         any `<call>` element out of the text stream."""
         if not self._model or self._model == DEFAULT_MODEL:
@@ -71,7 +78,9 @@ class OllamaProvider:
         options: dict = {"temperature": self._temperature}
         if self._num_ctx:
             options["num_ctx"] = self._num_ctx
-        if self._num_predict:
+        if max_tokens is not None:  # a side call's own bound (a fold summary's budget)
+            options["num_predict"] = int(max_tokens)
+        elif self._num_predict:
             options["num_predict"] = self._num_predict
         kwargs: dict = {}
         if self._think is not None:
@@ -102,6 +111,12 @@ class OllamaProvider:
         # or the text would be a confetti of tags.
         thinking = False
         async for chunk in stream:
+            if chunk.get("prompt_eval_count"):
+                # PROVIDER-REPORTED USAGE — ai_core calibrates its estimate with it.
+                self.last_prompt_tokens = int(chunk["prompt_eval_count"])
+            if chunk.get("done_reason"):
+                dr = chunk["done_reason"]
+                self.last_stop_reason = "max_tokens" if dr == "length" else dr
             message = chunk.get("message") or {}
             think = message.get("thinking") or ""
             if think:

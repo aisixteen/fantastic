@@ -30,6 +30,7 @@ import types
 import pytest
 
 import ollama_backend.tools as ot
+from _testkit import memory_meta
 
 # ─── the `user` agent: the human as an ordinary bundle ──────────
 #
@@ -137,7 +138,7 @@ class _Script:
         self.requests: list = []
         self.calls = 0
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         self.requests.append(messages)
         self.calls += 1
         if self._messages:
@@ -193,7 +194,7 @@ async def _wire(kernel, script: _Script, *, answer: str, ai_id: str = "asker"):
                         "handler_module": "ollama_backend.tools",
                         "id": ai_id,
                         "context_window": 32768,
-                        "can_call": {"user": "*", "cli": "*"},
+                        **memory_meta(kernel, ai_id, {"user": "*", "cli": "*"}),
                     },
                 }
             ]
@@ -339,7 +340,7 @@ async def test_the_gate_stands_between_a_model_and_a_person(seeded_kernel):
                         "handler_module": "ollama_backend.tools",
                         "id": "stranger",
                         "context_window": 32768,
-                        "can_call": {"cli": "*"},
+                        **memory_meta(seeded_kernel, "stranger", {"cli": "*"}),
                     },
                 }
             ]

@@ -7,6 +7,7 @@ root Agent).
 
 from __future__ import annotations
 
+import yaml
 import json
 
 from _testkit import boot_root, persist
@@ -24,9 +25,9 @@ def test_create_persists_to_disk(kernel, tmp_path):
     # Agent itself never writes; the loader does. persist() is a
     # synchronous full flush (mirrors the live debounced flush).
     persist(kernel)
-    f = tmp_path / ".fantastic" / "agents" / rec["id"] / "agent.json"
+    f = tmp_path / ".fantastic" / "agents" / rec["id"] / "agent.yaml"
     assert f.exists()
-    on_disk = json.loads(f.read_text())
+    on_disk = yaml.safe_load(f.read_text())
     assert on_disk["id"] == rec["id"]
     assert on_disk["model"] == "gemma4"
 
@@ -118,7 +119,7 @@ def test_load_all_skips_corrupted_agent_json(tmp_path, monkeypatch):
     del k1
     bad_dir = tmp_path / ".fantastic" / "agents" / "broken"
     bad_dir.mkdir(parents=True)
-    (bad_dir / "agent.json").write_text("{NOT_JSON")
+    (bad_dir / "agent.yaml").write_text("{NOT_JSON")
     # Should not raise; the corrupt sibling is skipped, the rest loads.
     k = boot_root()
     assert k.get("broken") is None
@@ -126,7 +127,7 @@ def test_load_all_skips_corrupted_agent_json(tmp_path, monkeypatch):
 
 
 def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsys):
-    """Weak loading: an agent.json with a handler_module that doesn't
+    """Weak loading: an agent.yaml with a handler_module that doesn't
     import (bundle not installed in this runtime, third-party plugin
     we don't have, etc.) gets skipped + logged on boot. The record is
     left untouched on disk, the rest of the tree still loads, and
@@ -146,7 +147,7 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
     del k
     ghost = tmp_path / ".fantastic" / "agents" / "ghost_42"
     ghost.mkdir(parents=True)
-    (ghost / "agent.json").write_text(
+    (ghost / "agent.yaml").write_text(
         json.dumps(
             {
                 "id": "ghost_42",

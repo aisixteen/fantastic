@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: repeat_read
+group: memory
+title: "the same file read three times: the model's view carries ONE body, later reads are stubs citing the first"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 90
+  max_turns: 30
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

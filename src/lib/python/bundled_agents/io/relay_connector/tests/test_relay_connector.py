@@ -449,7 +449,7 @@ async def test_guid_persists_across_reboot(tmp_path, monkeypatch):
     """The connector's identity (`guid`) is created ONCE at create_agent and
     survives a kernel reboot. It's a plain record meta field — `build_transport`
     reads it with `rec.get("guid")`, no auto-generation — so the standard
-    `.fantastic/agents/<id>/agent.json` persistence carries it. After a reboot in
+    `.fantastic/agents/<id>/agent.yaml` persistence carries it. After a reboot in
     the same dir the rehydrated record dials the SAME `ws://host/<guid>` path."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()

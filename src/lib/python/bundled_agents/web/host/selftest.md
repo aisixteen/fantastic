@@ -143,15 +143,15 @@ asyncio.run(main())
 ```
 Expected: prints `OK True`.
 
-### Test 7: PID lock — `.fantastic/lock.json` holds an alive pid
+### Test 7: PID lock — `.fantastic/lock.yaml` holds an alive pid
 
 ```bash
 # NOTE: $SPID is the `uv run` wrapper pid; the actual kernel pid is one
 # child below. Read the kernel pid from the lock file itself.
-KPID=$(python -c "import json; print(json.load(open('.fantastic/lock.json'))['pid'])")
+KPID=$(python -c "import json; print(json.load(open('.fantastic/lock.yaml'))['pid'])")
 python -c "
 import json, os
-d = json.load(open('.fantastic/lock.json'))
+d = json.load(open('.fantastic/lock.yaml'))
 def alive(p):
     try: os.kill(p,0); return True
     except: return False
@@ -178,10 +178,10 @@ earlier with a clearer error). Original serve still running.
 
 ```bash
 # Kill the actual kernel pid (NOT $SPID — that's `uv run` wrapper).
-KPID=$(python -c "import json; print(json.load(open('.fantastic/lock.json'))['pid'])")
+KPID=$(python -c "import json; print(json.load(open('.fantastic/lock.yaml'))['pid'])")
 kill -9 $KPID 2>/dev/null
 sleep 0.5
-test -f .fantastic/lock.json && echo "  lock survived SIGKILL: OK"
+test -f .fantastic/lock.yaml && echo "  lock survived SIGKILL: OK"
 
 # Spin up a fresh serve on a different port — should overwrite.
 PORT2=18902
@@ -192,7 +192,7 @@ for i in $(seq 1 30); do grep -q "kernel up" /tmp/serve2.log 2>/dev/null && brea
 sleep 0.4
 python -c "
 import json, os
-d = json.load(open('.fantastic/lock.json'))
+d = json.load(open('.fantastic/lock.yaml'))
 def alive(p):
     try: os.kill(p,0); return True
     except: return False

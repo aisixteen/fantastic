@@ -572,8 +572,14 @@ async def _status(id, payload, kernel):
         j = _jobs.get(jid)
         if j is None or j.get("owner") != id:
             return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
-        return {"jobs": [_snap(jid, full=True)]}
-    return {"jobs": [_snap(k) for k, v in _jobs.items() if v.get("owner") == id]}
+        return {
+            "jobs": [_snap(jid, full=True)],
+            "origin": f"{id} status {{job_id: {jid}}} — a live job; re-send for its output NOW, which may differ",
+        }
+    return {
+        "jobs": [_snap(k) for k, v in _jobs.items() if v.get("owner") == id],
+        "origin": f"{id} status — the job table NOW; re-send, it changes",
+    }
 
 
 def _no_job(id: str, jid) -> dict | None:

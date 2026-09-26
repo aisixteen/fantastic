@@ -49,7 +49,14 @@ async def _default(kernel) -> None:
                     [{"target": "cli", "payload": {"type": "intro_booting"}}]
                 )
             )[0]["result"]
-        await _boot_all_agents(kernel)
+        # THE START SEQUENCE — the root's memory store first, then everyone. A root
+        # with no `memory_store_id` does not start: fail loud, exit non-zero.
+        started = await kernel.start(boot_all=True)
+        if isinstance(started, dict) and started.get("error"):
+            hint = started.get("hint")
+            raise RuntimeError(
+                f"{started['error']}" + (f"\n  hint: {hint}" if hint else "")
+            )
         # Second PTY push: the "all booted" close. Each agent already announced
         # its OWN endpoints to cli during its boot (e.g. web sent its listening
         # URL) — the kernel does NOT gather them. Non-tty (the container daemon)
@@ -195,16 +202,3 @@ async def _repl_loop(kernel) -> None:
             f"  unknown command: {line!r}  "
             "(try: list, add <bundle>, delete <id>, @<id> ...)"
         )
-
-
-async def _boot_all_agents(kernel) -> None:
-    """Send `{type:"boot"}` to every agent in the tree so bundles
-    hydrate process-memory state (PTYs, uvicorn, HTTP clients).
-    Order: registration order (Python dict order, root first)."""
-    for a in list(kernel.agents.values()):
-        try:
-            (await kernel.send([{"target": a.id, "payload": {"type": "boot"}}]))[0][
-                "result"
-            ]
-        except Exception as e:
-            print(f"  [kernel] boot {a.id!r} raised: {e}", file=sys.stderr)

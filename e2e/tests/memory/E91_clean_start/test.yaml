@@ -1,0 +1,7 @@
+id: clean_start
+group: memory
+title: "an empty memory store: kernel_start, an AI agent's first turn — empty head, no error; the kernel's rows land under `kernel`"
+runner: probe.py
+costs: free
+limits:
+  idle_seconds: 60

@@ -64,28 +64,25 @@ def test_fit_reply_never_exceeds_the_cap_and_says_so():
     assert kept2 == items[:2] and not cut2
 
 
-async def test_grep_answers_under_the_inline_cap_for_a_broad_query(monkeypatch):
+async def test_grep_answers_under_the_inline_cap_for_a_broad_query():
     k = _K()
     rows = [
         _row("user", "\n".join(f"marker {i}.{j}" for j in range(80)), f"u:{i}")
         for i in range(40)
     ]  # every row matches, on distinct lines (identical lines are reported once)
-    for i in range(10):
+    pids = [k.mint_id() for _ in range(10)]
+    for i, pid in enumerate(pids):
         await _store_reply(
-            "ai", k, f"n:{i}", "\n".join(f"marker line {i}.{j}" for j in range(500))
+            "ai", k, pid, "\n".join(f"marker line {i}.{j}" for j in range(500))
         )
     rows.append(
         _row(
             "user",
-            "\n\n".join(f"[reply to n:{i} · n r]\nx" for i in range(10)),
+            "\n\n".join(f"[reply to {pid} · n r]\nx" for pid in pids),
             "u:tags",
         )
     )
-
-    async def fake_load(self_id, kernel, behind=False):
-        return rows
-
-    monkeypatch.setattr(core, "_load_history", fake_load)
+    await _seed(k, rows)
     r = await _grep("ai", {"query": "marker"}, k)
     cap = core._inline_cap(k.get("ai"))
     assert estimate_one({"role": "user", "content": json.dumps(r)}) <= cap + 64
@@ -208,7 +205,7 @@ async def test_recall_asks_the_model_and_expands_only_what_fits(monkeypatch):
     reply_ids = {r["id"] for r in a if str(r["content"]).startswith("[reply to ")}
 
     class _P:
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             head_ids = [
                 int(ln.split(" · ")[0])
                 for ln in messages[0]["content"].splitlines()
@@ -251,18 +248,24 @@ async def test_recall_clears_ram_scratch_but_never_the_store(monkeypatch):
     )
 
 
-async def test_boot_recalls_only_when_there_is_a_store(monkeypatch):
+async def test_boot_is_lazy_and_marks_the_view_for_rebuilding():
+    """Boot never touches the memory store; it marks the first turn to read the head
+    and run `context_recall`."""
     k = _K()
+    await _seed(k, [_row("user", "GOAL", "user:goal")] + _chain("a", 8))
+    k.store_calls.clear()
     _boot = _make_boot(_cfg())
     assert await _boot("ai", {}, k) is None
+    assert k.store_calls == [], "boot read nothing"
+    assert "ai" in core._recall_due, "the first turn rebuilds the view"
+    core._recall_due.discard("ai")
 
-    async def fake_sys(self_id, kernel):
-        return "s"
 
-    monkeypatch.setattr(core, "_default_system_content", fake_sys)
-    await _seed(k, [_row("user", "GOAL", "user:goal")] + _chain("a", 8))
-    r = await _boot("ai", {}, k)
-    assert r and r["kept"] >= 1 and await _load_view("ai", k)
+async def test_boot_without_a_memory_store_fails_loud():
+    k = _K({"context_window": 12000, "output_reserve": 0, "memory_store_id": None})
+    k.record.pop("memory_store_id")
+    out = await _make_boot(_cfg())("ai", {}, k)
+    assert out["reason"] == "missing_arg" and out["arg"] == "memory_store_id"
 
 
 async def test_a_fold_batch_makes_recall_due_on_the_next_turn(monkeypatch):
@@ -318,11 +321,17 @@ async def test_a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on(monkey
     boot = _make_boot(_cfg())
     await boot("ai", {}, kk)  # reboot → incarnation 2
     await _deliver(kk, "ai", "[reply to n:1 · n r]\nlate", "c", None, born=1)
-    assert sends == [], "no turn ran for the late reply"
+    # the late reply is handed to the TARGET marked `late` — it records the row under
+    # its own key (a store keys every row by its writer) and runs no turn
+    assert len(sends) == 1 and sends[0].get("late") is True
+    out = await core._make_send(_cfg())("ai", sends[0], kk)
+    assert out.get("late") is True
     rows = await core._load_history("ai", kk)
     assert rows[-1].get("kind") == "late" and "late" in rows[-1]["content"]
     await _deliver(kk, "ai", "[reply to n:2 · n r]\nfresh", "c", None, born=2)
-    assert len(sends) == 1, "a reply from THIS incarnation runs a turn"
+    assert len(sends) == 2 and not sends[1].get("late"), (
+        "a reply from THIS incarnation runs a turn"
+    )
 
 
 async def test_rows_appended_after_the_array_ride_behind_it(monkeypatch):

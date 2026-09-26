@@ -42,7 +42,7 @@ def test_custom_children_dir_round_trips(tmp_path, monkeypatch):
     # a child nests under host_agents/, not agents/
     k.create("file_bridge.tools", id="f1", x=7)
     persist(k.root)
-    assert (root_dir / "host_agents" / "f1" / "agent.json").exists()
+    assert (root_dir / "host_agents" / "f1" / "agent.yaml").exists()
     assert not (root_dir / "agents").exists()
 
     # reboot rehydrates from host_agents/

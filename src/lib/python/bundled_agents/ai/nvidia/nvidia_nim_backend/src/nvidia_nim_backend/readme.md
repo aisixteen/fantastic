@@ -13,12 +13,20 @@ prompt (via `system_prompt`), reads the completion, dispatches, and feeds the re
 back as the next `{send, text}` turn.
 
 ## Context management — owned HERE
-Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
-(`context_strategy`, default `compact`, + `[context-notice]`), and the `recall` /
-`context_status` verbs. The conversation's owner owns its context.
-
+The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
+is REQUIRED (a `send` fails loud naming it): every turn, fold and view is a row under
+this agent's key. Reply BODIES are never stored — a reply row keeps its one-line
+`origin`, and after a restart the model re-reads from it. Compaction fires at 0.8 of
+the budget (calibrated by the endpoint's reported prompt size when it reports one)
+with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
+`[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
+`context_clear` (a boundary, nothing deleted) inspect and page it. Sharing is by
+GRANT, by the owner's own choice: it `share`s a scope of its rows through the store;
+another agent starts from it with `fork_from {owner, grant, message}` and asks for a
+third agent's row with `request_share`. `watch {body?}` / `unwatch` subscribe to this
+agent's row events (a digest; bodies only for a watcher the rows are shared with).
 ## NIM-specific verbs
-- THE API KEY COMES FROM THE ENVIRONMENT (`NVIDIA_API_KEY`), read at call time. There is no key-storage verb and no sidecar: this bundle writes the key nowhere, so it is never in agent.json and never returned by reflect.
+- THE API KEY COMES FROM THE ENVIRONMENT (`NVIDIA_API_KEY`), read at call time. There is no key-storage verb and no sidecar: this bundle writes the key nowhere, so it is never in agent.yaml and never returned by reflect.
 
 `reflect` reports `has_api_key:bool` (never the key value itself).
 
@@ -32,8 +40,7 @@ lock) and returns `{response, final}`. It is a first-class peer of
 `exec_bridge`: a scheduler, a host job, a peer kernel, or another AI can
 call it by id. Optional `system_prompt:str` REPLACES the auto-built prompt
 (caller-supplied role/context — read it from a state agent yourself; the AI has NO
-yaml coupling). Optional `messages:list` REPLACES persisted history (fully
-stateless — though `api_key` is still required to reach the provider).
+yaml coupling). There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
 
 ## Streaming
 You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id

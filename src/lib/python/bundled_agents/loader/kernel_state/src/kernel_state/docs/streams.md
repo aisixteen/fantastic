@@ -28,17 +28,17 @@ what's behind it (a file, a socket, a generator). `file_bridge` is the
 reference SOURCE+SINK; the served `GET /<rest>/file/<path>` octet route is
 read_stream-only.
 
-## Bytes and the message log
+## Bytes and the execution rows
 
 A stream call is a message like any other, so its `call` row holds the payload and its
-`settle` row the result. Raw bytes do NOT go on the tape: `messages.xml` is text, base64
-is banned, and a `write_stream` body or a `read_stream` chunk is recorded as its LENGTH
-(`{"len": N}`). The log says N bytes passed between which agents, under which verb, at
+`settle` row the result. Raw bytes do NOT go into the kernel's memory store: base64 is
+banned, and a `write_stream` body or a `read_stream` chunk is recorded as its LENGTH
+(`{"len": N}`). The row says N bytes passed between which agents, under which verb, at
 which id — not what they were. The bytes themselves live wherever the SINK put them.
 
 ## The kernel's tail
 
-The kernel's row stream (every row after a cursor) is a SOURCE inside the process: every message with
-`id > after`, then every message as it lands. Yielding is not a message — no send, no
-task, no row. The loader's message pump is its first consumer; a UI or a relay can be
-the next, at no cost to the agents.
+The kernel's row stream (every execution row after a cursor) is a SOURCE inside the
+process: every row still in RAM with `id > after`, then every row as it lands. Yielding
+is not a message — no send, no task, no row. A UI or a relay can consume it at no cost
+to the agents; the kernel's own flusher writes the same rows into its memory store.

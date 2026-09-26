@@ -2,10 +2,10 @@
 
 # Reach this kernel
 
-Check `.fantastic/lock.json` first — it holds `{pid}`. One kernel per dir,
+Check `.fantastic/lock.yaml` first — it holds `{pid}`. One kernel per dir,
 so the two paths are mutually exclusive:
 
-**A daemon IS running** (lock.json has a live pid). The one-shot CLI is
+**A daemon IS running** (lock.yaml has a live pid). The one-shot CLI is
 locked out — go through the daemon's surface. Find it in the tree: a
 `web.tools` node carries the HTTP `port`; its children are the surfaces.
   - `web_rest.tools` child → `POST http://localhost:<port>/<rest_id>/<target>`
@@ -37,10 +37,12 @@ yourself):
 
 # Stopping the kernel
 
-`send kernel {"type":"shutdown_kernel"}` gracefully stops the whole kernel
-PROCESS. It acks `{"type":"shutdown_kernel","ok":true}` FIRST, then (after
-the reply is on the wire) releases `.fantastic/lock.json`, drains in-flight
-work, stops the HTTP/WS listeners, and exits code 0. Reachable over both
+`send kernel {"type":"kernel_stop"}` gracefully stops the whole kernel
+PROCESS. It acks `{"type":"kernel_stop","ok":true}` FIRST, then (after the
+reply is on the wire) drains: new work is refused, every call settles (done,
+or cancelled into the dead letters), the last execution rows flush into the
+kernel's memory store, agents shut down, `.fantastic/lock.yaml` releases, the
+HTTP/WS listeners stop, and it exits code 0. Reachable over both
 `web_rest` (POST) and `web_ws`, so a remote operator can stop the kernel
 with one verb — no `kill`, no backend knowledge.
 

@@ -32,6 +32,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from helpers import memory
 from helpers.proxy import Limits, distinct_calls
 
 BASELINE = {"$self": "*", "$parent": "*", "$children": "*"}
@@ -91,7 +92,9 @@ async def connect(
         "id": agent_id,
         "context_window": L.ctx,
         "num_ctx": L.ctx,
-        "can_call": can_call,
+        # ITS MEMORY — the conversation lives in the kernel's `memory` store, named
+        # on the record and reachable by an explicit egress (ingress opened below).
+        **memory.ai_memory_meta(can_call),
         # THE INGRESS HALF. A peer granted `can_call: {ai: [...]}` still cannot
         # reach the AI: the gate is two-sided and a sibling has no baseline edge.
         # A fixture that opens only the egress half builds a wire that carries
@@ -126,6 +129,8 @@ async def connect(
     if isinstance(made, dict) and made.get("error"):
         raise SystemExit(f"create_agent({agent_id}) refused: {made}")
     aid = made["id"]
+    # THE STORE'S HALF of the memory wire: its `callable_by` names the agent.
+    await memory.open_ingress(root, meta.get("memory_store_id") or memory.MEMORY, aid)
 
     # TWO-SIDED DENY-ALL. The AI streams its turn to `cli`; cli's baseline
     # `callable_by` accepts only its own subtree and creator, so without this the

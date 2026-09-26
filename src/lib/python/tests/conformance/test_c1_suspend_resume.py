@@ -25,6 +25,7 @@ survive the change unaltered:
 
 from __future__ import annotations
 
+from _testkit import memory_meta
 import asyncio
 import json
 import sys
@@ -100,7 +101,7 @@ class _FakeProvider:
         self.calls = 0
         self.requests: list = []
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         self.calls += 1
         self.requests.append(messages)
         last = messages[-1]["content"]
@@ -153,11 +154,11 @@ async def wired(seeded_kernel, store_agent):
         "ollama_backend.tools",
         id="c1_ai",
         context_window=32768,
-        # The chat store inherits ITS OWNER'S leg — without one, history has
-        # nowhere durable to land and the recorded ask this test reads back
-        # never persists.
-        file_bridge_id=store_agent,
-        can_call={"cli": "*", "c1_store": "*", "c1_user": "*"},
+        # The conversation lives in the agent's MEMORY STORE — wired and granted
+        # explicitly, both ends; the recorded ask this test reads back lands there.
+        **memory_meta(
+            seeded_kernel, "c1_ai", {"cli": "*", "c1_store": "*", "c1_user": "*"}
+        ),
     )
     fp = _FakeProvider()
     core._providers["c1_ai"] = fp

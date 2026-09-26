@@ -27,7 +27,12 @@ from helpers.kernel import open_kernel
 BK = _resolve_backend()
 FB = "cmp_fb"
 DONE = 'end your run by calling done — emit <call name="done"></call>'
-LOREM = ("the quick brown fox jumps over the lazy dog " * 220)
+# UNDER THE INLINE CAP, MANY OF THEM. A reply over the cap (~1.4k tokens at a 12k
+# window) is digested to its origin line in sync mode too (2026-09-26) — so a 2.4k
+# filler no longer grew the context and compaction never fired. ~1.1k-token fillers
+# stay inline, and ten of them overflow the window.
+LOREM = ("the quick brown fox jumps over the lazy dog " * 100)
+N = 10
 
 
 async def _call(root, target, payload):
@@ -42,7 +47,7 @@ async def main():
         secret = secrets.token_hex(4)
         Path("secret.txt").write_text(f"the passphrase is {secret}\n")
         # Bulky filler so a few reads blow past the tiny window.
-        for i in range(4):
+        for i in range(N):
             Path(f"filler_{i}.txt").write_text(f"chunk {i}: {LOREM}\n")
 
         for payload in (
@@ -65,8 +70,8 @@ async def main():
         task = (
             "Step 1: read `secret.txt` through the editor `notes` — it holds a "
             "passphrase you will need at the end. Step 2: read `filler_0.txt` "
-            "through `filler_3.txt` (four files) to study the corpus — read "
-            "them ONE PER TURN (four separate turns), not all at once. Step 3: WITHOUT reading "
+            f"through `filler_{N - 1}.txt` ({N} files) to study the corpus — read "
+            f"them ONE PER TURN ({N} separate turns), not all at once. Step 3: WITHOUT reading "
             "`secret.txt` again, write the passphrase to `answer.md`. If your "
             "conversation was compacted and the passphrase scrolled out of "
             "view, use `recall` (send yourself {type:'recall', query:'passphrase'}) "

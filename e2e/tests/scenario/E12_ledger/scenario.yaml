@@ -17,7 +17,7 @@ task: >-
   Get exactly ONE coin for the job 'alpha': make the dispense call in a way that
   is SAFE TO REPEAT, then repeat that exact call once and compare the two
   receipts. Store {'receipt': <receipt>, 'match': <true/false>} under the key
-  a document named exactly 'coin' (no extension) in the memory agent. Then say COIN SECURED.
+  a document named exactly 'coin' (no extension) in the `yaml_store` agent. Then say COIN SECURED.
 
 limits:
   max_turns: 14

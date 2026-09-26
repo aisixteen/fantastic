@@ -94,7 +94,7 @@ class ProjectionCtx:
 
     budget: int
     recent_n: int
-    summarize: Callable[[list[dict]], Awaitable[str]] | None
+    summarize: Callable[..., Awaitable[str]] | None  # (msgs, max_tokens=None)
     self_id: str
     kernel: Any
     # The conversation this projection is for. `fold` is the one strategy that WRITES

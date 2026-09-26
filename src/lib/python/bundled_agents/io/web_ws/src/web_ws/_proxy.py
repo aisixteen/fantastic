@@ -243,10 +243,6 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         # rule answers "may this client reach this leg"; it says nothing about
         # what the client may then READ.
         denial = kernel.authorize_state_subscribe(web_agent_id)
-        # `body:true` — row events carry content; gated as `rows_read` on the root.
-        body = bool(frame.get("body"))
-        if denial is None and body:
-            denial = kernel.authorize_row_bodies(web_agent_id)
         if denial is not None:
             await _send_envelope({"type": "error", "id": frame.get("id", ""), **denial})
             return
@@ -269,8 +265,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 # Drop silently; the WS is going down anyway.
                 pass
 
-        # Gated per row: this leg reads on the client's behalf, as itself.
-        unsub = kernel.add_state_subscriber(cb, reader_id=web_agent_id, body=body)
+        # Conversation rows are not on this stream — an AI agent announces its own
+        # rows to its watchers (`watch` on that agent, gated there).
+        unsub = kernel.add_state_subscriber(cb)
         state_unsubs.append(unsub)
 
     async def _on_state_unsubscribe(frame):

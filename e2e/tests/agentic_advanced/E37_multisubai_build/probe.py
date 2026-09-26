@@ -38,7 +38,7 @@ sys.path.insert(
         next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
     ),
 )
-from helpers import verdict  # noqa: E402
+from helpers import memory, verdict  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
 
@@ -90,13 +90,14 @@ TASK = (
     f"`{SOLVERS[1]}`, `{SOLVERS[2]}`, in ONE batch of three `create_agent` calls to "
     "`kernel`. Send `kernel` `<type>list_agents</type>` once and copy from the "
     "`brain` record these fields verbatim into each solver: `handler_module`, "
-    "`model`, `endpoint`, `max_tokens`, `file_bridge_id`, `context_window`. Set "
+    "`model`, `endpoint`, `max_tokens`, `memory_store_id`, `context_window`. Set "
     "`parent_id` to YOUR id. Set `description` to what the solver is for "
     f"(solver k holds the ledger of `oracle_k`). Give each solver these grant maps "
     "(a map is a tag whose children are keyed by agent id or a relative token):\n"
     f"  `<can_call>`: `<$self>*</$self> <$parent>*</$parent> <$children>*</$children> "
-    f"<oracle_k>*</oracle_k> <notes>*</notes>` and one `<solver_j>*</solver_j>` for "
-    "EACH of the two other solvers.\n"
+    f"<oracle_k>*</oracle_k> <notes>*</notes> <memory>*</memory>` (`memory` is the store "
+    "their conversation lives in — its door is already open for them) and one "
+    "`<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
     "  `<callable_by>`: `<$self>*</$self> <$parent>*</$parent> <$children>*</$children>` "
     "and one `<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
     "That is: solver k reaches its own oracle and both peers, and accepts both peers. "
@@ -196,15 +197,20 @@ async def fixture(root, *, interpreter=None):
         )
     for out in await root.send(batch):
         assert not (out.get("result") or {}).get("error"), out
+    # THE MEMORY STORE'S DOOR, opened by the operator for the solvers the creator will
+    # build (their ids are known): a solver the model creates names `memory` and may
+    # call it; the store's own ingress is the fixture's to grant.
+    for sid in SOLVERS:
+        await memory.open_ingress(root, memory.MEMORY, sid)
     return store
 
 
-def _rows(root, aid):
-    return [r for r in root.ctx.rows_for(aid) if r.get("kind") not in ("call", "task", "body", "view")]
+async def _rows(root, aid):
+    return await memory.rows_of(root, aid, conversation_only=True)
 
 
-def _assistant_text(root, aid) -> str:
-    return " ".join(str(r.get("content") or "") for r in _rows(root, aid) if r.get("role") == "assistant")
+async def _assistant_text(root, aid) -> str:
+    return " ".join(str(r.get("content") or "") for r in await _rows(root, aid) if r.get("role") == "assistant")
 
 
 async def score(root, store_id, total, new_total, transcript):
@@ -235,7 +241,7 @@ async def score(root, store_id, total, new_total, transcript):
     )
 
     # ── 2. ONE-BATCH KICKOFF with replies discarded, then `done` ──
-    creator = _rows(root, CREATOR)
+    creator = (await _rows(root, CREATOR))
     kick_turn = None
     for r in creator:
         if r.get("role") != "assistant":
@@ -269,7 +275,7 @@ async def score(root, store_id, total, new_total, transcript):
     if c3:
         end = time.monotonic() + 240.0
         while time.monotonic() < end and not stopped:
-            rows = _rows(root, CREATOR)
+            rows = (await _rows(root, CREATOR))
             # the wake: a root user row from a solver carrying CONCLUDED
             idx = next((i for i, r in enumerate(rows) if r.get("role") == "user" and "CONCLUDED" in str(r.get("content") or "")), None)
             if idx is not None:
@@ -296,7 +302,7 @@ async def score(root, store_id, total, new_total, transcript):
     print("\n  ── the exchange (peer messages, in send order) ──")
     sent: list[tuple[float, str, str, str]] = []
     for s_ in solvers:
-        for r in _rows(root, s_):
+        for r in (await _rows(root, s_)):
             if r.get("role") != "assistant":
                 continue
             for m in re.finditer(r"<call name=\"send\">(.*?)</call>", str(r.get("content") or ""), re.DOTALL):
@@ -313,18 +319,18 @@ async def score(root, store_id, total, new_total, transcript):
         print(f"  {ts - (sent[0][0] if sent else ts):6.0f}s {frm} → {to}: {txt[:150]}")
     print("\n  ── errors and refusals the solvers received ──")
     for s_ in solvers:
-        errs = [str(r.get("content") or "") for r in _rows(root, s_) if r.get("role") == "user" and ("<error>" in str(r.get("content") or "") or "NOT dispatched" in str(r.get("content") or ""))]
+        errs = [str(r.get("content") or "") for r in (await _rows(root, s_)) if r.get("role") == "user" and ("<error>" in str(r.get("content") or "") or "NOT dispatched" in str(r.get("content") or ""))]
         kinds = {}
         for e in errs:
             m = re.search(r"<error>(.*?)</error>|NOT dispatched: ([^.]*)", e, re.DOTALL)
             key = " ".join(((m.group(1) or m.group(2)) if m else e)[:90].split())
             kinds[key] = kinds.get(key, 0) + 1
         print(f"  {s_}: {len(errs)} — " + "; ".join(f"{k} ×{n}" for k, n in sorted(kinds.items(), key=lambda t: -t[1])[:4]))
-        last = [r for r in _rows(root, s_) if r.get("role") == "assistant"]
+        last = [r for r in (await _rows(root, s_)) if r.get("role") == "assistant"]
         if last:
             print(f"     last turn: {' '.join(str(last[-1].get('content') or '').split())[:200]}")
-    turns = {s: sum(1 for r in _rows(root, s) if r.get("role") == "assistant") for s in solvers}
-    ct = sum(1 for r in _rows(root, CREATOR) if r.get("role") == "assistant")
+    turns = {s: sum(1 for r in (await _rows(root, s)) if r.get("role") == "assistant") for s in solvers}
+    ct = sum(1 for r in (await _rows(root, CREATOR)) if r.get("role") == "assistant")
     print(f"\n  observed — creator turns        : {ct}")
     print(f"  observed — solver turns         : {turns}  (storm: {sum(turns.values())} turns)")
     ok = c1 and c2 and c3 and c4

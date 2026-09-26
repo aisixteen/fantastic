@@ -2,7 +2,7 @@
 
 Talks to a local `llama-server` (llama.cpp) over its OpenAI-compatible surface.
 Per-client chat threads, FIFO lock, and automatic context management (compaction /
-recall / context_status). Persistence via `file_bridge_id`. **No agentic loop** —
+recall / context_status). Conversation in its memory store (`memory_store_id`). **No agentic loop** —
 one provider pass per `send`.
 
 ## Implementation
@@ -68,13 +68,25 @@ inline and in the field; `none` → unparsed inline in `content`.
 There is **no `num_ctx`**: the context window is fixed at server start (`-c N`) and
 has no per-request equivalent, so this agent does not pretend to own one.
 
+## Context management — owned HERE
+The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
+is REQUIRED (a `send` fails loud naming it): every turn, fold and view is a row under
+this agent's key. Reply BODIES are never stored — a reply row keeps its one-line
+`origin`, and after a restart the model re-reads from it. Compaction fires at 0.8 of
+the budget (calibrated by the endpoint's reported prompt size when it reports one)
+with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
+`[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
+`context_clear` (a boundary, nothing deleted) inspect and page it. Sharing is by
+GRANT, by the owner's own choice: it `share`s a scope of its rows through the store;
+another agent starts from it with `fork_from {owner, grant, message}` and asks for a
+third agent's row with `request_share`. `watch {body?}` / `unwatch` subscribe to this
+agent's row events (a digest; bodies only for a watcher the rows are shared with).
+
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
 and returns `{response, final}`. A first-class peer of `exec_bridge`: a
 scheduler, a host job, a peer kernel, or a routine can call it by id. Optional
-`system_prompt:str` REPLACES the default system block. Optional `messages:list`
-REPLACES persisted history (fully stateless — no `file_bridge_id` needed, and no
-compaction — the caller owns the context in that mode).
+`system_prompt:str` REPLACES the default system block. There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
 
 An in-flight `send` is a kernel TASK: kill it with the universal `ps` → `cancel`
 system verbs. There is no `interrupt` verb.

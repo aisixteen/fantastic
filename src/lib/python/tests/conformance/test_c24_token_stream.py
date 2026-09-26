@@ -12,6 +12,7 @@ and a scripted provider so the chunk sequence is known."""
 
 from __future__ import annotations
 
+from _testkit import memory_meta
 import json
 
 import pytest
@@ -25,7 +26,7 @@ CHUNKS = [f"tok{i} " for i in range(12)]
 
 
 class _ChunkProvider:
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         for c in CHUNKS:
             yield c
 
@@ -46,7 +47,7 @@ def wired(seeded_kernel, store_agent):
         "ollama_backend.tools",
         id="c24_ai",
         context_window=32768,
-        can_call={"cli": "*"},
+        **memory_meta(seeded_kernel, "c24_ai", {"cli": "*"}),
         callable_by={"c24_ws_leg": "*"},
     )
     core._providers["c24_ai"] = _ChunkProvider()

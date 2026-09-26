@@ -2,7 +2,7 @@
 
 CONTRACT (identical across runtimes): the KERNEL owns a stable instance guid,
 minted ONCE on boot into the ROOT agent record's meta and persisted to disk
-(`.fantastic/agent.json`). It is a PERSISTENCE-scoped identity — sourced from the
+(`.fantastic/agent.yaml`). It is a PERSISTENCE-scoped identity — sourced from the
 persisted meta (unlike run-scoped runtime/env/version, read inline from the env) —
 so it round-trips a reboot verbatim and is never regenerated. Root reflect always
 carries a top-level `guid`; an explicit/existing guid always wins.
@@ -13,6 +13,7 @@ using the kernel bootstrap helpers (`boot_root` / `persist`).
 
 from __future__ import annotations
 
+import yaml
 import json
 
 from _testkit import boot_root, persist
@@ -27,7 +28,7 @@ def _is_guid(v) -> bool:
 async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
     """A fresh kernel with no `guid` in the root record auto-mints a 32-hex-char
     lowercase guid on boot, stores it in the root meta, and surfaces it top-level
-    in root reflect. `persist` materializes it to `.fantastic/agent.json`."""
+    in root reflect. `persist` materializes it to `.fantastic/agent.yaml`."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
     assert not k1.record.get("guid")  # nothing minted yet — no boot has run
@@ -53,7 +54,7 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
 
     # Materialize to disk and confirm the on-disk root record carries it.
     persist(k1)
-    disk = json.loads((tmp_path / ".fantastic" / "agent.json").read_text())
+    disk = yaml.safe_load((tmp_path / ".fantastic" / "agent.yaml").read_text())
     assert disk["guid"] == minted
 
 
@@ -92,7 +93,7 @@ async def test_explicit_guid_wins(tmp_path, monkeypatch):
     # Seed a root record carrying an explicit guid.
     fant = tmp_path / ".fantastic"
     fant.mkdir()
-    (fant / "agent.json").write_text(
+    (fant / "agent.yaml").write_text(
         json.dumps(
             {
                 "id": "kernel_state",

@@ -18,7 +18,7 @@ into it; the running artifact is a function of its *descriptance*, not its code.
 
 - **Agent** — recursive node, the universal type. Every entity in the
   system is an `Agent`. Agents have a persistent record on disk
-  (`agent.json`), an asyncio inbox, and a `_children` dict that's
+  (`agent.yaml`), an asyncio inbox, and a `_children` dict that's
   empty for leaves and populated for hosts. Same code at every depth.
   Each agent answers `{type:"reflect"}` returning a flat self-description.
 - **Kernel** — tree-wide shared context object. NOT an agent. NOT a
@@ -287,7 +287,7 @@ uv run pytest -n auto
 │   ├── _kernel.py                           # Kernel ctx + tree-mgmt API (create/delete/update/list/send)
 │   ├── modes/                               # dispatch_argv + one-shots (reflect/call) + default (boot + REPL)
 │   ├── _bundles.py                          # entry-point discovery (`fantastic.bundles`)
-│   ├── _lock.py                             # serve lock (.fantastic/lock.json)
+│   ├── _lock.py                             # serve lock (.fantastic/lock.yaml)
 │   └── _env.py                              # .env autoloader
 ├── pyproject.toml                            # workspace + bundle deps
 ├── selftest.md                               # selftest INDEX + LLM protocol

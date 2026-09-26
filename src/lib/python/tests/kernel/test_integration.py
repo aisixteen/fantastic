@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from _testkit import memory_meta
+
 import ollama_backend.tools as ot
 
 
@@ -9,15 +11,15 @@ class _FakeProvider:
     def __init__(self, scripts):
         self._scripts = list(scripts)
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         items = self._scripts.pop(0) if self._scripts else []
         for x in items:
             yield x
 
 
-async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
-    """ollama_backend.send persists its per-client chat as a JSONL sidecar on its
-    file leg (the AI writes no disk itself); read it back via the `history` verb."""
+async def test_persistence_routing_through_the_memory_store(seeded_kernel):
+    """ollama_backend.send appends its turns to the agent's memory store (the AI
+    writes no disk and holds no rows of its own); read them back via `recall`."""
     ob = (
         (
             await seeded_kernel.send(
@@ -28,9 +30,10 @@ async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
                             "type": "create_agent",
                             "parent_id": "kernel_state",
                             "handler_module": "ollama_backend.tools",
-                            "file_bridge_id": store_agent,
-                            # No explicit grant needed: the chat persists THROUGH the loader
-                            # ($loader baseline) into a `chat` child ($children baseline).
+                            "id": "chatter",
+                            # The conversation lives in the agent's MEMORY STORE —
+                            # wired and granted explicitly, both ends.
+                            **memory_meta(seeded_kernel, "chatter"),
                         },
                     }
                 ]

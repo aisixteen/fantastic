@@ -17,6 +17,7 @@ on a lock its own caller holds. `test_self_chain_does_not_deadlock` is that regr
 
 from __future__ import annotations
 
+from _testkit import ensure_memory
 import asyncio
 
 import ollama_backend.tools as ot
@@ -39,7 +40,7 @@ class _FakeProvider:
         self.calls = 0
         self.requests: list = []
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         self.requests.append(messages)
         items = self._scripts.pop(0) if self._scripts else []
         self.calls += 1
@@ -55,7 +56,8 @@ async def _make_ollama(kernel, grants=None):
     # Deny-all: the backend streams its turn to the `cli` renderer via send (the
     # default client) → grant that listener; `grants` adds any PEER the model in a
     # given test routes to (a `send`/`send_to` to another agent is lateral egress).
-    can_call = {"cli": "*", **(grants or {})}
+    store = ensure_memory(kernel)
+    can_call = {"cli": "*", store: "*", **(grants or {})}
     rec = (
         await kernel.send(
             [
@@ -67,6 +69,7 @@ async def _make_ollama(kernel, grants=None):
                         "handler_module": "ollama_backend.tools",
                         "context_window": 32768,
                         "can_call": can_call,
+                        "memory_store_id": store,
                     },
                 }
             ]
@@ -410,7 +413,7 @@ async def test_error_reply_does_not_route(seeded_kernel, store_agent):
     class _Boom:
         calls = 0
 
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             _Boom.calls += 1
             raise RuntimeError("provider exploded")
             yield  # pragma: no cover - generator marker

@@ -17,7 +17,7 @@ task: >-
   re-sending the call yourself — a call can carry a retries budget. Afterwards,
   find out what became of each of those two executions, and store
   {'pump': <the pump result>, 'valve': {'status': <status>, 'attempts': <attempts>}}
-  in a document named exactly 'report' (no extension) in the memory agent. Then say REPORT FILED.
+  in a document named exactly 'report' (no extension) in the `yaml_store` agent. Then say REPORT FILED.
 
 limits:
   max_turns: 14

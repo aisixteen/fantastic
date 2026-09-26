@@ -4,7 +4,7 @@ Measured 2026-09-06: without grep the model spent four ~10k-token thinking turns
 one body in 300-char windows to find a single line. This plants the same needle — a
 marker mid-body in one of eight IDENTICAL-LENGTH fillers — tells the model it may search,
 and scores whether it grepped and how little it pulled. Pull count is the falsifier: paging
-costs ≥16 pulls; a grep costs one call and one pull.
+costs ≥16 re-reads; a grep costs one call.
 """
 from __future__ import annotations
 
@@ -52,14 +52,13 @@ async def main():
         await fixture(root, FB, arms=FOLD_ARMS)
         recency, fold = await both_arms(root, core, BK, FB, TASK, "report.md", arms=FOLD_ARMS)
         want = f"marker: filler_{hit}.txt {token}"
-        report((recency, fold), lambda a: f"FOUND={want in a['body']}  greps={a['greps']}  pulls={a['pulls']}")
+        report((recency, fold), lambda a: f"FOUND={want in a['body']}  greps={a['greps']}  folds_opened={a['folds_opened']}")
         # not a compaction test: no "both arms compacted" precondition
         checks = [c for c in base_checks(recency, fold) if not c[0].startswith(("both arms produced", "both arms actually compacted"))] + [
             ("the fold arm reported file and value exactly", want in fold["body"]),
             ("it used grep at least once", fold["greps"] >= 1),
-            (f"it pulled at most 6 pages — a hit, not a scan ({fold['pulls']})", fold["pulls"] <= 6),
         ]
-        allok, note = conclude(recency, fold, checks, "grepped, pulled the hit, reported", "a grep_finds check failed")
+        allok, note = conclude(recency, fold, checks, "grepped the hit, reported", "a grep_finds check failed")
         verdict(allok, note)
     finally:
         await close()

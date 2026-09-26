@@ -8,73 +8,35 @@ chain is dead". These tests are the store, the cap, and the paging.
 
 from __future__ import annotations
 
-import json
 
-from ai_core.context import CHARS_PER_TOKEN, budget, estimate_one
+from ai_core.context import budget
 from _fake import FakeCtx as _Leg  # noqa: E402
 from ai_core.core import (
     _inline_cap,
     _load_reply,
-    _pull,
-    _pull_cap_chars,
     _store_reply,
 )
 
 
-def test_a_pull_page_can_never_exceed_the_inline_cap():
-    """THE INVARIANT that closes the recursion. If a page could be larger than what
-    inlines, the page itself would be stored and digested, and the model would pull
-    the pull forever (measured in review before it reached a live run)."""
+def test_the_inline_cap_is_an_eighth_of_the_budget():
     for window in (8000, 12000, 32000, 131072):
         rec = {"context_window": window, "output_reserve": 0}
         assert _inline_cap(rec) == max(256, budget(rec) // 8)
-        assert _pull_cap_chars(rec) // CHARS_PER_TOKEN <= _inline_cap(rec)
 
 
-async def test_store_then_pull_pages_through_the_body():
+async def test_a_body_is_held_in_ram_for_this_run_only():
+    """BODIES ARE NEVER PERSISTED: a large reply is kept in RAM under its pid for
+    this incarnation, and after a restart only its origin line remains."""
     k = _Leg()
-    body = "".join(f"line {i}\n" for i in range(8000))  # ~70KB, cap is ~24KB chars
+    body = "".join(f"line {i}\n" for i in range(800))
     assert await _store_reply("ai", k, 1001, body)
-    cap = _pull_cap_chars(k.get("ai"))
-    got, off, pages = "", 0, 0
-    while True:
-        r = await _pull("ai", {"pid": 1001, "offset": off}, k)
-        assert "error" not in r, r
-        assert len(r["text"]) <= cap
-        got += r["text"]
-        pages += 1
-        if r["eof"]:
-            break
-        off = r["next_offset"]
-    assert got == body
-    assert pages > 1, "the body should have needed more than one page"
+    text, nxt, eof, total = await _load_reply("ai", k, 1001, 0, 10**7)
+    assert text == body and eof and total == len(body)
+    assert not k.store_calls, "nothing of the body reached the store"
+    from ai_core.core import _mem
 
-
-async def test_a_pull_can_never_return_more_than_the_cap():
-    k = _Leg()
-    await _store_reply("ai", k, 1002, "z" * 100_000)
-    cap = _pull_cap_chars(k.get("ai"))
-    r = await _pull("ai", {"pid": 1002, "length": cap + 1}, k)
-    assert r["reason"] == "bad_arg" and r["arg"] == "length"
-    r = await _pull("ai", {"pid": 1002}, k)
-    # a page is sized so the SERIALIZED reply fits inline — never more than the cap in
-    # chars, and shorter when escaping would push the reply over
-    assert 64 < len(r["text"]) <= cap and not r["eof"]
-    assert estimate_one({"role": "user", "content": json.dumps(r)}) <= _inline_cap(
-        k.get("ai")
-    )
-
-
-async def test_pulling_an_unknown_pid_is_a_readable_refusal():
-    r = await _pull("ai", {"pid": 999999}, _Leg())
-    assert r["reason"] == "not_found"
-    r = await _pull("ai", {}, _Leg())
-    assert r["reason"] == "bad_arg" and r["arg"] == "pid"
-
-
-async def test_no_file_leg_means_the_body_cannot_be_stored():
-    k = _Leg()
-    assert await _load_reply("ai", k, "p:1", 0, 10) is None
+    _mem(k)["bodies"].pop("ai", None)  # the process restarts
+    assert await _load_reply("ai", k, 1001, 0, 10) is None
 
 
 # ── grep: find the line, don't page for it ───────────────────────────
@@ -220,10 +182,9 @@ async def test_grep_width_is_the_models_to_raise():
     assert "cafebabe" in r["matches"][0]["text"]
 
 
-async def test_grep_falls_back_per_knob_and_pull_refuses_a_negative_length():
-    """2026-09-16: a bad `limit` left `width` unbound (NameError on the first
-    match); a negative `length` sliced from the end with a negative next_offset."""
-    from ai_core.core import _grep, _pull, _store_reply
+async def test_grep_falls_back_per_knob():
+    """2026-09-16: a bad `limit` left `width` unbound (NameError on the first match)."""
+    from ai_core.core import _grep, _store_reply
 
     k = _Leg()
     pid = k.mint_id()
@@ -237,5 +198,3 @@ async def test_grep_falls_back_per_knob_and_pull_refuses_a_negative_length():
     await _store_reply("ai", k, pid, "rule: " + "x" * 300 + " VALUE=cafebabe")
     r = await _grep("ai", {"query": "rule:", "limit": "nope"}, k)
     assert r["matches"] and len(r["matches"][0]["text"]) == 200
-    r = await _pull("ai", {"pid": pid, "length": -5}, k)
-    assert r.get("reason") == "bad_arg" and "negative" in r["error"]

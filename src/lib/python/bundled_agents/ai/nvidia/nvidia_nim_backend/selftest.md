@@ -20,7 +20,7 @@ NVIDIA NIM-backed LLM agent (OpenAI-compatible). Same surface as
 `send` is a kernel task, killed with the universal `ps` → `cancel` system
 verbs (the bundle's `on_cancel` closes the turn out). The api_key is stored as a sidecar
 file at `.fantastic/agents/<id>/api_key` via `file_bridge_id` —
-never in `agent.json`, never returned by reflect.
+never in `agent.yaml`, never returned by reflect.
 
 ## Pre-flight
 

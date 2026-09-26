@@ -253,6 +253,7 @@ the frontend's `proxy_loader`. See "Two kernels" in the root readme.
 | `io/file_bridge` | filesystem-as-agent (`read`, `write`, `list`, `delete`, `rename`, `mkdir`) — the **fs edge of the io family**: crossing kernel↔disk is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), and bound by the **running-dir law**: root + every path are clamped inside the dir the kernel runs in (`../`, `~`, absolute escapes, outward symlinks refuse) |
 | `io/exec_bridge` | commands-as-agents (`start`, `status`, `stop`, `interrupt`, `clear`, `boot`) — the **process edge of the io family**: crossing kernel↔subprocess is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), and bound by a **regex command ALLOWLIST**: `allowed` on the record is a list of regexes, and `start {command, args}` refuses unless the shell-joined line fullmatches one — enforced through `proc`, the ONE process surface, exactly as `fs` is the one opener. No per-call override, no default, no PATH fallback; an empty `allowed` runs nothing. It is a GENERAL-PURPOSE COMMAND runner, **not** a code runner: there is no `code` field, no `interpreters`, no shim. A durable program is a FILE some process (or a `write_stream`) put on disk; running it is `command` + `args` like anything else, so the job table / output pump / connector relay / fd passing / task-table rows / mail contract are all language-blind. A spawned program speaks the kernel over the inherited `FANTASTIC_CTRL_FD` (`[4-byte BE len | JSON]`); to get a `kernel` global it includes the reference wire client (`exec_bridge/_connector.py`, `CONNECTOR_SRC`) in its own source — the bridge prepends nothing. Any verb the bundle does not own is MAIL for the running program (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`, `on_cancel` SIGKILLs the real process); `boot` is a no-op (nothing auto-restarts — a command is started by a caller, not the record). The withdrawn fields (`code`/`shim`/`interpreter`/`interpreters`/`argv_template`) are refused at WRITE time (`validate_meta`) and at `start`. NOT a sandbox: an allowlisted command is a NAMED command, with all of that command's reach. |
 | `scheduler` | recurring tasks; persistence routed through `file_bridge_id` |
+| `memory/ram_store` | the MEMORY STORE in RAM (ephemeral — gone with the process), with the topology of a SQL store: rows, fold refs, grants (cascade on prune), a text index. Multi-tenant: every row under `<guid>|<agent id>`; a caller reads/writes only its own key plus what a grant covers. Verbs `append`/`read`/`search`/`prune` (own rows), `share`/`unshare`/`grants` (a grant covers `head_until`/`range`/`fold`/`row` of YOUR rows only, `frozen` or `live`), `inject`/`dump` (the whole tables — for record `admins` only; mock rehydration). Serves the operator only with `operator: true`. The root's `memory_store_id` and every AI agent's name one. |
 | `text_file` | stateless TEXT-DOCUMENT agent — durable memory as plain files, ANY format (the substrate imposes none): line-numbered `read`, atomic `write` (tmp+rename on the target), SEARCH/REPLACE `patch` (all-or-nothing, fails loud), `append`; ON DEMAND: `version` hash + `if_match` guard, `checkpoint`/`checkpoints`/`restore`/`drop` (pre-images as plain files under `.ckpt/`, ids = the dispatch's task pid). Owns NO disk: every byte is a GATED send to the `file_bridge` named by `on:` or its `target_id` meta — fails loud unwired. |
 | `terminal_backend` | PTY shell backend (at `bundled_agents/terminal/`). VSCode-ported terminal robustness: streaming flow control (reader pauses past 100K unacked chars, resumes on the `ack` verb), incremental UTF-8 decode (no split-char `<?>` litter across `os.read` chunks), serialized full-buffer writes (bracketed-paste-safe), image-paste bridge (browser-clipboard image → `paste_image` → file saved + path typed into the PTY for a CLI like `claude`). The xterm view (`terminal_view`) lives in the TS frontend kernel (`ts/`). |
 | `ai/ollama/ollama_backend` | local LLM agent (ollama); per-client chat threads, FIFO lock, menu cache; RAW prompt-and-parse tool-calling — the `<call name=…>` TAG grammar with one child tag per argument and a verbatim `<bytes>` body, NO JSON on the model path (see `ai_core.tool_parse`) |
@@ -315,7 +316,7 @@ the next process start.
   The root reflect ALSO carries two deployment-context fields, in key order
   `runtime → env → version`: `env` (read from `$FANTASTIC_ENV`, default
   `"host"`; the container image bakes `"container"`) tells a client WHERE the
-  kernel runs — e.g. `env:"container"` means `shutdown_kernel` stops + (under
+  kernel runs — e.g. `env:"container"` means `kernel_stop` stops + (under
   `--rm`) removes a whole container, not just a process — and `version` (read
   from `$FANTASTIC_VERSION`, default `null`; the image bakes the release tag)
   names the build. Both are RUN-scoped (read inline at root reflect, never
@@ -331,7 +332,7 @@ the next process start.
   The root reflect ALSO carries `guid` — the kernel's stable INSTANCE identity,
   minted ONCE at boot (the loader's `_boot`, root only; auto-fills an absent field
   so an explicit `guid` wins and a minted one is never regenerated) and persisted
-  into the root record `.fantastic/agent.json`. Contributed by the same
+  into the root record `.fantastic/agent.yaml`. Contributed by the same
   `reflect_root_extra(agent)` hook, alongside `persistence`. Unlike the run-scoped
   `env`/`version` (read inline each reflect), the guid is PERSISTENCE-scoped — it
   round-trips a reboot verbatim, sourced from the persisted meta. A relay peer
@@ -498,7 +499,7 @@ The reply carries:
 - `readme` — the root readme: every transport (in_process / in_prompt /
   cli / ws / rest / binary-frame), the reflect surface, the `kernel`
   alias, the two-kernel (host + frontend) model, and the
-  `.fantastic/lock.json` daemon rule. This is where transport/wire docs
+  `.fantastic/lock.yaml` daemon rule. This is where transport/wire docs
   live now (they left the reflect JSON).
 - `tree` — the live agent tree (default `all`; `tree:"ids"` for a cheap
   id index).
@@ -557,7 +558,7 @@ review, force-push surprise, polluted history) is high.
     one-line docstring (auto-fed into reflect's `verbs` dict).
   - `VERBS = {"<name>": _<name>, ...}` dispatch table.
   - `async def handler(id, payload, kernel)` 4-line dispatcher.
-- Records in `.fantastic/agents/<id>/agent.json` carry only metadata.
+- Records in `.fantastic/agents/<id>/agent.yaml` carry only metadata.
   Process-memory state (PTY child, uvicorn server, in-flight tasks)
   is per-process and visible only to the kernel that owns it —
   reflect from the live `serve` to see it, NOT via a fresh
@@ -566,14 +567,19 @@ review, force-push surprise, polluted history) is high.
 ## Storage policy
 
 - Project code lives in version-controlled files in this repo or
-  user dirs. **`.fantastic/` is runtime state only** — agent.json
-  records, `messages.xml` (the ONE tape: the kernel's message log, one
-  open-rooted XML document appended by the loader's pump and hydrated cold at
-  boot, holding turns, replies, bodies, folds, recalls, views, every `call`
-  WITH its payload and every `settle` WITH its outcome body — raw bytes
-  reduced to `{len}`, the only reduction; the execution ledger is rebuilt from
-  these rows, there is no `ledger.json`), per-agent sidecars
-  (schedules.json), `lock.json`, `readme.md`. Wipe-and-rebuild safe.
+  user dirs. **`.fantastic/` is runtime state only** — agent.yaml
+  records (the root's carries `guid` and the id counter's `next_id`), per-agent
+  sidecars (schedules.yaml, schedule_events.yaml), `lock.yaml`, `readme.md`. The
+  kernel writes NO message log: every message lives in a MEMORY STORE agent
+  (`memory/ram_store`; rows keyed `<guid>|<agent id>`). The root's
+  `memory_store_id` is mandatory for `kernel_start` (fail loud — "create a
+  ram_store and name it in memory_store_id"); execution rows (`call` WITH its
+  payload, `settle` WITH its outcome, `task`, `ack`, `flush`) are flushed there
+  from RAM, raw bytes reduced to `{len}`; each AI agent names its own
+  `memory_store_id` for its conversation, reply bodies never stored (only their
+  one-line `origin`). The execution ledger is a projection over the store + RAM.
+  All kernel-written files are YAML (block style; format rules in
+  `kernel_state/yaml_io.py`); old `.json`/`.xml` files are ignored. Wipe-and-rebuild safe.
 - Use a `file_bridge` agent (rooted INSIDE the running dir — the clamp;
   created OPEN with `ingress_rule=allow_all_ingress`) for HTTP-served content:
   `<img src="/<file_id>/file/imgs/foo.png">` works in any html view.
@@ -628,7 +634,7 @@ favicon — a package lookup, not an arbitrary path).
   dir).
 - The file_bridge's path-safety refuses anything escaping its `root`, and
   the running-dir law clamps the `root` itself inside the kernel's cwd.
-- `fantastic` writes `.fantastic/lock.json` with `{pid, port}`;
+- `fantastic` writes `.fantastic/lock.yaml` with `{pid}`;
   a second serve in the same dir refuses with a clear error and stale
   locks (dead pid) get overwritten.
 

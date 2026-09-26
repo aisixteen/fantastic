@@ -29,6 +29,11 @@ DEFAULT_MODEL = "(server-loaded)"
 
 
 class LlamaCppProvider:
+    #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
+    #: ai_core calibrates its own token estimate with it.
+    last_prompt_tokens: int | None = None
+    last_stop_reason: str | None = None
+
     def __init__(
         self,
         endpoint: str = DEFAULT_ENDPOINT,
@@ -80,16 +85,25 @@ class LlamaCppProvider:
             )
         return self._client
 
-    async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
+    async def chat(
+        self, messages: list[dict], max_tokens: int | None = None
+    ) -> AsyncIterator[str]:
         """Stream raw text tokens — NO tools array. ai_core parses any
         `<call>` element out of the text stream."""
         client = self._get_client()
-        body: dict = {"messages": messages, "stream": True}
+        body: dict = {
+            "messages": messages,
+            "stream": True,
+            # PROVIDER-REPORTED USAGE on the last chunk (`usage.prompt_tokens`).
+            "stream_options": {"include_usage": True},
+        }
         if self._model:
             body["model"] = self._model
         if self._temperature is not None:
             body["temperature"] = self._temperature
-        if self._num_predict:
+        if max_tokens is not None:  # a side call's own bound (a fold summary's budget)
+            body["max_tokens"] = int(max_tokens)
+        elif self._num_predict:
             body["max_tokens"] = int(self._num_predict)
         if self._think is not None:
             body["chat_template_kwargs"] = {"enable_thinking": bool(self._think)}
@@ -109,9 +123,16 @@ class LlamaCppProvider:
                     obj = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                usage = obj.get("usage")
+                if isinstance(usage, dict) and usage.get("prompt_tokens"):
+                    # what the window really held — ai_core calibrates with it
+                    self.last_prompt_tokens = int(usage["prompt_tokens"])
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
+                if choices[0].get("finish_reason"):
+                    fr = choices[0]["finish_reason"]
+                    self.last_stop_reason = "max_tokens" if fr == "length" else fr
                 delta = choices[0].get("delta") or {}
                 # A REASONING MODEL SPLITS ITS OUTPUT. Started with
                 # `--reasoning-format deepseek`, llama-server streams the thought
