@@ -31,7 +31,9 @@ export function page<T>(
 ): Page<T> {
   let rest = items.slice();
 
-  const after = payload["after"];
+  // An int cursor (a message id) and its decimal string are the same cursor.
+  const raw = payload["after"];
+  const after = typeof raw === "number" ? String(raw) : raw;
   if (typeof after === "string" && after !== "") {
     const i = rest.findIndex((it) => ident(it) === after);
     if (i < 0) {

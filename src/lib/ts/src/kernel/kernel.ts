@@ -8,6 +8,7 @@ import { CURRENT_VERSION, validateRecords } from "./state.ts";
 import type { AgentRecord, Snapshot, StateEvent } from "./state.ts";
 import { ExecutionLedger } from "./ledger.ts";
 import { TaskTable } from "./tasks.ts";
+import { KernelStore } from "./kernel_store.ts";
 import { runBatch } from "./batch.ts";
 import type { Item, Outcome } from "./outcome.ts";
 import { UNHANDLED, refusal } from "./refusal.ts";
@@ -20,9 +21,12 @@ import { authorizeCall, denial } from "./authz.ts";
  * injects the real WS one. Non-local sends + remote watches go through here.
  */
 export interface Bridge {
-  forward(target: string, payload: Payload): Promise<Json>;
+  /** `caller` is the QUALIFIED sender `<this kernel's guid>|<agent id>` (`kernel`
+   *  for the operator), stamped on the call frame when this kernel has a guid —
+   *  a far side keys what the call writes by it. */
+  forward(target: string, payload: Payload, caller?: string): Promise<Json>;
   /** like forward, but the payload may carry a binary blob (Uint8Array). */
-  forwardBinary(target: string, payload: Record<string, unknown>): Promise<Json>;
+  forwardBinary(target: string, payload: Record<string, unknown>, caller?: string): Promise<Json>;
   emitRemote(target: string, payload: Payload): void;
   watchRemote(src: string): void;
   unwatchRemote(src: string): void;
@@ -49,10 +53,19 @@ export class Kernel {
    *  loader sets this to the host loader id/alias it proxies to; null = unwired. */
   persistenceProvider: string | null = null;
 
-  /** Every execution this kernel has run — dedup/join/retry/dead-letter. */
+  /** Executions still in RAM — in flight, or settled and not yet flushed:
+   *  dedup/join/retry/dead-letter. The rest live in the root's memory store. */
   readonly ledger = new ExecutionLedger();
   /** In-flight dispatches, as a tree: a cancel takes the subtree with it. */
   readonly tasks = new TaskTable();
+  /** The one id counter, the execution rows not yet flushed, and the link to
+   *  the root's memory store (`kernel_store.ts`). Shared by every view. */
+  readonly store: KernelStore;
+  /** Per-kernel RAM a bundle keeps for itself (never persisted) — e.g. an AI
+   *  agent's head cache. Keyed by the bundle; shared by every view. */
+  readonly bundleMem: Map<string, unknown> = new Map();
+  /** The unscoped kernel every view descends from. */
+  readonly base: Kernel;
 
   /**
    * The id that ORIGINATED the dispatch now running, or null for an operator.
@@ -65,7 +78,20 @@ export class Kernel {
    */
   readonly currentOrigin: string | null = null;
   /** The task id of the dispatch now running — a nested send parents to it. */
-  readonly currentTask: string | null = null;
+  readonly currentTask: number | null = null;
+  /**
+   * WHO CALLED the dispatch now running (null = the operator). A handler's own
+   * sends are attributed to itself (`currentOrigin`), so without this it could
+   * not tell whose request it is serving — which a verb whose PAYLOAD names a
+   * resource needs: a memory store keys every row by its writer.
+   */
+  readonly currentCaller: string | null = null;
+  /**
+   * The kernel's OWN traffic — the `shutdown` verbs of a stop, the flush, prune
+   * and reads of its memory store. It passes the drain (python's
+   * `shutdown_context` + registered-task rule).
+   */
+  readonly kernelTraffic: boolean = false;
 
   /** handler_module -> the JS handler that runs that view bundle locally. */
   private readonly handlers: Map<string, Handler> = new Map();
@@ -82,6 +108,11 @@ export class Kernel {
    *  `subscribeState`, which taps the HOST stream over the bridge. A loader
    *  agent subscribes here to persist the local tree. */
   private readonly stateSubscribers: Set<(e: StateEvent) => void> = new Set();
+
+  constructor() {
+    this.base = this;
+    this.store = new KernelStore(this);
+  }
 
   /** Register a JS view bundle by its handler_module name. */
   registerBundle(handlerModule: string, handler: Handler): void {
@@ -230,7 +261,10 @@ export class Kernel {
       for (const child of children.get(rec.id) ?? []) build(child, agent.id);
     };
 
-    if (rootRec !== null) build(rootRec, null);
+    if (rootRec !== null) {
+      build(rootRec, null);
+      this.store.resume(rootRec["next_id"]);
+    }
   }
 
   /** Resolve the `"kernel"` alias to the root id. */
@@ -243,11 +277,55 @@ export class Kernel {
   /** A view of this kernel whose sends are attributed to `agentId`. Shares all
    *  state by prototype — the ledger, the table and the tree are the SAME
    *  objects, only the origin differs. */
-  scopedFor(agentId: string, taskId: string | null): Kernel {
+  scopedFor(agentId: string, taskId: number | null): Kernel {
     const view = Object.create(this) as Kernel;
     Object.defineProperty(view, "currentOrigin", { value: agentId, enumerable: true });
     Object.defineProperty(view, "currentTask", { value: taskId, enumerable: true });
     return view;
+  }
+
+  /** The view a dispatch runs under: its sends are the target's, parented to
+   *  its task, and it knows who called it. */
+  private dispatchView(targetId: string, taskId: number, caller: string | null): Kernel {
+    const view = this.scopedFor(targetId, taskId);
+    Object.defineProperty(view, "currentCaller", { value: caller, enumerable: true });
+    return view;
+  }
+
+  /** The kernel's own traffic: operator sends that pass the drain. */
+  kernelView(): Kernel {
+    const view = Object.create(this.base) as Kernel;
+    Object.defineProperty(view, "kernelTraffic", { value: true, enumerable: true });
+    return view;
+  }
+
+  // ---- identity + the one counter ----------------------------------------
+
+  /** The kernel's stable INSTANCE identity: minted once when the root boots
+   *  (an explicit one wins, a minted one is never regenerated) and kept in the
+   *  root record, so the proxy_loader persists it. Every memory-store key is
+   *  `<guid>|<agent id>`. null until the root has booted. */
+  get guid(): string | null {
+    const root = this.rootId !== null ? this.agents.get(this.rootId) : undefined;
+    const g = root?.meta["guid"];
+    return typeof g === "string" && g !== "" ? g : null;
+  }
+
+  /** The next message id — the ONLY allocator (see kernel_store.ts). */
+  mintId(): number {
+    return this.store.mintId();
+  }
+
+  /** `<guid>|<the id that is sending>` (`kernel` for the operator) — what a
+   *  bridge frame carries so the far side knows who is calling. */
+  qualifiedCaller(): string | undefined {
+    const g = this.guid;
+    return g === null ? undefined : `${g}|${this.currentOrigin ?? "kernel"}`;
+  }
+
+  private ensureGuid(): void {
+    if (this.rootId === null || this.guid !== null) return;
+    this.updateMeta(this.rootId, { guid: mintGuid() });
   }
 
   /**
@@ -322,7 +400,7 @@ export class Kernel {
    * `reflect` is answered uniformly by the KERNEL for every local agent, never
    * by the handler, so it cannot drift bundle by bundle.
    */
-  async dispatch(targetId: string, payload: Payload, taskId: string): Promise<Json> {
+  async dispatch(targetId: string, payload: Payload, taskId: number): Promise<Json> {
     const id = this.resolve(targetId);
     const target = this.agents.get(id);
     const verb = str(payload, "type");
@@ -330,20 +408,24 @@ export class Kernel {
     if (target === undefined) {
       // FEDERATION: not ours, so it belongs to the host. `launch` already
       // refused the no-bridge case, so a bridge is present here.
-      return (this.bridge as Bridge).forward(id, payload);
+      return (this.bridge as Bridge).forward(id, payload, this.qualifiedCaller());
     }
     if (verb === "reflect") {
       const identity = reflectIdentity(target, this.rootId);
       return applyReflectFlags(this, target, payload, identity);
     }
-    // Kernel verbs act on the TABLE and the LEDGER, so they are the root's to
-    // answer and the named agent is the operand — refused HERE, in the handler,
-    // not in the gate.
-    if (isKernelVerb(verb)) return answerKernelVerb(this, id, verb, payload);
+    // `this` is the CALLER's view; the dispatch runs under the target's own.
+    const view = this.dispatchView(target.id, taskId, this.currentOrigin);
+    // Kernel verbs act on the TABLE, the LEDGER and the LIFECYCLE, so they are
+    // the root's to answer and the named agent is the operand — refused HERE, in
+    // the handler, not in the gate.
+    if (isKernelVerb(verb)) return answerKernelVerb(view, id, verb, payload);
+    // THE ROOT'S BOOT MINTS THE GUID every memory-store key carries.
+    if (verb === "boot" && id === this.rootId) this.ensureGuid();
     if (target.handler !== null) {
       // The handler receives a SCOPED kernel: its own nested sends are
       // attributed to it, and parent to this task so a cancel reaches them.
-      return target.handler(target.id, payload, this.scopedFor(target.id, taskId));
+      return target.handler(target.id, payload, view);
     }
     if (verb === "boot" || verb === "shutdown" || verb === "") {
       return null;
@@ -384,7 +466,7 @@ export class Kernel {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to forward to '${targetId}'` });
     }
-    return this.bridge.forwardBinary(this.resolve(targetId), payload);
+    return this.bridge.forwardBinary(this.resolve(targetId), payload, this.qualifiedCaller());
   }
 
   /** Call the HOST directly over the bridge, bypassing LOCAL resolution. The
@@ -397,7 +479,7 @@ export class Kernel {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to reach host '${target}'` });
     }
-    return this.bridge.forward(target, payload);
+    return this.bridge.forward(target, payload, this.qualifiedCaller());
   }
 
   /** connect/disconnect notifications for a remote endpoint's socket. */
@@ -444,6 +526,18 @@ export class Kernel {
     this.deliver(id, payload);
     const ws = this.watchers.get(id);
     if (ws !== undefined) for (const w of ws) this.deliver(w, payload);
+  }
+
+  /** Whether anything reads `id`'s inbox (a watcher with no reader receives
+   *  nothing, so a verb that would deliver there refuses up front). */
+  hasInbox(id: string): boolean {
+    return (this.inboxes.get(id)?.length ?? 0) > 0;
+  }
+
+  /** Put one payload in `id`'s inbox ONLY — no fan-out to its watchers (an AI
+   *  agent's row event goes to exactly the watcher it is for). */
+  deliverInbox(id: string, payload: Payload): void {
+    this.deliver(id, payload);
   }
 
   private deliver(id: string, payload: Payload): void {
@@ -515,4 +609,18 @@ export class Kernel {
 
 function bundleName(handlerModule: string): string {
   return handlerModule.replace(/\.(tools|js|ts)$/, "");
+}
+
+/** A fresh instance guid: 128 random bits, hex. NO FALLBACK — a guid that is
+ *  not random would let two kernels key their memory-store rows alike. */
+function mintGuid(): string {
+  const c = (globalThis as {
+    crypto?: { getRandomValues?: (a: Uint8Array) => Uint8Array };
+  }).crypto;
+  if (c === undefined || typeof c.getRandomValues !== "function") {
+    throw new Error("kernel: this runtime has no crypto.getRandomValues — cannot mint the kernel guid");
+  }
+  const b = new Uint8Array(16);
+  c.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 }

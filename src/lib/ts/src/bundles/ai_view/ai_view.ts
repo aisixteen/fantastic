@@ -358,9 +358,11 @@ export const aiView: ViewBundle = {
     });
 
     // boot: replay history + rebuild from a status snapshot
+    // `history` answers at DIGEST resolution ({id, role, head, bytes} per row) on
+    // every runtime; a row's full text is behind the agent's recall / grep.
     const hist = (await host.call(backend, { type: "history", client_id: clientId })) as Dict;
-    const messages = Array.isArray(hist["messages"]) ? (hist["messages"] as Dict[]) : [];
-    for (const m of messages) addMsg(s(m, "role"), s(m, "content"), dialogEl);
+    const rows = Array.isArray(hist["rows"]) ? (hist["rows"] as Dict[]) : [];
+    for (const m of rows) addMsg(s(m, "role"), s(m, "head"), dialogEl);
     const snap = (await host.call(backend, { type: "status", client_id: clientId })) as Dict;
     if (snap) {
       setOthersHint(typeof snap["others_pending"] === "number" ? (snap["others_pending"] as number) : 0);

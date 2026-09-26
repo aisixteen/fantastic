@@ -30,7 +30,10 @@ test("a NAMED execution runs once; re-sending returns the RECORDED outcome", asy
   const again = (await k.send([{ target: "till", payload: { type: "buy" }, id: "order-1" }]))[0]!;
   assert.equal(runs, 1, "the handler ran twice for one intent");
   assert.deepEqual(again.result, first.result);
-  assert.equal(again.pid, "order-1");
+  // The NAME is the caller's; the execution's id is the kernel's counter.
+  assert.equal(typeof first.pid, "number");
+  assert.equal(again.pid, first.pid);
+  assert.equal(again.name, "order-1");
 });
 
 test("a re-send while still IN FLIGHT joins — it does not start a second run", async () => {
@@ -55,19 +58,23 @@ test("an id is BOUND to its first target — aiming it elsewhere is refused", as
   assert.match(String((out!.result as Payload)["error"]), /bound to its first execution/);
 });
 
-test("a colon id REFERENCES a minted execution and never creates one", async () => {
-  const k = kernelWith({ a: () => ({ ok: true }) });
+test("an INT id REFERENCES a minted execution and never creates one", async () => {
+  let runs = 0;
+  const k = kernelWith({ a: () => ({ ok: ++runs }) });
   const [made] = await k.send([{ target: "a", payload: { type: "go" } }]);
-  const pid = made!.pid as string;
-  assert.match(pid, /^a:[0-9a-f]{8}$/, `unexpected pid shape: ${pid}`);
+  const pid = made!.pid as number;
+  assert.ok(Number.isInteger(pid) && pid > 0, `unexpected pid: ${String(pid)}`);
 
-  // Re-fetch by the minted pid: the recorded outcome, no new run.
+  // Re-fetch by the minted id: the recorded outcome, no new run.
   const [refetched] = await k.send([{ target: "a", payload: { type: "go" }, id: pid }]);
   assert.deepEqual(refetched!.result, made!.result);
+  assert.equal(runs, 1);
 
-  // An INVENTED colon id names nothing and must not create.
-  const [bad] = await k.send([{ target: "a", payload: { type: "go" }, id: "a:deadbeef" }]);
+  // An INVENTED int id names nothing and must not create — the kernel is the
+  // only allocator.
+  const [bad] = await k.send([{ target: "a", payload: { type: "go" }, id: 999_999 }]);
   assert.equal(bad!.status, "failed");
+  assert.equal(bad!.pid, null);
   assert.equal((bad!.result as Payload)["reason"], "bad_arg");
   assert.match(String((bad!.result as Payload)["error"]), /never created/);
 });
@@ -102,9 +109,9 @@ test("a spent retry budget PARKS the failure — the dead-letter queue is a quer
   assert.equal(out!.attempts, 2, "the retry budget was not spent");
 
   const led = ((await k.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
-  const rows = led["executions"] as { id: string; status: string; attempts: number }[];
+  const rows = led["executions"] as { name?: string; status: string; attempts: number }[];
   const parked = rows.filter((r) => r.status !== "completed");
-  assert.ok(parked.some((r) => r.id === "dl" && r.attempts === 2), JSON.stringify(rows));
+  assert.ok(parked.some((r) => r.name === "dl" && r.attempts === 2), JSON.stringify(rows));
 
   // Parked, NOT silently retried: re-sending the id returns the recorded failure.
   const [again] = await k.send([{ target: "dead", payload: { type: "go" }, id: "dl" }]);
@@ -121,16 +128,16 @@ test("the ledger verb is ORIGIN-SCOPED — an agent sees only what it originated
 
   // As the operator: everything is visible.
   const all = ((await k.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
-  const allRows = all["executions"] as { id: string }[];
-  assert.ok(allRows.some((r) => r.id === "operator-job"));
+  const allRows = all["executions"] as { name?: string }[];
+  assert.ok(allRows.some((r) => r.name === "operator-job"));
 
   // As an AGENT: only its own rows. Unscoped, this verb would hand any agent
   // the result BODIES of everything every other agent ran.
   const scoped = k.scopedFor("nosy", null);
   const mine = ((await scoped.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
-  const mineRows = mine["executions"] as { id: string }[];
+  const mineRows = mine["executions"] as { name?: string }[];
   assert.ok(
-    !mineRows.some((r) => r.id === "operator-job"),
+    !mineRows.some((r) => r.name === "operator-job"),
     "an agent read another origin's executions",
   );
 });
@@ -144,7 +151,7 @@ test("the retention ring evicts settled rows, unnamed before named, in-flight ne
   }
   assert.ok(k.ledger.size() <= 3, `ring not enforced: ${k.ledger.size()}`);
   assert.ok(
-    k.ledger.has("keep-me"),
+    k.ledger.resolveName("keep-me") !== undefined,
     "a NAMED row was evicted before unnamed ones — a named row is a dedup contract",
   );
 });

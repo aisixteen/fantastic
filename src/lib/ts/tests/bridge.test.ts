@@ -222,10 +222,9 @@ test("two bridges mint DISJOINT correlator ids — a second tab must not collide
   const b = await idsFrom();
   assert.notEqual(a, b, "two connections minted the SAME first correlator");
 
-  // Dash form, never colon: the colon namespace is kernel-minted-only, and a
-  // colon id sent from the wire is refused as "names no known execution".
+  // A STRING, `{prefix}-{n}`: on the host a frame id is the execution's NAME
+  // (message ids are the kernel's ints, which a bridge never mints).
   for (const id of [a, b]) {
-    assert.ok(!id.includes(":"), `bridge minted into the kernel namespace: ${id}`);
     assert.match(id, /^[0-9a-z]+-\d+$/, `unexpected correlator shape: ${id}`);
   }
 });
@@ -251,7 +250,35 @@ test("correlators stay unique across many calls on one socket", async () => {
   bridge.close();
 });
 
-test("the state stream can be opened with bodies; the frame carries `body: true`", async () => {
+test("a call frame carries the QUALIFIED caller once the kernel has a guid", async () => {
+  // `<this kernel's guid>|<the agent that asked>` (`kernel` for the operator):
+  // the far side keys what the call writes by it. No guid yet ⇒ no field.
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+  });
+  void k.send([{ target: "file_x", payload: { type: "list" } }]).catch(() => undefined);
+  await until(() => fk.forEndpoint("kernel_state")[0]?.lastCall() !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  assert.equal(sock.lastCall()!["caller"], undefined, "no guid, no caller");
+
+  k.updateMeta(k.rootId!, { guid: "g-local" });
+  void k.send([{ target: "file_x", payload: { type: "list", n: 2 } }]).catch(() => undefined);
+  await until(() => (sock.lastCall()!["payload"] as { n?: number }).n === 2);
+  assert.equal(sock.lastCall()!["caller"], "g-local|kernel");
+
+  void k.scopedFor("frontend", null)
+    .send([{ target: "file_x", payload: { type: "list", n: 3 } }])
+    .catch(() => undefined);
+  await until(() => (sock.lastCall()!["payload"] as { n?: number }).n === 3);
+  assert.equal(sock.lastCall()!["caller"], "g-local|frontend");
+  bridge.close();
+});
+
+test("the state stream has no body option — row events are not on it", async () => {
   const fk = fakeFactory();
   const k = kernelWithRoot();
   const bridge = new WsBridge(k, {
@@ -262,10 +289,10 @@ test("the state stream can be opened with bodies; the frame carries `body: true`
   bridge.forward("file_x", { type: "list", path: "." }).catch(() => undefined);
   await until(() => (fk.forEndpoint("kernel_state")[0] ?? undefined) !== undefined);
   const sock = fk.forEndpoint("kernel_state")[0]!;
-  const off = bridge.subscribeState(() => undefined, true);
+  const off = bridge.subscribeState(() => undefined);
   await until(() => sock.sent.some((f) => f["type"] === "state_subscribe"));
   const sub = sock.sent.find((f) => f["type"] === "state_subscribe")!;
-  assert.equal(sub["body"], true);
+  assert.deepEqual(sub, { type: "state_subscribe" });
   off();
   await until(() => sock.sent.some((f) => f["type"] === "state_unsubscribe"));
   bridge.close();

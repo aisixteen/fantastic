@@ -87,7 +87,7 @@ test("a refusal never reaches the task table, so it carries no pid", async () =>
   assert.equal(outs[0]!.result && (outs[0]!.result as Payload)["reason"], "missing_arg");
   assert.equal((outs[2]!.result as Payload)["reason"], "bad_arg");
   assert.equal(outs[3]!.status, "completed");
-  assert.ok(typeof outs[3]!.pid === "string");
+  assert.ok(typeof outs[3]!.pid === "number", "a dispatched item carries its int message id");
 });
 
 test("a timeout settles timed_out — and the kernel never defaults one", async () => {

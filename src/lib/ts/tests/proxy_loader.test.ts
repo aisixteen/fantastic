@@ -103,7 +103,9 @@ test("start persists the existing tree; mutations persist/forget over the bridge
   await loader.stop();
 });
 
-test("a host `row` event is relayed to subscribers untouched and never persists anything", async () => {
+test("the root record's guid and id bound persist through the proxy_loader like any meta edit", async () => {
+  // The counter comes back WITH the guid: both live in the root record, so a
+  // frontend that reloads keeps its store keys and never reuses an id.
   const k = new Kernel();
   k.registerBundle("canvas.ts", () => null);
   const fake = new FakeBridge();
@@ -113,16 +115,17 @@ test("a host `row` event is relayed to subscribers untouched and never persists 
   loader.start();
   await loader.flush();
   const before = fake.calls.length;
-
-  const seen: unknown[] = [];
-  k.addStateSubscriber((e) => seen.push(e));
-  const row = { id: 42, agent: "ai", parent: null, kind: "body", role: "user", head: "SECRET line one line two", bytes: 24 };
-  k.publishState({ agent_id: "ai", kind: "row", row });
+  k.updateMeta("canvas", { guid: "g1", next_id: 5000 });
   await loader.flush();
+  const persisted = fake.calls
+    .slice(before)
+    .filter((c) => c.payload["type"] === "persist_record")
+    .map((c) => c.payload["record"] as { id: string; guid?: string; next_id?: number });
+  assert.ok(persisted.some((r) => r.id === "canvas" && r.guid === "g1" && r.next_id === 5000));
 
-  assert.equal(seen.length, 1);
-  assert.deepEqual((seen[0] as { row: unknown }).row, row);
-  assert.ok(!("content" in row));
-  // the loader ignores it: nothing persisted, nothing forgotten
-  assert.equal(fake.calls.length, before);
+  const k2 = new Kernel();
+  k2.registerBundle("canvas.ts", () => null);
+  k2.load([{ id: "canvas", handler_module: "canvas.ts", guid: "g1", next_id: 5000 }]);
+  assert.equal(k2.guid, "g1");
+  assert.ok(k2.mintId() >= 5000, "a reload resumes past the reserved bound");
 });

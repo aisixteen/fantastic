@@ -1,73 +1,30 @@
-// The TASK TABLE — one row per in-flight dispatch, and the pid that names it.
+// The TASK TABLE — one row per in-flight dispatch.
 //
-// ONE ID SPACE: the pid minted here is the SAME id a caller may supply on a
-// batch item, the same id `ps` lists and `cancel` kills, and the same id a
-// bridge frame carries. There is no second `exec_id` field anywhere.
+// ONE ID SPACE: a task id is the MESSAGE id of the call that started it — an int
+// from the kernel's one counter (`Kernel.mintId`), the same id the call row, the
+// settle row, `ps`, `cancel` and the outcome's `pid` carry. The table never
+// mints; the kernel is the only allocator.
 
 import type { Json, Payload } from "./json.ts";
 import { page } from "./paging.ts";
 
-/** Opaque per-kernel salt so a pid cannot be predicted or replayed across
- *  kernels. Random per instance, never persisted. */
-function mintSalt(): string {
-  // Structural, not the DOM `Crypto` type: the pure kernel compiles without
-  // the DOM lib (src/kernel/tsconfig.json), so it must not NAME a DOM type.
-  const c = (globalThis as {
-    crypto?: { getRandomValues?: (a: Uint8Array) => Uint8Array };
-  }).crypto;
-  if (c !== undefined && typeof c.getRandomValues === "function") {
-    const b = new Uint8Array(8);
-    c.getRandomValues(b);
-    return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
-  }
-  // No CSPRNG in this runtime. The salt is an UNPREDICTABILITY nicety, not the
-  // uniqueness mechanism — that is the monotonic sequence below — so a weaker
-  // salt degrades opacity, never correctness.
-  return Math.floor(Math.random() * 0xffffffff).toString(16);
-}
-
 export interface TaskRow {
-  id: string;
+  id: number;
   agent: string;
   verb: string;
-  /** Set when someone cancels; the dispatch checks it at every await point. */
+  /** Set when someone cancels; the dispatch settles `cancelled` at once. */
   killed: boolean;
   /** Ids of the tasks this one spawned — the table is a TREE, and a cancel
    *  takes the subtree with it. */
-  children: Set<string>;
-  parent: string | null;
+  children: Set<number>;
+  parent: number | null;
   onCancel: (() => void)[];
 }
 
 export class TaskTable {
-  private readonly rows = new Map<string, TaskRow>();
-  private readonly salt = mintSalt();
-  private seq = 0;
+  private readonly rows = new Map<number, TaskRow>();
 
-  /**
-   * Next task id for `agentId` — `"<agent>:<hex8>"`.
-   *
-   * The token is OPAQUE, not a visible counter. Uniqueness comes from the
-   * monotonic sequence (an id is never reused, so a stale `cancel` kills
-   * nothing); the hash only hides the ordering. A VISIBLE counter invites an
-   * ordering inference that is false — the sequence increments on EVERY
-   * dispatch, so a caller sees gaps it did not cause. Measured 2026-08-20
-   * (the model): given `[reply to file_bridge_830365:10]` after issuing what
-   * it thought was `:5`, the model spent a whole turn reconciling the gap
-   * instead of doing the task.
-   */
-  mint(agentId: string): string {
-    this.seq += 1;
-    const n = this.seq;
-    let h = 0x811c9dc5;
-    for (const ch of `${this.salt}:${agentId}:${n}`) {
-      h ^= ch.charCodeAt(0);
-      h = Math.imul(h, 0x01000193) >>> 0;
-    }
-    return `${agentId}:${h.toString(16).padStart(8, "0")}`;
-  }
-
-  register(id: string, agent: string, verb: string, parent: string | null): TaskRow {
+  register(id: number, agent: string, verb: string, parent: number | null): TaskRow {
     const row: TaskRow = {
       id, agent, verb, killed: false, children: new Set(), parent, onCancel: [],
     };
@@ -76,11 +33,19 @@ export class TaskTable {
     return row;
   }
 
-  get(id: string): TaskRow | undefined {
+  get(id: number): TaskRow | undefined {
     return this.rows.get(id);
   }
 
-  done(id: string): void {
+  has(id: number): boolean {
+    return this.rows.has(id);
+  }
+
+  ids(): number[] {
+    return [...this.rows.keys()];
+  }
+
+  done(id: number): void {
     const row = this.rows.get(id);
     if (row === undefined) return;
     if (row.parent !== null) this.rows.get(row.parent)?.children.delete(id);
@@ -92,7 +57,7 @@ export class TaskTable {
     const all = [...this.rows.values()].map((r) => ({
       id: r.id, agent: r.agent, verb: r.verb,
     }));
-    const p = page(all, payload, (t) => t.id);
+    const p = page(all, payload, (t) => String(t.id));
     return { tasks: p.page as unknown as Json, next: p.next };
   }
 
@@ -104,10 +69,10 @@ export class TaskTable {
    * nothing and says so, rather than erroring: `cancel` is idempotent because
    * the caller usually cannot know whether the race was already lost.
    */
-  cancel(id: string): string[] {
+  cancel(id: number): number[] {
     const row = this.rows.get(id);
     if (row === undefined) return [];
-    const killed: string[] = [];
+    const killed: number[] = [];
     const walk = (r: TaskRow): void => {
       if (r.killed) return;
       r.killed = true;
