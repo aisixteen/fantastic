@@ -1,0 +1,55 @@
+id: tricky_0a1b2c
+handler_module: text_file.tools
+parent_id: kernel_state
+one: '1'
+truthy: 'true'
+nully: 'null'
+tilde: '~'
+empty: ''
+'yes': 'yes'
+'on': 'on'
+octal12: '0o17'
+exp: '1e3'
+exp_neg: '2E-4'
+dot_end: '5.'
+version: 1.2.3
+date: '2026-09-25'
+colon: 'a: b'
+hash: '# not a comment'
+lead: ' leading space'
+star: '*'
+unicode: héllo — 世界
+emoji: "ok \U0001F600"
+int: 42
+neg: -7
+float: 1.5
+bool: true
+none: null
+multiline: |
+  line one
+  line two
+no_final_nl: |-
+  a
+    indented b
+trailing_blank: "keep\n\n"
+space_before_break: "trail \nx"
+tab: "a\tb"
+long: 'word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word '
+can_call:
+  $self: '*'
+  $parent: '*'
+  kernel_store:
+  - read
+  - write
+callable_by:
+  $parent: '*'
+  $children: '*'
+nested:
+  list:
+  - 1
+  - two
+  - three: []
+  map: {}
+  deep:
+    x:
+    - []
