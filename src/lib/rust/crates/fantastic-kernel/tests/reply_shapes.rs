@@ -289,7 +289,7 @@ async fn list_agents_is_registry_order() {
 ///
 /// Python writes `parent_id` LAST because structure wins: a `parent_id` that
 /// leaked into meta must not shadow where the agent actually sits. Rust
-/// declared it third, so every record on the wire and in `agent.json` carried a
+/// declared it third, so every record on the wire and in `agent.yaml` carried a
 /// key order python never produces.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_parent_id_is_last() {

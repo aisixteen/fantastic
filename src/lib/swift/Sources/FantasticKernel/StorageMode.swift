@@ -1,7 +1,7 @@
 // Storage tier — disk vs in-memory.
 //
 // Mirrors Rust's `fantastic_kernel::StorageMode`. Disk mode persists
-// each agent's `agent.json` under a workdir; InMemory mode skips
+// each agent's `agent.yaml` under a workdir; InMemory mode skips
 // all disk writes (per-agent readme seeding, persistence, save/load
 // to file become no-ops).
 
@@ -9,7 +9,7 @@ import Foundation
 
 public enum StorageMode: Sendable, Equatable {
     /// Persistent — each agent's record lives in
-    /// `<workdir>/.fantastic/agents/<id>/agent.json`.
+    /// `<workdir>/.fantastic/agents/<id>/agent.yaml`.
     case disk(URL)
     /// In-memory only. Used by app-embedded kernels (brain) and
     /// most tests.

@@ -23,8 +23,9 @@
 
 use async_trait::async_trait;
 use fantastic_ai_core::events::emit_status;
-use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
-use fantastic_ai_core::retrieval;
+use fantastic_ai_core::provider::{
+    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+};
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::py_repr_value;
@@ -169,7 +170,7 @@ fn drop_cached_client(self_id: &AgentId) {
 const KEY_VAR: &str = "NVIDIA_API_KEY";
 
 /// Read the key from the environment. No sidecar, no agent record — the key is
-/// never written to disk by this bundle and never appears in `agent.json`.
+/// never written to disk by this bundle and never appears in `agent.yaml`.
 fn read_api_key() -> Option<String> {
     std::env::var(KEY_VAR)
         .ok()
@@ -194,6 +195,9 @@ struct NimProvider {
     model: String,
     kernel: Arc<Kernel>,
     client_id: String,
+    /// What the endpoint reported about the last pass — `usage.prompt_tokens` on
+    /// the last chunk, and the `finish_reason` (`length` ⇒ `max_tokens`).
+    report: ReportCell,
 }
 
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> u64 {
@@ -213,7 +217,23 @@ impl Provider for NimProvider {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
+    fn report(&self) -> ProviderReport {
+        self.report.lock().expect("report poisoned").clone()
+    }
+
+    fn clear_prompt_tokens(&self) {
+        self.report.lock().expect("report poisoned").prompt_tokens = None;
+    }
+
+    fn clear_stop_reason(&self) {
+        self.report.lock().expect("report poisoned").stop_reason = None;
+    }
+
+    async fn chat(
+        &self,
+        messages: &[Value],
+        max_tokens: Option<i64>,
+    ) -> Result<ProviderStream, ProviderError> {
         // NO guessy default: fail loud before the wire if no model is named.
         if self.model.is_empty() || self.model == DEFAULT_MODEL {
             return Err(ProviderError::raised(
@@ -223,11 +243,17 @@ impl Provider for NimProvider {
         }
         // RAW: no native `tools`/`tool_choice` — ai-core parses the `<tool_call>`
         // envelope out of the streamed text.
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
+            // PROVIDER-REPORTED USAGE on the last chunk (`usage.prompt_tokens`).
+            "stream_options": {"include_usage": true},
         });
+        if let Some(n) = max_tokens {
+            // a side call's own bound (a fold summary's budget)
+            body["max_tokens"] = json!(n);
+        }
         // Retry-once-on-429 (before any chunk yielded). Emits a
         // rate-limit say + status during the backoff.
         let mut attempt: u32 = 0;
@@ -285,7 +311,7 @@ impl Provider for NimProvider {
             break resp;
         };
 
-        Ok(consume_sse(resp))
+        Ok(consume_sse(resp, Arc::clone(&self.report)))
     }
 }
 
@@ -300,11 +326,11 @@ impl Provider for NimProvider {
 ///
 /// PURE RAW TEXT — no native `tool_calls` are read; ai-core parses the
 /// `<call name=…>` envelope out of the token text.
-fn consume_sse(resp: reqwest::Response) -> ProviderStream {
+fn consume_sse(resp: reqwest::Response, report: ReportCell) -> ProviderStream {
     let inner = resp.bytes_stream();
     // `pending` holds the events decoded from ONE chunk: a chunk can carry
     // several lines, and each line several tokens.
-    let init = (inner, SseState::new(), VecDeque::new(), false);
+    let init = (inner, SseState::new(report), VecDeque::new(), false);
     Box::pin(futures_util::stream::unfold(
         init,
         |(mut inner, mut st, mut pending, mut finished)| async move {
@@ -351,13 +377,15 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
 struct SseState {
     buf: Vec<u8>,
     wrap: ThinkWrap,
+    report: ReportCell,
 }
 
 impl SseState {
-    fn new() -> Self {
+    fn new(report: ReportCell) -> Self {
         Self {
             buf: Vec::new(),
             wrap: ThinkWrap::new(),
+            report,
         }
     }
 
@@ -381,6 +409,7 @@ impl SseState {
         let Ok(obj) = serde_json::from_str::<Value>(data) else {
             return false;
         };
+        fantastic_ai_core::think::note_openai_usage(&obj, &self.report);
         let Some(choices) = obj.get("choices").and_then(Value::as_array) else {
             return false;
         };
@@ -449,61 +478,22 @@ impl Bundle for NvidiaNimBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel),
-            // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`.
-            "boot" => {
-                // A BOOT IS A NEW INCARNATION (python `_make_boot`): a reply
-                // answering a call the PREVIOUS one made is recorded as a row
-                // and wakes no turn.
-                state::bump_incarnation(agent_id);
-                if fantastic_ai_core::history::load_history(
-                    agent_id,
-                    kernel,
-                    helpers::DEFAULT_CLIENT_ID,
-                    false,
-                )
-                .await
-                .is_empty()
-                {
-                    Value::Null
-                } else {
-                    let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
-                    retrieval::context_recall(agent_id, &json!({}), kernel, p.as_ref()).await
-                }
-            }
-            "send" => send_reply(agent_id, payload, kernel).await?,
-            // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
-            // record, this agent answers it by THINKING, and the asker writes
-            // the same call either way.
-            "inquiry" => match verbs::inquiry_open(payload) {
-                Err(refusal) => refusal,
-                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await?, payload),
-            },
-            "history" => verbs::history(agent_id, payload, kernel).await,
-            "recall" => verbs::recall(agent_id, payload, kernel).await,
-            // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
-            "pull" => retrieval::pull(agent_id, payload, kernel).await,
-            "grep" => retrieval::grep(agent_id, payload, kernel).await,
-            // Rebuild the view from the store: on boot, after folds, on request.
-            "context_recall" => {
-                let p = build_provider(agent_id, kernel, helpers::DEFAULT_CLIENT_ID);
-                retrieval::context_recall(agent_id, payload, kernel, p.as_ref()).await
-            }
-            // A new thread on the same store: the view starts here, nothing is deleted.
-            "context_clear" => retrieval::context_clear(agent_id, payload, kernel).await,
-            "context_status" => verbs::context_status(agent_id, kernel).await,
-            "status" => verbs::status(agent_id, payload),
-            // python's VERBS map has no `shutdown` — it is an unknown type like
-            // any other, and the value is rendered with python's `repr`.
-            _ => json!({
-                "error": format!(
-                    "nvidia_nim_backend: unknown type {}",
-                    py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
-                )
-            }),
-        };
-        Ok(Some(reply))
+        if verb == "reflect" {
+            return Ok(Some(reflect_reply(agent_id, kernel)));
+        }
+        // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
+        let provider = |client: &str| build_provider(agent_id, kernel, client);
+        if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
+            return Ok(Some(reply));
+        }
+        // python's VERBS map has no `shutdown` — it is an unknown type like any
+        // other, and the value is rendered with python's `repr`.
+        Ok(Some(json!({
+            "error": format!(
+                "nvidia_nim_backend: unknown type {}",
+                py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
+            )
+        })))
     }
 
     async fn on_delete(
@@ -547,26 +537,10 @@ fn build_provider(
         model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
         kernel: Arc::clone(kernel),
         client_id: client_id.to_string(),
+        report: ReportCell::default(),
     }))
 }
 
-async fn send_reply(
-    agent_id: &AgentId,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-) -> Result<Value, BundleError> {
-    let client_id = helpers::safe_client(
-        payload
-            .get("client_id")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
-    // NO KEY = NO PROVIDER, and the refusal is `send`'s to write (python
-    // `require_provider`): it belongs after the recursion guard and carries the
-    // `client_id`, neither of which a backend-local early return can do.
-    let provider = build_provider(agent_id, kernel, &client_id);
-    verbs::send(provider, agent_id, payload, kernel, CFG).await
-}
 
 /// `reflect` — python `_make_reflect` + `nvidia_nim_backend/tools.py`'s
 /// `_reflect_extra`: the shared base body, then `has_api_key`. The KEY itself is

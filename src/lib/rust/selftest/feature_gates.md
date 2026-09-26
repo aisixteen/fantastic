@@ -60,9 +60,9 @@ WORK=$(mktemp -d)
 cargo build -p fantastic-cli --release --no-default-features --features embedded
 BIN=./target/release/fantastic_kernel
 
-# Stage a record without booting (just write agent.json directly).
+# Stage a record without booting (just write agent.yaml directly).
 mkdir -p "$WORK/.fantastic/agents/tb"
-cat > "$WORK/.fantastic/agents/tb/agent.json" <<'JSON'
+cat > "$WORK/.fantastic/agents/tb/agent.yaml" <<'JSON'
 {
   "id": "tb",
   "handler_module": "terminal_backend.tools",

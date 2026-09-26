@@ -14,8 +14,12 @@ import Testing
 /// process-global, keyed by agent, and suites run in parallel.
 private let AI = "ai_f"
 
-private func fold(_ body: [JSON], _ c: ProjectionCtx) async -> AIProjection {
-    await AIStrategies.getStrategy("fold")!(body, [], .object([:]), c)
+/// The body a projection folds is the agent's conversation, so it lives in the
+/// agent's memory store — seeded there first (the store refuses a fold whose
+/// refs name rows it does not hold, as sqlite's FK would).
+private func fold(_ body: [JSON], _ c: ProjectionCtx) async throws -> AIProjection {
+    if let k = c.kernel { appendRows(c.selfId, kernel: k, body.filter { rowId($0) != nil }) }
+    return try await AIStrategies.getStrategy("fold")!(body, [], .object([:]), c)
 }
 
 private func viewIds(_ view: [JSON]) -> [Int64?] { view.map(rowId) }
@@ -103,7 +107,7 @@ struct FoldsTests {
         let body = [f.row("user", "GOAL", "user:goal")] + mid + [f.row("user", "now?", nil)]
         let full = AIContext.estimateTokens(body)
         let bud = Int64(Double(full) * 0.45)
-        let proj = await fold(body, f.ctx(bud))
+        let proj = try await fold(body, f.ctx(bud))
         #expect(proj.folded >= 1)
         #expect(f.foldsOf().count == proj.folded, "every fold row was persisted")
         let blob = serialized(proj.body)
@@ -119,11 +123,11 @@ struct FoldsTests {
         let (a, b) = (f.chain("a", 2), f.chain("b", 2))
         let body = [f.row("user", "GOAL", "user:goal")] + a + b + [f.row("user", "now?", nil)]
         let bud = Int64(Double(AIContext.estimateTokens(body)) * 0.5)
-        let p1 = await fold(body, f.ctx(bud))
+        let p1 = try await fold(body, f.ctx(bud))
         // next turn: the store now carries the fold rows; the view must not unfold them
         let persisted = f.rowsOf()
         let body2 = Array(body.dropLast()) + persisted.filter(isFold) + [body[body.count - 1]]
-        let p2 = await fold(body2, f.ctx(bud * 10))
+        let p2 = try await fold(body2, f.ctx(bud * 10))
         #expect(p2.folded == 0)
         // the SAME collapse renders: the folds visible now are exactly the ones visible then
         #expect(
@@ -134,7 +138,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let a = f.chain("a", 8)
         let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
-        let proj = await fold(
+        let proj = try await fold(
             body,
             f.ctx(
                 Int64(Double(AIContext.estimateTokens(body)) * 0.6),
@@ -151,7 +155,10 @@ struct FoldsTests {
 
     // ── the prerequisite: views keep row keys ───────────────────────────
 
-    @Test func grepAndPullDescendIntoAFold() async throws {
+    /// Descent without `pull`: grep scoped to a fold id searches its members
+    /// (the store expands the fold); `history {fold}` lists them with the fold's
+    /// summary. python `test_grep_and_history_descend_into_a_fold`.
+    @Test func grepAndHistoryDescendIntoAFold() async throws {
         let (kernel, ids, _) = await bootMockKernel(
             config: baseConfig { .provider(MockProvider()) }, backendIds: [AI],
             contextWindow: 12000, meta: ["output_reserve": .integer(0)])
@@ -167,8 +174,10 @@ struct FoldsTests {
                 "type": .string("grep"), "query": .string("secret"), "ids": .array([fo["id"]]),
             ]))])[0].result
         #expect(r["total"].asInt == 1 && r["matches"][0]["id"] == rows[2]["id"], Comment(rawValue: r.serialize()))
-        let p = await kernel.send([Item(agentId, .object(["type": .string("pull"), "pid": fo["id"]]))])[0].result
-        #expect(p["text"].asString == "summary of a" && p["refs"] == fo["refs"] && p["title"].asString == "done a")
+        let h = await kernel.send([Item(agentId, .object(["type": .string("history"), "fold": fo["id"]]))])[0].result
+        #expect(h["fold"]["title"].asString == "done a" && h["fold"]["summary"].asString == "summary of a",
+            Comment(rawValue: h.serialize()))
+        #expect((h["rows"].asArray ?? []).map { $0["id"] } == rows.map { $0["id"] })
     }
 
     @Test func theViewTrimmersKeepRowKeys() {
@@ -197,7 +206,7 @@ struct FoldsTests {
         let tailIds = Set(ch.suffix(5).compactMap(rowId))
         #expect(!span.contains { rowId(body[$0]).map { tailIds.contains($0) } ?? false }, "the live tail never folds")
         #expect(rowRole(body[span[span.count - 1]]) != "assistant", "a span never ends between a call and its answer")
-        let proj = await fold(body, f.ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.4)))
+        let proj = try await fold(body, f.ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.4)))
         #expect(proj.folded >= 1)
         #expect(serialized(proj.body).contains("one more"), "the open call at the tail is still in view")
     }
@@ -210,7 +219,7 @@ struct FoldsTests {
             rows.append(f.fold(f.ids(c), "done \(rowId(c[0])!)", String(repeating: "S", count: 1500), false))
         }
         rows.append(f.row("user", "now?", nil))
-        let proj = await fold(rows, f.ctx(1200))
+        let proj = try await fold(rows, f.ctx(1200))
         let top = proj.body.filter { isFold($0) && ($0["level"].asInt ?? 1) >= 2 }
         #expect(!top.isEmpty, "a fold whose members were folds was written by the SAME path")
         #expect(
@@ -227,7 +236,7 @@ struct FoldsTests {
             rows.append(f.fold(f.ids(c), "done \(t)", String(repeating: "S", count: 5000), false))
         }
         rows.append(f.row("user", "now?", nil))
-        let proj = await fold(rows, f.ctx(300))  // absurdly small
+        let proj = try await fold(rows, f.ctx(300))  // absurdly small
         #expect(!proj.body.isEmpty)  // it returned — no infinite loop
     }
 
@@ -250,10 +259,10 @@ struct FoldsTests {
         let a = f.chain("a", 8)
         let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
         let bud = Int64(Double(AIContext.estimateTokens(body)) * 0.5)
-        let p1 = await fold(body, f.ctx(bud))
+        let p1 = try await fold(body, f.ctx(bud))
         let persisted = f.rowsOf()
         let body2 = Array(body.dropLast()) + persisted.filter(isFold) + [body[body.count - 1]]
-        let p2 = await fold(body2, f.ctx(bud))
+        let p2 = try await fold(body2, f.ctx(bud))
         #expect(f.foldsOf().count == p1.folded + p2.folded, "no duplicate fold over an already-folded stretch")
     }
 
@@ -296,7 +305,7 @@ struct FoldsTests {
         let a = f.chain("a", 30)
         let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
         let bud = Int64(Double(AIContext.estimateTokens(body)) * 0.35)
-        _ = await fold(body, f.ctx(bud))
+        _ = try await fold(body, f.ctx(bud))
         let levels = f.foldsOf().map { $0["level"].asInt ?? 1 }
         #expect(levels.count >= 3)
         #expect((levels.max() ?? 0) <= 3, "\(levels)")
@@ -359,7 +368,7 @@ struct FoldsTests {
         let tail = (0..<7).map { f.row("user", "t\($0)", "user:t\($0)") }
         let body = [goal] + src + heads + tail
         let huge = AIContext.estimateTokens(body) * 100  // comfortably under budget
-        _ = await fold(body, f.ctx(huge))
+        _ = try await fold(body, f.ctx(huge))
         let levels = f.foldsOf().map { $0["level"].asInt ?? 1 }
         #expect(!levels.isEmpty && (levels.max() ?? 0) >= 2, "the head was left uncoalesced while under budget: \(levels)")
     }
@@ -371,7 +380,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let a = f.chain("a", 8)
         let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
-        _ = await fold(
+        _ = try await fold(
             body,
             f.ctx(
                 Int64(Double(AIContext.estimateTokens(body)) * 0.6),
@@ -389,7 +398,7 @@ struct FoldsTests {
         let a = f.chain("a", 8)
         let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
         let long = String(repeating: "t", count: 200)
-        _ = await fold(
+        _ = try await fold(
             body,
             f.ctx(
                 Int64(Double(AIContext.estimateTokens(body)) * 0.6),

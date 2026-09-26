@@ -45,6 +45,10 @@ pub struct Projection {
     pub stripped_bytes: i64,
     /// `fold`: fold rows written this projection.
     pub folded: usize,
+    /// `fold`: spans NOT folded because the summary stayed over its budget after
+    /// the one re-summarise — the span stays in view, reported, never a degraded
+    /// fold.
+    pub fold_refused: usize,
 }
 
 /// Everything a strategy needs, WITHOUT importing the seam. `budget` is the
@@ -117,17 +121,20 @@ pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>)
 ///
 /// A plain text completion (no tools; providers stream raw text) over the span
 /// rendered as `role: content` lines, wrapped in the summarizer system block.
-/// Every side call in this crate goes through it, `fold` included: fold used to
-/// build its own bare prompt, so the fold path ran a DIFFERENT system block from
-/// the compaction path and its output was shaped by a prompt python never sends.
+/// Every side call in this crate goes through it, `fold` included.
 ///
-/// NO INPUT CUT. Rust truncated the rendered span at 20 000 chars, which python
-/// does not; a long span therefore summarized only its head.
+/// `max_tokens` bounds the output (a fold summary's budget); the second value
+/// says whether the provider stopped AT that bound (`stop_reason ==
+/// "max_tokens"`), so a cut-off summary is never kept as if it were whole.
 ///
-/// A REASONING MODEL THINKS OUT LOUD HERE TOO. Measured 2026-09-06 (python),
-/// across two e2e runs: 172 of 172 model-written folds carried a title beginning
+/// NO INPUT CUT. A REASONING MODEL THINKS OUT LOUD HERE TOO: measured 2026-09-06
+/// (python), 172 of 172 model-written folds carried a title beginning
 /// `<think>The user wants me to summarize…`. Side calls strip like the main turn.
-pub async fn summarize(provider: &Arc<dyn Provider>, msgs: &[Value]) -> String {
+pub async fn summarize(
+    provider: &Arc<dyn Provider>,
+    msgs: &[Value],
+    max_tokens: Option<i64>,
+) -> (String, bool) {
     let rendered: String = msgs
         .iter()
         .map(|m| {
@@ -146,24 +153,26 @@ pub async fn summarize(provider: &Arc<dyn Provider>, msgs: &[Value]) -> String {
              decisions, facts, preferences, and unresolved tasks. Output ONLY the summary."}),
         json!({"role": "user", "content": rendered}),
     ];
-    let Ok(mut stream) = provider.chat(&prompt).await else {
-        return String::new();
+    provider.clear_stop_reason();
+    let Ok(mut stream) = provider.chat(&prompt, max_tokens).await else {
+        return (String::new(), false);
     };
     let mut parts: Vec<String> = Vec::new();
     while let Some(ev) = stream.next().await {
         match ev {
             Ok(ProviderEvent::Token(t)) => parts.push(t),
-            Err(_) => return String::new(),
+            Err(_) => return (String::new(), false),
         }
     }
-    crate::think::without_thinking(&parts.join(""))
+    let cut = provider.report().stop_reason.as_deref() == Some("max_tokens");
+    (crate::think::without_thinking(&parts.join("")), cut)
 }
 
 /// Summarize the overflow via [`summarize`]; degrade to a stub on ANY failure (a
 /// degraded artifact — the full transcript is whole in the durable store, so this
 /// is not a fallback chain). Python `safe_summary`.
 pub async fn safe_summary(provider: &Arc<dyn Provider>, overflow: &[Value]) -> String {
-    let s = summarize(provider, overflow).await;
+    let (s, _cut) = summarize(provider, overflow, None).await;
     let s = py_strip(&s);
     if s.is_empty() {
         STUB_SUMMARY.to_string()
@@ -189,6 +198,7 @@ pub async fn compact(
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
+            fold_refused: 0,
         };
     }
     let summary = safe_summary(provider, &overflow).await;
@@ -212,6 +222,7 @@ pub async fn compact(
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
+            fold_refused: 0,
         };
     };
     let head_cost = estimate_one(first);
@@ -231,6 +242,7 @@ pub async fn compact(
         stripped: 0,
         stripped_bytes: 0,
         folded: 0,
+        fold_refused: 0,
     }
 }
 
@@ -245,6 +257,7 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
+            fold_refused: 0,
         };
     }
     let first = body[0].clone();
@@ -260,6 +273,7 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
         stripped: 0,
         stripped_bytes: 0,
         folded: 0,
+        fold_refused: 0,
     }
 }
 

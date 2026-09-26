@@ -70,14 +70,11 @@ struct TextFileTests {
         let w = await callBin(
             k, .object(["type": .string("write"), "path": .string("a.txt")]), "hello\n")
         #expect(w["error"].isNull, "\(w)")
-        let rows = await k.send([
-            Item(
-                AgentId("kernel"),
-                .object([
-                    "type": .string("rows_read"), "agent": .string("fs"),
-                    "limit": .integer(200),
-                ]))
-        ])[0].result
+        // THE EXECUTION ROWS still in RAM (no memory store is wired, so nothing
+        // flushed them) — the leg's own call rows.
+        let rows: JSON = .object([
+            "rows": .array(k.rows.all().filter { $0["agent"]?.asString == "fs" }.map { .object($0) })
+        ])
         let calls = (rows["rows"].asArray ?? []).filter { $0["kind"].asString == "call" }
         let verbs = calls.compactMap { $0["verb"].asString }
         #expect(verbs.contains("write_stream"), "no leg call row: \(rows.serialize())")
@@ -89,14 +86,9 @@ struct TextFileTests {
         // …and the read half too.
         let r = await call(k, .object(["type": .string("read"), "path": .string("a.txt")]))
         #expect(r["error"].isNull, "\(r)")
-        let after = await k.send([
-            Item(
-                AgentId("kernel"),
-                .object([
-                    "type": .string("rows_read"), "agent": .string("fs"),
-                    "limit": .integer(200),
-                ]))
-        ])[0].result
+        let after: JSON = .object([
+            "rows": .array(k.rows.all().filter { $0["agent"]?.asString == "fs" }.map { .object($0) })
+        ])
         #expect(
             (after["rows"].asArray ?? []).contains {
                 $0["kind"].asString == "call" && $0["verb"].asString == "read_stream"

@@ -121,7 +121,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
 
     /// Inject a pre-built transport for `agentId`; the next `boot` of a leg whose
     /// record says `transport: "memory"` POPS it. Python's memory pair cannot be
-    /// carried in `agent.json` either — the test wires it and then boots.
+    /// carried in `agent.yaml` either — the test wires it and then boots.
     public func injectTransport(agentId: AgentId, transport: any BridgeTransport) {
         stateLock.lock()
         injectedTransports[agentId] = transport

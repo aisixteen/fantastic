@@ -7,7 +7,7 @@ UniFFI, no XCFramework, no native subprocess required.
 **Python (`../python/`) is the canonical reference for the Fantastic
 protocol.** This Swift kernel mirrors Python's wire shape (HTTP
 routes, WS frames, system verb payloads), on-disk format
-(`.fantastic/` layout, `agent.json` indent=2 pretty), and reflect
+(`.fantastic/` layout, `agent.yaml` / `messages.yaml` byte-identical YAML), and reflect
 contract. Drift from Python is a bug. Mechanical drift detection
 runs in [`Tests/FantasticParityTests`](Tests/FantasticParityTests/) —
 spawns the Python kernel as a subprocess and byte-diffs JSON replies
@@ -67,7 +67,7 @@ kernel modules.
 |---|---|---|---|
 | file_bridge | `FantasticFile` | both | the gated fs edge — sealed by default, running-dir clamp; read/write + read_stream/write_stream/pump (raw bytes) |
 | yaml_state | `FantasticYamlState` | both | durable YAML memory (`mem`/`data`); persists `state.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) — owns no disk of its own |
-| scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.json`/`history.jsonl` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
+| scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.yaml`/`schedule_events.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | cli | `FantasticCliBundle` | both | terminal render sink (`cli.tools`): token/done/say/error/status/context + the PTY intro to stdout; unknown verbs dropped |
 | ws_bridge / relay_connector | `FantasticKernelBridge` | both | cross-kernel comms, two io_bridge derivations (sealed by default). `ws_bridge`: in-memory + WS (asymmetric; targets remote `web_ws`). `relay_connector`: dials a relay-KERNEL router (`ws://host/<guid>`, group password in `X-Fantastic-Auth`, subprotocol `fantastic.relay.v1`), reaches a `partner_guid` and TUNNELS io_bridge frames over it; our `guid` auto-mints + persists on first boot if absent (explicit wins); auto-reconnect + keepalive + directory (`list_peers`/`watch_directory`); directory typing for the kernelgroup model — advertises an opaque attrs blob (`role` manager\|kernel, `owner_guid`, `exposes`) to the relay, `set_identity` updates it live; raw `read_stream` chunks ride as native binary WS frames (no base64) |
 | web | `FantasticWeb` | both | HTTP + WS server (swift-nio — serves on macOS + Linux) |
@@ -86,7 +86,8 @@ transport pairs two kernels (e.g. Swift ↔ Python) for end-to-end
 mixed-runtime tests.
 
 `OrderedDictionary` (from swift-collections) backs the `JSON.object`
-variant so `agent.json` byte-for-byte parity holds across runtimes.
+variant so `agent.yaml` byte-for-byte parity holds across runtimes (the
+YAML emitter is `FantasticKernel/MessagesYAML.swift`, by hand; Yams parses).
 
 ## Building
 

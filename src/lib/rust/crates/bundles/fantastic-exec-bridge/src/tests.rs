@@ -2109,9 +2109,7 @@ async fn a_watching_program_holds_drain_task_rows() {
     }
 
     // C36 — and each one is a ROW, under the id `ps` reported.
-    let store: Vec<_> = kernel
-        .rows
-        .for_agent(&a)
+    let store: Vec<_> = fantastic_kernel::test_support::rows_about(&kernel, &a)
         .into_iter()
         .filter(|r| r.get("kind") == Some(&json!("task")))
         .collect();

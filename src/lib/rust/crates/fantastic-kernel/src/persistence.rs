@@ -2,12 +2,12 @@
 //!
 //! ```text
 //! .fantastic/
-//! ├── lock.json                 {pid: u32}
-//! ├── agent.json                root record
+//! ├── lock.yaml                 pid: <u32>
+//! ├── agent.yaml                root record
 //! ├── readme.md                 seeded from the root bundle (if any)
 //! └── agents/
 //!     └── <child_id>/
-//!         ├── agent.json
+//!         ├── agent.yaml
 //!         ├── readme.md
 //!         └── agents/<grandchild>/...
 //! ```
@@ -37,6 +37,26 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// The record file of every agent dir — one block-style YAML mapping, keys in
+/// record order ([`crate::yaml_io::dump`]).
+pub const RECORD_FILE: &str = "agent.yaml";
+
+/// A record file's text → its mapping, or `None` when it is not one (corrupt,
+/// empty, a scalar). Callers skip or reseed; nothing is repaired.
+pub fn parse_record(raw: &str) -> Option<Map<String, Value>> {
+    match crate::yaml_io::load(raw) {
+        Ok(Value::Object(m)) => Some(m),
+        _ => None,
+    }
+}
+
+/// An agent record as the mapping its `agent.yaml` holds (id, handler_module,
+/// meta…, parent_id — the persisted key order).
+#[must_use]
+pub fn record_map(rec: &AgentRecord) -> Value {
+    crate::jsonsafe::record_value(rec)
+}
 
 /// ONE STORE IO, THROUGH THE BATCH (C47).
 ///
@@ -150,7 +170,7 @@ fn normalize_lexical(base: &Path, p: &Path) -> PathBuf {
 }
 
 /// An agent's dir RELATIVE to the loader's store root (`.fantastic`). The root
-/// loader itself → `""` (its `agent.json` sits at the provider root); a child →
+/// loader itself → `""` (its `agent.yaml` sits at the provider root); a child →
 /// `agents/<id>` (recursively). Both paths share the same base, so this is a
 /// plain prefix-strip (no canonicalization).
 pub fn store_reldir(store_root: &Path, agent_root: &Path) -> String {
@@ -227,7 +247,7 @@ fn mint_tmp_suffix() -> String {
     crate::lifecycle::hex(&crate::lifecycle::os_random(4))
 }
 
-/// Persist an agent's record onto its per-agent `agent.json` ("dirty binding"):
+/// Persist an agent's record onto its per-agent `agent.yaml` ("dirty binding"):
 /// the in-RAM agent and the on-disk file aren't strictly coupled; this brings the
 /// file up to date for the kernel-managed fields, leaving every other field
 /// alone. The write goes **THROUGH the discovered `file_bridge` provider's
@@ -237,14 +257,14 @@ fn mint_tmp_suffix() -> String {
 /// - **InMemory mode** → no-op (no filesystem at all)
 /// - **Ephemeral agent** → no-op (per-process composition; never persists)
 /// - **No provider wired** → no-op (RAM; lost on restart until a store is wired)
-/// - **Provider wired** → `read_stream` the existing JSON (ONE chunk, C44),
+/// - **Provider wired** → `read_stream` the existing YAML (to eof),
 ///   MERGE the agent's `record()` fields over it (overwriting only those keys,
 ///   leaving unknown keys + sidecars untouched), `write_stream` the merged
-///   JSON to a TMP sibling and `rename` it over `agent.json` (C43 — the same
+///   YAML to a TMP sibling and `rename` it over `agent.yaml` (C43 — the same
 ///   tmp+rename commit `text_file::write_atomic` uses). If the provider is
 ///   sealed it refuses and the write doesn't land — NO fallback; gating the
-///   store is the operator's choice. `json.dumps(record, indent=2)` bytes,
-///   python-exact including `\uXXXX` escapes (C42).
+///   store is the operator's choice. `yaml_io.dump(record)` bytes,
+///   python-exact.
 pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     if kernel.storage.is_in_memory() || agent.ephemeral {
         return Ok(());
@@ -257,18 +277,18 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     };
     let reldir = store_reldir(&root.root_path, &agent.root_path);
     let af = if reldir.is_empty() {
-        "agent.json".to_string()
+        RECORD_FILE.to_string()
     } else {
-        format!("{reldir}/agent.json")
+        format!("{reldir}/{RECORD_FILE}")
     };
     // Merge: the WHOLE document through the provider (python pages to eof since
     // 2026-09-20; one chunk lost every key of a record over 64 KiB), then overlay
     // the kernel-managed keys.
     let existing = read_via_store(kernel, &store_id, &af).await;
-    let mut on_disk: Map<String, Value> = match serde_json::from_slice::<Value>(&existing) {
-        Ok(Value::Object(m)) => m,
-        _ => Map::new(),
-    };
+    let mut on_disk: Map<String, Value> = std::str::from_utf8(&existing)
+        .ok()
+        .and_then(parse_record)
+        .unwrap_or_default();
     let record_json = crate::jsonsafe::record_value(&agent.record());
     if let Value::Object(record_map) = record_json {
         for (k, v) in record_map {
@@ -279,13 +299,13 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     // `code` field to lift out to a `main.py` sidecar any more: a durable program
     // is a FILE some process (or a `write_stream`) put on disk, not a record field
     // (mirrors python's `kernel_state`, which no longer splits code).
-    let json = fantastic_bundle::py_json_dumps(&Value::Object(on_disk), true, Some(2));
+    let body = crate::yaml_io::dump(&Value::Object(on_disk));
     let tmp = format!("{af}.tmp.{}", mint_tmp_suffix());
     let (write_meta, _) = store_send_binary(
         kernel,
         &store_id,
         serde_json::json!({"type": "write_stream", "path": tmp, "truncate": true}),
-        json.into_bytes(),
+        body.into_bytes(),
     )
     .await;
     if write_meta.get("error").is_some() {
@@ -385,7 +405,7 @@ pub async fn forget_path(kernel: &Arc<Kernel>, agent_root: &Path) {
     }
     let _ = Box::pin(crate::send::with_operator(kernel.send(vec![Item::new(
         store_id,
-        // `recursive` is REQUIRED: an agent's dir holds `agent.json` (and any
+        // `recursive` is REQUIRED: an agent's dir holds `agent.yaml` (and any
         // sidecars), and a bare `delete` on a populated dir refuses — py parity
         // (`kernel_state._forget_via_store` has always passed it).
         serde_json::json!({"type": "delete", "path": reldir, "recursive": true}),
@@ -435,11 +455,11 @@ pub fn load_children(
     paths.sort();
 
     for entry in paths {
-        let agent_file = entry.join("agent.json");
+        let agent_file = entry.join(RECORD_FILE);
         if !agent_file.exists() {
             continue;
         }
-        // An unreadable or corrupt `agent.json` is skipped SILENTLY — python
+        // An unreadable or corrupt `agent.yaml` is skipped SILENTLY — python
         // swallows both in `kernel_state/tools.py:131-155` and prints nothing
         // (A15.3). A rust-only WARN here landed on a one-shot's stdout and
         // stopped the reply parsing as JSON.
@@ -447,9 +467,10 @@ pub fn load_children(
             Ok(s) => s,
             Err(_) => continue,
         };
-        let rec: AgentRecord = match serde_json::from_str(&raw) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Some(rec) = parse_record(&raw)
+            .and_then(|m| serde_json::from_value::<AgentRecord>(Value::Object(m)).ok())
+        else {
+            continue;
         };
 
         // Weak-load check: if handler_module is set AND isn't in this
@@ -500,11 +521,11 @@ pub fn load_children(
 /// record returns `[]` (the caller reseeds), and a corrupt SIBLING is skipped.
 /// Port of python `kernel_state.tools.read_tree`.
 pub fn read_tree(root_dir: &Path) -> Vec<Value> {
-    let root_file = root_dir.join("agent.json");
+    let root_file = root_dir.join(RECORD_FILE);
     let Ok(raw) = fs::read_to_string(&root_file) else {
         return Vec::new();
     };
-    let Ok(Value::Object(root_rec)) = serde_json::from_str::<Value>(&raw) else {
+    let Some(root_rec) = parse_record(&raw) else {
         return Vec::new();
     };
     // The root record DECLARES the children-dir name (default "agents"); a
@@ -534,10 +555,10 @@ fn walk_tree(root_dir: &Path, rel_dir: &str, parent_id: &Value, out: &mut Vec<Va
             continue;
         };
         let rel = format!("{rel_dir}/{name}");
-        let Ok(raw) = fs::read_to_string(root_dir.join(&rel).join("agent.json")) else {
+        let Ok(raw) = fs::read_to_string(root_dir.join(&rel).join(RECORD_FILE)) else {
             continue;
         };
-        let Ok(Value::Object(mut rec)) = serde_json::from_str::<Value>(&raw) else {
+        let Some(mut rec) = parse_record(&raw) else {
             continue; // corrupt sibling → skip
         };
         rec.insert("parent_id".to_string(), parent_id.clone());
@@ -599,15 +620,15 @@ pub fn write_record_at(path: &Path, rec: &AgentRecord) -> KernelResult<()> {
             source: e,
         })?;
     }
-    let json = serde_json::to_string_pretty(rec).expect("AgentRecord always serializable");
-    fs::write(path, json).map_err(|e| KernelError::Persistence {
+    let body = crate::yaml_io::dump(&crate::jsonsafe::record_value(rec));
+    fs::write(path, body).map_err(|e| KernelError::Persistence {
         path: path.to_path_buf(),
         source: e,
     })?;
     Ok(())
 }
 
-/// Read an `agent.json` from `path` if it exists.
+/// Read an `agent.yaml` from `path` if it exists.
 pub fn read_record_at(path: &Path) -> KernelResult<Option<AgentRecord>> {
     if !path.exists() {
         return Ok(None);
@@ -616,18 +637,23 @@ pub fn read_record_at(path: &Path) -> KernelResult<Option<AgentRecord>> {
         path: path.to_path_buf(),
         source: e,
     })?;
-    let rec: AgentRecord = serde_json::from_str(&raw).map_err(|e| KernelError::CorruptRecord {
+    let map = parse_record(&raw).ok_or_else(|| KernelError::CorruptRecord {
         path: path.to_path_buf(),
-        source: e,
+        reason: "not a YAML mapping".to_string(),
     })?;
+    let rec: AgentRecord =
+        serde_json::from_value(Value::Object(map)).map_err(|e| KernelError::CorruptRecord {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
     Ok(Some(rec))
 }
 
 /// Standard relative path of the daemon lock from a workdir.
-pub const LOCK_PATH: &str = ".fantastic/lock.json";
+pub const LOCK_PATH: &str = ".fantastic/lock.yaml";
 
 /// Standard relative path of the root agent's record from a workdir.
-pub const ROOT_RECORD_PATH: &str = ".fantastic/agent.json";
+pub const ROOT_RECORD_PATH: &str = ".fantastic/agent.yaml";
 
 /// Standard relative directory containing child records from a workdir.
 pub const CHILDREN_DIR: &str = ".fantastic/agents";
@@ -804,40 +830,27 @@ async fn flush_records(kernel: &Arc<Kernel>, dirty: &Arc<std::sync::Mutex<Dirty>
 /// The MACHINERY lives here, in the kernel, because both the shipped
 /// `kernel_state.tools` bundle and the kernel's own test double drive exactly
 /// the same sequence; the bundle owns the VERB SURFACE, not a second copy of
-/// this. Python keeps these on the loader agent (`_fs_flush_loop`,
-/// `_message_pump`).
+/// this. Python keeps it on the loader agent (`_fs_flush_loop`).
 #[derive(Default)]
 pub struct RootLoaderState {
     /// The debounced record writer, when this loader watches (`watch != false`).
     pub writer: Option<PersistWriter>,
-    /// The message pump — ROOT only.
-    pub pump: Option<crate::messages_log::MessagePump>,
 }
 
 /// The loader's `boot`, python `kernel_state._boot`:
 ///
-/// 1. ROOT only — REBUILD the execution ledger from the tape (the `call` +
-///    `settle` rows the cold hydration already put back), then start the message
-///    pump at the highest id hydration saw. That order: rebuilding mints nothing,
-///    and nothing rebuilt is re-appended.
-/// 2. Unless `watch=false` (a loader serving a REMOTE kernel answers verbs
+/// 1. Unless `watch=false` (a loader serving a REMOTE kernel answers verbs
 ///    only) — subscribe the record writer to the kernel state stream.
-/// 3. ROOT only — mint the instance `guid` ONCE, AFTER the writer subscribes,
+/// 2. ROOT only — mint the instance `guid` ONCE, AFTER the writer subscribes,
 ///    so the `updated` event it publishes is what carries the new record to
 ///    disk. An explicit or already-persisted guid always wins.
+///
+/// There is no message pump and no hydration: the kernel keeps no conversation,
+/// and its execution rows are flushed by the kernel itself into the root's memory
+/// store (`kernel_start`).
 pub async fn boot_root_loader(kernel: &Arc<Kernel>, agent: &Arc<Agent>) -> RootLoaderState {
     let mut state = RootLoaderState::default();
     let is_root = agent.parent_id.is_none();
-    if is_root {
-        // THE TAPE IS THE LEDGER. `hydrate_messages` put the rows back cold; here
-        // the settled calls become `executions` again, so dedup survives the
-        // reboot out of one file.
-        let _ = crate::messages_log::hydrate_executions(kernel);
-        state.pump = Some(crate::messages_log::install_message_pump(
-            kernel,
-            kernel.rows.next_id() - 1,
-        ));
-    }
     let watching = agent
         .meta
         .read()
@@ -860,25 +873,17 @@ pub async fn boot_root_loader(kernel: &Arc<Kernel>, agent: &Arc<Agent>) -> RootL
                 "guid".to_string(),
                 Value::String(crate::lifecycle::mint_guid()),
             );
-            let rec = agent.update_meta(patch);
-            kernel.publish_state(&serde_json::json!({
-                "agent_id": rec.id,
-                "kind": "updated",
-                "changed": ["guid"],
-            }));
+            kernel.update(&agent.id, patch);
         }
     }
     state
 }
 
-/// Unsubscribe and stop both loops — python `_MessagePump.stop` +
-/// `_FlushLoop.stop`. The WRITING happened in `flush_pending`, before the walk.
+/// Unsubscribe and stop the record loop — python `_FlushLoop.stop`. The WRITING
+/// happened in `flush_pending`, before the walk.
 pub async fn shutdown_root_loader(state: RootLoaderState, kernel: &Arc<Kernel>) {
     if let Some(w) = state.writer {
         w.stop(kernel).await;
-    }
-    if let Some(p) = state.pump {
-        p.stop(kernel).await;
     }
 }
 

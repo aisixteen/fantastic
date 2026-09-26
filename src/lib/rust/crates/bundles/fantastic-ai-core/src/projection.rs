@@ -8,18 +8,18 @@
 
 use crate::context::{
     budget as agent_budget, estimate_one, estimate_tokens, recent_n as cfg_recent_n,
-    resolve_context_window, NOTICE_ENVELOPE_RESERVE,
+    resolve_context_window, BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE,
 };
 use crate::events::to_caller;
 use crate::helpers::{agent_meta, now_secs};
-use crate::history::load_history;
+use crate::memory::{load_history, save_view, MemoryStoreError};
 use crate::provider::Provider;
 use crate::state::BackendState;
 use crate::strategies::{
     compact, drop_orphan_tools, fold::fold, is_known_strategy, strip::strip, truncate,
     ProjectionCtx,
 };
-use crate::view::{res_of, save_view};
+use crate::view::res_of;
 use fantastic_bundle::py_repr_value;
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
@@ -27,6 +27,33 @@ use std::sync::Arc;
 
 /// Fold rows between automatic recalls. Python `RECALL_EVERY`.
 pub const RECALL_EVERY: usize = 3;
+
+/// THE TRIGGER: compaction fires once the calibrated prompt passes this share of
+/// the budget — early enough that the summariser itself has headroom. Python
+/// `TRIGGER`.
+pub const TRIGGER: f64 = 0.8;
+
+/// `round(x, 3)` — how python reports the calibration.
+#[must_use]
+pub fn round3(x: f64) -> f64 {
+    (x * 1000.0).round() / 1000.0
+}
+
+/// Why a projection produced no view.
+#[derive(Debug)]
+pub enum ProjectFail {
+    /// The `too_small` failsafe or an unknown-strategy config error — the dict IS
+    /// the reply.
+    Refusal(Value),
+    /// The memory store refused a read or a write the projection needed.
+    Store(MemoryStoreError),
+}
+
+impl From<MemoryStoreError> for ProjectFail {
+    fn from(e: MemoryStoreError) -> Self {
+        Self::Store(e)
+    }
+}
 
 /// The ONE canonical inbound context-notice — composed at the SEAM from a
 /// strategy's projection artifact. A `role:user` turn (the role every backend
@@ -52,15 +79,15 @@ pub fn context_notice(
     if stripped > 0 {
         lines.push(format!(
             "{stripped} reply bod(ies) were STRIPPED to their tag+title line \
-             ({stripped_bytes} bytes left your view); every one is still in durable \
-             storage — recall it by the pid on its line."
+             ({stripped_bytes} bytes left your view); grep finds a line in a body held \
+             this run — after a restart, re-read it from its origin."
         ));
     }
     // PYTHON'S BYTES. This line teaches the model how to page turns back, and
     // it taught the OLD JSON shape (`{type:'recall', query?, limit?}`) until
     // 2026-09-12 — a call the harness refuses. Python `_context_notice`.
     lines.push(
-        "The full transcript is intact in durable storage. To page dropped turns back, \
+        "The full transcript is intact in your memory store. To page dropped turns back, \
          send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`). If the dropped span holds \
          durable facts (names, decisions, preferences), persist them to your memory agent \
          now via the send tool — the earlier turns are leaving your live view."
@@ -88,11 +115,22 @@ pub async fn project_context(
     name: &str,
     messages: Vec<Value>,
     store_len: usize,
-) -> Result<Vec<Value>, Value> {
+) -> Result<Vec<Value>, ProjectFail> {
     let meta = agent_meta(self_id, kernel);
-    let b = agent_budget(&meta);
-    if estimate_tokens(&messages) <= b {
-        *state.projection.lock().expect("projection poisoned") = Some(json!({"fired": false}));
+    // THE BUDGET IN ESTIMATE UNITS: the record's budget, divided by how much the
+    // endpoint's own count exceeded our estimate last turn (`calib`).
+    let calib = state.calib.lock().expect("calib poisoned").unwrap_or(1.0);
+    let b = if calib > 0.0 {
+        ((agent_budget(&meta) as f64 / calib) as i64).max(BUDGET_FLOOR)
+    } else {
+        agent_budget(&meta)
+    };
+    if estimate_tokens(&messages) <= (b as f64 * TRIGGER) as i64 {
+        *state.projection.lock().expect("projection poisoned") = Some(json!({
+            "fired": false,
+            "trigger": TRIGGER,
+            "calibration": round3(calib),
+        }));
         return Ok(messages);
     }
     let system_block: Vec<Value> = messages.iter().take(1).cloned().collect();
@@ -138,7 +176,9 @@ pub async fn project_context(
             }),
         )
         .await;
-        return Err(json!({"error": format!("{name}: context_insufficient — {hint}")}));
+        return Err(ProjectFail::Refusal(json!({
+            "error": format!("{name}: context_insufficient — {hint}")
+        })));
     }
     // RAW, as python's `rec.get("context_strategy", DEFAULT_STRATEGY)`: only an
     // ABSENT key means `compact`. `as_str().unwrap_or("compact")` was a fallback
@@ -150,13 +190,13 @@ pub async fn project_context(
     let Some(strat_name) = strat_value.as_str().filter(|n| is_known_strategy(n)) else {
         // python `f"... {strat_name!r} (valid: {strategy_names()})"` — the repr of
         // the VALUE, and `str(list)` of the registry's names.
-        return Err(json!({
+        return Err(ProjectFail::Refusal(json!({
             "error": format!(
                 "{name}: unknown context_strategy {} (valid: {})",
                 py_repr_value(&strat_value),
                 py_repr_value(&json!(crate::strategies::STRATEGY_NAMES)),
             ),
-        }));
+        })));
     };
     let strat_name = strat_name.to_string();
     let recent = cfg_recent_n(&meta);
@@ -170,8 +210,8 @@ pub async fn project_context(
     };
     let proj = match strat_name.as_str() {
         "truncate" => truncate(&body, body_budget),
-        "strip" => strip(&body, &pctx).await,
-        "fold" => fold(&body, &pctx).await,
+        "strip" => strip(&body, &pctx).await?,
+        "fold" => fold(&body, &pctx).await?,
         _ => compact(&body, recent, body_budget, provider).await,
     };
     let dropped_pre = body.len().saturating_sub(proj.body.len());
@@ -212,8 +252,12 @@ pub async fn project_context(
     }
     let dropped_n = body.len().saturating_sub(out_body.len());
     let summarized = proj.summary.is_some();
+    let reported = *state.reported.lock().expect("reported poisoned");
     *state.projection.lock().expect("projection poisoned") = Some(json!({
         "fired": true,
+        "trigger": TRIGGER,
+        "calibration": round3(calib),
+        "reported_prompt_tokens": reported,
         "strategy": strat_name,
         "kept_messages": out_body.len(),
         "dropped_messages": dropped_n,
@@ -225,6 +269,9 @@ pub async fn project_context(
         "stripped": proj.stripped,
         "stripped_bytes": proj.stripped_bytes,
         "folded": proj.folded,
+        // Spans the fold strategy did NOT fold: the summary stayed over its budget
+        // after one re-summarise. Loud here, never a truncated summary.
+        "fold_refused": proj.fold_refused,
         // What the model actually sees this turn — so "after reload it sees only
         // the fold" is measured from the view, never self-reported.
         "view_ids": out_body.iter().filter_map(|m| m.get("id").and_then(Value::as_i64))
@@ -247,7 +294,8 @@ pub async fn project_context(
             .collect::<Vec<_>>(),
         b,
         &format!("projection: {strat_name}"),
-    );
+    )
+    .await?;
     // `store_len`, NOT `body.len() - 1`. `body` is the DEDUPED/trimmed model view
     // and `derive_reaction` slices the FULL durable store by this index; whenever
     // the trimmers dropped whole turns the index came up short by that many, so the
@@ -302,7 +350,7 @@ pub async fn derive_reaction(
     self_id: &AgentId,
     state: &Arc<BackendState>,
     kernel: &Arc<Kernel>,
-) -> Option<Value> {
+) -> Result<Option<Value>, MemoryStoreError> {
     let fired = state
         .projection
         .lock()
@@ -311,15 +359,15 @@ pub async fn derive_reaction(
         .and_then(|p| p.get("fired").and_then(Value::as_bool))
         .unwrap_or(false);
     let mark = state.compaction_mark.lock().expect("mark poisoned").clone();
-    let (idx, client_id) = match (fired, mark) {
+    let (idx, _client_id) = match (fired, mark) {
         (true, Some(m)) => m,
-        _ => return None,
+        _ => return Ok(None),
     };
-    let store = load_history(self_id, kernel, &client_id, false).await;
-    Some(reaction_from(
+    let store = load_history(self_id, kernel, false).await?;
+    Ok(Some(reaction_from(
         self_id.as_str(),
         store.get(idx..).unwrap_or_default(),
-    ))
+    )))
 }
 
 /// The reaction read itself, over the durable turns AFTER the notice cursor: did

@@ -1,6 +1,6 @@
-//! `.fantastic/lock.json` PID guard.
+//! `.fantastic/lock.yaml` PID guard.
 //!
-//! Shape: `{"pid": <u32>}`. A daemon writes the lock at boot; later
+//! Shape: `pid: <u32>` (a YAML mapping, [`crate::yaml_io::dump`]). A daemon writes the lock at boot; later
 //! invocations refuse with `KernelError::LockHeld` if the pid is alive.
 //! Stale locks (dead pid) get overwritten — matches Python's behavior.
 //!
@@ -49,7 +49,7 @@ pub fn pid_alive(pid: u32) -> bool {
 }
 
 /// Acquire the workdir lock for the current process. Writes
-/// `.fantastic/lock.json` with our pid.
+/// `.fantastic/lock.yaml` with our pid.
 ///
 /// If the lock file already exists AND the pid in it is alive,
 /// returns [`KernelError::LockHeld`]. If the pid is dead, the lock
@@ -67,7 +67,7 @@ pub fn acquire(workdir: &Path) -> KernelResult<PathBuf> {
             path: path.clone(),
             source: e,
         })?;
-        if let Ok(existing) = serde_json::from_str::<LockFile>(&raw) {
+        if let Some(existing) = parse_lock(&raw) {
             if pid_alive(existing.pid) {
                 return Err(KernelError::LockHeld { pid: existing.pid });
             }
@@ -75,10 +75,9 @@ pub fn acquire(workdir: &Path) -> KernelResult<PathBuf> {
         }
     }
     let me = std::process::id();
-    // python `json.dumps({"pid": os.getpid()})` — DEFAULT separators, i.e.
-    // `: ` after the key, not serde_json's compact `:` (C50).
-    let json = fantastic_bundle::py_json_dumps(&serde_json::json!({"pid": me}), true, None);
-    fs::write(&path, json).map_err(|e| KernelError::LockIo {
+    // python `yaml.dump({"pid": os.getpid()}, CSafeDumper, sort_keys=False)`.
+    let body = crate::yaml_io::dump(&serde_json::json!({"pid": me}));
+    fs::write(&path, body).map_err(|e| KernelError::LockIo {
         path: path.clone(),
         source: e,
     })?;
@@ -105,7 +104,7 @@ pub fn release(workdir: &Path) -> KernelResult<()> {
     let Ok(raw) = fs::read_to_string(&path) else {
         return Ok(());
     };
-    let Ok(lock) = serde_json::from_str::<LockFile>(&raw) else {
+    let Some(lock) = parse_lock(&raw) else {
         return Ok(());
     };
     if lock.pid != std::process::id() {
@@ -128,11 +127,17 @@ pub fn current_holder(workdir: &Path) -> KernelResult<Option<u32>> {
         path: path.clone(),
         source: e,
     })?;
-    let lock: LockFile = serde_json::from_str(&raw).map_err(|_| KernelError::LockIo {
+    let lock: LockFile = parse_lock(&raw).ok_or_else(|| KernelError::LockIo {
         path: path.clone(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, "lock.json malformed"),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, "lock.yaml malformed"),
     })?;
     Ok(Some(lock.pid))
+}
+
+/// python `_read_lock`: the YAML mapping, or `None` on any parse failure.
+fn parse_lock(raw: &str) -> Option<LockFile> {
+    let v = crate::yaml_io::load(raw).ok()?;
+    serde_json::from_value(v).ok()
 }
 
 #[cfg(test)]

@@ -563,7 +563,7 @@ async fn reflect_reply(agent: &Agent) -> Value {
         "verbs": {
             "reflect": "no args — identity, verb guide, and the wired default surface.",
             "boot": "no args — no-op; this agent holds no state to hydrate.",
-            "read": "args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary.",
+            "read": "args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version, origin}; refuses binary.",
             "write": "args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}.",
             "patch": "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}.",
             "append": "args: path:str (req), bytes (req — one chunk; str is utf-8-encoded), on:str? — appends (creates if absent); {path, size, version}.",
@@ -575,7 +575,7 @@ async fn reflect_reply(agent: &Agent) -> Value {
     })
 }
 
-async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
+async fn read_reply(id: &str, kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
     let path = match path_of(payload, "read") {
         Ok(p) => p,
         Err(e) => return e,
@@ -614,12 +614,22 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
         .enumerate()
         .map(|(i, t)| json!({"n": off + i + 1, "text": t}))
         .collect();
+    let ver = version_of(&data);
+    // HOW TO GET THIS BODY AGAIN — one line; a reader that keeps no body keeps
+    // this.
+    let origin = format!(
+        "{id} {path} lines {}-{} version {ver} — read {{path: {path}, offset: {off}, \
+         limit: {limit}}}; a different version means the file changed since",
+        off + 1,
+        off + page.len()
+    );
     json!({
         "path": path,
         "lines": page,
         "total": all_lines.len(),
         "eof": off.saturating_add(limit) >= all_lines.len(),
-        "version": version_of(&data),
+        "version": ver,
+        "origin": origin,
     })
 }
 
@@ -1094,7 +1104,7 @@ async fn dispatch(
         return unwired(verb);
     };
     match verb {
-        "read" => read_reply(kernel, &fb, payload).await,
+        "read" => read_reply(agent.id.as_str(), kernel, &fb, payload).await,
         "write" => write_reply(kernel, &fb, payload, blob).await,
         "patch" => patch_reply(kernel, &fb, payload, blob).await,
         "append" => append_reply(kernel, &fb, payload, blob).await,

@@ -28,9 +28,9 @@ fn a_blob_name_must_be_one_plain_filename() {
 
 #[test]
 fn kernel_managed_files_are_reserved() {
-    // A sidecar that could overwrite `agent.json` would let a consumer rewrite
+    // A sidecar that could overwrite `agent.yaml` would let a consumer rewrite
     // its own record — including its grants — through a byte channel.
-    for reserved in ["agent.json", "AGENT.JSON", "readme.md"] {
+    for reserved in ["agent.yaml", "AGENT.YAML", "readme.md"] {
         let e = guard_name(Some(reserved)).unwrap_err();
         assert!(e.contains("reserved"), "{reserved}: {e}");
     }

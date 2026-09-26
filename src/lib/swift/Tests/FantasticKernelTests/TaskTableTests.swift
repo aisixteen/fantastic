@@ -561,82 +561,24 @@ struct TaskTableCancelTests {
     // VERBATIM, `create_agent`'s `'kernel_state'` top-level token included — the
     // root-id rename landed with C12.
     static let pythonVerbDocs: [(String, String)] = [
-        (
-            "create_agent",
-            "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a "
-                + "CHILD OF `parent_id` — your own id grows your own subtree (no grant needed); "
-                + "'kernel_state' for top-level. No default parent."
-        ),
-        (
-            "update_agent",
-            "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you "
-                + "do not name is untouched), so a dict field must be sent WHOLE — "
-                + "`can_call`/`callable_by` included: restate every key you want to keep, the "
-                + "baseline `$self`/`$parent`/`$children` among them, or the keys you omit are "
-                + "GONE. Granting one edge reads like a PATCH and behaves like a PUT."
-        ),
-        (
-            "delete_agent",
-            "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest "
-                + "first; refuses if any descendant carries `delete_lock`."
-        ),
+        ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — your own id grows your own subtree (no grant needed); 'kernel_state' for top-level. No default parent."),
+        ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self`/`$parent`/`$children` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT."),
+        ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`."),
         ("list_agents", "No args. Every agent's record, flat. Paged."),
-        (
-            "ps",
-            "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, "
-                + "started_at}]}, one row per in-flight dispatch. Paged."
-        ),
-        (
-            "ledger",
-            "No args. EVERY execution and what it became — named under its id, unnamed under "
-                + "its minted pid — {executions:[{id, target, status, attempts, retries, named, "
-                + "outcome?}]}, paged, scoped to what YOU originated. Failed/timed_out/cancelled "
-                + "rows are the dead-letter queue: inspect, then retry with a NEW id if you choose "
-                + "— nothing is retried silently."
-        ),
-        (
-            "messages",
-            "args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, at "
-                + "DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, bytes, title?, "
-                + "level?, refs?}], refused:[ids], next?}. Your own rows always; another agent's "
-                + "only if its callable_by names you for `messages`. Bodies are behind that agent's "
-                + "`pull`."
-        ),
-        (
-            "rows_read",
-            "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a wildcard does not "
-                + "carry it). That agent's rows WHOLE (content included), oldest first — {rows:[…], "
-                + "next?}. The hydration read; agents read digests through `messages` instead."
-        ),
-        (
-            "rows_write",
-            "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a wildcard does not "
-                + "carry it). Appends rows to that agent's conversation, each under a FRESH id — "
-                + "{ids:[int]}. A row may not carry an `id`; re-ids are the caller's to remap."
-        ),
-        (
-            "cancel",
-            "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. "
-                + "Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as "
-                + "status:'cancelled'. Unknown id ⇒ {cancelled:false}."
-        ),
-        (
-            "shutdown_agents",
-            "No args. Stops the AGENTS, not the process: drains (new roots refused), sends "
-                + "`shutdown` to every agent advertising it, waits for in-flight work, cancels the "
-                + "rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        ),
-        (
-            "shutdown_kernel",
-            "No args. Stops the kernel PROCESS — under env:'container', the container."
-        ),
+        ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
+        ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently."),
+        ("ack_deadletter", "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}."),
+        ("kernel_start", "No args. THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}."),
+        ("cancel", "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
+        ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
+        ("kernel_stop", "No args. Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."),
     ]
 
     @Test func testKernelVerbsMapIsPythonVerbatim() async throws {
         let docs = try #require(Kernel.kernelVerbDocs().asObject)
         #expect(
             Array(docs.keys) == Self.pythonVerbDocs.map { $0.0 },
-            "the map is python's 12 keys in python's DECLARATION order")
+            "the map is python's 11 keys in python's DECLARATION order")
         for (name, text) in Self.pythonVerbDocs {
             #expect(docs[name]?.asString == text, "\(name) is not python's text")
         }

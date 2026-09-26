@@ -571,7 +571,7 @@ async fn a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger() {
     let rows = ledger_rows(&kernel).await;
     assert!(
         rows.iter()
-            .any(|r| r["target"] == b.0 && r["outcome"]["result"]["fast"] == true),
+            .any(|r| r["target"] == b.0 && r["status"] == "completed" && r["outcome"]["bytes"].is_number()),
         "a forked agent's send left no ledger row: {rows:?}"
     );
 }
@@ -582,7 +582,7 @@ async fn a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger() {
 /// reads it over a REST leg, and what that leg counts as the ORIGIN decides
 /// whether the probe sees the model's work at all.
 #[tokio::test]
-async fn the_ledger_view_is_origin_scoped() {
+async fn the_ledger_view_is_caller_scoped() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let b = mk_agent(&kernel, "l_theirs").await;
@@ -603,27 +603,25 @@ async fn the_ledger_view_is_origin_scoped() {
     })
     .await;
 
-    // The OPERATOR sees it.
-    let mine = |rows: Vec<serde_json::Value>| {
-        rows.iter()
-            .any(|r| r["target"] == b.0 && r["outcome"]["result"]["fast"] == true)
+    // The projection carries the originator as `_caller`; the `ledger` verb
+    // scopes by it — the operator sees all.
+    let entries = kernel.ledger_entries().await.expect("no store: RAM only");
+    let seen_by = |viewer: Option<&AgentId>| {
+        entries.iter().any(|e| {
+            e["target"] == b.0
+                && e["status"] == "completed"
+                && match viewer {
+                    None => true,
+                    Some(v) => e["_caller"] == v.0,
+                }
+        })
     };
-    assert!(
-        mine(kernel.ledger.rows_for(None)),
-        "the operator must see every execution: {:?}",
-        kernel.ledger.rows_for(None)
-    );
+    assert!(seen_by(None), "the operator must see every execution: {entries:?}");
     // A THIRD PARTY does not.
     let other = AgentId::from("l_stranger");
-    assert!(
-        !mine(kernel.ledger.rows_for(Some(&other))),
-        "an agent saw an execution it did not originate"
-    );
+    assert!(!seen_by(Some(&other)), "an agent saw an execution it did not originate");
     // The ORIGINATOR does.
-    assert!(
-        mine(kernel.ledger.rows_for(Some(&a))),
-        "the originator lost its own row"
-    );
+    assert!(seen_by(Some(&a)), "the originator lost its own row");
 }
 
 /// C22: the ledger row stores the execution's ORIGINAL PAYLOAD, and the join

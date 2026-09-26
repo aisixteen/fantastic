@@ -31,6 +31,28 @@ extension Kernel {
     /// Nothing propagates out: a handler that throws settles as `failed` with
     /// `raised: true`, a cancel settles as `cancelled`.
     public func send(_ items: [Item]) async -> [Outcome] {
+        // NAMED EXECUTIONS OUTLIVE RAM. Once flushed, a settled execution is only
+        // in the kernel's store; an item naming one is looked up there FIRST, so
+        // the synchronous launch below finds it exactly as if it had never left
+        // RAM. Python `Agent.send` → `recall_executions`.
+        //
+        // A STORE THAT FAILS THE LOOKUP: python's `_store_read` raises out of
+        // `send` itself. Swift's `send` does not throw, so every item of the batch
+        // settles `failed` with that raise as its body — the caller learns the
+        // same thing, and nothing is dispatched on a lookup that did not happen.
+        if storeId != nil, items.contains(where: { item in
+            let raw = item.rawId ?? item.id.map { JSON.string($0) }
+            return raw != nil && raw != .null
+        }) {
+            do {
+                try await recallExecutions(items)
+            } catch {
+                let err: JSON = .object([
+                    "error": .string(error.description), "raised": .bool(true),
+                ])
+                return items.map { _ in Outcome(pid: nil, status: .failed, result: err) }
+            }
+        }
         // SYNCHRONOUS launch: resolve, gate and claim the ledger row for EVERY
         // item before the first await, so `ps` shows the whole batch rather than
         // it appearing one row at a time.
@@ -180,13 +202,13 @@ extension Kernel {
             return .reflectFast(
                 ReflectFast(target: target, payload: item.payload, execId: nil))
         }
-        let execId: Int64 = joinId ?? rows.mintId()
+        let execId: Int64 = joinId ?? mintId()
         let taskId = TaskId(execId)
-        let origin = KernelTaskLocals.currentSender
+        let caller = KernelTaskLocals.currentSender
 
         switch ledger.open(
             execId, target: target.id, payload: item.payload, retries: retries, name: name,
-            origin: origin, callerId: callerId)
+            caller: caller, callerId: callerId)
         {
         case .refused(let r):
             return .settled(Outcome.refused(r))
@@ -199,36 +221,33 @@ extension Kernel {
             // about the verb this caller happened to send. Measured in python
             // 2026-08-28: a caller granted only a harmless verb reused another's
             // id and received its secret verbatim.
-            if let d = joinDenial(origin: origin, payload: origPayload, target: target) {
+            if let d = joinDenial(origin: caller, payload: origPayload, target: target) {
                 return .settled(Outcome.refused(d))
             }
             return .settled(o)
         // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS wait: it
         // does not own the execution and must not kill it.
-        case .join(let origPayload, let jid):
-            if let d = joinDenial(origin: origin, payload: origPayload, target: target) {
+        case .join(let origPayload, let jid, let box):
+            if let d = joinDenial(origin: caller, payload: origPayload, target: target) {
                 return .settled(Outcome.refused(d))
             }
-            return .joining(jid, timeout)
+            return .joining(jid, timeout, box)
         case .fresh:
             // THE CALL ROW, on the TARGET, under the pre-minted id — the trace of
-            // who was asked what, parented to the dispatch that asked.
-            //
-            // ONE TAPE. The row carries the WHOLE call — the dispatch payload
-            // verbatim, the retry budget, the attempt count as at dispatch, the
-            // deadline — because there is no second file: `messages.xml` is the
-            // only thing that outlives the process, and `attempts` is updated on
-            // this row at every retry (the kernel owns it in RAM).
-            // KEY ORDER IS PYTHON'S: id, kind, verb, parent, origin, payload,
-            // named, retries, attempts, timeout[, name].
+            // who was asked what, parented to the dispatch that asked. It carries
+            // the WHOLE call — the dispatch payload verbatim (raw bytes reduced to
+            // `{len}`), the retry budget, the attempt count as at dispatch, the
+            // deadline — and is what the kernel flushes into its memory store and
+            // reads back for `ledger` and named-call dedup.
+            // KEY ORDER IS PYTHON'S: id, kind, verb, parent, caller, payload,
+            // named, retries, attempts, timeout[, name]. (`origin` → `caller`:
+            // replies own `origin` now.)
             var callRow: Row = [
                 "id": .integer(execId), "kind": .string("call"), "verb": .string(verb),
             ]
             callRow["parent"] = KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null
-            // `origin` says who asked; absent (an operator's call) is what the
-            // loader's message pump keys its own-traffic skip on.
-            callRow["origin"] = origin.map { JSON.string($0.value) } ?? .null
-            callRow["payload"] = Kernel.tapeValue(item.payload, bytes: item.binary?.count)
+            callRow["caller"] = caller.map { JSON.string($0.value) } ?? .null
+            callRow["payload"] = Kernel.storeValue(item.payload, bytes: item.binary?.count)
             callRow["named"] = .bool(name != nil)
             callRow["retries"] = .integer(Int64(retries))
             callRow["attempts"] = .integer(1)
@@ -240,7 +259,7 @@ extension Kernel {
                 callRow["timeout"] = timeout.map { JSON.double($0) } ?? .null
             }
             if let name { callRow["name"] = .string(name) }
-            _ = try? rows.put(target.id, callRow)
+            _ = try? rowsPut(target.id, callRow)
         }
 
         // A CALLER-NAMED kernel reflect: the ledger applies (dedup, join, the
@@ -349,8 +368,8 @@ extension Kernel {
         switch launched {
         case .settled(let o):
             return o
-        case .joining(let execId, let timeout):
-            return await joinExecution(execId, timeout: timeout)
+        case .joining(let execId, let timeout, let box):
+            return await joinExecution(execId, timeout: timeout, box: box)
         case .dispatch(let d):
             var nextPid = d.taskId
             var pid: TaskId? = nil
@@ -364,9 +383,9 @@ extension Kernel {
             var body: Data? = nil
             while true {
                 let n = ledger.attempt(d.execId)
-                // THE TAPE COUNTS REAL RUNS. The call row was written with
-                // `attempts: 1`; every re-dispatch updates it in place, so a
-                // cold read of the log says what the work actually cost.
+                // THE ROW COUNTS REAL RUNS. The call row was written with
+                // `attempts: 1`; every re-dispatch updates it in place (while it
+                // is still in RAM), so the store says what the work cost.
                 if n > 1 { rows.stamp(d.execId, ["attempts": .integer(Int64(n))]) }
                 let box = TaskIdBox()
                 let (r, s, b) = await runDispatchOutcome(
@@ -429,23 +448,19 @@ extension Kernel {
         }
     }
 
-    /// Settle one execution's ledger row and write what the LOG keeps of it:
-    /// the outcome stamp on the call row, the `settle` row on the root, and the
-    /// persistence kick. Python `Agent._record` + `_stamp_call`.
+    /// Settle one execution's ledger row and write what the kernel KEEPS of it:
+    /// the outcome stamp on the live call row (while it is still in RAM), the
+    /// `settle` row on the root, and — for a dead ending — the `on_deadletter`
+    /// announcement. Python `Agent._record` + `_stamp_call`.
     private func recordSettle(
         execId: Int64, target: AgentId, pid: TaskId?, status: Status, reply: JSON, body: Data?
     ) -> Outcome {
+        let named = ledger.isNamed(execId)
         let out = ledger.settle(
             execId, Outcome(pid: pid, status: status, result: reply, body: body))
-        // THE OUTCOME IS A ROW TOO: the call row learns how it ended, and a
-        // `settle` row lands on the ROOT — never on the target's own list,
-        // which readers treat as the CONVERSATION. Python `_stamp_call`.
-        // The stamp is python's `{status, error?, reason?}` — an error's first
-        // 200 CODE POINTS, so a cold read of the log can say how a call ended.
-        // An `error` of ANY python-truthy type stamps (a refusal body whose
-        // error is a dict is still an error), rendered with `str()`; `reason`
-        // is copied RAW, whatever type it is. Reading only a non-empty string
-        // dropped every non-string error from the log.
+        // The live call row learns how it ended — python's `{status, error?,
+        // reason?}` stamp: an error's first 200 CODE POINTS, `reason` copied RAW.
+        // The call row may already be flushed (and gone from RAM) by now.
         var stamp: Row = ["status": .string(status.rawValue)]
         let err = reply["error"]
         if pyTruthy(err) {
@@ -456,42 +471,28 @@ extension Kernel {
         }
         rows.stamp(execId, ["outcome": .object(stamp)])
         if let r = root {
-            // THE SETTLE ROW CARRIES THE FULL OUTCOME — `{status, result}`, the
-            // body included, plus the final `attempts`. It is the only record of
-            // what a call became: `ledger.json` is gone, and a boot rebuilds
-            // `executions` (dedup across restart, C9) by reading these rows
-            // back. The SHORT stamp above stays on the live call row, where
-            // `messages` digests and the `ledger` verb read it.
+            // THE SETTLE IS ITS OWN ROW — a row is append-only, so the ending is
+            // an append, never an edit of the call row. It keeps what
+            // `storedOutcome` keeps: a NAMED call's whole result, a dead letter's
+            // error text, `{status, bytes}` otherwise. ON THE ROOT: a settle is
+            // KERNEL bookkeeping; `settled` names the target.
             let settleRow: Row = [
                 "kind": .string("settle"), "parent": .integer(execId),
                 "settled": .string(target.value),
-                "outcome": .object([
-                    "status": .string(status.rawValue),
-                    "result": Kernel.tapeValue(reply, bytes: body?.count),
-                ]),
+                "outcome": .object(
+                    storedOutcome(
+                        status: status.rawValue,
+                        result: Kernel.storeValue(reply, bytes: body?.count), named: named)),
                 "attempts": .integer(Int64(out.attempts)),
             ]
-            _ = try? rows.put(r.id, settleRow)
+            _ = try? rowsPut(r.id, settleRow)
         }
-        // NO DURABLE HALF TO KICK. The settle row IS the durable record now;
-        // the pump appends it like any other row, and its own appends stay out
-        // of the log by `MessagePump.skips`.
+        // A DEAD ENDING IS ANNOUNCED — nothing retries it on its own: someone has
+        // to look.
+        if DEAD_STATUSES.contains(status.rawValue) {
+            announceDeadletter(execId, status: status, attempts: out.attempts)
+        }
         return out
-    }
-
-    /// A row value with RAW BYTES reduced to their LENGTH.
-    ///
-    /// THE ONE REDUCTION. XML text cannot carry raw bytes and base64 is banned,
-    /// so a `write_stream` body in a call's payload and a `read_stream` chunk in
-    /// a settle's result are recorded as `{"len": N}` — python reduces the
-    /// `bytes` value it holds INSIDE the dict, swift carries those bytes on the
-    /// binary side channel (`Item.binary`, `Outcome.body`) and puts the same
-    /// `bytes` key back on the tape here. Everything else is verbatim; the
-    /// durable bytes live behind `file_bridge`, the one disk surface.
-    public static func tapeValue(_ value: JSON, bytes: Int?) -> JSON {
-        guard let n = bytes, case .object(var map) = value else { return value }
-        map["bytes"] = .object(["len": .integer(Int64(n))])
-        return .object(map)
     }
 
     /// Wait for an execution someone else owns.
@@ -499,10 +500,12 @@ extension Kernel {
     /// The joiner's `timeout` bounds only its OWN wait — on expiry it settles
     /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not own
     /// it and killing another caller's work would be a surprise.
-    func joinExecution(_ execId: Int64, timeout: Double?) async -> Outcome {
+    func joinExecution(_ execId: Int64, timeout: Double?, box: OutcomeBox) async -> Outcome {
         let deadline = timeout.map { Date().addingTimeInterval($0) }
         while true {
-            if let o = ledger.settledOutcome(execId) { return o }
+            // THE FUTURE THE OWNER SETTLES, held since launch: the execution may
+            // already have been flushed and forgotten by the time we look.
+            if let o = box.outcome { return o }
             if let d = deadline, Date() >= d {
                 // Python `_agent.py`: `pid` is the JOINED execution's id (not
                 // nil — the caller can still `cancel`/`ps` it), the text names
@@ -540,7 +543,7 @@ enum Launched {
     /// the task table (python `_Dispatched(pid=None)`).
     case reflectFast(ReflectFast)
     /// Already in flight under this id: wait for ITS outcome, run nothing.
-    case joining(Int64, Double?)
+    case joining(Int64, Double?, OutcomeBox)
     /// Passed the gate and claimed its row.
     case dispatch(Dispatch)
 }

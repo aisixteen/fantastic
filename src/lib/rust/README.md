@@ -133,7 +133,7 @@ iOS-safe bundles (compile under either tier):
 | `fantastic-web`             | axum HTTP host + WS + REST (dynamic mounting)                 |
 | `fantastic-web-ws`          | WS verb-channel routes (mounted onto parent web); sealed by default |
 | `fantastic-web-rest`        | REST verb-channel routes (mounted onto parent web); sealed by default |
-| `fantastic-scheduler`       | tokio-tick recurring tasks; persists `schedules.json`/`history.jsonl` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
+| `fantastic-scheduler`       | tokio-tick recurring tasks; persists `schedules.yaml`/`schedule_events.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | `fantastic-ollama-backend`  | local LLM via ollama; LLM contract reference impl             |
 | `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible, api_key sidecar, 429 retry) |
 | `fantastic-kernel-bridge`   | cross-kernel comms over memory / WS (asymmetric, WS-only)      |
@@ -221,10 +221,10 @@ HTTP + WebSocket:
 - **REST** `POST /<rest_id>/<target_id>` body=payload → `kernel.send` → JSON.
   `GET /<rest_id>/_reflect[/<target_id>]` for static discovery.
 - **`.fantastic/`** — disk-mode workdir state. Python-compatible
-  per-agent layout: `agent.json` for the root + `agents/<id>/agent.json`
-  recursively for every child. `lock.json` holds the daemon's PID.
+  per-agent layout: `agent.yaml` for the root + `agents/<id>/agent.yaml`
+  recursively for every child. `lock.yaml` holds the daemon's PID.
   Bundle-local sidecar files (chat history, scheduler state, etc.)
-  live next to each agent's `agent.json` in its dir.
+  live next to each agent's `agent.yaml` in its dir.
 
 ## State medium — save/load foundation
 
@@ -234,12 +234,12 @@ pick the *medium*:
 
 | mode | what it does | when |
 |---|---|---|
-| `StorageMode::Disk(workdir)` | Adapter mirrors each agent record onto `<workdir>/.fantastic/agents/<id>/agent.json`. **Dirty binding**: persistence merges kernel-managed fields into the existing JSON — never wholesale-overwrites, never touches sidecar files. Bundles reconcile their own slices when they next touch them. | The standalone CLI; the workspace-kernel embed (Pro Mac, anyone holding a folder). |
+| `StorageMode::Disk(workdir)` | Adapter mirrors each agent record onto `<workdir>/.fantastic/agents/<id>/agent.yaml`. **Dirty binding**: persistence merges kernel-managed fields into the existing JSON — never wholesale-overwrites, never touches sidecar files. Bundles reconcile their own slices when they next touch them. | The standalone CLI; the workspace-kernel embed (Pro Mac, anyone holding a folder). |
 | `StorageMode::InMemory` | No filesystem I/O ever. State lives only in `kernel.agents`. The consumer extracts a snapshot via `kernel.save() -> KernelState` and restores via `kernel.load(state)`. | An embedding app's in-RAM "brain" kernel — always running, never touches disk, snapshot persists externally. |
 
 Both modes share the same save/load API. The only difference is
 the medium — disk mode also mirrors each agent record to its
-`agent.json` on every mutation:
+`agent.yaml` on every mutation:
 
 ```rust
 let snapshot: KernelState = kernel.save();          // both modes (pure read)
@@ -258,7 +258,7 @@ against the running binary; CI fails on any divergence.
 ## Cross-runtime workdir compatibility
 
 Same `.fantastic/` directory loads under either Python or Rust
-kernel. Records hydrate from identical per-agent `agent.json` JSON.
+kernel. Records hydrate from identical per-agent `agent.yaml` JSON.
 Bundles missing in one runtime log a single skip line and the boot
 continues:
 

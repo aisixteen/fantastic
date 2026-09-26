@@ -13,7 +13,9 @@
 // Nothing is ever edited.
 //
 // If the summarizer fails, the fold is still written — refs plus the members'
-// joined titles — and says so on its own line. Degraded, loud, never silent.
+// joined titles — and says so on its own line. Degraded, loud, never silent. A
+// summary that stays OVER ITS BUDGET (or is CUT OFF by it) after one re-summarise
+// is REFUSED: nothing is folded, the span stays in view, `fold_refused` reports it.
 //
 // Python `ai_core/strategies/fold.py` is the reference; rust `fold.rs` the guide.
 
@@ -59,57 +61,209 @@ public enum AIFoldStrategy {
         String(String.UnicodeScalarView(t.unicodeScalars.prefix(MAX_TITLE)))
     }
 
-    /// (title, body, degraded). One summarizer call for one closed chain. Python
+    // THE SUMMARY BUDGET — this strategy's own defaults (the per-agent strategy
+    // slot is where they become configurable; not exposed now). A summary may take
+    // a fifth of the span it replaces, and never more than a quarter of the body
+    // budget: a fold that is itself a large fraction of the window buys nothing.
+    public static let SUMMARY_SHARE = 0.20
+    public static let WINDOW_SHARE = 0.25
+    /// Tokens — a title and one sentence always fit.
+    public static let SUMMARY_FLOOR: Int64 = 48
+    /// THE THINKING ALLOWANCE on a summary call's `maxTokens` (decided
+    /// 2026-09-26). The endpoint counts a reasoning model's thought against
+    /// `max_tokens`; at a bare budget (as small as ~93 tokens for a short span)
+    /// the thought alone hit the bound, every small summary was cut and refused,
+    /// and the last-resort cut dropped the fold that held the run's decision
+    /// (measured, E81). The SUMMARY TEXT — thought stripped — must still fit the
+    /// budget; the allowance is for the thinking only. Python `THINK_ALLOWANCE`.
+    public static let THINK_ALLOWANCE: Int64 = 1024
+
+    /// Python `FOLD_PROMPT`; `{budget}` is filled in.
+    static func foldPrompt(_ budget: Int64) -> String {
+        "FOLD this finished piece of work in AT MOST ~\(budget) tokens. First line: a "
+            + "one-sentence title (what it was and how it ended). Then a blank line. Then these "
+            + "sections, each one line or a few, in this order, omitting none (write `none`):\n"
+            + "ASKED: what was asked.\n"
+            + "DONE: what was found or decided — AND WHY.\n"
+            + "BINDING: rules, constraints and choices that still bind.\n"
+            + "ERRORS: every error, quoted verbatim.\n"
+            + "OPEN: what is unfinished.\n"
+            + "If the piece contains earlier fold summaries, MERGE them — on a conflict the newer "
+            + "statement wins, and unfinished work is carried forward. Output only that.\n\n"
+    }
+
+    /// Python `RESUMMARIZE`.
+    static func resummarize(got: Int64, budget: Int64) -> String {
+        "Your summary below is ~\(got) tokens; the budget is \(budget). Rewrite it to fit — "
+            + "keep the title line, the reasons, the binding rules and every quoted error; drop "
+            + "narration. Output only the summary.\n\n"
+    }
+
+    /// Python `RESUMMARIZE_CUT`.
+    static func resummarizeCut(budget: Int64) -> String {
+        "Your summary below was CUT OFF at the budget (\(budget) tokens) before it ended. "
+            + "Write it again, shorter, so it ENDS within the budget — keep the title line, the "
+            + "reasons, the binding rules and every quoted error; drop narration. Output only "
+            + "the summary.\n\n"
+    }
+
+    static let pathRx = try! NSRegularExpression(
+        pattern: "[\\w./-]+\\.(?:txt|md|py|json|ya?ml|js|ts|rs|swift|toml|csv|log|sh|html|css)\\b")
+    static let identRx = try! NSRegularExpression(pattern: "\\b[0-9a-f]{8,}\\b")
+    /// Lines the RUNTIME wrote into a user turn — never the user's own words.
+    static let RUNTIME_PREFIXES = [
+        "[reply to ", "[no call", "[context-notice", "[fold ", "[recall", "[late reply",
+        "[cleared ", "[fork of ",
+    ]
+    /// The user's own words, verbatim, at most this much per fold. Python
+    /// `INDEX_USER_CHARS`.
+    static let INDEX_USER_CHARS = 1200
+
+    private static func findAll(_ rx: NSRegularExpression, _ text: String) -> [String] {
+        let ns = text as NSString
+        return rx.matches(in: text, range: NSRange(location: 0, length: ns.length)).map {
+            ns.substring(with: $0.range)
+        }
+    }
+
+    /// `sorted(set(xs))` — python's code-point order.
+    private static func pySortedSet(_ xs: [String]) -> [String] {
+        Array(Set(xs)).sorted { Array($0.unicodeScalars.map(\.value)).lexicographicallyPrecedes(Array($1.unicodeScalars.map(\.value))) }
+    }
+
+    /// What a fold must never lose, extracted WITHOUT the model: the files and the
+    /// identifiers its members name, and what the USER said, verbatim (newest kept
+    /// first when over the cap). Appended to the summary — no summariser can drop
+    /// it. Python `mechanical_index`.
+    public static func mechanicalIndex(_ rows: [JSON], _ chain: [Int]) -> String {
+        let text = chain.map { rowContent(rows[$0]) }.joined(separator: "\n")
+        let files = Array(pySortedSet(findAll(pathRx, text)).prefix(30))
+        let idents = Array(pySortedSet(findAll(identRx, text)).prefix(20))
+        var said: [String] = []
+        var used = 0
+        for i in chain.reversed() {
+            let r = rows[i]
+            var c = pyStrip(rowContent(r))
+            if rowRole(r) != "user" || pyTruthy(r["kind"]) || c.isEmpty
+                || RUNTIME_PREFIXES.contains(where: { c.hasPrefix($0) })
+            {
+                continue
+            }
+            c = pySplitWhitespace(c).joined(separator: " ")
+            if used + c.unicodeScalars.count > INDEX_USER_CHARS {
+                c = String(String.UnicodeScalarView(c.unicodeScalars.prefix(max(0, INDEX_USER_CHARS - used))))
+                    + " …"
+            }
+            said.insert(c, at: 0)
+            used += c.unicodeScalars.count
+            if used >= INDEX_USER_CHARS { break }
+        }
+        var lines: [String] = []
+        if !files.isEmpty { lines.append("files: " + files.joined(separator: ", ")) }
+        if !idents.isEmpty { lines.append("identifiers: " + idents.joined(separator: ", ")) }
+        lines += said.map { "user said: \($0)" }
+        return lines.isEmpty ? "" : "INDEX (mechanical):\n" + lines.joined(separator: "\n")
+    }
+
+    /// The summary budget for one span. Python `summary_budget`.
+    public static func summaryBudget(_ ctx: ProjectionCtx, _ rows: [JSON], _ chain: [Int]) -> Int64 {
+        let span = AIContext.estimateTokens(chain.map { rows[$0] })
+        return max(
+            SUMMARY_FLOOR,
+            min(Int64(Double(span) * SUMMARY_SHARE), Int64(Double(ctx.budget) * WINDOW_SHARE)))
+    }
+
+    /// (title, body) out of a summary, or `nil` when it is not one. Python
+    /// `_split`.
+    static func split(_ text: String) -> (String, String)? {
+        // The title is the first NON-EMPTY line; a leading blank line or a stray
+        // quote must not become the title. Reasoning is already stripped by the
+        // summarizer; a summary that still opens a think block is not a summary.
+        // `text.splitlines()` — python's boundary set, so a CRLF summary is
+        // several lines and not one.
+        let lines = pySplitlines(text).map(pyStrip).filter { !$0.isEmpty }
+        guard let firstLine = lines.first, !firstLine.hasPrefix("<think") else { return nil }
+        let title = pyStrip(pyTrim(pyTrim(firstLine, "\""), "*#"))
+        let body = pyStrip(lines.dropFirst().joined(separator: "\n"))
+        // `title[:MAX_TITLE] or "(untitled)"`, and the body falls back to the
+        // UNCUT title — python's `body or title`.
+        let cut = cutTitle(title)
+        return (cut.isEmpty ? "(untitled)" : cut, body.isEmpty ? title : body)
+    }
+
+    /// (title, body, degraded), or `nil` when the summary stays OVER ITS BUDGET (or
+    /// is CUT OFF by it) after one re-summarise — then nothing is folded (the span
+    /// stays in view; loud in `context_status`), never a truncated summary.
+    ///
+    /// The budget is stated in the prompt; the call's `maxTokens` is the budget
+    /// plus `THINK_ALLOWANCE` (a reasoning model's thought counts against it);
+    /// `reserve` is what the fold row spends on its mechanical index, so summary +
+    /// index fit. A provider that stopped at `maxTokens` says so (`cut`) — a
+    /// cut-off summary is treated like an oversized one, never kept. Python
     /// `_summarize`.
-    static func summarize(_ ctx: ProjectionCtx, _ rows: [JSON], _ chain: [Int]) async -> (String, String, Bool) {
+    static func summarize(
+        _ ctx: ProjectionCtx, _ rows: [JSON], _ chain: [Int], reserve: Int64 = 0
+    ) async -> (String, String, Bool)? {
         let degraded = { () -> (String, String, Bool) in
             let t = titlesOf(rows, chain)
             return (cutTitle(t), t, true)
         }
         guard let summarize = ctx.summarize else { return degraded() }
-        let ask: JSON = .object([
-            "role": .string("user"),
-            "content": .string(
-                "FOLD this finished piece of work. First line: a one-sentence title (what it "
-                    + "was and how it ended). Then a blank line. Then 2-5 sentences: what was asked, "
-                    + "what was found or decided, anything that still binds. Output only that.\n\n"
-                    + AIFolds.chainText(rows, chain)),
-        ])
-        var text = ""
-        do { text = try await summarize([ask]) } catch { text = "" }
-        text = pyStrip(text)
+        let budget = max(SUMMARY_FLOOR, summaryBudget(ctx, rows, chain) - reserve)
+        func ask(_ content: String) async -> (String, Bool) {
+            do {
+                let (text, cut) = try await summarize(
+                    [.object(["role": .string("user"), "content": .string(content)])],
+                    Int(budget + THINK_ALLOWANCE))
+                return (pyStrip(text), cut)
+            } catch {
+                return ("", false)
+            }
+        }
+        var (text, cut) = await ask(foldPrompt(budget) + AIFolds.chainText(rows, chain))
         if text.isEmpty { return degraded() }
-        // The title is the first NON-EMPTY line; a leading blank line or a stray
-        // quote must not become the title. Reasoning is already stripped by the
-        // summarizer; a summary that still opens a think block is not a summary —
-        // degrade to titles.
-        // `text.splitlines()` — python's boundary set, so a CRLF summary is
-        // several lines and not one. Splitting on `"\n"` as a Character read the
-        // WHOLE CRLF text as a single line, which became the title.
-        let lines = pySplitlines(text).map(pyStrip).filter { !$0.isEmpty }
-        guard let firstLine = lines.first, !firstLine.hasPrefix("<think") else { return degraded() }
-        let title = pyStrip(pyTrim(pyTrim(firstLine, "\""), "*#"))
-        let body = pyStrip(lines.dropFirst().joined(separator: "\n"))
-        // `title[:MAX_TITLE] or "(untitled)"`, and the body falls back to the
-        // UNCUT title — python's `body or title`, not `body or title[:140]`.
-        let cut = cutTitle(title)
-        return (cut.isEmpty ? "(untitled)" : cut, body.isEmpty ? title : body, false)
+        let got = AIContext.estimateOne(.object(["role": .string("user"), "content": .string(text)]))
+        if cut || got > budget {
+            // ONE re-summarise, telling the model the numbers.
+            let tell = cut ? resummarizeCut(budget: budget) : resummarize(got: got, budget: budget)
+            (text, cut) = await ask(tell + text)
+            if text.isEmpty || cut
+                || AIContext.estimateOne(.object(["role": .string("user"), "content": .string(text)]))
+                    > budget
+            {
+                return nil
+            }
+        }
+        guard let parts = split(text) else { return degraded() }
+        return (parts.0, parts.1, false)
     }
 
-    /// Summarize `idxs` and append ONE fold row for them. A fold row in `idxs` is
-    /// just a member — that is how folds nest: the next fold over this stretch
-    /// of the view takes the earlier fold as one of its rows, and its level is
-    /// one above the deepest member. Python `write_fold`.
-    static func writeFold(_ ctx: ProjectionCtx, _ rows: [JSON], _ idxs: [Int]) async -> JSON {
+    /// Summarize `idxs` and append ONE fold row for them — or `nil` when the
+    /// summary would not fit its budget (nothing folded). A fold row in `idxs` is
+    /// just a member — that is how folds nest: the next fold over this stretch of
+    /// the view takes the earlier fold as one of its rows, and its level is one
+    /// above the deepest member. Python `write_fold`.
+    static func writeFold(_ ctx: ProjectionCtx, _ rows: [JSON], _ idxs: [Int]) async throws -> JSON? {
         let ids = idxs.compactMap { rowId(rows[$0]) }
         let lvl = 1 + (idxs.filter { isFold(rows[$0]) }.map { AIFolds.level(rows, rows[$0]) }.max() ?? 0)
-        let (title, text, degraded) = await summarize(ctx, rows, idxs)
+        // THE INDEX IS INSIDE THE BUDGET: built first, its size reserved from the
+        // summary's.
+        let index = mechanicalIndex(rows, idxs)
+        let reserve =
+            index.isEmpty
+            ? 0 : AIContext.estimateOne(.object(["role": .string("user"), "content": .string(index)]))
+        guard let (title, summary, degraded) = await summarize(ctx, rows, idxs, reserve: reserve)
+        else { return nil }
+        let text = index.isEmpty ? summary : "\(summary)\n\n\(index)"
+        guard let kernel = ctx.kernel else {
+            throw PyError("RuntimeError", "fold: no kernel to mint the fold's id from")
+        }
         let fr = AIFolds.makeFold(
             refs: ids, title: title, body: text, degraded: degraded,
-            id: ctx.kernel.rows.mintId(), lvl: lvl,
+            id: kernel.mintId(), lvl: lvl,
             parent: idxs.first.flatMap { rowParent(rows[$0]) })
         if let c = ctx.clientId, !c.isEmpty {
-            appendRows(ctx.selfId, kernel: ctx.kernel, [fr])
+            try await saveHistory(ctx.selfId.value, kernel, [fr])
         }
         return fr
     }
@@ -153,11 +307,12 @@ public enum AIFoldStrategy {
     /// head, then hand what is left to `strip`. Python `fold`.
     public static func fold(
         _ body: [JSON], _ systemBlock: [JSON], _ rec: JSON, _ ctx: ProjectionCtx
-    ) async -> AIProjection {
+    ) async throws -> AIProjection {
         var rows = body
         var view = AIFolds.render(rows)
         let budget = ctx.budget - AIContext.noticeEnvelopeReserve
         var folded = 0
+        var refused = 0
         if AIContext.estimateTokens(view) > budget && rows.count > 2 {
             let target = Int64(Double(budget) * AIStripStrategy.LOW)
             // ONE MOVE, REPEATED: fold the oldest stretch of the view — rows, folds,
@@ -165,7 +320,11 @@ public enum AIFoldStrategy {
             while AIContext.estimateTokens(view) > target {
                 let span = nextSpan(rows, view)
                 if span.isEmpty { break }
-                rows.append(await writeFold(ctx, rows, span))
+                guard let fr = try await writeFold(ctx, rows, span) else {
+                    refused += 1  // the summary would not fit: this span stays; stop here
+                    break
+                }
+                rows.append(fr)
                 folded += 1
                 view = AIFolds.render(rows)
             }
@@ -180,19 +339,24 @@ public enum AIFoldStrategy {
         // Terminates: each pass replaces `FOLD_RUN` adjacent folds with ONE, so
         // the run shrinks by `FOLD_RUN - 1` every time and `nextSpan` stops
         // selecting once fewer than `FOLD_RUN` remain.
-        while true {
+        while refused == 0 {
             let span = nextSpan(rows, view)
             if span.isEmpty || !span.allSatisfy({ isFold(rows[$0]) }) { break }
-            rows.append(await writeFold(ctx, rows, span))
+            guard let fr = try await writeFold(ctx, rows, span) else {
+                refused += 1
+                break
+            }
+            rows.append(fr)
             folded += 1
             view = AIFolds.render(rows)
         }
         // Stage two and three: strip bodies in what is left, then cut — strip's
         // own logic.
-        let out = await AIStripStrategy.strip(view, systemBlock, rec, ctx)
+        let out = try await AIStripStrategy.strip(view, systemBlock, rec, ctx)
         return AIProjection(
             body: out.body, omittedMarker: out.omittedMarker,
-            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: folded)
+            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: folded,
+            foldRefused: refused)
     }
 }
 

@@ -14,6 +14,7 @@ import Foundation
 import Testing
 
 @testable import FantasticAICore
+@testable import FantasticRamStore
 
 // MARK: - the scripted provider
 
@@ -440,6 +441,9 @@ func bootMockKernel(
     registry.register("mock_recorder.tools", recorder)
     registry.register("mock_raiser.tools", RaisingBundle())
     registry.register("mock_slow.tools", SlowBundle())
+    // THE MEMORY STORE every backend keeps its conversation in (python's
+    // `memory_meta`): a `ram_store`, keyed by the root's guid.
+    registry.register("ram_store.tools", RamStoreBundle())
     let kernel = Kernel(storage: .inMemory, bundles: registry)
     // A REAL root path, so `findStore` has something to match the store's own
     // `root` against — that match is how the loader owns sidecar placement.
@@ -447,7 +451,8 @@ func bootMockKernel(
         .appendingPathComponent("fantastic-mock-\(UUID().uuidString)")
         .appendingPathComponent(".fantastic")
     let root = Agent(
-        id: AgentId("kernel_state"), handlerModule: nil, parentId: nil, rootPath: storeRoot)
+        id: AgentId("kernel_state"), handlerModule: nil, parentId: nil,
+        meta: ["guid": .string(MOCK_GUID)], rootPath: storeRoot)
     kernel.register(root)
     kernel.setRoot(root)
     // Two-sided deny-all: each callee must ACCEPT the backends that reach it. The
@@ -470,6 +475,17 @@ func bootMockKernel(
             // placement, and the stand-in must satisfy the same rule.
             "root": .string(storeRoot.path),
             "id": .string("store"),
+            "callable_by": acceptJSON,
+        ]))])[0].result
+    // The memory store: serves the operator (admin) and accepts every backend —
+    // wiring pairs with granting on BOTH ends.
+    _ = await kernel.send([Item(AgentId("kernel_state"), .object([
+            "type": .string("create_agent"),
+            "parent_id": .string("kernel_state"),
+            "handler_module": .string("ram_store.tools"),
+            "id": .string("memory"),
+            "operator": .bool(true),
+            "admins": .array([.string("kernel")]),
             "callable_by": acceptJSON,
         ]))])[0].result
     _ = await kernel.send([Item(AgentId("kernel_state"), .object([
@@ -500,6 +516,7 @@ func bootMockKernel(
     var grant: OrderedCollections.OrderedDictionary<String, JSON> = [
         "cli": .string("*"),
         "probe": .string("*"), "raiser": .string("*"), "slowpoke": .string("*"),
+        "memory": .string("*"),
     ]
     for other in backendIds { grant[other] = .string("*") }
     var out: [String: AgentId] = [:]
@@ -524,6 +541,7 @@ func bootMockKernel(
             "handler_module": .string("mock_backend.tools"),
             "id": .string(id),
             "file_bridge_id": .string(legId),
+            "memory_store_id": .string("memory"),
             "context_window": .integer(contextWindow),
             "can_call": .object(backendGrant),
             // Peer backends call each other — accept them (ingress).
@@ -569,15 +587,27 @@ func waitUntil(_ what: String, _ cond: () async -> Bool) async throws {
     Issue.record("timed out waiting for \(what)")
 }
 
-/// The agent's CONVERSATION as the kernel row store holds it — every row for
-/// the agent minus the kernel's own bookkeeping kinds (`call`, `task`, `body`,
-/// `view`, `settle`). AGENT ID IS CONVERSATION ID: there is no client axis.
+/// The root guid every mock kernel keys its memory store by.
+let MOCK_GUID = "g-mock"
+
+/// Every row the agent's memory store holds under its key, in id order
+/// (views included) — a synchronous read of the `ram_store` tables.
+func storeRows(kernel: Kernel, id: AgentId) -> [JSON] {
+    guard let mem = kernel.agent(AgentId("memory")),
+        let bundle = kernel.bundles.get("ram_store.tools") as? RamStoreBundle
+    else { return [] }
+    let guid = kernel.root?.metaValue(forKey: "guid")?.asString ?? MOCK_GUID
+    return bundle.ownerRows(mem, owner: "\(guid)|\(id.value)")
+}
+
+/// The agent's CONVERSATION as its memory store holds it — the rows with a
+/// chat role, minus the `view` rows (python `_load_history(behind=True)`).
+/// AGENT ID IS CONVERSATION ID: there is no client axis.
 func conversationRows(kernel: Kernel, id: AgentId) -> [JSON] {
-    let bookkeeping: Set<String> = ["call", "task", "body", "view", "settle"]
-    return kernel.rows.forAgent(id).filter { r in
-        guard let k = r["kind"]?.asString else { return true }
-        return !bookkeeping.contains(k)
-    }.map { JSON.object($0) }
+    storeRows(kernel: kernel, id: id).filter { r in
+        r["kind"].asString != "view"
+            && ["user", "assistant", "system"].contains(r["role"].asString ?? "")
+    }
 }
 
 /// Poll the row store until the conversation reaches `count` rows (routing
@@ -592,3 +622,23 @@ func waitForHistory(kernel: Kernel, id: AgentId, count: Int) async throws {
 
 /// The explicit end-of-chain call, as the model writes it.
 let doneEnvelope = "<call name=\"done\"></call>"
+
+/// A plain `(msgs) -> text` test summarizer as the core's `AISummarizer`: the
+/// bound is ignored and the text is never reported cut.
+func summarizer(_ f: @escaping @Sendable ([JSON]) async throws -> String) -> AISummarizer {
+    { msgs, _ in (try await f(msgs), false) }
+}
+
+/// Seed rows straight into `id`'s memory store (python `k.rows_put(id, row)`):
+/// a row with no id takes the kernel's next one — the store trusts the ids its
+/// caller's kernel minted.
+func appendRows(_ id: AgentId, kernel: Kernel, _ rows: [JSON]) {
+    guard let mem = kernel.agent(AgentId("memory")),
+        let bundle = kernel.bundles.get("ram_store.tools") as? RamStoreBundle
+    else { return }
+    let guid = kernel.root?.metaValue(forKey: "guid")?.asString ?? MOCK_GUID
+    let minted: [JSON] = rows.map { r in
+        r["id"].asInt != nil ? r : withField(r, "id", .integer(kernel.mintId()))
+    }
+    bundle.seedRows(mem, owner: "\(guid)|\(id.value)", minted)
+}

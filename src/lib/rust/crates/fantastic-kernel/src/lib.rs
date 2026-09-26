@@ -2,7 +2,7 @@
 //!
 //! Stable surface: `send`, `emit`, `watch`, `create`/`delete`/`update`,
 //! `reflect`, on-disk `.fantastic/` layout. One runtime is active per
-//! workdir at a time, locked by `.fantastic/lock.json`. Agents whose
+//! workdir at a time, locked by `.fantastic/lock.yaml`. Agents whose
 //! bundle isn't installed in this runtime are skipped + logged at boot.
 //!
 //! ## Sub-phase A scope (current commit)
@@ -26,14 +26,13 @@ pub mod bootstrap;
 pub mod bundle;
 pub mod call_guard;
 pub mod errors;
+pub mod executions;
 pub mod inbox;
-pub(crate) mod jsonsafe;
+pub mod jsonsafe;
 pub mod kernel;
 pub mod ledger;
 pub mod lifecycle;
 pub mod lock;
-pub mod messages_log;
-pub mod messages_xml;
 pub mod outcome;
 pub mod paging;
 pub mod persistence;
@@ -45,6 +44,7 @@ pub mod send;
 pub mod state;
 pub mod storage;
 pub mod tasks;
+pub mod yaml_io;
 
 #[doc(hidden)]
 pub mod test_support;
@@ -62,7 +62,8 @@ pub use refusal::{bad, missing, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use scalar::{coerce_scalar, py_strip};
 pub use send::{
-    current_origin, current_sender, with_operator, with_sender, CURRENT_ORIGIN, CURRENT_SENDER,
+    current_origin, current_remote_caller, current_sender, with_operator, with_remote_caller,
+    with_sender, CURRENT_ORIGIN, CURRENT_SENDER,
 };
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;

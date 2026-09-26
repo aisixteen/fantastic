@@ -7,7 +7,7 @@
 //   - `Bootstrap.oneShot(workdir:)` — no lock; for `fantastic <id>
 //     <verb>` style one-off RPC against an existing workdir
 //   - `Bootstrap.awaitStop(kernel:)` — blocks until SIGINT/SIGTERM/SIGHUP or
-//     a root-only `shutdown_kernel`; the real daemon entrypoint (`Fantastic/
+//     a root-only `kernel_stop`; the real daemon entrypoint (`Fantastic/
 //     Daemon.swift`) races it against the REPL/block tasks and runs the
 //     kernel's graceful `shutdown()` itself.
 
@@ -41,13 +41,11 @@ public enum Bootstrap {
                 "already running (pid \(pid)) in \(workdir)")
         }
 
+        // The kernel keeps no conversation and hydrates no rows: `load` restores
+        // the tree and the id counter (the root record's reserved bound);
+        // execution rows live in the root's memory store, which `kernel_start`
+        // wires.
         let kernel = try await startKernel(workdir: workdir, portHint: portHint)
-
-        // THE MESSAGE STORE, hydrated COLD — before any agent exists, from
-        // above (python `hydrate_messages` in the bootstrap). A file of another
-        // version or a cut row refuses the boot rather than hydrating half a
-        // conversation.
-        try hydrateMessages(kernel, rootDir: url.appendingPathComponent(".fantastic"))
 
         // Hydrate state from disk if present.
         let stateFile = url.appendingPathComponent(".fantastic/state.json")
@@ -77,7 +75,6 @@ public enum Bootstrap {
     ) async throws -> Kernel {
         let url = URL(fileURLWithPath: workdir, isDirectory: true)
         let kernel = try await startKernel(workdir: workdir, portHint: 0)
-        try hydrateMessages(kernel, rootDir: url.appendingPathComponent(".fantastic"))
         let stateFile = url.appendingPathComponent(".fantastic/state.json")
         if let data = try? Data(contentsOf: stateFile),
             let json = String(data: data, encoding: .utf8)
@@ -88,23 +85,23 @@ public enum Bootstrap {
     }
 
     /// Block until an OS stop signal (SIGINT/SIGTERM/SIGHUP) arrives OR the
-    /// kernel's own `requestShutdown` fires (the root-only `shutdown_kernel`
+    /// kernel's own `requestShutdown` fires (the root-only `kernel_stop`
     /// verb, which deferred its trigger 100 ms so its ack flushed first). The
     /// two are raced; whichever loses is cancelled. Python `longrun` installs
-    /// the same three handlers on one stop event that `shutdown_kernel` shares.
+    /// the same three handlers on one stop event that `kernel_stop` shares.
     ///
     /// Returns the SIGNAL's name (`"SIGINT"`/`"SIGTERM"`/`"SIGHUP"`) when that
-    /// leg won, or `nil` for `shutdown_kernel`/cancellation — the caller
+    /// leg won, or `nil` for `kernel_stop`/cancellation — the caller
     /// prints python's `\n[kernel] <SIG> — shutting down...` line ONLY for a
     /// real signal (python's `_request_stop` runs only from
-    /// `add_signal_handler`; `shutdown_kernel` sets the same event directly,
+    /// `add_signal_handler`; `kernel_stop` sets the same event directly,
     /// with no such print).
     ///
     /// BOTH LEGS ARE CANCELLATION-AWARE. `shutdownRequested()` parked on a
     /// `withCheckedContinuation` with no cancellation handler, so `cancelAll`
     /// never returned: a SIGTERM printed nothing, the teardown lines never ran,
     /// `kernel.shutdown()` never ran, and the process was still alive 15 s later
-    /// with `lock.json` left behind (measured; the e2e driver SIGKILLed swift).
+    /// with `lock.yaml` left behind (measured; the e2e driver SIGKILLed swift).
     public static func awaitStop(kernel: Kernel) async -> String? {
         await withTaskGroup(of: String?.self) { group -> String? in
             group.addTask { await waitForSignal() }
@@ -120,7 +117,7 @@ public enum Bootstrap {
 
     /// Resolve with the caught signal's name on the first of SIGINT/SIGTERM/
     /// SIGHUP — or `nil` on cancellation, so a serve loop that ends another
-    /// way (`shutdown_kernel`) does not hang on a continuation nobody will
+    /// way (`kernel_stop`) does not hang on a continuation nobody will
     /// ever resume.
     private static func waitForSignal() async -> String? {
         let names: [Int32: String] = [SIGINT: "SIGINT", SIGTERM: "SIGTERM", SIGHUP: "SIGHUP"]

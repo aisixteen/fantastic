@@ -382,20 +382,32 @@ extension KernelBridgeBundle {
             // FORWARDED, not re-worded — the rule's own reason and repair, so a
             // peer hitting a sealed leg learns how to open it.
             reply = denial.asRefusal
+        } else if let bad = checkCaller(kernel, frame["caller"]) {
+            // THE QUALIFIED CALLER IS CHECKED ON INGRESS, before the kernel sees
+            // the frame: malformed, or claiming THIS kernel's guid ⇒ refused.
+            reply = bad
         } else {
             // UNDER THE LEG'S OWN IDENTITY: a peer frame reaching `kernel.send`
             // with a nil sender would be an OPERATOR call and the two-sided gate
             // would bound nothing.
             let targetId = AgentId(target.asString ?? "")
             let item = Item.fromFrame(targetId, inner, frameId: frame["id"].asString)
-            if !isBinary {
-                reply = await KernelTaskLocals.$currentSender.withValue(agentId) {
-                    await kernel.send([item])[0].result
+            // THE QUALIFIED CALLER rides into the dispatch: a memory store keys
+            // what this call writes by `<remote guid>|<remote agent>`, not by
+            // this leg. Python `remote_caller_context(kernel.id, caller)`.
+            let caller: String? = pyTruthy(frame["caller"]) ? frame["caller"].asString : nil
+            let run: @Sendable () async -> (JSON, Data?) = {
+                if !isBinary {
+                    return (await kernel.send([item])[0].result, nil)
                 }
-            } else {
-                (reply, replyBody) = await KernelTaskLocals.$currentSender.withValue(agentId) {
-                    await kernel.sendWithBinary(targetId, inner, body)
+                return await kernel.sendWithBinary(targetId, inner, body)
+            }
+            (reply, replyBody) = await KernelTaskLocals.$currentSender.withValue(agentId) {
+                if let caller {
+                    return await KernelTaskLocals.withRemoteCaller(
+                        leg: agentId, address: caller, run)
                 }
+                return await run()
             }
         }
         var out: JSON = .object([
@@ -410,6 +422,46 @@ extension KernelBridgeBundle {
         }
         out["_binary_path"] = .string("data.bytes")
         try? await transport.sendBinary(header: out, body: replyBody)
+    }
+
+    /// This kernel's own instance guid (the root record's `guid`), or `nil`
+    /// before the root minted one. Python `_local_guid`.
+    func localGuid(_ kernel: Kernel) -> String? {
+        guard let g = kernel.root?.metaValue(forKey: "guid")?.asString, !g.isEmpty else {
+            return nil
+        }
+        return g
+    }
+
+    /// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it:
+    /// it must read `<guid>|<agent id>`, and the guid must NOT be this kernel's
+    /// own — a remote cannot pose as a local agent. (A remote naming some THIRD
+    /// kernel's guid is not detectable here; accepted.) Python `_check_caller`.
+    public func checkCaller(_ kernel: Kernel, _ caller: JSON) -> JSON? {
+        if caller == .null { return nil }
+        let parts = caller.asString.map { $0.split(separator: "|", omittingEmptySubsequences: false) }
+        guard let parts, parts.count == 2, parts.allSatisfy({ !$0.isEmpty }) else {
+            return .object([
+                "error": .string("bridge: frame caller \(pyRepr(caller)) is not `<guid>|<agent id>`"),
+                "reason": .string("unauthorized"),
+            ])
+        }
+        if String(parts[0]) == localGuid(kernel) {
+            return .object([
+                "error": .string(
+                    "bridge: a remote frame claims THIS kernel's guid as its caller — refused"),
+                "reason": .string("unauthorized"),
+            ])
+        }
+        return nil
+    }
+
+    /// WHO IS CALLING, QUALIFIED: `<this kernel's guid>|<the agent that asked>`
+    /// (`kernel` for the operator). The far side keys store rows by it. `nil`
+    /// before the root minted a guid. Python `_forward`.
+    func qualifiedCaller(_ kernel: Kernel) -> String? {
+        guard let g = localGuid(kernel) else { return nil }
+        return "\(g)|\(KernelTaskLocals.currentOrigin?.value ?? "kernel")"
     }
 
     // MARK: - shared verbs
@@ -433,6 +485,7 @@ extension KernelBridgeBundle {
         var frame: JSON = .object([
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
         ])
+        if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
         // Stamp this leg's EGRESS credential on the ENVELOPE (never the payload).
         if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
         do {
@@ -479,6 +532,7 @@ extension KernelBridgeBundle {
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
             "_binary_path": .string("payload.bytes"),
         ])
+        if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
         if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
         do {
             try await transport.sendBinary(header: frame, body: blob)

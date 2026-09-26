@@ -33,6 +33,10 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
+    kernel.bundles.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -64,21 +68,27 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
         .await
         .remove(0)
         .result;
+    // Deny-all: its memory store (wired both ways) + its leg + `cli`.
+    let memory = fantastic_ram_store::test_support::memory_meta(
+        &kernel,
+        &backend_id,
+        json!({ file_id.clone(): "*", "cli": "*" }),
+    )
+    .await;
+    let mut create = json!({
+        "type": "create_agent",
+        "parent_id": "kernel",
+        "handler_module": HANDLER_MODULE,
+        "id": backend_id,
+        "file_bridge_id": file_id,
+        "endpoint": endpoint,
+        "model": "test-model",
+    });
+    for (k, v) in memory {
+        create[k] = v;
+    }
     let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({
-                "type": "create_agent",
-                "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
-                "id": backend_id,
-                "file_bridge_id": file_id,
-                "endpoint": endpoint,
-                "model": "test-model",
-                // Deny-all: persists to its store directly + streams to `cli`.
-                "can_call": { file_id: "*", "cli": "*" },
-            }),
-        )])
+        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -468,24 +478,11 @@ async fn history_persists_and_round_trips() {
     assert_eq!(last["role"], "assistant");
     assert_eq!(last["head"], "ack");
 
-    // The turns live in the KERNEL's row store — one table, keyed by the one
-    // counter, agent id IS conversation id. They used to be an append-only
-    // JSONL sidecar on the backend's own leg, split per client; that split gave
-    // two clients on one agent two threads that could not see each other, and
-    // the encoding was this bundle's private choice rather than the kernel's.
-    // The kernel's own bookkeeping — a `call` row per dispatch, a `task` row per
-    // fork — rides the same list and is not conversation (C36).
-    let rows: Vec<_> = kernel
-        .rows
-        .for_agent(&backend)
-        .into_iter()
-        .filter(|r| {
-            !matches!(
-                r.get("kind").and_then(Value::as_str),
-                Some("call" | "task" | "body" | "view" | "settle")
-            )
-        })
-        .collect();
+    // The turns live in the agent's MEMORY STORE (`memory_store_id`) — agent id
+    // IS conversation id; the kernel keeps no conversation.
+    let rows = fantastic_ai_core::memory::load_history(&backend, &kernel, true)
+        .await
+        .expect("store read");
     assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["content"], "ping");
     assert_eq!(rows[1]["content"], "ack");
@@ -518,8 +515,9 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             num_ctx: None,
             num_predict: None,
             think: None,
+            report: Default::default(),
         };
-        let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
+        let err = match p.chat(&[json!({"role": "user", "content": "hi"})], None).await {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
             Err(e) => e.message,
         };
@@ -543,7 +541,7 @@ async fn reflect_extras_match_python() {
         .await
         .remove(0)
         .result;
-    let keys: Vec<String> = r.as_object().unwrap().keys().take(15).cloned().collect();
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(16).cloned().collect();
     assert_eq!(
         keys,
         vec![
@@ -553,6 +551,7 @@ async fn reflect_extras_match_python() {
             "endpoint",
             "context_window",
             "context_strategy",
+            "memory_store_id",
             "verbs",
             "generating",
             "cancel",
@@ -619,4 +618,23 @@ async fn unknown_type_is_pythons_repr_and_shutdown_is_unknown() {
             .result;
         assert_eq!(r["error"], json!(want));
     }
+}
+
+/// PROVIDER-REPORTED USAGE off the NDJSON stream: `prompt_eval_count` calibrates
+/// ai_core's estimate, and `done_reason: length` is the output stopping AT its
+/// bound (`max_tokens`) — what a fold reads to refuse a cut summary.
+#[test]
+fn ndjson_usage_reports_prompt_tokens_and_a_cut_as_max_tokens() {
+    let report = fantastic_ai_core::provider::ReportCell::default();
+    note_usage(&json!({"message": {"content": "x"}, "done": false}), &report);
+    assert_eq!(report.lock().unwrap().prompt_tokens, None);
+    note_usage(
+        &json!({"done": true, "done_reason": "length", "prompt_eval_count": 321}),
+        &report,
+    );
+    let r = report.lock().unwrap().clone();
+    assert_eq!(r.prompt_tokens, Some(321));
+    assert_eq!(r.stop_reason.as_deref(), Some("max_tokens"));
+    note_usage(&json!({"done": true, "done_reason": "stop"}), &report);
+    assert_eq!(report.lock().unwrap().stop_reason.as_deref(), Some("stop"));
 }

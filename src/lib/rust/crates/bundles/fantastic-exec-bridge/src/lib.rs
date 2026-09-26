@@ -770,13 +770,22 @@ fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
     match job_id(payload).and_then(Value::as_str) {
         // `no_job` above has already established that the row exists and is ours.
         Some(jid) => match g.get(jid).filter(|j| &j.owner == agent_id) {
-            Some(j) => json!({"jobs": [jobs::snap(jid, j, true)]}),
+            Some(j) => json!({
+                "jobs": [jobs::snap(jid, j, true)],
+                "origin": format!(
+                    "{agent_id} status {{job_id: {jid}}} — a live job; re-send for its \
+                     output NOW, which may differ"
+                ),
+            }),
             None => json!({"jobs": []}),
         },
-        None => json!({"jobs": g.iter()
-            .filter(|(_, j)| &j.owner == agent_id)
-            .map(|(id, j)| jobs::snap(id, j, false))
-            .collect::<Vec<_>>()}),
+        None => json!({
+            "jobs": g.iter()
+                .filter(|(_, j)| &j.owner == agent_id)
+                .map(|(id, j)| jobs::snap(id, j, false))
+                .collect::<Vec<_>>(),
+            "origin": format!("{agent_id} status — the job table NOW; re-send, it changes"),
+        }),
     }
 }
 

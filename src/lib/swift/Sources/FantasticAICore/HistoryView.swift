@@ -286,3 +286,49 @@ func dedupeStaleReads(_ history: [JSON]) -> [JSON] {
     }
     return keepRev.reversed()
 }
+
+/// A reply whose BODY is byte-identical to an EARLIER one (the same file read
+/// again, the same listing) is shown as a one-line stub citing the first — the
+/// first copy stays whole. Only bodies worth the saving are stubbed, and a
+/// digested reply (its origin line) is already one line. The view restarts at a
+/// clear, so a read after a clear is new again. Python `dedupe_repeat_bodies`.
+func dedupeRepeatBodies(_ history: [JSON]) -> [JSON] {
+    var seen: [String: JSON] = [:]
+    var out: [JSON] = []
+    for turn in history {
+        let content = pyTruthy(turn["content"]) ? (turn["content"].asString ?? "") : ""
+        guard turn["role"].asString == "user", parseReplyTag(content) != nil else {
+            out.append(turn)
+            continue
+        }
+        var changed = false
+        var kept: [String] = []
+        for b in replyBlocks(content) {
+            // `head, _, body = b.partition("\n")`
+            let head: String
+            let body: String
+            if let nl = b.firstIndex(of: "\n") {
+                head = String(b[b.startIndex..<nl])
+                body = String(b[b.index(after: nl)...])
+            } else {
+                head = b
+                body = ""
+            }
+            if pyLen(body) < 400 || body.hasPrefix("(settled") {
+                kept.append(b)
+                continue
+            }
+            if let first = seen[body] {
+                kept.append(
+                    "\(head)\n[identical to the reply in row \(pyStr(first)) — the same "
+                        + "\(pyLen(body)) bytes, not repeated]")
+                changed = true
+            } else {
+                seen[body] = turn["id"]
+                kept.append(b)
+            }
+        }
+        out.append(changed ? withField(turn, "content", .string(kept.joined(separator: "\n\n"))) : turn)
+    }
+    return out
+}

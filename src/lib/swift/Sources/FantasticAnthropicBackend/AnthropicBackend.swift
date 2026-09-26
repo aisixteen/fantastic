@@ -81,7 +81,7 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
                 makeProvider: { agent, _, _ in
                     // THE ENVIRONMENT IS THE ONLY SOURCE — python-canonical.
                     // The key used to be read off the agent's own meta, which
-                    // means it was WRITTEN INTO agent.json on disk; rust and
+                    // means it was WRITTEN INTO agent.yaml on disk; rust and
                     // python's nvidia bundle both kept it out of the record for
                     // exactly that reason. Now nothing persists it at all.
                     //
@@ -112,51 +112,58 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     /// kernel and a python one hand a reader the same document. A swift-written
     /// summary of it was a second, shorter truth about the same bundle.
     static let readmeText = #"""
-        # anthropic_backend — Claude, a context-managed completion agent
-        Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Persistence via `file_bridge_id`.
+    # anthropic_backend — Claude, a context-managed completion agent
+    Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
 
-        ## Implementation
-        This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
+    ## Implementation
+    This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
-        ## Bare completion — the tool loop is the CALLER's
-        This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-        provider pass. It NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use`
-        blocks; the `AnthropicProvider` streams plain `text_delta` content, returned verbatim.
-        Any tool convention is the caller's — an authored agent teaches it in the prompt (via
-        `system_prompt`), reads the completion, dispatches, and feeds the result back as the
-        next `{send, text}` turn.
+    ## Bare completion — the tool loop is the CALLER's
+    This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
+    provider pass. It NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use`
+    blocks; the `AnthropicProvider` streams plain `text_delta` content, returned verbatim.
+    Any tool convention is the caller's — an authored agent teaches it in the prompt (via
+    `system_prompt`), reads the completion, dispatches, and feeds the result back as the
+    next `{send, text}` turn.
 
-        ## Context management — owned HERE
-        Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
-        (`context_strategy`, default `compact`, + `[context-notice]`), and the `recall` /
-        `context_status` verbs. The conversation's owner owns its context.
+    ## Context management — owned HERE
+    The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
+    is REQUIRED (a `send` fails loud naming it): every turn, fold and view is a row under
+    this agent's key. Reply BODIES are never stored — a reply row keeps its one-line
+    `origin`, and after a restart the model re-reads from it. Compaction fires at 0.8 of
+    the budget (calibrated by the endpoint's reported prompt size when it reports one)
+    with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
+    `[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
+    `context_clear` (a boundary, nothing deleted) inspect and page it. Sharing is by
+    GRANT, by the owner's own choice: it `share`s a scope of its rows through the store;
+    another agent starts from it with `fork_from {owner, grant, message}` and asks for a
+    third agent's row with `request_share`. `watch {body?}` / `unwatch` subscribe to this
+    agent's row events (a digest; bodies only for a watcher the rows are shared with).
+    ## Calling this agent
+    `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
+    and returns `{response, final}`. A first-class peer of `exec_bridge`: a scheduler,
+    a host job, a peer kernel, or a routine can call it by id. Optional `system_prompt:str`
+    REPLACES the default system block (the caller supplies its own role / tool convention).
+    There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
 
-        ## Calling this agent
-        `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
-        and returns `{response, final}`. A first-class peer of `exec_bridge`: a scheduler,
-        a host job, a peer kernel, or a routine can call it by id. Optional `system_prompt:str`
-        REPLACES the default system block (the caller supplies its own role / tool convention).
-        Optional `messages:list` REPLACES persisted history (fully stateless — no compaction;
-        the caller owns the context in that mode).
+    ## Streaming
+    You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
+    consumes the same stream (the driving caller, a browser tab, a peer). You do not route
+    your own output — you complete; the caller reads it and decides what to do next.
 
-        ## Streaming
-        You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
-        consumes the same stream (the driving caller, a browser tab, a peer). You do not route
-        your own output — you complete; the caller reads it and decides what to do next.
+    ## Recursion guard
+    A `send` carrying a reserved `_call_stack` that already contains this agent (a cycle)
+    or exceeds depth 8 is refused BEFORE the FIFO lock — so an authored agent's AI→AI chain can
+    neither deadlock nor run away. Don't set `_call_stack` yourself.
 
-        ## Recursion guard
-        A `send` carrying a reserved `_call_stack` that already contains this agent (a cycle)
-        or exceeds depth 8 is refused BEFORE the FIFO lock — so an authored agent's AI→AI chain can
-        neither deadlock nor run away. Don't set `_call_stack` yourself.
+    ## Meta-possibility — any routine orchestrates the whole substrate
+    Every routine (this AI, a host job, a peer kernel, or any out-of-process caller)
+    reaches every agent by id. From any of them you can read memory anywhere (`send(<state>,
+    {read})`), run an inference turn (`send(<ai>, {send, ...})`), and/or spawn compute
+    (`send(<py>, {start, code})`) — regardless of which kernel owns the target. Code
+    steps and LLM-call steps are interchangeable, both directions.
 
-        ## Meta-possibility — any routine orchestrates the whole substrate
-        Every routine (this AI, a host job, a peer kernel, or any out-of-process caller)
-        reaches every agent by id. From any of them you can read memory anywhere (`send(<state>,
-        {read})`), run an inference turn (`send(<ai>, {send, ...})`), and/or spawn compute
-        (`send(<py>, {start, code})`) — regardless of which kernel owns the target. Code
-        steps and LLM-call steps are interchangeable, both directions.
-
-        """#
+    """#
 
     public func handle(
         agentId: AgentId,
@@ -211,6 +218,9 @@ struct AnthropicProvider: AIProvider {
     /// without it a long swift turn ran past the harness's 180s send cap
     /// (measured 2026-09-15: E20 build failed 3/3).
     let sampling: OrderedDictionary<String, JSON>
+    /// What the endpoint REPORTED for the last pass — the prompt size (ai_core
+    /// calibrates its own estimate with it) and the stop reason.
+    let usage: AIUsage? = AIUsage()
 
     /// 502/503/504/520-524 from a CDN in front of the API is a hiccup, not an
     /// answer: a 1-2s restart once returned a Cloudflare HTML page and killed a
@@ -234,11 +244,12 @@ struct AnthropicProvider: AIProvider {
     /// (python: `body.update(self._sampling)`) so an explicit knob wins over a
     /// fixed field of the same name. Swift emitted `stream` before `messages`,
     /// which is the same request and a different byte stream.
-    func requestBody(messages: [JSON]) -> OrderedDictionary<String, JSON> {
+    func requestBody(messages: [JSON], maxTokens sideBound: Int? = nil) -> OrderedDictionary<String, JSON> {
         let (system, turns) = translateAnthropicMessages(messages)
         var body: OrderedDictionary<String, JSON> = [:]
         body["model"] = .string(model)
-        body["max_tokens"] = .integer(maxTokens)
+        // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the record's.
+        body["max_tokens"] = .integer(sideBound.map { Int64($0) } ?? maxTokens)
         body["messages"] = .array(turns)
         body["stream"] = .bool(true)
         // `if system:` — an EMPTY system block is no `system` key at all.
@@ -248,11 +259,16 @@ struct AnthropicProvider: AIProvider {
     }
 
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
+        chat(messages: messages, maxTokens: nil)
+    }
+
+    func chat(messages: [JSON], maxTokens sideBound: Int?) -> AsyncThrowingStream<AIChunk, Error> {
         let endpoint = endpoint
         let model = model
         let apiKey = apiKey
+        let usage = usage
         // RAW, always: no native `tools`/`tool_choice`.
-        let payload = JSON.object(requestBody(messages: messages)).serialize()
+        let payload = JSON.object(requestBody(messages: messages, maxTokens: sideBound)).serialize()
         return AsyncThrowingStream { continuation in
             let task = Task {
                 // THE KEY FIRST, THEN THE MODEL — python's order inside `chat()`
@@ -321,6 +337,7 @@ struct AnthropicProvider: AIProvider {
                             var state = AnthropicStreamState()
                             for try await line in bytesToLines(response.body) {
                                 let d = decodeAnthropicSSELine(line, state: &state)
+                                if let n = d.promptTokens { usage?.lastPromptTokens = n }
                                 for token in d.tokens { continuation.yield(.token(token)) }
                                 // python RAISES from inside the loop, so the
                                 // half-open think span is NOT closed on this
@@ -338,7 +355,15 @@ struct AnthropicProvider: AIProvider {
                             // it only on `message_stop` left the span open on exactly
                             // the turns that were cut.
                             for token in state.wrap.finish() { continuation.yield(.token(token)) }
-
+                            usage?.lastStopReason = state.stopReason
+                            // A BOUNDED SIDE CALL that stopped at its bound is an
+                            // ANSWER, not a fault: the caller asked for at most
+                            // `max_tokens` and reads the stop reason (a fold refuses
+                            // a cut summary).
+                            if sideBound != nil && state.stopReason == "max_tokens" {
+                                continuation.finish()
+                                return
+                            }
                             if let why = anthropicTerminalityError(state) {
                                 continuation.finish(throwing: PyError("RuntimeError", why))
                                 return

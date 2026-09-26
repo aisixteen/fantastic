@@ -41,12 +41,18 @@ fn register_default_bundles() -> BundleRegistry {
     // async over axum/tokio.
     // THE ROOT LOADER. `kernel_state.tools` is the root's own handler_module —
     // without it the tree root has a bundle that is not installed, so its boot
-    // (ledger rehydrate + flusher, message pump, record writer) never runs.
+    // (the guid, the record writer) never runs.
     reg.register(
         fantastic_core::HANDLER_MODULE,
         fantastic_core::KernelStateBundle::default(),
     );
     reg.register("file_bridge.tools", fantastic_file::FileBundle);
+    // THE MEMORY STORE in RAM — the root's `memory_store_id` and every AI agent's
+    // name one. Ephemeral: gone with the process.
+    reg.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
     // The render sink AI backends stream their reply to. Without it that
     // stream had nowhere to land on rust.
     reg.register(
@@ -317,7 +323,7 @@ fn ledger_cap_from(argv: Vec<String>) -> Result<(Vec<String>, Option<Option<usiz
 /// bootstraps its own, so every mode applies it.
 fn apply_ledger_cap(booted: &BootedKernel, cap: Option<Option<usize>>) {
     if let Some(cap) = cap {
-        booted.kernel.ledger.set_cap(cap);
+        booted.kernel.set_ledger_cap(cap);
     }
 }
 
@@ -331,7 +337,7 @@ async fn dispatch(
     // when the root record is being seeded too. python hangs the cold seed off
     // `write_record` (`main._bootstrap`: `if seeded: write_record(...)` →
     // `_seed_readme`), so a workdir that already carries a parseable
-    // `.fantastic/agent.json` gets NOTHING — rust used to write the readme and
+    // `.fantastic/agent.yaml` gets NOTHING — rust used to write the readme and
     // the whole docs tree on every invocation (measured 2026-09-20). A missing
     // OR unparseable record reseeds, as `bootstrap`'s own `seeded` does.
     // Best-effort: if the workdir can't be written to, the verb may still work.
@@ -410,7 +416,7 @@ async fn dispatch(
             // python builds the kernel in `main` BEFORE `dispatch_argv` runs, so
             // even the usage error leaves the seeded root record behind — the
             // readme seed above writes `readme.md` + `docs/` but never
-            // `.fantastic/agent.json` (measured: 19 created paths vs rust's 18).
+            // `.fantastic/agent.yaml` (measured: 19 created paths vs rust's 18).
             let opts = BootstrapOptions::one_shot(&workdir);
             let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
             apply_ledger_cap(&booted, cap);
@@ -479,7 +485,7 @@ async fn dispatch(
     if args.len() >= 2 {
         // A14.7 — the lock is probed BEFORE the bootstrap that would take it, so
         // the refusal is python's line rather than the kernel's LockHeld text. A
-        // malformed lock.json reads as "nobody holds it", as python's `_read_lock`
+        // malformed lock.yaml reads as "nobody holds it", as python's `_read_lock`
         // does.
         if let Some(pid) = lock::current_holder(&workdir).ok().flatten() {
             if lock::pid_alive(pid) {
@@ -575,19 +581,19 @@ async fn dispatch(
     // `[kernel] {e}` printer (C81).
     lock::acquire(&workdir)?;
 
-    // THE ROOT BOOTS FIRST, then every agent in REGISTRATION ORDER (python
-    // `_boot_all_agents` walks `kernel.agents.values()`, and the root is the
-    // first entry). The root's boot is what rehydrates the ledger, installs its
-    // flusher, starts the message pump and subscribes the record writer — so
-    // nothing a child's boot mints is lost, and nothing is installed twice.
-    // Failures are skipped; boot must never abort the daemon. A refusal REPLY is
-    // silent, as on python (`_boot_all_agents` prints only for a RAISED boot).
-    for id in kernel.agent_ids() {
-        let _ = kernel
-            .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
-            .await
-            .remove(0)
-            .result;
+    // THE START SEQUENCE — the root's memory store first, then everyone (python
+    // `kernel.start(boot_all=True)`). A root with no `memory_store_id` does not
+    // start: fail loud, exit non-zero — the lock released and the agents torn
+    // down on the way out, as python's `with FantasticLock()` + atexit do.
+    let started = kernel.start(true).await;
+    if let Some(err) = started.get("error").filter(|e| fantastic_bundle::py_truthy(e)) {
+        let mut msg = fantastic_bundle::py_str(err);
+        if let Some(hint) = started.get("hint").filter(|h| fantastic_bundle::py_truthy(h)) {
+            msg.push_str(&format!("\n  hint: {}", fantastic_bundle::py_str(hint)));
+        }
+        kernel.shutdown().await;
+        bootstrap::shutdown(&workdir)?;
+        return Err(msg.into());
     }
 
     // A14.13 — python `print("[kernel] up", flush=True)`. The tty half
@@ -599,24 +605,24 @@ async fn dispatch(
         _ = tokio::signal::ctrl_c() => "SIGINT",
         _ = sigterm() => "SIGTERM",
         _ = sighup() => "SIGHUP",
-        // A root-only `shutdown_kernel` verb fired (over web_rest / web_ws).
+        // A root-only `kernel_stop` verb fired (over web_rest / web_ws).
         // The verb already DEFERRED this signal ~100ms (see send.rs) so the
         // ack was enqueued + flushed over the web surface (WS frame across
         // out_tx -> send_task -> sink; HTTP body written by hyper after the
         // handler returned) before we got here. This extra short grace is
         // belt-and-suspenders before we drain the listeners below.
         // Backend-agnostic stop: this exit stops the container (PID 1) or
-        // kills the bare process, identically. python's `shutdown_kernel`
+        // kills the bare process, identically. python's `kernel_stop`
         // verb sets the SAME `stop` event `_request_stop` does, but does NOT
         // go through `_request_stop` — no per-signal line for this branch.
         _ = kernel.shutdown_requested() => {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            "shutdown_kernel"
+            "kernel_stop"
         },
     };
     // A14.13 — python's exact per-OS-signal line (`_request_stop`): a
     // leading blank line, the signal's name, stderr, flushed.
-    if sig != "shutdown_kernel" {
+    if sig != "kernel_stop" {
         eprintln!("\n[kernel] {sig} — shutting down...");
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }

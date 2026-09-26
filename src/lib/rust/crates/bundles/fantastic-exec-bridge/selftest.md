@@ -9,7 +9,7 @@ Your `code` is a SCRIPT, not a set of verb handlers. It is run top to bottom, on
 Put the work at module level. If the tool must survive its first pass to receive later
 sends, keep it running; only a LIVE job acks `{queued:true}`.
 
-The loader lays the `code` down as `main.py` beside `agent.json`. `start` spawns in the
+The loader lays the `code` down as `main.py` beside `agent.yaml`. `start` spawns in the
 BACKGROUND and returns at once; `boot` revives it after a reboot. There is **no `exec`**
 — any verb the bundle does not own is MAIL for the running program, so a blocking
 run-and-wait verb could never reach a live job's `on_message`.
@@ -45,10 +45,10 @@ Expect: `{job_id, status:"running"}` back immediately (well under a second), the
 
 ```sh
 cat .fantastic/agents/<pr-id>/main.py
-jq -e 'has("code") | not' .fantastic/agents/<pr-id>/agent.json
+jq -e 'has("code") | not' .fantastic/agents/<pr-id>/agent.yaml
 ```
 
-Expect: `main.py` holds the program verbatim, and `agent.json` does NOT carry a `code`
+Expect: `main.py` holds the program verbatim, and `agent.yaml` does NOT carry a `code`
 key. Two sources of truth for one program is the failure this split removes.
 
 ### Test 4: the connector reaches another agent

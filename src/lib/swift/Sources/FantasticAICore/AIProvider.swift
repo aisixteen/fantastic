@@ -51,4 +51,51 @@ public protocol AIProvider: Sendable {
     /// the only teardown a provider ever needed. Cancellation belongs to the one
     /// primitive, not to a per-provider seam.
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error>
+
+    /// The same stream, with `maxTokens` bounding THIS call's output (a side
+    /// call's budget — a fold summary); `nil` keeps the provider's own bound. A
+    /// stream that stopped AT the bound sets `usage.lastStopReason =
+    /// "max_tokens"`. Python `Provider.chat(messages, max_tokens=None)`.
+    func chat(messages: [JSON], maxTokens: Int?) -> AsyncThrowingStream<AIChunk, Error>
+
+    /// What the endpoint REPORTED about the last pass — the prompt size it
+    /// counted (calibrates the chars/4 estimate) and why the stream ended. `nil`
+    /// for a provider whose endpoint reports nothing. Python
+    /// `Provider.last_prompt_tokens` / `last_stop_reason`.
+    var usage: AIUsage? { get }
+}
+
+extension AIProvider {
+    /// A provider with no output bound of its own answers the unbounded stream.
+    public func chat(messages: [JSON], maxTokens: Int?) -> AsyncThrowingStream<AIChunk, Error> {
+        chat(messages: messages)
+    }
+
+    /// Reports nothing.
+    public var usage: AIUsage? { nil }
+}
+
+/// The endpoint's own report of the last pass, set by the provider as its stream
+/// runs. A reference, because a provider is a `Sendable` value built per send and
+/// the core reads the report after the stream ends. Python sets attributes on the
+/// provider object.
+public final class AIUsage: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _promptTokens: Int?
+    private var _stopReason: String?
+
+    public init() {}
+
+    /// The endpoint's own count of the last prompt, or `nil`.
+    public var lastPromptTokens: Int? {
+        get { lock.withLock { _promptTokens } }
+        set { lock.withLock { _promptTokens = newValue } }
+    }
+
+    /// Why the last stream ended — `"max_tokens"` when it stopped AT the output
+    /// bound.
+    public var lastStopReason: String? {
+        get { lock.withLock { _stopReason } }
+        set { lock.withLock { _stopReason = newValue } }
+    }
 }

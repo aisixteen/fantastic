@@ -23,8 +23,8 @@ FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 
 ```bash
 $FANTASTIC reflect | jq -e '.tree.id == "kernel_state"'
-test -f .fantastic/agent.json
-jq -e '.id == "kernel_state"' .fantastic/agent.json
+test -f .fantastic/agent.yaml
+jq -e '.id == "kernel_state"' .fantastic/agent.yaml
 ```
 
 ### Test 2: core seeds its own readme.md
@@ -47,7 +47,7 @@ $FANTASTIC kernel_state list_agents | jq -e '[.agents[].id] | contains(["kernel_
 
 ```bash
 $FANTASTIC kernel_state update_agent id=t_file note="from test 4"
-jq -e '.note == "from test 4"' .fantastic/agents/t_file/agent.json
+jq -e '.note == "from test 4"' .fantastic/agents/t_file/agent.yaml
 ```
 
 ### Test 5: delete_lock blocks delete_agent

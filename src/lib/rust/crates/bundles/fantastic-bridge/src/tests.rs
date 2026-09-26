@@ -1937,9 +1937,7 @@ async fn booted_bridge_ps_rows_match_python() {
     );
     // C36 — the fork is a MESSAGE: one `task` row on the leg, and the pid in
     // `ps` is that row's id.
-    let store: Vec<_> = kernel
-        .rows
-        .for_agent(&AgentId::from(bid.as_str()))
+    let store: Vec<_> = fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from(bid.as_str()))
         .into_iter()
         .filter(|r| r.get("kind") == Some(&json!("task")))
         .collect();

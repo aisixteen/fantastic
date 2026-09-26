@@ -195,13 +195,13 @@ impl Bundle for FileBundle {
                 // an escaping root answers `bad_arg`, not `transport_error`.
                 let root = fs::resolve_root(&root_str(&meta), &base);
                 match other {
-                    "list" => list_reply(&root, payload, &hidden_list(&meta)),
+                    "list" => list_reply(agent_id, &root, payload, &hidden_list(&meta)),
                     // THE STREAM VERBS ON THE TEXT CHANNEL, as python serves
                     // them: a model writes a document VERBATIM between `<bytes>`
                     // and `</bytes>` and python's parser delivers that as utf-8
                     // bytes to the same handler; a chunk read back renders utf-8
                     // in the reply. The binary channel stays for real blobs.
-                    "read_stream" => read_stream_reply(&root, payload, true).0,
+                    "read_stream" => read_stream_reply(agent_id, &root, payload, true).0,
                     // `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK. python types
                     // the argument (`isinstance(data, (bytes, bytearray))`), and
                     // JSON has no bytes, so ANY present value here — a string, a
@@ -258,7 +258,7 @@ impl Bundle for FileBundle {
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
         match verb {
             "read_stream" => {
-                let (reply, body) = read_stream_reply(&root, &header, false);
+                let (reply, body) = read_stream_reply(agent_id, &root, &header, false);
                 Ok((Some(reply), body))
             }
             "write_stream" => {
@@ -373,6 +373,7 @@ fn is_hidden(name: &str, hidden: &[Value]) -> bool {
 /// the wire. A leg reads the frame kind off that key; a head that simply omitted
 /// it left the browser a different dict shape on the two channels (A11.9).
 fn read_stream_reply(
+    agent_id: &AgentId,
     root: &Result<PathBuf, String>,
     payload: &Value,
     text_channel: bool,
@@ -424,6 +425,14 @@ fn read_stream_reply(
     out.insert("next_offset".to_string(), json!(next_offset));
     out.insert("eof".to_string(), json!(next_offset >= size));
     out.insert("size".to_string(), json!(size));
+    out.insert(
+        "origin".to_string(),
+        json!(format!(
+            "{agent_id} {path_str} bytes {offset}-{next_offset} of {size} — read_stream \
+             {{path: {path_str}, offset: {offset}, length: {}}}",
+            chunk.len()
+        )),
+    );
     // A CHUNK CAME BACK — `Some`, even when it is empty (an empty file, or a
     // read past the end). Only that tells a leg it may answer octet.
     let body = if text_channel { None } else { Some(chunk) };
@@ -716,7 +725,12 @@ fn reflect_reply(agent_id: &AgentId, meta: &Map<String, Value>, base: &Path) -> 
     Value::Object(out)
 }
 
-fn list_reply(root: &Result<PathBuf, String>, payload: &Value, hidden: &[Value]) -> Value {
+fn list_reply(
+    agent_id: &AgentId,
+    root: &Result<PathBuf, String>,
+    payload: &Value,
+    hidden: &[Value],
+) -> Value {
     let path_str = match path_arg("list", payload, "path") {
         Ok(p) => p,
         Err(e) => return e,
@@ -771,7 +785,13 @@ fn list_reply(root: &Result<PathBuf, String>, payload: &Value, hidden: &[Value])
         }
         files.push(Value::Object(obj));
     }
-    json!({"path": path_str, "files": files})
+    json!({
+        "path": path_str,
+        "files": files,
+        "origin": format!(
+            "{agent_id} list {path_str} — list {{path: {path_str}}}; changes as files change"
+        ),
+    })
 }
 
 /// What `list` found at the path — python's three branches, told apart before

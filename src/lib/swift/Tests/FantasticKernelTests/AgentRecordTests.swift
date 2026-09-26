@@ -122,7 +122,7 @@ struct AgentRecordCodableTests {
         #expect(root.ordered["parent_id"] == nil)
     }
 
-    /// The same order survives the merge-write onto an existing `agent.json`:
+    /// The same order survives the merge-write onto an existing `agent.yaml`:
     /// python's `existing.update(record)` overlays the record's keys in record
     /// order, and a key the record does NOT carry is left alone rather than
     /// deleted.
@@ -154,7 +154,7 @@ struct AgentRecordCodableTests {
         ])
         // A sidecar field an operator already wrote — it must survive and keep
         // the position it has on disk.
-        files.put("agents/kid/agent.json", #"{"note": "keep me", "id": "kid"}"#)
+        files.put("agents/kid/agent.yaml", #"{"note": "keep me", "id": "kid"}"#)
         _ = await k.send([
             Item(
                 AgentId("kernel"),
@@ -165,8 +165,8 @@ struct AgentRecordCodableTests {
                 ]))
         ])
         await k.flushRecords()
-        let written = try #require(files.get("agents/kid/agent.json"))
-        let keys = try JSON.parse(Data(written.utf8)).asObject?.keys.elements
+        let written = try #require(files.get("agents/kid/agent.yaml"))
+        let keys = try YamlIO.load(written).asObject?.keys.elements
         #expect(keys?.first == "note", "the on-disk key keeps its position: \(written)")
         #expect(keys?.last == "parent_id", "\(written)")
         #expect(keys?.contains("handler_module") == true, "\(written)")

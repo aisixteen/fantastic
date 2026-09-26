@@ -47,6 +47,10 @@ async fn mk_kernel_with(
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
+    kernel.bundles.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -77,7 +81,13 @@ async fn mk_kernel_with(
         .await
         .remove(0)
         .result;
-    let store_grant = fid.clone();
+    // Deny-all: its memory store (wired both ways) + its leg + `cli`.
+    let memory = fantastic_ram_store::test_support::memory_meta(
+        &kernel,
+        &ant,
+        json!({ fid.clone(): "*", "cli": "*" }),
+    )
+    .await;
     let mut create = json!({
         "type":"create_agent",
         "parent_id": "kernel",
@@ -85,10 +95,10 @@ async fn mk_kernel_with(
         "id": ant,
         "file_bridge_id": fid.clone(),
         "model": "test-model",
-        // Deny-all: the backend persists its api_key/history to its store directly
-        // and streams its turn to `cli` — both explicit grants.
-        "can_call": { store_grant: "*", "cli": "*" },
     });
+    for (k, v) in memory {
+        create[k] = v;
+    }
     if let Some(e) = endpoint {
         create["endpoint"] = json!(e);
     }
@@ -265,7 +275,7 @@ async fn reflect_keys_are_python_keys_in_python_order() {
         .result;
     // The kernel's own reflect frame (`can_call`, `tree`, …) is appended AFTER
     // the bundle's body; what this pins is the bundle's half, in python's order.
-    let keys: Vec<String> = r.as_object().unwrap().keys().take(11).cloned().collect();
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(12).cloned().collect();
     assert_eq!(
         keys,
         vec![
@@ -275,6 +285,7 @@ async fn reflect_keys_are_python_keys_in_python_order() {
             "endpoint".to_string(),
             "context_window".to_string(),
             "context_strategy".to_string(),
+            "memory_store_id".to_string(),
             "verbs".to_string(),
             "generating".to_string(),
             "cancel".to_string(),
@@ -843,8 +854,9 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             model: m,
             max_tokens: 16,
             sampling: Map::new(),
+            report: Default::default(),
         };
-        let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
+        let err = match p.chat(&[json!({"role": "user", "content": "hi"})], None).await {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
             Err(e) => e.message,
         };
@@ -873,7 +885,7 @@ fn the_wire_trace_lines_are_pythons_text() {
     );
     // python `f"[wire] <- stop_reason={stop_reason!r} blocks={blocks!r}"` — a
     // stream that carried nothing prints python's `None` and `[]`.
-    let mut st = SseState::new();
+    let mut st = SseState::new(Default::default(), false);
     assert_eq!(wire_reply_line(&st), "[wire] <- stop_reason=None blocks=[]");
     st.stop_reason = Some("end_turn".to_string());
     st.blocks = vec![json!("thinking"), json!("text")];
@@ -930,4 +942,31 @@ async fn the_wire_trace_prints_only_when_the_var_is_1() {
         None => std::env::remove_var("FANTASTIC_AI_WIRE"),
     }
     assert_eq!(r["response"], "hi");
+}
+
+/// PROVIDER-REPORTED USAGE: `message_start.usage` — input tokens with the cache
+/// reads and writes, what the window really held — calibrates ai_core's
+/// estimate; a BOUNDED side call that stopped at `max_tokens` is an ANSWER (no
+/// terminality error) and reports the stop reason for the fold to read.
+#[test]
+fn message_start_usage_and_a_bounded_cut_are_reported() {
+    let report = fantastic_ai_core::provider::ReportCell::default();
+    let mut st = SseState::new(std::sync::Arc::clone(&report), true);
+    for ev in [
+        json!({"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":3}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cut"}}),
+        json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
+        json!({"type":"message_stop"}),
+    ] {
+        decode_sse_line(&mut st, &format!("data: {ev}")).expect("decodes");
+    }
+    assert_eq!(report.lock().unwrap().prompt_tokens, Some(123));
+    assert_eq!(st.finish(), None, "a bounded cut is an answer");
+    assert_eq!(report.lock().unwrap().stop_reason.as_deref(), Some("max_tokens"));
+    // unbounded, the same cut is a terminality error
+    let mut st = SseState::new(Default::default(), false);
+    decode_sse_line(&mut st, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}")
+        .expect("decodes");
+    assert!(st.finish().is_some());
 }

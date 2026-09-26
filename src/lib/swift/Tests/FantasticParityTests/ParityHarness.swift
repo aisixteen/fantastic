@@ -264,7 +264,7 @@
         /// invariants only.
         @Test func rootGuidPerRuntimeAndStableParity() async throws {
             guard let binary = pythonBinaryURL() else { return }
-            // Separate workdirs — a SHARED `.fantastic/agent.json` would make
+            // Separate workdirs — a SHARED `.fantastic/agent.yaml` would make
             // both runtimes rehydrate the SAME persisted guid (defeating the
             // per-runtime check); distinct dirs each mint their own.
             let pyDir = makeTempDir()
@@ -281,7 +281,7 @@
             // the apples-to-apples "persistence-on" config matching Swift's disk
             // mode (which persists the root record at cold-seed). The create routes
             // through the `call` path, so the root BOOTS (the mint fires) and the
-            // flush persists the guid into `.fantastic/agent.json`.
+            // flush persists the guid into `.fantastic/agent.yaml`.
             _ = try pythonOneShot(
                 binary: binary, workdir: pyDir, agentId: "kernel_state", verb: "create_agent",
                 args: [
@@ -312,7 +312,7 @@
             }
             // Stable across a reboot of the SAME workdir (never regenerated) — on
             // swift. MEASURED 2026-09-13: python's one-shot does not persist the
-            // guid even with the provider wired above (`.fantastic/agent.json`
+            // guid even with the provider wired above (`.fantastic/agent.yaml`
             // carries no `guid`; two reflects answer two guids). Python is the
             // immutable reference, so its stability is not asserted here; the
             // shape check above still holds for both.

@@ -1,18 +1,16 @@
-// TAPE DURABILITY AT SHUTDOWN — subprocess level, the real binary.
+// THE DAEMON AND THE MEMORY STORE — subprocess level, the real binary.
 //
-// ONE TAPE (2026-09-24): there is no `ledger.json`. The LAST execution a run
-// performed is on disk in `.fantastic/messages.xml` when the process is gone —
-// its `call` row WITH the dispatch payload, its `settle` row WITH the whole
-// outcome body — and the execution ledger is rebuilt from exactly those rows at
-// the next boot. Both CLI shapes are pinned here because each has its own exit
-// path:
+// The kernel keeps no conversation and writes no message log: its execution rows
+// are flushed into the root's MEMORY STORE (`memory_store_id`), and the `ledger`
+// verb is a projection over that store plus what is still in RAM. Both CLI
+// shapes are pinned here because each has its own path:
 //
-//   - the DAEMON: `[kernel] up`, live calls over the REST leg, SIGTERM →
-//     `Kernel.shutdown()` → exit 0.
-//   - the ONE-SHOT: one call, then the process returns from `main`.
-//
-// In-process tests cannot see either: what matters is whether the process lands
-// the pump's last window before the lock is released.
+//   - the DAEMON runs `kernel_start`: a root with no `memory_store_id` does not
+//     start (fail loud, exit non-zero, the hint names ram_store); with one, live
+//     calls over the REST leg land in the store and `ledger` reads them back;
+//     SIGTERM → `Kernel.shutdown()` → exit 0, the id counter's bound on disk.
+//   - the ONE-SHOT runs an UNSTARTED kernel: no store required, so an admin can
+//     create the store and name it before the first `kernel_start`.
 
 #if os(macOS)
 
@@ -40,7 +38,7 @@
         try proc.run()
     }
 
-    @Suite("daemon + one-shot: the tape survives exit", .serialized)
+    @Suite("daemon + one-shot: the memory store", .serialized)
     struct DaemonLedgerTests {
 
         // ── harness ────────────────────────────────────────────────
@@ -114,11 +112,12 @@
             return (String(data: data, encoding: .utf8) ?? "", proc.terminationStatus)
         }
 
-        /// Seed the store + the web host + its REST leg, all through the CLI,
-        /// exactly as an operator would. Every reply is checked: a silent
-        /// setup failure would make the ledger assertion meaningless.
-        private func seed(_ dir: URL, port: UInt16) throws {
-            for argv in [
+        /// Seed the record store, the memory store (named by the root), the web
+        /// host and its REST leg, all through the CLI, exactly as an operator
+        /// would. Every reply is checked: a silent setup failure would make the
+        /// ledger assertion meaningless.
+        private func seed(_ dir: URL, port: UInt16, memory: Bool = true) throws {
+            var steps: [[String]] = [
                 [
                     "kernel", "create_agent", "parent_id=kernel_state",
                     "handler_module=file_bridge.tools", "id=store", "root=.fantastic",
@@ -134,9 +133,21 @@
                 [
                     "kernel", "create_agent", "parent_id=web",
                     "handler_module=web_rest.tools", "id=rest",
-                    "ingress_rule=allow_all_ingress", "can_call={\"store\": \"*\"}",
+                    "ingress_rule=allow_all_ingress",
+                    "can_call={\"store\": \"*\", \"kernel_state\": [\"ledger\"]}",
                 ],
-            ] {
+            ]
+            if memory {
+                steps += [
+                    [
+                        "kernel", "create_agent", "parent_id=kernel_state",
+                        "handler_module=ram_store.tools", "id=memory", "operator=true",
+                        "admins=[\"kernel\"]",
+                    ],
+                    ["kernel", "update_agent", "id=kernel_state", "memory_store_id=memory"],
+                ]
+            }
+            for argv in steps {
                 let (out, code) = try oneShot(dir, argv)
                 #expect(code == 0, "\(argv) exited \(code): \(out)")
                 #expect(!out.contains("\"error\""), "\(argv): \(out)")
@@ -173,16 +184,12 @@
             Issue.record("timed out waiting for \(what): \(detail())")
         }
 
-        /// Every row of the ONE TAPE. `ledger.json` must not exist — an old one
-        /// is ignored and nothing ever writes it again.
-        private func tapeRows(_ dir: URL) throws -> [Row] {
-            #expect(
-                !FileManager.default.fileExists(
-                    atPath: dir.appendingPathComponent(".fantastic/ledger.json").path),
-                "ledger.json is deleted — nothing may write it")
-            let f = dir.appendingPathComponent(".fantastic/messages.xml")
-            #expect(FileManager.default.fileExists(atPath: f.path), "no messages.xml at \(f.path)")
-            return try MessagesXML.parseMessages(try String(contentsOf: f, encoding: .utf8))
+        /// The root record on disk.
+        private func rootRecord(_ dir: URL) throws -> JSON {
+            try YamlIO.load(
+                try String(
+                    contentsOf: dir.appendingPathComponent(".fantastic/agent.yaml"),
+                    encoding: .utf8))
         }
 
         // ── the daemon path ────────────────────────────────────────
@@ -235,71 +242,83 @@
                     "\(name): \(String(data: d, encoding: .utf8) ?? "")")
             }
 
+            // THE LEDGER — a projection over the kernel's memory store (the
+            // flusher has had its debounce) plus RAM, scoped to the caller: the
+            // REST leg made these calls, so it sees them, results kept (named).
+            try await Task.sleep(nanoseconds: 500_000_000)
+            var lreq = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/rest/kernel")!)
+            lreq.httpMethod = "POST"
+            lreq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            lreq.httpBody = Data("{\"type\":\"ledger\"}".utf8)
+            let (ld, _) = try await session.data(for: lreq)
+            let ledger = try JSON.parse(ld)
+            let executions = ledger["executions"].asArray ?? []
+            for name in names {
+                let e = executions.first { $0["name"].asString == name }
+                #expect(e?["status"].asString == "completed", "\(name): \(ledger.serialize())")
+                #expect(e?["outcome"]["result"] != nil && e?["outcome"]["result"] != .null,
+                    "a named execution keeps its result: \(ledger.serialize())")
+            }
+
             // SIGTERM — the graceful path python takes.
             kill(proc.processIdentifier, SIGTERM)
             await wait(60, "the daemon to exit", tail.text) { !proc.isRunning }
             proc.waitUntilExit()
             #expect(proc.terminationStatus == 0, "exit \(proc.terminationStatus): \(tail.text)")
+            // THE COUNTER'S BOUND IS ON DISK, beside the guid: a restart never
+            // repeats an id. No message log was written.
+            let rec = try rootRecord(dir)
+            #expect(rec["next_id"].asInt != nil, "\(rec.serialize())")
+            #expect(rec["guid"].asString?.isEmpty == false)
+            #expect(
+                !FileManager.default.fileExists(
+                    atPath: dir.appendingPathComponent(".fantastic/messages.yaml").path))
+        }
 
-            // THE LAST EXECUTION IS ON THE TAPE — call AND settle, both whole.
-            let rows = try tapeRows(dir)
-            let landed = rows.compactMap { $0["name"]?.asString }
-            for name in names {
-                #expect(landed.contains(name), "\(name) never reached messages.xml: \(landed)")
-            }
-            let last = try #require(rows.last { $0["name"]?.asString == "daemon-call-3" })
-            #expect(last["agent"]?.asString == "store", "\(last)")
-            #expect(last["named"] == .bool(true), "\(last)")
-            #expect(last["payload"]?["type"] == .string("list"), "the payload verbatim: \(last)")
-            #expect(last["attempts"] == .integer(1) && last["retries"] == .integer(0))
-            let settle = try #require(
-                rows.last { $0["kind"]?.asString == "settle" && $0["parent"] == last["id"] })
-            #expect(settle["outcome"]?["status"] == .string("completed"), "\(settle)")
-            #expect(settle["outcome"]?["result"] != nil, "the whole outcome body: \(settle)")
-            #expect(settle["attempts"] == .integer(1))
+        @Test func aDaemonWithoutAMemoryStoreFailsLoud() async throws {
+            let dir = tmpDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            try seed(dir, port: freePort(), memory: false)
+            let proc = Process()
+            proc.executableURL = binary
+            proc.currentDirectoryURL = dir
+            proc.arguments = []
+            proc.standardInput = FileHandle.nullDevice
+            let errPipe = Pipe()
+            proc.standardOutput = Pipe()
+            proc.standardError = errPipe
+            try launch(proc)
+            let err = errPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            let text = String(data: err, encoding: .utf8) ?? ""
+            #expect(proc.terminationStatus != 0, "a root with no store started: \(text)")
+            #expect(text.contains("memory_store_id"), "\(text)")
+            #expect(text.contains("create a ram_store"), "the hint names what to create: \(text)")
         }
 
         // ── the one-shot path ──────────────────────────────────────
 
-        @Test func oneShotFlushesItsExecutionBeforeExit() async throws {
+        /// A one-shot runs an UNSTARTED kernel: no store is required, so the
+        /// admin creates the store and names it before the first start.
+        @Test func aOneShotNeedsNoStoreAndCanNameOne() async throws {
             let dir = tmpDir()
             defer { try? FileManager.default.removeItem(at: dir) }
-            let (mk, mkCode) = try oneShot(
-                dir,
+            for argv in [
                 [
                     "kernel", "create_agent", "parent_id=kernel_state",
                     "handler_module=file_bridge.tools", "id=store", "root=.fantastic",
                     "ingress_rule=allow_all_ingress",
-                ])
-            #expect(mkCode == 0, "\(mk)")
-
-            let (out, code) = try oneShot(dir, ["store", "list", "path="])
-            #expect(code == 0, "\(out)")
-            #expect(!out.contains("\"error\""), "\(out)")
-
-            // The process is GONE — everything it executed is on the tape.
-            //
-            // NOT the `store list` itself: an OPERATOR call on the discovered
-            // store is the loader's own persistence traffic, which never enters
-            // the log (`MessagePump.skips`, python's `_is_own_persistence`) —
-            // ledger.json used to keep it, the tape deliberately does not. What
-            // is pinned is the execution the one-shot performed BEFORE the store
-            // was the store: the `create_agent`, with its payload and its
-            // settle, landed by the exit path.
-            let rows = try tapeRows(dir)
-            let call = try #require(
-                rows.last {
-                    $0["kind"]?.asString == "call"
-                        && $0["payload"]?["type"] == .string("create_agent")
-                },
-                "the one-shot's own execution is missing: \(rows.count) rows")
-            #expect(call["payload"]?["id"] == .string("store"), "the payload verbatim: \(call)")
-            #expect(call["attempts"] == .integer(1) && call["named"] == .bool(false))
-            let settle = try #require(
-                rows.last { $0["kind"]?.asString == "settle" && $0["parent"] == call["id"] },
-                "no settle row for the one-shot's call")
-            #expect(settle["outcome"]?["status"] == .string("completed"), "\(settle)")
-            #expect(settle["outcome"]?["result"]["id"] == .string("store"), "\(settle)")
+                ],
+                [
+                    "kernel", "create_agent", "parent_id=kernel_state",
+                    "handler_module=ram_store.tools", "id=memory", "operator=true",
+                ],
+                ["kernel", "update_agent", "id=kernel_state", "memory_store_id=memory"],
+            ] {
+                let (out, code) = try oneShot(dir, argv)
+                #expect(code == 0 && !out.contains("\"error\""), "\(argv): \(out)")
+            }
+            #expect(try rootRecord(dir)["memory_store_id"].asString == "memory")
         }
     }
 

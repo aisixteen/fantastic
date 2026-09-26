@@ -2,7 +2,7 @@
 //
 // Mirrors Rust's `serde_json::Value` (with the `preserve_order`
 // feature) — object keys retain insertion order on round-trip, so
-// `agent.json` bytes match across Rust↔Swift cross-runtime testing.
+// on-disk records (`agent.yaml`) keep their key order across runtimes.
 //
 // The kernel's substrate dispatch is fundamentally dynamic: every
 // verb's payload is arbitrary JSON, switched on the `type` field at

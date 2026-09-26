@@ -72,12 +72,46 @@ handler's task, so the table is a tree.
   task. Before these moved to the root a manifest could grant "A may watch and
   kill B's work" as one edge; that is gone, knowingly.
 
+## Executions
+
+Every call is an EXECUTION: a `call` row when it is dispatched, a `settle` row with
+its outcome when it ends. The kernel holds them in RAM and FLUSHES them into its
+memory store (the root's `memory_store_id`, under the kernel's own key); a settled,
+flushed execution leaves RAM. A call carrying an `id` is NAMED: a second send of the
+same id returns the recorded outcome instead of running again — across a flush and a
+restart, because the store is read before dispatch.
+
+`ledger` — no args
+: `{executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}` —
+  a projection over the store plus what is not yet flushed, scoped to what YOU
+  originated. Paged. What a settle KEEPS of an outcome: a NAMED call's whole result
+  (its dedup contract), a dead letter's error text, and `{status, bytes}` for
+  everything else — a reply body is its caller's, never the kernel's record.
+
+`ack_deadletter` — args: `id:int|str` (an execution id, or its name)
+: A `failed`/`timed_out`/`cancelled` execution is a DEAD LETTER, announced by the
+  `on_deadletter` event on the root. There is no re-send: inspect it, retry with a
+  NEW id if you choose, then acknowledge it. An acknowledged dead letter may be
+  pruned; an unacknowledged one is kept. Returns `{acked:true, id}`.
+
 ## Process
 
-`shutdown_kernel` — no args
-: Stop the kernel process gracefully. Blast radius depends on where the kernel
-  runs: check the root reflect's `env` — under `env:"container"` this stops (and
-  with `--rm` removes) a whole container, not just a process.
+`kernel_start` — no args
+: The start sequence. The root must name `memory_store_id` — without it the start
+  refuses (create a `ram_store` and name it there if you have none). Boots the
+  root, then the store, starts flushing, then boots every other agent in
+  registration order. Idempotent. Returns `{started, store, booted:[ids]}`.
+
+`shutdown_agents` — no args
+: Stops the AGENTS, not the process: new work refused, `shutdown` sent to every
+  agent advertising it, in-flight work waited for, the rest cancelled (into the dead
+  letters). Returns `{drained, shut:[ids], cancelled:[ids]}`.
+
+`kernel_stop` — no args
+: Stop the kernel PROCESS gracefully — drain, every call settles, the last rows
+  flush, agents shut down, exit. Blast radius depends on where the kernel runs:
+  check the root reflect's `env` — under `env:"container"` this stops (and with
+  `--rm` removes) a whole container, not just a process.
 
 ## Refusals
 

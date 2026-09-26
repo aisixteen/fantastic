@@ -6,10 +6,12 @@
 //   1. Build the kernel (read the persisted tree; NO lock yet).
 //   2. Decide composition: a persisted `web.tools` agent, or `stdin.isatty()`
 //      → PTY. NEITHER → return silently, no lock ever taken (A14.13).
-//   3. Only then acquire `.fantastic/lock.json` (fail if a live process owns
-//      it) and boot every loaded agent, root first.
+//   3. Only then acquire `.fantastic/lock.yaml` (fail if a live process owns
+//      it) and run THE START SEQUENCE (`kernel_start`): the root's memory store
+//      first, then everyone. A root with no `memory_store_id` does not start —
+//      fail loud, exit non-zero.
 //   4. web → `_block_forever()`; tty → the REPL loop. Race those against the
-//      stop signal (SIGINT/SIGTERM/SIGHUP, or the root-only `shutdown_kernel`
+//      stop signal (SIGINT/SIGTERM/SIGHUP, or the root-only `kernel_stop`
 //      verb); first to finish wins and triggers `Kernel.shutdown()`.
 //
 // Workdir is **always cwd** — matches Python's implicit-cwd
@@ -50,16 +52,19 @@ enum DaemonMode {
     static let downLine = "[kernel] down"
 
     /// Python's `_request_stop` line (`longrun.py:79-83`) — printed ONLY for
-    /// a real OS signal, never for `shutdown_kernel` (which sets the same
+    /// a real OS signal, never for `kernel_stop` (which sets the same
     /// stop event directly, with no signal name to report).
     static func stopSignalLine(_ signalName: String) -> String {
         "\n[kernel] \(signalName) — shutting down..."
     }
 
-    /// Python's `_boot_all_agents` per-agent failure line (`longrun.py:207`):
-    /// `f"  [kernel] boot {a.id!r} raised: {e}"`.
-    static func bootRaisedLine(id: AgentId, error: JSON) -> String {
-        "  [kernel] boot \(pyRepr(id.value)) raised: " + pyStr(error)
+    /// A root that does not start (python `longrun._default`): the start
+    /// sequence's refusal, raised as `RuntimeError(f"{error}\n  hint: {hint}")`
+    /// and printed by `main_dispatch` as `[kernel] <e>`.
+    static func startRefusedLine(_ refusal: JSON) -> String {
+        var line = "[kernel] " + pyStr(refusal["error"])
+        if pyTruthy(refusal["hint"]) { line += "\n  hint: " + pyStr(refusal["hint"]) }
+        return line
     }
 
     /// Run no-args daemon mode in cwd. Returns when the daemon
@@ -76,11 +81,10 @@ enum DaemonMode {
         // the `{type:boot}` sends) is gated on "is there anything to serve".
         let kernel: Kernel
         do {
+            // The kernel keeps no conversation and hydrates no rows: `load`
+            // restores the tree and the id counter; execution rows live in the
+            // root's memory store, which `kernel_start` wires below.
             kernel = try await startKernel(workdir: cwd, portHint: 0)
-            // THE MESSAGE STORE, hydrated COLD — before any agent boots, from
-            // above. A file of another version or a cut row refuses the boot
-            // rather than hydrating half a conversation.
-            try hydrateMessages(kernel, rootDir: workdirURL.appendingPathComponent(".fantastic"))
             // C80: applied after every kernel construction (this mode builds
             // its own, separate from `FantasticCLI.bootDiskBacked`'s).
             if FantasticCLI.ledgerCap.wasSet { kernel.ledger.setCap(FantasticCLI.ledgerCap.cap) }
@@ -133,22 +137,18 @@ enum DaemonMode {
                 [Item(cli.id, .object(["type": .string("intro_booting")]))])[0].result
         }
 
-        // Step 4 — Boot every agent in REGISTRATION ORDER, ROOT FIRST. Python
-        // `_boot_all_agents` walks `kernel.agents.values()`, whose first entry
-        // is the root — and the ROOT'S boot is what installs the ledger, the
-        // message pump and the record writer, so nothing may run before it.
-        // Walking a `list_agents` REPLY instead put those two sends in the
-        // ledger and the message log before the pump even existed. A boot
-        // that raised prints python's line and the loop CONTINUES (python
-        // `except Exception as e: print(f"  [kernel] boot {a.id!r} raised:
-        // {e}", file=sys.stderr)`), the same shape as the substrate's own
-        // `raised: true` settle field.
-        for agent in kernel.allAgents() {
-            let outcome = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[
-                0]
-            if pyTruthy(outcome.result["raised"]) {
-                RuntimeLog.warn(bootRaisedLine(id: agent.id, error: outcome.result["error"]))
-            }
+        // Step 4 — THE START SEQUENCE (python `kernel.start(boot_all=True)`): the
+        // root boots (it mints the guid every store key carries), then the root's
+        // memory store, then the kernel starts flushing its execution rows into
+        // it, then every other agent boots in REGISTRATION ORDER. A root with no
+        // `memory_store_id` does not start: fail loud, exit non-zero — python
+        // raises out of `_default` and `main_dispatch` prints `[kernel] <e>`.
+        let started = await kernel.start(bootAll: true)
+        if pyTruthy(started["error"]) {
+            RuntimeLog.warn(startRefusedLine(started))
+            await kernel.shutdown()
+            lock.release()
+            exit(1)
         }
         // Second PTY push: the "all booted" close. Each agent already announced
         // its OWN endpoints during its boot — the kernel does NOT gather them,
@@ -162,7 +162,7 @@ enum DaemonMode {
         }
 
         // Step 5 — Race the REPL task (if tty), the block task (if web) and
-        // the stop signal (an OS signal, or `shutdown_kernel` over the web
+        // the stop signal (an OS signal, or `kernel_stop` over the web
         // surface, which deferred its trigger so its ack flushed first).
         // First to finish wins.
         let signalName = await withTaskGroup(of: String?.self) { group -> String? in
@@ -188,14 +188,15 @@ enum DaemonMode {
             group.cancelAll()
             return caught ?? nil
         }
-        // An OS signal (not `shutdown_kernel`, which sets the same event with
+        // An OS signal (not `kernel_stop`, which sets the same event with
         // no name attached) prints python's line before the teardown walk.
         if let signalName {
             RuntimeLog.warn(stopSignalLine(signalName))
         }
 
-        // Step 6 — Graceful shutdown: drain the agents, land the last message
-        // window (provider still alive), then the depth-first
+        // Step 6 — Graceful shutdown: drain the agents, every call settles, the
+        // last records and execution rows land (provider and store still
+        // alive), then the depth-first
         // `onShutdown`/`onDelete` walk that stops the listener and frees every
         // PTY and subprocess. Records and tree untouched. Both lines are
         // STDERR in python (`file=sys.stderr`), unlike the stdout `[kernel]

@@ -100,7 +100,7 @@ public struct TextFileBundle: AgentBundle {
     static let verbDocs: OrderedDictionary<String, JSON> = [
         "reflect": .string("no args — identity, verb guide, and the wired default surface."),
         "boot": .string("no args — no-op; this agent holds no state to hydrate."),
-        "read": .string("args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary."),
+        "read": .string("args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version, origin}; refuses binary."),
         "write": .string("args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."),
         "patch": .string("args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."),
         "append": .string("args: path:str (req), bytes (req — one chunk; str is utf-8-encoded), on:str? — appends (creates if absent); {path, size, version}."),
@@ -516,7 +516,7 @@ public struct TextFileBundle: AgentBundle {
         ])
     }
 
-    private func readReply(_ kernel: Kernel, fb: String, payload: JSON) async -> JSON {
+    private func readReply(_ kernel: Kernel, id: String, fb: String, payload: JSON) async -> JSON {
         let path: JSON
         switch pathOf(payload, "read") {
         case .failure(let e): return e
@@ -555,12 +555,19 @@ public struct TextFileBundle: AgentBundle {
                 page.append(.object(["n": .integer(Int64(off + i + 1)), "text": .string(t)]))
             }
         }
+        let ver = version(data)
         return .object([
             "path": path,
             "lines": .array(page),
             "total": .integer(Int64(allLines.count)),
             "eof": .bool(overflow || span >= allLines.count),
-            "version": .string(version(data)),
+            "version": .string(ver),
+            // HOW TO GET THIS BODY AGAIN — one line; a reader that keeps no body
+            // keeps this. Python `_read`'s `origin`.
+            "origin": .string(
+                "\(id) \(pyStr(path)) lines \(off + 1)-\(off + page.count) version \(ver) — "
+                    + "read {path: \(pyStr(path)), offset: \(off), limit: \(limit)}; a different "
+                    + "version means the file changed since"),
         ])
     }
 
@@ -984,7 +991,7 @@ public struct TextFileBundle: AgentBundle {
         guard Self.surfaceVerbs.contains(verb) else { return unknownType(typed) }
         guard let fb = target(agent, payload) else { return unwired(verb) }
         switch verb {
-        case "read": return await readReply(kernel, fb: fb, payload: payload)
+        case "read": return await readReply(kernel, id: agent.id.value, fb: fb, payload: payload)
         case "write": return await writeReply(kernel, fb: fb, payload: payload, blob: blob)
         case "patch": return await patchReply(kernel, fb: fb, payload: payload, blob: blob)
         case "append": return await appendReply(kernel, fb: fb, payload: payload, blob: blob)

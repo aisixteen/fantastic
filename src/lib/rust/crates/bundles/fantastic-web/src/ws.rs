@@ -630,15 +630,8 @@ pub(crate) async fn ws_loop(
                 // target, verb and payload summary, for every agent in the
                 // tree. So it is gated on the ROOT — an ingress rule answers
                 // "may this client reach this leg", never "what may it READ".
-                // `body:true` — row events carry content; gated as `rows_read`
-                // on the root, once, here.
-                let want_body = frame.get("body").is_some_and(fantastic_bundle::py_truthy);
                 let denial = fantastic_kernel::send::with_sender(leg.clone(), async {
-                    kernel.authorize_state_subscribe(&leg).or_else(|| {
-                        want_body
-                            .then(|| kernel.authorize_row_bodies(&leg))
-                            .flatten()
-                    })
+                    kernel.authorize_state_subscribe(&leg)
                 })
                 .await;
                 if let Some(d) = denial {
@@ -654,10 +647,10 @@ pub(crate) async fn ws_loop(
                 let _ = out_tx.send(Out::Text(encode_frame(&snapshot))).await;
                 let out_for_cb = out_tx.clone();
                 let kernel_for_cb = Arc::clone(&kernel);
-                // ON BEHALF OF THE LEG, not the operator: `row` digests reach
-                // this tap only for agents whose `callable_by` names the leg for
-                // `messages` (python `add_state_subscriber(cb, reader_id=…)`).
-                let token = kernel.add_state_subscriber_for(
+                // Conversation rows are not on this stream — an AI agent
+                // announces its own rows to its watchers (`watch` on that agent,
+                // gated there).
+                let token = kernel.add_state_subscriber(
                     Arc::new(move |event: &Value, body: Option<&(String, Vec<u8>)>| {
                         let Value::Object(ev) = event else {
                             return;
@@ -698,8 +691,6 @@ pub(crate) async fn ws_loop(
                         };
                         let _ = out_for_cb.try_send(out);
                     }),
-                    leg.clone(),
-                    want_body,
                 );
                 state_unsubs
                     .lock()

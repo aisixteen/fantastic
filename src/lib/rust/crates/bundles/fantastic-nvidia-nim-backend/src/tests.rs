@@ -36,6 +36,10 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
+    kernel.bundles.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -66,7 +70,13 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
         .await
         .remove(0)
         .result;
-    let store_grant = fid.clone();
+    // Deny-all: its memory store (wired both ways) + its leg + `cli`.
+    let memory = fantastic_ram_store::test_support::memory_meta(
+        &kernel,
+        &nim,
+        json!({ fid.clone(): "*", "cli": "*" }),
+    )
+    .await;
     let mut create = json!({
         "type":"create_agent",
         "parent_id": "kernel",
@@ -74,9 +84,10 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
         "id": nim,
         "file_bridge_id": fid.clone(),
         "model": "test-model",
-        // Deny-all: persists to its store directly + streams to `cli`.
-        "can_call": { store_grant: "*", "cli": "*" },
     });
+    for (k, v) in memory {
+        create[k] = v;
+    }
     if let Some(e) = endpoint {
         create["endpoint"] = json!(e);
     }
@@ -860,8 +871,9 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             model: m,
             kernel: Arc::clone(&kernel),
             client_id: "cli".to_string(),
+            report: Default::default(),
         };
-        let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
+        let err = match p.chat(&[json!({"role": "user", "content": "hi"})], None).await {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
             Err(e) => e.message,
         };
@@ -884,7 +896,7 @@ async fn reflect_keys_are_python_keys_in_python_order() {
         .await
         .remove(0)
         .result;
-    let keys: Vec<String> = r.as_object().unwrap().keys().take(12).cloned().collect();
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(13).cloned().collect();
     assert_eq!(
         keys,
         vec![
@@ -894,6 +906,7 @@ async fn reflect_keys_are_python_keys_in_python_order() {
             "endpoint",
             "context_window",
             "context_strategy",
+            "memory_store_id",
             "verbs",
             "generating",
             "cancel",

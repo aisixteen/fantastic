@@ -10,6 +10,37 @@ import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
+@testable import FantasticRamStore
+
+/// A kernel wired the way an AI agent needs one — python's `FakeCtx`: a root
+/// carrying a guid, a `memory` ram_store, and the agent's own record naming it
+/// (`memory_store_id`), the two gates granted both ways.
+func wiredKernel(
+    agent: String = "ai", meta: OrderedDictionary<String, JSON> = [:]
+) -> Kernel {
+    let registry = BundleRegistry()
+    registry.register("ram_store.tools", RamStoreBundle())
+    let k = Kernel(storage: .inMemory, bundles: registry)
+    let root = Agent(
+        id: AgentId("kernel_state"), handlerModule: nil, parentId: nil,
+        meta: ["guid": .string(MOCK_GUID)])
+    k.register(root)
+    k.setRoot(root)
+    k.composeEphemeralChild(
+        id: AgentId("memory"), handlerModule: "ram_store.tools", parent: root,
+        meta: [
+            "operator": .bool(true), "admins": .array([.string("kernel")]),
+            "callable_by": .object([agent: .string("*")]),
+        ])
+    var m: OrderedDictionary<String, JSON> = [
+        "memory_store_id": .string("memory"),
+        "can_call": .object(["memory": .string("*")]),
+    ]
+    for (kk, v) in meta { m[kk] = v }
+    k.composeEphemeralChild(
+        id: AgentId(agent), handlerModule: "fixture_ai.tools", parent: root, meta: m)
+    return k
+}
 
 /// python `BIG` in test_folds / test_view_recall.
 let FOLD_BIG = String(repeating: "x", count: 3000)
@@ -29,9 +60,10 @@ final class FoldFixture: @unchecked Sendable {
     private let lock = NSLock()
     private var tags: [String: Int64] = [:]
 
-    /// A bare kernel is a row store; the boot helpers hand a real one in.
-    init(kernel: Kernel = Kernel(), agent: String = "ai") {
-        self.kernel = kernel
+    /// A wired kernel (the agent + its memory store); the boot helpers hand a
+    /// real one in.
+    init(kernel: Kernel? = nil, agent: String = "ai") {
+        self.kernel = kernel ?? wiredKernel(agent: agent)
         self.agent = AgentId(agent)
     }
 
@@ -42,7 +74,7 @@ final class FoldFixture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let n = tags[tag] { return n }
-        let n = kernel.rows.mintId()
+        let n = kernel.mintId()
         tags[tag] = n
         return n
     }
@@ -114,17 +146,31 @@ final class FoldFixture: @unchecked Sendable {
     ) -> JSON {
         AIFolds.makeFold(
             refs: refs, title: title, body: body, degraded: degraded,
-            id: id ?? kernel.rows.mintId(), parent: parent)
+            id: id ?? kernel.mintId(), parent: parent)
     }
 
     /// The ids of a chain's rows (every row of a fixture chain carries one).
     func ids(_ rows: [JSON]) -> [Int64] { rows.compactMap(rowId) }
 
-    /// python `_seed` / `_save_history`.
-    func seed(_ rows: [JSON]) { appendRows(agent, kernel: kernel, rows) }
+    /// python `_seed` / `k.rows_put` — straight into the agent's store (ids the
+    /// fixture minted, trusted as the store trusts a caller's own).
+    func seed(_ rows: [JSON]) {
+        // a row with no id takes the kernel's next one (python `rows_put`)
+        appendRows(agent, kernel: kernel, rows)
+    }
 
-    /// python `k.rows_of()` — every row for the agent, bookkeeping included.
-    func rowsOf() -> [JSON] { kernel.rows.forAgent(agent).map(JSON.object) }
+    /// The store key the agent's rows live under.
+    var owner: String {
+        "\(kernel.root?.metaValue(forKey: "guid")?.asString ?? MOCK_GUID)|\(agent.value)"
+    }
+
+    /// python `k.rows_of()` — every row for the agent, views included.
+    func rowsOf() -> [JSON] {
+        guard let mem = kernel.agent(AgentId("memory")),
+            let bundle = kernel.bundles.get("ram_store.tools") as? RamStoreBundle
+        else { return [] }
+        return bundle.ownerRows(mem, owner: owner)
+    }
 
     /// python `k.folds_of()`.
     func foldsOf() -> [JSON] { rowsOf().filter(isFold) }
@@ -136,7 +182,7 @@ final class FoldFixture: @unchecked Sendable {
         recentN: Int = 4, clientId: String? = "c"
     ) -> ProjectionCtx {
         ProjectionCtx(
-            budget: budget, recentN: recentN, summarize: summarize, selfId: agent,
+            budget: budget, recentN: recentN, summarize: summarize.map(summarizer), selfId: agent,
             kernel: kernel, clientId: clientId)
     }
 }

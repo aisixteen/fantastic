@@ -992,21 +992,21 @@ async fn distilled_tree_reflect_echoes_to_node_watchers() {
     );
     assert!(rx.try_recv().is_none(), "one echo per reflect");
 
-    let rows = kernel.rows.for_agent(&node.id);
+    let rows = crate::test_support::rows_about(&kernel, &node.id);
     assert_eq!(rows.len(), 1, "{rows:?}");
     let row = &rows[0];
     assert_eq!(
         row.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["id", "kind", "verb", "parent", "origin", "payload", "internal", "agent", "ts"],
+        ["id", "kind", "verb", "parent", "caller", "payload", "internal", "agent", "ts"],
         "no outcome stamp: the internal dispatch opens no execution"
     );
     assert_eq!(row["kind"], "call");
     assert_eq!(row["verb"], "reflect");
     assert_eq!(row["internal"], true);
-    assert_eq!(row["origin"], Value::Null, "an operator reflect");
+    assert_eq!(row["caller"], Value::Null, "an operator reflect");
     assert_ne!(row["id"].as_i64(), out.pid.map(crate::TaskId::get));
     assert_eq!(
-        kernel.rows.for_agent(&watcher.id).len(),
+        crate::test_support::rows_about(&kernel, &watcher.id).len(),
         0,
         "a bare node is not dispatched"
     );
@@ -1014,7 +1014,7 @@ async fn distilled_tree_reflect_echoes_to_node_watchers() {
     // `detail:full` walks the wiring tree — nothing is dispatched.
     let _ = kernel_reflect(&kernel, json!({"type": "reflect", "detail": "full"})).await;
     assert!(rx.try_recv().is_none());
-    assert_eq!(kernel.rows.for_agent(&node.id).len(), 1);
+    assert_eq!(crate::test_support::rows_about(&kernel, &node.id).len(), 1);
 }
 
 #[tokio::test]

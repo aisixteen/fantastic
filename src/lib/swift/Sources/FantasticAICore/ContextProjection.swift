@@ -20,6 +20,61 @@ public enum ProjectionOutcome: Sendable {
     case failed(JSON)
 }
 
+/// THE TRIGGER: compaction fires once the calibrated prompt passes this share of
+/// the budget — early enough that the summariser itself has headroom. Python
+/// `TRIGGER`.
+public let TRIGGER = 0.8
+
+/// TOKEN CALIBRATION per agent: the prompt size the endpoint REPORTED for the last
+/// pass divided by our own estimate of what we sent. The estimate is chars/4 over
+/// the rendered messages; a real tokenizer disagrees with it, per model and per
+/// language. The budget is measured in ESTIMATE units scaled by this ratio, so
+/// what triggers a compaction is what the window really holds. 1.0 until an
+/// endpoint reports usage. Python `_calib` / `_reported` — keyed by kernel here,
+/// like every other AI side table.
+enum AICalibration {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var calib: [ObjectIdentifier: [String: Double]] = [:]
+    nonisolated(unsafe) private static var reported: [ObjectIdentifier: [String: Int]] = [:]
+
+    static func calibration(_ kernel: Kernel, _ id: String) -> Double {
+        lock.withLock { calib[ObjectIdentifier(kernel)]?[id] ?? 1.0 }
+    }
+
+    static func reportedTokens(_ kernel: Kernel, _ id: String) -> Int? {
+        lock.withLock { reported[ObjectIdentifier(kernel)]?[id] }
+    }
+
+    static func record(_ kernel: Kernel, _ id: String, reported r: Int, estimate: Int64) {
+        lock.withLock {
+            calib[ObjectIdentifier(kernel), default: [:]][id] = Double(r) / Double(max(1, estimate))
+            reported[ObjectIdentifier(kernel), default: [:]][id] = r
+        }
+    }
+
+    /// TEST SEAM — python's `core._calib["ai"] = 10.0`.
+    static func set(_ kernel: Kernel, _ id: String, _ c: Double?) {
+        lock.withLock {
+            if let c {
+                calib[ObjectIdentifier(kernel), default: [:]][id] = c
+            } else {
+                calib[ObjectIdentifier(kernel)]?.removeValue(forKey: id)
+                reported[ObjectIdentifier(kernel)]?.removeValue(forKey: id)
+            }
+        }
+    }
+
+    static func forget(_ kernel: Kernel) {
+        lock.withLock {
+            calib.removeValue(forKey: ObjectIdentifier(kernel))
+            reported.removeValue(forKey: ObjectIdentifier(kernel))
+        }
+    }
+}
+
+/// `round(x, 3)` as python renders it — the calibration a status reports.
+func round3(_ x: Double) -> Double { (x * 1000).rounded(.toNearestOrEven) / 1000 }
+
 extension AIBackend {
     // MARK: - the canonical notice
 
@@ -45,8 +100,8 @@ extension AIBackend {
         if stripped > 0 {
             lines.append(
                 "\(stripped) reply bod(ies) were STRIPPED to their tag+title line "
-                    + "(\(strippedBytes) bytes left your view); every one is still in durable "
-                    + "storage — recall it by the pid on its line.")
+                    + "(\(strippedBytes) bytes left your view); grep finds a line in a body held "
+                    + "this run — after a restart, re-read it from its origin.")
         }
         if !pinned.isEmpty {
             // POINT AT THE BLOCK, DO NOT REPEAT IT. The facts live in their own stable
@@ -60,7 +115,7 @@ extension AIBackend {
                     + "unchanged — they still bind.")
         }
         lines.append(
-            "The full transcript is intact in durable storage. To page dropped turns back, "
+            "The full transcript is intact in your memory store. To page dropped turns back, "
                 + "send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`). If the dropped span holds "
                 + "durable facts (names, decisions, preferences), persist them to your memory agent "
                 + "now via the send tool — the earlier turns are leaving your live view."
@@ -83,11 +138,22 @@ extension AIBackend {
     func projectContext(
         provider: any AIProvider, agent: Agent, clientId: String, messages: [JSON],
         storeLen: Int, kernel: Kernel
-    ) async -> ProjectionOutcome {
+    ) async throws -> ProjectionOutcome {
         let agentKey = agent.id.value
-        let b = AIContext.budget(agent)
-        if AIContext.estimateTokens(messages) <= b {
-            setProjection(agentKey, .object(["fired": .bool(false)]))
+        // THE BUDGET IN ESTIMATE UNITS: the record's budget, divided by how much
+        // the endpoint's own count exceeded our estimate last turn (calibration).
+        let calib = AICalibration.calibration(kernel, agentKey)
+        let b: Int64 =
+            calib > 0
+            ? max(AIContext.budgetFloor, Int64(Double(AIContext.budget(agent)) / calib))
+            : AIContext.budget(agent)
+        if AIContext.estimateTokens(messages) <= Int64(Double(b) * TRIGGER) {
+            setProjection(
+                agentKey,
+                .object([
+                    "fired": .bool(false), "trigger": .double(TRIGGER),
+                    "calibration": .double(round3(calib)),
+                ]))
             return .projected(messages)
         }
         let systemBlock = Array(messages.prefix(1))
@@ -148,7 +214,7 @@ extension AIBackend {
             budget: bodyBudget, recentN: AIContext.recentN(agent),
             summarize: AIStrategies.makeSummarizer(provider),
             selfId: agent.id, kernel: kernel, clientId: clientId)
-        let proj = await strat(body, systemBlock, .object(agent.meta), ctx)
+        let proj = try await strat(body, systemBlock, .object(agent.meta), ctx)
         let notice = contextNotice(
             strategy: stratName, summary: proj.summary, omittedMarker: proj.omittedMarker,
             droppedN: body.count - proj.body.count, pinned: proj.pinned,
@@ -201,7 +267,12 @@ extension AIBackend {
         setProjection(
             agentKey,
             .object([
-                "fired": .bool(true), "strategy": .string(stratName),
+                "fired": .bool(true), "trigger": .double(TRIGGER),
+                "calibration": .double(round3(calib)),
+                "reported_prompt_tokens":
+                    AICalibration.reportedTokens(kernel, agentKey).map { JSON.integer(Int64($0)) }
+                    ?? .null,
+                "strategy": .string(stratName),
                 "kept_messages": .integer(Int64(outBody.count)),
                 "dropped_messages": .integer(Int64(droppedN)),
                 "summarized": .bool(summarized),
@@ -209,6 +280,9 @@ extension AIBackend {
                 "stripped": .integer(Int64(proj.stripped)),
                 "stripped_bytes": .integer(Int64(proj.strippedBytes)),
                 "folded": .integer(Int64(proj.folded)),
+                // Spans the fold strategy did NOT fold: the summary stayed over its
+                // budget after one re-summarise. Loud here, never a truncated summary.
+                "fold_refused": .integer(Int64(proj.foldRefused)),
                 // What the model actually sees this turn — so "after reload it sees
                 // only the fold" is measured from the view, never self-reported.
                 "view_ids": .array(viewIds.prefix(200).map(JSON.integer)),
@@ -217,8 +291,8 @@ extension AIBackend {
         // THE VIEW ARRAY, written by every projection: what the model sees, at
         // what resolution — so the next turn (and the next process) rebuilds the
         // same bytes.
-        saveView(
-            agent.id, kernel: kernel,
+        try await saveView(
+            agent.id.value, kernel,
             ids: outBody.compactMap { m -> JSON? in
                 guard let id = rowId(m), id != 0 else { return nil }
                 return .object(["id": .integer(id), "res": .string(resOf(m))])
@@ -300,12 +374,12 @@ extension AIBackend {
     /// exists — so a model that DID persist, in the only way the substrate now
     /// offers, was scored as not having reacted at all. `nil` if no compaction has
     /// fired.
-    func deriveReaction(agent: Agent, kernel: Kernel) async -> JSON? {
+    func deriveReaction(agent: Agent, kernel: Kernel) async throws -> JSON? {
         let key = agent.id.value
         let fired = getProjection(key)["fired"].asBool ?? false
         guard fired, let (idx, clientId) = markFor(key) else { return nil }
         _ = clientId
-        let store = loadHistory(agent: agent, kernel: kernel)
+        let store = try await loadHistory(agent.id.value, kernel)
         var recalled = false
         var persisted = false
         var recallCount: Int64 = 0
@@ -362,8 +436,8 @@ extension AIBackend {
     /// (the cap); trimmed from the oldest end when it would not, with the index
     /// to continue from. Returns {messages:[{index,role,content}], total,
     /// truncated, note?}. Python `_recall`.
-    func recallVerb(agent: Agent, payload: JSON, kernel: Kernel) -> JSON {
-        let full = loadHistory(agent: agent, kernel: kernel, behind: true)
+    func recallVerb(agent: Agent, payload: JSON, kernel: Kernel) async throws -> JSON {
+        let full = try await loadHistory(agent.id.value, kernel, behind: true)
         let rawQ = payload["query"]
         let q = pyStrip((pyTruthy(rawQ) ? pyStr(rawQ) : "").lowercased())
         let limit = max(1, min((try? pyIntOr(payload["limit"], 20)) ?? 20, 100))
@@ -450,12 +524,17 @@ extension AIBackend {
     /// `context_status` verb: the context-budget posture + the last overflow
     /// projection + the model's derived reaction + where the last `assemble`
     /// took its view from. Read-only. Python `_context_status`.
-    func contextStatusVerb(agent: Agent, kernel: Kernel) async -> JSON {
-        let reaction = await deriveReaction(agent: agent, kernel: kernel)
+    func contextStatusVerb(agent: Agent, kernel: Kernel) async throws -> JSON {
+        let reaction = try await deriveReaction(agent: agent, kernel: kernel)
+        let key = agent.id.value
         return .object([
             "context_window": .integer(AIContext.resolveContextWindow(agent)),
             "output_reserve": .integer(AIContext.outputReserve(agent)),
             "budget": .integer(AIContext.budget(agent)),
+            "trigger": .double(TRIGGER),
+            "calibration": .double(round3(AICalibration.calibration(kernel, key))),
+            "reported_prompt_tokens":
+                AICalibration.reportedTokens(kernel, key).map { JSON.integer(Int64($0)) } ?? .null,
             "strategy": AIContext.strategy(agent),
             "last_projection": getProjection(agent.id.value),
             "last_reaction": reaction ?? .null,
@@ -468,6 +547,7 @@ extension AIBackend {
         var out: OrderedDictionary<String, JSON> = [:]
         out["context_window"] = .integer(AIContext.resolveContextWindow(agent))
         out["context_strategy"] = AIContext.strategy(agent)
+        out["memory_store_id"] = agent.metaValue(forKey: "memory_store_id") ?? .null
         return out
     }
 }

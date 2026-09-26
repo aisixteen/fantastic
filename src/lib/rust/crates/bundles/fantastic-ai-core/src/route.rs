@@ -113,7 +113,7 @@ pub fn no_payload_error(target: &str) -> String {
 /// `_deliver_soon`, whose whole job is to capture `born` BEFORE the delivery
 /// runs. A delivery that crosses the target's next boot is recorded, not acted
 /// on (see [`deliver`]).
-fn deliver_soon(
+pub(crate) fn deliver_soon(
     kernel: &Arc<Kernel>,
     target: &str,
     text: &str,
@@ -169,10 +169,10 @@ fn deliver_soon_with_born(
 /// `born` is the target's incarnation as of when this delivery was DECIDED. A
 /// boot bumps that counter, so a reply that crosses a reboot answers a call the
 /// previous incarnation made: the agent that asked is gone and the one that
-/// replaced it is on other work. It is kept as a ROW — real data, in the ledger
-/// and in the store — but it wakes no turn. Measured 2026-09-06 (python): the
-/// rebooted agent was woken by answers to its predecessor's calls and finished
-/// THAT work instead of the new instruction.
+/// replaced it is on other work. It is kept as a ROW — real data, written by the
+/// TARGET into its own store (the send is marked `late`) — but it wakes no turn.
+/// Measured 2026-09-06 (python): the rebooted agent was woken by answers to its
+/// predecessor's calls and finished THAT work instead of the new instruction.
 pub(crate) async fn deliver(
     kernel: &Arc<Kernel>,
     target: &str,
@@ -182,28 +182,18 @@ pub(crate) async fn deliver(
     born: u64,
 ) {
     let target_agent = AgentId::from(target);
-    if crate::state::incarnation(&target_agent) != born {
-        crate::history::append_history(
-            &target_agent,
-            kernel,
-            client_id,
-            &[json!({
-                "role": "user",
-                "parent": Value::Null,
-                "kind": "late",
-                "content": format!(
-                    "[late reply — answered a call made before this agent last \
-                     booted; recorded, not acted on]\n{text}"
-                ),
-            })],
-        )
-        .await;
-        return;
-    }
+    let late = crate::state::incarnation(&target_agent) != born;
     let mut payload = Map::new();
     payload.insert("type".to_string(), json!("send"));
     payload.insert("text".to_string(), json!(text));
     payload.insert("client_id".to_string(), json!(client_id));
+    if late {
+        // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real data —
+        // but it does not wake a turn: the agent that made the call is gone, and
+        // the one that replaced it is on other work. The TARGET writes it (a store
+        // keys every row by its writer), so it rides a `send` marked `late`.
+        payload.insert("late".to_string(), json!(true));
+    }
     if let Some(sp) = system_prompt {
         payload.insert("system_prompt".to_string(), json!(sp));
     }
@@ -367,6 +357,36 @@ pub(crate) fn fan_out(
     out
 }
 
+/// How to get a reply's body again, in ONE line: the replying agent's own
+/// `origin` when it wrote one (a text_file read names path, range and version);
+/// otherwise the call that produced it — re-sending it may not give the same
+/// bytes, and the line says so. Python `_origin_line`.
+#[must_use]
+pub fn origin_line(result: &Value, target: &str, verb: &str, payload: &Value) -> String {
+    if let Some(o) = result.get("origin").and_then(Value::as_str) {
+        if !py_strip(o).is_empty() {
+            return fantastic_bundle::py_split_whitespace(o)
+                .join(" ")
+                .chars()
+                .take(300)
+                .collect();
+        }
+    }
+    let mut args = Map::new();
+    if let Some(p) = payload.as_object() {
+        for (k, v) in p {
+            if !matches!(k.as_str(), "type" | "client_id" | "_call_stack") {
+                args.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    let shown: String = fantastic_bundle::py_json_dumps(&Value::Object(args), false, None)
+        .chars()
+        .take(200)
+        .collect();
+    format!("{target} {verb} {shown} — re-send it; the output may differ")
+}
+
 fn you_sent(args: &Map<String, Value>) -> Value {
     let mut out = Map::new();
     for (k, v) in args {
@@ -526,6 +546,9 @@ async fn route_reply_gated(
     // before the agent runs again. The model never sees a PARTIAL batch, so
     // it never re-asks for the missing half.
     let mut items: Vec<Item> = Vec::new();
+    // What each item was sent — its target as the model wrote it and its payload —
+    // for the origin line of a digested reply and the grants-cache refresh.
+    let mut payloads: Vec<(String, Value)> = Vec::new();
 
     // ONE COPY PER RECIPIENT. A `<to>` list is not a group address the kernel
     // knows about — there is no such thing; every send reaches exactly one
@@ -657,6 +680,7 @@ async fn route_reply_gated(
         if document.is_some() {
             payload.shift_remove("bytes");
         }
+        payloads.push((target.to_string(), Value::Object(payload.clone())));
         let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
         if let Some(doc) = document {
             item = item.with_binary(doc);
@@ -730,10 +754,19 @@ async fn route_reply_gated(
     // model: "the reply queue is running ahead of me", then re-polled forever).
     // The PID is the same id `ps`/`cancel` use, so a reply names a row the
     // model can act on.
+    // THE GRANTS CACHE IS WRITE-THROUGH: a share/unshare this turn made on its own
+    // store changes who may read row bodies — reload before the next row event.
     let meta = crate::helpers::agent_meta(&self_id, &kernel);
-    // PYTHON TRUTHINESS (`bool(rec.get("context_async"))`): a record that says
-    // `1` or `"on"` turns full-async on, and `as_bool` silently did not.
-    let async_on = meta.get("context_async").is_some_and(py_truthy);
+    let own_store = meta.get("memory_store_id").and_then(Value::as_str);
+    if payloads.iter().any(|(t, p)| {
+        Some(t.as_str()) == own_store
+            && matches!(p.get("type").and_then(Value::as_str), Some("share" | "unshare"))
+    }) {
+        crate::memory::forget_grants(&self_id, &kernel);
+        // the next body event simply carries none if the store refuses — no grant
+        // is assumed
+        let _ = crate::memory::my_grants(&self_id, &kernel).await;
+    }
     let cap = crate::context::inline_cap(&meta);
     let blocks: Vec<Block> = units
         .into_iter()
@@ -754,33 +787,28 @@ async fn route_reply_gated(
                     // FULL ASYNC. A reply is DATA, not a question — the model
                     // needs to be able to SEE it, not be forced to swallow it
                     // whole as its next turn. Anything over the inline cap is
-                    // stored under its pid and replaced by its digest; the model
-                    // pulls pages when it wants them. This is what makes an
-                    // unbounded reply (a 240KB ledger dump) non-fatal: it becomes
-                    // a row to page, never a turn to fit.
-                    if async_on {
-                        if let Some(p) = out.pid {
-                            let over = crate::context::estimate_one(
-                                &json!({"role": "user", "content": body}),
-                            ) > cap;
-                            if over && kernel.rows.body_put(&self_id, p.0, &body).is_ok() {
-                                // CODE POINTS: python prints `len(body)`, and
-                                // the model pulls that many characters back.
-                                let size = body.chars().count();
-                                // THE STUB NAMES GREP FIRST. It used to offer only
-                                // `pull`, and a model hunting one line paged 16
-                                // bodies (measured 2026-09-06, python
-                                // recall_after_fold: 24 pulls, 0 greps, marker
-                                // not found).
-                                body = format!(
-                                    "(settled, {size} bytes — NOT inlined. To find a line \
-                                     in it: send yourself <type>grep</type> \
-                                     <query>substring</query> <ids><item>{}</item></ids>. \
-                                     To read it: <type>pull</type> <pid>{}</pid> \
-                                     <offset>0</offset>)",
-                                    p.0, p.0
-                                );
-                            }
+                    // held in RAM under its pid and replaced by its digest + its
+                    // ORIGIN line. SYNC OR ASYNC ALIKE (decided 2026-09-26): a
+                    // body is never persisted; under the cap it is inline.
+                    if let Some(p) = out.pid {
+                        let over = crate::context::estimate_one(
+                            &json!({"role": "user", "content": body}),
+                        ) > cap;
+                        if over && crate::memory::store_reply(&self_id, &kernel, p.0, &body) {
+                            // CODE POINTS: python prints `len(body)`.
+                            let size = body.chars().count();
+                            let sent = payloads.get(i).map_or(&Value::Null, |(_, p)| p);
+                            // THE STUB IS THE ORIGIN. The body is held in RAM for
+                            // this incarnation only and never persisted; what
+                            // survives is the one line saying how to get it again.
+                            body = format!(
+                                "(settled, {size} bytes — NOT inlined, held in memory only \
+                                 until this agent restarts. origin: {}. To find a line in it: \
+                                 send yourself <type>grep</type> <query>substring</query> \
+                                 <ids><item>{}</item></ids>)",
+                                origin_line(&out.result, &u.target, &u.verb, sent),
+                                p.0
+                            );
                         }
                     }
                     (pid, body)

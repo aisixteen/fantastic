@@ -2,7 +2,7 @@
 //
 // Port of python `kernel_state._persist_blob`/`_load_blob` (#10). There is no
 // `ledger.json` any more (deleted 2026-09-24): the execution ledger IS the
-// `call`+`settle` rows of `messages.xml`, rebuilt by `hydrateExecutions`.
+// `call`+`settle` rows of `messages.yaml`, rebuilt by `hydrateExecutions`.
 //
 // The blob channel is a dumb BYTE authority: no data semantics — the caller owns
 // its format. What the consumer gets is that it never computes a path and never
@@ -18,7 +18,7 @@ import Foundation
 import OrderedCollections
 
 /// Files the KERNEL manages. A sidecar may not overwrite them.
-private let reservedBlobNames: Set<String> = ["agent.json", "readme.md"]
+private let reservedBlobNames: Set<String> = [RECORD_FILE, "readme.md"]
 
 extension Kernel {
     /// A store I/O send made as the KERNEL'S OWN BOOKKEEPING.

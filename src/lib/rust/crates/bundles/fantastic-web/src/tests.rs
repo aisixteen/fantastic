@@ -569,7 +569,7 @@ async fn binary_ws_frame_routes_like_a_text_call() {
         .collect();
     assert_eq!(
         keys,
-        vec!["path", "offset", "bytes", "next_offset", "eof", "size"],
+        vec!["path", "offset", "bytes", "next_offset", "eof", "size", "origin"],
         "python's key order, `bytes` nulled IN PLACE"
     );
     assert_eq!(body, vec![7u8; 4096]);
@@ -1802,7 +1802,7 @@ async fn octet_leg_header_contract_matches_python() {
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
         resp.headers()["x-fantastic-payload"],
-        r#"{"path": "na\u00efve.txt", "offset": 0, "next_offset": 7, "eof": true, "size": 7}"#
+        r#"{"path": "na\u00efve.txt", "offset": 0, "next_offset": 7, "eof": true, "size": 7, "origin": "fb_oct na\u00efve.txt bytes 0-7 of 7 \u2014 read_stream {path: na\u00efve.txt, offset: 0, length: 7}"}"#
     );
     assert_eq!(resp.headers()["x-fantastic-bytes-field"], "bytes");
     assert_eq!(resp.bytes().await.unwrap().as_ref(), b"naive!\n");
@@ -2555,7 +2555,7 @@ async fn json_leg_read_stream_answers_octet_including_empty_chunk() {
     assert_eq!(resp.headers()["x-fantastic-bytes-field"], "bytes");
     assert_eq!(
         resp.headers()["x-fantastic-payload"],
-        r#"{"path": "hello.txt", "offset": 0, "next_offset": 12, "eof": true, "size": 12}"#
+        r#"{"path": "hello.txt", "offset": 0, "next_offset": 12, "eof": true, "size": 12, "origin": "fb_jsonoct hello.txt bytes 0-12 of 12 \u2014 read_stream {path: hello.txt, offset: 0, length: 12}"}"#
     );
     assert_eq!(resp.bytes().await.unwrap().as_ref(), b"hello world\n");
 
@@ -2664,11 +2664,11 @@ async fn octet_leg_names_executions_and_validates_type() {
     );
 
     // The execution's own row exists on the target, attributed to the leg.
-    let rows = kernel.rows.for_agent(&AgentId::from("fb_octid"));
+    let rows = fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from("fb_octid"));
     assert!(
         rows.iter().any(|r| r["kind"] == json!("call")
             && r["verb"] == json!("write_stream")
-            && r["origin"] == json!("rest")),
+            && r["caller"] == json!("rest")),
         "the octet dispatch left no call row: {rows:?}"
     );
 

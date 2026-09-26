@@ -133,27 +133,6 @@ fn create_store(dir: &std::path::Path) {
     );
 }
 
-/// A14.18 — every non-daemon mode ends with an idempotent `Kernel::shutdown()`
-/// (python's atexit → `Kernel.shutdown`). Observable here via the message
-/// pump's own line, which only prints from inside `flush_pending` at
-/// shutdown when the pump has pending traffic and no store is wired — rust
-/// `bootstrap::shutdown` alone (lock release) never touched this.
-#[test]
-fn one_shot_runs_kernel_shutdown_at_exit() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let out = Command::new(fantastic_bin())
-        .args(["kernel_state", "reflect"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("run fantastic kernel_state reflect");
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("  [messages] no store wired — messages stay in RAM"),
-        "kernel shutdown must have run and flushed the message pump: {stdout}"
-    );
-}
-
 #[test]
 fn one_shot_create_agent_persists_record() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -162,7 +141,7 @@ fn one_shot_create_agent_persists_record() {
     create_store(tmp.path());
     assert!(
         tmp.path()
-            .join(".fantastic/agents/store/agent.json")
+            .join(".fantastic/agents/store/agent.yaml")
             .exists(),
         "the store must persist itself through itself"
     );
@@ -184,10 +163,10 @@ fn one_shot_create_agent_persists_record() {
         "create_agent exited non-zero: stderr={}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let path = tmp.path().join(".fantastic/agents/ff/agent.json");
+    let path = tmp.path().join(".fantastic/agents/ff/agent.yaml");
     assert!(
         path.exists(),
-        "agent.json not written (through the provider)"
+        "agent.yaml not written (through the provider)"
     );
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("file_bridge.tools"));
@@ -223,7 +202,7 @@ fn one_shot_boots_the_root_before_the_call() {
     );
     assert!(
         tmp.path()
-            .join(".fantastic/agents/second/agent.json")
+            .join(".fantastic/agents/second/agent.yaml")
             .exists(),
         "the root must boot (subscribe the record writer) BEFORE the call \
          dispatches, or this record never reaches disk"
@@ -296,7 +275,7 @@ fn help_prints_cli_help_md_verbatim() {
         );
         assert_eq!(out.stdout.len(), 1545, "python's help.md is 1545 bytes");
         assert!(
-            tmp.path().join(".fantastic/agent.json").exists(),
+            tmp.path().join(".fantastic/agent.yaml").exists(),
             "{spelling:?} must seed the workdir like every other mode"
         );
     }
@@ -305,7 +284,7 @@ fn help_prints_cli_help_md_verbatim() {
 /// D6 — the root readme + `docs/` tree are seeded ONLY when the root record is
 /// seeded. python's cold seed rides `write_record`, which `main._bootstrap`
 /// calls under `if seeded:`; a workdir that already holds a parseable
-/// `.fantastic/agent.json` keeps whatever sidecars it has (measured against
+/// `.fantastic/agent.yaml` keeps whatever sidecars it has (measured against
 /// python 2026-09-20: it writes neither `readme.md` nor `docs/`).
 #[test]
 fn the_root_readme_and_docs_are_seeded_only_with_the_root_record() {
@@ -321,7 +300,7 @@ fn the_root_readme_and_docs_are_seeded_only_with_the_root_record() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(virgin.path().join(".fantastic/agent.json").exists());
+    assert!(virgin.path().join(".fantastic/agent.yaml").exists());
     assert!(virgin.path().join(".fantastic/readme.md").exists());
     assert!(virgin
         .path()
@@ -333,7 +312,7 @@ fn the_root_readme_and_docs_are_seeded_only_with_the_root_record() {
     let fdir = seeded.path().join(".fantastic");
     std::fs::create_dir_all(&fdir).unwrap();
     std::fs::write(
-        fdir.join("agent.json"),
+        fdir.join("agent.yaml"),
         r#"{"id": "kernel_state", "handler_module": "kernel_state.tools", "guid": "g"}"#,
     )
     .unwrap();
@@ -360,7 +339,7 @@ fn the_root_readme_and_docs_are_seeded_only_with_the_root_record() {
     let broken = tempfile::TempDir::new().unwrap();
     let bdir = broken.path().join(".fantastic");
     std::fs::create_dir_all(&bdir).unwrap();
-    std::fs::write(bdir.join("agent.json"), "{NOT_JSON").unwrap();
+    std::fs::write(bdir.join("agent.yaml"), "{NOT_JSON").unwrap();
     let out = Command::new(fantastic_bin())
         .args(["kernel", "list_agents"])
         .current_dir(broken.path())
@@ -459,7 +438,7 @@ fn single_positional_prints_usage_and_exits_2() {
          \u{20}                                              daemon when a web agent is persisted)\n",
     );
     assert!(
-        tmp.path().join(".fantastic/agent.json").exists(),
+        tmp.path().join(".fantastic/agent.yaml").exists(),
         "python seeds before it refuses"
     );
 }
@@ -515,7 +494,7 @@ fn one_shot_json_is_python_ensure_ascii() {
 
 /// A14.17 — stdout carries the reply JSON and NOTHING else. The old
 /// `tracing_subscriber` wrote ANSI WARN lines there (a `boot ... errored`
-/// warning, a corrupt `agent.json` skip), so a caller piping into `jq` broke.
+/// warning, a corrupt `agent.yaml` skip), so a caller piping into `jq` broke.
 #[test]
 fn one_shot_stdout_is_only_the_reply_json() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -523,7 +502,7 @@ fn one_shot_stdout_is_only_the_reply_json() {
     // used to print a WARN line through the subscriber.
     std::fs::create_dir_all(tmp.path().join(".fantastic/agents/broken")).unwrap();
     std::fs::write(
-        tmp.path().join(".fantastic/agents/broken/agent.json"),
+        tmp.path().join(".fantastic/agents/broken/agent.yaml"),
         "{ not json",
     )
     .unwrap();
@@ -561,7 +540,7 @@ fn daemon_stderr_has_no_tracing_prefix() {
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join(".fantastic/agents/broken")).unwrap();
     std::fs::write(
-        tmp.path().join(".fantastic/agents/broken/agent.json"),
+        tmp.path().join(".fantastic/agents/broken/agent.yaml"),
         "{ not json",
     )
     .unwrap();
@@ -576,14 +555,14 @@ fn daemon_stderr_has_no_tracing_prefix() {
         "tracing ERROR on stderr: {stderr}"
     );
     assert!(
-        !stderr.contains("agent.json"),
+        !stderr.contains("agent.yaml"),
         "python skips a corrupt record silently: {stderr}"
     );
 }
 
 /// A14.13 — "nothing to serve" (no web agent, no tty) is decided BEFORE the
 /// lock and before any boot — python `_default`'s early `return` never calls
-/// `FantasticLock()`. Proof: no `lock.json` is ever created, and stdout
+/// `FantasticLock()`. Proof: no `lock.yaml` is ever created, and stdout
 /// never gets a `[kernel] up` (nothing was ever booted to announce).
 #[test]
 fn no_web_daemon_boots_nothing() {
@@ -599,7 +578,7 @@ fn no_web_daemon_boots_nothing() {
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
-        !tmp.path().join(".fantastic/lock.json").exists(),
+        !tmp.path().join(".fantastic/lock.yaml").exists(),
         "no lock is ever taken when there is nothing to serve"
     );
 }
@@ -619,19 +598,28 @@ fn daemon_output_lines_match_python() {
         .local_addr()
         .unwrap()
         .port();
-    // A root record too — a VIRGIN dir (no `.fantastic/agent.json`) reseeds
+    // A root record too — a VIRGIN dir (no `.fantastic/agent.yaml`) reseeds
     // fresh and hydrates NO children on that boot, python's own rule
-    // (`bootstrap.rs`'s `boot_disk`), so a bare `agents/web/agent.json` with
+    // (`bootstrap.rs`'s `boot_disk`), so a bare `agents/web/agent.yaml` with
     // no root record alongside it is invisible on the very first boot.
+    // …and the root names its MEMORY STORE, or it does not start.
     std::fs::create_dir_all(tmp.path().join(".fantastic")).unwrap();
     std::fs::write(
-        tmp.path().join(".fantastic/agent.json"),
-        "{\"id\": \"kernel_state\", \"handler_module\": \"kernel_state.tools\"}",
+        tmp.path().join(".fantastic/agent.yaml"),
+        "{\"id\": \"kernel_state\", \"handler_module\": \"kernel_state.tools\", \
+         \"memory_store_id\": \"memory\"}",
+    )
+    .unwrap();
+    std::fs::create_dir_all(tmp.path().join(".fantastic/agents/memory")).unwrap();
+    std::fs::write(
+        tmp.path().join(".fantastic/agents/memory/agent.yaml"),
+        "{\"id\": \"memory\", \"handler_module\": \"ram_store.tools\", \
+         \"parent_id\": \"kernel_state\", \"operator\": true}",
     )
     .unwrap();
     std::fs::create_dir_all(tmp.path().join(".fantastic/agents/web")).unwrap();
     std::fs::write(
-        tmp.path().join(".fantastic/agents/web/agent.json"),
+        tmp.path().join(".fantastic/agents/web/agent.yaml"),
         format!(
             "{{\"id\": \"web\", \"handler_module\": \"web.tools\", \
              \"parent_id\": \"kernel_state\", \"port\": {port}}}"
@@ -802,7 +790,7 @@ fn one_shot_refuses_a_live_lock_with_python_text() {
         .expect("spawn the lock holder");
     let pid = holder.id();
     std::fs::write(
-        tmp.path().join(".fantastic/lock.json"),
+        tmp.path().join(".fantastic/lock.yaml"),
         format!("{{\"pid\": {pid}}}"),
     )
     .unwrap();
@@ -863,7 +851,7 @@ fn the_root_is_the_kernel_state_loader_and_boots_before_the_roster() {
     create_store(tmp.path());
     assert!(tmp
         .path()
-        .join(".fantastic/agents/store/agent.json")
+        .join(".fantastic/agents/store/agent.yaml")
         .exists());
 }
 
@@ -918,11 +906,11 @@ fn init_with_one_arg_prints_usage_exit_2() {
     );
     // python builds the kernel BEFORE dispatch, so the usage error still leaves
     // the seeded ROOT RECORD behind, not just the readme + docs tree.
-    let rec = tmp.path().join(".fantastic").join("agent.json");
+    let rec = tmp.path().join(".fantastic").join("agent.yaml");
     assert!(rec.is_file(), "the usage error still seeds the root record");
     let text = std::fs::read_to_string(&rec).unwrap();
     assert!(
-        text.contains("\"id\": \"kernel_state\"") && text.contains("\"callable_by\""),
+        text.starts_with("id: kernel_state\n") && text.contains("\ncallable_by:"),
         "seeded record: {text}"
     );
 }
@@ -939,7 +927,7 @@ fn init_refuses_a_live_lock_with_python_text() {
         .expect("spawn the lock holder");
     let pid = holder.id();
     std::fs::write(
-        tmp.path().join(".fantastic/lock.json"),
+        tmp.path().join(".fantastic/lock.yaml"),
         format!("{{\"pid\": {pid}}}"),
     )
     .unwrap();
@@ -1055,50 +1043,61 @@ fn post_rest(port: u16, path: &str, exec_id: &str, body: &str) -> String {
     out
 }
 
-/// #37 — a ONE-SHOT is DURABLE at exit. The ledger flusher is debounced and
-/// coalescing, so the execution the process just ran is only on disk if
-/// `Kernel::shutdown` lands the last window BEFORE the lock is released. ONE
-/// TAPE: the execution IS the `call` row and its `settle` row in
-/// `messages.xml`, there is no `ledger.json`.
+/// Name the root's MEMORY STORE: a `ram_store` under the root (operator on), and
+/// `memory_store_id` on the root. A root without one does not start — the
+/// kernel keeps no conversation and no tape; its execution rows live in that
+/// store. Needs [`create_store`] first so the records persist.
+fn name_memory_store(dir: &std::path::Path) {
+    let out = run_cli(
+        dir,
+        &[
+            "kernel_state",
+            "create_agent",
+            "parent_id=kernel",
+            "handler_module=ram_store.tools",
+            "id=memory",
+            "operator=true",
+        ],
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run_cli(
+        dir,
+        &[
+            "kernel_state",
+            "update_agent",
+            "id=kernel_state",
+            "memory_store_id=memory",
+        ],
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The product path: a one-shot in a tree with a store named. A one-shot is an
+/// UNSTARTED kernel: it answers and exits, fast. Python
+/// `test_a_one_shot_is_fast_and_clean`.
 #[test]
-fn a_one_shot_flushes_its_message_log_before_exit() {
+fn a_one_shot_with_a_store_named_is_fast_and_clean() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_store(tmp.path());
-    run_cli(tmp.path(), &["kernel", "list_agents"]);
-
+    name_memory_store(tmp.path());
+    let t0 = std::time::Instant::now();
+    let out = run_cli(tmp.path(), &["kernel", "ps"]);
+    let wall = t0.elapsed();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(wall < std::time::Duration::from_secs(5), "one-shot took {wall:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"tasks\""), "{stdout}");
     assert!(
-        !tmp.path().join(".fantastic/ledger.json").exists(),
-        "ledger.json is deleted — the tape is the only durable record"
-    );
-    let xml = std::fs::read_to_string(tmp.path().join(".fantastic/messages.xml"))
-        .expect(".fantastic/messages.xml must exist after a one-shot");
-    assert!(xml.contains("kind=\"call\""), "no call row: {xml}");
-    assert!(xml.contains("kind=\"settle\""), "no settle row: {xml}");
-    // The one-shot's OWN execution is settled on disk, outcome body included.
-    let rows = fantastic_kernel::messages_xml::parse_messages(&xml).expect("the tape parses");
-    let call = rows
-        .iter()
-        .find(|r| {
-            r.get("kind") == Some(&serde_json::json!("call"))
-                && r.get("verb") == Some(&serde_json::json!("list_agents"))
-        })
-        .unwrap_or_else(|| panic!("no list_agents call row: {xml}"));
-    assert!(
-        rows.iter().any(|r| {
-            r.get("kind") == Some(&serde_json::json!("settle"))
-                && r.get("parent") == call.get("id")
-                && r["outcome"]["result"].get("agents").is_some()
-        }),
-        "the settle must carry the whole outcome body: {xml}"
+        !tmp.path().join(".fantastic/messages.yaml").exists()
+            && !tmp.path().join(".fantastic/ledger.json").exists(),
+        "the kernel keeps no tape"
     );
 }
 
-/// #37 — a DAEMON is durable at SIGTERM. A live REST call names its own
-/// execution id; after the signal the process exits 0, `lock.json` is gone,
-/// and that LAST execution is on the tape. A pump that is
-/// not drained inside `Kernel::shutdown` loses it.
+/// A root with no `memory_store_id` does not start: the daemon fails loud,
+/// exits non-zero, names the missing precondition, and releases its lock.
 #[test]
-fn a_daemon_flushes_its_last_execution_before_the_lock_goes() {
+fn a_daemon_without_a_memory_store_does_not_start() {
     let tmp = tempfile::TempDir::new().unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -1106,6 +1105,52 @@ fn a_daemon_flushes_its_last_execution_before_the_lock_goes() {
         .unwrap()
         .port();
     create_store(tmp.path());
+    let port_kv = format!("port={port}");
+    run_cli(
+        tmp.path(),
+        &[
+            "kernel_state",
+            "create_agent",
+            "parent_id=kernel",
+            "handler_module=web.tools",
+            "id=web",
+            &port_kv,
+        ],
+    );
+    let out = Command::new(fantastic_bin())
+        .current_dir(tmp.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the daemon");
+    assert!(!out.status.success(), "a root with no store must not start");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("memory_store_id"), "{stderr}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("[kernel] up"),
+        "it never came up"
+    );
+    assert!(
+        !tmp.path().join(".fantastic/lock.yaml").exists(),
+        "the lock must be released"
+    );
+}
+
+/// A DAEMON with its memory store named stops cleanly at SIGTERM: a live REST
+/// call settles, the signal exits 0, and `lock.yaml` is gone — the graceful stop
+/// (whose final flush lands the last execution rows in the store) finishes
+/// inside the stop window. What lands in the store is pinned in-process by
+/// `fantastic-ram-store/tests/kernel_store.rs`: a RAM store is gone with the
+/// process, so nothing is on disk to read back here.
+#[test]
+fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    create_store(tmp.path());
+    name_memory_store(tmp.path());
     let port_kv = format!("port={port}");
     run_cli(
         tmp.path(),
@@ -1181,13 +1226,7 @@ fn a_daemon_flushes_its_last_execution_before_the_lock_goes() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !tmp.path().join(".fantastic/lock.json").exists(),
+        !tmp.path().join(".fantastic/lock.yaml").exists(),
         "the lock must be released"
-    );
-    let xml = std::fs::read_to_string(tmp.path().join(".fantastic/messages.xml"))
-        .expect(".fantastic/messages.xml must exist after a daemon stop");
-    assert!(
-        xml.contains(exec_id),
-        "the LAST execution must be on the tape before exit: {xml}"
     );
 }

@@ -72,6 +72,40 @@ public enum KernelTaskLocals {
     public static func withShutdown<T>(_ body: () async -> T) async -> T {
         await $inShutdown.withValue(true) { await body() }
     }
+
+    /// THE QUALIFIED REMOTE CALLER, as a bridge leg marked it: a call that
+    /// crossed a bridge arrives carrying its sender's address `<remote kernel
+    /// guid>|<remote agent id>` on the frame, and the inbound leg dispatches it
+    /// under `withRemoteCaller(leg:address:)`. The dispatch that `send` launches
+    /// CONSUMES the pair (python `_dispatch_task`): when the leg itself is that
+    /// dispatch's caller, the address becomes `currentRemote`; a send the handler
+    /// makes itself carries no remote caller — its own writes are keyed under its
+    /// own id. Python `_remote_caller` / `_current_remote`.
+    @TaskLocal public static var remoteCaller: RemoteCaller? = nil
+
+    /// The qualified `<guid>|<agent id>` of a caller on ANOTHER kernel, when this
+    /// dispatch was relayed by a bridge leg that carried it; `nil` otherwise.
+    /// Python `current_remote_caller()`.
+    @TaskLocal public static var currentRemote: String? = nil
+
+    /// Mark the enclosed sends as `leg` relaying `address`'s call. Python
+    /// `remote_caller_context(leg_id, address)`.
+    public static func withRemoteCaller<T>(
+        leg: AgentId, address: String, _ body: () async -> T
+    ) async -> T {
+        await $remoteCaller.withValue(RemoteCaller(leg: leg, address: address)) { await body() }
+    }
+}
+
+/// A bridge leg relaying a remote caller: the leg's own id and the caller's
+/// qualified address.
+public struct RemoteCaller: Sendable, Equatable {
+    public let leg: AgentId
+    public let address: String
+    public init(leg: AgentId, address: String) {
+        self.leg = leg
+        self.address = address
+    }
 }
 
 /// The tree root's id — python's `kernel_state`, which IS the root and carries
@@ -153,22 +187,54 @@ public final class Kernel: @unchecked Sendable {
     /// the `ps` system verb reads it, `cancel` kills a subtree. See `Tasks.swift`.
     public let tasks = TaskTable()
 
-    /// THE MESSAGE STORE — every message the kernel ever made, id-addressed by
-    /// the one counter. See `RowStore`.
+    /// THE EXECUTION ROWS still in RAM — `call`, `settle`, `task`, `ack` rows not
+    /// yet flushed to the kernel's memory store. See `RowStore`; the one way in
+    /// is `rowsPut`.
     public let rows = RowStore()
-    /// The loader's message pump, once installed (see `MessagesLog.swift`).
-    public var messagePump: MessagePump?
     /// The loader's debounced RECORD writer, once installed (see
     /// `RecordWriter.swift`). Held here so a one-shot caller with no reference
     /// to the loader bundle can still drain it before the process exits.
     public var recordWriter: RecordWriter?
 
-    /// EVERY execution and what it became — named (a caller's dedup contract) or
-    /// unnamed (under its minted pid). Session lifetime, retention-ringed. The
-    /// DURABLE half is the TAPE: each row's `call`+`settle` pair in
-    /// `messages.xml`, replayed by `hydrateExecutions` at the root's boot. There
-    /// is no second file and no write-through flusher.
+    /// THE EXECUTION LEDGER, process side — every execution still in RAM: in
+    /// flight, or settled and not yet flushed. A flushed one lives on as its
+    /// `call` + `settle` rows in the kernel's memory store; `ledger` is a
+    /// projection over both. See `Ledger.swift`, `KernelStore.swift`.
     public let ledger = ExecutionLedger()
+
+    /// THE ONE COUNTER. Every id in the kernel — a call (one per batch item), a
+    /// forked task, a settle, a conversation row an AI agent writes to its store
+    /// — is the next value of this int64. Kernel-wide and monotonic.
+    ///
+    /// PERSISTED BY BLOCK RESERVATION, beside `guid` in the ROOT RECORD: `load`
+    /// reserves a block past the persisted bound (in memory only — the record is
+    /// untouched, so save → load → save round-trips), `start` writes that bound
+    /// into the root record (`next_id`), and a started kernel minting past it
+    /// reserves and writes the next block. A reboot starts at the persisted
+    /// bound, so ids never repeat; a crash skips at most one block. Python
+    /// `Kernel.next_id` / `id_reserved` / `ID_BLOCK`.
+    let counterLock = NSLock()
+    var _nextId: Int64 = 1
+    var _idReserved: Int64 = 1
+    public static let ID_BLOCK: Int64 = 1000
+
+    /// THE MEMORY STORE the kernel writes its execution rows to — the root
+    /// record's `memory_store_id`, resolved by `start`. `nil` ⇒ not started: rows
+    /// stay in RAM. Guarded by `storeLock`; the flush state beside it.
+    let storeLock = NSLock()
+    var _storeId: AgentId? = nil
+    var _started = false
+    var _flushWake: AsyncStream<Void>.Continuation? = nil
+    var _flusherTaskId: TaskId? = nil
+    /// The flush rows this kernel wrote (by id), and the calls that carried them:
+    /// those calls' own rows are ALREADY RECORDED — the flush row is their record.
+    var _ownFlushes: Set<Int64> = []
+    var _ownFlushCalls: [Int64: Int64] = [:]
+    /// How many `call` rows the store holds for the kernel (counted as flushed,
+    /// re-read at every prune) — what the retention window is measured against.
+    var _storedCalls = 0
+    /// ONE FLUSH AT A TIME.
+    let flushMutex = AsyncMutex()
 
     /// LIFECYCLE STATE — the methods live in `Lifecycle.swift`.
     /// DRAINING: the first phase of a graceful stop (`shutdownAgents`). New
@@ -196,20 +262,6 @@ public final class Kernel: @unchecked Sendable {
         self.storage = storage
         self.bundles = bundles
         self.inboxBound = inboxBound
-        // THE ROW EVENT — every appended row announces itself on the SAME state
-        // stream a `state_subscribe` already holds, at DIGEST resolution; the
-        // body stays behind `pull`/`rows_read`. Hydration publishes nothing
-        // because no subscriber exists yet at bootstrap (`hydrateMessages` runs
-        // before any bundle or client can subscribe), and `publishState` is a
-        // no-op with no subscribers anyway. Python `Kernel.rows_put`.
-        rows.onRow = { [weak self] rid, row in
-            self?.publishState(
-                .object([
-                    "agent_id": row["agent"] ?? .null,
-                    "kind": .string("row"),
-                    "row": .object(rowDigest(rid: rid, row: row)),
-                ]))
-        }
     }
 
     // ── Agent map ───────────────────────────────────────────────
@@ -347,7 +399,7 @@ public final class Kernel: @unchecked Sendable {
         _inboxes[id] = nil
     }
 
-    func deliverToInbox(_ id: AgentId, _ item: InboxItem) {
+    public func deliverToInbox(_ id: AgentId, _ item: InboxItem) {
         inboxLock.lock()
         let inbox = _inboxes[id]
         inboxLock.unlock()
@@ -363,7 +415,7 @@ public final class Kernel: @unchecked Sendable {
 
     /// Does `id` hold a registered inbox? A watcher without one receives neither
     /// the mail nor a state event — python's `if tgt_inbox is None: continue`.
-    func hasInbox(_ id: AgentId) -> Bool {
+    public func hasInbox(_ id: AgentId) -> Bool {
         inboxLock.lock()
         defer { inboxLock.unlock() }
         return _inboxes[id] != nil
@@ -511,68 +563,6 @@ public final class Kernel: @unchecked Sendable {
     }
 
     // ── State events ────────────────────────────────────────────
-
-    /// THE ROW READ GATE — one rule for `messages` and for the `row` state
-    /// event: an operator (`nil`) or the owner itself always; anyone else only
-    /// if the OWNER's `callable_by` names them for `messages`. A missing owner
-    /// reads as refused. Python `Agent.may_read_rows`.
-    public func mayReadRows(reader readerId: String?, owner ownerId: String) -> Bool {
-        guard let readerId, readerId != ownerId else { return true }
-        guard let owner = agent(AgentId(ownerId)) else { return false }
-        return authorizeCall(
-            grant: owner.metaValue(forKey: "callable_by") ?? .null, verb: "messages",
-            otherId: readerId, holderId: owner.id.value,
-            parentId: owner.parentId?.value,
-            childIds: Set(owner.childIds().map { $0.value }), loaderId: root?.id.value,
-            enforcePrivileged: false
-        ).allowed
-    }
-
-    /// May `readerId` receive row BODIES on the state stream? Bodies are what
-    /// `rows_read` guards — the privileged, kernel-wide read no wildcard
-    /// carries — so a body subscription is gated exactly as that verb on the
-    /// ROOT, once, at subscribe time. Refusal, or `nil`. Operator ungated.
-    /// Python `Agent.authorize_row_bodies`.
-    public func authorizeRowBodies(_ readerId: AgentId) -> JSON? {
-        guard KernelTaskLocals.currentSender != nil else { return nil }
-        guard let rootAgent = root else { return nil }
-        return gate(sender: readerId, verb: "rows_read", target: rootAgent, payload: .null)
-    }
-
-    /// Tap the state stream. `readerId` names WHO reads (a leg subscribing on
-    /// behalf of a client, after `authorizeStateSubscribe`): `row` events are
-    /// then delivered only for agents that reader may read (`mayReadRows`) —
-    /// the stream cannot leak a digest the `messages` verb would refuse. An
-    /// operator tap (`nil`) sees every event.
-    ///
-    /// `withBodies` (after `authorizeRowBodies` for a reader) adds the row's
-    /// `content` to every `row` event, so a view that renders every row skips
-    /// the pull round-trip; a `rows_read` holder reads every row whole already,
-    /// so no per-row filter applies to it. Python `add_state_subscriber`.
-    @discardableResult
-    public func subscribe(
-        readerId: String?, withBodies: Bool = false, _ cb: @escaping StateSubscriber
-    ) -> SubscriberToken {
-        if !withBodies, readerId == nil { return subscribe(cb) }
-        return subscribe { [weak self] event, body in
-            var event = event
-            if event["kind"].asString == "row" {
-                if !withBodies,
-                    self?.mayReadRows(reader: readerId, owner: event["agent_id"].asString ?? "")
-                        != true
-                {
-                    return
-                }
-                if withBodies, case .object(var o) = event, case .object(var r) = o["row"] ?? .null {
-                    let stored = (event["row"]["id"].asInt).flatMap { self?.rows.getOne($0) }
-                    r["content"] = stored?["content"] ?? .string("")
-                    o["row"] = .object(r)
-                    event = .object(o)
-                }
-            }
-            cb(event, body)
-        }
-    }
 
     @discardableResult
     public func subscribe(_ cb: @escaping StateSubscriber) -> SubscriberToken {

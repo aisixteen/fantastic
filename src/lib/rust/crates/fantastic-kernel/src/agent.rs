@@ -42,7 +42,7 @@ impl std::fmt::Display for AgentId {
     }
 }
 
-/// Persistent fields written to `<root>/agent.json`. Matches the
+/// Persistent fields written to `<root>/agent.yaml`. Matches the
 /// shape Python persists, byte-for-byte.
 ///
 /// `meta` flattens into the JSON object — `display_name`, `port`,
@@ -82,7 +82,7 @@ pub struct Agent {
     pub handler_module: Option<String>,
     /// Parent id; `None` for the root.
     pub parent_id: Option<AgentId>,
-    /// Arbitrary metadata persisted to agent.json (display_name, port, root, …).
+    /// Arbitrary metadata persisted to agent.yaml (display_name, port, root, …).
     pub meta: std::sync::RwLock<Map<String, Value>>,
     /// Direct children, in CREATION ORDER.
     ///
@@ -97,7 +97,7 @@ pub struct Agent {
     /// this agent's inbox. Updated by `watch` / `unwatch` in sub-phase B.
     #[allow(dead_code)]
     pub(crate) watcher_ids: RwLock<HashSet<AgentId>>,
-    /// Where this agent's `agent.json` + `agents/` dir lives on disk.
+    /// Where this agent's `agent.yaml` + `agents/` dir lives on disk.
     pub root_path: PathBuf,
     /// Skip disk writes when true (cli, repl, in-test fixtures).
     pub ephemeral: bool,
@@ -120,7 +120,7 @@ impl Agent {
     /// it in the kernel's `agents` map.
     ///
     /// `root_path` is the directory that holds (or will hold) this
-    /// agent's `agent.json` + recursive `agents/` subtree.
+    /// agent's `agent.yaml` + recursive `agents/` subtree.
     pub fn new(
         id: AgentId,
         handler_module: Option<String>,
@@ -239,9 +239,9 @@ impl Agent {
             .unwrap_or(false)
     }
 
-    /// Path of `agent.json` under `root_path`.
+    /// Path of `agent.yaml` under `root_path`.
     pub fn agent_file(&self) -> PathBuf {
-        self.root_path.join("agent.json")
+        self.root_path.join(crate::persistence::RECORD_FILE)
     }
 
     /// Path of the `agents/` subdir under `root_path` (children live here).

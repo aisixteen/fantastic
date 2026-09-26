@@ -972,7 +972,7 @@ struct RoutingTests {
             }, "\(JSON.array(rows).serialize())")
         // C36 — and it is a `task` ROW on the AI, under the same id, so the
         // handoff is in the message log and not only in the live table.
-        let stored = kernel.rows.forAgent(AgentId("ai"))
+        let stored = kernel.rows.all().filter { $0["agent"]?.asString == "ai" }
         #expect(
             stored.contains {
                 $0["kind"]?.asString == "task" && $0["verb"]?.asString == "deliver_reply"
@@ -984,10 +984,11 @@ struct RoutingTests {
     /// record before it goes rides ON THE REPLY — measured 2026-08-20 (`live_plan`):
     /// stated once as system-block policy, the model wrote a `SEEN` line for 0 of 10
     /// reflects. Only reflect bodies are dropped later, so only they carry it.
-    /// FULL ASYNC: with `context_async` on the record, a reply over the inline
-    /// cap is stored under its pid and the model is handed python's stub — the
-    /// exact bytes, grep named first — with the size counted AFTER the reflect
-    /// nudge rode on. The body stays one `grep`/`pull` away.
+    /// SYNC OR ASYNC ALIKE (decided 2026-09-26): a reply over the inline cap is
+    /// held in RAM under its pid (never persisted) and the model is handed
+    /// python's stub — the exact bytes, its ORIGIN line, grep named — with the
+    /// size counted AFTER the reflect nudge rode on. The body stays one `grep`
+    /// away for this run.
     @Test func anOverCapReplyIsStoredAndDeliveredAsTheStub() async throws {
         // A window whose inline cap (an eighth of the budget) is smaller than the
         // mock's own reflect + nudge, so that reply is the one that dehydrates.
@@ -1002,18 +1003,20 @@ struct RoutingTests {
             ]))])[0].result
         #expect(await script.waitForCalls(2), "the reflect never came back")
         try await waitForHistory(kernel: kernel, id: id, count: 3)
-        let bodies = kernel.rows.forAgent(id).filter { $0["kind"]?.asString == "body" }
-        let bodyRow = try #require(bodies.first, "the over-cap reply must be STORED")
-        let pid = try #require(bodyRow["parent"]?.asInt)
-        let body = bodyRow["content"]?.asString ?? ""
-        #expect(body.hasSuffix(REFLECT_NUDGE), "the nudge is inside the stored body, so it is inside the size")
+        // HELD IN RAM, never persisted — what the stored turn keeps is the
+        // origin line.
+        let held = heldBodies(id.value, kernel)
+        let firstHeld = held.elements.first
+        let (pid, body) = try #require(firstHeld.map { ($0.key, $0.value) }, "the over-cap reply must be HELD")
+        #expect(body.hasSuffix(REFLECT_NUDGE), "the nudge is inside the held body, so it is inside the size")
         #expect(
             AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)]))
                 > AIContext.inlineCap(kernel.agent(id)!))
         let stub =
-            "(settled, \(body.unicodeScalars.count) bytes — NOT inlined. To find a line in it: "
-            + "send yourself <type>grep</type> <query>substring</query> <ids><item>\(pid)</item></ids>. "
-            + "To read it: <type>pull</type> <pid>\(pid)</pid> <offset>0</offset>)"
+            "(settled, \(body.unicodeScalars.count) bytes — NOT inlined, held in memory only "
+            + "until this agent restarts. origin: mock reflect {} — re-send it; the output may differ. "
+            + "To find a line in it: send yourself <type>grep</type> <query>substring</query> "
+            + "<ids><item>\(pid)</item></ids>)"
         let delivered = conversationRows(kernel: kernel, id: id)[2]["content"].asString ?? ""
         #expect(delivered.hasPrefix("[reply to \(pid) · mock reflect"), Comment(rawValue: delivered))
         #expect(delivered.hasSuffix("]\n" + stub), Comment(rawValue: delivered))
@@ -1209,9 +1212,9 @@ struct RoutingTests {
             sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
 
         let jid = try #require(kernel.ledger.resolveName("job-alpha"), "the exec_id opened no named execution")
-        let row = try #require(kernel.ledger.rows(for: nil).first { $0["id"].asInt == jid })
-        #expect(row["retries"].asInt == 2, Comment(rawValue: row.serialize()))
-        #expect(row["named"].asBool == true && row["target"].asString == "vault", Comment(rawValue: row.serialize()))
+        let row = try #require(kernel.ledger.entry(jid))
+        #expect(row.retries == 2)
+        #expect(row.named && row.target.value == "vault")
         #expect(echo.answered().first?.1 == .object(["type": .string("withdraw")]), "the payload must reach the target verbatim")
         let body = (await sent.settled(1)).first?.1["text"].asString ?? ""
         #expect(body.hasPrefix("[reply to \(jid) \u{b7} vault withdraw]"), Comment(rawValue: body))

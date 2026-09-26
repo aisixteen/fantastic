@@ -28,8 +28,9 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
-use fantastic_ai_core::retrieval;
+use fantastic_ai_core::provider::{
+    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+};
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
@@ -191,7 +192,7 @@ fn drop_cached_client(self_id: &AgentId) {
 const KEY_VARS: [&str; 2] = ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY"];
 
 /// Read the key from the environment. No sidecar, no agent record — the key is
-/// never written to disk by this bundle and never appears in `agent.json`.
+/// never written to disk by this bundle and never appears in `agent.yaml`.
 fn read_api_key() -> Option<String> {
     KEY_VARS.iter().find_map(|v| {
         std::env::var(v)
@@ -257,6 +258,11 @@ struct AnthropicProvider {
     /// without it every long rust turn ran to ~41k chars and the proxy's 180s
     /// cap (measured 2026-09-12: build, implicit_constraint, graph_shape).
     sampling: Map<String, Value>,
+    /// The prompt size the endpoint REPORTED for the last pass (`message_start`
+    /// usage, cache reads included) and the last `stop_reason`. ai_core
+    /// calibrates its own token estimate with the first and refuses a cut fold
+    /// summary on the second.
+    report: ReportCell,
 }
 
 #[async_trait]
@@ -265,7 +271,23 @@ impl Provider for AnthropicProvider {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError> {
+    fn report(&self) -> ProviderReport {
+        self.report.lock().expect("report poisoned").clone()
+    }
+
+    fn clear_prompt_tokens(&self) {
+        self.report.lock().expect("report poisoned").prompt_tokens = None;
+    }
+
+    fn clear_stop_reason(&self) {
+        self.report.lock().expect("report poisoned").stop_reason = None;
+    }
+
+    async fn chat(
+        &self,
+        messages: &[Value],
+        max_tokens: Option<i64>,
+    ) -> Result<ProviderStream, ProviderError> {
         // THE KEY IS CHECKED HERE, AND BEFORE THE MODEL — python
         // `provider.py:112-119`. It used to gate the PROVIDER BUILD, so an
         // unwired connector answered `{error: "anthropic_backend: no api key
@@ -298,7 +320,11 @@ impl Provider for AnthropicProvider {
         let (system, anthropic_messages) = to_anthropic(messages);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
-        body.insert("max_tokens".into(), json!(self.max_tokens));
+        // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the record's.
+        match max_tokens.filter(|n| *n != 0) {
+            Some(n) => body.insert("max_tokens".into(), json!(n)),
+            None => body.insert("max_tokens".into(), json!(self.max_tokens)),
+        };
         body.insert("messages".into(), json!(anthropic_messages));
         body.insert("stream".into(), json!(true));
         if let Some(sys) = system {
@@ -367,7 +393,7 @@ impl Provider for AnthropicProvider {
             tokio::time::sleep(Duration::from_secs_f64(BACKOFF * f64::from(attempt))).await;
         };
 
-        Ok(consume_sse(resp))
+        Ok(consume_sse(resp, Arc::clone(&self.report), max_tokens.is_some()))
     }
 }
 
@@ -390,17 +416,35 @@ struct SseState {
     /// block with no `type` key appends python's `None`.
     blocks: Vec<Value>,
     wrap: fantastic_ai_core::think::ThinkWrap,
+    report: ReportCell,
+    /// A BOUNDED side call (`max_tokens` given): stopping at the bound is an
+    /// ANSWER, not a fault — the caller reads `stop_reason`.
+    bounded: bool,
 }
 
 impl SseState {
-    fn new() -> Self {
+    fn new(report: ReportCell, bounded: bool) -> Self {
         Self {
             buf: Vec::new(),
             stop: false,
             stop_reason: None,
             blocks: Vec::new(),
             wrap: fantastic_ai_core::think::ThinkWrap::new(),
+            report,
+            bounded,
         }
+    }
+
+    /// The stream ended: record its `stop_reason`, then the terminality verdict.
+    /// A BOUNDED SIDE CALL that stopped at its bound is an ANSWER, not a fault:
+    /// the caller asked for at most `max_tokens` and reads `stop_reason` (a fold
+    /// refuses a cut summary).
+    fn finish(&self) -> Option<String> {
+        self.report.lock().expect("report poisoned").stop_reason = self.stop_reason.clone();
+        if self.bounded && self.stop_reason.as_deref() == Some("max_tokens") {
+            return None;
+        }
+        self.terminality()
     }
 
     /// Terminality, decided by what the stream CONTAINED — not by what we asked
@@ -526,6 +570,20 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
                 .map(str::to_string)
                 .or(st.stop_reason.take());
         }
+        // PROVIDER-REPORTED USAGE — what the context window really held, cache
+        // reads included. ai_core calibrates its own estimate with it.
+        "message_start" => {
+            let u = obj
+                .get("message")
+                .and_then(|m| m.get("usage"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let n: i64 = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+                .iter()
+                .map(|k| u.get(*k).and_then(Value::as_i64).unwrap_or(0))
+                .sum();
+            st.report.lock().expect("report poisoned").prompt_tokens = (n != 0).then_some(n);
+        }
         "message_stop" => {
             // Balance a span the model never closed itself, so the text the
             // parser sees is well-formed.
@@ -534,7 +592,7 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
             }
             st.stop = true;
         }
-        _ => {} // message_start, ping — ignored
+        _ => {} // content_block_stop, ping — ignored
     }
     Ok(out)
 }
@@ -583,11 +641,11 @@ fn wire_reply_line(st: &SseState) -> String {
 /// long thought indistinguishable from a stalled request (measured 2026-09-04,
 /// `subai_graph:rust`). Python and swift both yield per delta; this was the only
 /// backend that did not.
-fn consume_sse(resp: reqwest::Response) -> ProviderStream {
+fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> ProviderStream {
     let inner = resp.bytes_stream();
     // `pending` holds the events decoded from ONE chunk: a chunk can carry
     // several lines, and each line several tokens.
-    let init = (inner, SseState::new(), VecDeque::new(), false);
+    let init = (inner, SseState::new(report, bounded), VecDeque::new(), false);
     Box::pin(futures_util::stream::unfold(
         init,
         |(mut inner, mut st, mut pending, mut finished)| async move {
@@ -606,7 +664,7 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                     if wire_on() {
                         println!("{}", wire_reply_line(&st));
                     }
-                    if let Some(why) = st.terminality() {
+                    if let Some(why) = st.finish() {
                         pending.push_back(Err(ProviderError::raised(why)));
                     }
                     continue;
@@ -640,7 +698,7 @@ fn consume_sse(resp: reqwest::Response) -> ProviderStream {
                         if wire_on() {
                             println!("{}", wire_reply_line(&st));
                         }
-                        if let Some(why) = st.terminality() {
+                        if let Some(why) = st.finish() {
                             pending.push_back(Err(ProviderError::raised(why)));
                         }
                         break;
@@ -673,61 +731,22 @@ impl Bundle for AnthropicBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel),
-            // BOOT WITH A STORE RUNS `context_recall` — python `_make_boot`.
-            "boot" => {
-                // A BOOT IS A NEW INCARNATION (python `_make_boot`): a reply
-                // answering a call the PREVIOUS one made is recorded as a row
-                // and wakes no turn.
-                state::bump_incarnation(agent_id);
-                if fantastic_ai_core::history::load_history(
-                    agent_id,
-                    kernel,
-                    helpers::DEFAULT_CLIENT_ID,
-                    false,
-                )
-                .await
-                .is_empty()
-                {
-                    Value::Null
-                } else {
-                    let p = build_provider(agent_id, kernel);
-                    retrieval::context_recall(agent_id, &json!({}), kernel, Some(&p)).await
-                }
-            }
-            "send" => send_reply(agent_id, payload, kernel).await?,
-            // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
-            // record, this agent answers it by THINKING, and the asker writes
-            // the same call either way.
-            "inquiry" => match verbs::inquiry_open(payload) {
-                Err(refusal) => refusal,
-                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await?, payload),
-            },
-            "history" => verbs::history(agent_id, payload, kernel).await,
-            "recall" => verbs::recall(agent_id, payload, kernel).await,
-            // FULL ASYNC: page a stored reply body by pid, or FIND the line first.
-            "pull" => retrieval::pull(agent_id, payload, kernel).await,
-            "grep" => retrieval::grep(agent_id, payload, kernel).await,
-            // Rebuild the view from the store: on boot, after folds, on request.
-            "context_recall" => {
-                let p = build_provider(agent_id, kernel);
-                retrieval::context_recall(agent_id, payload, kernel, Some(&p)).await
-            }
-            // A new thread on the same store: the view starts here, nothing is deleted.
-            "context_clear" => retrieval::context_clear(agent_id, payload, kernel).await,
-            "context_status" => verbs::context_status(agent_id, kernel).await,
-            "status" => verbs::status(agent_id, payload),
-            // python's VERBS map has no `shutdown` — it is an unknown type like
-            // any other, and the value is rendered with python's `repr`.
-            _ => json!({
-                "error": format!(
-                    "anthropic_backend: unknown type {}",
-                    py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
-                )
-            }),
-        };
-        Ok(Some(reply))
+        if verb == "reflect" {
+            return Ok(Some(reflect_reply(agent_id, kernel)));
+        }
+        // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
+        let provider = |client: &str| { let _ = client; Some(build_provider(agent_id, kernel)) };
+        if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
+            return Ok(Some(reply));
+        }
+        // python's VERBS map has no `shutdown` — it is an unknown type like any
+        // other, and the value is rendered with python's `repr`.
+        Ok(Some(json!({
+            "error": format!(
+                "anthropic_backend: unknown type {}",
+                py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
+            )
+        })))
     }
 
     /// The kernel is killing a task of this agent. If it is the in-flight
@@ -783,23 +802,10 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
         max_tokens,
         sampling,
+        report: ReportCell::default(),
     })
 }
 
-async fn send_reply(
-    agent_id: &AgentId,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-) -> Result<Value, BundleError> {
-    verbs::send(
-        Some(build_provider(agent_id, kernel)),
-        agent_id,
-        payload,
-        kernel,
-        CFG,
-    )
-    .await
-}
 
 /// `reflect` — python `_make_reflect` with no `reflect_extra`: the shared base
 /// body and nothing else. `max_tokens`, `tool_use`, `file_bridge_id` and

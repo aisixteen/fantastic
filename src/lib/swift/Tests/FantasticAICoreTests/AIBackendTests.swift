@@ -13,6 +13,7 @@ import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
+@testable import FantasticRamStore
 
 /// The private reaction cursor, read through the same lock the backend uses.
 /// SYNCHRONOUS on purpose: `NSLock.lock()` is unavailable from an async context.
@@ -37,10 +38,12 @@ struct AIBackendTests {
         // The kernel appends its own frame (can_call/callable_by/…) after the
         // bundle's body; the BODY is what this pins.
         #expect(
-            (r.asObject?.keys.prefix(12)).map(Array.init) == [
+            (r.asObject?.keys.prefix(13)).map(Array.init) == [
                 "id", "sentence", "model", "endpoint", "context_window", "context_strategy",
-                "verbs", "generating", "cancel", "emits", "concurrency", "extra",
+                "memory_store_id", "verbs", "generating", "cancel", "emits", "concurrency",
+                "extra",
             ], "\(r.asObject?.keys.map { $0 } ?? [])")
+        #expect(r["memory_store_id"].asString == "memory")
         #expect(r["id"].asString == id.value)
         #expect(r["kind"].isNull && r["provider"].isNull)
         #expect(r["model"].asString == "(no default — set the `model` meta)")
@@ -54,7 +57,8 @@ struct AIBackendTests {
         #expect(
             r["verbs"].asObject?.keys.elementsEqual([
                 "reflect", "send", "inquiry", "history", "status", "context_status", "recall",
-                "pull", "grep", "context_recall", "context_clear", "boot",
+                "grep", "context_recall", "context_clear", "fork_from", "request_share", "watch",
+                "unwatch", "boot",
             ]) == true, "\(r["verbs"])")
         #expect(
             r["verbs"]["reflect"].asString
@@ -514,23 +518,39 @@ struct AIBackendTests {
         #expect(stored.map { $0["content"].asString ?? "" } == ["one", "x " + doneEnvelope, "two", "x " + doneEnvelope])
     }
 
-    @Test func historyNeedsNoFileLeg() async throws {
-        // The conversation lives in the KERNEL ROW STORE — no `file_bridge_id`,
-        // no sidecar, no chat agent. A backend with no leg at all still keeps
-        // its turns; persistence of the store is the kernel's concern.
+    @Test func historyNeedsNoFileLegButAMemoryStore() async throws {
+        // The conversation lives in the agent's MEMORY STORE — no
+        // `file_bridge_id`, no sidecar, no chat agent. A backend with no leg at
+        // all keeps its turns in the store it names; with NO store named, the
+        // send fails loud before any turn (python `_send`'s `_store_of`).
         let registry = BundleRegistry()
         registry.register(
             "mock_backend.tools", MockBundle(config: baseConfig { .provider(MockProvider(tokens: ["ok ", doneEnvelope])) }))
+        registry.register("ram_store.tools", RamStoreBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        let root = Agent(
+            id: AgentId("kernel_state"), handlerModule: nil, parentId: nil,
+            meta: ["guid": .string(MOCK_GUID)])
         kernel.register(root)
         kernel.setRoot(root)
+        _ = await kernel.send([Item(AgentId("kernel_state"), .object([
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                "handler_module": .string("ram_store.tools"), "id": .string("memory"),
+                "callable_by": .object(["naked": .string("*")]),
+            ]))])
         let r = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("create_agent"),
                 "parent_id": .string("kernel_state"),
                 "handler_module": .string("mock_backend.tools"), "id": .string("naked"),
             ]))])[0].result
         let id = AgentId(r["id"].asString ?? "naked")
+        let refused = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
+        #expect(refused["reason"].asString == "missing_arg", "\(refused.serialize())")
+        #expect((refused["error"].asString ?? "").contains("memory_store_id"))
+        kernel.update(id, [
+            "memory_store_id": .string("memory"),
+            "can_call": .object(["memory": .string("*"), "cli": .string("*")]),
+        ])
         _ = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, count: 2)
         let rows = conversationRows(kernel: kernel, id: id)
@@ -653,20 +673,19 @@ struct AIBackendTests {
         #expect(AIContext.estimateOne(turn("user", String(repeating: "x", count: 400))) >= 100)
         #expect(AIContext.estimateTokens(body) > AIContext.estimateTokens(Array(body.prefix(2))))
 
-        let kernel = Kernel()
-        func ctx(_ summarize: (@Sendable ([JSON]) async throws -> String)?) -> ProjectionCtx {
+        func ctx(_ summarize: AISummarizer?) -> ProjectionCtx {
             ProjectionCtx(
                 budget: 1_000_000, recentN: 4, summarize: summarize, selfId: AgentId("ai"),
-                kernel: kernel)
+                kernel: nil)
         }
         // truncate: keeps first + recent, omittedMarker, NO summary.
-        let tr = await AIStrategies.truncate(body, [], .object([:]), ctx(nil))
+        let tr = try await AIStrategies.truncate(body, [], .object([:]), ctx(nil))
         #expect(tr.omittedMarker && tr.summary == nil)
         #expect(tr.body.first?["content"].asString == body.first?["content"].asString)
         #expect(tr.body.last?["content"].asString == body.last?["content"].asString)
 
         // compact: recent verbatim + a summary artifact (via the mock provider).
-        let cp = await AIStrategies.compact(
+        let cp = try await AIStrategies.compact(
             body, [], .object([:]),
             ctx(AIStrategies.makeSummarizer(MockProvider(tokens: ["SUMMARY"]))))
         #expect(cp.summary == "SUMMARY")
@@ -829,7 +848,7 @@ struct AIBackendTests {
                     "content": .string("turn\(i)-" + String(repeating: "x", count: 8000)),
                 ]))
         }
-        let outcome = await backend.projectContext(
+        let outcome = try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "probe", messages: fat,
             storeLen: store.count, kernel: kernel)
         guard case .projected = outcome else {
@@ -983,14 +1002,14 @@ struct AIBackendTests {
         #expect(seen.contains("hello peer"))
     }
 
-    // B1.10: a non-empty `messages` list is STATELESS — `[system] + messages +
-    // live turn`, and the row store is untouched.
-    @Test func statelessMessagesOverrideLeavesTheStoreUnchanged() async throws {
+    // The `messages` context-array parameter of `send` is REMOVED: the
+    // conversation is ALWAYS the agent's own (its memory store). A supplied list
+    // is ignored — python's `_send` no longer reads it.
+    @Test func aSuppliedMessagesListIsNotAConversation() async throws {
         let script = ProviderScript([["ok " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
-        let before = conversationRows(kernel: kernel, id: id).count
         _ = await kernel.send([
             Item(
                 id,
@@ -998,22 +1017,16 @@ struct AIBackendTests {
                     "type": .string("send"), "text": .string("live"),
                     "client_id": .string("c"),
                     "messages": .array([
-                        .object(["role": .string("user"), "content": .string("supplied A")]),
-                        .object(["role": .string("assistant"), "content": .string("supplied B")]),
+                        .object(["role": .string("user"), "content": .string("supplied A")])
                     ]),
                 ]))
         ])[0].result
         #expect(await script.waitForCalls(1))
         let msgs = try #require(script.request(0))
-        #expect(msgs.count == 4, "[system] + 2 supplied + the live turn")
-        #expect(msgs[0]["role"].asString == "system")
-        #expect(msgs[1]["content"].asString == "supplied A")
-        #expect(msgs[2]["content"].asString == "supplied B")
-        #expect(msgs[3]["content"].asString == "live")
-        try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(
-            conversationRows(kernel: kernel, id: id).count == before,
-            "a stateless turn persists nothing")
+        #expect(msgs.count == 2, "[system] + the live turn")
+        #expect(!JSON.array(msgs).serialize().contains("supplied A"))
+        try await waitForHistory(kernel: kernel, id: id, count: 2)
+        #expect(conversationRows(kernel: kernel, id: id).map { $0["content"] }.first == .string("live"))
     }
 
     // B1.6: `options` via python `str`, `action` via `json.dumps`.

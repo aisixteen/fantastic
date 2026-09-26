@@ -11,7 +11,9 @@
 // THE MACHINERY LIVES HERE, in the kernel, because the shipped
 // `kernel_state.tools` bundle and the kernel's own tests drive exactly the same
 // sequence; the bundle owns the VERB SURFACE, not a second copy of this. Python
-// keeps these handles on the loader agent (`_fs_flush_loop`, `_message_pump`).
+// keeps this handle on the loader agent (`_fs_flush_loop`). There is no message
+// pump: the kernel keeps no conversation, and its execution rows are flushed by
+// the kernel itself into its memory store (`KernelStore.swift`).
 
 import FantasticJSON
 import Foundation
@@ -142,15 +144,12 @@ public final class RecordWriter: @unchecked Sendable {
     }
 }
 
-/// What the ROOT LOADER's `boot` installed — the handles a shutdown needs back.
+/// What the ROOT LOADER's `boot` installed — the handle a shutdown needs back.
 public struct RootLoaderState: Sendable {
     /// The debounced record writer, when this loader watches (`watch != false`).
     public var writer: RecordWriter?
-    /// The message pump — ROOT only.
-    public var pump: MessagePump?
-    public init(writer: RecordWriter? = nil, pump: MessagePump? = nil) {
+    public init(writer: RecordWriter? = nil) {
         self.writer = writer
-        self.pump = pump
     }
 }
 
@@ -196,25 +195,15 @@ extension Kernel {
 
     /// The loader's `boot`, python `kernel_state._boot`:
     ///
-    /// 1. ROOT only — rebuild the execution ledger FROM THE TAPE
-    ///    (`hydrateExecutions`: the cold `hydrateMessages` put the rows back,
-    ///    here the settled calls become `executions` again so dedup survives the
-    ///    reboot), then start the message pump at the highest id hydration saw.
-    ///    Before the pump subscribes: rebuilding mints nothing, and nothing
-    ///    rebuilt is re-appended.
-    /// 2. Unless `watch=false` (a loader serving a REMOTE kernel answers verbs
+    /// 1. Unless `watch=false` (a loader serving a REMOTE kernel answers verbs
     ///    only) — subscribe the record writer to the kernel state stream.
-    /// 3. ROOT only — mint the instance `guid` ONCE, AFTER the writer subscribes,
+    /// 2. ROOT only — mint the instance `guid` ONCE, AFTER the writer subscribes,
     ///    so the `updated` event it publishes is what carries the new record to
     ///    disk. An explicit or already-persisted guid always wins, and once
     ///    written back it is never regenerated.
     public func bootRootLoader(_ loader: Agent) async -> RootLoaderState {
         var state = RootLoaderState()
         let isRoot = loader.parentId == nil
-        if isRoot {
-            hydrateExecutions()
-            state.pump = installMessagePump(after: rows.nextId - 1)
-        }
         let watching = loader.metaValue(forKey: "watch").map { $0 != .bool(false) } ?? true
         if !watching { return state }
         state.writer = installPersistWriter(loader: loader.id)
@@ -224,14 +213,12 @@ extension Kernel {
         return state
     }
 
-    /// Land the last window and unsubscribe — python `_MessagePump.stop` +
-    /// `_FlushLoop.stop`.
+    /// Unsubscribe + stop the record loop — python `_FlushLoop.stop`.
     public func shutdownRootLoader(_ state: RootLoaderState) async {
         if let w = state.writer {
             await w.stop()
             recordWriter = nil
         }
-        if state.pump != nil { await flushPendingMessages() }
     }
 
     /// A 32-hex instance guid — the same spelling python's `uuid4().hex` writes.

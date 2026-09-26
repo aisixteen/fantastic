@@ -23,11 +23,11 @@ FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 
 ```bash
 $FANTASTIC reflect >/tmp/fk_test/reflect1.json
-test -f .fantastic/agent.json
-jq -e '.id == "kernel_state"' .fantastic/agent.json
+test -f .fantastic/agent.yaml
+jq -e '.id == "kernel_state"' .fantastic/agent.yaml
 ```
 
-Expect: `.fantastic/agent.json` exists with `id=kernel_state` after first
+Expect: `.fantastic/agent.yaml` exists with `id=kernel_state` after first
 invocation. Reflect returns the uniform identity + tree (default
 `tree=all`); `reflect bundles=all` lists the installable catalog and
 `reflect readme=true` attaches the root readme. Transport/wire docs
@@ -37,19 +37,19 @@ live in the readme, not the reflect JSON.
 
 ```bash
 $FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=foo root=/tmp/fk_root
-test -f .fantastic/agents/foo/agent.json
-jq -e '.handler_module == "file_bridge.tools"' .fantastic/agents/foo/agent.json
+test -f .fantastic/agents/foo/agent.yaml
+jq -e '.handler_module == "file_bridge.tools"' .fantastic/agents/foo/agent.yaml
 # Plant a custom field the kernel doesn't know:
-jq '. + {user_note: "preserve me"}' .fantastic/agents/foo/agent.json \
-  > /tmp/foo.json && mv /tmp/foo.json .fantastic/agents/foo/agent.json
+jq '. + {user_note: "preserve me"}' .fantastic/agents/foo/agent.yaml \
+  > /tmp/foo.json && mv /tmp/foo.json .fantastic/agents/foo/agent.yaml
 # Mutate a kernel-managed field:
 $FANTASTIC kernel_state update_agent id=foo root=/tmp/fk_root_v2
 # The custom field must survive the merge:
-jq -e '.user_note == "preserve me" and .root == "/tmp/fk_root_v2"' .fantastic/agents/foo/agent.json
+jq -e '.user_note == "preserve me" and .root == "/tmp/fk_root_v2"' .fantastic/agents/foo/agent.yaml
 ```
 
 Expect: child agent persisted with handler_module + meta intact.
-Subsequent updates merge into the existing `agent.json` — fields
+Subsequent updates merge into the existing `agent.yaml` — fields
 the kernel doesn't manage (the dirty-binding contract).
 
 ### Test 3: cascade delete removes subtree
@@ -70,7 +70,7 @@ Expect: both agent directories are removed on cascade delete.
 ```bash
 mkdir -p .fantastic/agents/ghost_1
 echo '{"id":"ghost_1","handler_module":"nonexistent.tools","parent_id":"kernel_state"}' \
-  > .fantastic/agents/ghost_1/agent.json
+  > .fantastic/agents/ghost_1/agent.yaml
 $FANTASTIC reflect 2>&1 | tee /tmp/fk_test/boot.log
 grep -q '\[kernel\] skipping agent ghost_1: bundle nonexistent.tools not installed in this runtime' \
   /tmp/fk_test/boot.log
@@ -79,25 +79,25 @@ jq -e '[.tree | recurse(.children[]?) | select(.id == "ghost_1")] | length == 0'
 ```
 
 Expect: ghost_1 is logged + skipped, NOT in the reflected tree. The
-record `agent.json` is left untouched on disk for the next runtime.
+record `agent.yaml` is left untouched on disk for the next runtime.
 
-### Test 5: lock.json + PID liveness
+### Test 5: lock.yaml + PID liveness
 
 ```bash
 $FANTASTIC kernel_state create_agent handler_module=web.tools port=18181
 $FANTASTIC &
 DAEMON_PID=$!
 sleep 1
-test -f .fantastic/lock.json
-jq -e ".pid == $DAEMON_PID" .fantastic/lock.json
+test -f .fantastic/lock.yaml
+jq -e ".pid == $DAEMON_PID" .fantastic/lock.yaml
 # Second invocation refuses while the lock is held:
 ! $FANTASTIC reflect 2>&1 | grep -q "lock"
 kill $DAEMON_PID
 sleep 1
-test ! -f .fantastic/lock.json
+test ! -f .fantastic/lock.yaml
 ```
 
-Expect: lock.json written on boot with current PID. Second invocation
+Expect: lock.yaml written on boot with current PID. Second invocation
 in the same dir refuses with a clear error. Lock released on
 graceful shutdown.
 
@@ -123,7 +123,7 @@ Expect: both test files pass. Together they assert:
 - Weak-load drops unknown handler_modules during `load`
 - Snapshot validation rejects: future schema version, missing root,
   duplicate ids, dangling parent references
-- The persistence merge-only contract: existing agent.json fields
+- The persistence merge-only contract: existing agent.yaml fields
   the kernel doesn't manage survive a subsequent update_agent call
   (dirty binding)
 
@@ -135,5 +135,5 @@ Expect: both test files pass. Together they assert:
 | 2. persistence round-trip (merge) |  |  |
 | 3. cascade delete |  |  |
 | 4. weak-load skip+log |  |  |
-| 5. lock.json + PID liveness |  |  |
+| 5. lock.yaml + PID liveness |  |  |
 | 6. in-memory boot + save/load |  |  |

@@ -1510,7 +1510,7 @@
             #expect(inboxRow["parent"].asInt == relayRow["id"].asInt, "\(inboxRow.serialize())")
             // C36 — and each fork is a `task` ROW under the same id, so a cold
             // read of the message log says what the job held, not just `ps`.
-            let stored = kernel.rows.forAgent(a).filter { $0["kind"]?.asString == "task" }
+            let stored = kernel.rows.all().filter { $0["agent"]?.asString == a.value }.filter { $0["kind"]?.asString == "task" }
             let forked = stored.map { ($0["id"]?.asInt, $0["verb"]?.asString) }
             for row in [relayRow, watchRow, inboxRow] {
                 #expect(

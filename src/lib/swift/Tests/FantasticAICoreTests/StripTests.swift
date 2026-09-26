@@ -21,7 +21,7 @@ private let BIG = String(repeating: "x", count: 6000)
 private let AI = "ai_s"
 
 private func ctx(_ bud: Int64, _ selfId: String = AI) -> ProjectionCtx {
-    ProjectionCtx(budget: bud, recentN: 4, summarize: nil, selfId: AgentId(selfId), kernel: Kernel())
+    ProjectionCtx(budget: bud, recentN: 4, summarize: nil, selfId: AgentId(selfId), kernel: nil)
 }
 
 private func turn(_ role: String, _ content: String) -> JSON { plainTurn(role, content) }
@@ -45,8 +45,8 @@ private func run(_ n: Int = 8, live: String = "write the report") -> [JSON] {
     return body
 }
 
-private func strip(_ body: [JSON], _ c: ProjectionCtx) async -> AIProjection {
-    await AIStrategies.getStrategy("strip")!(body, [], .object([:]), c)
+private func strip(_ body: [JSON], _ c: ProjectionCtx) async throws -> AIProjection {
+    try await AIStrategies.getStrategy("strip")!(body, [], .object([:]), c)
 }
 
 private func contents(_ rows: [JSON]) -> [String] { rows.map { $0["content"].asString ?? "" } }
@@ -61,7 +61,7 @@ struct StripTests {
 
     @Test func underBudgetNothingIsStripped() async throws {
         let body = run(2)
-        let proj = await strip(body, ctx(100_000))
+        let proj = try await strip(body, ctx(100_000))
         #expect(proj.stripped == 0)
         #expect(contents(proj.body) == contents(body))
     }
@@ -70,7 +70,7 @@ struct StripTests {
         let body = run(8)
         let full = AIContext.estimateTokens(body)
         let bud = Int64(Double(full) * 0.7)  // over by ~30%
-        let proj = await strip(body, ctx(bud))
+        let proj = try await strip(body, ctx(bud))
         #expect(proj.stripped > 0)
         let out = AIContext.estimateTokens(proj.body)
         // HYSTERESIS: went well below the line, not just under it.
@@ -83,7 +83,7 @@ struct StripTests {
 
     @Test func aStubKeepsTheTagAndTheTitleAndSaysHowBigTheBodyWas() async throws {
         let body = run(8)
-        let proj = await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.5)))
+        let proj = try await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.5)))
         let firstStub = proj.body[2]["content"].asString ?? ""
         #expect(firstStub.hasPrefix("[reply to ai:0000 · notes read · \"survey filler_0\"]"))
         #expect(firstStub.contains("(stripped: 6000 bytes"))
@@ -92,7 +92,7 @@ struct StripTests {
 
     @Test func theModelsOwnTurnsAreNeverTouched() async throws {
         let body = run(8)
-        let proj = await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.5)))
+        let proj = try await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.5)))
         let before = contents(body.filter { $0["role"].asString == "assistant" })
         let after = contents(proj.body.filter { $0["role"].asString == "assistant" })
         #expect(before == after)
@@ -102,7 +102,7 @@ struct StripTests {
         var body = run(8)
         body[0] = reply("goal:0", "the goal itself")  // a reply-shaped goal turn
         body[body.count - 1] = reply("live:0", "a reply-shaped live turn")
-        let proj = await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.4)))
+        let proj = try await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.4)))
         #expect((proj.body[0]["content"].asString ?? "").contains(BIG))
         #expect((proj.body[proj.body.count - 1]["content"].asString ?? "").contains(BIG))
     }
@@ -113,21 +113,21 @@ struct StripTests {
     @Test func strippingIsMonotoneAndTheRenderIsByteStableBetweenEvents() async throws {
         let body = run(8)
         let bud = Int64(Double(AIContext.estimateTokens(body)) * 0.6)
-        let a = await strip(body, ctx(bud))
-        let b = await strip(body, ctx(bud))  // same inputs, no new event
+        let a = try await strip(body, ctx(bud))
+        let b = try await strip(body, ctx(bud))  // same inputs, no new event
         #expect(JSON.array(a.body).serialize() == JSON.array(b.body).serialize())
         // Now the budget RELAXES; nothing may come back.
-        let c = await strip(body, ctx(bud * 4))
+        let c = try await strip(body, ctx(bud * 4))
         #expect(JSON.array(c.body).serialize() == JSON.array(a.body).serialize())
     }
 
     @Test func aSecondEventOnlyExtendsTheStrippedRun() async throws {
         let body = run(8)
         let bud1 = Int64(Double(AIContext.estimateTokens(body)) * 0.8)
-        let a = await strip(body, ctx(bud1))
+        let a = try await strip(body, ctx(bud1))
         let n1 = a.stripped
         let bud2 = Int64(Double(AIContext.estimateTokens(body)) * 0.4)
-        let b = await strip(body, ctx(bud2))
+        let b = try await strip(body, ctx(bud2))
         #expect(b.stripped > n1)
         // the first n1 stubs are byte-identical to before — the prefix extended, no holes
         #expect(contents(Array(b.body.prefix(2 + 3 * n1))) == contents(Array(a.body.prefix(2 + 3 * n1))))
@@ -140,7 +140,7 @@ struct StripTests {
             body.append(reply("ai:" + String(format: "%04x", i), "t\(i)", body: String(repeating: "z", count: 50)))
         }
         body.append(turn("user", "now?"))
-        let proj = await strip(body, ctx(3000))
+        let proj = try await strip(body, ctx(3000))
         #expect(proj.omittedMarker == true, "prose alone overflowed; the cut must have fired")
         #expect(proj.body[0]["content"].asString == "GOAL")
         #expect(proj.body[proj.body.count - 1]["content"].asString == "now?")
@@ -149,8 +149,8 @@ struct StripTests {
 
     @Test func perAgentStateDoesNotLeakAcrossAgents() async throws {
         let body = run(8)
-        _ = await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.5), AI + "_a"))
-        let fresh = await strip(body, ctx(100_000, AI + "_b"))
+        _ = try await strip(body, ctx(Int64(Double(AIContext.estimateTokens(body)) * 0.5), AI + "_a"))
+        let fresh = try await strip(body, ctx(100_000, AI + "_b"))
         #expect(fresh.stripped == 0)
     }
 

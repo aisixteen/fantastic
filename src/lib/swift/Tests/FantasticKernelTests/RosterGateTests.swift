@@ -182,7 +182,7 @@ struct RosterGateTests {
         await mk(k, "worker")
         _ = await k.send([Item(AgentId("kernel"), .object(["type": .string("reflect")]))])[0].result
 
-        let calls = k.rows.forAgent(AgentId("worker")).filter { $0["kind"]?.asString == "call" }
+        let calls = k.rows.all().filter { $0["agent"]?.asString == "worker" }.filter { $0["kind"]?.asString == "call" }
         let internals = calls.filter { $0["internal"]?.asBool == true }
         #expect(internals.count == 1, "one internal reflect per roster node")
         let row = internals[0]
@@ -201,7 +201,7 @@ struct RosterGateTests {
             sender: AgentId("caller"), target: AgentId("kernel"),
             payload: .object(["type": .string("reflect")]))
         // Only its create-time `boot` row — no reflect call, internal or not.
-        let rows = k.rows.forAgent(AgentId("secret"))
+        let rows = k.rows.all().filter { $0["agent"]?.asString == "secret" }
         #expect(
             !rows.contains { $0["verb"]?.asString == "reflect" },
             "a node the caller may not reflect is never called")

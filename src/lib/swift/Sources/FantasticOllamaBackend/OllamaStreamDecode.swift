@@ -49,3 +49,20 @@ func decodeOllamaLine(_ line: String, wrap: inout ThinkingWrap) -> OllamaDecoded
     tokens += wrap.content(message["content"].asString ?? "")
     return OllamaDecoded(tokens: tokens, done: parsed["done"].asBool == true)
 }
+
+/// What ONE NDJSON line REPORTS about the pass, beside its text: the prompt size
+/// ollama counted (`prompt_eval_count`) and why the stream ended (`done_reason`,
+/// `length` → `max_tokens`). `nil` fields: not on this line. Python
+/// `OllamaProvider.chat`.
+func ollamaReport(_ line: String) -> (promptTokens: Int?, stopReason: String?) {
+    guard let data = line.data(using: .utf8), let parsed = try? JSON.parse(data) else {
+        return (nil, nil)
+    }
+    let n = pyTruthy(parsed["prompt_eval_count"]) ? parsed["prompt_eval_count"].asInt.map(Int.init) : nil
+    var stop: String? = nil
+    if pyTruthy(parsed["done_reason"]) {
+        let dr = pyStr(parsed["done_reason"])
+        stop = dr == "length" ? "max_tokens" : dr
+    }
+    return (n, stop)
+}

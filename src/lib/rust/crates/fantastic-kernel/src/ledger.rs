@@ -1,34 +1,29 @@
-//! The EXECUTION LEDGER — every dispatch is a row, named or not.
+//! The EXECUTION LEDGER, process side — one entry per execution still in RAM: in
+//! flight, or settled and not yet flushed.
 //!
-//! Port of python `kernel/_agent.py`'s `_ledger_open`/`_record` + `_kernel.py`'s
-//! `executions`/`ledger_put` (canonical). `tmp/pychanges.md` #34–#37.
+//! Port of python `kernel/_kernel.py`'s `executions`/`ledger_put`/`names` (canonical).
 //!
 //! A batch item's optional `id` NAMES the execution — ENSURE-semantics, exactly
 //! what a supplied `create_agent` id already means, applied to dispatch:
 //!
 //! - unknown id ⇒ dispatch and record (a name, not a new mechanism)
 //! - in flight  ⇒ JOIN — no second run (C10: once-only under concurrency)
-//! - settled    ⇒ the recorded outcome returns, the handler never runs
-//!   (C11 idempotency; C9 in-process, and across restart — the ROOT LOADER
-//!   rebuilds these rows from the `call`/`settle` rows on `messages.xml`,
-//!   the ONE tape; there is no second ledger file)
+//! - settled    ⇒ the recorded outcome returns, the handler never runs (C9/C11)
+//!
+//! A settled execution that was FLUSHED lives on as its `call` + `settle` rows in
+//! the kernel's memory store; `send` looks a name up there
+//! (`Kernel::recall_executions`) before launching and puts it back here as a DONE
+//! entry ([`Ledger::put_settled`]), so dedup survives both the flush and a restart.
 //!
 //! ONE ID SPACE. The caller's id IS the pid that `ps`/`cancel`/reply tags carry;
-//! an UNNAMED execution is ledgered under its minted pid. So any reply is
-//! re-fetchable by pid, and there is no second id type to reconcile — a minted
-//! pid can never dedup (the caller learns it only after dispatch), a
-//! caller-chosen id can.
+//! an UNNAMED execution is ledgered under its minted pid.
 //!
-//! RETENTION IS A RING. Past `cap`, the OLDEST SETTLED rows are evicted,
-//! unnamed before named — a named row carries a dedup contract, and evicting it
-//! silently re-arms a side effect. In-flight rows are never evicted, so the cap
-//! may overshoot while work is live. `None` = unbounded, the operator's explicit
-//! choice.
+//! RETENTION IS A RING in RAM. Past `cap`, the OLDEST SETTLED entries are evicted,
+//! unnamed before named. In-flight entries are never evicted. In the store, the
+//! same number is the prune window (`Kernel::prune_executions`). `None` = unbounded.
 //!
-//! THE VIEW IS ORIGIN-SCOPED. Rows record who originated them; an agent sees
-//! only its own, the operator sees all. Unscoped, `ledger` would be a
-//! side-channel around `callable_by` — reading other agents' result bodies
-//! without ever being granted an edge to them.
+//! THE VIEW IS CALLER-SCOPED. Entries record who originated them (`caller`); the
+//! `ledger` verb shows an agent only its own, the operator everything.
 
 use crate::agent::AgentId;
 use crate::outcome::{Outcome, Status};
@@ -57,7 +52,11 @@ struct Row {
     /// the kernel's; a name is a handle the caller may re-send to JOIN. Only a
     /// named row is a dedup contract, and the ring evicts unnamed rows first.
     name: Option<String>,
-    origin: Option<AgentId>,
+    /// WHO ORIGINATED it (`None` = the operator) — the `ledger` verb's scope and
+    /// the `on_deadletter` event's addressee.
+    caller: Option<AgentId>,
+    /// `ack_deadletter` retired this dead letter (while it is still in RAM).
+    acked: bool,
     /// `None` while in flight. Set ONCE, at the final outcome — a retrying
     /// execution does not settle its intermediate attempts, so a joiner never
     /// sees an answer that was later retried away.
@@ -93,9 +92,8 @@ struct Inner {
     cap: Option<usize>,
 }
 
-/// The kernel's execution ledger. Session-lifetime; the durable half is the
-/// TAPE — the root loader rebuilds these rows at boot from the `call` + `settle`
-/// rows of `messages.xml` (the kernel never touches disk).
+/// The kernel's execution ledger, process side. The durable half is the `call` +
+/// `settle` rows the kernel flushes into its memory store.
 pub struct Ledger {
     inner: Mutex<Inner>,
 }
@@ -136,7 +134,7 @@ impl Ledger {
         payload: &Value,
         retries: u32,
         name: Option<&str>,
-        origin: Option<AgentId>,
+        caller: Option<AgentId>,
     ) -> Opened {
         let mut g = self.inner.lock().expect("ledger poisoned");
 
@@ -187,7 +185,8 @@ impl Ledger {
                 retries,
                 attempts: 0,
                 name: name.map(str::to_string),
-                origin,
+                caller,
+                acked: false,
                 outcome: None,
                 tx,
             },
@@ -263,62 +262,133 @@ impl Ledger {
         Self::evict(&mut g);
     }
 
-    /// Rows as the `ledger` verb renders them, oldest first, scoped to `viewer`.
-    ///
-    /// `viewer` is the ORIGIN of the reading dispatch: `None` = operator, who
-    /// sees everything; `Some(id)` = an agent, who sees only what it originated.
-    pub fn rows_for(&self, viewer: Option<&AgentId>) -> Vec<Value> {
+    /// The retention cap (`None` = unbounded) — also the store-side prune window.
+    #[must_use]
+    pub fn cap(&self) -> Option<usize> {
+        self.inner.lock().expect("ledger poisoned").cap
+    }
+
+    /// Is `exec_id` held AND settled?
+    #[must_use]
+    pub fn is_done(&self, exec_id: i64) -> bool {
+        self.inner
+            .lock()
+            .expect("ledger poisoned")
+            .rows
+            .get(&exec_id)
+            .is_some_and(|r| r.outcome.is_some())
+    }
+
+    /// Every held execution that has NOT settled — what the graceful stop waits
+    /// on before its final flush.
+    #[must_use]
+    pub fn unsettled(&self) -> Vec<i64> {
         let g = self.inner.lock().expect("ledger poisoned");
         g.order
             .iter()
-            .filter_map(|id| g.rows.get(id).map(|r| (id, r)))
-            .filter(|(_, r)| match viewer {
-                None => true,
-                Some(v) => r.origin.as_ref() == Some(v),
-            })
+            .filter(|id| g.rows.get(id).is_some_and(|r| r.outcome.is_none()))
+            .copied()
+            .collect()
+    }
+
+    /// `(target, caller, name, named)` of one held execution.
+    #[must_use]
+    pub fn info(&self, exec_id: i64) -> Option<(AgentId, Option<AgentId>, Option<String>)> {
+        let g = self.inner.lock().expect("ledger poisoned");
+        g.rows
+            .get(&exec_id)
+            .map(|r| (r.target.clone(), r.caller.clone(), r.name.clone()))
+    }
+
+    /// Mark a held dead letter acknowledged (`ack_deadletter`).
+    pub fn mark_acked(&self, exec_id: i64) {
+        if let Some(r) = self
+            .inner
+            .lock()
+            .expect("ledger poisoned")
+            .rows
+            .get_mut(&exec_id)
+        {
+            r.acked = true;
+        }
+    }
+
+    /// FORGET one execution — its rows landed in the store, which is its record
+    /// now. The name binding goes with it, but only if it still points HERE.
+    pub fn forget(&self, exec_id: i64) {
+        let mut g = self.inner.lock().expect("ledger poisoned");
+        if let Some(name) = g.rows.remove(&exec_id).and_then(|r| r.name) {
+            if g.names.get(&name) == Some(&exec_id) {
+                g.names.remove(&name);
+            }
+        }
+        g.order.retain(|i| *i != exec_id);
+    }
+
+    /// The RAM half of the `ledger` PROJECTION, oldest first — python
+    /// `ledger_entries`' overlay loop. Each entry carries its originator as
+    /// `_caller` for the verb to scope by; a settled one carries what the settle
+    /// row KEEPS (`stored_outcome`) — the same shape flushed or not.
+    #[must_use]
+    pub fn entries(&self) -> Vec<(i64, Map<String, Value>, bool)> {
+        let g = self.inner.lock().expect("ledger poisoned");
+        g.order
+            .iter()
+            .filter_map(|id| g.rows.get(id).map(|r| (*id, r)))
             .map(|(id, r)| {
-                // NO `verb` KEY. Python's row is exactly {id, target, attempts,
-                // retries, named, name?, status, outcome?} — KEY ORDER (C16),
-                // and `name` is OMITTED (not `null`) when the execution is
-                // unnamed, exactly like python's `if row.get("name"): entry["name"]
-                // = …`. The verb is not lost — the TAPE's `call` row carries it,
-                // beside the payload; the read verb never needed it.
-                let mut o = Map::new();
-                o.insert("id".to_string(), json!(id));
-                o.insert("target".to_string(), json!(r.target.0));
-                o.insert("attempts".to_string(), json!(r.attempts));
-                o.insert("retries".to_string(), json!(r.retries));
-                o.insert("named".to_string(), json!(r.name.is_some()));
-                if let Some(name) = &r.name {
-                    o.insert("name".to_string(), json!(name));
-                }
-                o.insert(
-                    "status".to_string(),
-                    json!(r
-                        .outcome
-                        .as_ref()
-                        .map_or("in_flight", |out| out.status.as_str())),
+                let mut e = Map::new();
+                e.insert("id".to_string(), json!(id));
+                e.insert("target".to_string(), json!(r.target.0));
+                e.insert("attempts".to_string(), json!(r.attempts));
+                e.insert("retries".to_string(), json!(r.retries));
+                e.insert("named".to_string(), json!(r.name.is_some()));
+                e.insert(
+                    "_caller".to_string(),
+                    r.caller.as_ref().map_or(Value::Null, |c| json!(c.0)),
                 );
-                if let Some(out) = &r.outcome {
-                    o.insert("outcome".to_string(), out.to_value());
+                if let Some(name) = &r.name {
+                    e.insert("name".to_string(), json!(name));
                 }
-                Value::Object(o)
+                match &r.outcome {
+                    Some(out) => {
+                        e.insert("status".to_string(), json!(out.status.as_str()));
+                        // THE SAME SHAPE flushed or not: what the settle row keeps,
+                        // made wire-safe (a raw body reads `<bytes:N>`).
+                        let kept = stored_outcome(
+                            out,
+                            r.name.is_some(),
+                            crate::jsonsafe::BodyAs::Marker,
+                        );
+                        let mut oc = Map::new();
+                        oc.insert("pid".to_string(), json!(id));
+                        if let Value::Object(k) = kept {
+                            for (key, v) in k {
+                                oc.insert(key, v);
+                            }
+                        }
+                        oc.insert("attempts".to_string(), json!(out.attempts));
+                        e.insert("outcome".to_string(), Value::Object(oc));
+                    }
+                    None => {
+                        e.insert("status".to_string(), json!("in_flight"));
+                    }
+                }
+                (id, e, r.acked)
             })
             .collect()
     }
 
-    /// REBUILD ONE SETTLED EXECUTION FROM THE TAPE — the durable half of C9.
+    /// PUT BACK ONE FLUSHED, SETTLED EXECUTION — the durable half of C9, python
+    /// `recall_executions`' `ledger_put`. `call` is its `call` row (target at
+    /// `agent`, the payload, the retry budget, the name, the caller) and
+    /// `outcome` the settle row's `outcome`: a NAMED call's settle kept its
+    /// `result`; any other kept only what `stored_outcome` keeps — and the result
+    /// says so (the kept fields minus `status`). It comes back DONE, so a re-send
+    /// returns the recorded outcome instead of running the handler again.
     ///
-    /// `call` is the `call` row (it carries the target at `agent`, the retry
-    /// budget, the caller's name and the origin) and `outcome` is its `settle`
-    /// row's body (`{status, result}`); `attempts` is the settle's final count.
-    /// Together they ARE the row a live kernel held, so it comes back DONE and a
-    /// re-send of the id returns the recorded outcome instead of running the
-    /// handler again — across a restart, out of one file.
-    ///
-    /// A LIVE ROW ALWAYS WINS: an id already open is left alone. An unknown
-    /// status is not guessed at — the row is skipped and `false` comes back.
-    pub fn hydrate_settled(
+    /// A LIVE ENTRY ALWAYS WINS: an id already held is left alone. An unknown
+    /// status is not guessed at — nothing is put and `false` comes back.
+    pub fn put_settled(
         &self,
         exec_id: i64,
         call: &crate::rows::Row,
@@ -330,27 +400,34 @@ impl Ledger {
         };
         let status = match outcome.get("status").and_then(Value::as_str) {
             Some("completed") => Status::Completed,
-            // A HANDLER THAT SAID NO IS A SETTLED ROW TOO. Dropping `errored`
-            // re-arms exactly the call the ledger exists to never run twice.
+            // A HANDLER THAT SAID NO IS A SETTLED EXECUTION TOO.
             Some("errored") => Status::Errored,
             Some("failed") => Status::Failed,
             Some("cancelled") => Status::Cancelled,
             Some("timed_out") => Status::TimedOut,
             _ => return false,
         };
+        let result = match outcome.get("result") {
+            Some(r) => r.clone(),
+            None => Value::Object(
+                outcome
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "status")
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        };
         let mut g = self.inner.lock().expect("ledger poisoned");
         if g.rows.contains_key(&exec_id) {
             return false;
         }
-        // THE LIVE SHAPE, rebuilt: a joiner after a reboot must receive exactly
-        // what a joiner before it received — {pid, status, result, attempts}.
         let out = Outcome {
             pid: Some(crate::tasks::TaskId(exec_id)),
             status,
-            result: outcome.get("result").cloned().unwrap_or(Value::Null),
+            result,
             attempts,
-            // A REHYDRATED outcome has no binary body: the tape records raw
-            // bytes as their LENGTH, never the bytes.
+            // A RECALLED outcome has no binary body: the store records raw bytes
+            // as their LENGTH, never the bytes.
             body: None,
         };
         let (tx, _rx) = watch::channel(Some(out.clone()));
@@ -362,17 +439,17 @@ impl Ledger {
             exec_id,
             Row {
                 target: AgentId::from(target),
-                // SETTLED: nothing is left to re-run, so the row keeps no
-                // payload. A joiner of a rehydrated row is gated against exactly
-                // that — no verb, no fields (python stores `None`).
-                payload: Value::Null,
+                // The ORIGINAL call's payload: a joiner of a recalled execution
+                // is authorized against exactly that call.
+                payload: call.get("payload").cloned().unwrap_or(Value::Null),
                 retries: call.get("retries").and_then(Value::as_u64).unwrap_or(0) as u32,
                 attempts,
                 name,
-                origin: call
-                    .get("origin")
+                caller: call
+                    .get("caller")
                     .and_then(Value::as_str)
                     .map(AgentId::from),
+                acked: false,
                 outcome: Some(out),
                 tx,
             },
@@ -421,3 +498,64 @@ impl Ledger {
 #[cfg(test)]
 #[path = "ledger/tests.rs"]
 mod tests;
+
+/// The dead endings — an execution that settled one of these is a DEAD LETTER:
+/// announced (`on_deadletter`), listed by `ledger`, never retried silently, and
+/// retired by `ack_deadletter`. Python `DEAD_STATUSES`.
+#[must_use]
+pub fn is_dead(status: Status) -> bool {
+    matches!(status, Status::Failed | Status::TimedOut | Status::Cancelled)
+}
+
+/// WHAT A SETTLE ROW KEEPS of an outcome — the one definition (python
+/// `stored_outcome`, decided 2026-09-26).
+///
+/// A NAMED call keeps its whole result: its name is a dedup contract, and a
+/// re-send returns the recorded outcome (C9). A DEAD LETTER keeps its error text:
+/// someone has to read why it died. Every other settle keeps a digest —
+/// `{status, bytes}`.
+///
+/// Why not the body everywhere: the kernel's own store reads are executions too
+/// (the `ledger` projection, every AI agent's head read), so a settle holding its
+/// body re-recorded the store inside the store — measured ~6x growth per `ledger`
+/// call (2 KB → 14.8 MB in five). And a reply body is not persisted anyway: its
+/// receiver holds it in RAM with the one-line `origin` that gets it again.
+///
+/// `body_as` says how a raw reply body is written where python's dict holds the
+/// bytes: `{len: N}` for the store (`_store_safe`), `<bytes:N>` for the wire
+/// (`_json_safe`).
+#[must_use]
+pub fn stored_outcome(out: &Outcome, named: bool, body_as: crate::jsonsafe::BodyAs) -> Value {
+    let status = Value::from(out.status.as_str());
+    let res = crate::jsonsafe::with_body(&out.result, out.body.as_deref(), body_as);
+    let mut kept = Map::new();
+    kept.insert("status".to_string(), status);
+    if named {
+        kept.insert("result".to_string(), res);
+        return Value::Object(kept);
+    }
+    if is_dead(out.status) {
+        if let Value::Object(m) = &res {
+            for k in ["error", "reason", "side", "cancelled", "timed_out"] {
+                if let Some(v) = m.get(k) {
+                    let v = match v {
+                        Value::String(s) => Value::String(s.chars().take(500).collect()),
+                        other => other.clone(),
+                    };
+                    kept.insert(k.to_string(), v);
+                }
+            }
+        }
+        return Value::Object(kept);
+    }
+    // `len(json.dumps(_store_safe(res), default=str))` — python's separators and
+    // ASCII escaping, measured over the STORE form (bytes as `{len}`).
+    let stored = crate::jsonsafe::with_body(
+        &out.result,
+        out.body.as_deref(),
+        crate::jsonsafe::BodyAs::Len,
+    );
+    let size = fantastic_bundle::py_json_dumps(&stored, true, None).len();
+    kept.insert("bytes".to_string(), json!(size));
+    Value::Object(kept)
+}

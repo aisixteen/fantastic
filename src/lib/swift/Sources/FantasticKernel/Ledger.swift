@@ -1,7 +1,8 @@
-// The EXECUTION LEDGER — every dispatch is a row, named or not.
+// The EXECUTION LEDGER, process side — every dispatch is an execution, named or
+// not.
 //
 // Port of python `kernel/_agent.py`'s `_ledger_open`/`_record` + `_kernel.py`'s
-// `executions`/`ledger_put` (canonical). `tmp/pychanges.md` #34–#37.
+// `executions`/`ledger_put` (canonical).
 //
 // A batch item's optional `id` NAMES the execution — ENSURE-semantics, exactly
 // what a supplied `create_agent` id already means, applied to dispatch:
@@ -9,24 +10,22 @@
 //   unknown id ⇒ dispatch and record (a name, not a new mechanism)
 //   in flight  ⇒ JOIN — no second run (C10: once-only under concurrency)
 //   settled    ⇒ the recorded outcome returns, the handler never runs
-//                (C11 idempotency; C9 in-process, and across restart — ONE TAPE:
-//                 `hydrateExecutions` rebuilds these rows from `messages.xml`'s
-//                 `call`+`settle` pairs, there is no `ledger.json`)
+//                (C11 idempotency; C9 across the flush and a restart — a settled
+//                 execution that left RAM lives on as its `call` + `settle` rows
+//                 in the kernel's memory store, and `Kernel.recallExecutions`
+//                 brings it back before `send` launches an item naming it)
 //
 // ONE ID SPACE. The caller's id IS the pid that `ps`/`cancel`/reply tags carry;
-// an UNNAMED execution is ledgered under its minted pid. So any reply is
-// re-fetchable by pid, and there is no second id type to reconcile — a minted
-// pid can never dedup (the caller learns it only after dispatch), a
-// caller-chosen id can.
+// an UNNAMED execution is ledgered under its minted pid.
 //
-// RETENTION IS A RING. Past `cap`, the OLDEST SETTLED rows are evicted, unnamed
-// before named — a named row carries a dedup contract, and evicting it silently
-// re-arms a side effect. In-flight rows are never evicted.
+// RAM HOLDS WHAT IS IN FLIGHT OR NOT YET FLUSHED. Once an execution's settle row
+// landed in the store it leaves this table (`forget`); the `ledger` verb is a
+// PROJECTION over the store plus what is still here.
 //
-// THE VIEW IS ORIGIN-SCOPED. Rows record who originated them; an agent sees only
-// its own, the operator sees all. Unscoped, `ledger` would be a side-channel
-// around `callable_by` — reading other agents' result bodies without ever being
-// granted an edge to them.
+// RETENTION IS A RING (for a kernel that never started and so never flushes).
+// Past `cap`, the OLDEST SETTLED rows are evicted, unnamed before named — a named
+// row carries a dedup contract, and evicting it silently re-arms a side effect.
+// In-flight rows are never evicted.
 
 import FantasticJSON
 import Foundation
@@ -36,30 +35,63 @@ import OrderedCollections
 /// a long-lived kernel cannot grow without limit.
 public let defaultLedgerCap = 1_000_000
 
-/// What ``ExecutionLedger/open(_:target:retries:named:origin:)`` decided.
+/// THE FUTURE of one execution — python's `fut`. A joiner holds the box it was
+/// handed at launch, so the outcome reaches it even after the execution left
+/// the table (flushed and forgotten between two polls).
+public final class OutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Outcome?
+
+    init(_ value: Outcome? = nil) { self.value = value }
+
+    public var outcome: Outcome? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ o: Outcome) {
+        lock.lock()
+        defer { lock.unlock() }
+        if value == nil { value = o }
+    }
+}
+
+/// What ``ExecutionLedger/open(_:target:payload:retries:name:caller:callerId:)``
+/// decided.
 public enum Opened {
     /// A new execution: dispatch it, then settle it.
     case fresh
     /// Someone else is running this id — await their outcome, run nothing.
     /// Carries the execution's ORIGINAL PAYLOAD: a joiner is handed that
     /// execution's outcome verbatim, so the gate must be asked about the call
-    /// that was actually made — its verb AND its arguments (a `create_agent`'s
-    /// `parent_id` is the placement the gate reads). `nil` after a rehydrate,
-    /// where python's row carries `payload: None`.
-    case join(payload: JSON?, id: Int64)
+    /// that was actually made. `nil` after a recall from the store, where
+    /// python's row carries the payload but the joiner is gated on it the same.
+    case join(payload: JSON?, id: Int64, box: OutcomeBox)
     /// Already settled: this IS the answer; the handler must not run again.
     case settled(Outcome, payload: JSON?, id: Int64)
     /// The id is unusable — the refusal to hand back verbatim.
     case refused(JSON)
 }
 
+/// One execution in RAM, as the ledger projection reads it.
+public struct LedgerEntry: Sendable {
+    public let id: Int64
+    public let target: AgentId
+    public let retries: UInt32
+    public let attempts: UInt32
+    public let name: String?
+    public var named: Bool { name != nil }
+    public let caller: AgentId?
+    public let outcome: Outcome?
+    public let acked: Bool
+}
+
 /// One execution and what it became.
 private struct LedgerRow {
     var target: AgentId
     /// The PAYLOAD this execution ran — the question the gate must be asked when
-    /// somebody joins it, arguments included. `nil` on a rehydrated row: a
-    /// settled execution has nothing left to re-run, and python stores
-    /// `payload: None` for exactly that reason.
+    /// somebody joins it, arguments included.
     var payload: JSON?
     var retries: UInt32
     var attempts: UInt32
@@ -67,61 +99,61 @@ private struct LedgerRow {
     /// join / retry handle. Its id is the kernel's message id either way.
     var name: String?
     var named: Bool { name != nil }
-    var origin: AgentId?
-    /// `nil` while in flight. Set ONCE, at the FINAL outcome — a retrying
-    /// execution does not settle its intermediate attempts, so a joiner never
-    /// sees an answer that was later retried away.
-    var outcome: Outcome?
+    /// WHO CALLED — `nil` for the operator. Scopes `ledger`, `ack_deadletter`
+    /// and the `on_deadletter` announcement. (Python renamed `origin` →
+    /// `caller`: replies own `origin` now.)
+    var caller: AgentId?
+    /// The future: `nil` inside while in flight. Set ONCE, at the FINAL outcome —
+    /// a retrying execution does not settle its intermediate attempts.
+    var box: OutcomeBox
+    /// A dead letter someone acknowledged (`ack_deadletter`).
+    var acked: Bool = false
+    var outcome: Outcome? { box.outcome }
 }
 
-/// The kernel's execution ledger. Session-lifetime; the durable half is written
-/// through the discovered store, because the kernel never touches disk itself.
+/// The kernel's execution ledger, process side.
 public final class ExecutionLedger: @unchecked Sendable {
     private let lock = NSLock()
     private var rows: [Int64: LedgerRow] = [:]
     /// Caller name → the id it opened. `resolveName` is the ONE bridge.
     private var names: [String: Int64] = [:]
     private var order: [Int64] = []
-    private var cap: Int?
+    private var _cap: Int?
 
-    public init(cap: Int? = defaultLedgerCap) { self.cap = cap }
+    public init(cap: Int? = defaultLedgerCap) { self._cap = cap }
 
-    /// Claim `execId` for an execution, or discover it is already taken.
-    ///
-    /// `named` distinguishes a caller-chosen id from a minted pid: only the
-    /// former is a dedup contract, and the ring evicts the latter first.
-    /// The id a caller's NAME resolves to, if that name has opened an execution.
+    /// The retention window — the RAM ring here, the store-side prune window
+    /// in the kernel's memory store (python `ledger_cap`). `nil` = unbounded.
+    public var cap: Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _cap
+    }
+
+    /// The id a caller's NAME resolves to, while its execution is held in RAM.
     public func resolveName(_ name: String) -> Int64? {
         lock.lock()
         defer { lock.unlock() }
         return names[name]
     }
 
+    /// Claim `execId` for an execution, or discover it is already taken.
+    ///
     /// `callerId` is the CALLER's raw id AS GIVEN — a string name or an int
-    /// (C38) — used ONLY to render the rebind refusal in python's exact words
-    /// (`.string`s pyRepr'd, `.integer`s bare digits); `name` is `Some` only
-    /// for the string-name case.
+    /// (C38) — used ONLY to render the rebind refusal in python's exact words.
     public func open(
         _ execId: Int64, target: AgentId, payload: JSON, retries: UInt32, name: String?,
-        origin: AgentId?, callerId: JSON
+        caller: AgentId?, callerId: JSON
     ) -> Opened {
         lock.lock()
         defer { lock.unlock() }
 
         // A NAME THAT ALREADY OPENED AN EXECUTION joins it — resolved here, under
-        // the lock, so two callers racing on one name cannot both open. (The
-        // resolve in `launch` is the fast path; this is the one that holds.)
+        // the lock, so two callers racing on one name cannot both open.
         var execId = execId
         if let n = name, let existing = names[n] { execId = existing }
         if let row = rows[execId] {
-            // AN ID IS BOUND TO ITS FIRST TARGET. The same id aimed elsewhere is
-            // a different intent wearing the same name — returning the other
-            // execution's outcome would be silently wrong.
-            //
-            // PYTHON'S PROSE, verbatim (C31 r2 correction): BOTH the error text
-            // and the extras render the CALLER's RAW id, never the minted
-            // `execId` — `pyRepr` for a string, bare digits for an int; the
-            // target names via `pyRepr` too. NO `bound_to`.
+            // AN ID IS BOUND TO ITS FIRST TARGET.
             if row.target != target {
                 return .refused(
                     Refusal.make(
@@ -133,29 +165,25 @@ public final class ExecutionLedger: @unchecked Sendable {
                         extra: [("arg", .string("id"))]))
             }
             if let o = row.outcome { return .settled(o, payload: row.payload, id: execId) }
-            return .join(payload: row.payload, id: execId)
+            return .join(payload: row.payload, id: execId, box: row.box)
         }
 
-        // A COLON ID REFERENCES an existing minted execution; it never creates
-        // one. The caller cannot mint into the kernel's namespace, so an unknown
-        // colon id is a dangling reference, not a new job.
         if let n = name { names[n] = execId }
         rows[execId] = LedgerRow(
             target: target, payload: payload, retries: retries, attempts: 0, name: name,
-            origin: origin,
-            outcome: nil)
+            caller: caller, box: OutcomeBox())
         order.append(execId)
         evict()
         return .fresh
     }
 
-    /// Count one dispatch attempt; returns the new count.
-    @discardableResult
     /// Whether a row exists under `execId` (named or minted, settled or not).
     public func has(_ execId: Int64) -> Bool {
         lock.withLock { rows[execId] != nil }
     }
 
+    /// Count one dispatch attempt; returns the new count.
+    @discardableResult
     public func attempt(_ execId: Int64) -> UInt32 {
         lock.lock()
         defer { lock.unlock() }
@@ -182,83 +210,92 @@ public final class ExecutionLedger: @unchecked Sendable {
     public func settle(_ execId: Int64, _ outcome: Outcome) -> Outcome {
         lock.lock()
         defer { lock.unlock() }
-        guard var r = rows[execId] else { return outcome }
+        guard let r = rows[execId] else { return outcome }
         var out = outcome
         out.attempts = max(r.attempts, 1)
-        r.outcome = out
-        rows[execId] = r
-        return out
+        r.box.set(out)
+        return r.box.outcome ?? out
     }
 
-    /// The settled outcome for `execId`, if it has one — how a joiner reads the
-    /// owner's answer.
+    /// The settled outcome for `execId`, if it has one.
     public func settledOutcome(_ execId: Int64) -> Outcome? {
         lock.lock()
         defer { lock.unlock() }
         return rows[execId]?.outcome
     }
 
-    /// Rows as the `ledger` verb renders them, oldest first, scoped to `viewer`.
-    ///
-    /// `viewer` is the ORIGIN of the reading dispatch: `nil` = operator, who sees
-    /// everything; otherwise an agent, which sees only what it originated.
-    public func rows(for viewer: AgentId?) -> [JSON] {
+    /// Is `execId` held and NAMED? (What the settle row keeps depends on it.)
+    public func isNamed(_ execId: Int64) -> Bool {
+        lock.withLock { rows[execId]?.named ?? false }
+    }
+
+    /// One execution's projection fields, if it is still in RAM.
+    public func entry(_ execId: Int64) -> LedgerEntry? {
         lock.lock()
         defer { lock.unlock() }
-        return order.compactMap { id -> JSON? in
+        guard let r = rows[execId] else { return nil }
+        return LedgerEntry(
+            id: execId, target: r.target, retries: r.retries, attempts: r.attempts,
+            name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked)
+    }
+
+    /// Every execution still in RAM, oldest first — the RAM half of the ledger
+    /// projection.
+    public func entries() -> [LedgerEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return order.compactMap { id in
             guard let r = rows[id] else { return nil }
-            if let v = viewer, r.origin != v { return nil }
-            // NO `verb` KEY. Python's row is exactly {id, target, attempts,
-            // retries, named, name?, status, outcome?} and the ports carried an
-            // eighth key, so the same wiring answered a 7-key row here and an
-            // 8-key row there. The verb is not lost — a live row keeps the whole
-            // ORIGINAL PAYLOAD, which is what authorizes a joiner; the read verb
-            // never needed it. C16: `status`/`outcome` land AFTER `name`, not
-            // right after `target` — python builds the base dict, then
-            // optionally `name`, then `status` (+`outcome` only when settled).
-            var o: OrderedDictionary<String, JSON> = [
-                "id": .integer(id),
-                "target": .string(r.target.value),
-                "attempts": .integer(Int64(r.attempts)),
-                "retries": .integer(Int64(r.retries)),
-                "named": .bool(r.named),
-            ]
-            if let n = r.name { o["name"] = .string(n) }
-            if let out = r.outcome {
-                o["status"] = .string(out.status.rawValue)
-                o["outcome"] = out.asJSON
-            } else {
-                o["status"] = .string("in_flight")
-            }
-            return .object(o)
+            return LedgerEntry(
+                id: id, target: r.target, retries: r.retries, attempts: r.attempts,
+                name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked)
         }
     }
 
-    /// REBUILD ONE SETTLED EXECUTION FROM THE TAPE — the durable half of C9.
-    ///
-    /// `ledger.json` is gone. A settled call is a `call` row (payload, retries,
-    /// name, origin) plus its `settle` row (the full outcome, the final
-    /// attempts), so this side is a projection of the two: a row that is already
-    /// DONE, holding the recorded outcome, exactly what a live kernel had. Dedup
-    /// ("a completed step is never re-executed") therefore holds across reboots
-    /// with no second file.
-    ///
-    /// A LIVE ROW ALWAYS WINS: an id the ledger already holds is not overwritten
-    /// by the tape. Returns whether a row was added.
+    /// The ids of executions still IN FLIGHT (no outcome yet).
+    public func inFlightIds() -> [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return order.filter { rows[$0]?.outcome == nil && rows[$0] != nil }
+    }
+
+    /// `ack_deadletter` on an execution still in RAM.
+    public func markAcked(_ execId: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        rows[execId]?.acked = true
+    }
+
+    /// FORGET one execution — it settled and its settle row landed in the store,
+    /// which is its record now. Python `_forget_execution`.
+    public func forget(_ execId: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        forgetLocked(execId)
+    }
+
+    private func forgetLocked(_ execId: Int64) {
+        guard let r = rows.removeValue(forKey: execId) else { return }
+        if let n = r.name, names[n] == execId { names.removeValue(forKey: n) }
+        order.removeAll { $0 == execId }
+    }
+
+    /// BRING A FLUSHED EXECUTION BACK — its `call` + `settle` rows read from the
+    /// kernel's memory store, so dedup survives the flush and a restart. A row
+    /// that is DONE, holding the recorded outcome. A LIVE ROW ALWAYS WINS: an id
+    /// the ledger already holds is not overwritten. Returns whether a row was
+    /// added. Python `recall_executions` → `ledger_put`.
     @discardableResult
     public func putSettled(
-        _ execId: Int64, target: AgentId, retries: UInt32, attempts: UInt32, name: String?,
-        origin: AgentId?, outcome: Outcome
+        _ execId: Int64, target: AgentId, payload: JSON?, retries: UInt32, attempts: UInt32,
+        name: String?, caller: AgentId?, outcome: Outcome
     ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         if rows[execId] != nil { return false }
         rows[execId] = LedgerRow(
-            target: target,
-            // SETTLED: nothing left to re-run, so a joiner is gated on an empty
-            // call — python stores `payload: None` for exactly that reason.
-            payload: nil,
-            retries: retries, attempts: attempts, name: name, origin: origin, outcome: outcome)
+            target: target, payload: payload, retries: retries, attempts: attempts, name: name,
+            caller: caller, box: OutcomeBox(outcome))
         if let n = name { names[n] = execId }
         order.append(execId)
         evict()
@@ -266,23 +303,18 @@ public final class ExecutionLedger: @unchecked Sendable {
     }
 
     /// Set the ring's cap and immediately re-run eviction against it (C80).
-    /// Python sets its `ledger_cap` attribute directly — a lazy change that
-    /// only bites on the NEXT insert — but the CLI always sets a cap BEFORE
-    /// any execution exists, so the two are equivalent at that one call
-    /// site; evicting here too costs nothing and also covers a cap lowered
-    /// with rows already live, which python's plain attribute set would
-    /// otherwise leave overshooting until the next `open`. `nil` = unbounded.
+    /// `nil` = unbounded.
     public func setCap(_ newCap: Int?) {
         lock.lock()
         defer { lock.unlock() }
-        cap = newCap
+        _cap = newCap
         evict()
     }
 
     /// The ring: evict oldest SETTLED rows, unnamed before named, never
     /// in-flight.
     private func evict() {
-        guard let cap else { return }
+        guard let cap = _cap else { return }
         if rows.count <= cap { return }
         for namedPass in [false, true] {
             var i = 0
@@ -290,6 +322,7 @@ public final class ExecutionLedger: @unchecked Sendable {
                 let id = order[i]
                 if let r = rows[id], r.outcome != nil, r.named == namedPass {
                     rows.removeValue(forKey: id)
+                    if let n = r.name, names[n] == id { names.removeValue(forKey: n) }
                     order.remove(at: i)
                 } else {
                     i += 1

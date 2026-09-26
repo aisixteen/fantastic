@@ -86,6 +86,22 @@ impl From<&str> for ProviderError {
 /// driven inside a spawned task.
 pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError>>;
 
+/// What the endpoint REPORTED about the last pass — python's provider attributes
+/// `last_prompt_tokens` / `last_stop_reason`. Shared with the stream a provider
+/// hands out, which fills it in as the endpoint reports.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderReport {
+    /// The endpoint's own count of the last prompt (calibrates the estimate), or
+    /// `None` when it reported none.
+    pub prompt_tokens: Option<i64>,
+    /// Why the last stream ended — `"max_tokens"` when it stopped AT the output
+    /// bound (a side call's budget).
+    pub stop_reason: Option<String>,
+}
+
+/// The shared cell a provider and its streams write the report into.
+pub type ReportCell = std::sync::Arc<std::sync::Mutex<ProviderReport>>;
+
 /// Streaming chat adapter for one upstream LLM. Built per agent by the
 /// backend; the only per-backend seam the shared machinery talks to.
 #[async_trait]
@@ -93,8 +109,32 @@ pub trait Provider: Send + Sync {
     /// Stream a plain-text completion for `messages` (role + text content).
     /// Yields [`ProviderEvent::Token`] content tokens in order, or an error
     /// describing a transport/HTTP failure. NO tools, NO state.
-    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, ProviderError>;
+    ///
+    /// `max_tokens` bounds THIS call's output (a side call's budget — a fold
+    /// summary); `None` keeps the provider's own bound. A stream that stopped at
+    /// the bound reports `stop_reason = "max_tokens"`.
+    async fn chat(
+        &self,
+        messages: &[Value],
+        max_tokens: Option<i64>,
+    ) -> Result<ProviderStream, ProviderError>;
 
     /// The upstream model id this provider talks to.
     fn model(&self) -> String;
+
+    /// What the endpoint reported about the last pass. A provider that reads no
+    /// usage reports nothing — `None` everywhere, which leaves the calibration at
+    /// 1.0 and never marks a summary cut.
+    fn report(&self) -> ProviderReport {
+        ProviderReport::default()
+    }
+
+    /// A FRESH prompt-size reading per pass: a provider that reports nothing this
+    /// time must not leave last pass's number standing. Python
+    /// `provider.last_prompt_tokens = None`.
+    fn clear_prompt_tokens(&self) {}
+
+    /// Forget the last stop reason before a bounded side call. Python
+    /// `provider.last_stop_reason = None`.
+    fn clear_stop_reason(&self) {}
 }

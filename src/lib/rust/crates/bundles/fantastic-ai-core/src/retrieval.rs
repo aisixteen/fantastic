@@ -1,30 +1,31 @@
-//! FULL ASYNC retrieval: page a stored reply body by pid (`pull`), or FIND the
-//! line first (`grep`). Plus `context_recall` — rebuild the agent's VIEW from
-//! its store.
+//! Retrieval: FIND the line anywhere in memory (`grep`), start a new thread
+//! (`context_clear`), and rebuild the agent's VIEW from its store
+//! (`context_recall`).
 //!
-//! These three are what make an unbounded reply non-fatal. A reply too large to
-//! inline is stored under its pid and the model is handed a digest; it then
-//! greps for the line it wants and pulls only that. Without them a 240KB ledger
-//! dump is a turn that cannot fit.
+//! A reply too large to inline is held IN RAM under its pid for this run only and
+//! the model is handed a digest + its `origin` line; grep reaches the body while
+//! it is held, and the store (every row ever written, behind every clear, inside
+//! every fold) plus every granted scope always. There is no `pull`: after a
+//! restart the model re-reads from the origin line.
 //!
-//! Mirrors python `ai_core/core.py` `_pull` / `_grep` / `_context_recall`.
+//! Mirrors python `ai_core/core.py` `_grep` / `_context_clear` / `_context_recall`.
 
 use crate::assembly::default_system_content;
 use crate::context::{
-    budget as agent_budget, estimate_one, fit_reply, inline_cap, pull_cap_chars, BUDGET_FLOOR,
+    budget as agent_budget, estimate_one, fit_reply, inline_cap, BUDGET_FLOOR,
     NOTICE_ENVELOPE_RESERVE,
 };
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
-use crate::helpers::{agent_meta, DEFAULT_CLIENT_ID};
-use crate::history::{append_history, load_history};
+use crate::helpers::agent_meta;
 use crate::history_view::{parse_reply_tag, reply_blocks};
+use crate::memory::{head, load_history, save_history, save_view, store_call, MemResult};
 use crate::provider::{Provider, ProviderEvent};
 use crate::strategies::strip::{pid_of, LOW};
 use crate::think::without_thinking;
-use crate::view::{apply_res, res_of, save_view};
+use crate::view::{apply_res, res_of};
 use fantastic_bundle::{
-    decimal_value, py_int, py_int_or, py_json_dumps, py_set_order, py_split_whitespace,
-    py_splitlines, py_str, py_strip, py_truthy,
+    decimal_value, py_int, py_int_or, py_split_whitespace, py_splitlines, py_str, py_strip,
+    py_truthy,
 };
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
@@ -36,7 +37,7 @@ use std::sync::Arc;
 /// it copied out of a tag). Anything else is not an id. Python `_as_id`.
 ///
 /// THE TWO BRANCHES DIFFER ON PURPOSE: an int must be POSITIVE, a digit string
-/// need not be (`'0'` → 0, which `pull` then answers as a readable not_found).
+/// need not be (`'0'` → 0, which a lookup then answers as a readable not_found).
 /// The string is python-stripped and its digits are any Unicode decimal (`'٣'`
 /// → 3); `'+5'` is not a digit string and is not an id.
 #[must_use]
@@ -62,137 +63,16 @@ fn bad_arg(msg: &str, arg: &str) -> Value {
     json!({"error": msg, "reason": "bad_arg", "arg": arg})
 }
 
-/// `pull`: read ONE PAGE of a reply body that was too large to inline.
+/// `grep`: find the LINE that mentions something ANYWHERE in memory — every row
+/// this agent ever wrote or received (behind every clear, inside every fold), the
+/// rows other agents SHARED with it, and the reply bodies still held in memory
+/// this run. Python `_grep`.
 ///
-/// args: `pid` (req — the pid on a settled reply's tag), `offset?` (0),
-/// `length?` (chars; default and max = the inline cap). Returns
-/// `{pid, offset, text, next_offset, eof}` — page with `offset: next_offset`
-/// until `eof`.
-pub async fn pull(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let Some(pid) = payload.get("pid").and_then(as_id) else {
-        return bad_arg(
-            "pull: `pid` (an int) is required — it is on the reply's tag line",
-            "pid",
-        );
-    };
-    let meta = agent_meta(agent_id, kernel);
-    let cap = pull_cap_chars(&meta) as i64;
-    // python: `offset = max(0, int(payload.get("offset") or 0))` and
-    // `length = int(payload.get("length") or cap)` under ONE try/except — a
-    // non-integer either side is the SAME refusal, and it carries no `arg`.
-    let null = Value::Null;
-    let (offset, length) = match (
-        py_int_or(payload.get("offset").unwrap_or(&null), 0),
-        py_int_or(payload.get("length").unwrap_or(&null), cap),
-    ) {
-        (Ok(o), Ok(l)) => (o.max(0), l),
-        _ => {
-            return json!({
-                "error": "pull: offset/length must be integers",
-                "reason": "bad_arg",
-            })
-        }
-    };
-    if length < 0 {
-        return json!({
-            "error": "pull: length must not be negative",
-            "reason": "bad_arg",
-        });
-    }
-    if length > cap {
-        return bad_arg(
-            &format!(
-                "pull: length {length} exceeds the {cap}-char page cap — a page must fit \
-                 INLINE where it is going; ask for less and page"
-            ),
-            "length",
-        );
-    }
-    let got = kernel.rows.body_get(
-        pid,
-        usize::try_from(offset).unwrap_or(0),
-        usize::try_from(length.max(1)).unwrap_or(1),
-    );
-    if got.is_none() {
-        // A fold id: its body is on the row itself.
-        for r in load_history(agent_id, kernel, DEFAULT_CLIENT_ID, true).await {
-            if r.get("kind").and_then(Value::as_str) == Some("fold") && row_id(&r) == Some(pid) {
-                // python `str(r.get("body") or "")` — a falsy body is the empty
-                // string, a non-string one is its `str()`.
-                let body = r.get("body").cloned().unwrap_or(Value::Null);
-                let text = if py_truthy(&body) {
-                    py_str(&body)
-                } else {
-                    String::new()
-                };
-                let chars: Vec<char> = text.chars().collect();
-                let n = chars.len() as i64;
-                // `text[:length]` with PYTHON SLICE SEMANTICS: a negative length
-                // counts from the end, and `next_offset`/`eof` stay signed.
-                let end = if length < 0 {
-                    (n + length).max(0)
-                } else {
-                    length.min(n)
-                };
-                let cut: String = chars[..usize::try_from(end).unwrap_or(0)].iter().collect();
-                return json!({
-                    "pid": pid,
-                    "offset": 0,
-                    "text": cut,
-                    "next_offset": length.min(n),
-                    "eof": length >= n,
-                    "refs": match r.get("refs") {
-                        Some(v) if py_truthy(v) => v.clone(),
-                        _ => json!([]),
-                    },
-                    "title": r.get("title").cloned().unwrap_or(Value::Null),
-                });
-            }
-        }
-        return json!({
-            "error": format!(
-                "pull: no stored body for pid {pid} — only replies too large to inline \
-                 are stored; small ones were already in your turn"
-            ),
-            "reason": "not_found",
-        });
-    }
-    let (text, nxt, eof, total) = got.expect("checked above");
-    let cap_tok = inline_cap(&meta);
-    let reply = |t: &str, n: usize, e: bool| json!({"pid": pid, "offset": offset, "text": t, "next_offset": n, "eof": e, "total": total});
-    // A PAGE FITS INLINE, MEASURED SERIALIZED. Measured 2026-09-06 (python): raw
-    // pages sized to the cap in chars came back OVER it once JSON-escaped
-    // (newlines, quotes) and were dehydrated — the model pulled its own pull.
-    // Shrink until the reply itself fits.
-    let mut text = text;
-    let mut out = reply(&text, nxt, eof);
-    while text.chars().count() > 64
-        && estimate_one(&json!({
-            "role": "user",
-            "content": py_json_dumps(&out, true, None),
-        })) > cap_tok
-    {
-        let keep = (text.chars().count() as f64 * 0.8) as usize;
-        text = text.chars().take(keep).collect();
-        out = reply(&text, offset as usize + text.chars().count(), false);
-    }
-    out
-}
-
-/// `grep`: find the LINE that mentions something, wherever it is — a stored body
-/// never pulled, a digest line, an old turn.
-///
-/// args: `query` (req — case-insensitive substring), `ids?` (row ids / pids /
-/// fold ids to search; default: every row of this conversation and every stored
-/// reply body it received), `limit?`, `width?` (chars of each matched line, from
-/// its start; default 200). Returns `{matches:[{id, line, text}], total, truncated}`.
-///
-/// THE SUPER SIMPLE ONE, deliberately. Measured 2026-09-06 (python): the model
-/// spent four ~10k-token thinking turns byte-scanning one 6.8KB body in 300-char
-/// pages to find a single line. "Find the line that mentions X" is the operation
-/// it wanted, and this is it — substring, case-insensitive, over rows and stored
-/// bodies, capped.
-pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+/// args: `query` (req — case-insensitive substring), `ids?` (row ids / pids / fold
+/// ids to search; a fold id searches its members), `limit?`, `width?` (chars of
+/// each matched line, from its start; default 200). Returns `{matches:[{id, line,
+/// text}], total, truncated}`.
+pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> MemResult<Value> {
     let null = Value::Null;
     // python `str(payload.get("query") or "").strip().lower()` — a NUMERIC query
     // is its digits, not "no query".
@@ -204,47 +84,30 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     })
     .to_lowercase();
     if q.is_empty() {
-        return bad_arg("grep: `query` is required", "query");
+        return Ok(bad_arg("grep: `query` is required", "query"));
     }
-    // python `int(payload.get(k) or dflt)`, each knob under its OWN try
-    // (2026-09-20): a bad `limit` no longer leaves `width` unbound.
+    // python `int(payload.get(k) or dflt)`, each knob under its OWN try.
     let num = |k: &str, dflt: i64| py_int_or(payload.get(k).unwrap_or(&null), dflt);
     let limit = num("limit", 100).map_or(100, |l| l.clamp(1, 100)) as usize;
     let width = num("width", 200).map_or(200, |w| w.clamp(20, 20_000)) as usize;
 
-    let raw_ids = payload.get("ids");
-    let ids: Option<Vec<i64>> = match raw_ids {
+    let ids: Option<Vec<i64>> = match payload.get("ids") {
+        None | Some(Value::Null) => None,
         Some(Value::Array(a)) => {
             let parsed: Vec<Option<i64>> = a.iter().map(as_id).collect();
             if parsed.iter().any(Option::is_none) {
-                return bad_arg(
+                return Ok(bad_arg(
                     "grep: `ids` must be a list of message ids / pids (ints)",
                     "ids",
-                );
+                ));
             }
             Some(parsed.into_iter().flatten().collect())
         }
-        Some(Value::Null) | None => None,
         Some(_) => {
-            return bad_arg(
+            return Ok(bad_arg(
                 "grep: `ids` must be a list of message ids / pids (ints)",
                 "ids",
-            )
-        }
-    };
-
-    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, true).await;
-    // A fold id in `ids` is a DESCENT: it expands to the rows it collapsed. An
-    // EMPTY list is falsy in python, so it means NO SCOPE — not "scope to
-    // nothing", which scoped every row out.
-    let scope: Option<Vec<i64>> = ids
-        .as_ref()
-        .filter(|v| !v.is_empty())
-        .map(|v| py_set_order(&expand_ids(&rows, v)));
-    let in_scope = |id: Option<i64>| -> bool {
-        match &scope {
-            None => true,
-            Some(s) => id.is_some_and(|i| s.contains(&i)),
+            ))
         }
     };
 
@@ -255,78 +118,109 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     // times in one run and pushed the one body hit past the inline cap (measured
     // 2026-09-06, python recall_after_fold). The first occurrence keeps its
     // address.
-    //
-    // PYTHON'S LINE SET: `str.splitlines()` splits on `\r`, `\v`, `\f` and the
-    // information separators too, and the dedupe key / the cut use python's
-    // whitespace. Rust's `lines()` saw ONE line where python saw four.
-    let mut scan = |rid: i64, text: &str, matches: &mut Vec<Value>, total: &mut usize| {
+    let mut take = |rid: Value, n: Value, line: &str, matches: &mut Vec<Value>, total: &mut usize| {
+        let key = py_split_whitespace(line).join(" ");
+        if !seen_lines.insert(key) {
+            return;
+        }
+        *total += 1;
+        if matches.len() < limit {
+            let cut: String = py_strip(line).chars().take(width).collect();
+            matches.push(json!({"id": rid, "line": n, "text": cut}));
+        }
+    };
+
+    // BODIES FIRST: what a grep is for is the line inside a body never read
+    // whole — rows that merely mention the query come after, so the content hit is
+    // never the one the inline cap cuts. Bodies live in RAM for this run only.
+    let bodies = crate::memory::bodies(agent_id, kernel);
+    let mut in_reach: Option<HashSet<i64>> = None;
+    if let Some(ids) = &ids {
+        // A fold id is a DESCENT: its members are reply rows, and their bodies
+        // hang off the pids on their tags (measured 2026-09-08: a descent that
+        // ignored them found nothing, 22 greps, 22 zeros). An id that is itself a
+        // pid counts.
+        let rows = load_history(agent_id, kernel, true).await?;
+        let scope: HashSet<i64> = expand_ids(&rows, ids).into_iter().collect();
+        let mut reach: HashSet<i64> = ids.iter().copied().collect();
+        reach.extend(scope.iter().copied());
+        for m in &rows {
+            if !row_id(m).is_some_and(|i| scope.contains(&i)) {
+                continue;
+            }
+            if m.get("role").and_then(Value::as_str) != Some("user") {
+                continue;
+            }
+            let c = m.get("content").and_then(Value::as_str).unwrap_or("");
+            for block in reply_blocks(c) {
+                if let Some(p) = pid_of(block).and_then(|t| as_id(&Value::String(t.to_string()))) {
+                    reach.insert(p);
+                }
+            }
+        }
+        in_reach = Some(reach);
+    }
+    for (pid, text) in &bodies {
+        if in_reach.as_ref().is_some_and(|r| !r.contains(pid)) {
+            continue;
+        }
         for (n, line) in py_splitlines(text).into_iter().enumerate() {
-            if !line.to_lowercase().contains(&q) {
+            if line.to_lowercase().contains(&q) {
+                take(json!(pid), json!(n + 1), line, &mut matches, &mut total);
+            }
+        }
+    }
+    // YOUR ROWS — the WHOLE conversation, searched by the store itself.
+    let mut req = Map::new();
+    req.insert("type".to_string(), json!("search"));
+    req.insert("query".to_string(), json!(q));
+    req.insert("limit".to_string(), json!(1000));
+    req.insert("width".to_string(), json!(width));
+    if let Some(ids) = &ids {
+        req.insert("ids".to_string(), json!(ids));
+    }
+    let res = store_call(agent_id, kernel, Value::Object(req)).await?;
+    for m in res.get("matches").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let text = m.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        take(
+            m.get("id").cloned().unwrap_or(Value::Null),
+            m.get("line").cloned().unwrap_or(json!(0)),
+            &text,
+            &mut matches,
+            &mut total,
+        );
+    }
+    // ROWS SHARED WITH YOU — every fork row's grant, searched under that grant.
+    if ids.is_none() {
+        for r in head(agent_id, kernel).await? {
+            if r.get("kind").and_then(Value::as_str) != Some("fork") {
                 continue;
             }
-            let key = py_split_whitespace(line).join(" ");
-            if !seen_lines.insert(key) {
+            let Some(grant) = r.get("grant").filter(|g| !g.is_null()) else {
                 continue;
-            }
-            *total += 1;
-            if matches.len() < limit {
-                let cut: String = py_strip(line).chars().take(width).collect();
-                matches.push(json!({"id": rid, "line": n + 1, "text": cut}));
-            }
-        }
-    };
-
-    // A row's text: the content when it is a string, else `json.dumps(content,
-    // default=str)` — ensure_ascii, so `{"k": "é"}` is scanned as
-    // `{"k": "é"}` and grep `é` matches nothing while grep `u00e9` does.
-    let row_text = |m: &Value| -> String {
-        match m.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            other => py_json_dumps(other.unwrap_or(&Value::Null), true, None),
-        }
-    };
-
-    // The bodies in reach: the pids on the reply tags of the rows considered —
-    // every row of the conversation, or, under a scope, the rows the scope names
-    // (a fold's members ARE reply rows, and their bodies hang off the pids in
-    // their tags — a descent that ignored them found nothing, measured
-    // 2026-09-08, python: 22 greps, 22 zeros). An id that is itself a pid counts.
-    let mut pids: Vec<i64> = Vec::new();
-    for m in &rows {
-        if !in_scope(row_id(m)) {
-            continue;
-        }
-        if m.get("role").and_then(Value::as_str) != Some("user") {
-            continue;
-        }
-        let text = row_text(m);
-        for block in reply_blocks(&text) {
-            if let Some(p) = pid_of(block).and_then(|t| as_id(&Value::String(t.to_string()))) {
-                pids.push(p);
+            };
+            let res = store_call(
+                agent_id,
+                kernel,
+                json!({"type": "search", "query": q, "grant": grant, "limit": 1000, "width": width}),
+            )
+            .await?;
+            let owner = r.get("owner").map_or_else(|| "None".to_string(), py_str);
+            for m in res.get("matches").and_then(Value::as_array).cloned().unwrap_or_default() {
+                let text = m.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                let rid = format!(
+                    "{owner}:{}",
+                    m.get("id").map_or_else(|| "None".to_string(), py_str)
+                );
+                take(
+                    json!(rid),
+                    m.get("line").cloned().unwrap_or(json!(0)),
+                    &text,
+                    &mut matches,
+                    &mut total,
+                );
             }
         }
-    }
-    if let Some(s) = &scope {
-        let mut ordered: Vec<i64> = s.clone();
-        ordered.extend(pids);
-        let mut seen = HashSet::new();
-        pids = ordered.into_iter().filter(|p| seen.insert(*p)).collect();
-    }
-    // STORED BODIES FIRST: what a grep is for is the line inside a body never
-    // pulled — rows that merely mention the query (the task, the model's own
-    // plan) come after, so the content hit is never the one the inline cap cuts.
-    for pid in &pids {
-        if let Some((text, _, _, _)) = kernel.rows.body_get(*pid, 0, 4 * 1024 * 1024) {
-            scan(*pid, &text, &mut matches, &mut total);
-        }
-    }
-    for m in &rows {
-        let Some(rid) = row_id(m) else { continue };
-        if !in_scope(Some(rid)) {
-            continue;
-        }
-        let text = row_text(m);
-        scan(rid, &text, &mut matches, &mut total);
     }
     let (kept, cut) = fit_reply(
         &matches,
@@ -347,7 +241,7 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
             );
         }
     }
-    Value::Object(out)
+    Ok(Value::Object(out))
 }
 
 const RECALL_PROMPT: &str = "You are rebuilding your own working context. Below is the HEAD of your
@@ -382,7 +276,7 @@ pub fn first_json(text: &str) -> Option<Map<String, Value>> {
 /// One plain completion, reasoning stripped. Python `_compose`.
 async fn compose(provider: &Arc<dyn Provider>, prompt: &str) -> String {
     let Ok(mut stream) = provider
-        .chat(&[json!({"role": "user", "content": prompt})])
+        .chat(&[json!({"role": "user", "content": prompt})], None)
         .await
     else {
         return String::new();
@@ -397,17 +291,25 @@ async fn compose(provider: &Arc<dyn Provider>, prompt: &str) -> String {
     without_thinking(&parts.join(""))
 }
 
-/// `context_clear`: a NEW THREAD on the same store. A clear is a BOUNDARY, not a
-/// deletion — it writes a `clear` row, and [`load_history`] starts the model's
-/// conversation there. Every earlier row stays in the store, reachable by id.
+/// `context_clear`: a NEW THREAD on the same store — a CLEAR-FOLD: one row whose
+/// members are every row since the previous clear (no summary), and the model's
+/// view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or
+/// forgotten: grep, recall and `history {fold: <id>}` reach every member.
 ///
 /// args: `why?` (a sentence, whitespace-collapsed and capped at 200). Returns
-/// `{cleared, behind}`. Mirrors python `_context_clear`.
-pub async fn context_clear(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+/// `{cleared, rows}`. Mirrors python `_context_clear`.
+pub async fn context_clear(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
-    let behind = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, true)
-        .await
-        .len();
+    let members: Vec<i64> = head(agent_id, kernel)
+        .await?
+        .iter()
+        .filter(|r| r.get("kind").and_then(Value::as_str) != Some("view"))
+        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+        .collect();
     // python `" ".join(str(payload.get("why") or "").split())[:200]`.
     let raw = payload.get("why").cloned().unwrap_or(Value::Null);
     let text = if py_truthy(&raw) {
@@ -420,27 +322,29 @@ pub async fn context_clear(agent_id: &AgentId, payload: &Value, kernel: &Arc<Ker
         .chars()
         .take(200)
         .collect();
-    let rid = kernel.rows.mint_id();
-    append_history(
+    let rid = kernel.mint_id();
+    save_history(
         agent_id,
         kernel,
-        DEFAULT_CLIENT_ID,
         &[json!({
             "role": "user",
             "id": rid,
             "parent": Value::Null,
             "kind": "clear",
+            "refs": members,
             "title": if why.is_empty() { "cleared" } else { why.as_str() },
             "content": format!(
-                "[cleared {rid} · {behind} rows behind]{} — a new thread; earlier rows are in the store, reachable by id (grep, pull, recall).",
+                "[cleared {rid} · {} rows]{} — a new thread; the rows before it are this \
+                 clear's members, reachable by id (grep, recall, history fold={rid}).",
+                members.len(),
                 if why.is_empty() { String::new() } else { format!(" {why}") }
             ),
         })],
     )
-    .await;
+    .await?;
     // The persisted view names rows behind the clear — empty it, so the view is the
     // store from the clear on. RAM is scratch; the store is never cleared.
-    save_view(agent_id, kernel, &[], agent_budget(&meta), "cleared");
+    save_view(agent_id, kernel, &[], agent_budget(&meta), "cleared").await?;
     let st = crate::state::state_for(agent_id);
     *st.projection.lock().expect("projection poisoned") = None;
     *st.compaction_mark.lock().expect("mark poisoned") = None;
@@ -448,7 +352,7 @@ pub async fn context_clear(agent_id: &AgentId, payload: &Value, kernel: &Arc<Ker
     *st.folds_since.lock().expect("folds_since poisoned") = 0;
     *st.recall_due.lock().expect("recall_due poisoned") = false;
     *st.view_source.lock().expect("view_source poisoned") = None;
-    json!({"cleared": rid, "behind": behind})
+    Ok(json!({"cleared": rid, "rows": members.len()}))
 }
 
 /// `context_recall`: rebuild this agent's VIEW from its store — fit the head to
@@ -463,11 +367,11 @@ pub async fn context_recall(
     payload: &Value,
     kernel: &Arc<Kernel>,
     provider: Option<&Arc<dyn Provider>>,
-) -> Value {
+) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
-    let rows = load_history(agent_id, kernel, DEFAULT_CLIENT_ID, false).await;
+    let rows = load_history(agent_id, kernel, false).await?;
     if rows.is_empty() {
-        return json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "empty store", "degraded": false});
+        return Ok(json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "empty store", "degraded": false}));
     }
     let sys_tokens = estimate_one(&json!({
         "role": "system",
@@ -481,7 +385,7 @@ pub async fn context_recall(
         .filter(|r| row_id(r).is_some())
         .collect();
     if view.is_empty() {
-        return json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "no addressable rows", "degraded": false});
+        return Ok(json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "no addressable rows", "degraded": false}));
     }
     let digest = |r: &Value| -> Value {
         if res_of(r) == "full" && row_content(r).starts_with("[reply to ") {
@@ -641,9 +545,9 @@ pub async fn context_recall(
             json!({"id": id, "res": res})
         })
         .collect();
-    save_view(agent_id, kernel, &ids, body_budget, &why);
+    save_view(agent_id, kernel, &ids, body_budget, &why).await?;
     // the decision is a ROW — the next reload reads why the last recall chose as it did
-    let rid = kernel.rows.mint_id();
+    let rid = kernel.mint_id();
     // THE LIVE TASK IS NAMED. The view keeps the first root (the goal) at the top,
     // and after a recall a model with several roots re-answered the FIRST one and
     // called done (measured 2026-09-06, python fold_paging). The newest root is
@@ -671,10 +575,9 @@ pub async fn context_recall(
             .collect();
         format!(" · live task: {} \"{text}\"", row_id(l).unwrap_or(0))
     });
-    append_history(
+    save_history(
         agent_id,
         kernel,
-        DEFAULT_CLIENT_ID,
         &[json!({
             "role": "user",
             "id": rid,
@@ -687,18 +590,18 @@ pub async fn context_recall(
             ),
         })],
     )
-    .await;
+    .await?;
     // RAM is scratch, reconstructible by definition; the store is never cleared.
     let st = crate::state::state_for(agent_id);
     *st.projection.lock().expect("projection poisoned") = None;
     *st.compaction_mark.lock().expect("mark poisoned") = None;
     crate::strategies::strip::forget(agent_id.as_str());
-    json!({
+    Ok(json!({
         "kept": ids.len(),
         "expanded": expand.len(),
         "dropped": view.len() - ids.len(),
         "budget": body_budget,
         "why": why,
         "degraded": degraded,
-    })
+    }))
 }

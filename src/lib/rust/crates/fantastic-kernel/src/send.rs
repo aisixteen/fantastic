@@ -90,6 +90,42 @@ pub fn current_origin() -> Option<AgentId> {
 }
 
 tokio::task_local! {
+    /// THE QUALIFIED REMOTE CALLER a bridge leg is relaying — `(leg id,
+    /// "<remote kernel guid>|<remote agent id>")`. Set by the inbound leg around the
+    /// send it makes for a call that crossed a bridge
+    /// ([`with_remote_caller`]); read ONCE, at dispatch, by [`Kernel::send`]'s
+    /// launch — the address belongs to the dispatch only when the leg itself is
+    /// its origin. Python `_remote_caller`.
+    static REMOTE_CALLER: Option<(AgentId, String)>;
+}
+
+tokio::task_local! {
+    /// The qualified caller of the dispatch running right now, when it crossed a
+    /// bridge — python `_current_remote`. A memory store keys what such a call
+    /// writes by this address, not by the leg. NOT inherited by the handler's own
+    /// sends (a spawned dispatch starts without `REMOTE_CALLER`), so a handler's
+    /// own writes stay keyed under its own id.
+    pub(crate) static CURRENT_REMOTE: Option<String>;
+}
+
+/// Run `fut` as a bridge leg relaying `address`'s call — python
+/// `remote_caller_context(leg_id, address)`.
+pub async fn with_remote_caller<F, T>(leg: AgentId, address: String, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    REMOTE_CALLER.scope(Some((leg, address)), fut).await
+}
+
+/// The qualified `<guid>|<agent id>` of a caller on ANOTHER kernel, when this
+/// dispatch was relayed by a bridge leg that carried it; `None` otherwise.
+/// Python `current_remote_caller()`.
+#[must_use]
+pub fn current_remote_caller() -> Option<String> {
+    CURRENT_REMOTE.try_with(|r| r.clone()).ok().flatten()
+}
+
+tokio::task_local! {
     /// THE KERNEL'S OWN SHUTDOWN TRAFFIC. `shutdown_agents` sets the drain flag
     /// FIRST (so nothing new enters while it works) and only then sends every
     /// agent its `shutdown` verb — which the drain gate would otherwise refuse
@@ -389,6 +425,24 @@ impl Kernel {
     /// five times, nothing built). The industry shape is the same — all results
     /// of one batch return together.
     pub async fn send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
+        // NAMED EXECUTIONS OUTLIVE RAM. Once flushed, a settled execution is only in
+        // the kernel's store; an item naming one is looked up there FIRST, so the
+        // synchronous launch below finds it exactly as if it had never left RAM.
+        //
+        // A store read that fails RAISES in python (out of `send`, into the
+        // caller's handler). `send` never raises here, so every item of the batch
+        // settles `failed` with that raise — the same record python's dispatch
+        // makes of it.
+        if self.store_id().is_some()
+            && items
+                .iter()
+                .any(|it| it.id.is_some() || it.raw_id.as_ref().is_some_and(|v| !v.is_null()))
+        {
+            if let Err(e) = self.recall_executions(&items).await {
+                let r = crate::executions::raised("RuntimeError", &e);
+                return items.iter().map(|_| Outcome::refused(r.clone())).collect();
+            }
+        }
         // SYNCHRONOUS launch: resolve, gate and register EVERY item before the
         // first await, so `ps` shows the whole batch rather than it appearing
         // one row at a time.
@@ -539,8 +593,8 @@ impl Kernel {
         // agent's own `shutdown` dispatch using its tools) passes; everything
         // else is a new root and is refused BEFORE it costs an id. The
         // root's own control surface stays open: kernel verbs
-        // (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`,
-        // `ledger`) and `reflect` are how an operator watches and finishes
+        // (`shutdown_agents` again, `kernel_stop`, `ps`, `ledger`) and
+        // `reflect` are how an operator watches and finishes
         // the stop. Python `Agent._send` (`kernel/_agent.py`).
         if self.draining() && !in_shutdown() {
             let to_root = item.target.as_str() == "kernel"
@@ -578,7 +632,7 @@ impl Kernel {
             }
         }
 
-        let origin = current_sender();
+        let caller = current_sender();
 
         // C88: the UNNAMED `kernel` reflect fast path. python checks the
         // LITERAL alias the caller sent (`target_id == "kernel"`, not the
@@ -607,7 +661,7 @@ impl Kernel {
         // never mints into the kernel's space. The mint stays SYNCHRONOUS:
         // the pid exists before the first await, which is what makes a whole
         // batch visible in `ps` at once.
-        let exec_id = join_id.unwrap_or_else(|| self.rows.mint_id());
+        let exec_id = join_id.unwrap_or_else(|| self.mint_id());
         let task_id = TaskId(exec_id);
 
         match self.ledger.open(
@@ -617,7 +671,7 @@ impl Kernel {
             &item.payload,
             retries,
             name.as_deref(),
-            origin.clone(),
+            caller.clone(),
         ) {
             crate::ledger::Opened::Refused(r) => {
                 self.tasks.forget(&task_id);
@@ -634,7 +688,7 @@ impl Kernel {
                 // that question, not about the verb this caller happened to
                 // send. Measured in python 2026-08-28: a caller granted only a
                 // harmless verb reused another's id and got its secret verbatim.
-                if let Some(d) = self.join_denial(&origin, &orig_payload, &target) {
+                if let Some(d) = self.join_denial(&caller, &orig_payload, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
                 return Launched::Settled(*o);
@@ -643,7 +697,7 @@ impl Kernel {
             // wait: it does not own the execution and must not kill it.
             crate::ledger::Opened::Join(rx, orig_payload) => {
                 self.tasks.forget(&task_id);
-                if let Some(d) = self.join_denial(&origin, &orig_payload, &target) {
+                if let Some(d) = self.join_denial(&caller, &orig_payload, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
                 return Launched::Joining(Box::new(Joiner {
@@ -660,12 +714,13 @@ impl Kernel {
                 // ledger just opened, so the call, the task and the outcome are
                 // all one number. Python `Agent._ledger_open`.
                 //
-                // ONE TAPE. The row carries the WHOLE call — the dispatch
-                // payload verbatim, the retry budget, the attempt count as at
-                // dispatch, the deadline — because there is no second file:
-                // `messages.xml` is the only thing that outlives the process,
-                // and `attempts` is updated on this row at every retry (the
-                // kernel owns the row in RAM).
+                // The row carries the WHOLE call — the dispatch payload
+                // verbatim, the retry budget, the attempt count as at dispatch,
+                // the deadline — because it is what the kernel flushes into its
+                // memory store, and what named-call dedup reads back after the
+                // flush or a restart. `attempts` is updated on this row at every
+                // retry while it is still in RAM. `caller` scopes who may see it
+                // through `ledger` (it was `origin`; replies own `origin` now).
                 let mut row = Map::new();
                 row.insert("id".to_string(), Value::from(exec_id));
                 row.insert("kind".to_string(), Value::from("call"));
@@ -678,8 +733,8 @@ impl Kernel {
                     Value::from(current_task().map(TaskId::get)),
                 );
                 row.insert(
-                    "origin".to_string(),
-                    Value::from(origin.as_ref().map(|o| o.0.clone())),
+                    "caller".to_string(),
+                    Value::from(caller.as_ref().map(|o| o.0.clone())),
                 );
                 row.insert(
                     "payload".to_string(),
@@ -695,7 +750,7 @@ impl Kernel {
                 if let Some(n) = name.as_deref() {
                     row.insert("name".to_string(), Value::from(n));
                 }
-                let _ = self.rows.put(&target.id, row);
+                let _ = self.rows_put(&target.id, row);
             }
         }
 
@@ -753,9 +808,9 @@ impl Kernel {
         let (pid, reply, status, body) = loop {
             let attempts = self.ledger.attempt(exec_id);
             if attempts > 1 {
-                // THE TAPE COUNTS REAL RUNS. The call row went down with
-                // `attempts: 1`; every re-dispatch updates it in place, so a
-                // cold read of the log knows what the work actually cost.
+                // THE ROW COUNTS REAL RUNS. The call row went down with
+                // `attempts: 1`; every re-dispatch updates it in place while it
+                // is in RAM, and the settle row carries the final count.
                 let mut bump = Map::new();
                 bump.insert("attempts".to_string(), Value::from(attempts));
                 self.rows.stamp(exec_id, &bump);
@@ -804,21 +859,8 @@ impl Kernel {
         let out = self
             .ledger
             .settle(exec_id, Outcome::new(pid, status, reply).with_body(body));
-        // A SETTLE IS A ROW. Without one the message log records only
-        // BEGINNINGS: a `call` row is appended at launch and nothing is ever
-        // appended for its ending, so a cold read cannot tell "never settled"
-        // from "settled". (Python had the same hole from the other side — it
-        // mutated the launch row in place and the pump's debounce usually missed
-        // the stamp.) A row is append-only by contract, so the ending has to be
-        // an append.
-        //
-        // ON THE ROOT, not on the settled call's agent: an agent's row list is
-        // read as its CONVERSATION — by the model's own history, by a fork's
-        // row copy — and each of those readers filters bookkeeping by an
-        // enumerated set of kinds it was told about. A new kind on an agent's
-        // list is conversation to whichever reader was not. `settled` names the
-        // agent as a FIELD, so the ending still says what it ended.
-        self.stamp_call(pid, &out);
+        // A SETTLE IS A ROW — see `stamp_call`.
+        self.stamp_call(pid, &out, &target.id).await;
         out
     }
 
@@ -835,7 +877,7 @@ impl Kernel {
         target: &Arc<Agent>,
         payload: &Value,
     ) -> (Value, Status) {
-        let pid = self.rows.mint_id();
+        let pid = self.mint_id();
         let mut row = Map::new();
         row.insert("id".to_string(), Value::from(pid));
         row.insert("kind".to_string(), Value::from("call"));
@@ -848,12 +890,12 @@ impl Kernel {
             Value::from(current_task().map(TaskId::get)),
         );
         row.insert(
-            "origin".to_string(),
+            "caller".to_string(),
             Value::from(current_sender().map(|o| o.0)),
         );
         row.insert("payload".to_string(), payload.clone());
         row.insert("internal".to_string(), Value::from(true));
-        let _ = self.rows.put(&target.id, row);
+        let _ = self.rows_put(&target.id, row);
         let (reply, status, _no_body) = self
             .run_dispatch(
                 target,
@@ -868,27 +910,24 @@ impl Kernel {
         (reply, status)
     }
 
-    /// Settle the call: stamp the live row AND append a `settle` row.
+    /// Settle the call: append a `settle` row carrying what the kernel KEEPS of
+    /// the outcome ([`crate::ledger::stored_outcome`]: the whole result for a
+    /// named call, the error text for a dead letter, `{status, bytes}` otherwise).
     ///
-    /// The STAMP on the live call row is python's, not the ledger's `Outcome`:
-    /// `{status, error?, reason?}` — the error is `str(result.error)` cut to 200
-    /// CODE POINTS, and both optional keys follow python truthiness. Live readers
-    /// (`messages` digests, the `ledger` verb) read it there and must keep working.
+    /// THE SETTLE IS ITS OWN ROW — a row is append-only, so the ending is an
+    /// append, never an edit of the call row. With the call row it is the record
+    /// of what a call became, and it is what the kernel flushes into its memory
+    /// store and reads back for `ledger` and for named-call dedup.
     ///
-    /// THE SETTLE ROW CARRIES THE FULL OUTCOME — `{status, result}`, the body
-    /// included, plus the final `attempts`. It is the only record of what a call
-    /// became: `ledger.json` is gone, and a boot rebuilds `executions` (dedup
-    /// across restart, C9) by reading these rows back. A RAW reply body is the
-    /// tape's one reduction: `{"len": N}` where the bytes sat.
-    ///
-    /// Nothing is written when the call row is absent (a refusal that never
-    /// opened one, a hydrated id): python returns early on the same test, and
-    /// the settle row exists to END a call that was written down.
-    fn stamp_call(self: &Arc<Self>, pid: Option<TaskId>, out: &Outcome) {
+    /// The call row may already be flushed (and gone from RAM) by now; the target
+    /// comes from the live execution. While the call row is still in RAM it takes
+    /// the python stamp `{status, error?, reason?}` (the error cut to 200 CODE
+    /// POINTS, both optional keys by python truthiness). ON THE ROOT: a settle is
+    /// KERNEL bookkeeping; `settled` names the target. A dead ending (failed /
+    /// timed_out / cancelled) is ANNOUNCED — `on_deadletter` — because nothing
+    /// retries it on its own: someone has to look.
+    async fn stamp_call(self: &Arc<Self>, pid: Option<TaskId>, out: &Outcome, target: &AgentId) {
         let Some(pid) = pid else { return };
-        let Some(row) = self.rows.get_one(pid.get()) else {
-            return;
-        };
         let mut stamp = Map::new();
         stamp.insert("status".to_string(), Value::from(out.status.as_str()));
         if let Some(res) = out.result.as_object() {
@@ -905,23 +944,28 @@ impl Kernel {
         let mut onto = Map::new();
         onto.insert("outcome".to_string(), Value::Object(stamp));
         self.rows.stamp(pid.get(), &onto);
+        let named = self
+            .ledger
+            .info(pid.get())
+            .is_some_and(|(_, _, name)| name.is_some());
+        let settled = self
+            .ledger
+            .info(pid.get())
+            .map_or_else(|| target.clone(), |(t, _, _)| t);
         if let Some(root) = self.root() {
             let mut settle = Map::new();
             settle.insert("kind".to_string(), Value::from("settle"));
             settle.insert("parent".to_string(), Value::from(pid.get()));
+            settle.insert("settled".to_string(), Value::from(settled.0));
             settle.insert(
-                "settled".to_string(),
-                row.get("agent").cloned().unwrap_or(Value::Null),
+                "outcome".to_string(),
+                crate::ledger::stored_outcome(out, named, crate::jsonsafe::BodyAs::Len),
             );
-            let mut full = Map::new();
-            full.insert("status".to_string(), Value::from(out.status.as_str()));
-            full.insert(
-                "result".to_string(),
-                taped_payload(&out.result, out.body.as_deref()),
-            );
-            settle.insert("outcome".to_string(), Value::Object(full));
             settle.insert("attempts".to_string(), Value::from(out.attempts));
-            let _ = self.rows.put(&root.id, settle);
+            let _ = self.rows_put(&root.id, settle);
+        }
+        if crate::ledger::is_dead(out.status) {
+            self.announce_deadletter(pid.get(), out, out.attempts).await;
         }
     }
 
@@ -1064,11 +1108,19 @@ impl Kernel {
             // spawn `CURRENT_SENDER` becomes the target, so this is the last
             // place the origin is still visible.
             let origin = current_sender();
+            // A bridge leg relaying a remote caller marked its send; the address
+            // belongs to THIS dispatch only when the leg itself is its origin.
+            let remote = REMOTE_CALLER
+                .try_with(Clone::clone)
+                .ok()
+                .flatten()
+                .filter(|(leg, _)| origin.as_ref() == Some(leg))
+                .map(|(_, address)| address);
             let tid = task_id;
             let cancel = handle.cancel_signal();
             let killed = handle.killed_flag();
             tokio::spawn(async move {
-                CURRENT_ORIGIN
+                CURRENT_REMOTE.scope(remote, CURRENT_ORIGIN
                     .scope(
                         origin,
                         CURRENT_SENDER.scope(
@@ -1102,7 +1154,7 @@ impl Kernel {
                                 }),
                             ),
                         ),
-                    )
+                    ))
                     .await
             })
         };
@@ -1361,59 +1413,6 @@ impl Kernel {
         current_sender()?;
         let root = self.root()?;
         self.gate(watcher_id, "state_subscribe", &root, &Value::Null)
-    }
-
-    /// May `reader` receive row BODIES on the state stream? Bodies are what
-    /// `rows_read` guards — the privileged, kernel-wide read no wildcard carries
-    /// — so a body subscription is gated exactly as that verb on the ROOT, once,
-    /// at subscribe time. Refusal, or `None`. An OPERATOR tap is ungated.
-    pub fn authorize_row_bodies(self: &Arc<Self>, reader: &AgentId) -> Option<Value> {
-        current_sender()?;
-        let root = self.root()?;
-        self.gate(reader, "rows_read", &root, &Value::Null)
-    }
-
-    /// THE ROW READ GATE — one rule for the `messages` verb and for the `row`
-    /// state event: an operator (`None`) or the owner itself always; anyone else
-    /// only if the OWNER's `callable_by` names them for `messages`. A missing
-    /// owner reads as refused.
-    ///
-    /// A ROOT VERB SKIPS INGRESS, which is why this runs at all — but it is the
-    /// OWNER's ingress being re-checked, not an egress escalation, so
-    /// privileged-verb cover does not apply.
-    #[must_use]
-    pub fn may_read_rows(&self, reader: Option<&AgentId>, owner: &str) -> bool {
-        let Some(reader) = reader else { return true };
-        if reader.0 == owner {
-            return true;
-        }
-        let root_id = self.root().map(|r| r.id.0.clone());
-        self.agents
-            .get(&AgentId::from(owner))
-            .map(|e| {
-                let holder = e.value();
-                let grant = holder
-                    .meta
-                    .read()
-                    .expect("meta lock poisoned")
-                    .get("callable_by")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                let children: std::collections::HashSet<String> =
-                    holder.child_ids().into_iter().map(|c| c.0).collect();
-                crate::authz::authorize_call(
-                    &grant,
-                    "messages",
-                    reader.0.as_str(),
-                    holder.id.0.as_str(),
-                    holder.parent_id.as_ref().map(|p| p.0.as_str()),
-                    &children,
-                    root_id.as_deref(),
-                    false,
-                )
-                .allowed
-            })
-            .unwrap_or(false)
     }
 
     /// Detach a previously-registered watcher.

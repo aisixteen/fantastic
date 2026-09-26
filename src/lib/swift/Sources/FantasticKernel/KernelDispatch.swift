@@ -632,17 +632,17 @@ extension Kernel {
     /// task-table row, the watcher fanout and the state events. It opens NO
     /// ledger execution, so nothing stamps or settles the row.
     func internalDispatch(_ target: Agent, _ payload: JSON) async -> (JSON, Status) {
-        let pid = rows.mintId()
+        let pid = mintId()
         var row: Row = [
             "id": .integer(pid), "kind": .string("call"), "verb": payload["type"],
         ]
         row["parent"] = KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null
-        row["origin"] = KernelTaskLocals.currentSender.map { JSON.string($0.value) } ?? .null
-        // ONE TAPE: the internal variant carries its payload too — key order
-        // `id, kind, verb, parent, origin, payload, internal`.
+        row["caller"] = KernelTaskLocals.currentSender.map { JSON.string($0.value) } ?? .null
+        // The internal variant carries its payload too — key order
+        // `id, kind, verb, parent, caller, payload, internal`.
         row["payload"] = payload
         row["internal"] = .bool(true)
-        _ = try? rows.put(target.id, row)
+        _ = try? rowsPut(target.id, row)
         let (reply, _) = await runDispatch(
             target: target, payload: payload, verb: payload["type"].asString ?? "",
             taskOut: nil, taskId: TaskId(pid), binary: nil)
@@ -691,7 +691,7 @@ extension Kernel {
         // ledger key for an unnamed execution — minting a second one here would
         // split the two apart, so the row and the reply would name different
         // things and a pid could not re-fetch its own outcome.
-        let taskId = taskId ?? TaskId(rows.mintId())
+        let taskId = taskId ?? TaskId(mintId())
         // Hand the PID back SYNCHRONOUSLY, at dispatch — before any reply exists. A
         // caller that wants to correlate the answer needs the id at send time, not
         // after; that is the whole point of the id.
@@ -725,10 +725,19 @@ extension Kernel {
             target, "send",
             binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
 
+        // A BRIDGE LEG RELAYING A REMOTE CALLER marked its send; the address
+        // belongs to THIS dispatch only when the leg itself is its caller.
+        // Consumed here, so the handler's own sends carry no remote caller.
+        // Python `Agent._dispatch_task`.
+        let rc = KernelTaskLocals.remoteCaller
+        let remote: String? = (rc != nil && rc!.leg == origin) ? rc!.address : nil
+
         let box = DispatchBox()
         let bodyBox = BodyBox()
         let work = Task {
-            let reply = await KernelTaskLocals.$currentOrigin.withValue(origin) {
+            let reply = await KernelTaskLocals.$remoteCaller.withValue(nil) {
+                await KernelTaskLocals.$currentRemote.withValue(remote) {
+            await KernelTaskLocals.$currentOrigin.withValue(origin) {
                 await KernelTaskLocals.$currentSender.withValue(target.id) {
                 await KernelTaskLocals.$currentTask.withValue(taskId) {
                 await KernelTaskLocals.$ownTask.withValue(taskId) {
@@ -752,6 +761,8 @@ extension Kernel {
                         }
                     }
                 }
+                }
+            }
                 }
             }
             box.resolve(reply)
@@ -868,14 +879,14 @@ extension Kernel {
         // them on another agent's work.
         case "ps", "cancel":
             return true
-        // THE ROW STORE — `messages` is the digest read every agent may be
-        // granted; `rows_read`/`rows_write` are hydration, PRIVILEGED.
-        case "messages", "rows_read", "rows_write":
+        // The EXECUTION LEDGER's retire verb — a dead letter is acknowledged.
+        case "ack_deadletter":
             return true
-        // Root-only control verbs — gated inside their handler to the tree
-        // root. `shutdown_agents` stops the agents; `shutdown_kernel` stops
-        // the whole kernel process gracefully.
-        case "shutdown_agents", "shutdown_kernel":
+        // The kernel's LIFECYCLE. `kernel_start` is the one start sequence (the
+        // root's memory store first, then everyone); `kernel_stop` the graceful
+        // stop of the process. `shutdown_agents` stops the agents, not the
+        // process. Root-only, gated inside their handler to the tree root.
+        case "kernel_start", "shutdown_agents", "kernel_stop":
             return true
         default:
             return false

@@ -30,7 +30,7 @@ fn acquire_writes_lock_file() {
     let path = acquire(tmp.path()).unwrap();
     assert!(path.exists());
     let raw = std::fs::read_to_string(&path).unwrap();
-    let lock: LockFile = serde_json::from_str(&raw).unwrap();
+    let lock: LockFile = parse_lock(&raw).unwrap();
     assert_eq!(lock.pid, std::process::id());
 }
 
@@ -56,7 +56,7 @@ fn acquire_overwrites_stale_lock() {
     let acquired = acquire(tmp.path()).unwrap();
     assert_eq!(acquired, lock_path);
     let raw = std::fs::read_to_string(&lock_path).unwrap();
-    let lock: LockFile = serde_json::from_str(&raw).unwrap();
+    let lock: LockFile = parse_lock(&raw).unwrap();
     assert_eq!(lock.pid, std::process::id());
 }
 
@@ -98,18 +98,17 @@ fn lock_held_text_is_python_verbatim() {
         err.to_string(),
         "another fantastic owns this dir: pid=4242\n  \
          -> kill it:  kill 4242\n  \
-         -> or, if stale, remove the lock:  rm .fantastic/lock.json"
+         -> or, if stale, remove the lock:  rm .fantastic/lock.yaml"
     );
 }
 
 #[test]
-fn lock_bytes_are_python_json_dumps() {
-    // C50: python `json.dumps({"pid": os.getpid()})` uses the DEFAULT
-    // separators — `: ` after the key — not serde_json's compact `:`.
+fn lock_bytes_are_python_yaml_dump() {
+    // python `yaml.dump({"pid": os.getpid()}, CSafeDumper, sort_keys=False)`.
     let tmp = TempDir::new().unwrap();
     let path = acquire(tmp.path()).unwrap();
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(raw, format!("{{\"pid\": {}}}", std::process::id()));
+    assert_eq!(raw, format!("pid: {}\n", std::process::id()));
 }
 
 #[test]

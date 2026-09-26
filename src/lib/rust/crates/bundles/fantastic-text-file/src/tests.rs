@@ -1323,7 +1323,7 @@ const PY_TOOLS: &str = concat!(
 );
 
 /// C37: THE LEG IO SEAM RIDES THE BATCH. Every chunk this agent moves is an
-/// ordinary execution on the leg — a `call` row with the editor as its origin,
+/// ordinary execution on the leg — a `call` row with the editor as its caller,
 /// a ledger id, a settle. `send_with_binary` minted none of that, so the bytes
 /// a model wrote left no record of who asked or of how it ended, and a
 /// checkpoint id named a task that was never in the table.
@@ -1335,7 +1335,7 @@ async fn leg_calls_are_batch_rows() {
     let r = call(&k, &ed, json!({"type": "read", "path": "doc.md"})).await;
     assert_eq!(r["lines"][0]["text"], "one", "{r}");
 
-    let rows = k.rows.for_agent(&AgentId::from("store"));
+    let rows = fantastic_kernel::test_support::rows_about(&k, &AgentId::from("store"));
     let stream_calls: Vec<_> = rows
         .iter()
         .filter(|r| {
@@ -1352,15 +1352,13 @@ async fn leg_calls_are_batch_rows() {
     );
     for row in &stream_calls {
         assert_eq!(
-            row["origin"],
+            row["caller"],
             json!("ed"),
             "a leg call must be attributed to the editor: {row:?}"
         );
     }
     // Every one of them ENDED — a settle row on the root names its id.
-    let settles: Vec<i64> = k
-        .rows
-        .for_agent(&AgentId::from("kernel_state"))
+    let settles: Vec<i64> = fantastic_kernel::test_support::rows_about(&k, &AgentId::from("kernel_state"))
         .iter()
         .filter(|r| r["kind"] == json!("settle"))
         .filter_map(|r| r["parent"].as_i64())

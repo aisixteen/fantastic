@@ -77,11 +77,9 @@ struct ViewRecallTests {
         }
         var pids: [Int64] = []
         for i in 0..<10 {
-            let pid = kernel.rows.mintId()
+            let pid = kernel.mintId()
             pids.append(pid)
-            try kernel.rows.bodyPut(
-                agent.id, pid: pid,
-                text: (0..<500).map { "marker line \(i).\($0)" }.joined(separator: "\n"))
+            storeReply(agent.id.value, kernel, pid: pid, body: (0..<500).map { "marker line \(i).\($0)" }.joined(separator: "\n"))
         }
         rows.append(
             f.row(
@@ -126,11 +124,11 @@ struct ViewRecallTests {
             .object(["id": a[2]["id"], "res": .string("stub")]),
             .object(["id": a[4]["id"], "res": .string("full")]),
         ]
-        saveView(agent.id, kernel: kernel, ids: ids, budget: 1000, why: "test")
-        let v = try #require(loadView(agent.id, kernel: kernel))
-        #expect(v["ids"] == .array(ids) && v["why"]?.asString == "test")
+        try await saveView(agent.id.value, kernel, ids: ids, budget: 1000, why: "test")
+        let v = try #require(try await loadView(agent.id.value, kernel))
+        #expect(v["ids"] == .array(ids) && v["why"].asString == "test")
 
-        let (msgs, n) = await backend.assemble(
+        let (msgs, n) = try await backend.assemble(
             agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel)
         #expect(n == a.count)
         let body = Array(msgs[1..<(msgs.count - 1)])
@@ -145,11 +143,11 @@ struct ViewRecallTests {
         let (kernel, agent, f, backend) = await boot()
         let a = f.chain("a", 1, big: false)
         f.seed(a)
-        saveView(
-            agent.id, kernel: kernel,
+        try await saveView(
+            agent.id.value, kernel,
             ids: [.object(["id": .string("gone:0000"), "res": .string("full")])], budget: 1,
             why: "x")
-        let (msgs, _) = await backend.assemble(
+        let (msgs, _) = try await backend.assemble(
             agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel)
         #expect(msgs.count == 1 + a.count + 1)
         #expect(backend.getViewSource(AI)?.hasPrefix("store") == true)
@@ -175,16 +173,19 @@ struct ViewRecallTests {
 
     @Test func recallMechanicalFitIsUnderBudgetAndPersistsAViewAndARow() async throws {
         let (kernel, agent, f, backend) = await boot()
+        // minted in the order they land: the store returns an owner's rows in ID
+        // order, and ids are minted at the append
+        let goal = f.row("user", "GOAL", "user:goal")
         let a = f.chain("a", 20)
-        f.seed([f.row("user", "GOAL", "user:goal")] + a)
+        f.seed([goal] + a)
         let r = try await backend.contextRecall(
             agent: agent, payload: dry(), kernel: kernel, provider: nil)
         #expect(r["degraded"].asBool == true && (r["kept"].asInt ?? 0) >= 1)
-        let v = try #require(loadView(agent.id, kernel: kernel))
+        let v = try #require(try await loadView(agent.id.value, kernel))
         #expect(
-            v["ids"]?.asArray?.first?["id"].asInt == f.id("user:goal"), "the goal turn is always in"
+            v["ids"].asArray?.first?["id"].asInt == f.id("user:goal"), "the goal turn is always in"
         )
-        let rows = backend.loadHistory(agent: agent, kernel: kernel)
+        let rows = try await loadHistory(agent.id.value, kernel)
         let rec = rows.filter { $0["kind"].asString == "recall" }
         #expect(rec.count == 1 && (rec.first?["content"].asString ?? "").contains("[recall "))
         // a second recall is deterministic on the same store (modulo its own new row)
@@ -216,8 +217,8 @@ struct ViewRecallTests {
         let r = try await backend.contextRecall(
             agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
         #expect(r["degraded"].asBool == false && r["why"].asString == "the last two replies matter")
-        let v = try #require(loadView(agent.id, kernel: kernel))
-        let fullReplies = (v["ids"]?.asArray ?? []).filter {
+        let v = try #require(try await loadView(agent.id.value, kernel))
+        let fullReplies = (v["ids"].asArray ?? []).filter {
             $0["res"].asString == "full" && $0["id"].asInt.map { replyIds.contains($0) } ?? false
         }
         #expect(
@@ -231,26 +232,40 @@ struct ViewRecallTests {
         backend.setProjection(AI, .object(["fired": .bool(true)]))
         backend.setMark(AI, index: 3, client: "cli")
         AIStripStrategy.set(AI, ["n:1"])
-        let before = backend.loadHistory(agent: agent, kernel: kernel).count
+        let before = try await loadHistory(agent.id.value, kernel).count
         _ = try await backend.contextRecall(
             agent: agent, payload: dry(), kernel: kernel, provider: nil)
         #expect(backend.getProjection(AI) == .null)
         #expect(markOf(backend, AI) == nil)
         #expect(!AIStripStrategy.has(AI))
         #expect(
-            backend.loadHistory(agent: agent, kernel: kernel).count == before + 1,
+            try await loadHistory(agent.id.value, kernel).count == before + 1,
             "one recall row appended, nothing removed")
     }
 
-    @Test func bootRecallsOnlyWhenThereIsAStore() async throws {
-        // python's `_cfg()` builds no provider: the recall stays at the mechanical fit.
-        let (kernel, agent, f, _) = await boot(
+    /// Boot never touches the memory store; it marks the first turn to read the
+    /// head and run `context_recall`. python `test_boot_is_lazy_and_marks_the_
+    /// view_for_rebuilding`.
+    @Test func bootIsLazyAndMarksTheViewForRebuilding() async throws {
+        let (kernel, agent, f, backend) = await boot(
             config: baseConfig { .refused(.object(["error": .string("no provider")])) })
-        let bootVerb: JSON = .object(["type": .string("boot")])
-        #expect(await kernel.send([Item(agent.id, bootVerb)])[0].result == .null)
         f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 8))
-        let r = await kernel.send([Item(agent.id, bootVerb)])[0].result
-        #expect((r["kept"].asInt ?? 0) >= 1 && loadView(agent.id, kernel: kernel) != nil)
+        let bootVerb: JSON = .object(["type": .string("boot")])
+        let before = storeRows(kernel: kernel, id: agent.id).count
+        #expect(await kernel.send([Item(agent.id, bootVerb)])[0].result == .null)
+        #expect(storeRows(kernel: kernel, id: agent.id).count == before, "boot wrote nothing")
+        _ = backend
+        // The recall is owed on the backend the agent's bundle runs — observed
+        // through the next turn in `anOwedRecallRunsAtTheStartOfTheNextLiveTurn`.
+    }
+
+    @Test func bootWithoutAMemoryStoreFailsLoud() async throws {
+        let (kernel, agent, _, _) = await boot()
+        kernel.update(agent.id, ["memory_store_id": .null])
+        let out = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[0].result
+        #expect(
+            out["reason"].asString == "missing_arg" && out["arg"].asString == "memory_store_id",
+            "\(out.serialize())")
     }
 
     @Test func aFoldBatchMakesRecallDueOnTheNextTurn() async throws {
@@ -260,7 +275,9 @@ struct ViewRecallTests {
         let body =
             [plainTurn("system", "sys"), f.row("user", "GOAL", "user:goal")] + f.chain("a", 12)
             + [f.row("user", "now?", nil)]
-        let out = await backend.projectContext(
+        // the conversation the projection folds is the agent's store
+        f.seed(Array(body.dropFirst()))
+        let out = try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "cli", messages: body,
             storeLen: body.count - 1, kernel: kernel)
         guard case .projected = out else {
@@ -268,31 +285,24 @@ struct ViewRecallTests {
             return
         }
         #expect(backend.isRecallDue(AI))
-        #expect(loadView(agent.id, kernel: kernel) != nil, "every projection writes the view")
+        #expect(try await loadView(agent.id.value, kernel) != nil, "every projection writes the view")
     }
 
-    /// THE LIVE PATH, end to end: a send that folds a chain marks a recall due,
-    /// and the NEXT send runs it before assembling — python `_recall_due` is
-    /// consumed at the top of `_send`, and the decision lands as a `kind:recall`
-    /// row. Measured 2026-09-13 (recall_after_fold:swift): 6 folds, 0 recalls.
+    /// THE LIVE PATH, end to end: a LAZY boot marks the view for rebuilding, and
+    /// the NEXT send runs `context_recall` before assembling — python
+    /// `_recall_due` is consumed at the top of `_run` — so the decision lands as
+    /// a `kind:recall` row. (A fold batch owes a recall the same way; the fold
+    /// half is pinned by `aFoldBatchMakesRecallDueOnTheNextTurn`.) Measured
+    /// 2026-09-13 (recall_after_fold:swift): 6 folds, 0 recalls.
     @Test func anOwedRecallRunsAtTheStartOfTheNextLiveTurn() async throws {
         let (kernel, agent, f, _) = await boot(
             config: baseConfig { .provider(MockProvider(tokens: ["ok ", doneEnvelope])) },
-            // Room for the real system block (~5.1k tok) plus a head, not the chain.
-            contextWindow: 8000,
-            meta: ["output_reserve": .integer(0), "context_strategy": .string("fold")])
-        f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 12))
-        let r1 = await kernel.send([
-            Item(agent.id, .object(["type": .string("send"), "text": .string("now?")]))
-        ])[0].result
-        let cs = await kernel.send([Item(agent.id, .object(["type": .string("context_status")]))])[
-            0
-        ].result
-        let folds = f.foldsOf().count
+            contextWindow: 32000,
+            meta: ["output_reserve": .integer(0)])
+        f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 4, big: false))
+        _ = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[0].result
         #expect(
-            folds >= 3,
-            "the first send folds the chain: \(folds) send=\(r1.serialize().prefix(300)) status=\(cs.serialize().prefix(400))"
-        )
+            !f.rowsOf().contains { $0["kind"].asString == "recall" }, "boot is lazy: no recall yet")
         _ = await kernel.send([
             Item(agent.id, .object(["type": .string("send"), "text": .string("again")]))
         ])[0].result
@@ -309,8 +319,9 @@ struct ViewRecallTests {
         // Its own agent id: the incarnation table is process-global and other
         // suites boot `mock` agents while this runs.
         let id = "reboot_ai"
-        // Pass 1 answers boot's recall prompt (no JSON — the mechanical fit stands);
-        // pass 2 is the ONE turn a live reply may run. A third would be a runaway.
+        // Boot is LAZY: it calls nothing. The first live turn opens with the owed
+        // recall (pass 1 — no JSON, the mechanical fit stands) and then runs (pass
+        // 2). A third would be a runaway.
         let script = ProviderScript([[doneEnvelope], [doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig([id: script]), backendIds: [id])
@@ -332,7 +343,8 @@ struct ViewRecallTests {
         await deliverTurn(
             kernel: kernel, target: id, text: "[reply to n:2 · n r]\nfresh", clientId: "c",
             systemPrompt: nil, born: AIIncarnation.of(kernel, id))
-        #expect(script.calls == afterBoot + 1, "a reply from THIS incarnation runs a turn")
+        #expect(afterBoot == 0, "boot is lazy — no model call")
+        #expect(script.calls == afterBoot + 2, "a reply from THIS incarnation runs a turn (recall + pass)")
     }
 
     /// The array is the head as of its write; the log keeps growing. Measured
@@ -341,8 +353,8 @@ struct ViewRecallTests {
         let (kernel, agent, f, backend) = await boot()
         let a = f.chain("a", 4, big: false)
         f.seed(a)
-        saveView(
-            agent.id, kernel: kernel,
+        try await saveView(
+            agent.id.value, kernel,
             ids: [
                 .object(["id": a[0]["id"], "res": .string("full")]),
                 .object(["id": a[2]["id"], "res": .string("full")]),
@@ -352,7 +364,7 @@ struct ViewRecallTests {
             f.row("user", "[reply to notes:new · notes read]\nfiller_9 body", "ai:new2", "ai:new1"),
         ]
         f.seed(later)
-        let (msgs, _) = await backend.assemble(
+        let (msgs, _) = try await backend.assemble(
             agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel)
         let ids = msgs[1..<(msgs.count - 1)].map { $0["id"] }
         #expect(Array(ids.prefix(2)) == [a[0]["id"], a[2]["id"]], "the array first")
@@ -370,7 +382,7 @@ struct ViewRecallTests {
         _ = try await backend.contextRecall(
             agent: agent, payload: dry(), kernel: kernel, provider: nil)
         let rec = try #require(
-            backend.loadHistory(agent: agent, kernel: kernel).last {
+            try await loadHistory(agent.id.value, kernel).last {
                 $0["kind"].asString == "recall"
             })
         let content = rec["content"].asString ?? ""
@@ -381,16 +393,18 @@ struct ViewRecallTests {
 
     @Test func theLiveRootIsFoundEvenWhenAFoldCollapsedIt() async throws {
         let (kernel, agent, f, backend) = await boot()
+        // minted in the order they land (ids are minted at the append)
+        let t0 = f.row("user", "TASK 0: first", "user:t0")
+        let a = f.chain("a", 2)
+        let t1 = f.row("user", "TASK 1: latest work", "user:t1")
         let b = f.chain("b", 2)
-        let rows =
-            [f.row("user", "TASK 0: first", "user:t0")] + f.chain("a", 2)
-            + [f.row("user", "TASK 1: latest work", "user:t1")] + b
+        let rows = [t0] + a + [t1] + b
         f.seed(rows)
         f.seed([f.fold([f.id("user:t1")] + f.ids(b), "task 1 folded", "body", false)])
         _ = try await backend.contextRecall(
             agent: agent, payload: dry(), kernel: kernel, provider: nil)
         let rec = try #require(
-            backend.loadHistory(agent: agent, kernel: kernel).last {
+            try await loadHistory(agent.id.value, kernel).last {
                 $0["kind"].asString == "recall"
             })
         let content = rec["content"].asString ?? ""
@@ -425,7 +439,7 @@ struct ViewRecallTests {
             .object([
                 "role": .string("user"), "kind": .string(""),
                 "content": .object(["a": .integer(1)]),
-                "id": .integer(kernel.rows.mintId()), "parent": .null,
+                "id": .integer(kernel.mintId()), "parent": .null,
             ])
         ])
         let r = await kernel.send([Item(agent.id, .object(["type": .string("history")]))])[0].result
@@ -463,14 +477,17 @@ struct ViewRecallTests {
         #expect(r2["matches"].asArray?.first?["line"].asInt == 2, "\(r2.serialize())")
     }
 
-    // B5.8: a non-string content is `json.dumps(content, default=str)` — every
-    // non-ASCII scalar ESCAPED. The model greps what it was shown.
+    // B5.8: a non-string content RECALLS as `json.dumps(content, default=str)` —
+    // every non-ASCII scalar ESCAPED. The rows are searched by the MEMORY STORE,
+    // whose text index is `json.dumps(c, default=str, ensure_ascii=False)`
+    // (python ram_store `_text_of`): the unescaped scalar is found, the escape
+    // is not.
     @Test func nonStringContentIsPythonsEscapedDump() async throws {
         let (kernel, agent, f, _) = await boot()
         f.seed([
             .object([
                 "role": .string("user"), "content": .object(["k": .string("\u{e9}")]),
-                "id": .integer(kernel.rows.mintId()), "parent": .null,
+                "id": .integer(kernel.mintId()), "parent": .null,
             ])
         ])
         let rec = await kernel.send([Item(agent.id, .object(["type": .string("recall")]))])[0]
@@ -482,7 +499,7 @@ struct ViewRecallTests {
             Item(
                 agent.id,
                 .object([
-                    "type": .string("grep"), "query": .string("u00e9"),
+                    "type": .string("grep"), "query": .string("\u{e9}"),
                 ]))
         ])[0].result
         #expect(hit["total"].asInt == 1, "\(hit.serialize())")
@@ -490,93 +507,10 @@ struct ViewRecallTests {
             Item(
                 agent.id,
                 .object([
-                    "type": .string("grep"), "query": .string("\u{e9}"),
+                    "type": .string("grep"), "query": .string("u00e9"),
                 ]))
         ])[0].result
         #expect(miss["total"].asInt == 0, "\(miss.serialize())")
-    }
-
-    // B5.9: the AI's own `_as_id` — a digit string is STRIPPED first and `'0'`
-    // IS an id, so `pull pid:'0'` reaches `not_found`, not `bad_arg`.
-    @Test func pullPidPaddedStringPagesLikePython() async throws {
-        let (kernel, agent, f, _) = await boot()
-        f.seed(f.chain("a", 1, big: false))
-        let zero = await kernel.send([
-            Item(
-                agent.id,
-                .object([
-                    "type": .string("pull"), "pid": .string("0"),
-                ]))
-        ])[0].result
-        #expect(zero["reason"].asString == "not_found", "\(zero.serialize())")
-        #expect(zero["error"].asString?.contains("no stored body for pid 0") == true)
-        // `'+5'` is not all digits — that one IS a bad arg.
-        let plus = await kernel.send([
-            Item(
-                agent.id,
-                .object([
-                    "type": .string("pull"), "pid": .string("+5"),
-                ]))
-        ])[0].result
-        #expect(plus["reason"].asString == "bad_arg", "\(plus.serialize())")
-        // A PADDED digit string resolves: `' 12 '` is 12.
-        let body = "the body of the reply"
-        let pid = kernel.rows.mintId()
-        _ = try kernel.rows.bodyPut(agent.id, pid: pid, text: body)
-        let padded = await kernel.send([
-            Item(
-                agent.id,
-                .object([
-                    "type": .string("pull"), "pid": .string(" \(pid) "),
-                ]))
-        ])[0].result
-        #expect(padded["text"].asString == body, "\(padded.serialize())")
-    }
-
-    // C70 (unblocks B5.1's stored-body twin): `kernel.rows.bodyGet` pages a
-    // STORED body by CODE POINTS now, not graphemes — the fold branch was
-    // already fixed in `AsyncRepliesTests.pullAndGrepWidthCountCodePoints`,
-    // which this test's sibling comment named as waiting on C70.
-    @Test func pullPagesACrlfBodyByCodePoints() async throws {
-        let (kernel, agent, f, _) = await boot()
-        f.seed(f.chain("a", 1, big: false))
-        let pid = kernel.rows.mintId()
-        _ = try kernel.rows.bodyPut(agent.id, pid: pid, text: String(repeating: "a\r\nb", count: 3))
-        let r = await kernel.send([
-            Item(
-                agent.id,
-                .object(["type": .string("pull"), "pid": .integer(pid), "length": .integer(5)]))
-        ])[0].result
-        #expect(r["text"].asString == "a\r\nba", "\(r.serialize())")
-        #expect(r["next_offset"].asInt == 5)
-        #expect(r["eof"] == .bool(false))
-    }
-
-    // B5.10: a scope is scanned in CPython's int-SET order, which decides which
-    // row owns a line two bodies share.
-    @Test func grepScopeScansBodiesInPythonSetOrder() {
-        #expect(pySetOrder([1116, 1065, 1066, 1080]) == [1080, 1065, 1066, 1116])
-        // The table grows when `fill*5 >= mask*3`, and the order changes with it.
-        #expect(pySetOrder([1, 2, 3]) == [1, 2, 3])
-        #expect(pySetOrder(Array(1...9)).count == 9)
-    }
-
-    // B5.11 + B5.1: pull refuses a negative length (python 2026-09-20) — it used
-    // to slice from the END and hand back a negative `next_offset`.
-    @Test func pullFoldNegativeLengthIsRefused() async throws {
-        let (kernel, agent, f, _) = await boot()
-        let fold = f.fold([], "t", "abcdefghij", false)
-        f.seed([fold])
-        let pid = try #require(rowId(fold))
-        let r = await kernel.send([
-            Item(
-                agent.id,
-                .object([
-                    "type": .string("pull"), "pid": .integer(pid), "length": .integer(-3),
-                ]))
-        ])[0].result
-        #expect(r["error"].asString == "pull: length must not be negative", "\(r.serialize())")
-        #expect(r["reason"].asString == "bad_arg")
     }
 
     // B5.3: `dry` is python-truthy — `1` is dry and makes NO model call.
@@ -638,12 +572,14 @@ struct ViewRecallTests {
         // A truthy int is wrapped: one candidate, and the recall completes.
         let (k2, a2, f2, b2) = await boot()
         f2.seed([f2.row("user", "GOAL", "user:goal")] + f2.chain("a", 6, big: false))
-        let before = b2.loadHistory(agent: a2, kernel: k2).count
+        let before = try await loadHistory(a2.id.value, k2).count
         let num = try await b2.contextRecall(
             agent: a2, payload: .object([:]), kernel: k2,
             provider: ComputedProvider { _ in #"{"expand": 5, "why": "w"}"# })
         #expect(num["degraded"] == .bool(false), "\(num.serialize())")
-        #expect(b2.loadHistory(agent: a2, kernel: k2).count == before + 1, "the recall row is written")
+        let after = try await loadHistory(a2.id.value, k2).count
+        #expect(after == before + 1, "the recall row is written")
+        _ = b2
     }
 
     // B5.5: `context_strategy` is read RAW — only an ABSENT key means compact.
@@ -663,7 +599,7 @@ struct ViewRecallTests {
         // The projection REFUSES by name rather than silently running compact.
         f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 20))
         let big = (0..<40).map { plainTurn("user", "\(BIG) \($0)") }
-        let outcome = await backend.projectContext(
+        let outcome = try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "c",
             messages: [plainTurn("system", "sys")] + big, storeLen: big.count, kernel: kernel)
         guard case .failed(let err) = outcome else {
@@ -678,8 +614,9 @@ struct ViewRecallTests {
 
     // ── the clear boundary ───────────────────────────────────────────────
 
-    /// `context_clear`: the view begins at the `[cleared …]` row; earlier rows
-    /// stay in the store, reachable through recall/grep (behind: true) and by id.
+    /// `context_clear`: a CLEAR-FOLD — the view begins at the `[cleared …]` row;
+    /// earlier rows are its members, reachable through recall/grep (behind:
+    /// true), `history {fold}` and by id.
     /// python `test_context_clear_starts_a_new_thread_without_deleting`.
     @Test func contextClearStartsANewThreadWithoutDeleting() async throws {
         let (kernel, agent, f, backend) = await boot()
@@ -687,28 +624,31 @@ struct ViewRecallTests {
             f.row("user", "the codename is HALCYON", "user:1"),
             f.row("assistant", "noted", "ai:1"),
         ])
-        #expect(backend.loadHistory(agent: agent, kernel: kernel).count == 2)
-        let out = backend.contextClear(
+        #expect(try await loadHistory(agent.id.value, kernel).count == 2)
+        let out = try await backend.contextClear(
             agent: agent, payload: .object(["why": .string("fresh start")]), kernel: kernel)
-        #expect(out["behind"].asInt == 2)
-        let hist = backend.loadHistory(agent: agent, kernel: kernel)
+        #expect(out["rows"].asInt == 2)
+        let hist = try await loadHistory(agent.id.value, kernel)
         #expect(hist.count == 1 && hist[0]["kind"].asString == "clear")
         #expect(
             (hist[0]["content"].asString ?? "").hasPrefix(
-                "[cleared \(out["cleared"].asInt ?? 0) \u{b7} 2 rows behind] fresh start"),
+                "[cleared \(out["cleared"].asInt ?? 0) \u{b7} 2 rows] fresh start"),
             "\(hist[0].serialize())")
+        // A CLEAR-FOLD: its members are every row before it.
+        #expect(hist[0]["refs"].asArray?.count == 2, "\(hist[0].serialize())")
         #expect(!JSON.array(hist).serialize().contains("HALCYON"))
         // behind the boundary, everything is still there
-        #expect(backend.loadHistory(agent: agent, kernel: kernel, behind: true).count == 3)
-        let r = backend.recallVerb(
+        #expect(try await loadHistory(agent.id.value, kernel, behind: true).count == 3)
+        let r = try await backend.recallVerb(
             agent: agent, payload: .object(["query": .string("codename")]), kernel: kernel)
         #expect(r["total"].asInt == 1)
         // the persisted view is emptied, so assembly renders the store from the clear on
-        #expect(try #require(loadView(agent.id, kernel: kernel))["ids"]?.asArray?.isEmpty == true)
+        let cleared = try #require(try await loadView(agent.id.value, kernel))
+        #expect(cleared["ids"].asArray?.isEmpty == true)
         // chatting on: the new thread grows after the mark
         f.seed([f.row("user", "hello again", "user:2")])
         #expect(
-            backend.loadHistory(agent: agent, kernel: kernel).last?["content"].asString
+            try await loadHistory(agent.id.value, kernel).last?["content"].asString
                 == "hello again")
     }
 }

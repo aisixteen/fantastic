@@ -177,26 +177,19 @@ impl Bundle for RootLoader {
         }
     }
     /// THE SHIPPED BUNDLE'S HOOK, stood in for: the pending RECORDS are written
-    /// and the pump lands every message minted so far — before the teardown walk,
-    /// while the provider is still alive. Both writers close here and nowhere
-    /// else (`fantastic-core`'s `flush_pending`).
+    /// before the teardown walk, while the provider is still alive
+    /// (`fantastic-core`'s `flush_pending`).
     async fn flush_pending(
         &self,
         _agent_id: &AgentId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        let (writer, pump) = {
-            let mut g = self.installed.lock().expect("loader poisoned");
-            match g.as_mut() {
-                Some(i) => (i.writer.clone(), i.pump.take()),
-                None => (None, None),
-            }
+        let writer = {
+            let g = self.installed.lock().expect("loader poisoned");
+            g.as_ref().and_then(|i| i.writer.clone())
         };
         if let Some(w) = writer {
             w.flush(kernel).await;
-        }
-        if let Some(p) = pump {
-            p.stop(kernel).await;
         }
         Ok(())
     }
@@ -219,8 +212,8 @@ pub fn register_root_loader(reg: &mut BundleRegistry) {
     reg.register("kernel_state.tools", RootLoader::default());
 }
 
-/// `boot` the root, as the daemon's registration-order pass does — the call
-/// that installs the ledger flusher, the message pump and the record writer.
+/// `boot` the root, as `kernel_start` does first — the call that installs the
+/// record writer and mints the guid.
 pub async fn boot_root(kernel: &Arc<Kernel>) {
     let Some(root) = kernel.root() else { return };
     let _ = kernel
@@ -264,4 +257,16 @@ pub async fn wire_fake_store(kernel: &Arc<Kernel>, store_root: &Path) {
             }),
         )])
         .await;
+}
+
+/// The execution rows still in RAM that are ABOUT `agent` (its `agent` field), in
+/// id order — what a test reads where the kernel never started (nothing flushed).
+#[must_use]
+pub fn rows_about(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<crate::rows::Row> {
+    kernel
+        .rows
+        .all()
+        .into_iter()
+        .filter(|r| r.get("agent").and_then(Value::as_str) == Some(agent.0.as_str()))
+        .collect()
 }

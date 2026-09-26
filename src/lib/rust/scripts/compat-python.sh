@@ -143,7 +143,7 @@ fi
 # ── weak-load skip+log ──────────────────────────────────────────────
 "$RUST_BIN" core create_agent handler_module=ghost_unknown.tools id=ghost_1 >/dev/null 2>&1 || true
 mkdir -p "$WORKDIR/.fantastic/agents/ghost_planted"
-cat >"$WORKDIR/.fantastic/agents/ghost_planted/agent.json" <<'JSON'
+cat >"$WORKDIR/.fantastic/agents/ghost_planted/agent.yaml" <<'JSON'
 {"id":"ghost_planted","handler_module":"never_installed.tools","parent_id":"core"}
 JSON
 # Reboot daemon for the new on-disk record to be hydrated.

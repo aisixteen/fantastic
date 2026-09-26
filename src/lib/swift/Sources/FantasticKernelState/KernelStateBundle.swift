@@ -13,14 +13,14 @@
 // Contract (duck-typed; any agent answering these is a loader):
 //
 //   load_tree                 -> {records, version}   read the subtree (direct)
-//   persist_record {record}   -> {ok}                 write one agent.json
+//   persist_record {record}   -> {ok}                 write one agent.yaml
 //   forget_record {id}        -> {ok}                 remove one agent's dir
 //   persist_blob / load_blob                          the sidecar byte channel
 //
-// The ROOT loader also owns the kernel-wide bookkeeping python's `_boot`
-// installs: the execution-ledger rebuild FROM THE TAPE (`hydrateExecutions` —
-// there is no `ledger.json`), the message pump and the record `persist_writer`
-// (`Kernel.bootRootLoader`).
+// The ROOT loader installs the record `persist_writer` at `boot`
+// (`Kernel.bootRootLoader`) and mints the instance guid. It keeps NO message
+// tape: the kernel holds no conversation, and its execution rows are flushed by
+// the kernel itself into the root's memory store.
 
 import FantasticJSON
 import FantasticKernel
@@ -30,8 +30,8 @@ import OrderedCollections
 /// The `kernel_state.tools` bundle.
 public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// Per-loader process state — what `boot` installed, so a second `boot` is a
-    /// no-op and `onShutdown` can tear it down. Python keeps these on the agent
-    /// object (`_fs_flush_loop`, `_message_pump`).
+    /// no-op and `onShutdown` can tear it down. Python keeps it on the agent
+    /// object (`_fs_flush_loop`).
     private struct LoaderState {
         var installed: RootLoaderState?
         var booted = false
@@ -117,7 +117,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         let rootDir = loaderRoot(agent)
         if rootDir.path != agent.rootPath.path,
             !FileManager.default.fileExists(
-                atPath: rootDir.appendingPathComponent("agent.json").path)
+                atPath: rootDir.appendingPathComponent(RECORD_FILE).path)
         {
             Self.writeRecord(at: rootDir, agent.record().ordered)
         }
@@ -130,7 +130,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         return nil
     }
 
-    /// args: record:dict (req). Merge-write one agent.json. Location is the live
+    /// args: record:dict (req). Merge-write one agent.yaml. Location is the live
     /// agent's own dir if present, else computed under this loader's root from
     /// the record's parent chain.
     private func persistRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) -> JSON {
@@ -211,30 +211,20 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
 
     // ── lifecycle ──────────────────────────────────────────────
 
-    /// LAND THE LAST WINDOW while the provider child is still alive. The kernel
+    /// LAND THE LAST RECORDS while the provider child is still alive. The kernel
     /// awaits this BEFORE the teardown walk (python `flush_pending`).
     ///
-    /// RECORDS FIRST, then the pump: their writes mint rows, and the pump's own
-    /// window has to close after them. The record writer's final flush LIVES
-    /// HERE — it used to sit in `stop()`, which runs mid-teardown-walk with the
-    /// store already gone, and the last update never landed.
+    /// THE RECORD FLUSH LIVES HERE, not in `onShutdown`. The record loop
+    /// debounces 0.15 s; a `create_agent` + `update_agent` followed straight away
+    /// by `shutdown()` used to reach its final flush mid-teardown-walk, with the
+    /// store already gone, and the update never landed.
     public func flushPending(agentId: AgentId, kernel: Kernel) async throws {
         await kernel.flushRecords()
-        let pump: MessagePump? = withLock {
-            guard var e = state[agentId.value], var i = e.installed else { return nil }
-            let p = i.pump
-            i.pump = nil
-            e.installed = i
-            state[agentId.value] = e
-            return p
-        }
-        if pump != nil { await kernel.flushPendingMessages() }
     }
 
-    /// Unsubscribe + stop the loops. `flushPending` normally ran already (the
-    /// kernel calls it before the walk, while the provider is alive) and is what
-    /// WRITES; a path that skipped it still lands the last MESSAGE window here,
-    /// through the pump's own catch-up.
+    /// Unsubscribe + stop the record loop. `flushPending` normally ran already
+    /// (the kernel calls it before the walk, while the provider is alive) and is
+    /// what WRITES.
     public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
         let installed: RootLoaderState? = withLock {
             let e = state.removeValue(forKey: agentId.value)
@@ -283,21 +273,15 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         return path
     }
 
-    /// Merge-write one record's `agent.json` at `dir` (the agent's own dir).
+    /// Merge-write one record's `agent.yaml` at `dir` (the agent's own dir).
     /// Reads any existing file and overlays only the kernel-managed keys,
     /// preserving unknown fields + sidecars. Python `write_record`.
     static func writeRecord(at dir: URL, _ record: OrderedDictionary<String, JSON>) {
-        let file = dir.appendingPathComponent("agent.json")
-        var onDisk: OrderedDictionary<String, JSON> = [:]
-        if let data = try? Data(contentsOf: file), let parsed = try? JSON.parse(data),
-            case .object(let d) = parsed
-        {
-            onDisk = d
-        }
+        let file = dir.appendingPathComponent(RECORD_FILE)
+        var onDisk = Persistence.readRecord(file) ?? [:]
         for (k, v) in record { onDisk[k] = v }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let body = JSON.object(onDisk).serializePretty(indent: 2)
-        try? Data(body.utf8).write(to: file, options: .atomic)
+        try? Persistence.recordBytes(onDisk).write(to: file, options: .atomic)
     }
 
     /// Refuse a RECORD verb that names an agent outside the caller's own subtree.
@@ -337,7 +321,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         "load_tree": .string(
             "args: none. Read this loader's subtree from disk → {records, version}."),
         "persist_record": .string(
-            "args: record:dict (req). Merge-write one agent.json. Location is the"),
+            "args: record:dict (req). Merge-write one agent.yaml. Location is the"),
         "forget_record": .string(
             "args: id:str (req), parent_id:str (opt). rmtree the agent's dir. For a"),
         "persist_blob": .string(

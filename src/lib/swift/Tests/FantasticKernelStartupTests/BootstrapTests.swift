@@ -15,9 +15,9 @@ struct WorkdirLockTests {
 
         let lock = WorkdirLock(workdir: tmp)
         try lock.acquire()
-        let lockPath = tmp.appendingPathComponent(".fantastic/lock.json")
+        let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
         let data = try Data(contentsOf: lockPath)
-        let parsed = try JSON.parse(data)
+        let parsed = try YamlIO.load(String(decoding: data, as: UTF8.self))
         #expect(parsed["pid"].asInt == Int64(getpid()))
         lock.release()
     }
@@ -42,34 +42,32 @@ struct WorkdirLockTests {
 
         // Write a lock file pointing at a definitely-dead pid (0 is
         // never a real user-space pid).
-        let lockPath = tmp.appendingPathComponent(".fantastic/lock.json")
+        let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
         try FileManager.default.createDirectory(
             at: lockPath.deletingLastPathComponent(),
             withIntermediateDirectories: true)
         let stale = #"{"pid": 0}"#
         try stale.write(to: lockPath, atomically: true, encoding: .utf8)
 
-        // Should acquire cleanly even though a lock.json already exists.
+        // Should acquire cleanly even though a lock.yaml already exists.
         let lock = WorkdirLock(workdir: tmp)
         try lock.acquire()
         let data = try Data(contentsOf: lockPath)
-        let parsed = try JSON.parse(data)
+        let parsed = try YamlIO.load(String(decoding: data, as: UTF8.self))
         #expect(parsed["pid"].asInt == Int64(getpid()))
         lock.release()
     }
 
-    /// C50: python's `json.dumps({"pid": N})` bytes — WITH the space after
-    /// `:` (`', '`/`': '` are `json.dumps`'s default separators even
-    /// compact), never this runtime's serde-shaped `serialize()`.
-    @Test func testLockBytesArePythonJsonDumps() throws {
+    /// C50: python's `yaml.dump({"pid": N})` bytes — `pid: N` + newline.
+    @Test func testLockBytesArePythonYamlDump() throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let lock = WorkdirLock(workdir: tmp)
         try lock.acquire()
         defer { lock.release() }
-        let lockPath = tmp.appendingPathComponent(".fantastic/lock.json")
+        let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
         let bytes = try String(contentsOf: lockPath, encoding: .utf8)
-        #expect(bytes == "{\"pid\": \(getpid())}", "\(bytes)")
+        #expect(bytes == "pid: \(getpid())\n", "\(bytes)")
     }
 
     /// C82: a live recorded pid refuses acquisition even when NOTHING holds
@@ -80,7 +78,7 @@ struct WorkdirLockTests {
     @Test func acquireRefusesALiveRecordedPidWithoutFlock() throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let lockPath = tmp.appendingPathComponent(".fantastic/lock.json")
+        let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
         try FileManager.default.createDirectory(
             at: lockPath.deletingLastPathComponent(), withIntermediateDirectories: true)
         // getpid() is a genuinely live pid (this very test process) and the
@@ -102,7 +100,7 @@ struct WorkdirLockTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let lock = WorkdirLock(workdir: tmp)
         try lock.acquire()
-        let lockPath = tmp.appendingPathComponent(".fantastic/lock.json")
+        let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
         // Simulate a second kernel having reclaimed the file after our
         // in-memory `fileDescriptor` was captured: a DIFFERENT recorded pid
         // (release only checks identity against OUR pid, never liveness, so
@@ -114,7 +112,7 @@ struct WorkdirLockTests {
         #expect(
             FileManager.default.fileExists(atPath: lockPath.path),
             "a foreign lock must survive release")
-        let stillForeign = try JSON.parse(Data(contentsOf: lockPath))
+        let stillForeign = try YamlIO.load(String(decoding: Data(contentsOf: lockPath), as: UTF8.self))
         #expect(
             stillForeign["pid"].asInt == Int64(foreignPid),
             "release must not touch the foreign content")
@@ -131,7 +129,7 @@ struct BootstrapTests {
         defer { lock.release() }
 
         // Lock file should exist + name our pid.
-        let lockPath = tmp.appendingPathComponent(".fantastic/lock.json")
+        let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
         #expect(FileManager.default.fileExists(atPath: lockPath.path))
 
         // Core agent registered.
@@ -193,11 +191,11 @@ struct HydrationWalkTests {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let store = tmp.appendingPathComponent(".fantastic")
-        try seed(store, "agent.json", #"{"id": "kernel_state", "parent_id": null}"#)
+        try seed(store, "agent.yaml", #"{"id": "kernel_state", "parent_id": null}"#)
         // A STALE parent_id on disk: the position wins, not the field.
-        try seed(store, "agents/a/agent.json", #"{"id": "a", "parent_id": "bogus"}"#)
+        try seed(store, "agents/a/agent.yaml", #"{"id": "a", "parent_id": "bogus"}"#)
         try seed(
-            store, "agents/a/agents/b/agent.json", #"{"id": "b", "parent_id": "kernel_state"}"#)
+            store, "agents/a/agents/b/agent.yaml", #"{"id": "b", "parent_id": "kernel_state"}"#)
 
         let recs = Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "a", "b"])
@@ -208,12 +206,12 @@ struct HydrationWalkTests {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let store = tmp.appendingPathComponent(".fantastic")
-        try seed(store, "agent.json", #"{"id": "kernel_state", "parent_id": null}"#)
-        try seed(store, "agents/bad/agent.json", "{ this is not json")
-        try seed(store, "agents/bad/agents/kid/agent.json", #"{"id": "kid"}"#)
-        // A dir with NO agent.json is likewise skipped and not descended.
-        try seed(store, "agents/empty/agents/ghost/agent.json", #"{"id": "ghost"}"#)
-        try seed(store, "agents/good/agent.json", #"{"id": "good"}"#)
+        try seed(store, "agent.yaml", #"{"id": "kernel_state", "parent_id": null}"#)
+        try seed(store, "agents/bad/agent.yaml", "{ this is not json")
+        try seed(store, "agents/bad/agents/kid/agent.yaml", #"{"id": "kid"}"#)
+        // A dir with NO agent.yaml is likewise skipped and not descended.
+        try seed(store, "agents/empty/agents/ghost/agent.yaml", #"{"id": "ghost"}"#)
+        try seed(store, "agents/good/agent.yaml", #"{"id": "good"}"#)
 
         let recs = Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "good"])
@@ -223,9 +221,9 @@ struct HydrationWalkTests {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let store = tmp.appendingPathComponent(".fantastic")
-        try seed(store, "agent.json", #"{"id": "kernel_state", "parent_id": null}"#)
+        try seed(store, "agent.yaml", #"{"id": "kernel_state", "parent_id": null}"#)
         for id in ["zeta", "alpha", "mid"] {
-            try seed(store, "agents/\(id)/agent.json", #"{"id": "\#(id)"}"#)
+            try seed(store, "agents/\(id)/agent.yaml", #"{"id": "\#(id)"}"#)
         }
         let recs = Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "alpha", "mid", "zeta"])
@@ -237,12 +235,12 @@ struct HydrationWalkTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let store = tmp.appendingPathComponent(".fantastic")
         try seed(
-            store, "agent.json",
+            store, "agent.yaml",
             #"{"id": "kernel_state", "parent_id": null, "children_dir": "host_agents"}"#)
-        try seed(store, "host_agents/a/agent.json", #"{"id": "a"}"#)
-        try seed(store, "host_agents/a/host_agents/b/agent.json", #"{"id": "b"}"#)
+        try seed(store, "host_agents/a/agent.yaml", #"{"id": "a"}"#)
+        try seed(store, "host_agents/a/host_agents/b/agent.yaml", #"{"id": "b"}"#)
         // A tree under the DEFAULT name is invisible once another is declared.
-        try seed(store, "agents/never/agent.json", #"{"id": "never"}"#)
+        try seed(store, "agents/never/agent.yaml", #"{"id": "never"}"#)
 
         let recs = Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "a", "b"])
@@ -261,9 +259,9 @@ struct HydrationWalkTests {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let store = tmp.appendingPathComponent(".fantastic")
-        try seed(store, "agent.json", #"{"id": "kernel_state", "parent_id": null}"#)
+        try seed(store, "agent.yaml", #"{"id": "kernel_state", "parent_id": null}"#)
         try seed(
-            store, "agents/web/agent.json",
+            store, "agents/web/agent.yaml",
             #"""
             {"id": "web", "handler_module": "web.tools", "port": 8080,
              "can_call": {"$self": "*", "$parent": "*", "rest": ["reflect"], "ws": "*"},
@@ -307,10 +305,10 @@ struct RootBootTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let rec = #"{"id": "\#(id)", "handler_module": null, "parent_id": null}"#
         try rec.write(
-            to: dir.appendingPathComponent("agent.json"), atomically: true, encoding: .utf8)
+            to: dir.appendingPathComponent("agent.yaml"), atomically: true, encoding: .utf8)
     }
 
-    /// C56 — python's `read_tree` returns `[]` when the root `agent.json` is
+    /// C56 — python's `read_tree` returns `[]` when the root `agent.yaml` is
     /// MISSING **or not JSON**, and the bootstrap then seeds a fresh root,
     /// overwrites the file, and hydrates NO children on that boot. Swift used to
     /// overwrite the corrupt root and hydrate the children anyway.
@@ -320,7 +318,7 @@ struct RootBootTests {
         let dot = tmp.appendingPathComponent(".fantastic")
         try FileManager.default.createDirectory(at: dot, withIntermediateDirectories: true)
         try "{not json".write(
-            to: dot.appendingPathComponent("agent.json"), atomically: true, encoding: .utf8)
+            to: dot.appendingPathComponent("agent.yaml"), atomically: true, encoding: .utf8)
         try seedChild(tmp, "orphan")
 
         let kernel = try await startKernel(workdir: tmp.path)
@@ -329,7 +327,7 @@ struct RootBootTests {
         #expect(kernel.agent(AgentId("orphan")) != nil, "children survive a reseed (python 2026-09-20)")
         // The file was overwritten with the CONSTRUCTED root: the grant baseline
         // in its order, and no guid yet (the loader's boot mints that).
-        let parsed = try JSON.parse(try Data(contentsOf: dot.appendingPathComponent("agent.json")))
+        let parsed = try YamlIO.load(String(decoding: try Data(contentsOf: dot.appendingPathComponent("agent.yaml")), as: UTF8.self))
         #expect(parsed["id"].asString == "kernel_state")
         #expect(parsed["handler_module"].asString == "kernel_state.tools")
         #expect(
@@ -388,7 +386,7 @@ struct RootBootTests {
             }
             """
         try rec.write(
-            to: dot.appendingPathComponent("agent.json"), atomically: true, encoding: .utf8)
+            to: dot.appendingPathComponent("agent.yaml"), atomically: true, encoding: .utf8)
         let kernel = try await startKernel(workdir: tmp.path)
         #expect(kernel.root?.id.value == "kernel_state")
         #expect(kernel.root?.handlerModule == "kernel_state.tools")
@@ -409,7 +407,7 @@ struct RootBootTests {
         for agent in kernel.allAgents() {
             _ = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[0]
         }
-        let verbs = kernel.rows.forAgent(AgentId("kernel_state"))
+        let verbs = kernel.rows.all().filter { $0["agent"]?.asString == "kernel_state" }
             .filter { $0["kind"]?.asString == "call" }
             .compactMap { $0["verb"]?.asString }
         #expect(verbs == ["boot"], "the boot pass minted \(verbs)")
@@ -419,7 +417,7 @@ struct RootBootTests {
     /// C85 — `shutdownRequested()` resolves on CANCELLATION as well as on the
     /// stop signal. It parked on a bare continuation, so the loser of the
     /// daemon's race was never resumed, `cancelAll()` waited forever, and the
-    /// process had to be SIGKILLed with `lock.json` left behind.
+    /// process had to be SIGKILLed with `lock.yaml` left behind.
     @Test func awaitStopReturnsWhenCancelled() async throws {
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
         let root = Agent(id: AgentId(ROOT_ID), handlerModule: nil, parentId: nil)

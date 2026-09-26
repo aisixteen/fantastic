@@ -173,10 +173,8 @@ extension JSON {
     /// python's default), and the python float repr. Delegates to
     /// `pyJsonDumps` rather than this file's OWN compact `writeTo` (which
     /// mirrors rust's `serde_json` instead — raw UTF-8, `null` for a
-    /// non-finite double) because on-disk `agent.json` bytes must match what
-    /// the python kernel writes for the same record, and `writeTo` never did.
-    ///
-    /// Used for on-disk persistence (`agent.json`) — never for the wire,
+    /// non-finite double) because these bytes must match python's
+    /// `json.dumps(v, indent=2)`, and `writeTo` never did. Never the wire,
     /// which stays on the compact `serialize()` above.
     public func serializePretty(indent: Int = 2) -> String {
         pyJsonDumps(self, ensureAscii: true, indent: indent)

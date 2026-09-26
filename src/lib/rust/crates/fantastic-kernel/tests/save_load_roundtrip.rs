@@ -2,7 +2,7 @@
 //! foundation.
 //!
 //! [`KernelState`] is a Rust value — never a file on disk. Disk mode
-//! mirrors agent records to per-agent `agent.json` files via
+//! mirrors agent records to per-agent `agent.yaml` files via
 //! [`persistence::persist`] / [`persistence::load_children`]; the
 //! `save()` / `load()` API is for IN-RAM export (e.g. an embedding
 //! brain kernel persisting state externally to an external
@@ -68,12 +68,12 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
     fantastic_kernel::test_support::settle_records().await;
 
     // KernelState lives only in RAM. No `state.json` file is ever
-    // created — the on-disk medium is the per-agent agent.json tree
+    // created — the on-disk medium is the per-agent agent.yaml tree
     // (written THROUGH the provider).
     assert!(!tmp.path().join(".fantastic/state.json").exists());
     assert!(tmp
         .path()
-        .join(".fantastic/agents/alpha/agent.json")
+        .join(".fantastic/agents/alpha/agent.yaml")
         .exists());
 
     let snap = kernel.save();
@@ -211,9 +211,9 @@ async fn load_rejects_future_version() {
 
 #[tokio::test]
 async fn persist_merge_preserves_extra_fields_on_disk() {
-    // The dirty-binding contract: existing agent.json fields the
+    // The dirty-binding contract: existing agent.yaml fields the
     // kernel doesn't manage survive persist calls. Stage an agent
-    // dir + agent.json with a custom field, then drive an
+    // dir + agent.yaml with a custom field, then drive an
     // `update_agent` that touches a different field and confirm the
     // custom one's still there.
     use serde_json::Map;
@@ -233,16 +233,17 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"merge_test","port":8080}))])
         .await.remove(0).result;
     fantastic_kernel::test_support::settle_records().await;
-    let agent_json = tmp.path().join(".fantastic/agents/merge_test/agent.json");
+    let agent_json = tmp.path().join(".fantastic/agents/merge_test/agent.yaml");
     assert!(agent_json.exists());
 
     // Stash a custom field that the kernel doesn't know about.
     let mut existing: Map<String, Value> =
-        serde_json::from_str(&std::fs::read_to_string(&agent_json).unwrap()).unwrap();
+        fantastic_kernel::persistence::parse_record(&std::fs::read_to_string(&agent_json).unwrap())
+            .unwrap();
     existing.insert("user_note".into(), json!("don't lose me"));
     std::fs::write(
         &agent_json,
-        serde_json::to_string_pretty(&existing).unwrap(),
+        fantastic_kernel::yaml_io::dump(&Value::Object(existing)),
     )
     .unwrap();
 
@@ -258,7 +259,8 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
     fantastic_kernel::test_support::settle_records().await;
 
     let after: Map<String, Value> =
-        serde_json::from_str(&std::fs::read_to_string(&agent_json).unwrap()).unwrap();
+        fantastic_kernel::persistence::parse_record(&std::fs::read_to_string(&agent_json).unwrap())
+            .unwrap();
     assert_eq!(after.get("user_note"), Some(&json!("don't lose me")));
     assert_eq!(after.get("port"), Some(&json!(9090)));
 

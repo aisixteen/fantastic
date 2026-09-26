@@ -17,6 +17,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 futures-util = { workspace = true }
 
 [dev-dependencies]
+# Every AI agent keeps its conversation in a memory store; the tests wire one.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
 # The SCENARIO runner reads the shared yaml and needs the roles a scenario
 # names — `cli` is the render sink an AI streams its turn to.
 serde_yaml = "0.9"

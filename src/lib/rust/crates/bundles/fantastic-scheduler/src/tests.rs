@@ -31,7 +31,7 @@ fn now() -> f64 {
 }
 
 /// What a probe target saw when it was hit: when, and the scheduler's
-/// persisted `schedules.json` at that instant (when a capture path is set).
+/// persisted `schedules.yaml` at that instant (when a capture path is set).
 type Seen = (f64, Option<Value>);
 
 /// Every probe hit so far, keyed by probe agent id.
@@ -75,7 +75,7 @@ impl Bundle for ProbeBundle {
                     .capture
                     .as_ref()
                     .and_then(|p| std::fs::read_to_string(p).ok())
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+                    .and_then(|s| fantastic_kernel::yaml_io::load(&s).ok());
                 self.hits
                     .0
                     .lock()
@@ -344,10 +344,10 @@ async fn schedule_persists_and_lists() {
         .result;
     let schedules = listed["schedules"].as_array().unwrap();
     assert!(schedules.iter().any(|s| s["id"] == sid));
-    // schedules.json exists on disk via the loader's store.
+    // schedules.yaml exists on disk via the loader's store.
     assert!(tmp
         .path()
-        .join(format!(".fantastic/agents/{}/schedules.json", sch))
+        .join(format!(".fantastic/agents/{}/schedules.yaml", sch))
         .exists());
 }
 
@@ -586,13 +586,13 @@ async fn due_schedules_fire_as_one_concurrent_batch() {
 
 #[tokio::test]
 async fn next_run_is_persisted_before_the_fire() {
-    // The probe reads schedules.json the moment it is hit: the store must
+    // The probe reads schedules.yaml the moment it is hit: the store must
     // already hold the bumped run_count/next_run (persist-BEFORE-fire).
     let tmp = TempDir::new().unwrap();
     let sch_id = scheduler_id_for(&tmp);
     let capture = tmp
         .path()
-        .join(format!(".fantastic/agents/{sch_id}/schedules.json"));
+        .join(format!(".fantastic/agents/{sch_id}/schedules.yaml"));
     let (kernel, sch, hits) = mk_probed(&tmp, &["p_cap"], Some(capture), true).await;
     let r = schedule(&kernel, &sch, "p_cap", 1, json!({})).await;
     let sid = r["schedule_id"].as_str().unwrap().to_string();
@@ -603,7 +603,7 @@ async fn next_run_is_persisted_before_the_fire() {
     stop_tick(&kernel, &sch).await;
     assert!(hit, "probe must be hit");
     let (at, doc) = hits.get("p_cap").unwrap();
-    let doc = doc.expect("store had no schedules.json at fire time");
+    let doc = doc.expect("store had no schedules.yaml at fire time");
     let rec = doc
         .as_array()
         .unwrap()
@@ -1007,10 +1007,10 @@ async fn tick_sec_below_a_tenth_is_not_clamped() {
     assert_eq!(reflect_reply(&sch, &kernel)["tick_sec"], json!(0.02));
 }
 
-/// A5.10 — the sidecar bytes are python's `json.dumps`: `indent=2` for
-/// schedules.json, defaults (`, ` / `: `, `ensure_ascii`) for a history line.
+/// The sidecar bytes are python's `yaml_io.dump`: a block YAML sequence,
+/// indent 2, key order kept, unicode verbatim (`allow_unicode`).
 #[tokio::test]
-async fn history_line_uses_python_json_layout() {
+async fn schedules_sidecar_uses_python_yaml_layout() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     let r = kernel
@@ -1025,13 +1025,15 @@ async fn history_line_uses_python_json_layout() {
     assert!(r["schedule_id"].is_string(), "{r}");
     let body = std::fs::read_to_string(
         tmp.path()
-            .join(format!(".fantastic/agents/{}/schedules.json", sch.as_str())),
+            .join(format!(".fantastic/agents/{}/schedules.yaml", sch.as_str())),
     )
-    .expect("schedules.json");
-    // indent 2, and NON-ASCII ESCAPED — python's `ensure_ascii` default.
-    assert!(body.starts_with("[\n  {\n    \"id\":"), "{body}");
-    assert!(body.is_ascii(), "{body}");
-    assert!(body.contains("c\\u00f3re"), "{body}");
+    .expect("schedules.yaml");
+    assert!(body.starts_with("- id: "), "{body}");
+    assert!(body.contains("\n  target: córe\n"), "{body}");
+    assert!(
+        body.contains("\n  payload:\n    type: list_agents\n"),
+        "{body}"
+    );
 }
 
 /// A5.14 — `delete_agent` evicts the process schedule cache (python's

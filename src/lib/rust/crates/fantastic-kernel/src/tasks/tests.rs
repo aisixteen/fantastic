@@ -1031,7 +1031,7 @@ async fn spawn_task_writes_a_task_row() {
         "python's key order: the row as written, then what the store adds"
     );
     // …and it sits on the forking agent's list, beside its `call` rows.
-    let mine = kernel.rows.for_agent(&a);
+    let mine = crate::test_support::rows_about(&kernel, &a);
     let kinds: Vec<&str> = mine
         .iter()
         .filter_map(|r| r.get("kind").and_then(Value::as_str))
@@ -1055,13 +1055,13 @@ async fn a_task_keeps_a_parent_that_has_already_ended() {
     let agent = mk_agent_grant(&kernel, "forker", json!({})).await;
     let handle = crate::tasks::TaskHandle::new();
 
-    let dead = crate::tasks::TaskId(kernel.rows.mint_id());
+    let dead = crate::tasks::TaskId(kernel.mint_id());
     // The forking dispatch ended before the work it forked registered itself —
     // the shape a bundle's long-lived loop has (the scheduler tick, a pty
     // reader): the parent id is real, the parent task is gone.
     assert!(!kernel.tasks.contains(&dead), "never registered");
 
-    let forked = crate::tasks::TaskId(kernel.rows.mint_id());
+    let forked = crate::tasks::TaskId(kernel.mint_id());
     kernel
         .tasks
         .register(&forked, &agent, "tick_loop", Some(dead), handle);

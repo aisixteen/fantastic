@@ -154,18 +154,6 @@ public enum AIContext {
         return (kept, false)
     }
 
-    /// The most a single `pull` may return — EXACTLY the inline cap, in chars.
-    ///
-    /// It was half the window, and that ate its own tail: a full page was larger
-    /// than the inline cap, so the page itself got stored and digested, so the
-    /// model pulled the pull, forever, and never saw a byte. A pull page must
-    /// ALWAYS inline; making the two caps one number makes that arithmetic
-    /// rather than a special case. More pages at a tiny window is the price, and
-    /// it is the right one. Python `_pull_cap_chars`.
-    public static func pullCapChars(_ agent: Agent) -> Int {
-        Int(inlineCap(agent)) * charsPerToken
-    }
-
     /// The agent's configured `recent_n` (verbatim recent turns), clamped to
     /// [1, 50]; default 6.
     ///

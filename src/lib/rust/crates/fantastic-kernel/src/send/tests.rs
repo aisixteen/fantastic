@@ -585,161 +585,6 @@ async fn the_state_stream_is_not_covered_by_a_wildcard() {
         .is_none());
 }
 
-/// THE ROW EVENT IS GATED LIKE `messages` (2026-09-23): a leg that may tap the
-/// state stream still sees a row digest only for agents whose `callable_by`
-/// names it for `messages`; an operator tap sees every row. Twin of python's
-/// `test_row_events_reach_only_readers_the_owner_names`.
-#[tokio::test]
-async fn row_events_reach_only_readers_the_owner_names() {
-    let kernel = Arc::new(Kernel::new());
-    let root = make_agent("kernel_state");
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    let victim = make_agent_under("victim", "kernel_state");
-    kernel.register(Arc::clone(&victim));
-    kernel.register(make_agent_under("nosy", "kernel_state"));
-
-    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
-    let sink = Arc::clone(&seen);
-    let _reader = kernel.add_state_subscriber_for(
-        Arc::new(move |e: &Value, _b| sink.lock().expect("sink").push(e.clone())),
-        AgentId::from("nosy"),
-        false,
-    );
-    let everything = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
-    let all = Arc::clone(&everything);
-    let _operator = kernel.add_state_subscriber(Arc::new(move |e: &Value, _b| {
-        all.lock().expect("sink").push(e.clone());
-    }));
-
-    let body = |text: &str| {
-        json!({"kind": "body", "role": "user", "content": text})
-            .as_object()
-            .expect("object")
-            .clone()
-    };
-    let rows_of = |log: &Arc<std::sync::Mutex<Vec<Value>>>, owner: &str| -> Vec<Value> {
-        log.lock()
-            .expect("sink")
-            .iter()
-            .filter(|e| e["kind"] == json!("row") && e["agent_id"] == json!(owner))
-            .cloned()
-            .collect()
-    };
-
-    kernel
-        .rows
-        .put(&AgentId::from("victim"), body("x"))
-        .expect("put");
-    assert_eq!(
-        rows_of(&everything, "victim").len(),
-        1,
-        "operator tap lost the row"
-    );
-    assert!(
-        rows_of(&seen, "victim").is_empty(),
-        "row digest leaked ungranted"
-    );
-
-    // The OWNER names the reader for `messages` — the same grant the verb reads.
-    victim.meta.write().expect("meta").insert(
-        "callable_by".to_string(),
-        json!({"$self": "*", "$parent": "*", "nosy": ["messages"]}),
-    );
-    kernel
-        .rows
-        .put(&AgentId::from("victim"), body("y"))
-        .expect("put");
-    // SCOPED TO THE VICTIM: a child reads its PARENT's rows through the
-    // `$children` baseline, so the root's own rows reach nosy too.
-    let rows = rows_of(&seen, "victim");
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0]["row"]["head"], json!("y"));
-
-    // Its OWN rows always reach it.
-    kernel
-        .rows
-        .put(&AgentId::from("nosy"), body("mine"))
-        .expect("put");
-    assert_eq!(rows_of(&seen, "nosy")[0]["row"]["head"], json!("mine"));
-}
-
-/// `body:true` — the row event carries CONTENT, gated as `rows_read` on the
-/// root (privileged: a wildcard does not carry it); without the flag no event
-/// ever carries content. Twin of python's
-/// `test_row_bodies_ride_the_stream_only_for_a_rows_read_holder`.
-#[tokio::test]
-async fn row_bodies_ride_the_stream_only_for_a_rows_read_holder() {
-    let kernel = Arc::new(Kernel::new());
-    let root = make_agent("kernel_state");
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    kernel.register(make_agent_under("victim", "kernel_state"));
-    let nosy = make_agent_under("nosy", "kernel_state");
-    kernel.register(Arc::clone(&nosy));
-
-    let refused = crate::send::with_sender(AgentId::from("nosy"), async {
-        kernel.authorize_row_bodies(&AgentId::from("nosy"))
-    })
-    .await;
-    assert!(refused.is_some(), "bodies ungranted");
-
-    nosy.meta.write().expect("meta").insert(
-        "can_call".to_string(),
-        json!({
-            "$self": "*", "$parent": "*", "$children": "*",
-            "kernel_state": ["state_subscribe", "rows_read"],
-        }),
-    );
-    assert!(crate::send::with_sender(AgentId::from("nosy"), async {
-        kernel.authorize_row_bodies(&AgentId::from("nosy"))
-    })
-    .await
-    .is_none());
-
-    let full = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
-    let sink = Arc::clone(&full);
-    let _reader = kernel.add_state_subscriber_for(
-        Arc::new(move |e: &Value, _b| sink.lock().expect("sink").push(e.clone())),
-        AgentId::from("nosy"),
-        true,
-    );
-    let digest = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
-    let plain = Arc::clone(&digest);
-    // An operator tap, no bodies asked.
-    let _operator = kernel.add_state_subscriber(Arc::new(move |e: &Value, _b| {
-        plain.lock().expect("sink").push(e.clone());
-    }));
-
-    kernel
-        .rows
-        .put(
-            &AgentId::from("victim"),
-            json!({"kind": "body", "role": "user", "content": "the body"})
-                .as_object()
-                .expect("object")
-                .clone(),
-        )
-        .expect("put");
-
-    let rows_of = |log: &Arc<std::sync::Mutex<Vec<Value>>>| -> Vec<Value> {
-        log.lock()
-            .expect("sink")
-            .iter()
-            .filter(|e| e["kind"] == json!("row") && e["agent_id"] == json!("victim"))
-            .cloned()
-            .collect()
-    };
-    let got = rows_of(&full);
-    assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(got[0]["row"]["content"], json!("the body"));
-    // The digest is untouched beside it.
-    assert_eq!(got[0]["row"]["head"], json!("the body"));
-    assert_eq!(got[0]["row"]["bytes"], json!(8));
-    let plain = rows_of(&digest);
-    assert_eq!(plain.len(), 1);
-    assert!(plain[0]["row"].get("content").is_none(), "{plain:?}");
-}
 
 // ─── C20: the gate's denial shapes are python's ────────────────
 
@@ -1102,17 +947,18 @@ async fn a_dispatch_writes_a_call_row_with_outcome() {
         ])
         .await
         .remove(0);
-    let rows = kernel.rows.for_agent(&worker.id);
+    let rows = crate::test_support::rows_about(&kernel, &worker.id);
     assert_eq!(rows.len(), 1, "one call row on the TARGET: {rows:?}");
     let call = &rows[0];
     // PYTHON'S KEY ORDER: the row as it was written, then the two keys the store
     // adds (`{**row, "id": rid, "agent": agent_id}` — `id` keeps its place).
-    // ONE TAPE: the whole call goes down — the payload verbatim, the retry
-    // budget, the attempt count, the deadline.
+    // The whole call goes down — the payload verbatim, the retry budget, the
+    // attempt count, the deadline — and is what the kernel flushes into its
+    // memory store.
     assert_eq!(
         call.keys().map(String::as_str).collect::<Vec<_>>(),
         vec![
-            "id", "kind", "verb", "parent", "origin", "payload", "named", "retries", "attempts",
+            "id", "kind", "verb", "parent", "caller", "payload", "named", "retries", "attempts",
             "timeout", "name", "agent", "ts", "outcome"
         ],
         "…and `outcome` is stamped onto the end at settle"
@@ -1121,10 +967,9 @@ async fn a_dispatch_writes_a_call_row_with_outcome() {
     assert_eq!(call["named"], json!(true));
     assert_eq!(call["retries"], json!(0));
     assert_eq!(call["attempts"], json!(1));
-    // NO DEADLINE ⇒ `null` in RAM, and the tape's writer omits it (as it omits
-    // every `None`) — python's row carries the key the same way.
+    // NO DEADLINE ⇒ `null` in RAM — python's row carries the key the same way.
     assert_eq!(call["timeout"], Value::Null);
-    assert!(!crate::messages_xml::row_to_xml(call).contains("timeout"));
+    assert!(crate::yaml_io::row_to_doc(call).contains("\ntimeout: null\n"));
     assert_eq!(call["kind"], json!("call"));
     assert_eq!(call["verb"], json!("work"));
     assert_eq!(
@@ -1133,7 +978,7 @@ async fn a_dispatch_writes_a_call_row_with_outcome() {
         "no dispatch was nested around it"
     );
     assert_eq!(
-        call["origin"],
+        call["caller"],
         Value::Null,
         "an operator send has no origin"
     );
@@ -1162,7 +1007,7 @@ async fn an_unnamed_kernel_reflect_writes_no_row() {
     );
     assert_eq!(out.status, Status::Completed);
     assert_eq!(out.result["id"], json!("kernel_state"));
-    let root_rows = kernel.rows.for_agent(&AgentId::from("kernel_state"));
+    let root_rows = crate::test_support::rows_about(&kernel, &AgentId::from("kernel_state"));
     assert!(
         root_rows.is_empty(),
         "no call row on the root: {root_rows:?}"
@@ -1186,7 +1031,7 @@ async fn a_named_kernel_reflect_still_opens_the_ledger() {
         out.pid.is_some(),
         "a named reflect still mints an id: {out:?}"
     );
-    let root_rows = kernel.rows.for_agent(&AgentId::from("kernel_state"));
+    let root_rows = crate::test_support::rows_about(&kernel, &AgentId::from("kernel_state"));
     let calls: Vec<_> = root_rows
         .iter()
         .filter(|r| r.get("kind").and_then(Value::as_str) == Some("call"))
@@ -1204,7 +1049,7 @@ async fn an_errored_call_row_stamps_the_python_error_and_reason() {
     kernel
         .send(vec![Item::new(worker.id.clone(), json!({"type": "nope"}))])
         .await;
-    let call = kernel.rows.for_agent(&worker.id).remove(0);
+    let call = crate::test_support::rows_about(&kernel, &worker.id).remove(0);
     let stamp = &call["outcome"];
     assert_eq!(stamp["status"], json!("errored"));
     assert_eq!(stamp["reason"], json!("not_found"));
@@ -1262,18 +1107,16 @@ async fn a_falsy_non_string_error_settles_completed() {
     }
 }
 
-/// ONE TAPE: the settle row carries the FULL outcome body and the final
-/// attempts — it is the only record of what a call became, and a boot rebuilds
-/// `executions` out of it. The live call row keeps the python STAMP.
+/// THE SETTLE ROW keeps what `stored_outcome` keeps — an UNNAMED call's
+/// `{status, bytes}` (its body went to its caller; python's growth fix, §3) —
+/// and the final attempts. The live call row keeps the python STAMP.
 #[tokio::test]
-async fn the_settle_row_carries_the_whole_outcome() {
+async fn the_settle_row_keeps_what_stored_outcome_keeps() {
     let (kernel, worker) = c36_kernel();
     kernel
         .send(vec![Item::new(worker.id.clone(), json!({"type": "work"}))])
         .await;
-    let settles: Vec<_> = kernel
-        .rows
-        .for_agent(&AgentId::from("kernel_state"))
+    let settles: Vec<_> = crate::test_support::rows_about(&kernel, &AgentId::from("kernel_state"))
         .into_iter()
         .filter(|r| r.get("kind") == Some(&json!("settle")))
         .collect();
@@ -1282,7 +1125,7 @@ async fn the_settle_row_carries_the_whole_outcome() {
     assert_eq!(s["settled"], json!("w"), "the agent the call was on");
     assert_eq!(
         s["outcome"],
-        json!({"status": "completed", "result": {"ok": true}})
+        json!({"status": "completed", "bytes": 12})
     );
     assert_eq!(s["attempts"], json!(1));
     assert_eq!(
@@ -1316,9 +1159,7 @@ async fn a_refusal_that_opened_no_call_row_appends_no_settle() {
             json!({"type": "work"}),
         )])
         .await;
-    assert!(kernel
-        .rows
-        .for_agent(&AgentId::from("kernel_state"))
+    assert!(crate::test_support::rows_about(&kernel, &AgentId::from("kernel_state"))
         .iter()
         .all(|r| r.get("kind") != Some(&json!("settle"))));
 }
@@ -1335,7 +1176,7 @@ async fn a_nested_send_names_its_caller_as_parent() {
     // A send issued INSIDE that dispatch's task would carry its pid; here we
     // assert the top-level case reads null and the id space is one counter.
     assert!(outer.pid.is_some());
-    let rows = inner.rows.for_agent(&wid);
+    let rows = crate::test_support::rows_about(&inner, &wid);
     assert_eq!(rows[0]["parent"], Value::Null);
 }
 
@@ -1524,7 +1365,7 @@ async fn a_forked_body_mints_before_the_dispatch_settles() {
             let id = k.spawn_task(a, "body", async move {
                 let mut row = Map::new();
                 row.insert("kind".to_string(), Value::from("note"));
-                let _ = k2.rows.put(&a2, row);
+                let _ = k2.rows_put(&a2, row);
             });
             Ok(Some(json!({ "task": id.0 })))
         }
@@ -1551,9 +1392,7 @@ async fn a_forked_body_mints_before_the_dispatch_settles() {
             .send(vec![Item::new(mine.clone(), json!({"type": "go"}))])
             .await;
         let find = |owner: &AgentId, kind: &str| -> Option<i64> {
-            kernel
-                .rows
-                .for_agent(owner)
+            crate::test_support::rows_about(&kernel, owner)
                 .into_iter()
                 .find(|r| r.get("kind").and_then(Value::as_str) == Some(kind))
                 .and_then(|r| r.get("id").and_then(Value::as_i64))
@@ -1735,21 +1574,19 @@ async fn a_bytes_payload_summarizes_as_bytes_n() {
 // ─── C2 + C4 — the kernel_verbs map is python's `_SYSTEM_VERB_DOCS` ─────────
 
 /// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
-/// (`P/kernel/_agent.py`). `create_agent` names this runtime's root id until
-/// C12 renames the root to `kernel_state`.
-const PY_KERNEL_VERB_DOCS: [(&str, &str); 12] = [
+/// (`P/kernel/_agent.py`).
+const PY_KERNEL_VERB_DOCS: [(&str, &str); 11] = [
     ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — your own id grows your own subtree (no grant needed); 'kernel_state' for top-level. No default parent."),
     ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self`/`$parent`/`$children` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT."),
     ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`."),
     ("list_agents", "No args. Every agent's record, flat. Paged."),
     ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
-    ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?}]}, paged, scoped to what YOU originated. Failed/timed_out/cancelled rows are the dead-letter queue: inspect, then retry with a NEW id if you choose — nothing is retried silently."),
-    ("messages", "args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, bytes, title?, level?, refs?}], refused:[ids], next?}. Your own rows always; another agent's only if its callable_by names you for `messages`. Bodies are behind that agent's `pull`."),
-    ("rows_read", "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a wildcard does not carry it). That agent's rows WHOLE (content included), oldest first — {rows:[…], next?}. The hydration read; agents read digests through `messages` instead."),
-    ("rows_write", "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a wildcard does not carry it). Appends rows to that agent's conversation, each under a FRESH id — {ids:[int]}. A row may not carry an `id`; re-ids are the caller's to remap."),
+    ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently."),
+    ("ack_deadletter", "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}."),
+    ("kernel_start", "No args. THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}."),
     ("cancel", "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
     ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
-    ("shutdown_kernel", "No args. Stops the kernel PROCESS — under env:'container', the container."),
+    ("kernel_stop", "No args. Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."),
 ];
 
 #[test]
@@ -1764,11 +1601,11 @@ fn kernel_verb_docs_match_python_verbatim() {
     let distilled = kernel_verbs_view(false);
     assert_eq!(
         distilled["shutdown_agents"],
-        json!(PY_KERNEL_VERB_DOCS[10].1)
+        json!(PY_KERNEL_VERB_DOCS[9].1)
     );
     assert_eq!(
-        distilled["messages"],
-        json!("args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, at DIGEST resolution")
+        distilled["ack_deadletter"],
+        json!("args: id:int|str (req")
     );
 }
 

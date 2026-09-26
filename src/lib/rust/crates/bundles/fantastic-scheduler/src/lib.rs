@@ -4,8 +4,12 @@
 //! via `load_blob`/`persist_blob` — nothing to wire; a write failfasts only when
 //! the loader has no store, reads are empty until then):
 //!
-//! - `schedules.json` — `[{id, target, payload, interval_seconds, next_run, paused, run_count, created_at, timeout?}, …]`
-//! - `history.jsonl`  — append-only, one event per fire, ring-trimmed to `HISTORY_MAX`.
+//! - `schedules.yaml` — a YAML sequence of `{id, target, payload, interval_seconds, next_run, paused, run_count, created_at, timeout?}`
+//! - `schedule_events.yaml` — a YAML STREAM, one `---` document per `schedule_fired`
+//!   event, ring-trimmed to `HISTORY_MAX`.
+//!
+//! Both are written by `fantastic_kernel::yaml_io::dump` — the one emitter
+//! config the kernel's own files use (block style, indent 2, key order kept).
 //!
 //! Verbs (mirror Python verb-for-verb):
 //!
@@ -16,7 +20,7 @@
 //! - `list`                                                    → `{schedules}`
 //! - `pause` / `resume` args `{schedule_id?}`                  → flip one or all
 //! - `tick_now`     args `{schedule_id}`                       → fire immediately
-//! - `history`      args `{limit?, schedule_id?}`              → tail of history.jsonl
+//! - `history`      args `{limit?, schedule_id?}`              → tail of schedule_events.yaml
 //!
 //! A tick collects every DUE schedule, bumps `run_count`/`next_run`, persists
 //! FIRST (a crash inside the fire window cannot re-fire on reboot), then fires
@@ -33,8 +37,9 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_repr_value, py_str, py_truthy};
+use fantastic_bundle::{py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::yaml_io;
 use fantastic_kernel::{bad, AgentId, Item, Kernel, Status};
 use futures_util::FutureExt;
 use serde_json::{json, Map, Value};
@@ -264,10 +269,10 @@ async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value:
 // ── file-agent-routed persistence ───────────────────────────────────
 
 // THE LOADER OWNS THE PATH. This bundle names only a FILENAME; the sidecar
-// lands beside the agent's own agent.json in whatever store the kernel
+// lands beside the agent's own agent.yaml in whatever store the kernel
 // discovered. No provider is named here and no path is computed.
-const SCHEDULES_BLOB: &str = "schedules.json";
-const HISTORY_BLOB: &str = "history.jsonl";
+const SCHEDULES_BLOB: &str = "schedules.yaml";
+const HISTORY_BLOB: &str = "schedule_events.yaml";
 
 async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<String> {
     // Operator authority: reading our OWN sidecar is bookkeeping processed from
@@ -332,9 +337,11 @@ async fn load_schedules(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<Value> 
         return cached;
     }
     let raw = file_read(agent_id, kernel, SCHEDULES_BLOB).await;
-    let parsed: Vec<Value> = match raw {
-        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
-        None => Vec::new(),
+    // python `_load`: a YAML sequence, anything else (absent, malformed, not a
+    // list) reads as none.
+    let parsed: Vec<Value> = match raw.map(|s| yaml_io::load(&s)) {
+        Some(Ok(Value::Array(items))) => items,
+        _ => Vec::new(),
     };
     SCHEDULE_CACHE
         .lock()
@@ -350,8 +357,8 @@ async fn load_schedules(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<Value> 
 /// only `schedule`/`tick_now` — which roll back explicitly — do not. Warming the
 /// cache on success alone made rust the opposite of python on every one of them.
 ///
-/// The bytes are `json.dumps(…, indent=2)`: indent 2, `ensure_ascii`, and python's
-/// separators (A5.10).
+/// The bytes are `yaml_io.dump(schedules)` — a block YAML sequence, the one
+/// emitter config the kernel's own files use.
 async fn save_schedules(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -360,7 +367,7 @@ async fn save_schedules(
     SCHEDULE_CACHE
         .lock()
         .insert(agent_id.clone(), schedules.to_vec());
-    let body = py_json_dumps(&Value::Array(schedules.to_vec()), true, Some(2));
+    let body = yaml_io::dump(&Value::Array(schedules.to_vec()));
     file_write(agent_id, kernel, SCHEDULES_BLOB, &body).await
 }
 
@@ -372,23 +379,16 @@ async fn append_history(
     let prev = file_read(agent_id, kernel, HISTORY_BLOB)
         .await
         .unwrap_or_default();
-    // py `json.dumps(event, default=str)` — defaults, so `, ` / `: ` separators and
-    // `ensure_ascii` (A5.10).
-    let line = py_json_dumps(event, true, None);
+    // python `raw + yaml_io.row_to_doc(event)`: one `---` document per event.
     let mut combined = prev;
-    combined.push_str(&line);
-    combined.push('\n');
-    // Ring-trim past 2× MAX.
-    let lines: Vec<&str> = combined.split_terminator('\n').collect();
-    let trimmed = if lines.len() > 2 * HISTORY_MAX {
-        let keep: Vec<&str> = lines
+    combined.push_str(&event_doc(event));
+    // Ring-trim if oversize: keep the newest HISTORY_MAX documents.
+    let events = parse_events(&combined);
+    let trimmed = if events.len() > 2 * HISTORY_MAX {
+        events[events.len() - HISTORY_MAX..]
             .iter()
-            .rev()
-            .take(HISTORY_MAX)
-            .rev()
-            .copied()
-            .collect();
-        keep.join("\n") + "\n"
+            .map(event_doc)
+            .collect::<String>()
     } else {
         combined
     };
@@ -400,21 +400,30 @@ async fn read_history(agent_id: &AgentId, kernel: &Arc<Kernel>, limit: usize) ->
         Some(s) => s,
         None => return Vec::new(),
     };
-    raw.lines()
-        .rev()
-        .take(limit)
-        .filter_map(|l| {
-            let t = l.trim();
-            if t.is_empty() {
-                None
-            } else {
-                serde_json::from_str(t).ok()
-            }
-        })
-        .collect::<Vec<Value>>()
-        .into_iter()
-        .rev()
-        .collect()
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let events = parse_events(&raw);
+    // python `_parse_events(raw)[-limit:]` — `[-0:]` is the whole list.
+    let from = if limit == 0 {
+        0
+    } else {
+        events.len().saturating_sub(limit)
+    };
+    events[from..].to_vec()
+}
+
+/// One event as one stream document (python `yaml_io.row_to_doc(event)`).
+fn event_doc(event: &Value) -> String {
+    format!("{}{}", yaml_io::SEPARATOR, yaml_io::dump(event))
+}
+
+/// The event stream's documents that are mappings. A malformed stream reads
+/// EMPTY — reads are lenient, as python's `_parse_events` is.
+fn parse_events(raw: &str) -> Vec<Value> {
+    yaml_io::load_all(raw)
+        .map(|docs| docs.into_iter().filter(Value::is_object).collect())
+        .unwrap_or_default()
 }
 
 // ── tick loop ───────────────────────────────────────────────────────
@@ -549,7 +558,7 @@ async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) {
         // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
         // `schedule_fired` doubled every delivery to a live program's on_message —
         // the payload send IS the tick; telemetry rides the scheduler's own inbox
-        // and history.jsonl.
+        // and schedule_events.yaml.
         kernel.emit(agent_id, event).await;
     }
 }
@@ -750,7 +759,10 @@ async fn unschedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kern
 
 async fn list_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let schedules = load_schedules(agent_id, kernel).await;
-    json!({"schedules": schedules})
+    json!({
+        "schedules": schedules,
+        "origin": format!("{agent_id} list — re-send; changes as schedules change"),
+    })
 }
 
 /// `pause`/`resume` — one schedule, or the whole scheduler.
@@ -828,7 +840,11 @@ async fn history_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
         entries.retain(|e| e.get("schedule_id") == Some(sid));
     }
     let n = entries.len();
-    json!({"history": entries, "count": n})
+    json!({
+        "history": entries,
+        "count": n,
+        "origin": format!("{agent_id} history — re-send; grows as schedules fire"),
+    })
 }
 
 #[cfg(test)]
