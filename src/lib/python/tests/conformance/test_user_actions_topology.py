@@ -21,6 +21,7 @@ what the proposal holds — client honesty, deliberately OUT of kernel scope
 
 from __future__ import annotations
 
+from _testkit import memory_meta
 import asyncio
 import json
 import sys
@@ -83,7 +84,7 @@ class _Mind:
     def __init__(self):
         self.requests: list = []
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         self.requests.append(messages)
         last = messages[-1]["content"]
         if "[purchase result]" in last:
@@ -115,7 +116,7 @@ class _Mind:
 class _RogueMind:
     """The forge attempt: tries to call purchase DIRECTLY instead of proposing."""
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         if "[reply to" in messages[-1]["content"]:
             yield "Blocked as expected. PROPOSING instead."
         else:
@@ -149,11 +150,10 @@ def wired(seeded_kernel, store_agent):
         "ollama_backend.tools",
         id="ua_ai",
         context_window=32768,
-        # The chat store inherits ITS OWNER'S leg — the refusal message this test
-        # polls history for has nowhere durable to land without one.
-        file_bridge_id=store_agent,
-        # THE WALL: no ua_buy anywhere in the AI's reach
-        can_call={"cli": "*"},
+        # The conversation lives in the agent's MEMORY STORE — the refusal message
+        # this test polls history for lands there.
+        # THE WALL: no ua_buy anywhere in the AI's reach (only cli + its store)
+        **memory_meta(seeded_kernel, "ua_ai", {"cli": "*"}),
         callable_by={"ua_leg": ["send"], "ua_buy": ["send"]},
     )
     with TestClient(app) as c:

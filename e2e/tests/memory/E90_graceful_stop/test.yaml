@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow. No model: this is the kernel's own stop.
+id: graceful_stop
+group: memory
+title: "a call in flight at kernel_stop settles cancelled, lands in the store, and waits in the dead letters until acked"
+runner: probe.py
+costs: free
+limits:
+  idle_seconds: 60

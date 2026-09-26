@@ -28,7 +28,7 @@ Expected: `{"error":"scheduler.schedule: persist_blob: no store wired — persis
 ```bash
 FA=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 SCH=$(fantastic $SC schedule target=cli payload='{"type":"say","text":"hello"}' interval_seconds=60 | python -c "import json,sys;print(json.load(sys.stdin)['schedule_id'])")
-test -f .fantastic/agents/$SC/schedules.json && echo "OK persisted through the loader"
+test -f .fantastic/agents/$SC/schedules.yaml && echo "OK persisted through the loader"
 ```
 Expected: `OK persisted through the loader`. File contents include the schedule_id.
 
@@ -39,10 +39,10 @@ fantastic $SC tick_now schedule_id=$SCH
 ```
 Expected: `{"fired":true,"schedule_id":"<SCH>"}`.
 
-### Test 4: history.jsonl populated
+### Test 4: schedule_events.yaml populated
 
 ```bash
-test -f .fantastic/agents/$SC/history.jsonl && grep -c "schedule_fired" .fantastic/agents/$SC/history.jsonl
+test -f .fantastic/agents/$SC/schedule_events.yaml && grep -c "schedule_fired" .fantastic/agents/$SC/schedule_events.yaml
 ```
 Expected: ≥ 1.
 
@@ -77,7 +77,7 @@ Expected: `"count": <N>` with N ≥ 1.
 | 1 | schedule fails without a store (boot succeeds) | |
 | 2 | schedule persists through the loader | |
 | 3 | tick_now fires | |
-| 4 | history.jsonl populated | |
+| 4 | schedule_events.yaml populated | |
 | 5 | pause + resume toggle | |
 | 6 | unschedule removes | |
 | 7 | history endpoint | |

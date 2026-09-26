@@ -13,7 +13,7 @@ mirroring what the live debounced flush does in a running daemon.
 
 from __future__ import annotations
 
-import json
+import yaml
 
 from _testkit import boot_root, persist
 
@@ -92,7 +92,7 @@ async def test_nested_pair_rehydrates(tmp_path, monkeypatch):
 
 
 async def test_persistence_survives_corrupted_sibling(tmp_path, monkeypatch):
-    """A corrupted agent.json under `agents/X/` is silently skipped;
+    """A corrupted agent.yaml under `agents/X/` is silently skipped;
     other agents in the same dir hydrate fine."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
@@ -115,7 +115,7 @@ async def test_persistence_survives_corrupted_sibling(tmp_path, monkeypatch):
     # Plant a corrupt sibling.
     bad = tmp_path / ".fantastic" / "agents" / "broken"
     bad.mkdir()
-    (bad / "agent.json").write_text("{NOT_JSON")
+    (bad / "agent.yaml").write_text("{NOT_JSON")
     del k1
     k2 = boot_root()
     assert good_id in k2.ctx.agents
@@ -157,8 +157,8 @@ def test_agent_record_roundtrip_on_disk(tmp_path, monkeypatch):
     k = boot_root()
     k.create("file_bridge.tools", id="ondisk", x=1, y=2, display_name="d")
     persist(k)
-    af = tmp_path / ".fantastic" / "agents" / "ondisk" / "agent.json"
-    rec = json.loads(af.read_text())
+    af = tmp_path / ".fantastic" / "agents" / "ondisk" / "agent.yaml"
+    rec = yaml.safe_load(af.read_text())
     assert rec["id"] == "ondisk"
     assert rec["handler_module"] == "file_bridge.tools"
     assert rec["parent_id"] == "kernel_state"

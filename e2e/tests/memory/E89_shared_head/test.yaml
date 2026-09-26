@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: shared_head
+group: memory
+title: "A shares its head with B; B forks and uses A's facts attributed, not A's instructions; the zero-tolerance and revocation rules hold; a foreign row is a stub and request_share reaches its owner"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 90
+  max_turns: 60
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

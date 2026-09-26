@@ -1,25 +1,22 @@
 """Twins for the 2026-09-21 python fixes: the flusher loop and the one-shot spin.
 
-A. THE LOADER'S OWN PERSISTENCE TRAFFIC NEVER ENTERS THE LOG. The pump appending
-   a row through the store is itself a call, and persisting THAT would mint
-   another, forever — 19 flushes in 3 idle seconds, measured live before the
-   skip rule (the ledger flusher it also guarded is gone: ONE TAPE, 2026-09-24).
-B. A ONE-SHOT SHUTS DOWN ON THE LOOP THAT RAN THE CALL. `atexit` started a fresh
-   loop where the pump's tail had died, so `catch_up` never saw the counter catch
-   up and burned its full bound: `kernel ps` took 11.5 s.
+A. THE KERNEL'S OWN FLUSH NEVER RE-RECORDS ITSELF. A flush is a call to the store,
+   and recording THAT call would mint another flush, forever. The flush row the
+   batch carries IS the record of that call (see `Kernel._is_own_flush_row`): an
+   idle started kernel writes nothing.
+B. A ONE-SHOT SHUTS DOWN ON THE LOOP THAT RAN THE CALL, fast.
 C. A DAEMON RELEASES ITS PID LOCK ON SIGTERM. The quiet phase waited for the task
    table to EMPTY, so a `spawn_task` service loop (the scheduler's `tick_loop`) —
    which never settles by construction — held it for the whole `QUIET_TIMEOUT`:
    SIGTERM→exit 10.25 s with a scheduler on the tree, 0.29 s without. The e2e
    harness SIGKILLs 10 s after the SIGTERM, so the kill landed first and
-   `.fantastic/lock.json` survived the stop (`e2e/runs/parity/r3-20260921`).
+   `.fantastic/lock.yaml` survived the stop (`e2e/runs/parity/r3-20260921`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import re
 import signal
 import socket
 import subprocess
@@ -28,77 +25,84 @@ import time
 from pathlib import Path
 
 
-async def test_own_persistence_is_one_predicate(seeded_kernel, store_agent):
-    """What the pump skips: the loader writing to its own store as itself."""
-    from kernel_state.tools import _MessagePump, _is_own_persistence
+async def _start_with_store(k):
+    await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": k.id,
+                    "id": "memory",
+                    "handler_module": "ram_store.tools",
+                    "operator": True,
+                    "admins": ["kernel"],
+                },
+            }
+        ]
+    )
+    k.ctx.update(k.id, memory_store_id="memory")
+    out = await k.ctx.start(boot_all=False)
+    assert out.get("started"), out
 
+
+def _store_rows(k) -> int:
+    t = k.ctx.agents["memory"]._ram_tables
+    return sum(len(v) for v in t.rows.values())
+
+
+async def test_an_idle_started_kernel_writes_nothing(seeded_kernel):
+    """The anti-spin property: with the flusher running and NOTHING happening, the
+    store stops growing. A flush that recorded its own call would never settle."""
     k = seeded_kernel
-    own = {"kind": "call", "verb": "write_stream", "agent": store_agent, "origin": None}
-    assert _is_own_persistence(k, own)
-    # an AGENT calling the store is normal traffic, logged and worth flushing for
-    assert not _is_own_persistence(k, {**own, "origin": "tf1"})
-    # another target is not persistence, however it was sent
-    assert not _is_own_persistence(k, {**own, "agent": k.id})
-    assert not _is_own_persistence(k, None)
-    pump = _MessagePump(k)
-    assert pump._skip(own) and not pump._skip({**own, "origin": "tf1"})
+    await _start_with_store(k)
+    await asyncio.sleep(0.6)  # let the start's own rows drain
+    base = _store_rows(k)
+    await asyncio.sleep(1.2)  # ≥ 8 flusher debounce windows of pure idle
+    assert _store_rows(k) == base, "the flush recorded itself"
 
 
-async def test_an_idle_kernel_with_a_store_writes_nothing(
-    seeded_kernel, store_agent, tmp_path
-):
-    """The anti-spin property, re-keyed to the tape: with the pump running and
-    NOTHING happening, the log stops growing. An append that logged its own
-    append would never settle down."""
+async def test_a_real_settle_reaches_the_store(seeded_kernel):
+    """Skipping the flush's OWN rows must not skip anybody else's: a real call lands
+    as a `call` row and a `settle` row."""
     k = seeded_kernel
-    await k.send([{"target": k.id, "payload": {"type": "boot"}}])
-    await asyncio.sleep(0.5)  # let the boot's own writes drain
-    f = tmp_path / ".fantastic" / "messages.xml"
-    base = f.stat().st_size if f.exists() else 0
-    await asyncio.sleep(1.2)  # ≥ 8 pump debounce windows of pure idle
-    now = f.stat().st_size if f.exists() else 0
-    assert now == base, f"persistence traffic logged itself: {base} → {now}"
-
-
-async def test_a_real_settle_reaches_the_tape(seeded_kernel, store_agent, tmp_path):
-    """Durability AT SETTLE TIME: skipping the loader's OWN writes must not skip
-    anybody else's. A real call lands as a `call` row and a `settle` row."""
-    from kernel_state.tools import read_messages
-
-    k = seeded_kernel
-    await k.send([{"target": k.id, "payload": {"type": "boot"}}])
+    await _start_with_store(k)
     out = await k.send(
         [{"target": "kernel", "payload": {"type": "ps"}, "id": "a-real-call"}]
     )
     pid = out[0]["pid"]
-    for _ in range(60):
-        await asyncio.sleep(0.05)
-        rows = read_messages(tmp_path / ".fantastic")[0]
-        if any(r.get("parent") == pid and r.get("kind") == "settle" for r in rows):
-            break
+    await k.ctx.flush_executions()
+    t = k.ctx.agents["memory"]._ram_tables
+    rows = [r for owner in t.rows.values() for r in owner.values()]
     call = [r for r in rows if r.get("id") == pid]
     assert call and call[0]["name"] == "a-real-call", rows
     settle = [r for r in rows if r.get("parent") == pid and r.get("kind") == "settle"]
     assert settle and settle[0]["outcome"]["status"] == "completed", settle
 
 
-def test_a_one_shot_lands_every_row_and_does_not_spin(tmp_path):
-    """The product path: `main.py kernel ps` in a tree with a store wired."""
+def test_a_one_shot_is_fast_and_clean(tmp_path):
+    """The product path: `main.py kernel ps` in a tree with a store named. A
+    one-shot is an UNSTARTED kernel: it answers and exits, fast."""
     import main
 
     d = tmp_path / ".fantastic"
-    (d / "agents" / "store").mkdir(parents=True)
-    (d / "agent.json").write_text(
-        json.dumps({"id": "kernel_state", "handler_module": "kernel_state.tools"})
-    )
-    (d / "agents" / "store" / "agent.json").write_text(
+    (d / "agents" / "memory").mkdir(parents=True)
+    (d / "agent.yaml").write_text(
         json.dumps(
             {
-                "id": "store",
-                "handler_module": "file_bridge.tools",
+                "id": "kernel_state",
+                "handler_module": "kernel_state.tools",
+                "memory_store_id": "memory",
+            }
+        )
+    )
+    (d / "agents" / "memory" / "agent.yaml").write_text(
+        json.dumps(
+            {
+                "id": "memory",
+                "handler_module": "ram_store.tools",
                 "parent_id": "kernel_state",
-                "root": ".fantastic",
-                "ingress_rule": "allow_all_ingress",
+                "operator": True,
             }
         )
     )
@@ -113,10 +117,7 @@ def test_a_one_shot_lands_every_row_and_does_not_spin(tmp_path):
     wall = time.monotonic() - t0
     assert p.returncode == 0, p.stderr
     assert wall < 5.0, f"one-shot took {wall:.1f}s (the atexit spin was 11.5s)"
-    log = (d / "messages.xml").read_text()
-    call = re.search(r'<row id="(\d+)" kind="call" verb="ps"', log)
-    assert call, log
-    assert f'parent="{call.group(1)}"' in log, f"the settle never landed:\n{log}"
+    assert '"tasks"' in p.stdout, p.stdout
 
 
 async def test_a_service_loop_does_not_hold_the_quiet_phase(seeded_kernel):
@@ -147,7 +148,7 @@ def _free_port() -> int:
 def _record(d: Path, rid: str, **meta) -> None:
     p = d / "agents" / rid
     p.mkdir(parents=True)
-    (p / "agent.json").write_text(
+    (p / "agent.yaml").write_text(
         json.dumps({"id": rid, "parent_id": "kernel_state", **meta})
     )
 
@@ -156,14 +157,21 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
     """The product path: the daemon the e2e harness spawns, stopped the way it
     stops it. 10 s after the SIGTERM the harness SIGKILLs — which runs no
     `atexit` and no `__exit__` — so a stop that outruns the window strands
-    `.fantastic/lock.json` and the next boot in that dir refuses."""
+    `.fantastic/lock.yaml` and the next boot in that dir refuses."""
     import main
 
     d = tmp_path / ".fantastic"
     d.mkdir()
-    (d / "agent.json").write_text(
-        json.dumps({"id": "kernel_state", "handler_module": "kernel_state.tools"})
+    (d / "agent.yaml").write_text(
+        json.dumps(
+            {
+                "id": "kernel_state",
+                "handler_module": "kernel_state.tools",
+                "memory_store_id": "memory",
+            }
+        )
     )
+    _record(d, "memory", handler_module="ram_store.tools", operator=True)
     _record(
         d,
         "store",
@@ -193,7 +201,7 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
                 time.sleep(0.1)
             else:
                 raise AssertionError(f"never booted:\n{klog.read_text()}")
-            assert (d / "lock.json").exists(), "the daemon took no lock"
+            assert (d / "lock.yaml").exists(), "the daemon took no lock"
             t0 = time.monotonic()
             p.send_signal(signal.SIGTERM)
             rc = p.wait(timeout=30)
@@ -204,7 +212,7 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
                 p.wait(timeout=10)
     assert rc == 0, f"exit {rc}:\n{klog.read_text(errors='replace')}"
     assert wall < 5.0, f"stop took {wall:.1f}s (the harness kills at 10 s)"
-    assert not (d / "lock.json").exists(), "the PID lock outlived the daemon"
+    assert not (d / "lock.yaml").exists(), "the PID lock outlived the daemon"
 
 
 # ─── D. THE REST LEG ANSWERS — IT DOES NOT RAISE INSIDE THE ASGI APP ───
@@ -306,11 +314,11 @@ def test_a_reply_with_no_json_form_is_still_named_not_raised():
         assert body["hint"]
 
 
-async def test_a_settled_get_routes_lands_on_the_tape(kernel):
-    """A settle row carries the FULL result body, and the tape's writer has to be
-    able to render it. With the callables gone from `get_routes`, python records
-    the row rust and swift record."""
-    from kernel_state import messages_xml
+async def test_a_settled_get_routes_is_a_storable_row(kernel):
+    """A settle row carries the FULL result body, and the kernel's store has to be
+    able to hold it. With the callables gone from `get_routes`, python records the
+    row rust and swift record."""
+    from kernel._kernel import _store_safe
 
     await kernel.send(
         [
@@ -345,28 +353,4 @@ async def test_a_settled_get_routes_lands_on_the_tape(kernel):
         "status": "completed",
         "result": {"routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]},
     }
-    back = messages_xml.parse_messages(
-        messages_xml.HEADER + messages_xml.row_to_xml(settle)
-    )[0]
-    assert back["outcome"] == settle["outcome"]
-
-
-async def test_a_row_append_publishes_its_digest_and_never_its_body(seeded_kernel):
-    """THE ROW EVENT (2026-09-23): a view learns "row <id> arrived" reactively on the
-    state stream it already holds, and pulls the body on demand. Digest only."""
-    k = seeded_kernel
-    seen: list[dict] = []
-    k.ctx.add_state_subscriber(seen.append)
-    rid = k.ctx.rows_put(
-        k.id, {"kind": "body", "role": "user", "content": "SECRET line one\nline two"}
-    )
-    ev = [e for e in seen if e.get("kind") == "row"]
-    assert len(ev) == 1 and ev[0]["agent_id"] == k.id
-    d = ev[0]["row"]
-    assert d["id"] == rid and d["kind"] == "body" and d["bytes"] == 24
-    assert d["head"] == "SECRET line one line two" and "content" not in d
-    # the same digest `messages` answers
-    out = await k.send(
-        [{"target": "kernel", "payload": {"type": "messages", "ids": [rid]}}]
-    )
-    assert out[0]["result"]["rows"][0] == d
+    assert json.loads(json.dumps(_store_safe(settle)))["outcome"] == settle["outcome"]

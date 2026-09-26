@@ -6,6 +6,7 @@ call gets ONE runtime reminder; a `{"name":"done"}` call ends the chain
 silently. EVERY turn is held to it — a first turn from a person too (2026-09-09:
 "all is tool calls") — so prose with no call is nudged until `done`."""
 
+from _testkit import memory_meta
 import asyncio
 
 from ai_core import core
@@ -20,7 +21,7 @@ class _Script:
         self.incoming: list[str] = []
         self.delay = delay  # a slow first turn, so a second send can queue behind it
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         self.calls += 1
         self.incoming.append(messages[-1]["content"])
         if self.calls == 1 and self.delay:
@@ -72,7 +73,7 @@ async def test_silent_chain_turns_are_nudged_until_a_call_or_done(seeded_kernel)
         "ollama_backend.tools",
         id=aid,
         context_window=32768,
-        can_call={"cli": "*"},
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
     core._providers[aid] = fp
     try:
@@ -99,7 +100,10 @@ async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel):
     )
     aid = "nd_b"
     seeded_kernel.create(
-        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
     core._providers[aid] = fp
     try:
@@ -120,7 +124,10 @@ async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel):
     fp = _Script(["just an answer, no calls", DONE])
     aid = "nd_c"
     seeded_kernel.create(
-        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
     core._providers[aid] = fp
     try:
@@ -150,7 +157,10 @@ async def test_await_with_nothing_in_flight_is_refused_and_told_what_to_do(
     fp = _Script(['waiting <call name="await"></call>', DONE])
     aid = "nd_aw"
     seeded_kernel.create(
-        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
     core._providers[aid] = fp
     try:
@@ -173,7 +183,10 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
     fp = _Script(['waiting <call name="await"></call>', DONE], delay=0.3)
     aid = "nd_aw2"
     seeded_kernel.create(
-        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
     core._providers[aid] = fp
     try:

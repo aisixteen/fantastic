@@ -44,7 +44,7 @@ async def main():
                 f"file that carried an audit marker (grep for it if it is no longer in view). Then {DONE}.")
         a = await run_arm(root, core, BK, FB, AID, STRATEGY, EXTRA, task, "report.md")
         want = f"marker: filler_1.txt {marker}"
-        print(f"     turns={a['turns']}  folded={a['folded']}  recalls={a['recall_rows']}  greps={a['greps']}  pulls={a['pulls']}  "
+        print(f"     turns={a['turns']}  folded={a['folded']}  recalls={a['recall_rows']}  greps={a['greps']}  folds_opened={a['folds_opened']}  "
               f"self-replies dehydrated={a['dehydrated_self']}{(' ' + '; '.join(a.get('dehydrated_self_tags') or [])) if a['dehydrated_self'] else ''}  FOUND={want in a['body']}")
         checks = [
             (f"folds fired ({a['folded']})", a["folded"] >= 1),

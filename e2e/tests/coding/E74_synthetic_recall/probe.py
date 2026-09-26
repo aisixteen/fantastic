@@ -1,11 +1,12 @@
 """coding/synthetic_recall — the agent wakes into a history it never lived.
 
-A realistic store is written from above BEFORE the agent exists: a goal, twelve
-dehydrated reads, two folds whose bodies carry a RULE and a FACT, a marker under one of
-them. Then the agent is created: `boot` runs `context_recall`, which fits the head to
-the budget and asks the model what it wants in full. Scored on the persisted view (it
-exists, fits, holds both folds and the tail, carries a why), on the recall row, and on a
-task that needs the rule and the fact.
+A realistic conversation is written into the agent's MEMORY STORE from above BEFORE the
+agent exists: a goal, twelve digested reads (their bodies were never kept — each reply
+is its origin line), two folds whose summaries carry a RULE and a FACT. Then the agent
+is created; its boot is lazy, so its FIRST TURN reads the head and runs `context_recall`,
+which fits the head to the budget and asks the model what it wants in full. Scored on
+the persisted view (it exists, fits, holds both folds, carries a why), on the recall
+row, and on a task that needs the rule and the fact — with no file re-read.
 """
 from __future__ import annotations
 
@@ -40,11 +41,12 @@ from ai_core.folds import make_fold
 FB = "synth_fb"
 
 
-def _reply(mint, pid, parent, title, size):
+def _reply(mint, pid, parent, title, size, path):
     return {"role": "user", "id": mint(), "parent": parent,
             "content": f'[reply to {pid} · notes read · "{title}" · ↑{parent}]\n'
-                       f"(settled, {size} bytes — NOT inlined. To find a line in it: send yourself "
-                       f"{{type:'grep', query:'<substring>', ids:[{pid}]}}. To read it: {{type:'pull', pid:{pid}, offset:0}})"}
+                       f"(settled, {size} bytes — NOT inlined, held in memory only until this agent "
+                       f"restarts. origin: notes {path} — read {{path: {path}}}. To find a line in it: "
+                       f"send yourself <type>grep</type> <query>substring</query> <ids><item>{pid}</item></ids>)"}
 
 
 async def main():
@@ -57,33 +59,33 @@ async def main():
         mint = root.ctx.mint_id  # ids come from the kernel's one counter, planted or not
         goal = {"role": "user", "id": mint(), "parent": None,
                 "content": "Survey filler_0..11 one per turn, then write report.md listing every file."}
-        rows, bodies, ids = [goal], {}, []
+        rows, ids = [goal], []
         prev = goal["id"]
         for i in range(12):
             call_id = mint()
             pid = mint()
             rows.append({"role": "assistant", "id": call_id, "parent": prev,
                          "content": f'Reading filler_{i}. <call name="send"><target_id>notes</target_id><title>survey filler_{i}</title><type>read</type><path>filler_{i}.txt</path></call>'})
-            rep = _reply(mint, pid, call_id, f"survey filler_{i}", 3000)
+            rep = _reply(mint, pid, call_id, f"survey filler_{i}", 3000, f"filler_{i}.txt")
             rows.append(rep); ids.append((call_id, rep["id"]))
-            bodies[pid] = Path(f"filler_{i}.txt").read_text()
             prev = rep["id"]
         f1 = make_fold(AID, [x for pair in ids[:6] for x in pair], "filler_0-5 surveyed: padding; HOUSE RULE learned",
                        f"Read filler_0..5. All padding. HOUSE RULE (from the operator, binds the whole run): report.md must OPEN with the exact line `## {rule_tok}`.", False, id=mint(), parent=goal["id"])
         f2 = make_fold(AID, [x for pair in ids[6:] for x in pair], "filler_6-11 surveyed: marker in filler_5? no — fact recorded",
                        f"Read filler_6..11. Padding. FACT recorded for the report: the build id is `{fact_tok}`; write it as `build: {fact_tok}`.", False, id=mint(), parent=goal["id"])
         rows += [f1, f2]
-        # PLANT BEFORE THE AGENT EXISTS. `_save_history` resolves the leg from the record,
-        # so the record is created first with no provider (no turn runs), planted, then
-        # deleted and re-created through `connect` — whose `boot` finds a store and recalls.
-        await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": AID,
-                                    "handler_module": "text_file.tools", "target_id": FB,
-                                    "file_bridge_id": FB, "can_call": {FB: "*"}})
-        await plant_store(core, root, AID, rows, bodies)
-        await call(root, root.id, {"type": "delete_agent", "id": AID})
-        # ── boot → context_recall ─────────────────────────────────────────────
+        # PLANT BEFORE THE AGENT EXISTS — into its memory store, as the store's admin;
+        # the store keys rows by owner, so the agent need not exist yet.
+        await plant_store(core, root, AID, rows)
         from helpers.facts_arm import connect_arm
         conn = await connect_arm(root, core, BK, FB, AID, STRATEGY, EXTRA)
+        # ── the task ─────────────────────────────────────────────────────────
+        task = (f"Write `report.md` through `notes`: list every filler you surveyed, one per line, obeying the "
+                f"house rule you learned and including the build id you recorded. Do not re-read the fillers. Then {DONE}.")
+        from helpers import drive
+        await drive(conn, task, client_id=AID, via="user")
+        await conn.close()
+        # THE FIRST TURN rebuilt the view (lazy boot → context_recall on turn one).
         view = await read_view(core, root, AID)
         rows_after = await store_rows(root, core, AID)
         recalls = [m for m in rows_after if m.get("kind") == "recall"]
@@ -91,26 +93,22 @@ async def main():
         has_folds = bool(view) and {f1["id"], f2["id"]} <= {e["id"] for e in view["ids"]}
         print(f"     view rows={len((view or {}).get('ids') or [])}  fits={fits}  folds in view={has_folds}  "
               f"why={(view or {}).get('why', '')[:80]!r}  recall rows={len(recalls)}")
-        # ── the task ─────────────────────────────────────────────────────────
-        task = (f"Write `report.md` through `notes`: list every filler you surveyed, one per line, obeying the "
-                f"house rule you learned and including the build id you recorded. Do not re-read the fillers. Then {DONE}.")
-        from helpers import drive
-        await drive(conn, task, client_id=AID, via="user")
-        await conn.close()
         body = Path("report.md").read_text() if Path("report.md").exists() else ""
-        final_rows = await store_rows(root, core, AID)
         from helpers import ctx_score
-        pulls = len(ctx_score.calls_made(final_rows, target=AID, verb="pull"))
+        # only what the MODEL wrote — the planted assistant rows carry the twelve original reads
+        planted_ids = {r["id"] for r in rows}
+        mine = [r for r in rows_after if r.get("id") not in planted_ids]
+        rereads = len([c for c in ctx_score.calls_made(mine, verb="read") if str(c["payload"].get("path", "")).startswith("filler_")])
         opens = body.strip().splitlines()[0].strip() == f"## {rule_tok}" if body.strip() else False
         checks = [
-            ("a view was persisted at boot", bool(view)),
+            ("a view was persisted on the first turn", bool(view)),
             ("the view fits the budget", fits),
             ("the view holds both folds", has_folds),
             ("the view carries a why", bool((view or {}).get("why"))),
             (f"a recall row was written ({len(recalls)})", len(recalls) >= 1),
-            ("the report opens with the rule from a fold body", opens),
-            ("the report carries the fact from a fold body", f"build: {fact_tok}" in body),
-            (f"it pulled at most 6 pages ({pulls})", pulls <= 6),
+            ("the report opens with the rule from a fold summary", opens),
+            ("the report carries the fact from a fold summary", f"build: {fact_tok}" in body),
+            (f"no filler was re-read ({rereads})", rereads == 0),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

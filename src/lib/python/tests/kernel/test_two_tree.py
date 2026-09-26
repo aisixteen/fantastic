@@ -118,9 +118,9 @@ async def test_two_tree_roundtrip(tmp_path, monkeypatch):
 
     # ── on host disk, under the web/ namespace ──
     web = tmp_path / ".fantastic" / "web" / "agents"
-    assert (web / "canvas" / "agent.json").exists()
-    assert (web / "canvas" / "agents" / "panel" / "agent.json").exists()
-    assert (web / "canvas" / "agents" / "vfx" / "agent.json").exists()
+    assert (web / "canvas" / "agent.yaml").exists()
+    assert (web / "canvas" / "agents" / "panel" / "agent.yaml").exists()
+    assert (web / "canvas" / "agents" / "vfx" / "agent.yaml").exists()
 
     # ── REHYDRATE: a fresh frontend kernel loads via web_loader.load_tree ──
     reply = (

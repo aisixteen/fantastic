@@ -1,8 +1,11 @@
 """scheduler bundle — recurring tasks as an agent.
 
 State (sidecars in `.fantastic/agents/{id}/`, persisted THROUGH the loader):
-  schedules.json   — list of {id, target, payload, interval_seconds, next_run, paused, run_count, timeout?}
-  history.jsonl    — append-only schedule_fired events, ring-trimmed to HISTORY_MAX
+  schedules.yaml         — a YAML sequence of {id, target, payload, interval_seconds, next_run, paused, run_count, timeout?}
+  schedule_events.yaml   — a YAML STREAM, one `---` document per schedule_fired event,
+                           ring-trimmed to HISTORY_MAX
+  Both are written by `kernel_state.yaml_io.dump` — the one emitter config the
+  kernel's own files use (block style, indent 2, key order kept).
 
 There is NOTHING to wire — the scheduler persists through `kernel_state` (the loader),
 which owns the `.fantastic` store. A write failfasts only when no store is wired at the
@@ -32,10 +35,12 @@ at it doubled every delivery.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import secrets
 import time
+
+import yaml
+from kernel_state import yaml_io
 
 from kernel import operator_context
 from kernel._refusal import bad
@@ -102,8 +107,8 @@ def validate_meta(meta: dict, record: dict) -> str | None:
 
 # Sidecar filenames — kernel_state computes the dir (`agents/<id>/`) under the one
 # `.fantastic` store it owns. The scheduler wires NOTHING; it persists THROUGH the loader.
-_SCHED_NAME = "schedules.json"
-_HISTORY_NAME = "history.jsonl"
+_SCHED_NAME = "schedules.yaml"
+_HISTORY_NAME = "schedule_events.yaml"
 
 
 async def _file_read(sid: str, kernel, name: str) -> str | None:
@@ -164,16 +169,17 @@ async def _load(sid: str, kernel) -> list[dict]:
         _cache[sid] = []
         return _cache[sid]
     try:
-        _cache[sid] = json.loads(raw)
-    except json.JSONDecodeError:
-        _cache[sid] = []
+        doc = yaml_io.load(raw)
+    except yaml.YAMLError:
+        doc = None
+    _cache[sid] = doc if isinstance(doc, list) else []
     return _cache[sid]
 
 
 async def _save(sid: str, kernel) -> dict | None:
     """Persist the cache THROUGH the loader; returns an error dict on failure."""
     return await _file_write(
-        sid, kernel, _SCHED_NAME, json.dumps(_cache.get(sid, []), indent=2)
+        sid, kernel, _SCHED_NAME, yaml_io.dump(_cache.get(sid, []))
     )
 
 
@@ -182,28 +188,29 @@ async def _save(sid: str, kernel) -> dict | None:
 
 async def _append_history(sid: str, kernel, event: dict) -> dict | None:
     raw = await _file_read(sid, kernel, _HISTORY_NAME) or ""
-    appended = raw + json.dumps(event, default=str) + "\n"
-    # Ring-trim if oversize.
-    lines = appended.splitlines()
-    if len(lines) > 2 * HISTORY_MAX:
-        appended = "\n".join(lines[-HISTORY_MAX:]) + "\n"
+    appended = raw + yaml_io.row_to_doc(event)
+    # Ring-trim if oversize: keep the newest HISTORY_MAX documents.
+    events = _parse_events(appended)
+    if len(events) > 2 * HISTORY_MAX:
+        appended = "".join(yaml_io.row_to_doc(e) for e in events[-HISTORY_MAX:])
     return await _file_write(sid, kernel, _HISTORY_NAME, appended)
+
+
+def _parse_events(raw: str) -> list[dict]:
+    """The event stream's documents that are mappings. A malformed stream reads
+    empty (reads are lenient, as they were for the JSON-lines file)."""
+    try:
+        docs = list(yaml.load_all(raw, Loader=yaml.CSafeLoader))
+    except yaml.YAMLError:
+        return []
+    return [d for d in docs if isinstance(d, dict)]
 
 
 async def _read_history(sid: str, kernel, limit: int) -> list[dict]:
     raw = await _file_read(sid, kernel, _HISTORY_NAME)
     if not raw:
         return []
-    out: list[dict] = []
-    for line in raw.splitlines()[-limit:]:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
+    return _parse_events(raw)[-limit:]
 
 
 # ─── tick loop ──────────────────────────────────────────────────
@@ -399,7 +406,10 @@ async def _unschedule(id, payload, kernel):
 
 async def _list(id, payload, kernel):
     """No args. Returns {schedules: [<schedule record>, ...]}."""
-    return {"schedules": list(await _load(id, kernel))}
+    return {
+        "schedules": list(await _load(id, kernel)),
+        "origin": f"{id} list — re-send; changes as schedules change",
+    }
 
 
 async def _pause(id, payload, kernel):
@@ -470,7 +480,11 @@ async def _history(id, payload, kernel):
     sid = payload.get("schedule_id")
     if sid:
         entries = [e for e in entries if e.get("schedule_id") == sid]
-    return {"history": entries, "count": len(entries)}
+    return {
+        "history": entries,
+        "count": len(entries),
+        "origin": f"{id} history — re-send; grows as schedules fire",
+    }
 
 
 # ─── dispatch ───────────────────────────────────────────────────

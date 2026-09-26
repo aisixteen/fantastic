@@ -1,9 +1,11 @@
 """coding/reboot_continuity — kill the process state, keep the store, continue.
 
-Sixteen reads. After the eighth the agent is deleted and re-created on the same id and
-leg (the sidecar, bodies and view live under the run cwd and survive). `boot` runs
-`context_recall`. Scored: the report lists all sixteen, reads after the reboot do not
-repeat the first eight, and the post-reboot view is a subset of the store.
+Sixteen reads. After the eighth the agent is deleted and re-created on the same id: its
+rows and view stay in its memory store (delete_agent keeps store data), while reply
+bodies — held in RAM only — are gone. The boot is lazy; the first turn after it reads
+the head and runs `context_recall`. Scored: the report lists all sixteen, reads after
+the reboot do not repeat the first eight, and the post-reboot view is a subset of the
+store.
 """
 from __future__ import annotations
 
@@ -55,9 +57,6 @@ async def main():
         reads_before = len(ctx_score.calls_made(before, target="notes", verb="read"))
         # ── REBOOT ───────────────────────────────────────────────────────────
         conn = await reboot_agent(root, core, BK, FB, AID, STRATEGY, EXTRA, watch_conn=conn)
-        view = await read_view(core, root, AID)
-        store_ids = {m.get("id") for m in await store_rows(root, core, AID)}
-        view_ok = bool(view) and all(e["id"] in store_ids for e in view["ids"])
         # WHAT WAS READ IS MEASURED, NOT ASSUMED. Phase one is bounded at 14 turns, so the
         # first instruction is usually unfinished; a second instruction that claims "you
         # already have 0..7" is false and the model rightly re-read the gap (measured
@@ -71,6 +70,10 @@ async def main():
                 f"one per line. Then {DONE}.")
         await drive(conn, rest, client_id=AID, via="user")
         await conn.close()
+        # THE BOOT IS LAZY: the first turn after it read the head and rebuilt the view.
+        view = await read_view(core, root, AID)
+        store_ids = {m.get("id") for m in await store_rows(root, core, AID)}
+        view_ok = bool(view) and all(e["id"] in store_ids for e in view["ids"])
         after = await store_rows(root, core, AID)
         reads_after = len(ctx_score.calls_made(after, target="notes", verb="read")) - reads_before
         rereads = sum(1 for c in ctx_score.calls_made(after[len(before):], target="notes", verb="read")

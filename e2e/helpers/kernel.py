@@ -56,6 +56,10 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
 
         root = boot_root()
         Cli(root.ctx, parent=root)
+        # THE MEMORY STORE, then the start sequence — as the daemon does.
+        from helpers import memory
+
+        await memory.wire_in_process(root)
 
         async def close() -> None:
             return None
@@ -85,7 +89,7 @@ async def reopen_kernel(root):
     The first process must already be gone (`root.ctx.shutdown()` stops it and
     waits). The tree under `.fantastic` is what survives: records, rows, the
     message log. `HostKernel.seed` is idempotent on an existing tree — it boots
-    a seed process only when `agent.json` is absent, then rewrites the driver's
+    a seed process only when `agent.yaml` is absent, then rewrites the driver's
     own records (web/ws/rest) to the same bytes — so booting again here is the
     restart the probe means, not a fresh kernel wearing the old directory.
 
@@ -102,3 +106,53 @@ async def reopen_kernel(root):
     spec = {"cmd": k.cmd, "root_id": k.root_id, "env": {}}
     k2 = HostKernel(spec, k.workdir, reach=list(k.reach)).boot()
     return WireRoot(k2)
+
+
+async def restart(root, core):
+    """STOP this kernel and START A NEW ONE on the same directory — the records on
+    disk and the memory store's tables carried across. Returns `(root2, stop)`,
+    `stop` being the agent half's own report (`shutdown_agents`).
+
+    A `ram_store` dies with its process, so the harness carries its tables the way a
+    durable store keeps them by itself: `dump` → new kernel → `inject`, BEFORE the new
+    kernel's first turn reads anything. The guid and the id counter come back with the
+    root record, so every carried row keeps its key and no id repeats.
+
+    IN PROCESS the stop is `shutdown_agents` + `Kernel.shutdown()` (drain, every call
+    settled, the last rows flushed) and the dump is taken AFTER it, so it holds the
+    stop's own endings. OVER THE WIRE the kernel is a process and a draining kernel
+    refuses new work, so the dump is taken BEFORE the stop — what the stop itself
+    settles is not carried.
+    """
+    from helpers import memory
+
+    async def _k(r, payload):
+        return (await r.send([{"target": "kernel", "payload": payload}]))[0]["result"]
+
+    if core is not None:
+        from _testkit import boot_root, persist
+        from cli import Cli
+
+        from kernel._kernel import shutdown_context
+
+        stop = await root.ctx.shutdown_agents()
+        await root.ctx.shutdown()
+        with shutdown_context():
+            tables = await memory.dump(root)
+        persist(root)
+        core._providers.clear()
+        core._projection.clear()
+        core._compaction_mark.clear()
+        root2 = boot_root()
+        Cli(root2.ctx, parent=root2)
+        await memory.inject(root2, tables)
+        out = await root2.ctx.start(boot_all=True)
+        if not out.get("started"):
+            raise SystemExit(f"kernel_start refused after restart: {out}")
+        return root2, stop
+    tables = await memory.dump(root)
+    stop = await _k(root, {"type": "shutdown_agents"})
+    await root.ctx.shutdown()
+    root2 = await reopen_kernel(root)
+    await memory.inject(root2, tables)
+    return root2, stop

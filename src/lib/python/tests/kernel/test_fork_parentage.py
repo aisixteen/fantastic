@@ -89,10 +89,11 @@ async def test_a_programs_send_is_parented_to_the_job_not_a_dead_dispatch(
     # THE ROW THE PROGRAM'S SEND WROTE.
     rows = [
         r
-        for r in root.ctx.rows_for("mailbox")
+        for r in root.ctx.rows.values()
+        if r.get("agent") == "mailbox"
         if (r.get("verb") or (r.get("payload") or {}).get("type")) == "note"
     ]
-    assert rows, f"no row for the program's send: {root.ctx.rows_for('mailbox')}"
+    assert rows, f"no row for the program's send: {list(root.ctx.rows.values())}"
     parent = rows[0].get("parent")
 
     # The dispatch that forked the relay is LONG GONE...

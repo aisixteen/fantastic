@@ -2,7 +2,7 @@
 
 Every entity in the system is an Agent. Agents have:
   - An in-memory `record` (id + handler_module + parent_id + meta). A
-    loader agent persists it to `<root_path>/agent.json` — Agent itself
+    loader agent persists it to `<root_path>/agent.yaml` — Agent itself
     never touches disk; `_root_path` is just its address in the tree.
   - A `_children: dict[str, Agent]` (empty for leaves).
   - An asyncio inbox for incoming payloads.
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 import os
 import secrets
 import sys
@@ -57,6 +56,7 @@ from kernel._refusal import (
     INVALID_META,
     LOCKED,
     NO_CONSUMER,
+    NOT_FOUND,
     NOT_HERE,
     TIMEOUT,
     UNAUTHORIZED,
@@ -78,16 +78,20 @@ from kernel._kernel import (
     _in_shutdown,
     CANCELLED,
     COMPLETED,
+    DEAD_STATUSES,
     ERRORED,
     FAILED,
     Kernel,
     TIMED_OUT,
     _current_origin,
+    _current_remote,
     _current_sender,
     _current_task,
+    _remote_caller,
     _summarize_payload,
     operator_context,
     outcome,
+    stored_outcome,
     page,
 )
 
@@ -109,28 +113,18 @@ _SYSTEM_VERBS = frozenset(
         # faces. Plain verbs — an AGENT can call them on another agent.
         "ps",
         "cancel",
-        # The EXECUTION LEDGER's read surface — named executions, live and
+        # The EXECUTION LEDGER's read surface — every execution, live and
         # settled, outcomes included. `ps` is work in flight; `ledger` is what
-        # named work BECAME. Terminal non-completed rows ARE the dead-letter
-        # queue: parked, inspectable, never silently retried.
+        # work BECAME. Terminal non-completed rows ARE the dead-letter queue:
+        # parked, inspectable, never silently retried; `ack_deadletter` retires one.
         "ledger",
-        # THE ROW STORE's read surface — conversation rows by id, at DIGEST
-        # resolution. Gated INSIDE the handler (root verbs skip ingress): an
-        # agent reads its own rows; anyone else's only when that owner's
-        # `callable_by` names the caller for `messages`; the operator sees all.
-        "messages",
-        # THE ROW STORE's whole surface, PRIVILEGED. `messages` is the read every
-        # agent may be granted (digests, no bodies); these two are hydration —
-        # reading a conversation WHOLE and writing one into an agent — which is
-        # what a loader does from above. A wildcard never carries them; only a
-        # grant that NAMES them does.
-        "rows_read",
-        "rows_write",
-        # Root-only control verb — gated inside its handler to the tree
-        # root (a non-root agent answers with an error). Stops the whole
-        # kernel process gracefully; see `_verb_shutdown_kernel`.
+        "ack_deadletter",
+        # The kernel's LIFECYCLE. `kernel_start` is the one start sequence (the
+        # root's memory store first, then everyone); `kernel_stop` the graceful
+        # stop of the process. `shutdown_agents` stops the agents, not the process.
+        "kernel_start",
         "shutdown_agents",
-        "shutdown_kernel",
+        "kernel_stop",
     }
 )
 
@@ -145,8 +139,10 @@ _MUTATING_VERBS = frozenset(
         "update_agent",
         "delete_agent",
         "cancel",
+        "ack_deadletter",
+        "kernel_start",
         "shutdown_agents",
-        "shutdown_kernel",
+        "kernel_stop",
     }
 )
 
@@ -187,29 +183,24 @@ _SYSTEM_VERB_DOCS = {
     "ledger": (
         "No args. EVERY execution and what it became — named under its id, "
         "unnamed under its minted pid — {executions:[{id, target, status, "
-        "attempts, retries, named, outcome?}]}, paged, scoped to what YOU "
-        "originated. Failed/timed_out/cancelled rows are the dead-letter queue: "
-        "inspect, then retry with a NEW id if you choose — nothing is retried "
-        "silently."
+        "attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU "
+        "originated; read from the kernel's memory store plus what is not yet "
+        "flushed. `outcome` keeps the RESULT only for a named call; a dead letter "
+        "keeps its error; anything else is {status, bytes} — the reply itself went "
+        "to its caller. Failed/timed_out/cancelled rows are the dead-letter queue "
+        "(announced by the `on_deadletter` event): inspect, retry with a NEW id "
+        "if you choose, then `ack_deadletter` it — nothing is retried silently."
     ),
-    "messages": (
-        "args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, "
-        "at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, bytes, "
-        "title?, level?, refs?}], refused:[ids], next?}. Your own rows always; another "
-        "agent's only if its callable_by names you for `messages`. Bodies are behind "
-        "that agent's `pull`."
+    "ack_deadletter": (
+        "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD "
+        "LETTER (failed/timed_out/cancelled) you originated: recorded in the "
+        "kernel's store, it may then be pruned. Returns {acked:true, id}."
     ),
-    "rows_read": (
-        "args: agent:str (req), after:int|str?, limit:int?. PRIVILEGED (a wildcard does "
-        "not carry it). That agent's "
-        "rows WHOLE (content included), oldest first — {rows:[…], next?}. The "
-        "hydration read; agents read digests through `messages` instead."
-    ),
-    "rows_write": (
-        "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a wildcard does "
-        "not carry it). Appends rows "
-        "to that agent's conversation, each under a FRESH id — {ids:[int]}. A row "
-        "may not carry an `id`; re-ids are the caller's to remap."
+    "kernel_start": (
+        "No args. THE START SEQUENCE — the root must name `memory_store_id` (fail "
+        "loud otherwise): boots the root, then that store, starts flushing the "
+        "kernel's execution rows into it, then boots every other agent in "
+        "registration order. Idempotent. Returns {started, store, booted:[ids]}."
     ),
     "cancel": (
         "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
@@ -221,8 +212,10 @@ _SYSTEM_VERB_DOCS = {
         "sends `shutdown` to every agent advertising it, waits for in-flight work, "
         "cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
     ),
-    "shutdown_kernel": (
-        "No args. Stops the kernel PROCESS — under env:'container', the container."
+    "kernel_stop": (
+        "No args. Stops the kernel PROCESS gracefully — drain, every call settles "
+        "(done, or cancelled into the dead letters), the last rows flush, agents "
+        "shut down, exit. Under env:'container', the container."
     ),
 }
 
@@ -283,7 +276,7 @@ class Agent:
     Public attributes — read freely; mutate only through the methods.
 
     Class-level `ephemeral`: when True, a loader skips this agent
-    entirely — `save()` omits it and no agent.json is ever written.
+    entirely — `save()` omits it and no agent.yaml is ever written.
     Use for per-process composables that have no meaningful state —
     e.g. the stdout renderer (`Cli`). Defaults to False; subclasses
     override.
@@ -315,7 +308,7 @@ class Agent:
         `root_path` is a DERIVED ADDRESS ONLY — the loader agent owns
         all disk I/O; an Agent never reads or writes it. Sidecar bundles
         (file / chat / readme) compute their paths under it, and
-        the loader maps `<root_path>/agent.json` ←→ this record. Children
+        the loader maps `<root_path>/agent.yaml` ←→ this record. Children
         address at `<root_path>/agents/<child_id>/`.
         """
         if not isinstance(ctx, Kernel):
@@ -530,7 +523,7 @@ class Agent:
 
     @property
     def record(self) -> dict:
-        """Persistent fields written to agent.json — id +
+        """Persistent fields written to agent.yaml — id +
         handler_module + parent_id + meta."""
         rec: dict[str, Any] = {"id": self.id}
         if self.handler_module is not None:
@@ -600,6 +593,13 @@ class Agent:
         """
         if not isinstance(items, list):
             raise TypeError("send takes a LIST of {target, payload, timeout?} items")
+        # NAMED EXECUTIONS OUTLIVE RAM. Once flushed, a settled execution is only in
+        # the kernel's store; an item naming one is looked up there FIRST, so the
+        # synchronous launch below finds it exactly as if it had never left RAM.
+        if self.ctx.store_id is not None and any(
+            isinstance(it, dict) and it.get("id") is not None for it in items
+        ):
+            await self.ctx.recall_executions(items)
         results: list[dict | None] = [None] * len(items)
         dispatched: list[_Dispatched] = []
         for i, item in enumerate(items):  # SYNC loop — every pid exists
@@ -911,13 +911,13 @@ class Agent:
         if bad := self._check_retries(item):
             return None, bad
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        origin = _current_sender.get()
+        caller = _current_sender.get()
         # EVERY SEND IS A MESSAGE. The row names the call — who was asked what,
         # by which message — and takes the outcome's status at settle; the reply
         # body stays with the reply. `parent` is the message that made the call.
         # ONE TAPE. The row carries the WHOLE call — the dispatch payload
         # verbatim, the retry budget, the attempt count as at dispatch, the
-        # deadline — because there is no second file: `messages.xml` is the only
+        # deadline — because there is no second file: `messages.yaml` is the only
         # thing that outlives the process, and `attempts` is updated on this dict
         # at every retry (the kernel owns the row in RAM).
         row = {
@@ -925,7 +925,7 @@ class Agent:
             "kind": "call",
             "verb": payload.get("type"),
             "parent": _current_task.get(),
-            "origin": origin,
+            "caller": caller,
             "payload": payload,
             "named": name is not None,
             "retries": retries,
@@ -937,7 +937,7 @@ class Agent:
         self.ctx.rows_put(target.id, row)
         # The side entry is the WHOLE engine: dedup and join key on it, retry
         # re-issues against it, dead-letter is reading it. `attempts` counts real
-        # runs; `origin` scopes who may see the row through the `ledger` verb.
+        # runs; `caller` scopes who may see the row through the `ledger` verb.
         self.ctx.ledger_put(
             exec_id,
             {
@@ -949,7 +949,7 @@ class Agent:
                 "attempts": 1,
                 "named": name is not None,
                 "name": name,
-                "origin": origin,
+                "caller": caller,
             },
         )
         return fut, None
@@ -1144,61 +1144,48 @@ class Agent:
         return out
 
     def _stamp_call(self, pid: int | None, out: dict) -> None:
-        """Settle the call: stamp the live row AND append a `settle` row.
+        """Settle the call: append a `settle` row carrying what the kernel KEEPS of
+        the outcome (`stored_outcome`: the whole result for a named call, the error
+        text for a dead letter, `{status, bytes}` otherwise).
 
-        THE SETTLE IS ITS OWN ROW because the stamp alone never reached disk.
-        The call row is appended at LAUNCH and the stamp MUTATES that dict in
-        place; the loader's pump renders rows on a 0.15 s debounce, so
-        `messages.xml` carried an outcome only for calls that happened to
-        settle inside that window. Everything slower — every AI reply, every
-        job, every stream — was written down as a launch with no ending, and a
-        cold read could not tell "never settled" from "settled late". A row is
-        append-only by contract (`Kernel.rows_put`), so the ending has to be
-        an append, not an edit.
+        THE SETTLE IS ITS OWN ROW — a row is append-only, so the ending is an
+        append, never an edit of the call row. With the call row it is the record
+        of what a call became, and it is what the kernel flushes into its memory
+        store and reads back for `ledger` and for named-call dedup.
 
-        THE SETTLE ROW CARRIES THE FULL OUTCOME — `{status, result}`, the body
-        included, plus the final `attempts`. It is the only record of what a
-        call became: `ledger.json` is gone, and a boot rebuilds `executions`
-        (dedup across restart, C9) by reading these rows back.
-
-        The stamp stays on the LIVE call row: live readers (`messages` digests,
-        the `ledger` verb) read it there and must keep working. Hydration
-        replays the settle rows onto their parents."""
-        row = self.ctx.rows.get(pid) if pid is not None else None
-        if row is None:
+        The call row may already be flushed (and gone from RAM) by now; the target
+        comes from the live execution. A dead ending (failed / timed_out /
+        cancelled) is ANNOUNCED — `on_deadletter` — because nothing retries it on
+        its own: someone has to look."""
+        if pid is None:
             return
+        row = self.ctx.rows.get(pid)
+        exe = self.ctx.executions.get(pid)
         res = out.get("result")
         stamp = {"status": out.get("status")}
         if isinstance(res, dict) and res.get("error"):
             stamp["error"] = str(res.get("error"))[:200]
             if res.get("reason"):
                 stamp["reason"] = res.get("reason")
-        row["outcome"] = stamp
-        exe = self.ctx.executions.get(pid)
+        if row is not None:
+            row["outcome"] = stamp  # the live row, while it is still in RAM
         attempts = out.get("attempts")
         if attempts is None and exe is not None:
             attempts = exe["attempts"]
-        # ON THE ROOT, not on the settled call's agent. A settle is KERNEL
-        # bookkeeping — the ledger's half of a dispatch — and an agent's row
-        # list is read as its CONVERSATION by everything from the model's own
-        # history to a fork's `copy_rows`. Every one of those readers filters
-        # bookkeeping by an enumerated set of kinds, hardcoded independently in
-        # five places, so a new kind on an agent's list is conversation to
-        # whichever reader has not been told about it. Measured 2026-09-11:
-        # `settle` reached a model's prompt as a message reading `null`, and
-        # `thread_fork` copied settles as conversation and lost its arithmetic.
-        # The root's list is already nobody's conversation; `agent` stays a
-        # FIELD so the ending still names what it ended.
+        target = (exe or {}).get("target") or (row or {}).get("agent") or self.id
+        # ON THE ROOT: a settle is KERNEL bookkeeping; `settled` names the target.
         self.ctx.rows_put(
             self.ctx.root.id,
             {
                 "kind": "settle",
                 "parent": pid,
-                "settled": row.get("agent") or self.id,
-                "outcome": {"status": out.get("status"), "result": out.get("result")},
+                "settled": target,
+                "outcome": stored_outcome(out, bool((exe or {}).get("named"))),
                 "attempts": attempts,
             },
         )
+        if out.get("status") in DEAD_STATUSES:
+            self.ctx.announce_deadletter(pid, out, attempts)
 
     def advertises(self, verb: str) -> bool:
         """Whether this agent's bundle answers `verb` (its `VERBS` table)."""
@@ -1522,7 +1509,7 @@ class Agent:
                 "kind": "call",
                 "verb": payload.get("type"),
                 "parent": _current_task.get(),
-                "origin": _current_sender.get(),
+                "caller": _current_sender.get(),
                 "payload": payload,
                 "internal": True,
             },
@@ -2032,74 +2019,11 @@ class Agent:
 
     # ─── public API: state stream ──────────────────────────────
 
-    def may_read_rows(self, reader_id: str | None, owner_id: str) -> bool:
-        """THE ROW READ GATE — one rule for `messages` and for the `row` state event:
-        an operator (`None`) or the owner itself always; anyone else only if the
-        OWNER's `callable_by` names them for `messages`. A missing owner reads as
-        refused."""
-        if reader_id is None or reader_id == owner_id:
-            return True
-        owner = self.ctx.agents.get(owner_id)
-        if owner is None:
-            return False
-        d = authorize_call(
-            owner._meta.get("callable_by") or {},
-            "messages",
-            reader_id,
-            holder_id=owner.id,
-            holder_parent=owner.parent.id if owner.parent is not None else None,
-            holder_children=frozenset(owner._children),
-            loader_id=self._root().id,
-            enforce_privileged=False,
-        )
-        return bool(d.allowed)
-
-    def authorize_row_bodies(self, reader_id: str) -> dict | None:
-        """May `reader_id` receive row BODIES on the state stream? Bodies are what
-        `rows_read` guards — the privileged, kernel-wide read no wildcard carries —
-        so a body subscription is gated exactly as that verb on the ROOT, once, at
-        subscribe time. Refusal, or None. Operator (`sender=None`) ungated."""
-        if _current_sender.get() is None:
-            return None
-        return self._gate(reader_id, "rows_read", self._root(), {})
-
-    def add_state_subscriber(
-        self,
-        callback: Callable[[dict], None],
-        reader_id: str | None = None,
-        body: bool = False,
-    ):
-        """Tap the state stream. `reader_id` names WHO reads (a leg subscribing on
-        behalf of a client, after `authorize_state_subscribe`): `row` events are
-        then delivered only for agents that reader may read (`may_read_rows`) —
-        the stream cannot leak a digest the `messages` verb would refuse. An
-        operator tap (`None`) sees every event.
-
-        `body=True` (after `authorize_row_bodies` for a reader) adds the row's
-        `content` to every `row` event, so a view that renders every row skips
-        the pull round-trip; a `rows_read` holder reads every row whole already,
-        so no per-row filter applies to it."""
-        if not body and reader_id is None:
-            return self.ctx.add_state_subscriber(callback)
-
-        def gated(event: dict) -> None:
-            if event.get("kind") == "row":
-                if not body and not self.may_read_rows(
-                    reader_id, event.get("agent_id", "")
-                ):
-                    return
-                if body:
-                    row = self.ctx.rows.get(event["row"]["id"])
-                    event = {
-                        **event,
-                        "row": {
-                            **event["row"],
-                            "content": (row or {}).get("content", ""),
-                        },
-                    }
-            callback(event)
-
-        return self.ctx.add_state_subscriber(gated)
+    def add_state_subscriber(self, callback: Callable[[dict], None]):
+        """Tap the state stream (agent lifecycle + traffic telemetry). Conversation
+        rows are NOT on it: the kernel holds none — an AI agent announces its own
+        rows to its watchers (`watch`, gated by that agent)."""
+        return self.ctx.add_state_subscriber(callback)
 
     def state_snapshot(self) -> list[dict]:
         return self.ctx.state_snapshot()
@@ -2119,6 +2043,12 @@ class Agent:
         # PAYLOAD names a resource can tell whose it is. `_current_sender` is
         # about to become this agent's own id, which is why this is separate.
         _current_origin.set(origin)
+        # A bridge leg relaying a remote caller marked its send; the address belongs
+        # to THIS dispatch only when the leg itself is its origin. Consumed here, so
+        # the handler's own sends carry no remote caller.
+        rc = _remote_caller.get()
+        _remote_caller.set(None)
+        _current_remote.set(rc[1] if rc is not None and rc[0] == origin else None)
         return await self._dispatch(payload)
 
     async def _dispatch(self, payload: dict) -> dict | None:
@@ -2284,19 +2214,17 @@ class Agent:
         if verb == "ps":
             return self._verb_ps(payload)
         if verb == "ledger":
-            return self._verb_ledger(payload)
-        if verb == "messages":
-            return self._verb_messages(payload)
-        if verb == "rows_read":
-            return self._verb_rows_read(payload)
-        if verb == "rows_write":
-            return self._verb_rows_write(payload)
+            return await self._verb_ledger(payload)
+        if verb == "ack_deadletter":
+            return await self._verb_ack_deadletter(payload)
         if verb == "cancel":
             return await self._verb_cancel(payload)
+        if verb == "kernel_start":
+            return await self._verb_kernel_start(payload)
         if verb == "shutdown_agents":
             return await self._verb_shutdown_agents(payload)
-        if verb == "shutdown_kernel":
-            return await self._verb_shutdown_kernel(payload)
+        if verb == "kernel_stop":
+            return await self._verb_kernel_stop(payload)
         return refusal(UNHANDLED, f"unhandled system verb {verb!r}", verb=verb)
 
     def _verb_ps(self, payload: dict) -> dict:
@@ -2308,179 +2236,73 @@ class Agent:
         tasks, nxt = page(self.ctx.task_rows(), payload, key=lambda r: r["id"])
         return {"tasks": tasks, "next": nxt}
 
-    def _verb_messages(self, payload: dict) -> dict:
-        """args: ids:list[int|str] (req), limit:int?, after:int|str?. Rows by id at DIGEST
-        resolution, gated INSIDE: the caller's own rows always; another agent's only
-        when that owner's `callable_by` names the caller for `messages` (the same
-        ingress check `_gate` runs, re-run here against the OWNER because a root verb
-        skips ingress); the operator sees all. Refused ids are LISTED, never silently
-        dropped. Bodies stay behind the owner's `pull`."""
-        raw = payload.get("ids")
-        ids = [_as_id(x) for x in raw] if isinstance(raw, list) else []
-        if not ids or any(x is None for x in ids):
-            return refusal(
-                BAD_ARG,
-                "messages: `ids` must be a non-empty list of message ids (ints)",
-                arg="ids",
-            )
-        caller = _current_origin.get()
-        allowed_owner: dict[str, bool] = {}
-
-        def may_read(owner_id: str) -> bool:
-            if owner_id not in allowed_owner:
-                allowed_owner[owner_id] = self.may_read_rows(caller, owner_id)
-            return allowed_owner[owner_id]
-
-        after = _as_id(payload.get("after"))
-        if after is not None and after in ids:
-            ids = ids[ids.index(after) + 1 :]
-        out, refused = [], []
-        for rid in ids:
-            row = self.ctx.rows.get(rid)
-            if row is None:
-                refused.append(rid)
-                continue
-            if not may_read(row.get("agent", "")):
-                refused.append(rid)
-                continue
-            out.append(self.ctx.row_digest(rid, row))
-        # DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
-        try:
-            limit = int(payload.get("limit") or 0)
-        except (TypeError, ValueError):
-            limit = 0
-        cap_bytes = 32 * 1024
-        kept: list[dict] = []
-        used = 0
-        for d in out:
-            if limit and len(kept) >= limit:
-                break
-            n = len(json.dumps(d))
-            if used + n > cap_bytes:
-                break
-            kept.append(d)
-            used += n
-        nxt = kept[-1]["id"] if len(kept) < len(out) and kept else None
-        return {"rows": kept, "refused": refused, "next": nxt}
-
-    def _verb_rows_read(self, payload: dict) -> dict:
-        """args: agent:str (req), after:int|str?, limit:int?. That agent's rows WHOLE —
-        content included, oldest first — {rows:[…], next:int|None}.
-
-        PRIVILEGED: a wildcard grant never carries it, so reaching it takes a
-        grant that NAMES `rows_read`. This is hydration's read, the one
-        `messages` deliberately is not (digests, no bodies, grantable per
-        owner) — an agent reading another's conversation whole is exactly what
-        the digest exists to prevent, and saying so takes an explicit yes."""
-        agent = payload.get("agent")
-        if not isinstance(agent, str) or not agent.strip():
-            return refusal(
-                BAD_ARG, "rows_read: `agent` must be an agent id", arg="agent"
-            )
-        rows = self.ctx.rows_for(agent.strip())
-        after = _as_id(payload.get("after"))
-        if after is not None:
-            ids = [r.get("id") for r in rows]
-            rows = rows[ids.index(after) + 1 :] if after in ids else []
-        try:
-            limit = int(payload.get("limit") or 0)
-        except (TypeError, ValueError):
-            limit = 0
-        truncated = bool(limit) and len(rows) > limit
-        kept = rows[:limit] if truncated else rows
-        return {"rows": kept, "next": kept[-1]["id"] if truncated and kept else None}
-
-    def _verb_rows_write(self, payload: dict) -> dict:
-        """args: agent:str (req), rows:list[dict] (req). Append rows to that agent's
-        conversation, each under a FRESH id — {ids:[int]}, in the order given.
-        PRIVILEGED, for the same reason as `rows_read`: this is what a loader does
-        from above (hydrating a store it just read), and an agent writing into
-        another's conversation is not a thing a WILDCARD should ever say yes to.
-
-        A row may not carry its own `id`: the store is the only allocator. Re-ids
-        are the CALLER's to remap — the kernel does not know which of a row's
-        fields are references, and guessing would corrupt a fold's `refs`."""
-        agent = payload.get("agent")
-        if not isinstance(agent, str) or not agent.strip():
-            return refusal(
-                BAD_ARG, "rows_write: `agent` must be an agent id", arg="agent"
-            )
-        rows = payload.get("rows")
-        if (
-            not isinstance(rows, list)
-            or not rows
-            or not all(isinstance(r, dict) for r in rows)
-        ):
-            return refusal(
-                BAD_ARG,
-                "rows_write: `rows` must be a non-empty list of rows",
-                arg="rows",
-            )
-        if any("id" in r and r["id"] is not None for r in rows):
-            return refusal(
-                BAD_ARG,
-                "rows_write: a row may not carry an `id` — the store mints every "
-                "id, and a copy is a NEW row",
-                arg="rows",
-            )
-        aid = agent.strip()
-        return {"ids": [self.ctx.rows_put(aid, dict(r)) for r in rows]}
-
-    def _verb_ledger(self, payload: dict) -> dict:
+    async def _verb_ledger(self, payload: dict) -> dict:
         """No args. EVERY execution and what it became — named under its id,
         unnamed under its minted pid — {executions:[{id, target, status,
-        attempts, retries, named, outcome?}]}, paged. `status` is 'in_flight'
-        until the row settles, then the outcome's own status; `outcome` appears
-        only once settled. `named` says which kind of row it is: True for a
-        caller-named execution (its `id` is the caller's own, and is also its
-        `cancel`/`ps` handle), False for an unnamed send. Either way `id` is the
-        kernel's message id (an int); a named row also carries `name`.
+        attempts, retries, named, outcome?, acked?}]}, paged. `status` is
+        'in_flight' until the execution settles, then the outcome's own status.
 
-        This docstring — and the `ledger` line every reflect carries — used to
-        say NAMED executions only, and that "unnamed sends never appear here".
-        Both were true before unnamed executions were ledgered under their pid
-        and neither was true afterwards, so a model reading the reflect expected
-        its own handful of jobs and received every minted-pid row beside them.
-
-        Rows whose status is failed/timed_out/cancelled are the DEAD-LETTER
-        QUEUE: terminal, inspectable, never silently retried — a retry is a
-        caller's explicit new id."""
-        # ORIGIN-SCOPED. The ledger carries other agents' RESULT BODIES; an
+        A PROJECTION, not a table: the executions still in RAM (in flight, or
+        settled and not yet flushed) merged with the `call`/`settle`/`ack` rows the
+        kernel flushed into its memory store — each call paired with its settle.
+        Rows whose status is failed/timed_out/cancelled are the DEAD-LETTER QUEUE:
+        terminal, inspectable, never silently retried; `ack_deadletter` retires one."""
+        # CALLER-SCOPED. The ledger carries other agents' RESULT BODIES; an
         # unscoped read would be a side-channel around `callable_by` (read any
         # agent's replies without its ingress ever saying yes). An agent sees
         # the executions IT originated; the operator (sender=None) sees all.
         viewer = _current_origin.get()
-        rows = []
-        for eid, row in self.ctx.executions.items():
-            if viewer is not None and row.get("origin") != viewer:
-                continue
-            fut = row["fut"]
-            entry = {
-                "id": eid,
-                "target": row["target"],
-                "attempts": row["attempts"],
-                "retries": row["retries"],
-                "named": row["named"],
-            }
-            if row.get("name"):
-                entry["name"] = row["name"]
-            if fut.done():
-                out = fut.result()
-                entry["status"] = out["status"]
-                # TODO(ledger digest): this is the FULL result body of every execution,
-                # with no default `limit` (page(): absent ⇒ everything) and a docstring
-                # that says "No args." — so one call returns more than the caller's
-                # whole window and the message dies on `too_small`. Measured 2026-09-05:
-                # 34k–127k tokens against a 12k window, 5 of 6 e2e arms killed. Fix:
-                # digest rows {id, target, verb, status, attempts, bytes, head, title}
-                # here, full body only via {type:'ledger', id}. Same in rust and swift.
-                # Kernel change — waiting on explicit approval, python first.
-                entry["outcome"] = _json_safe(out)
-            else:
-                entry["status"] = "in_flight"
-            rows.append(entry)
+        entries = await self.ctx.ledger_entries()
+        rows = [
+            e for e in entries if viewer is None or e.pop("_caller", None) == viewer
+        ]
+        for e in rows:
+            e.pop("_caller", None)
         page_rows, nxt = page(rows, payload, key=lambda r: r["id"])
         return {"executions": page_rows, "next": nxt}
+
+    async def _verb_ack_deadletter(self, payload: dict) -> dict:
+        """args: id:int|str (req — an execution id, or its name). Acknowledge a DEAD
+        LETTER you originated (the operator: any). The ack is a row in the
+        kernel's store; an acked dead letter may be pruned. Returns {acked, id}."""
+        raw = payload.get("id")
+        if raw is None or raw == "" or isinstance(raw, bool):
+            return missing("ack_deadletter", "id")
+        viewer = _current_origin.get()
+        entries = await self.ctx.ledger_entries()
+        eid = _as_id(raw)
+        hit = next(
+            (
+                e
+                for e in entries
+                if (eid is not None and e["id"] == eid)
+                or (eid is None and e.get("name") == raw)
+            ),
+            None,
+        )
+        if hit is None or (viewer is not None and hit.get("_caller") != viewer):
+            return refusal(
+                NOT_FOUND,
+                f"ack_deadletter: no execution {raw!r} of yours in the ledger",
+                arg="id",
+            )
+        if hit.get("status") not in DEAD_STATUSES:
+            return refusal(
+                BAD_ARG,
+                f"ack_deadletter: execution {hit['id']} is {hit.get('status')!r}, not a dead "
+                "letter — only failed / timed_out / cancelled work is acknowledged",
+                arg="id",
+            )
+        if hit.get("acked"):
+            return {"acked": True, "id": hit["id"], "already": True}
+        self.ctx.rows_put(
+            self.ctx.root.id,
+            {"kind": "ack", "parent": hit["id"], "caller": viewer},
+        )
+        exe = self.ctx.executions.get(hit["id"])
+        if exe is not None:
+            exe["acked"] = True
+        return {"acked": True, "id": hit["id"]}
 
     async def _verb_cancel(self, payload: dict) -> dict:
         """args: task_id:int — kill that task AND ITS SUBTREE (children first,
@@ -2507,43 +2329,34 @@ class Agent:
             return {"cancelled": False, "killed": []}
         return await self.ctx.cancel_task(task_id)
 
+    async def _verb_kernel_start(self, payload: dict) -> dict:
+        """No args. The start sequence — see `Kernel.start`. Idempotent."""
+        return await self.ctx.start(boot_all=True)
+
     async def _verb_shutdown_agents(self, payload: dict) -> dict:
         """No args. The agent half of a graceful stop: drain, the `shutdown` verb
         to every agent that advertises it, quiet, cancel the rest. The kernel keeps
-        serving; the persister catches up. Root control surface only."""
+        serving; the flusher catches up. Root control surface only."""
         return await self.ctx.shutdown_agents()
 
-    async def _verb_shutdown_kernel(self, payload: dict) -> dict:
-        """Gracefully stop the whole kernel PROCESS (root control surface
-        only). Privileged: a non-root agent answers with an error so the
-        verb is gated to the kernel's own control surface, not an
-        arbitrary child.
+    async def _verb_kernel_stop(self, payload: dict) -> dict:
+        """Gracefully stop the whole kernel PROCESS (root control surface only).
 
-        Order: (1) ack `{type:"shutdown_kernel", ok:true}` and let it
-        flush; (2) AFTER the reply is on the wire, trigger the daemon's
-        normal graceful path (release `.fantastic/lock.json`, drain
-        in-flight + stop the HTTP/WS listeners), (3) exit code 0. The exit
-        is DEFERRED via `call_later` so the in-flight REST body / WS frame
-        is fully written before uvicorn is drained — never exit
-        synchronously here or the caller sees a dropped socket, not an ack.
+        Order: (1) ack `{type:"kernel_stop", ok:true}` and let it flush; (2) AFTER
+        the reply is on the wire, trigger the daemon's graceful path — drain, every
+        call settles (done, or cancelled into the dead letters), the last execution
+        rows flush into the kernel's store, agents shut down, the lock releases —
+        (3) exit code 0. The exit is DEFERRED via `call_later` so the in-flight
+        REST body / WS frame is fully written before uvicorn is drained.
 
-        Backend-agnostic stop: the kernel is PID 1 in a container, so its
-        exit stops the container (auto-removed under `--rm`); a bare host
-        process simply dies. Either way the port goes down and the lock
-        releases — the caller need not know how the kernel was launched.
-
-        Idempotent / one-shot: reuses the daemon's single `stop` event, so
-        a racing SIGTERM collapses to one shutdown; a second call lands on
-        a dead port. In non-daemon contexts (one-shot CLI / REPL-only with
-        no serve loop) there is nothing to stop — it still acks."""
+        The kernel is PID 1 in a container, so its exit stops the container; a
+        bare host process simply dies. Idempotent: reuses the daemon's single
+        `stop` event, so a racing SIGTERM collapses to one shutdown. With no serve
+        loop (one-shot CLI / REPL-only) there is nothing to stop — it still acks."""
         ev = self.ctx.shutdown_event
         if ev is not None and not ev.is_set():
-            # Defer the trigger so the ack reply is fully flushed to the
-            # caller before the serve loop tears uvicorn down. 100ms is
-            # imperceptible and well within a bounded grace; uvicorn's own
-            # graceful drain (server.should_exit) handles the socket close.
             asyncio.get_running_loop().call_later(0.1, ev.set)
-        return {"type": "shutdown_kernel", "ok": True}
+        return {"type": "kernel_stop", "ok": True}
 
     _LIST_HINT = (
         "Raw records — how agents are WIRED, not what they are FOR, and no manual. "

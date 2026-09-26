@@ -24,6 +24,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from backends import THINK_BUDGET
+from helpers import memory
 from helpers import verdict
 from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime
 
@@ -162,6 +163,10 @@ def main(scenario_id: str) -> int:
         can_call = {**BASE, store["id"]: "*"}
         for peer in (sc.get("grants") or {}).get("ai_can_call", []):
             can_call[peer] = "*"
+        # ITS MEMORY: the conversation lives in the kernel's `memory` store — the
+        # agent names it and may call it; the store's ingress for `ai` was seeded
+        # (every declared id may reach it).
+        can_call[memory.MEMORY] = "*"
         ai = k.create(
             parent_id=k.root_id,
             id="ai",
@@ -171,7 +176,7 @@ def main(scenario_id: str) -> int:
             # appended it while python did not.
             endpoint=endpoint,
             model=model,
-            file_bridge_id=store["id"],
+            memory_store_id=memory.MEMORY,
             # ONE BUDGET (backends.THINK_BUDGET), not a second default here.
             max_tokens=int(os.environ.get("MAX_TOKENS") or THINK_BUDGET),
             can_call=can_call,

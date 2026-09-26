@@ -77,7 +77,7 @@ async def test_shutdown_walks_depth_first(seeded_kernel):
 
 async def test_shutdown_does_not_touch_records_or_tree(seeded_kernel, tmp_path):
     """Shutdown is the OPPOSITE of cascade-delete: hooks run, tree
-    stays. ctx.agents, parent._children, and the on-disk agent.json
+    stays. ctx.agents, parent._children, and the on-disk agent.yaml
     must all survive so the next boot rehydrates the same tree."""
     fired: list[str] = []
 

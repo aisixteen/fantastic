@@ -9,8 +9,9 @@ description = "Fantastic kernel_state — the durable-state root agent (tree roo
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 # Depends on file_bridge for `fs` — the single clamped disk surface (all disk IO
-# funnels through it; nothing here touches the disk directly).
-dependencies = ["fantastic-file-bridge"]
+# funnels through it; nothing here touches the disk directly). pyyaml (libyaml C
+# binding, CSafeLoader/CSafeDumper) for the on-disk format: agent.yaml + messages.yaml.
+dependencies = ["fantastic-file-bridge", "pyyaml>=6"]
 
 [project.entry-points."fantastic.bundles"]
 kernel_state = "kernel_state.tools"

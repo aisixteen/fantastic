@@ -32,6 +32,7 @@ from io_bridge._base import Action, Decision, EgressRule, IngressRule, parse_spe
 from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import DenyInbound, resolve_ingress
 from io_bridge.egress_rules import Silent, resolve_egress
+from kernel import current_origin, remote_caller_context
 from kernel._refusal import NOT_CONNECTED, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
@@ -144,7 +145,7 @@ class _BridgeState:
 _bridges: dict[str, _BridgeState] = {}
 
 # Test seam: MemoryTransport tests inject a pre-built transport here before booting
-# (a memory pair can't be carried in agent.json). `boot` pops it for `transport=memory`.
+# (a memory pair can't be carried in agent.yaml). `boot` pops it for `transport=memory`.
 _test_transport_inject: dict[str, _BaseTransport] = {}
 
 
@@ -166,6 +167,35 @@ def _next_corr(id: str, st: _BridgeState) -> str:
     # the serving side. Bridge-minted correlators are caller-chosen ids like
     # any other — fresh per forward, so each forward is its own intent.
     return f"{id}-{st.corr_counter}"
+
+
+def _local_guid(kernel: Any) -> str | None:
+    root = getattr(getattr(kernel, "ctx", None), "root", None)
+    return (root.record.get("guid") if root is not None else None) or None
+
+
+def _check_caller(kernel: Any, caller: Any) -> dict | None:
+    """INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it: it
+    must read `<guid>|<agent id>`, and the guid must NOT be this kernel's own — a
+    remote cannot pose as a local agent. (A remote naming some THIRD kernel's guid is
+    not detectable here; accepted.)"""
+    if caller is None:
+        return None
+    if (
+        not isinstance(caller, str)
+        or caller.count("|") != 1
+        or not all(caller.split("|"))
+    ):
+        return {
+            "error": f"bridge: frame caller {caller!r} is not `<guid>|<agent id>`",
+            "reason": "unauthorized",
+        }
+    if caller.split("|")[0] == _local_guid(kernel):
+        return {
+            "error": "bridge: a remote frame claims THIS kernel's guid as its caller — refused",
+            "reason": "unauthorized",
+        }
+    return None
 
 
 async def _serve_inbound_call(
@@ -211,7 +241,17 @@ async def _serve_inbound_call(
         fid = frame.get("id")
         if isinstance(fid, str) and fid:
             item["id"] = fid
-        reply = (await kernel.send([item]))[0]["result"]
+        caller = frame.get("caller")
+        bad_caller = _check_caller(kernel, caller)
+        if bad_caller is not None:
+            reply = bad_caller
+        elif caller:
+            # THE QUALIFIED CALLER rides into the dispatch: a memory store keys what
+            # this call writes by `<remote guid>|<remote agent>`, not by this leg.
+            with remote_caller_context(kernel.id, caller):
+                reply = (await kernel.send([item]))[0]["result"]
+        else:
+            reply = (await kernel.send([item]))[0]["result"]
     try:
         await transport.send({"type": "reply", "id": frame.get("id"), "data": reply})
     except ConnectionClosed:
@@ -402,6 +442,11 @@ async def _forward(id, payload, kernel):
     st.pending[corr] = fut
 
     frame = {"type": "call", "id": corr, "target": target, "payload": inner}
+    # WHO IS CALLING, QUALIFIED: `<this kernel's guid>|<the agent that asked>`
+    # (`kernel` for the operator). The far side keys store rows by it.
+    guid = _local_guid(kernel)
+    if guid:
+        frame["caller"] = f"{guid}|{current_origin() or 'kernel'}"
     # Stamp this leg's EGRESS credential on the envelope via the shared decorator.
     frame = stamp_egress(st.egress, frame)
     try:

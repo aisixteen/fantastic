@@ -7,6 +7,7 @@ has_api_key flag appears in reflect) plus 429-retry behavior covered."""
 
 from __future__ import annotations
 
+from _testkit import ensure_memory
 import asyncio
 import json
 import os
@@ -25,7 +26,7 @@ class _FakeProvider:
         self._scripts = list(scripts)
         self.calls = 0
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, max_tokens=None):
         items = self._scripts.pop(0) if self._scripts else []
         self.calls += 1
         for x in items:
@@ -72,11 +73,13 @@ async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None)
     # queueing, history and status — not context math) would fail on
     # `context_insufficient` for reasons unrelated to what they assert.
     # Deny-all: the backend streams its turn to `cli` via send (default client).
-    can_call = {"cli": "*"}
+    store = ensure_memory(kernel)
+    can_call = {"cli": "*", store: "*"}
     meta = {
         "handler_module": "nvidia_nim_backend.tools",
         "context_window": 32768,
         "can_call": can_call,
+        "memory_store_id": store,
     }
     if file_bridge_id is not None:
         meta["file_bridge_id"] = file_bridge_id
@@ -335,7 +338,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 await asyncio.sleep(0.20)
@@ -410,7 +413,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
     order: list[str] = []
 
     class _SerialProvider:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             nonlocal in_flight, max_in_flight
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
@@ -485,7 +488,7 @@ async def test_send_retries_once_on_rate_limit(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 raise _http_status_error(429, retry_after="0")
@@ -529,7 +532,7 @@ async def test_send_surfaces_error_after_repeated_rate_limit(
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             raise _http_status_error(429, retry_after="0")
             yield  # unreachable; makes this an async generator
@@ -560,7 +563,7 @@ async def test_send_does_not_retry_on_non_429_http_error(seeded_kernel, store_ag
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             raise _http_status_error(503)
             yield
@@ -591,7 +594,7 @@ async def test_mid_stream_429_propagates_without_retry(seeded_kernel, store_agen
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             yield "partial "
             raise _http_status_error(429, retry_after="0")
@@ -682,7 +685,7 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 await asyncio.sleep(0.10)
@@ -749,7 +752,7 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
     captured: list[dict] = []
 
     class _SlowProvider:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             captured.append(
                 (
                     await seeded_kernel.send(
@@ -798,7 +801,7 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 await asyncio.sleep(0.15)
@@ -878,7 +881,7 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
     holder: list[dict] = []
 
     class _RedactProvider:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             holder.append(
                 (
                     await seeded_kernel.send(
@@ -922,7 +925,7 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
     nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _SlowProvider:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             await asyncio.sleep(5.0)
             yield "never"
 
@@ -1001,7 +1004,7 @@ async def test_status_done_emits_with_reason_timeout(
     monkeypatch.setattr(nt, "SEND_TIMEOUT", 0.05)
 
     class _ForeverProvider:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             await asyncio.sleep(5.0)
             yield "never"
 
@@ -1070,7 +1073,7 @@ async def test_status_thinking_during_429_wait(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 req = httpx.Request("POST", "https://x")

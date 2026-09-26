@@ -15,6 +15,7 @@ the safe alphabet — `cid__turn` works, `cid#turn` does not.
 
 from __future__ import annotations
 
+from _testkit import memory_meta
 import asyncio
 
 from ai_core import core
@@ -89,7 +90,7 @@ class _Blocked:
     def __init__(self):
         self.release = asyncio.Event()
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         await self.release.wait()
         yield "done"
 
@@ -99,7 +100,10 @@ async def test_a_send_cancelled_while_queued_leaves_no_phantom_queue_entry(
 ):
     aid = "cid_queue"
     seeded_kernel.create(
-        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
     blocked = _Blocked()
     core._providers[aid] = blocked

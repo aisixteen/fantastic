@@ -40,7 +40,7 @@ def _body(n: int, size: int = 200) -> list[dict]:
     ]
 
 
-async def _fake_summary(_msgs) -> str:
+async def _fake_summary(_msgs, max_tokens=None) -> str:
     return "SUMMARY"
 
 
@@ -57,7 +57,7 @@ def _ctx(
 
 
 class _FakeProvider:
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         yield "FAKESUMMARY"
 
 
@@ -117,7 +117,7 @@ async def test_compact_returns_projection_with_summary():
 async def test_truncate_returns_projection_no_summarizer():
     called = []
 
-    async def spy(_msgs):
+    async def spy(_msgs, max_tokens=None):
         called.append(1)
         return "S"
 
@@ -147,7 +147,7 @@ async def test_tool_pairing_never_orphans_role_tool():
 
 
 async def test_summarizer_failure_degrades_to_stub():
-    async def boom(_msgs):
+    async def boom(_msgs, max_tokens=None):
         raise RuntimeError("nope")
 
     proj = await get_strategy("compact")(
@@ -191,7 +191,7 @@ async def test_seam_short_circuits_when_under_budget():
         {}, _cfg(), _FakeProvider(), "ai", k, "cli", msgs, len(msgs) - 1
     )
     assert out == msgs  # unchanged
-    assert _projection["ai"] == {"fired": False}
+    assert _projection["ai"] == {"fired": False, "trigger": 0.8, "calibration": 1.0}
     assert k.sent == [] and k.emitted == []  # no context event when nothing compacts
 
 
@@ -746,28 +746,40 @@ def test_a_stale_reflect_whose_body_has_a_bracket_still_dedupes():
 
 
 async def test_context_clear_starts_a_new_thread_without_deleting(seeded_kernel):
-    """`context_clear`: the view begins at the `[cleared …]` row; earlier rows stay
-    in the store, reachable through recall/grep (behind=True) and by id."""
+    """`context_clear` is a CLEAR-FOLD: one row whose members are every row since the
+    previous clear; the view begins at its `[cleared …]` line; nothing is deleted —
+    recall/grep reach the members, and `history {fold}` lists them."""
+    from _testkit import memory_meta
+
     k = seeded_kernel
     aid = "ai_clear"
-    ctx = core._ctx(k)
-    for role, text in (("user", "the codename is HALCYON"), ("assistant", "noted")):
-        ctx.rows_put(aid, {"role": role, "content": text})
+    k.create("ollama_backend.tools", id=aid, **memory_meta(k, aid, {"cli": "*"}))
+    await core._save_history(
+        aid,
+        k,
+        [
+            {"role": "user", "content": "the codename is HALCYON"},
+            {"role": "assistant", "content": "noted"},
+        ],
+    )
     assert len(await core._load_history(aid, k)) == 2
     out = await core._context_clear(aid, {"why": "fresh start"}, k)
-    assert out["behind"] == 2
+    assert out["rows"] == 2
     hist = await core._load_history(aid, k)
     assert len(hist) == 1 and hist[0]["kind"] == "clear"
     assert hist[0]["content"].startswith(
-        f"[cleared {out['cleared']} · 2 rows behind] fresh start"
+        f"[cleared {out['cleared']} · 2 rows] fresh start"
     )
+    assert len(hist[0]["refs"]) == 2, "the clear-fold's members are the earlier rows"
     assert "HALCYON" not in json.dumps(hist)
     # behind the boundary, everything is still there
     assert len(await core._load_history(aid, k, behind=True)) == 3
     r = await core._recall(aid, {"query": "codename"}, k)
     assert r["total"] == 1
+    g = await core._grep(aid, {"query": "halcyon"}, k)
+    assert g["total"] == 1
     # the persisted view is emptied, so assembly renders the store from the clear on
     assert (await core._load_view(aid, k))["ids"] == []
     # chatting on: the new thread grows after the mark
-    ctx.rows_put(aid, {"role": "user", "content": "hello again"})
+    await core._save_history(aid, k, [{"role": "user", "content": "hello again"}])
     assert [r["content"] for r in await core._load_history(aid, k)][-1] == "hello again"

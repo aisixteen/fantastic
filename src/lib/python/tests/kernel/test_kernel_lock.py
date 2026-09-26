@@ -9,6 +9,7 @@ import json
 import os
 
 import pytest
+import yaml
 
 from kernel import (
     LOCK_FILE,
@@ -50,7 +51,7 @@ def test_pid_alive_zero_negative():
 def test_acquire_writes_lock_when_none():
     acquire_lock()
     assert LOCK_FILE.exists()
-    data = json.loads(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text())
     assert data == {"pid": os.getpid()}
 
 
@@ -62,14 +63,14 @@ def test_acquire_raises_when_live_lock_present(tmp_path):
     with pytest.raises(RuntimeError, match="another fantastic owns this dir"):
         acquire_lock()
     # Existing lock untouched.
-    assert json.loads(LOCK_FILE.read_text())["pid"] == os.getpid()
+    assert yaml.safe_load(LOCK_FILE.read_text())["pid"] == os.getpid()
 
 
 def test_acquire_overwrites_stale_lock():
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCK_FILE.write_text(json.dumps({"pid": 2**31 - 2}))
     acquire_lock()
-    data = json.loads(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text())
     assert data == {"pid": os.getpid()}
 
 
@@ -77,7 +78,7 @@ def test_acquire_overwrites_corrupt_lock():
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCK_FILE.write_text("not json {{{")
     acquire_lock()
-    data = json.loads(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text())
     assert data == {"pid": os.getpid()}
 
 
@@ -117,7 +118,7 @@ def test_context_manager_acquires_and_releases():
     assert not LOCK_FILE.exists()
     with FantasticLock():
         assert LOCK_FILE.exists()
-        assert json.loads(LOCK_FILE.read_text()) == {"pid": os.getpid()}
+        assert yaml.safe_load(LOCK_FILE.read_text()) == {"pid": os.getpid()}
     assert not LOCK_FILE.exists()
 
 
@@ -134,5 +135,5 @@ def test_context_manager_raises_on_conflict():
 def test_lock_shape():
     """The lock file is `{pid:int}`."""
     acquire_lock()
-    data = json.loads(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text())
     assert data == {"pid": os.getpid()}

@@ -4,7 +4,7 @@ roster:
   can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id:
     [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
     ''readings'': ''*'', ''totals'': ''*'', ''clock'': ''*'', ''brain'': ''*'', ''user'':
-    ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*''}>'
+    ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*'', memory.MEMORY: ''*''}>'
   callable_by:
     $self: '*'
     $parent: '*'

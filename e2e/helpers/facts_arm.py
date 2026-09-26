@@ -19,7 +19,7 @@ import os
 import re
 from pathlib import Path
 
-from helpers import Limits, connect, ctx_score, drive, human
+from helpers import Limits, connect, ctx_score, drive, human, memory
 from helpers.ai import Connected  # noqa: F401  (re-exported for probes)
 
 # THE SQUEEZE. The model itself has 256k; this is the window the probes hand the agent so
@@ -50,7 +50,7 @@ LOREM = "the quick brown fox jumps over the lazy dog " * 150
 ARMS = (("ai_recency", "truncate", {}), ("ai_facts", "halve", {"context_facts": True}))
 STRIP_ARMS = (("ai_recency", "truncate", {}), ("ai_strip", "strip", {"context_titles": True}))
 # FULL ASYNC: the strategy is the plain recency baseline on BOTH sides — the variable is
-# the reply path. Large replies are stored and digested; the model pulls pages.
+# the reply path. Large replies are held in RAM and digested to their origin line.
 ASYNC_ARMS = (
     ("ai_recency", "truncate", {}),
     ("ai_async", "truncate", {"context_async": True, "context_titles": True}),
@@ -63,9 +63,8 @@ FOLD_ARMS = (
 
 
 def leg(fb: str) -> dict:
-    """The record fields that name a file leg — NONE on python (rows, bodies and the view
-    live in the kernel), `file_bridge_id` on the runtimes that still failfast at `send`
-    without one (rust `history.rs`, swift backend). Parity item one."""
+    """The record fields that name a file leg — NONE on python (the conversation lives
+    in the agent's memory store), `file_bridge_id` on the runtimes not yet ported."""
     from helpers.kernel import runtime_name
 
     return {} if runtime_name() == "python" else {"file_bridge_id": fb}
@@ -76,35 +75,13 @@ async def call(root, target, payload):
 
 
 async def store_rows(root, core, aid: str) -> list[dict]:
-    """The agent's whole durable store, for SCORING. In process it is read directly
-    (`history` now answers at digest resolution, under the inline cap — a probe that
-    scores calls and tokens needs the rows themselves). Over the wire it asks the
-    kernel for the same rows (`rows_read`) — every runtime answers it; there is no
-    second path (a `recall` fallback carried text without ids, and a probe that
-    scores ROWS was silently scoring something else)."""
+    """The agent's conversation, for SCORING. In process it is what the agent itself
+    reads (`_load_history`: its head, from the last clear on); over the wire it is the
+    same agent's rows read from its memory store — every runtime answers it."""
     if core is not None:
         return await core._load_history(aid, root)
-    whole = await call(root, "kernel", {"type": "rows_read", "agent": aid, "limit": 200})
-    assert isinstance(whole, dict) and "rows" in whole, f"rows_read refused: {whole}"
-    out = list(whole.get("rows") or [])
-    after = whole.get("next")
-    while after is not None:
-        whole = await call(
-            root, "kernel", {"type": "rows_read", "agent": aid, "limit": 200, "after": after}
-        )
-        out += list((whole or {}).get("rows") or [])
-        after = (whole or {}).get("next")
-    # THE CONVERSATION, as `_load_history` reads it in process: `rows_read`
-    # returns the agent's rows WHOLE — the kernel's own bookkeeping included
-    # — so the wire path must hide the same kinds, or a probe counts a
-    # planted `body` row as a fourth turn (measured 2026-09-12,
-    # messages_gate:rust: `[13, 16, 19, 22]` against an expected 3).
-    return [r for r in out if r.get("kind") not in _BOOKKEEPING]
+    return await memory.rows_of(root, aid, conversation_only=True)
 
-
-#: The kernel's own bookkeeping kinds — in the same table, never the
-#: conversation. What `_load_history` hides in process; the wire hides the same.
-_BOOKKEEPING = ("call", "task", "body", "view", "settle")
 
 #: Fields of a planted row that hold REFERENCES to other planted rows. A remap
 #: has to know these by name: the kernel deliberately does not guess which of a
@@ -128,7 +105,7 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
         if isinstance(v, list):
             out[f] = [seen.get(x, x) if isinstance(x, int) else x for x in v]
     # The reply TAG carries the pid in its text — remap it there too, or a
-    # planted reply names a row that does not exist and `grep`/`pull` find
+    # planted reply names a row that does not exist and `grep` / `history` find
     # nothing (which is exactly what the fold probes measure).
     c = out.get("content")
     if isinstance(c, str) and c.startswith("[reply to "):
@@ -142,60 +119,36 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
     return out
 
 
-async def plant_store(core, root, aid: str, rows: list[dict], bodies: dict[str, str] | None = None) -> None:
+async def plant_store(core, root, aid: str, rows: list[dict]) -> None:
     """Write a conversation FROM ABOVE before the agent exists (or beside it): rows into
-    the kernel's row store under the agent's id, dehydrated bodies under their pids. The
-    agent need not exist yet — agent id is conversation id, and rows outlive the agent.
+    the agent's MEMORY STORE under its id, as the store's admin. The agent need not
+    exist yet — the store keys rows by owner, and rows outlive the agent. Reply BODIES
+    are never persisted, so a planted history carries its replies inline.
 
-    IN PROCESS the rows already carry real ids and go down in one call. OVER THE
-    WIRE they cannot: `rows_write` refuses a caller-chosen id, so the rows go one
-    at a time IN DEPENDENCY ORDER and every reference is remapped to the id the
-    store just assigned. Every reference a planted history holds points BACKWARD
-    (a reply to its call, a fold to rows it collapsed, a turn to its parent), so
-    one forward pass is enough.
-    """
+    IN PROCESS the rows carry real ids (`root.ctx.mint_id`) and go down in one call.
+    OVER THE WIRE the ids are PLACEHOLDERS (`WireCtx.mint_id`): the rows go one at a
+    time, in dependency order, WITHOUT ids — the store takes the kernel's next one —
+    and every reference is remapped to the id just assigned. Every reference a planted
+    history holds points BACKWARD, so one forward pass is enough."""
     if core is not None:
-        await core._save_history(aid, root, rows)
-        for pid, body in (bodies or {}).items():
-            await core._store_reply(aid, root, pid, body)
+        await memory.plant(root, aid, rows)
         return
     seen: dict[int, int] = {}
     for row in rows:
         placeholder = row.get("id")
-        got = await call(root, "kernel", {
-            "type": "rows_write", "agent": aid, "rows": [_remap_row(row, seen)]})
-        ids = (got or {}).get("ids")
-        assert isinstance(ids, list) and ids, f"rows_write refused a planted row: {got}"
+        ids = await memory.plant(root, aid, [_remap_row(row, seen)])
         if isinstance(placeholder, int):
             seen[placeholder] = ids[0]
-        # THE CALLER'S ROW LEARNS ITS REAL ID. A probe scores against the id it
-        # planted (`planted["id"] in store`); on the wire that was a placeholder
-        # and could never match (measured 2026-09-12, misleading_fold:rust).
+        # THE CALLER'S ROW LEARNS ITS REAL ID (a probe scores against it).
         row["id"] = ids[0]
-    # THE BODIES, under the pids the store actually assigned.
-    for pid, body in (bodies or {}).items():
-        real = seen.get(pid, pid)
-        got = await call(root, "kernel", {
-            "type": "rows_write", "agent": aid,
-            "rows": [{"kind": "body", "parent": real, "content": body}]})
-        assert (got or {}).get("ids"), f"rows_write refused a planted body: {got}"
 
 
 async def read_view(core, root, aid: str) -> dict | None:
-    """The agent's VIEW — the ordered ids it sees, each at a resolution.
-
-    In process that is `_load_view`. Over the wire the view IS a row (`kind:
-    "view"`), so the newest one in the agent's store is the same document —
-    `rows_read` carries rows whole. No verb exposes it directly and none should
-    be added for a probe's convenience."""
+    """The agent's VIEW — the ordered ids it sees, each at a resolution: the newest
+    `view` row in its memory store (in process: what `_load_view` reads)."""
     if core is not None:
         return await core._load_view(aid, root)
-    whole = await call(root, "kernel", {"type": "rows_read", "agent": aid})
-    latest = None
-    for r in (whole or {}).get("rows") or []:
-        if r.get("kind") == "view" and isinstance(r.get("ids"), list):
-            latest = r
-    return latest
+    return await memory.latest_view(root, aid)
 
 
 async def connect_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict):
@@ -299,8 +252,7 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
         "titled": sum(1 for c in ctx_score.calls_made(msgs) if c.get("title")),
         "sends": len(ctx_score.calls_made(msgs)),
         "ledger_calls": len(ctx_score.calls_made(msgs, verb="ledger")),
-        "pulls": len(ctx_score.calls_made(msgs, target=aid, verb="pull")),
-        "pulled": [c["payload"].get("pid") for c in ctx_score.calls_made(msgs, target=aid, verb="pull")],
+        "folds_opened": len([c for c in ctx_score.calls_made(msgs, target=aid, verb="history") if c["payload"].get("fold") is not None]),
         "greps": len(ctx_score.calls_made(msgs, target=aid, verb="grep")),
         "folded": sum(int(d.get("folded") or 0) for d in conn.compactions),
         "fold_ids": [m.get("id") for m in msgs if m.get("kind") == "fold"],
@@ -338,10 +290,10 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
 
 
 def _descents(msgs, aid) -> list[str]:
-    """Fold ids the model actually went INTO — a grep scoped to one, or a pull of one."""
-    # A descent is a grep/pull aimed at a fold — or at a LEAF the fold collapsed: the
-    # body (pid) behind one of its member replies. The model that pulls the member's
-    # body has gone through the fold to the file, which is the point.
+    """Fold ids the model actually went INTO — a grep scoped to one, or `history {fold}`."""
+    # A descent is a grep aimed at a fold — or at a LEAF the fold collapsed: the body
+    # (pid) behind one of its member replies — or a `history {fold}` listing its
+    # members. The model that reaches the member's body has gone through the fold.
     folds = {m.get("id") for m in msgs if m.get("kind") == "fold"}
     # leaf pid → the fold ids whose members that pid's reply row belongs to
     by_row = {m.get("id"): m for m in msgs if m.get("id") is not None}
@@ -370,8 +322,9 @@ def _descents(msgs, aid) -> list[str]:
     for c in ctx_score.calls_made(msgs, target=aid, verb="grep"):
         for i in c["payload"].get("ids") or []:
             out += _hit(_i(i))
-    for c in ctx_score.calls_made(msgs, target=aid, verb="pull"):
-        out += _hit(_i(c["payload"].get("pid")))
+    for c in ctx_score.calls_made(msgs, target=aid, verb="history"):
+        if c["payload"].get("fold") is not None:
+            out += _hit(_i(c["payload"].get("fold")))
     return out
 
 
@@ -403,7 +356,7 @@ def after_replies(root, aid: str, n: int = 1):
     2026-09-09)."""
 
     async def ready() -> bool:
-        rows = root.ctx.rows_for(aid)
+        rows = await memory.rows_of(root, aid)
         return (
             sum(
                 1
@@ -466,88 +419,15 @@ async def send_payload_later(root, aid: str, payload: dict, delay: float):
 async def inject_row(core, root, aid: str, row: dict) -> None:
     """Append a row to the agent's OWN store from above — how a probe plants a
     MISLEADING fold (a summary that contradicts its members) to see if the model
-    verifies by descending.
-
-    In process the row goes down under the id the probe minted. Over the wire
-    the store mints: `rows_write` refuses a caller-chosen id, so the row's own
-    `id` is dropped and everything it REFERS TO (a fold's `refs`, its `parent`)
-    stays as written — those name rows the running agent already holds, which
-    are real ids on both paths."""
+    verifies by descending. In process the row keeps the id the probe minted; over
+    the wire the store takes the kernel's next one, and everything the row REFERS TO
+    (a fold's `refs`, its `parent`) stays as written — those are real ids on both
+    paths."""
     if core is not None:
-        await core._save_history(aid, root, [row])
+        await memory.plant(root, aid, [row])
         return
-    got = await call(root, "kernel", {
-        "type": "rows_write", "agent": aid, "rows": [_remap_row(row, {})]})
-    ids = (got or {}).get("ids")
-    assert ids, f"rows_write refused the injected row: {got}"
+    ids = await memory.plant(root, aid, [_remap_row(row, {})])
     row["id"] = ids[0]  # the caller's row learns its real id (see plant_store)
-
-
-async def copy_rows(root, src: str, dst: str) -> int:
-    """FORK from above: the source's rows re-minted under the destination id, parents
-    re-linked through the same map so the chains survive. Ids come from the kernel's one
-    counter and the table is one dict — copying an id verbatim would clobber the
-    original's row, so every copy is re-minted.
-
-    IN PROCESS BY DEFAULT (`root.ctx`), over the wire through the kernel's own
-    `rows_read`/`rows_write` when there is no ctx to reach. The two paths do the
-    SAME arithmetic — the wire one just asks the kernel for what the in-process
-    one takes directly — so a fork means the same thing on every runtime."""
-    remap: dict[int, int] = {}
-
-    def forked(r: dict) -> dict | None:
-        """One source row as its copy, or None when it is not the conversation.
-        The kernel's own bookkeeping (a `call` row per send, a `task` row per
-        fork, a `body`, a `view`) is the ORIGINAL's ledger and stays with it —
-        bodies and views resolve through ids the copy does not have."""
-        if r.get("kind") in ("call", "task", "body", "view"):
-            return None
-        row = {k: v for k, v in r.items() if k not in ("id", "agent", "ts")}
-        if row.get("parent") in remap:
-            row["parent"] = remap[row["parent"]]
-        if row.get("refs"):
-            row["refs"] = [remap.get(x, x) for x in row["refs"]]
-        return row
-
-    # `rows_put` is the IN-PROCESS allocator — it takes a pre-minted id, which
-    # the wire's `rows_write` refuses by design. Its presence is what says this
-    # is the in-process kernel.
-    ctx = getattr(root, "ctx", None)
-    if getattr(ctx, "rows_put", None) is not None:
-        for r in ctx.rows_for(src):
-            row = forked(r)
-            if row is not None:
-                remap[r["id"]] = ctx.rows_put(dst, row)
-        return len(remap)
-
-    # ONE ROW PER CALL, because a parent inside the same batch has no new id
-    # until its copy lands — the remap is built as it goes, exactly as above.
-    for r in await _wire_rows(root, src):
-        row = forked(r)
-        if row is None:
-            continue
-        out = await call(root, "kernel", {"type": "rows_write", "agent": dst, "rows": [row]})
-        ids = (out or {}).get("ids") or []
-        assert ids, f"rows_write refused a fork row: {out}"
-        remap[r["id"]] = ids[0]
-    return len(remap)
-
-
-async def _wire_rows(root, aid: str) -> list[dict]:
-    """An agent's rows WHOLE, over the wire — the kernel's `rows_read`, paged."""
-    out: list[dict] = []
-    after = None
-    while True:
-        payload = {"type": "rows_read", "agent": aid, "limit": 200}
-        if after is not None:
-            payload["after"] = after
-        r = await call(root, "kernel", payload)
-        page = (r or {}).get("rows") or []
-        out += page
-        after = (r or {}).get("next")
-        if after is None:
-            break
-    return out
 
 
 async def continue_arm(root, core, aid: str, task: str, artifact: str, *, timeout: float = 300.0) -> dict:
@@ -566,8 +446,7 @@ async def continue_arm(root, core, aid: str, task: str, artifact: str, *, timeou
     msgs = await store_rows(root, core, aid)
     body = p.read_text() if p.exists() else ""
     return {"id": aid, "body": body, "msgs": msgs, "descents": _descents(msgs, aid),
-            "greps": len(ctx_score.calls_made(msgs, target=aid, verb="grep")),
-            "pulls": len(ctx_score.calls_made(msgs, target=aid, verb="pull"))}
+            "greps": len(ctx_score.calls_made(msgs, target=aid, verb="grep"))}
 
 
 async def both_arms(root, core, bk, fb, task, artifact, *, arms=ARMS) -> tuple[dict, dict]:
@@ -584,7 +463,7 @@ def report(arms, score_line):
             f"     turns={a['turns']}  cuts={a['cuts']} (dropped {a['dropped']})  "
             f"stripped={a['stripped']} ({a['stripped_bytes']}B)  titled={a['titled']}/{a['sends']}  "
             f"ledger calls={a['ledger_calls']}\n"
-            f"     digested={a['digested']}  pulls={a['pulls']}  greps={a['greps']}  "
+            f"     digested={a['digested']}  folds_opened={a['folds_opened']}  greps={a['greps']}  "
             f"folded={a['folded']}  levels={a['fold_levels']}  recalls={a['recall_rows']}  "
             f"self-replies dehydrated={a['dehydrated_self']}{(' ' + '; '.join(a['dehydrated_self_tags'])) if a['dehydrated_self'] else ''}  view={len((a.get('view') or {}).get('ids') or [])} rows  "
             f"descents={len(a['descents'])}  roots={a['roots']}\n"

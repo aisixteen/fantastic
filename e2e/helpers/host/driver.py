@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import atexit
 import json
+
+import yaml
 import os
 import signal
 import socket
@@ -41,20 +43,15 @@ import urllib.request
 from pathlib import Path
 
 from . import artifacts
+from helpers import memory
 
 BASE = {"$self": "*", "$parent": "*", "$children": "*"}
 #: PRIVILEGED verbs lose their wildcard cover — named explicitly, as everywhere.
-#: `rows_read`/`rows_write` are hydration's pair: a probe that FORKS a
-#: conversation (E37) needs them over the wire, where the in-process path reaches
-#: `root.ctx` directly. Naming them here is the whole point of their being
-#: privileged — a driver says yes on purpose, a wildcard never does it by accident.
 ROOT_VERBS = [
     "*",
     "create_agent",
     "update_agent",
     "delete_agent",
-    "rows_read",
-    "rows_write",
 ]
 
 #: The HTTP header carrying a caller-chosen execution id. The credential
@@ -81,7 +78,7 @@ def _bytes_field(d: dict):
 #: loader, `kernel_state`. Rust and swift called it `core` until the python
 #: parity port (`bootstrap.rs DEFAULT_ROOT_ID`, `Kernel.swift ROOT_ID`); the row
 #: is what the driver seeds and grants against, so it must name what the binary
-#: actually writes into `.fantastic/agent.json` or every grant misses.
+#: actually writes into `.fantastic/agent.yaml` or every grant misses.
 RUNTIMES = {
     "python": {
         "cmd": ["src/lib/python/.venv/bin/python", "src/lib/python/main.py"],
@@ -159,6 +156,12 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
+
+def _dump(rec: dict) -> str:
+    """A record as the kernel writes it (`agent.yaml`): block style, key order kept."""
+    return yaml.safe_dump(rec, sort_keys=False, allow_unicode=True, default_flow_style=False)
+
+
 class HostKernel:
     """A spawned kernel, reachable over REST."""
 
@@ -216,13 +219,13 @@ class HostKernel:
         subprocess.run([*self.cmd, "reflect"], cwd=self.workdir, env=self.env,
                        capture_output=True, check=False)
         w = self.workdir / ".fantastic"
-        if not (w / "agent.json").exists():
+        if not (w / "agent.yaml").exists():
             seed = subprocess.Popen(self.cmd, cwd=self.workdir, env=self.env,
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL,
                                     start_new_session=True)
             for _ in range(100):
-                if (w / "agent.json").exists():
+                if (w / "agent.yaml").exists():
                     break
                 time.sleep(0.1)
             seed.terminate()
@@ -230,24 +233,39 @@ class HostKernel:
                 seed.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 seed.kill()
-        if not (w / "agent.json").exists():
-            raise SystemExit(f"kernel never seeded {w}/agent.json")
+        if not (w / "agent.yaml").exists():
+            raise SystemExit(f"kernel never seeded {w}/agent.yaml")
 
         (w / "agents/web/agents/rest").mkdir(parents=True, exist_ok=True)
-        root = json.loads((w / "agent.json").read_text())
+        root = yaml.safe_load((w / "agent.yaml").read_text())
         root["callable_by"] = {**BASE, "rest": "*"}
         root["can_call"] = {**BASE, "rest": "*"}
-        (w / "agent.json").write_text(json.dumps(root, indent=2))
+        # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one. One
+        # ram_store for the kernel's own rows AND every AI agent's conversation; the
+        # driver's legs are its admins (they read and plant rows for the probes),
+        # and every declared id may reach it.
+        root["memory_store_id"] = memory.MEMORY
+        (w / "agent.yaml").write_text(_dump(root))
+        (w / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
+        (w / "agents" / memory.MEMORY / "agent.yaml").write_text(_dump(
+            memory.store_record(
+                self.root_id,
+                admins=["kernel", "rest", "ws"],
+                callable_by={**BASE, "rest": "*", "ws": "*", "web": "*",
+                             **{t: "*" for t in self.reach
+                                if t not in (self.root_id, memory.MEMORY)}},
+            )))
         # `web` NEEDS EGRESS OF ITS OWN. A `watch` frame is dispatched as the
         # WEB agent, not as the ws leg that carried it, so without this every
         # subscription is refused `web may not call "watch" on <id>` — and a
         # watcher that is refused looks exactly like a stream with no events,
         # which is worse than no watcher at all.
-        (w / "agents/web/agent.json").write_text(json.dumps(
+        (w / "agents/web/agent.yaml").write_text(_dump(
             {"id": "web", "handler_module": "web.tools",
              "parent_id": self.root_id, "port": port,
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          **{t: "*" for t in self.reach if t != self.root_id}}}, indent=2))
+                          memory.MEMORY: "*",
+                          **{t: "*" for t in self.reach if t != self.root_id}}}))
         # The WS leg — the EVENT face. REST cannot push, so a failed pass (which
         # announces itself as a `status` event on the agent's own stream) is
         # invisible without this; see `helpers/host/ws.py`.
@@ -259,19 +277,21 @@ class HostKernel:
         # and every frame is refused) and a `can_call` naming each id by literal
         # id or `$token`: `"*"` as a grant-map KEY never matches a target.
         (w / "agents/web/agents/ws").mkdir(parents=True, exist_ok=True)
-        (w / "agents/web/agents/ws/agent.json").write_text(json.dumps(
+        (w / "agents/web/agents/ws/agent.yaml").write_text(_dump(
             {"id": "ws", "handler_module": "web_ws.tools", "parent_id": "web",
              "ingress_rule": "allow_all_ingress",
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          **{t: "*" for t in self.reach if t != self.root_id}}}, indent=2))
-        (w / "agents/web/agents/rest/agent.json").write_text(json.dumps(
+                          memory.MEMORY: "*",
+                          **{t: "*" for t in self.reach if t != self.root_id}}}))
+        (w / "agents/web/agents/rest/agent.yaml").write_text(_dump(
             {"id": "rest", "handler_module": "web_rest.tools", "parent_id": "web",
              # SEALED BY DEFAULT: an io leg with no rule denies every inbound
              # call. Swift enforces this on the written tree; rust let the same
              # record through — a parity difference worth knowing.
              "ingress_rule": "allow_all_ingress",
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          **{t: "*" for t in self.reach if t != self.root_id}}}, indent=2))
+                          memory.MEMORY: "*",
+                          **{t: "*" for t in self.reach if t != self.root_id}}}))
         return port
 
     def boot(self) -> "HostKernel":

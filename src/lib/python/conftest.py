@@ -79,7 +79,7 @@ async def store_agent(seeded_kernel):
     The loader (`kernel_state`) DISCOVERS it as its provider (root resolves to `.fantastic`)
     and persists records — AND internal-state sidecars (ai chat, scheduler) — THROUGH it
     via `persist_blob`, landing sidecars at `.fantastic/agents/<id>/` next to their
-    agent.json (one shared store, no nest). Tests just need this fixture present so the
+    agent.yaml (one shared store, no nest). Tests just need this fixture present so the
     loader has a store. (The ai backends still wire `file_bridge_id` to it directly — their
     migration is separate.)"""
     rec = (

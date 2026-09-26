@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from _testkit import ensure_memory
 import asyncio
 
 
@@ -21,7 +22,7 @@ class _FakeProvider:
         self._scripts = list(scripts)
         self.calls = 0
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         items = self._scripts.pop(0) if self._scripts else []
         self.calls += 1
         for x in items:
@@ -31,8 +32,13 @@ class _FakeProvider:
 async def _make_ollama(kernel, file_bridge_id=None):
     # Deny-all: the backend streams its turn to `cli` via send (default client),
     # and persists to its store directly when wired — both explicit grants.
-    can_call = {"cli": "*"}
-    meta = {"handler_module": "ollama_backend.tools", "can_call": can_call}
+    store = ensure_memory(kernel)
+    can_call = {"cli": "*", store: "*"}
+    meta = {
+        "handler_module": "ollama_backend.tools",
+        "can_call": can_call,
+        "memory_store_id": store,
+    }
     if file_bridge_id is not None:
         meta["file_bridge_id"] = file_bridge_id
         can_call[file_bridge_id] = "*"
@@ -162,7 +168,7 @@ class _RecordProvider:
         self.calls = 0
         self.last_messages = None
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         self.last_messages = list(messages)  # snapshot — _run mutates the list later
         items = self._scripts.pop(0) if self._scripts else []
         self.calls += 1
@@ -197,37 +203,30 @@ async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, store_
         ot._providers.pop(oid, None)
 
 
-async def test_stateless_messages_override_needs_no_file_bridge(seeded_kernel):
-    """messages + system_prompt in the payload → fully stateless: no file_bridge_id
-    required, caller's history used verbatim, the new user turn appended."""
-    oid = await _make_ollama(seeded_kernel)  # NO file_bridge_id
-    rp = _RecordProvider([["leaf-answer"]])
-    ot._providers[oid] = rp
+async def test_a_send_with_no_memory_store_fails_loud(seeded_kernel):
+    """No `memory_store_id` ⇒ no turn: the send refuses up front, naming the fix —
+    the conversation has nowhere to live, and nothing falls back to RAM."""
+    rec = seeded_kernel.create(
+        "ollama_backend.tools", id="storeless", can_call={"cli": "*"}
+    )
+    assert rec.get("id") == "storeless", rec
+    ot._providers["storeless"] = _FakeProvider([["never"]])
     try:
-        r = (
+        boot = (
             await seeded_kernel.send(
-                [
-                    {
-                        "target": oid,
-                        "payload": {
-                            "type": "send",
-                            "text": "now",
-                            "system_prompt": "S",
-                            "messages": [
-                                {"role": "user", "content": "earlier"},
-                                {"role": "assistant", "content": "prior"},
-                            ],
-                        },
-                    }
-                ]
+                [{"target": "storeless", "payload": {"type": "boot"}}]
             )
         )[0]["result"]
-        assert r["final"] == "leaf-answer"
-        assert rp.last_messages[0]["content"] == "S"
-        assert rp.last_messages[1]["content"] == "earlier"
-        assert rp.last_messages[-1]["content"] == "now"
+        assert boot["reason"] == "missing_arg" and boot["arg"] == "memory_store_id"
+        out = (
+            await seeded_kernel.send(
+                [{"target": "storeless", "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
+        assert out["reason"] == "missing_arg" and "memory_store_id" in out["error"]
+        assert ot._providers["storeless"].calls == 0, "the model was never called"
     finally:
-        ot._providers.pop(oid, None)
+        ot._providers.pop("storeless", None)
 
 
 async def test_send_refuses_cycle(seeded_kernel, store_agent):
@@ -410,7 +409,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 await asyncio.sleep(0.20)
@@ -511,7 +510,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
     order: list[str] = []
 
     class _SerialProvider:
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             nonlocal in_flight, max_in_flight
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
@@ -635,7 +634,7 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 # While we're "thinking", measure queue depth.
@@ -708,7 +707,7 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
     captured_status: list[dict] = []
 
     class _SlowProvider:
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             r = (
                 await seeded_kernel.send(
                     [
@@ -760,7 +759,7 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             self.calls += 1
             if self.calls == 1:
                 # bob runs first; alice gets queued behind him
@@ -843,7 +842,7 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
     snap_holder: list[dict] = []
 
     class _RedactProvider:
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             snap_holder.append(
                 (
                     await seeded_kernel.send(
@@ -890,7 +889,7 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
     oid = await _make_ollama(seeded_kernel, store_agent)
 
     class _SlowProvider:
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             await asyncio.sleep(5.0)
             yield "never"
 
@@ -1016,7 +1015,7 @@ async def test_status_done_emits_with_reason_timeout(
     monkeypatch.setattr(ot, "SEND_TIMEOUT", 0.05)
 
     class _ForeverProvider:
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             await asyncio.sleep(5.0)
             yield "never"
 

@@ -50,12 +50,12 @@ def test_external_base_outside_cwd(tmp_path, monkeypatch):
     work.mkdir()
     monkeypatch.chdir(work)
     foreign = tmp_path / "other_project"
-    fs.write_text(str(foreign), ".fantastic/lock.json", '{"pid": 7}', external=True)
+    fs.write_text(str(foreign), ".fantastic/lock.yaml", '{"pid": 7}', external=True)
     # clamped surface would refuse this base; external serves it.
     with pytest.raises(ValueError):
-        fs.read_text(str(foreign), ".fantastic/lock.json")  # clamped → escapes cwd
-    assert fs.read_text(str(foreign), ".fantastic/lock.json", external=True)
-    assert fs.exists(str(foreign), ".fantastic/lock.json", external=True)
+        fs.read_text(str(foreign), ".fantastic/lock.yaml")  # clamped → escapes cwd
+    assert fs.read_text(str(foreign), ".fantastic/lock.yaml", external=True)
+    assert fs.exists(str(foreign), ".fantastic/lock.yaml", external=True)
 
 
 def test_external_path_still_clamped_within_base(tmp_path):

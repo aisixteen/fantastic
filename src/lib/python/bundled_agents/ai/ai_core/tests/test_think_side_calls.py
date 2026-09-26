@@ -12,7 +12,7 @@ class _P:
     def __init__(self, text):
         self.text = text
 
-    async def chat(self, messages):
+    async def chat(self, messages, max_tokens=None):
         for i in range(0, len(self.text), 7):
             yield self.text[i : i + 7]
 
@@ -48,7 +48,7 @@ def _ctx(summ):
 
 
 async def test_a_fold_title_is_the_first_non_empty_line_after_stripping():
-    async def summ(msgs):
+    async def summ(msgs, max_tokens=None):
         return (
             '\n\n"Read 8 files; all pangram."\n\nAsked to read; found nothing unusual.'
         )
@@ -62,7 +62,7 @@ async def test_a_fold_title_is_the_first_non_empty_line_after_stripping():
 
 
 async def test_a_summary_that_still_opens_a_think_block_degrades_to_titles():
-    async def summ(msgs):
+    async def summ(msgs, max_tokens=None):
         return "<think>never closed"
 
     rows = [

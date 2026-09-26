@@ -3,6 +3,7 @@ that was measured wrong, in the smallest reachable form."""
 
 from __future__ import annotations
 
+import yaml
 import asyncio
 import builtins
 import json
@@ -45,7 +46,14 @@ async def test_kernel_ledger_is_json_after_a_binary_outcome(seeded_kernel, file_
     )
     r = (
         await k.send(
-            [{"target": fb, "payload": {"type": "read_stream", "path": "a.txt"}}]
+            # NAMED — only a named call's result is kept in its settle row
+            [
+                {
+                    "target": fb,
+                    "payload": {"type": "read_stream", "path": "a.txt"},
+                    "id": "read-a",
+                }
+            ]
         )
     )[0]["result"]
     assert isinstance(r.get("bytes"), (bytes, bytearray))
@@ -54,36 +62,6 @@ async def test_kernel_ledger_is_json_after_a_binary_outcome(seeded_kernel, file_
     ]
     json.dumps(ledger)  # used to raise: bytes are not JSON
     assert "<bytes:2>" in json.dumps(ledger)
-
-
-async def test_messages_digest_never_raises_on_caller_written_rows(seeded_kernel):
-    k = seeded_kernel
-    rows = [
-        {"kind": "call", "verb": "x", "refs": 5, "outcome": "settled?"},
-        {"kind": "view", "ids": 3, "budget": 1, "why": "w"},
-        {"role": "user", "content": "plain", "refs": [1, 2]},
-    ]
-    w = (
-        await k.send(
-            [
-                {
-                    "target": "kernel",
-                    "payload": {"type": "rows_write", "agent": k.id, "rows": rows},
-                }
-            ]
-        )
-    )[0]["result"]
-    ids = w.get("ids") or w.get("rows") or []
-    assert ids, w
-    d = (
-        await k.send(
-            [{"target": "kernel", "payload": {"type": "messages", "ids": ids}}]
-        )
-    )[0]["result"]
-    assert "raised" not in d and d.get("rows"), d
-    by_kind = {r.get("kind"): r for r in d["rows"]}
-    assert by_kind["call"].get("refs") == 1 and by_kind["call"].get("status") is None
-    assert by_kind["view"].get("ids") == 1
 
 
 async def test_readme_key_is_lexical_and_exact(seeded_kernel):
@@ -122,8 +100,8 @@ def test_corrupt_root_record_keeps_the_children(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     d = tmp_path / ".fantastic"
     (d / "agents" / "memo").mkdir(parents=True)
-    (d / "agent.json").write_text("{ not json")
-    (d / "agents" / "memo" / "agent.json").write_text(
+    (d / "agent.yaml").write_text("{ not json")
+    (d / "agents" / "memo" / "agent.yaml").write_text(
         json.dumps({"id": "memo", "handler_module": "text_file.tools"})
     )
     recs = read_tree(d)
@@ -325,7 +303,7 @@ async def test_a_long_line_does_not_end_the_pipe(seeded_kernel):
 
 
 async def test_records_over_a_chunk_keep_every_key(tmp_path, monkeypatch):
-    """2026-09-16: the merge read took ONE 64 KiB chunk, so a larger agent.json
+    """2026-09-16: the merge read took ONE 64 KiB chunk, so a larger agent.yaml
     failed to parse and its unknown keys vanished on the next write."""
     from _testkit import boot_root
 
@@ -366,7 +344,7 @@ async def test_records_over_a_chunk_keep_every_key(tmp_path, monkeypatch):
         ]
     )
     await asyncio.sleep(0.6)
-    f = tmp_path / ".fantastic" / "agents" / "fat" / "agent.json"
+    f = tmp_path / ".fantastic" / "agents" / "fat" / "agent.yaml"
     assert f.exists(), "record not persisted"
-    doc = json.loads(f.read_text())
+    doc = yaml.safe_load(f.read_text())
     assert doc.get("mark") == 1 and doc.get("note") == big

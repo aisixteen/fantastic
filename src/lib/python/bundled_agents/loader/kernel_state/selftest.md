@@ -117,7 +117,7 @@ fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.
 ```
 Expected: `{"id":"file_bridge_<hex6>", "handler_module":"file_bridge.tools",
 "parent_id":"kernel_state"}`. File check:
-`.fantastic/agents/file_bridge_<hex6>/agent.json` exists.
+`.fantastic/agents/file_bridge_<hex6>/agent.yaml` exists.
 
 ### Test 4: update_agent persists + emits agent_updated
 
@@ -126,7 +126,7 @@ ID=$(fantastic kernel_state list_agents | python -c "import json,sys;print([a fo
 fantastic kernel_state update_agent id=$ID model=foo x=42
 ```
 Expected: `{"updated":true,"id":"…","agent":{… "model":"foo", "x":42}}`.
-File check: `agent.json` of that id contains `"model":"foo"` and
+File check: `agent.yaml` of that id contains `"model":"foo"` and
 `"x":42`. Watchers of `kernel_state` see an `agent_updated` emit (verified
 in pytest; fragile to drive via CLI).
 

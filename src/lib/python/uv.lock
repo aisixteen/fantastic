@@ -15,6 +15,7 @@ members = [
     "fantastic-llamacpp-backend",
     "fantastic-nvidia-nim-backend",
     "fantastic-ollama-backend",
+    "fantastic-ram-store",
     "fantastic-relay-connector",
     "fantastic-scheduler",
     "fantastic-static-loader",
@@ -267,6 +268,7 @@ dependencies = [
     { name = "fantastic-llamacpp-backend" },
     { name = "fantastic-nvidia-nim-backend" },
     { name = "fantastic-ollama-backend" },
+    { name = "fantastic-ram-store" },
     { name = "fantastic-relay-connector" },
     { name = "fantastic-scheduler" },
     { name = "fantastic-static-loader" },
@@ -276,6 +278,7 @@ dependencies = [
     { name = "fantastic-web-rest" },
     { name = "fantastic-web-ws" },
     { name = "fantastic-ws-bridge" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -299,6 +302,7 @@ requires-dist = [
     { name = "fantastic-llamacpp-backend", editable = "bundled_agents/ai/llamacpp/llamacpp_backend" },
     { name = "fantastic-nvidia-nim-backend", editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
+    { name = "fantastic-ram-store", editable = "bundled_agents/memory/ram_store" },
     { name = "fantastic-relay-connector", editable = "bundled_agents/io/relay_connector" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
@@ -308,6 +312,7 @@ requires-dist = [
     { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
     { name = "fantastic-web-ws", editable = "bundled_agents/io/web_ws" },
     { name = "fantastic-ws-bridge", editable = "bundled_agents/io/ws_bridge" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 
 [package.metadata.requires-dev]
@@ -325,10 +330,14 @@ version = "0.1.0"
 source = { editable = "bundled_agents/loader/kernel_state" }
 dependencies = [
     { name = "fantastic-file-bridge" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" }]
+requires-dist = [
+    { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
+    { name = "pyyaml", specifier = ">=6" },
+]
 
 [[package]]
 name = "fantastic-llamacpp-backend"
@@ -376,6 +385,11 @@ requires-dist = [
 ]
 
 [[package]]
+name = "fantastic-ram-store"
+version = "0.1.0"
+source = { editable = "bundled_agents/memory/ram_store" }
+
+[[package]]
 name = "fantastic-relay-connector"
 version = "0.1.0"
 source = { editable = "bundled_agents/io/relay_connector" }
@@ -394,6 +408,16 @@ requires-dist = [
 name = "fantastic-scheduler"
 version = "0.1.0"
 source = { editable = "bundled_agents/scheduler" }
+dependencies = [
+    { name = "fantastic-kernel-state" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
+    { name = "pyyaml", specifier = ">=6" },
+]
 
 [[package]]
 name = "fantastic-static-loader"

@@ -1,6 +1,7 @@
 """kernel_state — pure disk read/write/forget + round-trip through Kernel.load,
 plus the live subscribe→flush→rmtree wiring of the booted root loader."""
 
+import yaml
 import asyncio
 import json
 from pathlib import Path
@@ -25,10 +26,10 @@ def _stage(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = Path(".fantastic")
     (root / "agents" / "web" / "agents" / "web_ws").mkdir(parents=True)
-    (root / "agent.json").write_text(
+    (root / "agent.yaml").write_text(
         json.dumps({"id": "kernel_state", "handler_module": "kernel_state.tools"})
     )
-    (root / "agents" / "web" / "agent.json").write_text(
+    (root / "agents" / "web" / "agent.yaml").write_text(
         json.dumps(
             {
                 "id": "web",
@@ -38,7 +39,7 @@ def _stage(tmp_path, monkeypatch):
             }
         )
     )
-    (root / "agents" / "web" / "agents" / "web_ws" / "agent.json").write_text(
+    (root / "agents" / "web" / "agents" / "web_ws" / "agent.yaml").write_text(
         json.dumps(
             {"id": "web_ws", "handler_module": "web_ws.tools", "parent_id": "web"}
         )
@@ -77,7 +78,7 @@ def test_write_record_merge_not_overwrite(tmp_path, monkeypatch):
     write_record(d, {"id": "a", "handler_module": "x.tools", "custom_sidecar": 1})
     # the kernel re-persists only its keys; the sidecar field must survive
     write_record(d, {"id": "a", "handler_module": "x.tools", "x": 2})
-    on_disk = json.loads((d / "agent.json").read_text())
+    on_disk = yaml.safe_load((d / "agent.yaml").read_text())
     assert on_disk["custom_sidecar"] == 1  # preserved
     assert on_disk["x"] == 2  # added
     assert on_disk["id"] == "a"
@@ -87,7 +88,7 @@ def test_rmtree_removes_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     d = Path("gone")
     (d / "agents" / "child").mkdir(parents=True)
-    (d / "agent.json").write_text("{}")
+    (d / "agent.yaml").write_text("{}")
     rmtree(d)
     assert not d.exists()
 
@@ -120,7 +121,7 @@ async def test_no_provider_state_stays_in_ram(tmp_path, monkeypatch):
         aid = rec["id"]
         await asyncio.sleep(0.3)  # debounce window
         assert root.ctx.get_agent(aid) is not None  # live in the tree (RAM)
-        assert not (tmp_path / ".fantastic" / "agents" / aid / "agent.json").exists()
+        assert not (tmp_path / ".fantastic" / "agents" / aid / "agent.yaml").exists()
     finally:
         await on_shutdown(root)
 
@@ -165,8 +166,8 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
         aid = rec["id"]
         agent_dir = tmp_path / ".fantastic" / "agents" / aid
         await asyncio.sleep(0.3)  # let the debounce flush stream the record
-        assert (agent_dir / "agent.json").exists()
-        assert json.loads((agent_dir / "agent.json").read_text())["x"] == 7
+        assert (agent_dir / "agent.yaml").exists()
+        assert yaml.safe_load((agent_dir / "agent.yaml").read_text())["x"] == 7
         assert (agent_dir / "readme.md").exists()  # readme seeded via stream too
 
         (
@@ -205,8 +206,8 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
         )
     )[0]["result"]
     sid = rec["id"]
-    # boot seeds the namespace anchor (read_tree needs a root agent.json)
-    assert (tmp_path / sess / "agent.json").exists()
+    # boot seeds the namespace anchor (read_tree needs a root agent.yaml)
+    assert (tmp_path / sess / "agent.yaml").exists()
 
     # persist two JS view records (NOT live host agents) — they nest under
     # the session root. The JS root (canvas) sends parent_id = the session
@@ -247,8 +248,8 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
     )[0]["result"]
     canvas_dir = tmp_path / sess / "agents" / "canvas"
     term_dir = canvas_dir / "agents" / "term1"
-    assert (canvas_dir / "agent.json").exists()
-    assert (term_dir / "agent.json").exists()
+    assert (canvas_dir / "agent.yaml").exists()
+    assert (term_dir / "agent.yaml").exists()
 
     # load_tree reads the namespace back (anchor + canvas + term1)
     reply = (await root.send([{"target": sid, "payload": {"type": "load_tree"}}]))[0][
@@ -284,13 +285,12 @@ async def test_a_record_commits_atomically_and_leaves_no_debris(
     """A record is streamed to a tmp beside the target and RENAMED into place.
 
     A `write_stream` that dies after truncating would otherwise leave a
-    half-written or empty `agent.json` — the record gone, and the next boot
+    half-written or empty `agent.yaml` — the record gone, and the next boot
     hydrating a tree with a hole in it. The commit is the leg's own single atomic
     op, so the outcomes are "the old record survives" or "the new one is
     complete", never a torn file. What this pins is the visible half: the file
     parses, and no `.tmp.` debris is left behind.
     """
-    import json
 
     rec = (
         await seeded_kernel.send(
@@ -324,9 +324,9 @@ async def test_a_record_commits_atomically_and_leaves_no_debris(
 
     root = tmp_path / ".fantastic"
     agent_dir = root / "agents" / "atomic_probe"
-    on_disk = agent_dir / "agent.json"
+    on_disk = agent_dir / "agent.yaml"
     assert on_disk.exists(), sorted(p.name for p in agent_dir.iterdir())
-    parsed = json.loads(on_disk.read_text())
+    parsed = yaml.safe_load(on_disk.read_text())
     assert parsed["id"] == "atomic_probe" and parsed["display_name"] == "Atomic"
     debris = [p.name for p in agent_dir.iterdir() if ".tmp." in p.name]
     assert debris == [], f"the commit must leave no tmp behind: {debris}"

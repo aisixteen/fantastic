@@ -82,10 +82,9 @@ class WireRoot:
         `subai_graph`, 27 minutes each).
 
         This is NOT the in-process bypass wearing a wire coat: every method here
-        goes through the kernel's own `rows_read` / `rows_write` verbs, which the
-        driver is granted by name (`ROOT_VERBS`) precisely because they are
-        privileged. One probe, one code path, every runtime — which is the rule
-        the scenario suite exists under.
+        goes through the memory store's own verbs, as the admin the driver's leg
+        was seeded to be. One probe, one code path, every runtime — which is the
+        rule the scenario suite exists under.
         """
         return WireCtx(self.k)
 
@@ -124,15 +123,13 @@ class WireTranscript:
         # BOUNDED. A poll is a status check, not the work — it must fail fast
         # and let the loop keep counting rather than inherit the driver's
         # 300-second default (see `WireRoot.send`).
-        # THE STORE, not the backend's `history` verb: python's `history` answers
-        # a DIGEST page ({rows:[{id, head, bytes…}], next, total}) and never the
-        # bodies, so the text this reader scores lives only in the kernel's
-        # `rows_read` — the same rows the in-process reader walks, bookkeeping
-        # (call/task/body/view/settle) filtered the same way.
-        r = self.k.send(
-            "kernel", {"type": "rows_read", "agent": self.aid}, timeout=15)
-        rows = r.get("rows") if isinstance(r, dict) else None
-        if not isinstance(rows, list):
+        # THE STORE, not the backend's `history` verb: `history` answers a DIGEST
+        # page and never the text, so the text this reader scores is read from the
+        # agent's memory store — the same rows the in-process reader walks.
+        # THE AGENT'S MEMORY STORE, read as an admin naming the owner — the same
+        # rows `_load_history` reads in process.
+        rows = WireCtx(self.k).rows_for(self.aid)
+        if not rows:
             return
         msgs = [m for m in rows if m.get("kind") not in WireCtx.BOOKKEEPING]
         # PRINT BOTH SIDES, count ONE. `n` and `transcript` stay assistant-only so
@@ -195,20 +192,19 @@ class WireTranscript:
 
 
 class WireCtx:
-    """`root.ctx`-shaped reader over a spawned kernel's REST face.
+    """A reader over a spawned kernel's REST face, for the scorers.
 
-    BLOCKING, like `WireTranscript._refresh` and for the same reason: the
-    scorers that use it are plain synchronous functions called from async code,
-    and `HostKernel.send` is blocking `urllib` anyway. Every call is bounded, so
-    a dead kernel fails the check rather than hanging the probe.
+    The kernel keeps no conversation: an agent's rows live in the `memory` store,
+    read here as an ADMIN naming the owner (the driver's `rest` leg is one — see
+    `HostKernel.seed`). BLOCKING, like `WireTranscript._refresh`: the scorers that
+    use it are plain synchronous functions, and every call is bounded.
     """
 
-    #: Kernel bookkeeping — in the same table, never the conversation.
-    BOOKKEEPING = ("call", "task", "body", "view", "settle")
+    #: Rows in an agent's store that are not conversation.
+    BOOKKEEPING = ("view",)
 
-    #: Placeholder ids start here — far above anything the kernel's counter will
-    #: reach in a test, so a remap can tell a placeholder from a real id by value
-    #: alone. See `mint_id`.
+    #: Placeholder ids start here — far above anything the kernel's counter reaches
+    #: in a test, so a remap tells a placeholder from a real id by value alone.
     PLACEHOLDER_BASE = 1_000_000_000
 
     def __init__(self, k: Any):
@@ -216,54 +212,45 @@ class WireCtx:
         self._next_placeholder = self.PLACEHOLDER_BASE
 
     def mint_id(self) -> int:
-        """A PLACEHOLDER id for a row that is about to be planted.
-
-        In process this returns a real id from the kernel's counter, because the
-        planter can write a row under an id it chose. Over the wire it cannot:
-        `rows_write` refuses a row that carries its own `id` on purpose — the
-        store is the only allocator, and re-ids are the caller's to remap.
-
-        So the wire mints a placeholder and `facts_arm.plant_store` remaps it to
-        the id the store actually assigned, writing rows in dependency order. A
-        probe writes the SAME code either way; only the remap differs, and in
-        process it is the identity.
-        """
+        """A PLACEHOLDER id for a row about to be planted. In process a probe mints a
+        real id from the kernel's counter; over the wire it cannot, so it plants rows
+        WITHOUT ids (the store takes the kernel's next one) and `facts_arm.plant_store`
+        remaps every reference from these placeholders to the ids assigned."""
         self._next_placeholder += 1
         return self._next_placeholder
+
+    def _store(self, payload: dict, timeout: float = 30) -> dict:
+        r = self.k.send("memory", payload, timeout=timeout)
+        return r if isinstance(r, dict) else {}
 
     def _kernel(self, payload: dict, timeout: float = 30) -> dict:
         r = self.k.send("kernel", payload, timeout=timeout)
         return r if isinstance(r, dict) else {}
 
     def rows_for(self, aid: str) -> list[dict]:
-        """That agent's rows WHOLE, oldest first — the kernel's `rows_read`.
-
-        An agent that has never been written to answers with an empty list, not
-        an error: a scorer counting turns on an agent the model never built is
-        asking a legitimate question and the answer is zero.
-        """
-        r = self._kernel({"type": "rows_read", "agent": aid})
-        rows = r.get("rows")
-        return rows if isinstance(rows, list) else []
+        """That agent's rows WHOLE, oldest first. An agent never written to answers
+        an empty list — a legitimate zero."""
+        out: list[dict] = []
+        after = None
+        while True:
+            q = {"type": "read", "owner": aid, "limit": 1000}
+            if after is not None:
+                q["after"] = after
+            r = self._store(q)
+            rows = r.get("rows")
+            if not isinstance(rows, list):
+                return out
+            out.extend({**x, "agent": aid} for x in rows)
+            after = r.get("next")
+            if after is None:
+                return out
 
     def rows_write(self, aid: str, rows: list[dict]) -> list[int]:
-        """Append rows under FRESH ids — the kernel's `rows_write`. Returns the
-        ids the store assigned, in order. The store is the only allocator."""
-        r = self._kernel({"type": "rows_write", "agent": aid, "rows": rows})
+        """Append rows to that agent's conversation (ids from the kernel's counter
+        when a row carries none). Returns the ids, in order."""
+        r = self._store({"type": "append", "owner": aid, "rows": rows})
         ids = r.get("ids")
         return ids if isinstance(ids, list) else []
-
-    def body_get(self, pid: int, offset: int = 0, length: int = 4096):
-        """One page of a stored reply body by pid — read off the `body` row the
-        store keeps, which `rows_read` returns whole. `None` when nothing is
-        stored under that pid."""
-        for owner in self.agent_ids():
-            for r in self.rows_for(owner):
-                if r.get("kind") == "body" and r.get("parent") == pid:
-                    text = str(r.get("content") or "")
-                    chunk = text[offset:offset + length]
-                    return chunk, offset + len(chunk), offset + len(chunk) >= len(text), len(text)
-        return None
 
     def agent_ids(self) -> list[str]:
         r = self._kernel({"type": "list_agents"})
@@ -281,9 +268,8 @@ class WireCtx:
         return t if isinstance(t, list) else []
 
     def view_for(self, aid: str) -> dict | None:
-        """That agent's VIEW — the newest `view` row in its store. There is no
-        verb that returns it directly; the view IS a row, and `rows_read` carries
-        rows whole, so this reads the same document `_load_view` reads."""
+        """That agent's VIEW — the newest `view` row in its store, the same
+        document `_load_view` reads."""
         latest = None
         for r in self.rows_for(aid):
             if r.get("kind") == "view" and isinstance(r.get("ids"), list):
@@ -292,28 +278,24 @@ class WireCtx:
 
     @property
     def next_id(self) -> int:
-        """The id the store will mint NEXT. Derived from the highest id in the
-        table, which is what the counter guarantees — there is no verb that
-        exposes the counter itself, and inventing one to satisfy a probe would
-        be a product change made for a test."""
-        top = 0
-        for aid in self.agent_ids():
-            for r in self.rows_for(aid):
-                rid = r.get("id")
-                if isinstance(rid, int) and rid > top:
-                    top = rid
-        return top + 1
+        """At least the id the kernel mints NEXT: the root record's reserved bound
+        (`next_id`, written by `kernel_start`) — the counter's durable half."""
+        r = self._kernel({"type": "list_agents"})
+        for a in r.get("agents") or []:
+            if a.get("parent_id") is None:
+                return int(a.get("next_id") or 1)
+        return 1
 
     async def shutdown(self) -> dict:
         """The kernel's TEARDOWN — the wire twin of the in-process
         `Kernel.shutdown()`. Over the wire the kernel is a process, so this is
-        `shutdown_kernel` (the root-only verb that stops it) followed by waiting
+        `kernel_stop` (the root-only verb that stops it) followed by waiting
         for that process to be gone. The agent half (`shutdown_agents`) is the
         probe's own call, made before this exactly as it is in process."""
         import asyncio
 
         ack = await asyncio.to_thread(
-            self.k.send, "kernel", {"type": "shutdown_kernel"}, 30)
+            self.k.send, "kernel", {"type": "kernel_stop"}, 30)
         proc = getattr(self.k, "proc", None)
         if proc is not None:
             for _ in range(300):  # the verb defers its exit ~100ms; wait on the PROCESS
@@ -321,5 +303,5 @@ class WireCtx:
                     break
                 await asyncio.sleep(0.1)
             else:
-                raise AssertionError("shutdown_kernel acked but the kernel process is still alive")
+                raise AssertionError("kernel_stop acked but the kernel process is still alive")
         return ack if isinstance(ack, dict) else {"ok": ack}

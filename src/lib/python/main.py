@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from cli import Cli
-from kernel_state.tools import hydrate_messages, read_tree, write_record
+from kernel_state.tools import read_tree, write_record
 
 from kernel import Kernel, _load_dotenv, dispatch_argv
 
@@ -31,19 +31,19 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     compose per-process ephemerals. No agent boots here — `dispatch_argv`
     runs the boot pass (which is when the root loader subscribes)."""
     records = read_tree(root_dir)
-    # No ROOT record on disk (fresh project, or a missing/corrupt `agent.json`
+    # No ROOT record on disk (fresh project, or a missing/corrupt `agent.yaml`
     # with children still under `agents/`): the root IS the loader
-    # (id="kernel_state"). Seed its agent.json + readme now so the next boot
+    # (id="kernel_state"). Seed its agent.yaml + readme now so the next boot
     # reads it (read-only `reflect` paths take no lock and write nothing).
     seeded = not any(r.get("parent_id") is None for r in records)
     if seeded:
         records = [
             {"id": "kernel_state", "handler_module": "kernel_state.tools"}
         ] + records
+    # The kernel keeps no conversation and hydrates no rows: `load` restores the
+    # tree and the id counter (the root record's reserved bound); execution rows
+    # live in the root's memory store, which `kernel_start` wires.
     kernel.load(records, root_path=root_dir)
-    # HYDRATE THE MESSAGE STORE, cold, before the first send mints an id. The kernel
-    # starts empty; the loader bundle's reader fills it from above and sets the counter.
-    hydrate_messages(kernel, root_dir)
     # No stream provider is composed here. kernel_state's AUTO-FLUSH persists ONLY
     # through a DISCOVERED provider (a file_bridge child rooted at `.fantastic` that an
     # operator/LLM wires) — with none wired the live tree stays in RAM (no fallback).

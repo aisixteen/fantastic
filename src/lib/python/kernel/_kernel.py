@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from kernel._refusal import UNKNOWN_AGENT, refusal
+from kernel._refusal import MISSING_ARG, UNAUTHORIZED, UNHANDLED, UNKNOWN_AGENT, refusal
 from kernel._state import CURRENT_VERSION, validate_records
 
 if TYPE_CHECKING:
@@ -116,6 +116,37 @@ def current_origin() -> str | None:
     job, it runs first, and duplicating it here would be a second truth.
     """
     return _current_origin.get()
+
+
+# THE QUALIFIED REMOTE CALLER. A call that crossed a bridge arrives carrying its
+# sender's address `<remote kernel guid>|<remote agent id>` on the frame. The inbound
+# leg dispatches it under `remote_caller_context(leg_id, address)`; the dispatch that
+# `send` launches (origin == that leg) reads the address through
+# `current_remote_caller()`. `Agent._dispatch_task` consumes the pair, so a send the
+# handler itself makes does NOT inherit a caller it never had — its own writes are
+# keyed under its own id.
+_remote_caller: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "_remote_caller", default=None
+)
+_current_remote: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_current_remote", default=None
+)
+
+
+@contextlib.contextmanager
+def remote_caller_context(leg_id: str, address: str):
+    """Mark the enclosed sends as a bridge leg relaying `address`'s call."""
+    token = _remote_caller.set((leg_id, address))
+    try:
+        yield
+    finally:
+        _remote_caller.reset(token)
+
+
+def current_remote_caller() -> str | None:
+    """The qualified `<guid>|<agent id>` of a caller on ANOTHER kernel, when this
+    dispatch was relayed by a bridge leg that carried it; None otherwise."""
+    return _current_remote.get()
 
 
 def current_task() -> int | None:
@@ -244,6 +275,53 @@ ERRORED = "errored"
 FAILED = "failed"
 CANCELLED = "cancelled"
 TIMED_OUT = "timed_out"
+# THE DEAD ENDINGS. An execution that settled one of these is a DEAD LETTER: it is
+# announced (`on_deadletter`), listed by `ledger`, never retried silently, and
+# retired by `ack_deadletter`.
+DEAD_STATUSES = frozenset({"failed", "timed_out", "cancelled"})
+
+
+def _store_safe(o: Any) -> Any:
+    """A row a memory store can hold and a JSON wire can carry: raw bytes are reduced
+    to `{len: N}` — the one reduction; everything else passes through."""
+    if isinstance(o, (bytes, bytearray)):
+        return {"len": len(o)}
+    if isinstance(o, dict):
+        return {k: _store_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_store_safe(v) for v in o]
+    return o
+
+
+def stored_outcome(out: dict, named: bool) -> dict:
+    """WHAT A SETTLE ROW KEEPS of an outcome — the one definition (decided 2026-09-26).
+
+    A NAMED call keeps its whole result: its name is a dedup contract, and a re-send
+    returns the recorded outcome (C9). A DEAD LETTER keeps its error text: someone has
+    to read why it died. Every other settle keeps a digest — `{status, bytes}`.
+
+    Why not the body everywhere: the kernel's own store reads are executions too (the
+    `ledger` projection, every AI agent's head read), so a settle holding its body
+    re-recorded the store inside the store — measured ~6x growth per `ledger` call
+    (2 KB → 14.8 MB in five). And a reply body is not persisted anyway (§3): its
+    receiver holds it in RAM with the one-line `origin` that gets it again."""
+    status = out.get("status")
+    res = out.get("result")
+    if named:
+        return {"status": status, "result": res}
+    if status in DEAD_STATUSES:
+        kept: dict = {"status": status}
+        if isinstance(res, dict):
+            for k in ("error", "reason", "side", "cancelled", "timed_out"):
+                if k in res:
+                    v = res[k]
+                    kept[k] = str(v)[:500] if isinstance(v, str) else v
+        return kept
+    try:
+        size = len(json.dumps(_store_safe(res), default=str))
+    except (TypeError, ValueError):
+        size = None
+    return {"status": status, "bytes": size}
 
 
 def outcome(pid: int | None, status: str, result: dict | None) -> dict:
@@ -374,63 +452,70 @@ class Kernel:
     # leaves the kernel — `ps` serves the five public fields only.
     tasks: dict[int, dict] = field(default_factory=dict)
 
-    # THE ONE COUNTER. Every id in the kernel — a conversation row, a call (one
-    # per batch item), a forked task, a reply body's pid, a checkpoint — is the
-    # next value of this int64. Kernel-wide and monotonic for the process
-    # lifetime: `a < b` means "a was created before b", across agents, and an
-    # id is never reused (a stale `cancel` kills nothing). Not persisted by the
-    # kernel: a loader that hydrates messages restores it as `max(id) + 1`
-    # (see `kernel_state` — the kernel never guesses a counter).
+    # THE ONE COUNTER. Every id in the kernel — a call (one per batch item), a
+    # forked task, a settle, a conversation row an AI agent writes to its store —
+    # is the next value of this int64. Kernel-wide and monotonic: `a < b` means "a
+    # was created before b", across agents, and an id is never reused (a stale
+    # `cancel` kills nothing).
+    #
+    # PERSISTED BY BLOCK RESERVATION, beside `guid` in the ROOT RECORD: `load`
+    # reserves a block past the persisted bound, `start` writes that bound into the
+    # root record (`next_id`), and a started kernel minting past it reserves and
+    # writes the next block — the loader persists it like any record edit. A reboot starts at the persisted bound, so ids never
+    # repeat; a crash skips at most one block (gaps are harmless — ids are opaque).
+    # The guid and the counter persist TOGETHER: a root that is not durable mints
+    # a new guid on its next boot, so every store key is new and ids restarting
+    # from 1 cannot collide. A counter going BACKWARDS under the same guid (an old
+    # agent.yaml restored) is the admin's to prevent.
     next_id: int = 1
+    id_reserved: int = 1
+    ID_BLOCK = 1000
 
-    # THE EXECUTION LEDGER — caller-NAMED executions (a batch item's `id`).
-    # `send([{.., id:"job-42"}])` means ENSURE that execution exists (the same
-    # semantics `create_agent` gives a supplied agent id): unknown id ⇒ dispatch
-    # and record; id in flight ⇒ JOIN it (no second run — C10); id settled ⇒ the
-    # recorded outcome returns and no handler runs (C9/C11 idempotency). The id
-    # is the SAME identifier `ps`/`cancel`/reply tags carry — one id space.
-    # THE MESSAGE IS THE ROW; this dict is the PROCESS side of a call: its
-    # future, the payload a retry re-issues, the attempt count. The call's
-    # message row (`kind:"call"`, in `rows`) carries what outlives the process —
-    # the payload verbatim, the retry budget, the attempts — and its `settle`
-    # row carries the full outcome. ONE TAPE: a loader rebuilds this dict from
-    # those rows at boot (there is no second ledger file).
+    # THE EXECUTION LEDGER, process side — one entry per execution still in RAM:
+    # in flight, or settled and not yet flushed. `send([{.., id:"job-42"}])` means
+    # ENSURE that execution exists (the semantics `create_agent` gives a supplied
+    # agent id): unknown name ⇒ dispatch and record; in flight ⇒ JOIN it (no second
+    # run — C10); settled ⇒ the recorded outcome returns and no handler runs
+    # (C9/C11). A settled execution that was flushed lives on as its `call` +
+    # `settle` rows in the kernel's memory store; `send` looks a name up there
+    # (`recall_executions`) before launching, so dedup survives both the flush and
+    # a restart.
     # Entry: {"target", "fut": Future[outcome], "payload", "timeout",
-    #         "retries", "attempts", "named", "name", "origin"}.
+    #         "retries", "attempts", "named", "name", "caller", "acked"?}.
     executions: dict[int, dict] = field(default_factory=dict)
 
-    # Caller NAMES → message id. A batch item's `id` is a NAME (ensure
-    # semantics: unknown ⇒ dispatch, known ⇒ join); the execution's id is the
-    # counter's. Forgotten when the ring evicts the execution.
+    # Caller NAMES → message id, while the execution is in RAM.
     names: dict[str, int] = field(default_factory=dict)
 
-    # LEDGER RETENTION — a RING: when the ledger exceeds the cap, the OLDEST
-    # SETTLED rows are evicted, unnamed before named (a named row carries a
-    # dedup contract; evicting it silently re-arms a side effect, so named go
-    # last). In-flight rows are never evicted — the cap may overshoot while
-    # work is live. None = unbounded (the operator's explicit choice).
+    # RETENTION. In RAM a RING bounds `executions` (oldest SETTLED first, unnamed
+    # before named, never in flight) — what matters for a kernel that was never
+    # started and so never flushes. In the store, the same number is the prune
+    # window. None = unbounded (the operator's explicit choice).
     # Set at kernel start: `--ledger-cap N|inf` / FANTASTIC_LEDGER_CAP.
     ledger_cap: int | None = 1_000_000
 
-    # THE MESSAGE STORE — every message the kernel ever made, id-addressed by the
-    # one counter, append-only: a row is never edited or removed by this API. An
-    # agent's CONVERSATION (a message, a delivered reply, a fold mark, a recall
-    # decision) and the kernel's own bookkeeping — a `call` row per batch item, a
-    # `task` row per forked job — live in the same table; readers filter by `kind`.
-    # A dehydrated reply BODY is a `body` row whose `parent` is the call's id; an
-    # agent's VIEW (the ordered ids it sees, each at a resolution) is a `view` row,
-    # the newest one being current. ONE TABLE, so one append-only stream carries
-    # everything. Rows outlive `delete_agent`: agent id is conversation id, and a
-    # re-created id continues where it left off — a clean slate is a new id.
-    #
-    # THE KERNEL NEVER KNOWS DISK. It starts empty, always. A hydrator (a loader
-    # bundle, from above) fills it with `rows_put` and sets `next_id`; a persister
-    # tails it with `rows_stream(after)`. Both are optional and interchangeable.
+    # THE EXECUTION ROWS — `call`, `settle`, `task`, `ack_deadletter` rows the kernel minted
+    # and has NOT YET FLUSHED to its memory store, id-addressed. The kernel keeps
+    # NO conversation: an AI agent's rows live in that agent's memory store. Once a
+    # row is flushed it leaves RAM (`flush_executions`); a kernel that was never
+    # started keeps them here until the process ends.
     rows: dict[int, dict] = field(default_factory=dict)
-    _rows_by_agent: dict[str, list[int]] = field(default_factory=dict)
-    _body_by_parent: dict[int, int] = field(default_factory=dict)  # pid → body row
-    _view_by_agent: dict[str, int] = field(default_factory=dict)  # agent → view row
     _tails: list["asyncio.Queue"] = field(default_factory=list)
+
+    # THE MEMORY STORE the kernel writes its execution rows to — the root record's
+    # `memory_store_id`, resolved by `start`. None ⇒ not started: rows stay in RAM.
+    store_id: str | None = None
+    started: bool = False
+    _flush_wake: "asyncio.Event | None" = None
+    _flush_lock: "asyncio.Lock | None" = None
+    _flusher_task_id: int | None = None
+    # The flush rows this kernel wrote (by id), and the calls that carried them:
+    # those calls' own rows are ALREADY RECORDED — the flush row is their record.
+    _own_flushes: set[int] = field(default_factory=set)
+    _own_flush_calls: dict[int, int] = field(default_factory=dict)  # call id → flush id
+    # How many `call` rows the store holds for the kernel (counted as flushed, re-read
+    # at every prune) — what the retention window is measured against.
+    _stored_calls: int = 0
 
     # DRAINING: the first phase of a graceful stop (`shutdown_agents`). New roots
     # are refused `{reason:"draining"}`; sends with a live parent task, and the
@@ -439,61 +524,22 @@ class Kernel:
 
     def mint_id(self) -> int:
         """The next message id. The ONLY allocator in the kernel: a call, a forked
-        task, a conversation row, a reply body all take their id here, so one
-        number names one thing everywhere (`ps`, `cancel`, `messages`, a reply
-        tag). Minting reserves the id; the row may be written later (`rows_put`
-        accepts a pre-minted id) — an AI message names its own id in the reply tags
-        it sends before its row exists."""
+        task, a conversation row, a checkpoint all take their id here, so one
+        number names one thing everywhere (`ps`, `cancel`, a reply tag, a store
+        row). Reserves a new block in the root record when the old one is spent."""
         n = self.next_id
         self.next_id = n + 1
+        if n >= self.id_reserved:
+            self.id_reserved = n + self.ID_BLOCK
+            if self.started and self.root is not None:
+                self.root.update(self.root.id, next_id=self.id_reserved)
         return n
 
-    @staticmethod
-    def row_digest(rid: int, row: dict) -> dict:
-        """The DIGEST of one row — what `messages` answers and what the `row` state
-        event carries: id, agent, parent, kind, role, a 120-char head and the byte
-        count, plus the per-kind extras. NEVER the content: bodies stay behind
-        `pull` / `rows_read`, so the gate is not bypassed by a stream."""
-        content = str(row.get("content", ""))
-        d = {
-            "id": rid,
-            "agent": row.get("agent"),
-            "parent": row.get("parent"),
-            "kind": row.get("kind") or row.get("role"),
-            "role": row.get("role"),
-            "head": content[:120].replace("\n", " "),
-            "bytes": len(content),
-        }
-        if row.get("title"):
-            d["title"] = row["title"]
-        if row.get("level"):
-            d["level"] = row["level"]
-        refs = row.get("refs")
-        if refs:
-            # A caller-written row may hold anything; a digest never raises.
-            d["refs"] = len(refs) if isinstance(refs, (list, tuple, dict, str)) else 1
-        if row.get("kind") in ("call", "task"):
-            d["verb"] = row.get("verb")
-            if row.get("name"):
-                d["name"] = row["name"]
-            outcome = row.get("outcome")
-            if outcome:
-                d["status"] = (
-                    outcome.get("status") if isinstance(outcome, dict) else None
-                )
-        elif row.get("kind") == "view":
-            # a view digest says how much it holds, never the array itself
-            ids = row.get("ids") or []
-            d["ids"] = len(ids) if isinstance(ids, (list, tuple, dict, str)) else 1
-            d["budget"] = row.get("budget")
-            d["title"] = row.get("why")
-        return d
-
     def rows_put(self, agent_id: str, row: dict) -> int:
-        """Append one message for `agent_id`; mint its id when absent, accept a
-        PRE-MINTED unused one, refuse anything else — the store is the only
-        allocator. Bookkeeping from above (the same standing as `ledger_put`),
-        never gated. Returns the id."""
+        """Append one EXECUTION row (`agent` = the agent it is about); mint its id
+        when absent, accept a PRE-MINTED unused one, refuse anything else — the
+        kernel is the only allocator. Bookkeeping from above, never gated. Wakes the
+        flusher. Returns the id."""
         rid = row.get("id")
         if rid is None:
             rid = self.mint_id()
@@ -510,35 +556,18 @@ class Kernel:
         stored = {**row, "id": rid, "agent": agent_id}
         stored.setdefault("ts", time.time())
         self.rows[rid] = stored
-        self._rows_by_agent.setdefault(agent_id, []).append(rid)
-        kind = stored.get("kind")
-        if kind == "body" and isinstance(stored.get("parent"), int):
-            self._body_by_parent[stored["parent"]] = rid
-        elif kind == "view":
-            self._view_by_agent[agent_id] = rid
         for q in self._tails:
             q.put_nowait(stored)
-        # THE ROW EVENT — a view learns "row <id> arrived" reactively and pulls the
-        # body when it needs it. Digest only, on the same state stream a
-        # `state_subscribe` already holds; hydration publishes nothing because no
-        # subscriber exists yet at bootstrap.
-        self.publish_state(
-            {"agent_id": agent_id, "kind": "row", "row": self.row_digest(rid, stored)}
-        )
+        if self._flush_wake is not None:
+            self._flush_wake.set()
         return rid
 
     async def rows_stream(self, after: int):
-        """THE TAIL. Every row with `id > after` in id order, then every row as it is
-        appended — for a persister (the loader's pump) or any other consumer. Replay
-        then live, deduped by id, so a subscriber that opens at the id it last saw
-        misses nothing and doubles nothing. Yielding is not a message: no send, no
-        task, no row. The queue holds references to rows already in RAM."""
+        """THE TAIL. Every row still in RAM with `id > after` in id order, then every
+        row as it is appended. Replay then live, deduped by id. Yielding is not a
+        message: no send, no task, no row."""
         q: asyncio.Queue = asyncio.Queue()
         self._tails.append(q)  # registered BEFORE the snapshot: nothing slips between
-        # IDS DO NOT ARRIVE IN ORDER. An AI message's id is minted when the message starts
-        # and its row lands when the message ends, after calls minted in between — so
-        # "newer than the last yielded" would drop it (measured 2026-09-08: every
-        # conversation message missing from the log). Dedupe only against the replay.
         replayed = sorted(i for i in self.rows if i > after)
         try:
             for rid in replayed:
@@ -555,47 +584,6 @@ class Kernel:
         finally:
             if q in self._tails:
                 self._tails.remove(q)
-
-    def rows_for(self, agent_id: str) -> list[dict]:
-        """That agent's rows, in append order."""
-        return [
-            self.rows[i]
-            for i in self._rows_by_agent.get(agent_id, ())
-            if i in self.rows
-        ]
-
-    def rows_get(self, ids: list[int]) -> list[dict]:
-        """Rows by id, any agent, in the order asked. The `messages` verb gates."""
-        return [self.rows[i] for i in ids if i in self.rows]
-
-    def body_put(self, agent_id: str, pid: int, text: str) -> int:
-        """A reply body too large to inline: a `body` row under the conversation that
-        received it, `parent` = the call's id. Returns the row id."""
-        return self.rows_put(agent_id, {"kind": "body", "parent": pid, "content": text})
-
-    def body_get(self, pid: int, offset: int, length: int):
-        """One page of a stored body: (text, next_offset, eof, size), or None."""
-        rid = self._body_by_parent.get(pid)
-        row = self.rows.get(rid) if rid is not None else None
-        if row is None:
-            return None
-        b = str(row.get("content", ""))
-        chunk = b[offset : offset + max(1, length)]
-        nxt = offset + len(chunk)
-        return chunk, nxt, nxt >= len(b), len(b)
-
-    def view_put(self, agent_id: str, doc: dict) -> int:
-        """The agent's VIEW as a `view` row; the newest one is current."""
-        return self.rows_put(agent_id, {**doc, "kind": "view"})
-
-    def view_get(self, agent_id: str) -> dict | None:
-        rid = self._view_by_agent.get(agent_id)
-        row = self.rows.get(rid) if rid is not None else None
-        if row is None:
-            return None
-        return {
-            k: v for k, v in row.items() if k not in ("kind", "agent", "id", "parent")
-        }
 
     def resolve_name(self, name: str) -> int | None:
         """The message id a caller's name stands for, while its execution is held."""
@@ -620,11 +608,478 @@ class Kernel:
                     continue
                 if not r["fut"].done():
                     continue
-                del self.executions[eid]
-                if r.get("name") and self.names.get(r["name"]) == eid:
-                    del self.names[r["name"]]
+                self._forget_execution(eid)
                 if len(self.executions) <= cap:
                     return
+
+    def _forget_execution(self, eid: int) -> None:
+        r = self.executions.pop(eid, None)
+        if r is not None and r.get("name") and self.names.get(r["name"]) == eid:
+            del self.names[r["name"]]
+
+    # ─── the kernel's memory store: start, flush, read back ─────────
+
+    FLUSH_DEBOUNCE = 0.15  # seconds of quiet before a batch is written
+
+    async def start(self, *, boot_all: bool = True) -> dict:
+        """THE START SEQUENCE — the `kernel_start` verb, and what the daemon runs.
+
+        1. The root record must name `memory_store_id`. None ⇒ FAIL LOUD: the kernel
+           keeps its execution rows (the ledger, dead letters, named-call dedup) in
+           a memory store and does not start without one. No built-in default.
+        2. Boot the root (it mints the guid every store key carries), then THAT
+           store — before anyone who might call it.
+        3. The store must serve the operator (the kernel writes as `kernel`) —
+           probed now, refused now, never discovered on the first flush.
+        4. Start flushing: every execution row minted so far and from now on is
+           written into the store and leaves RAM.
+        5. `boot_all`: boot every other agent in registration order (AI agents boot
+           lazily — they read their own store on their first turn).
+        Idempotent: a second call reports the store it is already writing to."""
+        if self.started:
+            return {"started": True, "already": True, "store": self.store_id}
+        root = self.root
+        if root is None:
+            return {"error": "kernel: no root agent registered"}
+        sid = root.record.get("memory_store_id")
+        if not isinstance(sid, str) or not sid:
+            return refusal(
+                MISSING_ARG,
+                "kernel_start: the root record names no `memory_store_id` — the kernel "
+                "keeps its execution rows (ledger, dead letters, named-call dedup) in a "
+                "memory store and will not start without one",
+                hint=(
+                    "a memory store is needed — create a ram_store and name it in "
+                    f"memory_store_id if you have none: `create_agent parent_id={root.id} "
+                    "handler_module=ram_store.tools id=memory operator=true`, then "
+                    f"`update_agent id={root.id} memory_store_id=memory`"
+                ),
+                arg="memory_store_id",
+            )
+        store = self.agents.get(self.well_known.get(sid, sid))
+        if store is None:
+            return self.unknown_agent(
+                sid, hint="the root's `memory_store_id` names no agent in this tree"
+            )
+        booted: list[str] = []
+        with operator_context():
+            for a in (root, store):
+                out = (
+                    await self.send([{"target": a.id, "payload": {"type": "boot"}}])
+                )[0]
+                if out["status"] != COMPLETED:
+                    return refusal(
+                        UNHANDLED,
+                        f"kernel_start: boot of {a.id!r} did not complete "
+                        f"({out['status']}): {out['result']}",
+                    )
+                booted.append(a.id)
+            probe = (
+                await self.send(
+                    [{"target": store.id, "payload": {"type": "read", "limit": 1}}]
+                )
+            )[0]["result"]
+        if isinstance(probe, dict) and probe.get("error"):
+            return refusal(
+                UNAUTHORIZED,
+                f"kernel_start: the memory store {store.id!r} refuses the kernel: "
+                f"{probe.get('error')}",
+                hint=probe.get("hint")
+                or f"the store must serve the operator: update_agent id={store.id} operator=true",
+            )
+        # The reserved id bound goes to the loader now (the root is booted, so its
+        # record writer is listening): a crash from here on skips ids, never reuses.
+        root.update(root.id, next_id=self.id_reserved)
+        self.store_id = store.id
+        self._flush_wake = asyncio.Event()
+        self._flush_lock = asyncio.Lock()
+        self.started = True
+        self._flusher_task_id = self.spawn_task(
+            root.id, "flush_executions", self._flusher(), keepalive=True
+        )
+        self._flush_wake.set()
+        if boot_all:
+            for a in list(self.agents.values()):
+                if a.id in (root.id, store.id):
+                    continue
+                with operator_context():
+                    out = (
+                        await self.send([{"target": a.id, "payload": {"type": "boot"}}])
+                    )[0]
+                if out["status"] == COMPLETED and not (
+                    isinstance(out["result"], dict) and out["result"].get("error")
+                ):
+                    booted.append(a.id)
+                else:
+                    print(
+                        f"  [kernel] boot {a.id!r}: {out['status']} {out['result']}",
+                        file=sys.stderr,
+                    )
+        return {"started": True, "store": store.id, "booted": booted}
+
+    async def _flusher(self) -> None:
+        """The flush loop: wake on a new row, let a burst settle, write a batch."""
+        assert self._flush_wake is not None
+        while True:
+            await self._flush_wake.wait()
+            await asyncio.sleep(self.FLUSH_DEBOUNCE)
+            self._flush_wake.clear()
+            await self.flush_executions()
+
+    def _is_own_flush_row(self, row: dict) -> bool:
+        """A row the kernel's own flush produced — ALREADY RECORDED by its flush row.
+
+        A flush is a `send` to the store, so it mints a `call` row and a `settle`
+        row like every send; writing those would mint two more on the next flush,
+        forever. The flush therefore describes ITSELF: it mints one id and appends a
+        `flush` row inside the very batch it writes. The call that carried that batch
+        names the flush row in its payload — the store already holds the record of
+        this execution — so its call and settle rows are not written again. This is
+        dedup by execution (the store proves it), not a blind spot: every OTHER call
+        to the store, the kernel's own reads included, is recorded like any call."""
+        if row.get("kind") == "call" and row.get("agent") == self.store_id:
+            payload = row.get("payload") or {}
+            if payload.get("type") == "append":
+                for r in payload.get("rows") or ():
+                    if (
+                        isinstance(r, dict)
+                        and r.get("kind") == "flush"
+                        and r.get("id") in self._own_flushes
+                    ):
+                        self._own_flush_calls[row["id"]] = r["id"]
+                        return True
+        if row.get("kind") == "settle" and row.get("parent") in self._own_flush_calls:
+            return True
+        return False
+
+    async def flush_executions(self) -> dict:
+        """Write every execution row still in RAM to the memory store, as ONE batch
+        closed by a self-describing `flush` row; on success the rows leave RAM and a
+        settled execution whose settle row landed leaves `executions` (the store is
+        its record now). All or nothing: a refused batch stays in RAM for the next
+        flush, and the refused flush is itself a dead letter.
+
+        EDGE (recorded, not resolved): the write can LAND while its reply is lost
+        (a timeout). The store then holds the flush row as `done` while RAM saw the
+        flush call fail — that call is a dead letter in RAM (the ledger shows it,
+        `on_deadletter` announced it), and its own rows are not re-flushed because
+        the store already recorded them. RAM and store disagree about THAT flush
+        only; the admin reconciles."""
+        if self.store_id is None or self._flush_lock is None:
+            return {"flushed": 0}
+        async with self._flush_lock:
+            own = [rid for rid, r in self.rows.items() if self._is_own_flush_row(r)]
+            for rid in own:
+                r = self.rows.pop(rid)
+                if r.get("kind") == "settle":
+                    # The flush call ended: its bookkeeping goes. A flush that did
+                    # not complete stays in `executions` — a dead letter in RAM.
+                    fid = self._own_flush_calls.pop(r.get("parent"), None)
+                    self._own_flushes.discard(fid)
+                    status = (r.get("outcome") or {}).get("status")
+                    if status == COMPLETED:
+                        self._forget_execution(r["parent"])
+            ids = sorted(self.rows)
+            if not ids:
+                return {"flushed": 0}
+            fid = self.mint_id()
+            self._own_flushes.add(fid)
+            batch_kinds = {i: self.rows[i].get("kind") for i in ids}
+            batch = [_store_safe(self.rows[i]) for i in ids]
+            batch.append(
+                {
+                    "id": fid,
+                    "kind": "flush",
+                    "covers": ids,
+                    "status": "done",
+                    "ts": time.time(),
+                }
+            )
+            with operator_context():
+                out = (
+                    await self.send(
+                        [
+                            {
+                                "target": self.store_id,
+                                "payload": {"type": "append", "rows": batch},
+                            }
+                        ]
+                    )
+                )[0]
+            res = out["result"]
+            if out["status"] != COMPLETED or (
+                isinstance(res, dict) and res.get("error")
+            ):
+                print(
+                    f"  [kernel] flush of {len(ids)} execution row(s) to "
+                    f"{self.store_id!r} failed: {out['status']} {res}",
+                    file=sys.stderr,
+                )
+                return {"flushed": 0, "error": res}
+            for i in ids:
+                r = self.rows.pop(i, None)
+                if r is not None and r.get("kind") == "settle":
+                    exe = self.executions.get(r.get("parent"))
+                    if exe is not None and exe["fut"].done():
+                        self._forget_execution(r["parent"])
+            self._stored_calls += sum(1 for i in ids if (batch_kinds.get(i) == "call"))
+        pruned = 0
+        if self.ledger_cap is not None and self._stored_calls > self.ledger_cap:
+            pruned = await self.prune_executions()
+        return {"flushed": len(ids), "flush": fid, "pruned": pruned}
+
+    async def prune_executions(self) -> int:
+        """THE STORE-SIDE RETENTION WINDOW (`ledger_cap`). Over the cap, the OLDEST
+        settled executions leave the kernel's store — unnamed first, then named (a
+        named one carries a dedup contract, so it goes last) — each with its settle and
+        ack rows, and the task/flush rows that only covered what was pruned. A DEAD
+        LETTER that nobody acked stays: it is waiting for a person. In-flight work is
+        never pruned. Returns how many executions went."""
+        rows = await self._store_read({})
+        calls = [r for r in rows if r.get("kind") == "call" and not r.get("internal")]
+        settles = {r.get("parent"): r for r in rows if r.get("kind") == "settle"}
+        acked = {r.get("parent") for r in rows if r.get("kind") == "ack"}
+        self._stored_calls = len(calls)
+        cap = self.ledger_cap or 0
+        if len(calls) <= cap:
+            return 0
+        # HYSTERESIS: down to 90% of the window, so a full store is not re-read and
+        # re-pruned on every flush once it sits at the cap.
+        over = len(calls) - (cap * 9 // 10 if cap >= 10 else cap)
+
+        def prunable(c: dict) -> bool:
+            st = settles.get(c["id"])
+            if st is None or c["id"] in self.executions:
+                return False  # in flight (or still live in RAM)
+            status = (st.get("outcome") or {}).get("status")
+            return status not in DEAD_STATUSES or c["id"] in acked
+
+        doomed_calls: list[int] = []
+        for named_pass in (False, True):
+            for c in sorted(calls, key=lambda r: r["id"]):
+                if len(doomed_calls) >= over:
+                    break
+                if bool(c.get("named")) is named_pass and prunable(c):
+                    doomed_calls.append(c["id"])
+        if not doomed_calls:
+            return 0
+        gone = set(doomed_calls)
+        doomed = set(gone)
+        for r in rows:
+            if r.get("kind") in ("settle", "ack") and r.get("parent") in gone:
+                doomed.add(r["id"])
+        kept_calls = [c["id"] for c in calls if c["id"] not in gone]
+        floor = min(kept_calls) if kept_calls else None
+        for r in rows:
+            if r.get("kind") == "flush" and set(r.get("covers") or ()) <= doomed | {
+                x for x in (r.get("covers") or ()) if floor is not None and x < floor
+            }:
+                doomed.add(r["id"])
+            elif r.get("kind") == "task" and floor is not None and r["id"] < floor:
+                doomed.add(r["id"])
+        with operator_context():
+            out = (
+                await self.send(
+                    [
+                        {
+                            "target": self.store_id,
+                            "payload": {"type": "prune", "ids": sorted(doomed)},
+                        }
+                    ]
+                )
+            )[0]["result"]
+        if isinstance(out, dict) and out.get("error"):
+            print(
+                f"  [kernel] prune of the kernel's store failed: {out}", file=sys.stderr
+            )
+            return 0
+        self._stored_calls -= len(gone)
+        return len(gone)
+
+    async def _store_read(self, payload: dict) -> list[dict]:
+        """Every row of the kernel's own key matching `payload`, all pages."""
+        out: list[dict] = []
+        after = None
+        while True:
+            q = {"type": "read", **payload, "limit": 1000}
+            if after is not None:
+                q["after"] = after
+            with operator_context():
+                res = (await self.send([{"target": self.store_id, "payload": q}]))[0][
+                    "result"
+                ]
+            if not isinstance(res, dict) or res.get("error"):
+                raise RuntimeError(f"kernel: memory store read failed: {res}")
+            out.extend(res.get("rows") or [])
+            after = res.get("next")
+            if after is None:
+                return out
+
+    async def ledger_entries(self) -> list[dict]:
+        """The LEDGER PROJECTION: flushed `call`/`settle`/`ack_deadletter` rows from the store,
+        overlaid by what is still in RAM (live executions, unflushed rows). Each
+        entry carries its originator as `_caller` for the verb to scope by."""
+        entries: dict[int, dict] = {}
+        acked: set[int] = set()
+        rows: list[dict] = []
+        if self.store_id is not None:
+            rows = await self._store_read({"kinds": ["call", "settle", "ack"]})
+        rows = rows + [
+            r for r in self.rows.values() if r.get("kind") in ("call", "settle", "ack")
+        ]
+        settles: dict[int, dict] = {}
+        for r in rows:
+            k = r.get("kind")
+            if k == "ack":
+                acked.add(r.get("parent"))
+            elif k == "settle":
+                settles[r.get("parent")] = r
+        for r in rows:
+            if r.get("kind") != "call" or r.get("internal"):
+                continue
+            eid = r["id"]
+            e = {
+                "id": eid,
+                "target": r.get("agent"),
+                "attempts": r.get("attempts", 1),
+                "retries": r.get("retries", 0),
+                "named": bool(r.get("named")),
+                "_caller": r.get("caller"),
+            }
+            if r.get("name"):
+                e["name"] = r["name"]
+            st = settles.get(eid)
+            if st is not None:
+                oc = st.get("outcome") or {}
+                e["status"] = oc.get("status")
+                e["attempts"] = st.get("attempts") or e["attempts"]
+                e["outcome"] = {"pid": eid, **oc, "attempts": e["attempts"]}
+            else:
+                e["status"] = "in_flight"
+            entries[eid] = e
+        from kernel._agent import _json_safe
+
+        for eid, x in self.executions.items():
+            e = {
+                "id": eid,
+                "target": x["target"],
+                "attempts": x["attempts"],
+                "retries": x["retries"],
+                "named": x["named"],
+                "_caller": x.get("caller"),
+            }
+            if x.get("name"):
+                e["name"] = x["name"]
+            if x["fut"].done():
+                res = x["fut"].result()
+                e["status"] = res["status"]
+                # THE SAME SHAPE flushed or not: what the settle row keeps.
+                e["outcome"] = {
+                    "pid": eid,
+                    **_json_safe(stored_outcome(res, bool(x["named"]))),
+                    "attempts": res.get("attempts", x["attempts"]),
+                }
+            else:
+                e["status"] = "in_flight"
+            if x.get("acked"):
+                acked.add(eid)
+            entries[eid] = e
+        for eid in acked:
+            if eid in entries:
+                entries[eid]["acked"] = True
+        return [entries[i] for i in sorted(entries)]
+
+    async def recall_executions(self, items: list) -> None:
+        """Bring a flushed execution back into RAM before `send` launches an item that
+        names it — a caller NAME not held in RAM, or an int id not in `executions`.
+        A settled one comes back as a DONE future holding its recorded outcome (dedup
+        survives the flush and a restart); one with no settle row was in flight when
+        the process stopped and rebuilds nothing — re-sending runs it."""
+        wanted: list[tuple[str, object]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            x = it.get("id")
+            if isinstance(x, str) and x and x not in self.names:
+                wanted.append(("name", x))
+            elif (
+                isinstance(x, int)
+                and not isinstance(x, bool)
+                and x not in self.executions
+            ):
+                wanted.append(("id", x))
+        if not wanted:
+            return
+        loop = asyncio.get_event_loop()
+        for kind, key in wanted:
+            match = {"name": key} if kind == "name" else None
+            calls = await self._store_read(
+                {"kinds": ["call"], **({"match": match} if match else {"ids": [key]})}
+            )
+            if not calls:
+                continue
+            call = calls[-1]
+            settles = await self._store_read(
+                {"kinds": ["settle"], "match": {"parent": call["id"]}}
+            )
+            if not settles:
+                continue
+            st = settles[-1]
+            oc = st.get("outcome") or {}
+            attempts = st.get("attempts") or call.get("attempts") or 1
+            fut = loop.create_future()
+            # A NAMED call's settle kept its result; an unnamed one (joined by its
+            # int id) kept only what `stored_outcome` keeps — and says so.
+            result = (
+                oc["result"]
+                if "result" in oc
+                else {k: v for k, v in oc.items() if k != "status"}
+            )
+            fut.set_result(
+                {
+                    "pid": call["id"],
+                    "status": oc.get("status"),
+                    "result": result,
+                    "attempts": attempts,
+                }
+            )
+            self.ledger_put(
+                call["id"],
+                {
+                    "target": call.get("agent"),
+                    "fut": fut,
+                    "payload": call.get("payload"),
+                    "timeout": None,
+                    "retries": call.get("retries", 0),
+                    "attempts": attempts,
+                    "named": bool(call.get("named")),
+                    "name": call.get("name"),
+                    "caller": call.get("caller"),
+                },
+            )
+
+    def announce_deadletter(self, pid: int, out: dict, attempts) -> None:
+        """`on_deadletter` — an execution settled failed / timed_out / cancelled.
+        Emitted on the ORIGINATING caller's own inbox (and so to whoever watches it,
+        a UI included), or on the root for an operator send. Nothing retries it; the
+        event is how a person learns there is something to decide."""
+        exe = self.executions.get(pid) or {}
+        caller = exe.get("caller")
+        entry = {
+            "type": "on_deadletter",
+            "id": pid,
+            "target": exe.get("target"),
+            "caller": caller,
+            "status": out.get("status"),
+            "attempts": attempts,
+        }
+        if exe.get("name"):
+            entry["name"] = exe["name"]
+        src = self.agents.get(caller) if caller else self.root
+        if src is None:
+            src = self.root
+        if src is not None:
+            src._fanout(entry, kind="emit")
 
     def register_task(
         self,
@@ -904,6 +1359,7 @@ class Kernel:
 
     SHUTDOWN_VERB_TIMEOUT = 30.0  # one bound for every agent's `shutdown` dispatch
     QUIET_TIMEOUT = 10.0  # how long in-flight work may take to settle before cancel
+    SETTLE_TIMEOUT = 2.0  # how long a cancelled batch may take to record its ending
 
     async def shutdown_agents(self) -> dict:
         """The AGENT half of a graceful stop — also the `shutdown_agents` kernel verb.
@@ -955,7 +1411,7 @@ class Kernel:
             every daemon that ran one: measured 2026-09-21, SIGTERM→exit was
             10.25 s with a scheduler on the tree and 0.29 s without it, and the
             e2e harness's 10 s stop window then SIGKILLed the kernel with its
-            PID lock (`.fantastic/lock.json`) still on disk. Forks are cancelled
+            PID lock (`.fantastic/lock.yaml`) still on disk. Forks are cancelled
             below — that is what a stop does to them — never awaited."""
             return [tid for tid in pending() if not self.tasks[tid].get("_forked")]
 
@@ -970,6 +1426,17 @@ class Kernel:
             with operator_context():
                 out = await self.cancel_task(tid)
             cancelled += out.get("killed", [])
+        # EVERY CALL SETTLES before this returns. A killed dispatch's batch records
+        # its `cancelled` outcome (and its settle row) a few loop turns after the
+        # abort; the stop that follows flushes the last rows, so it must not start
+        # before those endings exist. Bounded: a batch that never settles is not
+        # waited on forever.
+        deadline = time.monotonic() + self.SETTLE_TIMEOUT
+        while time.monotonic() < deadline and any(
+            not x["fut"].done() and eid not in self.tasks
+            for eid, x in self.executions.items()
+        ):
+            await asyncio.sleep(0.01)
         return {"drained": True, "shut": shut, "cancelled": cancelled}
 
     async def shutdown(self) -> None:
@@ -992,6 +1459,17 @@ class Kernel:
                     await hook(self.root)
             except Exception as e:  # noqa: BLE001 — teardown continues
                 print(f"  [shutdown] flush_pending raised: {e}", file=sys.stderr)
+        if self.started:
+            # THE LAST EXECUTION ROWS, while the store is still alive: everything
+            # settled by the drain (done, or cancelled into the dead letters) lands.
+            try:
+                with shutdown_context():
+                    await self.flush_executions()
+            except Exception as e:  # noqa: BLE001 — teardown continues
+                print(f"  [shutdown] final flush raised: {e}", file=sys.stderr)
+            entry = self.tasks.get(self._flusher_task_id or -1)
+            if entry is not None:
+                entry["_task"].cancel()
         await self.root.shutdown()
         self._shutdown_complete = True
 
@@ -1112,6 +1590,14 @@ class Kernel:
 
         if root_rec is not None:
             build(root_rec, None)
+            # THE COUNTER COMES BACK WITH THE GUID: the root record's reserved bound
+            # is where this run starts, and this run's first block is reserved in
+            # memory. `load` never edits a record (save → load → save is identical);
+            # `start` writes the bound, and a started kernel persists every later block.
+            nid = root_rec.get("next_id")
+            if isinstance(nid, int) and not isinstance(nid, bool) and nid > 0:
+                self.next_id = max(self.next_id, nid)
+            self.id_reserved = self.next_id + self.ID_BLOCK
 
     # ─── state stream ──────────────────────────────────────────
 

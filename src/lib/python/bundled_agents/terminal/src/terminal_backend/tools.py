@@ -472,7 +472,10 @@ async def _output(id, payload, kernel):
     text = _scrollback_text(id)
     if max_bytes < len(text.encode("utf-8")):
         text = text[-max_bytes:]
-    return {"output": text}
+    return {
+        "output": text,
+        "origin": f"{id} output — the scrollback NOW; re-send, it moves",
+    }
 
 
 async def _restart(id, payload, kernel):

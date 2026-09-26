@@ -1,10 +1,10 @@
-"""Per-project-dir PID lock — `.fantastic/lock.json`.
+"""Per-project-dir PID lock — `.fantastic/lock.yaml`.
 
 The lock is **PID-only**: one fantastic process per project dir at a
 time, enforced by checking whether the recorded pid is still alive.
 Nothing else lives in the lock file.
 
-Lock file contents: `{pid: int}`. That's it. Endpoint discovery (port
+Lock file contents: `{pid: int}` as a YAML mapping (`pid: 123`). That's it. Endpoint discovery (port
 for HTTP/WS) is a separate concern belonging to whichever bundle
 publishes a transport — not the substrate.
 
@@ -15,12 +15,13 @@ Use the `FantasticLock` context manager rather than calling
 from __future__ import annotations
 
 import atexit
-import json
 import os
 from pathlib import Path
 
+import yaml
+
 FANTASTIC_DIR = Path(".fantastic")
-LOCK_FILE = FANTASTIC_DIR / "lock.json"
+LOCK_FILE = FANTASTIC_DIR / "lock.yaml"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -44,9 +45,10 @@ def _read_lock() -> dict | None:
     if not LOCK_FILE.exists():
         return None
     try:
-        return json.loads(LOCK_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
+        doc = yaml.load(LOCK_FILE.read_text(), Loader=yaml.CSafeLoader)
+    except (yaml.YAMLError, OSError):
         return None
+    return doc if isinstance(doc, dict) else None
 
 
 def acquire_lock() -> None:
@@ -63,7 +65,9 @@ def acquire_lock() -> None:
                 f"  -> or, if stale, remove the lock:  rm {LOCK_FILE}"
             )
     FANTASTIC_DIR.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.write_text(json.dumps({"pid": os.getpid()}))
+    LOCK_FILE.write_text(
+        yaml.dump({"pid": os.getpid()}, Dumper=yaml.CSafeDumper, sort_keys=False)
+    )
     atexit.register(release_lock)
 
 

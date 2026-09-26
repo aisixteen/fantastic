@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: shared_fold
+group: memory
+title: "agent A folds a finding and shares the fold; agent B, given only the grant, answers a question that needs the member detail"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 90
+  max_turns: 60
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {E2E_WINDOW: "16000"}

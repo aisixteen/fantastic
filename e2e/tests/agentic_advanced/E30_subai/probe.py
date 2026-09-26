@@ -60,6 +60,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
+from helpers import memory
 from helpers import (
     Watch,
     distinct_calls,
@@ -187,6 +188,8 @@ MINE = {
     "web",
     "rest",
     "ws",
+    # The kernel's memory store (`helpers.memory.MEMORY`), a fixture on every runtime.
+    "memory",
 }
 
 
@@ -241,7 +244,10 @@ def _ai_meta(
             "user": "*",
             EXECUTOR_LEG: "*",
             store["id"]: "*",
+            # ITS MEMORY — the conversation lives in the kernel's `memory` store.
+            memory.MEMORY: "*",
         },
+        "memory_store_id": memory.MEMORY,
         # The AI agent is pinned to the server's real window; the builder gets its own.
         "context_window": CTX if agent_id == "brain" else BUILDER_CTX,
         # THE WIRE FACES. On a spawned kernel the driver arrives as `rest` and a
@@ -322,9 +328,9 @@ def true_total() -> int:
 #: Files the KERNEL writes, never the model. They are skipped outright: the scan
 #: reports the first non-empty file it saw when the value is absent, and reporting
 #: one of these made a run read as though the model had stored junk —
-#: `stored='{"pid":9626}' key='.fantastic/lock.json'` on every spawned runtime,
+#: `stored='{"pid":9626}' key='.fantastic/lock.json' (now lock.yaml)` on every spawned runtime,
 #: `.fantastic/readme.md` in process (measured 2026-09-03).
-_KERNEL_OWNED = {"agent.json", "lock.json", "readme.md"}
+_KERNEL_OWNED = {"agent.yaml", "lock.yaml", "readme.md"}
 
 
 async def find_value(root, mem_id: str, want: int):
@@ -341,7 +347,7 @@ async def find_value(root, mem_id: str, want: int):
     # task intends lands at `.fantastic/total.txt`. Skipping the dir made check 3
     # structurally unpassable via the fixture's own persist path (measured
     # 2026-09-02: swift lane stored exactly the true total, scored `stored=None`).
-    # Skip the RECORDS instead: `agents/` subtrees and `agent.json` files.
+    # Skip the RECORDS instead: `agents/` subtrees and `agent.yaml` files.
     skip_dirs = {"readings", "agents", ".ckpt", "__pycache__"}
     pat = _re.compile(rf"\b{want}\b")
     first = None
@@ -809,6 +815,9 @@ async def run(
         )
     )[0]["result"]
     aid = ai["id"]
+    # the store's half of each memory wire
+    for who in ("brain", aid):
+        await memory.open_ingress(root, memory.MEMORY, who)
 
     transcript: list[str] = []
 
@@ -871,7 +880,7 @@ async def run(
             # against an empty list.
             self.transcript = transcript
 
-        async def chat(self, messages):
+        async def chat(self, messages, max_tokens=None):
             self.n += 1
             fresh = messages[seen[0] :] if seen[0] else messages
             for m in fresh:

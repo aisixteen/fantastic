@@ -22,7 +22,7 @@ Two surfaces, ONE per call site (never tried in sequence — not a fallback):
   - **external** (`external=True`) — `root` is an operator/peer-chosen base that may live
     ANYWHERE; `path` is still clamped within it (can't escape the base via `..`). This is
     for surfaces that legitimately operate OUTSIDE the running dir BY DESIGN: `terminal`
-    orchestrating a SIBLING fantastic project (reading its `.fantastic/lock.json`, spawning
+    orchestrating a SIBLING fantastic project (reading its `.fantastic/lock.yaml`, spawning
     it) and `terminal_backend` writing a clipboard image into a system temp scratch dir. The
     running-dir law does NOT apply (the base isn't the kernel's own state) — but the open()
     still funnels through here, so there is still exactly one disk module.
@@ -32,7 +32,7 @@ orchestration tools always `external=True`. There is no "try clamped, else exter
 that would be a fallback, which this kernel refuses.
 
 The ONLY disk code outside this module is:
-  - the substrate's fixed-path bootstrap (`kernel/_lock.py` lock.json, `_env` cwd/.env,
+  - the substrate's fixed-path bootstrap (`kernel/_lock.py` lock.yaml, `_env` cwd/.env,
     `Agent._read_readme` reading an agent's own `readme.md` back for reflect) — the
     substrate is decoupled from bundles BY DESIGN (it sends verbs, never imports one), so
     it cannot import `fs`; these are fixed-relative reads of the kernel's own tree (within
