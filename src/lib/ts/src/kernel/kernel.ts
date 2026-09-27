@@ -337,26 +337,9 @@ export class Kernel {
    * have different fixes and only the operator can apply either.
    */
   gate(senderId: string, verb: string, targetId: string): Payload | null {
-    const sender = this.agents.get(senderId);
     const target = this.agents.get(targetId);
-    // EGRESS — may the SENDER call the target? A sender that is not an agent of
-    // this kernel has NO record here, so it holds NO grant: python reads its
-    // record as `{id}` (empty `can_call`) and refuses it at egress, whatever the
-    // target's `callable_by` says. An origin is only ever vouched for by the
-    // kernel that holds its record — a remote caller's authority lives on its
-    // own side of the bridge, never here.
-    const ok = authorizeCall(
-      sender?.meta["can_call"] as Payload | undefined,
-      verb,
-      targetId,
-      {
-        holderId: senderId,
-        holderParent: sender?.parentId ?? null,
-        holderChildren: new Set(sender?.children.keys() ?? []),
-        loaderId: this.rootId,
-      },
-    );
-    if (!ok) return denial("egress", senderId, targetId, verb);
+    const egress = this.egressGate(senderId, verb, targetId);
+    if (egress !== null) return egress;
     // INGRESS DOES NOT APPLY TO A KERNEL VERB (python `_gate`, rust `gate.rs`).
     // `callable_by` answers "do I accept being acted upon by you" — and for
     // `ps`/`cancel`/`ledger` and friends the root is not what is acted upon: it
@@ -385,6 +368,38 @@ export class Kernel {
       if (!ok) return denial("ingress", senderId, targetId, verb);
     }
     return null;
+  }
+
+  /**
+   * The EGRESS half alone — may the SENDER call `targetId` with `verb`? Its
+   * `can_call`, tokens relative to the sender (`$self`/`$parent`/`$children`/
+   * `$loader`), privileged verbs never under a wildcard (python
+   * `authorize_call`, `enforce_privileged=True`).
+   *
+   * It is the WHOLE local check for a HOST-BOUND send: the target lives on the
+   * host, so its `callable_by` is the host's to apply to the arriving call — but
+   * whether this agent may SEND is decided here, BEFORE anything reaches the
+   * bridge. Forwarding first would make every agent's reach to the host the
+   * operator's.
+   *
+   * A sender that is not an agent of this kernel has NO record here, so it holds
+   * NO grant: python reads its record as `{id}` (empty `can_call`) and refuses
+   * it, whatever the target's `callable_by` says.
+   */
+  egressGate(senderId: string, verb: string, targetId: string): Payload | null {
+    const sender = this.agents.get(senderId);
+    const ok = authorizeCall(
+      sender?.meta["can_call"] as Payload | undefined,
+      verb,
+      targetId,
+      {
+        holderId: senderId,
+        holderParent: sender?.parentId ?? null,
+        holderChildren: new Set(sender?.children.keys() ?? []),
+        loaderId: this.rootId,
+      },
+    );
+    return ok ? null : denial("egress", senderId, targetId, verb);
   }
 
   /** Resolve the `"kernel"` alias for callers outside this module. */
@@ -481,7 +496,18 @@ export class Kernel {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to forward to '${targetId}'` });
     }
-    return this.bridge.forwardBinary(this.resolve(targetId), payload, this.qualifiedCaller());
+    const id = this.resolve(targetId);
+    const refused = this.hostBoundRefusal(id, payload);
+    if (refused !== null) return Promise.resolve(refused);
+    return this.bridge.forwardBinary(id, payload, this.qualifiedCaller());
+  }
+
+  /** An AGENT's host-bound call passes its own EGRESS gate before the bridge
+   *  sees a byte; the operator (no origin) is the root of trust. */
+  private hostBoundRefusal(targetId: string, payload: Record<string, unknown>): Payload | null {
+    if (this.currentOrigin === null) return null;
+    const verb = typeof payload["type"] === "string" ? payload["type"] : "";
+    return this.egressGate(this.currentOrigin, verb, targetId);
   }
 
   /** Call the HOST directly over the bridge, bypassing LOCAL resolution. The
@@ -494,6 +520,8 @@ export class Kernel {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to reach host '${target}'` });
     }
+    const refused = this.hostBoundRefusal(target, payload);
+    if (refused !== null) return Promise.resolve(refused);
     return this.bridge.forward(target, payload, this.qualifiedCaller());
   }
 
