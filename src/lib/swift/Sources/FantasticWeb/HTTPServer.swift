@@ -5,10 +5,13 @@
 //   GET  /_assets/favicon.png       → the bundled favicon
 //   GET  /favicon.png               → the bundled favicon
 //   GET  /{agent_id}/file/{path}    → proxy to the agent's `read_stream` SOURCE
-//   <method> /<leg>/<...>           → routes a child leg declared via `get_routes`
-//   GET  /{host_id}/ws              → WebSocket upgrade → the shared proxy
+//   <method> /<leg>/<...>           → routes a child leg declared via `get_routes`,
+//                                     served by the endpoint it handed over
+//   GET  <declared ws path>         → WebSocket upgrade → that route's endpoint
+//                                     (web_ws: `/{host_id}/ws` → its proxy)
 //
-// Matching is Starlette's over the ORDERED route list: first path+method match
+// Matching is Starlette's over the ORDERED route list (a literal path beats a
+// pattern — `orderRoutes`): first path+method match
 // handles; else the first path-only match answers 405 with `allow`; else (path
 // ≠ `/`) the trailing slash is toggled and a match answers 307; else 404
 // `{"detail":"Not Found"}`. No transport.js, no vendored asset tree, no
@@ -40,23 +43,29 @@ enum PathSegment: Sendable, Equatable {
     case pathParam(String)
 }
 
-/// A route contributed by a child agent (web_ws / web_rest), pulled
-/// at host boot via the child's `get_routes` verb. `kind` selects the
-/// host's shared handler: `.websocket` runs the shared WS proxy;
-/// `.http` calls the owning bundle's `WebRouteOwner.serveRoute`.
+/// A route contributed by a child agent (web_ws / web_rest / any leg): the
+/// DECLARATION pulled at host boot via the child's `get_routes` verb, mounted
+/// with the LIVE endpoint the child's bundle handed over for that path
+/// (`WebRouteEndpoints`, python `route_endpoints(agent)`). A websocket route
+/// upgrades onto its endpoint's handler; an HTTP route calls its endpoint.
 public struct RouteSpec: Sendable {
     public let kind: RouteKind
     public let method: String  // uppercased; "GET" for websocket upgrades
     public let path: String
     let template: [PathSegment]
     public let ownerId: AgentId
+    /// The live endpoint the owner handed over for `path`.
+    public let endpoint: WebEndpoint
 
-    public init(kind: RouteKind, method: String, path: String, ownerId: AgentId) {
+    public init(
+        kind: RouteKind, method: String, path: String, ownerId: AgentId, endpoint: WebEndpoint
+    ) {
         self.kind = kind
         self.method = method.uppercased()
         self.path = path
         self.template = parseTemplate(path)
         self.ownerId = ownerId
+        self.endpoint = endpoint
     }
 
     /// Match request `segments` (raw, empty ones KEPT) against this template.
@@ -169,7 +178,7 @@ enum RouteTarget: Sendable {
     case index
     case favicon
     case fileProxy
-    case leg(AgentId)
+    case leg(RouteSpec)
 }
 
 /// One entry of the ordered route table.
@@ -317,7 +326,7 @@ public final class WebServer: @unchecked Sendable {
                     spec.path,
                     Route(
                         kind: spec.kind, methods: [spec.method], template: spec.template,
-                        target: .leg(spec.ownerId))
+                        target: .leg(spec))
                 ))
         }
         return stableByParams(table, path: { $0.path }).map { $0.route }
@@ -390,8 +399,9 @@ public final class WebServer: @unchecked Sendable {
     // MARK: - Pipeline
 
     /// Configure a child connection's pipeline: HTTP server + a WebSocket
-    /// upgrade path (the upgrader matches a `.websocket` route and, on
-    /// upgrade, installs the shared `WebSocketProxyHandler`).
+    /// upgrade path (the upgrader matches a `.websocket` route in the ordered
+    /// live table and, on upgrade, installs the handler that route's endpoint
+    /// builds).
     private func configurePipeline(_ channel: Channel) -> EventLoopFuture<Void> {
         let kernel = self.kernel
         let upgrader = NIOWebSocketServerUpgrader(
@@ -406,10 +416,10 @@ public final class WebServer: @unchecked Sendable {
                 if self.originRefused(websocket: true, method: "GET", origin: origin) {
                     return channel.eventLoop.makeSucceededFuture(nil)
                 }
+                // ANY declared websocket path upgrades — literal or patterned,
+                // resolved by the ordered live table (a literal beats a pattern).
                 let segs = rawSegments(decodePath(head.uri))
-                if let (_, params) = self.matchWebSocket(segments: segs),
-                    params["host_id"] != nil
-                {
+                if self.matchWebSocket(segments: segs) != nil {
                     // uvicorn's 101 also carries `date` + `server` (python
                     // additionally negotiates permessage-deflate, which needs a
                     // compression implementation — recorded, not ported).
@@ -424,16 +434,20 @@ public final class WebServer: @unchecked Sendable {
                 guard let self = self,
                     case let segs = rawSegments(decodePath(head.uri)),
                     let (spec, params) = self.matchWebSocket(segments: segs),
-                    let hostId = params["host_id"]
+                    case .websocket(let endpoint) = spec.endpoint
                 else {
                     return channel.eventLoop.makeSucceededVoidFuture()
                 }
+                // THE ROUTE'S OWN ENDPOINT — whatever the leg handed over for
+                // this path (web_ws: its proxy, bound to the captured host_id).
                 return channel.pipeline.addHandler(
-                    WebSocketProxyHandler(
-                        hostId: hostId, legId: spec.ownerId, kernel: kernel,
-                        // The same boot pid an HTTP request task is parented to:
-                        // python serves BOTH under `CURRENT_TASK.scope` (A11.31).
-                        bootParent: self.requestParent))
+                    endpoint(
+                        WebSocketUpgrade(
+                            params: params,
+                            // The same boot pid an HTTP request task is parented
+                            // to: python serves BOTH under `CURRENT_TASK.scope`
+                            // (A11.31).
+                            bootParent: self.requestParent)))
             })
         let httpHandler = HTTPDispatchHandler(server: self)
         let upgradeConfig: NIOHTTPServerUpgradeConfiguration = (
@@ -550,9 +564,9 @@ public final class WebServer: @unchecked Sendable {
         case .fileProxy:
             return await serveFileProxy(
                 agentId: params["agent_id"] ?? "", path: params["path"] ?? "")
-        case .leg(let owner):
+        case .leg(let spec):
             return await dispatchLegRoute(
-                owner: owner, params: params, query: query, pathOnly: pathOnly, request: request)
+                spec: spec, params: params, query: query, pathOnly: pathOnly, request: request)
         }
     }
 
@@ -677,14 +691,15 @@ public final class WebServer: @unchecked Sendable {
     static let payloadHeader = "x-fantastic-payload"
     static let bytesFieldHeader = "x-fantastic-bytes-field"
 
-    /// Serve a matched leg route. The JSON leg is the leg bundle's own
-    /// `serveRoute` (python's mounted callable); the octet leg is the host's,
-    /// because a JSON `{status, content_type, body}` reply cannot carry raw
-    /// bytes or response headers.
+    /// Serve a matched leg route. The JSON leg is the endpoint the leg handed
+    /// over for this path (python's mounted callable); the octet leg is the
+    /// host's, because a JSON `{status, content_type, body}` reply cannot carry
+    /// raw bytes or response headers.
     private func dispatchLegRoute(
-        owner: AgentId, params: [String: String], query: [String: String], pathOnly: String,
+        spec: RouteSpec, params: [String: String], query: [String: String], pathOnly: String,
         request: HTTPRequest
     ) async -> HTTPResponse {
+        let owner = spec.ownerId
         // Header values decode byte-for-byte as latin-1 (starlette's ASGI
         // layer), lowercased names.
         var lowerHeaders: [String: String] = [:]
@@ -726,14 +741,11 @@ public final class WebServer: @unchecked Sendable {
             "headers": .object(headerObj),
             "body": .string(bodyText),
         ])
-        guard let agent = kernel.agent(owner), let hm = agent.handlerModule,
-            let bundle = kernel.bundles.get(hm), let routeOwner = bundle as? WebRouteOwner
-        else {
+        guard case .http(let endpoint) = spec.endpoint else {
             return jsonHTTP(
-                500, .object(["error": .string("no route owner \(owner.value)")]))
+                500, .object(["error": .string("no http endpoint for \(spec.path)")]))
         }
-        let (reply, chunk) = await routeOwner.serveRoute(
-            legId: owner, request: routeRequest, kernel: kernel)
+        let (reply, chunk) = await endpoint(routeRequest)
         let status = Int(reply["status"].asInt ?? 200)
         // ONE DECISION, shared with the octet leg: a reply that HOLDS a chunk is
         // octet, whatever its length (A13.1).

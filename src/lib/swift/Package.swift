@@ -117,6 +117,9 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                // The web-route seam hands a websocket endpoint over as the NIO
+                // handler the host installs on the upgraded channel.
+                .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
         .target(
@@ -208,12 +211,19 @@ let package = Package(
             ]
         ),
         // Composable web surfaces (children of a `web` host). They run
-        // no server — they return `get_routes` descriptors the host
-        // mounts. WS handling is the host's shared proxy, so neither
-        // depends on FantasticWeb (no cycle).
+        // no server — they DECLARE routes (`get_routes`) and hand the host the
+        // live endpoint per path (`WebRouteEndpoints`, python
+        // `route_endpoints`). The WS proxy is web_ws's own endpoint (python
+        // `web_ws/_proxy.py`), so neither depends on FantasticWeb (no cycle).
         .target(
             name: "FantasticWebWS",
-            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticIoBridge"]
+            dependencies: [
+                "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
+                .product(name: "OrderedCollections", package: "swift-collections"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+            ]
         ),
         .target(
             name: "FantasticWebRest",
@@ -418,6 +428,10 @@ let package = Package(
                 // so it needs the anthropic backend and ordered maps.
                 "FantasticAnthropicBackend",
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                // A stub leg's websocket endpoint is a NIO handler (the web
+                // route seam).
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
             ]
         ),
     ]

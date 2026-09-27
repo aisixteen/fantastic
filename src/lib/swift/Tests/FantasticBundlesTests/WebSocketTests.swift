@@ -8,6 +8,7 @@ import Foundation
 import Testing
 
 @testable import FantasticWeb
+@testable import FantasticWebWS
 
 /// An unreadable frame kind — the one thing `receiveJSON` cannot answer.
 private enum WSFrameError: Error { case unknownKind }
