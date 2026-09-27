@@ -183,3 +183,78 @@ test("joining an execution is gated on the verb THAT execution ran", async () =>
   ]);
   assert.equal((again!.result as Payload)["secret"], "TOP-SECRET");
 });
+
+// ── python `_gate` / rust `gate.rs` parity (found by the contract corpus) ────
+
+test("a KERNEL verb at the root is gated on egress only — the root is not what is acted upon", async () => {
+  // A GRANDCHILD of the root: the root's baseline `$children` does not name it,
+  // so an ingress check would refuse it. For `ps`/`cancel` the operand rides in
+  // the payload, so python and rust check egress alone (lifecycle.yaml's warden).
+  const k = tree();
+  k.registerBundle("leaf.tools", () => ({ ok: true }));
+  k.register(new Agent({ id: "warden", parentId: "alice", handlerModule: "leaf.tools", meta: { can_call: { kernel_state: ["ps", "cancel"] } } }));
+  const warden = k.scopedFor("warden", null);
+  const [ps] = await warden.send([{ target: "kernel", payload: { type: "ps" } }]);
+  assert.equal(ps!.status, "completed", JSON.stringify(ps!.result));
+  // egress still decides: a kernel verb the grant does not name is refused
+  const [led] = await warden.send([{ target: "kernel", payload: { type: "ledger" } }]);
+  assert.equal((led!.result as Payload)["side"], "egress");
+  // and a NON-kernel verb at the root still needs the root to accept the caller
+  k.get("warden")!.meta["can_call"] = { kernel_state: "*" };
+  const [poke] = await warden.send([{ target: "kernel", payload: { type: "poke" } }]);
+  assert.equal((poke!.result as Payload)["side"], "ingress");
+});
+
+test("`$loader` names the persistence root — this kernel's root", () => {
+  const ctx = { holderId: "a", holderParent: "p", holderChildren: new Set<string>(), loaderId: "kernel_state" };
+  assert.equal(authorizeCall({ $loader: ["persist_blob"] }, "persist_blob", "kernel_state", ctx), true);
+  assert.equal(authorizeCall({ $loader: ["persist_blob"] }, "persist_blob", "p", ctx), false);
+  assert.equal(authorizeCall({ $loader: "*" }, "x", "kernel_state", { ...ctx, loaderId: null }), false);
+});
+
+test("a malformed grant is DENY, never a character walk", () => {
+  const ctx = { holderId: "a", holderParent: "p", holderChildren: new Set<string>() };
+  assert.equal(authorizeCall("*" as unknown as Payload, "poke", "0", ctx), false);
+  assert.equal(authorizeCall(["*"] as unknown as Payload, "poke", "0", ctx), false);
+});
+
+test("hydration's pair is privileged: a wildcard never carries rows_read / rows_write", () => {
+  const ctx = { holderId: "a", holderParent: "p", holderChildren: new Set<string>() };
+  for (const verb of ["rows_read", "rows_write"]) {
+    assert.ok(PRIVILEGED_VERBS.has(verb));
+    assert.equal(authorizeCall({ $parent: "*" }, verb, "p", ctx), false);
+    assert.equal(authorizeCall({ $parent: [verb] }, verb, "p", ctx), true);
+  }
+});
+
+test("a sender that is NOT an agent of this kernel holds no grant — refused at egress", async () => {
+  // python `_gate`: an unknown sender's record reads as `{id}` (empty can_call),
+  // so EVERY send is refused at egress — even where the target's callable_by
+  // names it, even a kernel verb, even reflect. Measured on the python kernel:
+  // ghost → kernel_state reflect / kernel ps / `open` reflect all `side: egress`.
+  const k = tree();
+  k.get("bob")!.meta["callable_by"] = { ghost: "*" };
+  const ghost = k.scopedFor("ghost", null);
+  for (const [target, verb] of [["kernel_state", "reflect"], ["kernel", "ps"], ["bob", "reflect"], ["bob", "poke"]] as const) {
+    const [out] = await ghost.send([{ target, payload: { type: verb } }]);
+    assert.equal(out!.status, "failed", `${target} ${verb}`);
+    assert.equal((out!.result as Payload)["reason"], "unauthorized");
+    assert.equal((out!.result as Payload)["side"], "egress", `${target} ${verb}`);
+  }
+  // an agent that LEAVES the tree loses its reach with its record
+  const alice = k.scopedFor("alice", null);
+  assert.equal((await alice.send([{ target: "kernel", payload: { type: "reflect" } }]))[0]!.status, "completed");
+  k.remove("alice");
+  const [gone] = await alice.send([{ target: "kernel", payload: { type: "reflect" } }]);
+  assert.equal((gone!.result as Payload)["side"], "egress", "a removed agent's in-flight view is a stranger now");
+  // the operator is still the root of trust
+  const [op] = await k.send([{ target: "bob", payload: { type: "poke" } }]);
+  assert.equal(op!.status, "completed");
+});
+
+test("a watch by a watcher that is not an agent here is refused the same way", () => {
+  const k = tree();
+  const d = k.scopedFor("ghost", null).watch("bob", "ghost");
+  assert.equal(d?.["reason"], "unauthorized");
+  assert.equal(d?.["side"], "egress");
+});

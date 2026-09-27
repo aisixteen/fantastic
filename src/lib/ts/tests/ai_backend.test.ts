@@ -1,191 +1,192 @@
-// The BROWSER-RESIDENT AI agent: its loop, not its wire.
+// The BROWSER-RESIDENT AI agent: its turn, not its wire.
 //
 // The provider is faked here on purpose. What is under test is the thing that
-// makes a streaming text endpoint into an AGENT: that the calls it writes as
-// text actually reach other agents through the kernel, that their replies come
-// back into its context, and that it stops for the right reasons. The wire
-// itself is pinned separately in `tool_parse.test.ts`.
+// makes a streaming text endpoint into an AGENT: that the calls it writes as text
+// actually reach other agents through the kernel, that their replies come back as
+// its next turn, and that its chain ends for the right reasons. The wire itself
+// is pinned separately in `tool_parse.test.ts`; the chain contract (done / nudge
+// / await) in `ai_turn.test.ts`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Kernel } from "../src/kernel/kernel.ts";
+import type { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
-import {
-  OpenAIProvider,
-  runLoop,
-  systemPrompt,
-  withoutThinking,
-  type Provider,
-} from "../src/bundles/ai/ai_backend.ts";
+import type { Json, Payload } from "../src/kernel/json.ts";
+import { OpenAIProvider } from "../src/bundles/ai/ai_backend.ts";
+import { withoutThinking } from "../src/bundles/ai/think.ts";
+import { ASYNC_HOWTO, TITLES_HOWTO, defaultSystemContent } from "../src/bundles/ai/howtos.ts";
+import { renderCall } from "../src/bundles/ai/tool_parse.ts";
+import type { Value } from "../src/bundles/ai/tool_parse.ts";
+import { DONE, Mind, backendWorld, settle } from "./ai_world.ts";
 
-/** A provider that replays scripted turns — one per pass. */
-function scripted(turns: string[]): Provider {
-  let i = 0;
-  return {
-    async *chat() {
-      const t = turns[Math.min(i++, turns.length - 1)];
-      // Streamed in pieces, because a real one arrives that way and the loop
-      // must not depend on a whole turn landing at once.
-      for (const piece of t.match(/.{1,7}/gs) ?? []) yield piece;
-    },
-  };
-}
-
-function tree(): Kernel {
-  const k = new Kernel();
-  k.setRoot(new Agent({ id: "kernel_state" }));
-  k.registerBundle("store.tools", (_id, payload) => {
-    const p = payload as any;
-    if (p.type === "read") return { key: p.key, value: 42 };
-    if (p.type === "reflect") return { id: "store", sentence: "a store" };
-    return { error: "unknown" };
-  });
-  k.register(new Agent({ id: "store", parentId: "kernel_state", handlerModule: "store.tools" }));
+/** backendWorld + a `store` agent the ai may call. */
+function world(mind: Mind, handler: (p: Payload) => Json): Kernel {
+  const k = backendWorld(mind);
+  k.registerBundle("store.tools", (_id, payload) => handler(payload));
+  k.register(new Agent({ id: "store", parentId: "kernel_state", handlerModule: "store.tools", meta: { callable_by: { ai: "*" } } }));
+  // update_agent REPLACES a map: the baseline is restated with the new edge
+  k.updateMeta("ai", { can_call: { $self: "*", $parent: "*", $children: "*", mem: "*", tool: "*", store: "*" } });
   return k;
 }
 
-const call = (target: string, payload: object) =>
-  `<tool_call>{"name":"send","arguments":{"target_id":"${target}","payload":${JSON.stringify(payload)}}}</tool_call>`;
+const storeAnswers = (p: Payload): Json => {
+  if (p["type"] === "read") return { key: p["key"] ?? null, value: 42 };
+  if (p["type"] === "reflect") return { id: "store", sentence: "a store" };
+  return { error: "unknown" };
+};
 
-test("a call written as TEXT actually reaches another agent", async () => {
-  const k = tree();
-  const hist = [{ role: "system", content: systemPrompt("ai") }];
-  const out = await runLoop(
-    "ai",
-    k,
-    scripted([call("store", { type: "read", key: "answer" }), "The answer is 42."]),
-    hist,
-  );
-  assert.equal(out.calls, 1);
-  // The REPLY must land back in context — that is what makes it a loop rather
-  // than a one-shot completion.
-  // Match the REPLY turns, not the system block — which mentions the tag while
-  // teaching it, and counted as one until this filter got specific.
-  const responses = hist.filter(
-    (m) => m.role === "user" && m.content.startsWith("<tool_response>"),
-  );
-  assert.equal(responses.length, 1);
-  assert.match(responses[0].content, /"value":42/);
-  assert.equal(out.text, "The answer is 42.");
+const call = (target: string, payload: { [k: string]: Value }, extra: { [k: string]: Value } = {}) =>
+  renderCall("send", { target_id: target, payload, ...extra });
+
+async function run(k: Kernel, text: string, extra: Payload = {}): Promise<Payload> {
+  const out = (await k.send([{ target: "ai", payload: { type: "send", text, ...extra } }]))[0]!.result as Payload;
+  await settle(k);
+  return out;
+}
+
+test("a call written as TEXT reaches another agent, and its reply is the next turn", async () => {
+  const mind = new Mind([call("store", { type: "read", key: "answer" }), "The answer is 42. " + DONE]);
+  const k = world(mind, storeAnswers);
+  await run(k, "what is the answer?");
+  assert.equal(mind.calls, 2);
+  // The REPLY lands back in context as the next turn — that is what makes a chain
+  // rather than a one-shot completion — in the tag notation, never JSON.
+  const reply = mind.incoming[1]!;
+  assert.ok(reply.startsWith("[reply to "), reply);
+  assert.ok(reply.includes("store read"));
+  assert.ok(reply.includes("<value>42</value>"), reply);
 });
 
-test("the loop ends when the model stops calling", async () => {
-  const out = await runLoop("ai", tree(), scripted(["Nothing to do."]), []);
-  assert.equal(out.passes, 1);
-  assert.equal(out.calls, 0);
+test("the chain ends when the model says done", async () => {
+  const mind = new Mind(["Nothing to do. " + DONE]);
+  const k = world(mind, storeAnswers);
+  await run(k, "hi");
+  assert.equal(mind.calls, 1);
 });
 
 test("two calls in one turn both dispatch", async () => {
-  const k = tree();
-  const hist: any[] = [];
-  const out = await runLoop(
-    "ai",
-    k,
-    scripted([
-      call("store", { type: "read", key: "a" }) + call("store", { type: "reflect" }),
-      "done",
-    ]),
-    hist,
-  );
-  assert.equal(out.calls, 2);
+  const seen: Payload[] = [];
+  const mind = new Mind([call("store", { type: "read", key: "a" }) + call("store", { type: "list" })]);
+  const k = world(mind, (p) => {
+    seen.push(p);
+    return storeAnswers(p);
+  });
+  await run(k, "go");
+  assert.deepEqual(seen.map((p) => p["type"]).sort(), ["list", "read"]);
+  assert.equal(mind.incoming[1]!.split("\n\n[reply to ").length, 2, "both replies arrive in ONE turn");
 });
 
 test("a REFUSAL is fed back as information, not thrown", async () => {
-  // The gate is two-sided; an agent that cannot reach a peer must learn that
-  // from its own transcript rather than have the loop crash under it.
-  const k = tree();
-  const hist: any[] = [];
-  const out = await runLoop("ai", k, scripted([call("nobody", { type: "read" }), "ok"]), hist);
-  assert.equal(out.calls, 1);
-  const resp = hist.find((m) => m.content.includes("<tool_response>"));
-  assert.ok(resp, "the refusal never reached the model");
+  // The gate is two-sided; an agent that cannot reach a peer must learn that from
+  // its own transcript rather than have the chain crash under it.
+  const mind = new Mind([call("nobody", { type: "read" }), "ok " + DONE]);
+  const k = world(mind, storeAnswers);
+  await run(k, "go");
+  assert.equal(mind.calls, 2, "the refusal never reached the model");
+  assert.ok(mind.incoming[1]!.startsWith("[reply to "));
+  assert.ok(mind.incoming[1]!.includes("<error>"), mind.incoming[1]);
 });
 
-test("a MALFORMED envelope is named back to the model, and the loop continues", async () => {
-  // A model that tried three times and produced nothing looks identical to one
-  // that chose to stop — unless it is told what went wrong.
-  const k = tree();
-  const hist: any[] = [];
-  const out = await runLoop(
-    "ai",
-    k,
-    scripted([
-      '<tool_call>{"name":"send","arguments":{"code":"def f():\\n  return 1}}</tool_call>',
-      call("store", { type: "read", key: "a" }),
-      "recovered",
-    ]),
-    hist,
-  );
-  const notice = hist.find((m) => m.content.includes("could not be parsed"));
-  assert.ok(notice, "the model was never told its envelope was malformed");
-  assert.equal(out.calls, 1, "it never got to make the corrected call");
+test("a MALFORMED envelope is named back to the model, and the chain continues", async () => {
+  // A model that tried and produced nothing looks identical to one that chose to
+  // stop — unless it is told what went wrong.
+  const seen: Payload[] = [];
+  const mind = new Mind([
+    '<call name="send"><type>read</type></call>', // no target
+    call("store", { type: "read", key: "a" }),
+    "recovered " + DONE,
+  ]);
+  const k = world(mind, (p) => {
+    seen.push(p);
+    return storeAnswers(p);
+  });
+  await run(k, "go");
+  assert.ok(mind.incoming[1]!.includes("call NOT dispatched: a send names its target"), mind.incoming[1]);
+  assert.equal(seen.length, 1, "it got to make the corrected call");
+  assert.equal(mind.calls, 3);
 });
 
 test("a NAMED execution is forwarded, so a repeat does not re-run the side effect", async () => {
   // Ensure-semantics is the whole point of naming a call: unknown ⇒ dispatch,
-  // settled ⇒ the RECORDED outcome, handler never runs again. The loop dropped
-  // the model's `id` until a double-fire probe caught it — the model named the
-  // execution, the kernel never heard the name, and the coin was dispensed twice.
+  // settled ⇒ the RECORDED outcome, handler never runs again.
   let dispensed = 0;
-  const k = new Kernel();
-  k.setRoot(new Agent({ id: "kernel_state" }));
-  k.registerBundle("disp.tools", () => ({ coin: ++dispensed }));
-  k.register(
-    new Agent({ id: "dispenser", parentId: "kernel_state", handlerModule: "disp.tools" }),
-  );
-
-  const named =
-    '<tool_call>{"name":"send","arguments":{"target_id":"dispenser","id":"coin-alpha","payload":{"type":"dispense"}}}</tool_call>';
-  // The SAME call, twice — exactly what "work as if your reply was lost" means.
-  await runLoop("ai", k, scripted([named, named, "done"]), []);
+  const named = call("store", { type: "dispense" }, { exec_id: "coin-alpha" });
+  const mind = new Mind([named, named, DONE]); // the SAME call, twice
+  const k = world(mind, () => ({ coin: ++dispensed }));
+  await run(k, "dispense one coin");
   assert.equal(dispensed, 1, "the named repeat dispensed a second time");
+  assert.ok(mind.incoming[2]!.includes("<coin>1</coin>"), "the repeat got the RECORDED outcome");
 });
 
-test("the model's id rides through UNTOUCHED — the kernel validates it", async () => {
-  // Ids are the kernel's ints; a name is a string. The loop forwards whatever
-  // the model wrote and the KERNEL owns the semantics: an int it never minted
-  // comes back as a refusal the model reads, and nothing runs.
+test("the model's exec_id rides through UNTOUCHED — the kernel validates it", async () => {
+  // Ids are the kernel's ints; a name is a string. Routing forwards whatever the
+  // model wrote and the KERNEL owns the semantics: an int it never minted comes
+  // back as a refusal the model reads, and nothing runs.
   let ran = 0;
-  const k = new Kernel();
-  k.setRoot(new Agent({ id: "kernel_state" }));
-  k.registerBundle("p.tools", () => ({ ok: ++ran }));
-  k.register(new Agent({ id: "p", parentId: "kernel_state", handlerModule: "p.tools" }));
-  const hist: any[] = [];
-  const out = await runLoop(
-    "ai",
-    k,
-    scripted([
-      '<tool_call>{"name":"send","arguments":{"target_id":"p","id":424242,"payload":{"type":"go"}}}</tool_call>',
-      "done",
-    ]),
-    hist,
-  );
-  assert.equal(out.calls, 1);
+  const mind = new Mind([call("store", { type: "go" }, { exec_id: 424242 }), DONE]);
+  const k = world(mind, () => ({ ok: ++ran }));
+  await run(k, "go");
   assert.equal(ran, 0, "an invented int id must not create an execution");
-  const resp = hist.find((m) => m.content.startsWith("<tool_response>"));
-  assert.match(resp.content, /never created/);
+  assert.match(mind.incoming[1]!, /never created/);
 });
 
-test("maxPasses bounds a model that calls forever", async () => {
-  const out = await runLoop(
-    "ai",
-    tree(),
-    scripted([call("store", { type: "read", key: "a" })]), // never stops calling
-    [],
-    { maxPasses: 3 },
-  );
-  assert.equal(out.passes, 3);
+test("the recursion guard refuses a cycle and an over-deep chain before the lock", async () => {
+  const k = world(new Mind(), storeAnswers);
+  const cyc = await run(k, "x", { _call_stack: ["peer", "ai"] });
+  assert.match(String(cyc["error"]), /cycle detected/);
+  assert.deepEqual(cyc["cycle"], ["peer", "ai", "ai"]);
+  const deep = await run(k, "x", { _call_stack: ["a", "b", "c", "d", "e", "f", "g", "h"] });
+  assert.match(String(deep["error"]), /max call depth 8/);
 });
 
-test("the system prompt teaches the ONE tool and the exact envelope", () => {
-  const p = systemPrompt("ai");
+test("the system block teaches the ONE tool grammar and the how-tos", async () => {
+  const k = world(new Mind(), storeAnswers);
+  const p = await defaultSystemContent("ai", k);
   // No schema is sent to the provider, so what the model knows is this text.
-  assert.match(p, /<tool_call>/);
-  assert.match(p, /target_id/);
-  assert.match(p, /reflect/);
+  assert.ok(p.includes('<call name="send">'));
+  assert.ok(p.includes("<target_id>"));
+  assert.ok(p.includes("## Reaching other agents"));
+  assert.ok(p.includes("## Context window & compaction"));
+  assert.ok(p.includes("## Your memory") && p.includes("MEMORY STORE `mem`"));
+  assert.ok(p.startsWith("Fantastic kernel."), "the kernel's own reflect opens it");
+  assert.ok(p.includes("You are `ai`."));
+  assert.ok(!p.includes("<tool_call>") && !p.includes('"arguments"'), "no JSON grammar on the model path");
+  // the titles / async blocks are opt-in, on the record
+  assert.ok(!p.includes(TITLES_HOWTO) && !p.includes(ASYNC_HOWTO));
+  k.updateMeta("ai", { context_titles: true, context_async: true });
+  const q = await defaultSystemContent("ai", k);
+  assert.ok(q.includes(TITLES_HOWTO) && q.includes(ASYNC_HOWTO));
 });
 
-test("thinking is stripped before a turn is shown", () => {
+test("a caller's system_prompt REPLACES the substrate prompt", async () => {
+  const mind = new Mind([DONE]);
+  const k = world(mind, storeAnswers);
+  await run(k, "hi", { system_prompt: "You are a terse bot." });
+  assert.equal(mind.seen[0]![0]!.content, "You are a terse bot.");
+});
+
+test("inquiry: the answer is what the model emits with inquiry_answer", async () => {
+  const mind = new Mind(['<call name="inquiry_answer"><answer>yes, ship it</answer></call>']);
+  const k = world(mind, storeAnswers);
+  const out = (await k.send([{ target: "ai", payload: { type: "inquiry", text: "ship?", options: ["yes", "no"], request_id: "r1" } }]))[0]!;
+  assert.deepEqual(out.result, { answer: "yes, ship it", request_id: "r1" });
+  assert.ok(mind.incoming[0]!.endsWith("ship?\n\nOptions: yes, no"));
+  await settle(k);
+});
+
+test("inquiry: no answer, or the placeholder, is refused — never harvested from prose", async () => {
+  const k1 = world(new Mind(["probably yes " + DONE]), storeAnswers);
+  const none = (await k1.send([{ target: "ai", payload: { type: "inquiry", text: "ship?" } }]))[0]!;
+  assert.equal(none.status, "errored");
+  assert.equal((none.result as Payload)["reason"], "unhandled");
+  await settle(k1);
+  const k2 = world(new Mind(['<call name="inquiry_answer"><answer>...</answer></call>']), storeAnswers);
+  const ph = (await k2.send([{ target: "ai", payload: { type: "inquiry", text: "ship?" } }]))[0]!;
+  assert.equal((ph.result as Payload)["reason"], "bad_arg");
+  await settle(k2);
+});
+
+test("thinking is stripped before a turn is recorded", () => {
   assert.equal(withoutThinking("<think>deliberating</think>answer"), "answer");
 });
 

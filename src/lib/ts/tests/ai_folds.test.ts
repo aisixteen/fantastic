@@ -1,7 +1,6 @@
 // Folds are marks: chains derived from `parent`, stretches collapse to an appended
 // row with refs, the view hides the members, and every one stays one descent
-// away. Mirrors python ai_core/tests/test_folds.py. (The degraded fold title is
-// the members' calls — `notes read` — where python's reply tags carry titles.)
+// away. Mirrors python ai_core/tests/test_folds.py.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -116,7 +115,7 @@ test("a failed summarizer still writes a fold and says so", async () => {
   assert.ok((proj.folded ?? 0) >= 1);
   const f = (await w.folds())[0]!;
   assert.match(String(f["content"]), /summary unavailable/);
-  assert.match(String(f["title"]), /notes read/, "degraded title is the members' calls");
+  assert.match(String(f["title"]), /read a0/, "degraded title is the members' titles");
 });
 
 // ── descent through the verbs ───────────────────────────────────────
@@ -139,13 +138,16 @@ test("grep and history descend into a fold", async () => {
 // ── the prerequisite: views keep row keys ───────────────────────────
 
 test("the view trimmers keep row keys", () => {
-  const w = new World();
-  const reflect = w.reply("u:1", "a:0", "TREE", "reflect");
-  const out = dropAnsweredReflects([reflect, { role: "assistant", content: "SEEN notes" }, w.reply("u:2", "a:0", "TREE", "reflect")]);
-  assert.equal(out[0]!["id"], w.id("u:1"));
-  assert.equal(out[0]!["parent"], w.id("a:0"));
-  assert.ok("reply" in out[0]!);
-  const out2 = dedupeStaleReads([reflect, { role: "assistant", content: "k" }, w.reply("u:2", "a:0", "TREE", "reflect")]);
+  const turn: Turn = {
+    role: "user",
+    id: "u:1",
+    parent: "a:0",
+    content: "[reply to n:1 · notes reflect]\nTREE\n\n[reply to n:2 · notes read]\nx",
+  };
+  const out = dropAnsweredReflects([turn, { role: "assistant", content: "SEEN notes" }, { ...turn, id: "u:2" }]);
+  assert.equal(out[0]!["id"], "u:1");
+  assert.equal(out[0]!["parent"], "a:0");
+  const out2 = dedupeStaleReads([turn, { role: "assistant", content: "k" }, { ...turn, id: "u:2" }]);
   assert.ok(out2.filter((m) => m["role"] === "user").every((m) => "id" in m));
 });
 

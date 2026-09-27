@@ -4,7 +4,6 @@ import type { ProjectionCtx, Strategy, Turn } from "../context.ts";
 import { chainText, isFold, level, makeFold, render } from "../folds.ts";
 import { NOTICE_ENVELOPE_RESERVE } from "./base.ts";
 import { LOW, strip } from "./strip.ts";
-import { isReply, replyMeta } from "../replies.ts";
 import { saveHistory } from "../memory.ts";
 
 // `fold` — self-inflicted, mechanical compaction that leaves MARKS the model can
@@ -21,7 +20,7 @@ import { saveHistory } from "../memory.ts";
 // is ever edited. A summary that stays over its budget (or is CUT OFF at it)
 // after ONE re-summarise folds NOTHING — the span stays in view and the refusal
 // is reported, never a truncated summary. A summarizer that FAILS still writes a
-// degraded fold (refs + the members' call names) that says so on its own line.
+// degraded fold (refs + the members' titles) that says so on its own line.
 
 const MAX_TITLE = 140;
 
@@ -60,26 +59,19 @@ export const RESUMMARIZE_CUT = (budget: number): string =>
   "reasons, the binding rules and every quoted error; drop narration. Output only " +
   "the summary.\n\n";
 
-/** The degraded title: what the members were — the calls their replies answered
- *  (the ts counterpart of the titles on python's reply tags), or any quoted title. */
+/** The degraded title: the members' call titles, off their reply tags. */
 function titlesOf(rows: Turn[], chain: number[]): string {
   const out: string[] = [];
   for (const i of chain) {
-    const r = rows[i]!;
-    const meta = isReply(r) ? replyMeta(r) : null;
-    if (meta !== null) out.push(`${meta.target} ${meta.verb}`);
-    else {
-      const m = /· "([^"]{1,140})"/.exec(String(r["content"] ?? ""));
-      if (m !== null) out.push(m[1] as string);
-    }
+    const m = /· "([^"]{1,140})"/.exec(String(rows[i]!["content"] ?? ""));
+    if (m !== null) out.push(m[1] as string);
   }
   return [...new Set(out)].join("; ") || "(untitled)";
 }
 
 const PATH = /[\w./-]+\.(?:txt|md|py|json|ya?ml|js|ts|rs|swift|toml|csv|log|sh|html|css)\b/g;
 const IDENT = /\b[0-9a-f]{8,}\b/g;
-/** Runtime lines, not the user's words: python's set, plus the ts reply wrapper
- *  and the ts malformed-envelope notice. */
+/** Runtime lines, not the user's words. */
 const RUNTIME = [
   "[reply to ",
   "[no call",
@@ -89,9 +81,7 @@ const RUNTIME = [
   "[late reply",
   "[cleared ",
   "[fork of ",
-  "<tool_response>",
 ];
-const TS_NOTICE = /^\[\d+ tool_call envelope/;
 /** the user's own words, verbatim, at most this much per fold */
 export const INDEX_USER_CHARS = 1200;
 
@@ -107,7 +97,7 @@ export function mechanicalIndex(rows: Turn[], chain: number[]): string {
   for (const i of [...chain].reverse()) {
     const r = rows[i]!;
     let c = String(r["content"] ?? "").trim();
-    if (r["role"] !== "user" || r["kind"] || c === "" || RUNTIME.some((p) => c.startsWith(p)) || TS_NOTICE.test(c)) {
+    if (r["role"] !== "user" || r["kind"] || c === "" || RUNTIME.some((p) => c.startsWith(p))) {
       continue;
     }
     c = c.split(/\s+/).filter(Boolean).join(" ");

@@ -1,8 +1,6 @@
 // The view array is the agent's state; `context_recall` rebuilds it; every
 // self-read verb answers under the inline cap. Mirrors python
-// ai_core/tests/test_view_recall.py. (Python's reboot case — a reply to a
-// previous incarnation's call arriving as a `late` row — has no ts counterpart:
-// the ts loop answers a call in-line, so no reply outlives the pass that made it.)
+// ai_core/tests/test_view_recall.py.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,6 +16,7 @@ import { resOf } from "../src/bundles/ai/replies.ts";
 import { aiMem, loadHistory, loadView, saveView, storeReply } from "../src/bundles/ai/memory.ts";
 import { contextRecall, fitReply, grep, history } from "../src/bundles/ai/verbs.ts";
 import { makeAIBackend, type AIRecord } from "../src/bundles/ai/ai_backend.ts";
+import { deliver } from "../src/bundles/ai/routing.ts";
 import { registerRamStore } from "../src/bundles/memory/ram_store.ts";
 import { BIG, World } from "./ai_world.ts";
 
@@ -101,8 +100,8 @@ test("a stale array falls back to the store and says so", async () => {
 test("resOf classifies rows", () => {
   const w = new World();
   assert.equal(resOf(w.fold(["x:1", "x:2"], "t", "b")), "fold");
-  assert.equal(resOf(w.reply(null, null, "[reply to 1 · n r] (stripped: 10 bytes — recall by pid)")), "stub");
-  assert.equal(resOf(w.reply(null, null, "body")), "full");
+  assert.equal(resOf({ role: "user", content: "[reply to n:1 · n r]\n(stripped: 10 bytes — recall by pid)" }), "stub");
+  assert.equal(resOf({ role: "user", content: "[reply to n:1 · n r]\nbody" }), "full");
 });
 
 // ── context_recall ───────────────────────────────────────────────────
@@ -126,7 +125,7 @@ test("recall asks the model and expands only what fits", async () => {
   const w = new World();
   const a = w.chain("a", 12);
   await w.seed([w.row("user", "GOAL", "user:goal"), ...a]);
-  const replyIds = new Set(a.filter((r) => String(r["content"]).startsWith("<tool_response>")).map((r) => r["id"]));
+  const replyIds = new Set(a.filter((r) => String(r["content"]).startsWith("[reply to ")).map((r) => r["id"]));
   const p: Provider = {
     async *chat(messages) {
       const headIds = messages[0]!.content.split("\n")
@@ -156,10 +155,13 @@ test("recall clears RAM scratch but never the store", async () => {
   assert.equal((await loadHistory("ai", w.k)).length, before + 1, "one recall row appended, nothing removed");
 });
 
-function backendKernel(meta: Payload = {}): { k: Kernel; calls: () => number } {
+function backendKernel(meta: Payload = {}, provider?: Provider): { k: Kernel; calls: () => number } {
   const k = new Kernel();
   registerRamStore(k);
-  k.registerBundle("ai.ts", makeAIBackend((id) => k.get(id)!.meta as AIRecord));
+  k.registerBundle(
+    "ai.ts",
+    makeAIBackend((id) => k.get(id)!.meta as AIRecord, provider !== undefined ? { makeProvider: () => provider } : {}),
+  );
   k.setRoot(new Agent({ id: "kernel_state", meta: { guid: "g1" } }));
   k.register(new Agent({ id: "mem", parentId: "kernel_state", handlerModule: "ram_store.ts", meta: { operator: true, admins: ["kernel"], callable_by: { ai: "*" } } }));
   k.register(new Agent({ id: "ai", parentId: "kernel_state", handlerModule: "ai.ts", meta: { memory_store_id: "mem", can_call: { mem: "*" }, ...meta } }));
@@ -174,6 +176,40 @@ test("boot is lazy and marks the view for rebuilding", async () => {
   assert.equal(out.result, null);
   assert.equal(calls(), before, "boot read nothing");
   assert.ok(aiMem(k).recallDue.has("ai"), "the first turn rebuilds the view");
+});
+
+test("boot without a memory store fails loud", async () => {
+  const { k } = backendKernel();
+  delete k.get("ai")!.meta["memory_store_id"];
+  const out = (await k.send([{ target: "ai", payload: { type: "boot" } }]))[0]!.result as Payload;
+  assert.equal(out["reason"], "missing_arg");
+  assert.equal(out["arg"], "memory_store_id");
+});
+
+test("a reply in flight across a reboot is recorded, not acted on", async () => {
+  // Measured 2026-09-06 (python): the rebooted agent was woken by answers to calls
+  // its previous incarnation made, and finished THAT work instead of the new one.
+  let passes = 0;
+  const provider: Provider = {
+    async *chat(messages) {
+      // a TURN opens with the system block; `context_recall`'s side call does not
+      if (messages[0]?.role === "system") passes += 1;
+      yield '<call name="done"></call>';
+    },
+  };
+  const { k } = backendKernel({ context_window: 12000, output_reserve: 0 }, provider);
+  await k.send([{ target: "ai", payload: { type: "boot" } }]); // incarnation 1
+  const born = aiMem(k).incarnation.get("ai")!;
+  await k.send([{ target: "ai", payload: { type: "boot" } }]); // reboot → incarnation 2
+  await deliver(k, "ai", "[reply to n:1 · n r]\nlate", "c", null, born);
+  assert.equal(passes, 0, "a late reply runs no turn");
+  let rows = await loadHistory("ai", k);
+  assert.equal(rows[rows.length - 1]!["kind"], "late");
+  assert.ok(String(rows[rows.length - 1]!["content"]).includes("late"));
+  await deliver(k, "ai", "[reply to n:2 · n r]\nfresh", "c", null, aiMem(k).incarnation.get("ai")!);
+  assert.equal(passes, 1, "a reply from THIS incarnation runs a turn");
+  rows = await loadHistory("ai", k);
+  assert.ok(rows.some((r) => String(r["content"]).includes("fresh")));
 });
 
 test("a fold batch makes recall due on the next turn, and every projection writes the view", async () => {

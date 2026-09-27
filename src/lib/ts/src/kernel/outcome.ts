@@ -9,8 +9,21 @@
 
 import type { Json, Payload } from "./json.ts";
 
-/** `pid is null` ⟺ the item never reached the task table. */
-export type Status = "completed" | "failed" | "cancelled" | "timed_out";
+/**
+ * The terminal states of ONE batch item (python's outcome vocabulary):
+ *   completed — the handler ran and answered; `result` is its reply verbatim.
+ *   errored   — the handler RAN and said NO: its reply carries a truthy `error`
+ *               (a missing path, a refusal it composed). FAILURE IS A STATUS —
+ *               a reader learns it from `status`, never by parsing `result`.
+ *               Not retried (a semantic no is not transient) and not a dead
+ *               letter.
+ *   failed    — no handler answer exists: a refusal before dispatch, or the
+ *               handler threw.
+ *   cancelled — killed via `cancel`.
+ *   timed_out — the item's own deadline expired.
+ * `pid is null` ⟺ the item never reached the task table.
+ */
+export type Status = "completed" | "errored" | "failed" | "cancelled" | "timed_out";
 
 /** THE DEAD ENDINGS. An execution that settled one of these is a DEAD LETTER: it
  *  is announced (`on_deadletter`), listed by `ledger`, never retried silently,
@@ -50,8 +63,14 @@ export function refused(result: Json): Outcome {
   return { pid: null, status: "failed", result, attempts: 1 };
 }
 
-export function isTerminalFailure(status: Status): boolean {
-  return status === "failed" || status === "timed_out";
+/** A reply that SAYS no: a dict carrying a truthy `error` (python truthiness). */
+export function errorShaped(result: Json): boolean {
+  if (result === null || typeof result !== "object" || Array.isArray(result)) return false;
+  const e = (result as Payload)["error"];
+  if (e === undefined || e === null || e === false || e === 0 || e === "") return false;
+  if (Array.isArray(e)) return e.length > 0;
+  if (typeof e === "object") return Object.keys(e).length > 0;
+  return true;
 }
 
 /** A message id as an int: a positive integer, or its decimal string (a model

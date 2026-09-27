@@ -339,19 +339,33 @@ export class Kernel {
   gate(senderId: string, verb: string, targetId: string): Payload | null {
     const sender = this.agents.get(senderId);
     const target = this.agents.get(targetId);
-    if (sender !== undefined) {
-      const ok = authorizeCall(
-        sender.meta["can_call"] as Payload | undefined,
-        verb,
-        targetId,
-        {
-          holderId: sender.id,
-          holderParent: sender.parentId,
-          holderChildren: new Set(sender.children.keys()),
-        },
-      );
-      if (!ok) return denial("egress", senderId, targetId, verb);
-    }
+    // EGRESS — may the SENDER call the target? A sender that is not an agent of
+    // this kernel has NO record here, so it holds NO grant: python reads its
+    // record as `{id}` (empty `can_call`) and refuses it at egress, whatever the
+    // target's `callable_by` says. An origin is only ever vouched for by the
+    // kernel that holds its record — a remote caller's authority lives on its
+    // own side of the bridge, never here.
+    const ok = authorizeCall(
+      sender?.meta["can_call"] as Payload | undefined,
+      verb,
+      targetId,
+      {
+        holderId: senderId,
+        holderParent: sender?.parentId ?? null,
+        holderChildren: new Set(sender?.children.keys() ?? []),
+        loaderId: this.rootId,
+      },
+    );
+    if (!ok) return denial("egress", senderId, targetId, verb);
+    // INGRESS DOES NOT APPLY TO A KERNEL VERB (python `_gate`, rust `gate.rs`).
+    // `callable_by` answers "do I accept being acted upon by you" — and for
+    // `ps`/`cancel`/`ledger` and friends the root is not what is acted upon: it
+    // is the control surface, the operand rides in the payload (`task_id`,
+    // `id`). Asking the root to accept each caller would make the operator edit
+    // the ROOT's record for every agent that needs the task table. So egress is
+    // the whole check: an agent granted `<root>:[ps, cancel]` can watch and kill
+    // ANY task — the per-victim granularity is gone, knowingly.
+    if (target !== undefined && target.parentId === null && isKernelVerb(verb)) return null;
     if (target !== undefined) {
       const ok = authorizeCall(
         target.meta["callable_by"] as Payload | undefined,
@@ -361,6 +375,7 @@ export class Kernel {
           holderId: target.id,
           holderParent: target.parentId,
           holderChildren: new Set(target.children.keys()),
+          loaderId: this.rootId,
           // INGRESS: the privileged escalation is already blocked at egress, so
           // a callee's `$children:"*"` ("I trust my own subtree") legitimately
           // accepts a privileged verb.

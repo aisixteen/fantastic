@@ -568,31 +568,105 @@ fn walk_tree(root_dir: &Path, rel_dir: &str, parent_id: &Value, out: &mut Vec<Va
     }
 }
 
-/// An absolute dir for a record that is NOT (or no longer) live: walk its parent
-/// chain in the kernel index and join every link under the root's children dir.
-/// Python `kernel_state.tools._resolve_path`.
+/// A loader's PERSISTED records → `{id: parent_id}`, the parent taken from DISK
+/// POSITION under `root_dir` (authoritative, as [`read_tree`] does): a record
+/// directly under `<root_dir>/<children_dir>` is parented to the loader itself.
+/// A record the host never runs — a federated kernel's, sent through a bridge —
+/// exists only here, so a walk that stops at the live tree loses every record
+/// nested under it. Python `kernel_state.tools._disk_parents`.
+#[must_use]
+pub fn disk_parents(
+    root_dir: &Path,
+    children_dir: &str,
+    loader_id: &str,
+) -> std::collections::HashMap<String, Option<String>> {
+    let mut out = Vec::new();
+    walk_tree(root_dir, children_dir, &Value::from(loader_id), &mut out, children_dir);
+    out.into_iter()
+        .filter_map(|r| {
+            let id = r.get("id")?.as_str()?.to_string();
+            let parent = r.get("parent_id").and_then(Value::as_str).map(str::to_string);
+            Some((id, parent))
+        })
+        .collect()
+}
+
+/// WHERE A RECORD REALLY IS, for one loader: the LIVE tree first, then the
+/// loader's persisted records (read from disk once, on first need). Python
+/// `kernel_state.tools._where` + its per-walk `disk` cache.
+pub struct RecordPlaces<'a> {
+    kernel: &'a Kernel,
+    root_dir: PathBuf,
+    children_dir: String,
+    loader_id: String,
+    disk: Option<std::collections::HashMap<String, Option<String>>>,
+}
+
+impl<'a> RecordPlaces<'a> {
+    /// The places a loader (`loader_id`, owning `root_dir`, children under
+    /// `children_dir`) knows.
+    #[must_use]
+    pub fn new(kernel: &'a Kernel, root_dir: PathBuf, children_dir: String, loader_id: String) -> Self {
+        Self {
+            kernel,
+            root_dir,
+            children_dir,
+            loader_id,
+            disk: None,
+        }
+    }
+
+    /// `(known, parent)` for one id: the live tree, then the loader's persisted
+    /// records. Unknown in both ⇒ `(false, None)` — the caller decides; nothing is
+    /// guessed.
+    pub fn locate(&mut self, node: &str) -> (bool, Option<String>) {
+        if let Some(live) = self.kernel.agents.get(&AgentId::from(node)) {
+            return (true, live.parent_id.as_ref().map(|p| p.0.clone()));
+        }
+        let disk = self.disk.get_or_insert_with(|| {
+            disk_parents(&self.root_dir, &self.children_dir, &self.loader_id)
+        });
+        match disk.get(node) {
+            Some(parent) => (true, parent.clone()),
+            None => (false, None),
+        }
+    }
+
+    /// A record's on-disk dir under the loader's root, by walking its parent
+    /// chain where it really is (live, then disk) — so a record nested 2+ levels
+    /// under a federated record lands where it belongs. A record that already
+    /// exists keeps ITS position; `payload_parent` places only a NEW one. Python
+    /// `kernel_state.tools._resolve_path`.
+    pub fn resolve(&mut self, id: &str, payload_parent: Option<&str>) -> PathBuf {
+        let mut parts: Vec<String> = vec![id.to_string()];
+        let (known, mut pid) = self.locate(id);
+        if !known {
+            pid = payload_parent.map(str::to_string);
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(p) = pid {
+            if p.is_empty() || p == self.loader_id || !seen.insert(p.clone()) {
+                break;
+            }
+            parts.push(p.clone());
+            pid = self.locate(&p).1;
+        }
+        let mut path = self.root_dir.clone();
+        for part in parts.iter().rev() {
+            path = path.join(&self.children_dir).join(part);
+        }
+        path
+    }
+}
+
+/// An absolute dir for a record that is NOT (or no longer) live, under the ROOT
+/// loader: its parent chain walked where it really is — the live tree, then the
+/// root's persisted records — and joined under the root's children dir. Python
+/// `kernel_state.tools._resolve_path` for the root loader.
 pub fn resolve_record_path(kernel: &Arc<Kernel>, id: &str, parent_id: Option<&str>) -> PathBuf {
     let Some(root) = kernel.root() else {
         return PathBuf::new();
     };
-    let mut parts: Vec<String> = vec![id.to_string()];
-    let mut pid: Option<String> = parent_id.map(str::to_string).or_else(|| {
-        kernel
-            .agents
-            .get(&AgentId::from(id))
-            .and_then(|a| a.parent_id.as_ref().map(|p| p.0.clone()))
-    });
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    while let Some(p) = pid {
-        if p == root.id.0 || !seen.insert(p.clone()) {
-            break;
-        }
-        parts.push(p.clone());
-        pid = kernel
-            .agents
-            .get(&AgentId::from(p.as_str()))
-            .and_then(|a| a.parent_id.as_ref().map(|q| q.0.clone()));
-    }
     let children_dir = root
         .meta
         .read()
@@ -604,11 +678,8 @@ pub fn resolve_record_path(kernel: &Arc<Kernel>, id: &str, parent_id: Option<&st
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "agents".to_string());
-    let mut path = root.root_path.clone();
-    for part in parts.iter().rev() {
-        path = path.join(&children_dir).join(part);
-    }
-    path
+    RecordPlaces::new(kernel, root.root_path.clone(), children_dir, root.id.0.clone())
+        .resolve(id, parent_id)
 }
 
 /// Convenience: write a record to a specific path. Used by tests that

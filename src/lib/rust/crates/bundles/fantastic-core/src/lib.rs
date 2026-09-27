@@ -246,7 +246,7 @@ impl KernelStateBundle {
             return bad;
         }
         let parent_id = record.get("parent_id").and_then(Value::as_str);
-        if let Some(denied) = guard_record_owner("persist_record", id, parent_id, kernel) {
+        if let Some(denied) = guard_record_owner("persist_record", id, parent_id, agent, kernel) {
             return denied;
         }
         if let Some(pid) = parent_id {
@@ -279,7 +279,7 @@ impl KernelStateBundle {
             return bad;
         }
         let parent_id = payload.get("parent_id").and_then(Value::as_str);
-        if let Some(denied) = guard_record_owner("forget_record", target, parent_id, kernel) {
+        if let Some(denied) = guard_record_owner("forget_record", target, parent_id, agent, kernel) {
             return denied;
         }
         if let Some(pid) = parent_id {
@@ -313,32 +313,10 @@ fn write_record(root_path: &Path, record: &Map<String, Value>) {
     let _ = fs::write(&file, body);
 }
 
-/// An absolute dir for a record under THIS loader's root — python
-/// `_resolve_path`. The record's parent chain is walked in the kernel and STOPS
-/// AT THE LOADER (not at the kernel root): a session loader's records nest
-/// directly under its own `root`, whatever host agents sit above the loader.
-/// The chain starts at the record's OWN `parent_id` (none ⇒ directly under the
-/// loader), and a link's parent is the live agent's.
-fn resolve_under(
-    agent: &Arc<Agent>,
-    kernel: &Arc<Kernel>,
-    id: &str,
-    parent_id: Option<&str>,
-) -> std::path::PathBuf {
-    let mut parts: Vec<String> = vec![id.to_string()];
-    let mut pid: Option<String> = parent_id.filter(|p| !p.is_empty()).map(str::to_string);
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    while let Some(p) = pid {
-        if p == agent.id.0 || !seen.insert(p.clone()) {
-            break;
-        }
-        parts.push(p.clone());
-        pid = kernel
-            .agents
-            .get(&AgentId::from(p.as_str()))
-            .and_then(|a| a.parent_id.as_ref().map(|q| q.0.clone()));
-    }
-    let children_dir = agent
+/// The children-container dir name for this loader's namespace (declared config;
+/// default "agents"). Python `_children_name`.
+fn children_name(agent: &Arc<Agent>) -> String {
+    agent
         .meta
         .read()
         .ok()
@@ -348,48 +326,65 @@ fn resolve_under(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| "agents".to_string());
-    let mut path = loader_root(agent);
-    for part in parts.iter().rev() {
-        path = path.join(&children_dir).join(part);
-    }
-    path
+        .unwrap_or_else(|| "agents".to_string())
+}
+
+/// Where records REALLY are for this loader: the live tree, then its own
+/// persisted records under its root (disk position). Python `_where`.
+fn places<'a>(agent: &Arc<Agent>, kernel: &'a Kernel) -> persistence::RecordPlaces<'a> {
+    persistence::RecordPlaces::new(kernel, loader_root(agent), children_name(agent), agent.id.0.clone())
+}
+
+/// An absolute dir for a record under THIS loader's root — python
+/// `_resolve_path`. The chain is walked where it really is (the live tree, then
+/// this loader's persisted records) and STOPS AT THE LOADER, so a session
+/// loader's records nest under its own `root` — 2+ levels under a federated
+/// record included. A record that already exists keeps its own position; the
+/// payload's `parent_id` places only a new one.
+fn resolve_under(
+    agent: &Arc<Agent>,
+    kernel: &Arc<Kernel>,
+    id: &str,
+    parent_id: Option<&str>,
+) -> std::path::PathBuf {
+    places(agent, kernel).resolve(id, parent_id)
 }
 
 /// Refuse a RECORD verb that names an agent outside the caller's own subtree —
 /// python `_guard_record_owner`. An OPERATOR (`current_origin()` is `None`) is
-/// the bookkeeping these verbs exist for and stays ungated.
+/// the bookkeeping these verbs exist for and stays ungated; an agent may name
+/// ITSELF or something it owns.
+///
+/// THE CHAIN IS WALKED WHERE IT REALLY IS: the live tree, then this loader's own
+/// persisted records (a federated kernel's records are not live here). A record
+/// that already exists is placed by the live tree or its disk position, never by
+/// the payload — else naming a sibling's id with `parent_id` = yourself passed.
+/// The payload's `parent_id` places only a record that exists in neither.
 fn guard_record_owner(
     verb: &str,
     record_id: &str,
     parent_id: Option<&str>,
+    agent: &Arc<Agent>,
     kernel: &Arc<Kernel>,
 ) -> Option<Value> {
     let caller = fantastic_kernel::current_origin()?;
     if caller.0 == record_id {
         return None;
     }
+    let mut at = places(agent, kernel);
+    let (known, mut node) = at.locate(record_id);
+    if !known {
+        node = parent_id.filter(|p| !p.is_empty()).map(str::to_string);
+    }
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut node: Option<String> = parent_id
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            kernel
-                .agents
-                .get(&AgentId::from(record_id))
-                .and_then(|a| a.parent_id.as_ref().map(|p| p.0.clone()))
-        });
-    while let Some(n) = node {
+    while let Some(n) = node.filter(|n| !n.is_empty()) {
         if n == caller.0 {
             return None;
         }
         if !seen.insert(n.clone()) {
             break;
         }
-        node = kernel
-            .agents
-            .get(&AgentId::from(n.as_str()))
-            .and_then(|a| a.parent_id.as_ref().map(|p| p.0.clone()));
+        node = at.locate(&n).1;
     }
     Some(fantastic_kernel::refusal(
         fantastic_kernel::refusal::UNAUTHORIZED,

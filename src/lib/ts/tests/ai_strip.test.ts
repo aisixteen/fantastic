@@ -1,9 +1,8 @@
 // `strip` — the ledger at mixed resolution. Reply BODIES are stubbed oldest-first
 // in one batch (hysteresis), the model's own turns are never touched, a stub
-// names the call it answered, the set is monotone so the rendered prefix is
-// byte-stable between strip events, and the cut is only the second stage.
-// Mirrors python ai_core/tests/test_strip.py (the title-cleaning case has no ts
-// counterpart: the ts call grammar carries no titles).
+// keeps the reply tag and the call's title, the set is monotone so the rendered
+// prefix is byte-stable between strip events, and the cut is only the second
+// stage. Mirrors python ai_core/tests/test_strip.py.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,7 +11,7 @@ import { estimateTokens } from "../src/bundles/ai/context.ts";
 import type { ProjectionCtx, Turn } from "../src/bundles/ai/context.ts";
 import { getStrategy } from "../src/bundles/ai/strategies/index.ts";
 import { LOW, stripped } from "../src/bundles/ai/strategies/strip.ts";
-import { wrap } from "../src/bundles/ai/replies.ts";
+import { cleanTitle } from "../src/bundles/ai/replies.ts";
 import { recall } from "../src/bundles/ai/verbs.ts";
 import { World, callText, turn } from "./ai_world.ts";
 
@@ -25,15 +24,18 @@ function ctx(budget: number, selfId = "ai"): ProjectionCtx {
   return { budget, recentN: 4, summarize: null, selfId, kernel: null, clientId: null };
 }
 
-function reply(pid: number, body = BIG, verb = "read"): Turn {
-  return { role: "user", content: wrap(body), reply: { pid, target: "notes", verb } };
+function reply(pid: string, title: string | null, body = BIG, verb = "read"): Turn {
+  const t = title ? `[reply to ${pid} · notes ${verb} · "${title}"]` : `[reply to ${pid} · notes ${verb}]`;
+  return turn("user", `${t}\n${body}`);
 }
+
+const hex4 = (i: number): string => i.toString(16).padStart(4, "0");
 
 function run(n = 8, live = "write the report"): Turn[] {
   const b: Turn[] = [turn("user", "GOAL: survey then report")];
   for (let i = 0; i < n; i++) {
     b.push(turn("assistant", `Reading filler_${i}. ${callText("notes", { type: "read" })}`));
-    b.push(reply(1000 + i));
+    b.push(reply(`ai:${hex4(i)}`, `survey filler_${i}`));
     b.push(turn("assistant", `filler_${i} was padding.`));
   }
   b.push(turn("user", live));
@@ -60,14 +62,13 @@ test("over budget strips the oldest bodies in one batch down to LOW", async () =
   assert.equal(proj.omittedMarker, false, "no cut was needed");
 });
 
-test("a stub names the call it answered and how big the body was", async () => {
+test("a stub keeps the tag and the title and says how big the body was", async () => {
   const body = run(8);
   const proj = await strip(body, [], {}, ctx(Math.floor(estimateTokens(body) * 0.5)));
   const stub = String(proj.body[2]!["content"]);
-  assert.ok(stub.startsWith("<tool_response>[reply to 1000 · notes read]"), stub);
+  assert.ok(stub.startsWith('[reply to ai:0000 · notes read · "survey filler_0"]'), stub);
   assert.match(stub, /\(stripped: 6000 bytes/);
   assert.ok(!stub.includes(BIG));
-  assert.deepEqual(proj.body[2]!["reply"], body[2]!["reply"], "the row keeps its reply metadata");
 });
 
 test("the model's own turns are never touched", async () => {
@@ -79,8 +80,8 @@ test("the model's own turns are never touched", async () => {
 
 test("the goal and the live turn are never stripped", async () => {
   const body = run(8);
-  body[0] = reply(1, BIG);
-  body[body.length - 1] = reply(2, BIG);
+  body[0] = reply("goal:0", "the goal itself"); // a reply-shaped goal turn
+  body[body.length - 1] = reply("live:0", "a reply-shaped live turn");
   const proj = await strip(body, [], {}, ctx(Math.floor(estimateTokens(body) * 0.4)));
   assert.ok(String(proj.body[0]!["content"]).includes(BIG));
   assert.ok(String(proj.body[proj.body.length - 1]!["content"]).includes(BIG));
@@ -113,7 +114,7 @@ test("when every body is stripped and prose still overflows, the cut is stage tw
   const body: Turn[] = [turn("user", "GOAL")];
   for (let i = 0; i < 40; i++) {
     body.push(turn("assistant", `long deliberation ${i} ` + "y".repeat(800)));
-    body.push(reply(2000 + i, "z".repeat(50)));
+    body.push(reply(`ai:${hex4(i)}`, `t${i}`, "z".repeat(50)));
   }
   body.push(turn("user", "now?"));
   const proj = await strip(body, [], {}, ctx(3000));
@@ -128,6 +129,13 @@ test("per-agent state does not leak across agents", async () => {
   await strip(body, [], {}, ctx(Math.floor(estimateTokens(body) * 0.5), "a"));
   const fresh = await strip(body, [], {}, ctx(100_000, "b"));
   assert.equal(fresh.stripped, 0);
+});
+
+test("a title cannot close the tag or end the line", () => {
+  assert.equal(cleanTitle("read filler_2] then\nrun"), "read filler_2  then run");
+  assert.equal(cleanTitle("   "), null);
+  assert.equal(cleanTitle(42), null);
+  assert.equal(cleanTitle("t".repeat(500))!.length, 140);
 });
 
 test("a recall page is trimmed to fit the window and says so", async () => {

@@ -145,7 +145,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         // becomes a directory, so an unvalidated one writes wherever it points.
         if let bad = Refusal.guardAgentId("persist_record", id) { return bad }
         let parentId = record["parent_id"]?.asString
-        if let denied = Self.guardRecordOwner("persist_record", id, parentId, kernel) {
+        if let denied = guardRecordOwner("persist_record", id, parentId, agent, kernel) {
             return denied
         }
         if let pid = parentId, let bad = Refusal.guardAgentId("persist_record", pid) {
@@ -165,7 +165,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         }
         if let bad = Refusal.guardAgentId("forget_record", target) { return bad }
         let parentId = payload["parent_id"].asString
-        if let denied = Self.guardRecordOwner("forget_record", target, parentId, kernel) {
+        if let denied = guardRecordOwner("forget_record", target, parentId, agent, kernel) {
             return denied
         }
         if let pid = parentId, let bad = Refusal.guardAgentId("forget_record", pid) {
@@ -251,19 +251,54 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         return "agents"
     }
 
-    /// Compute a record's on-disk dir under this loader's root by walking the
-    /// record's parent chain in the kernel. Used when the agent isn't (or is no
-    /// longer) live. Python `_resolve_path`.
+    /// This loader's PERSISTED records → `[id: parent id]`, the parent taken from
+    /// DISK POSITION under its root (authoritative, as `readTree` does): a record
+    /// directly under the root's children dir is parented to the loader itself. A
+    /// record the host never runs — a federated kernel's, sent through a bridge —
+    /// exists only here, so a walk that stops at the live tree loses every record
+    /// nested under it. Python `_disk_parents`.
+    private func diskParents(_ agent: Agent) -> [String: String?] {
+        let cd = childrenName(agent)
+        var out: [String: String?] = [:]
+        for rec in Persistence.walkRecords(
+            loaderRoot(agent).appendingPathComponent(cd), childrenDir: cd,
+            parentId: agent.id.value)
+        {
+            out[rec.id] = .some(rec.parentId)
+        }
+        return out
+    }
+
+    /// (known, parent) for one id: the LIVE tree first, then this loader's
+    /// persisted records (read once per walk, cached in `disk`). Unknown in both
+    /// ⇒ (false, nil) — the caller decides; nothing is guessed. Python `_where`.
+    private func whereIs(
+        _ agent: Agent, _ kernel: Kernel, _ node: String, _ disk: inout [String: String?]?
+    ) -> (known: Bool, parent: String?) {
+        if let live = kernel.agent(AgentId(node)) { return (true, live.parentId?.value) }
+        if disk == nil { disk = diskParents(agent) }
+        if let entry = disk?[node] { return (true, entry) }
+        return (false, nil)
+    }
+
+    /// Compute a record's on-disk dir under this loader's root by walking its
+    /// parent chain: the live tree, then this loader's persisted records (so a
+    /// record nested 2+ levels under a federated record lands where it belongs).
+    /// A record that already exists keeps ITS position; the payload's `parent_id`
+    /// places only a NEW one. Used when the agent isn't (or is no longer) live.
+    /// Python `_resolve_path`.
     private func resolvePath(_ agent: Agent, _ kernel: Kernel, _ id: String, _ parentId: String?)
         -> URL
     {
         var parts = [id]
-        var pid = parentId
+        var disk: [String: String?]? = nil
+        var (known, pid) = whereIs(agent, kernel, id, &disk)
+        if !known { pid = parentId }
         var seen = Set<String>()
         while let p = pid, !p.isEmpty, p != agent.id.value, !seen.contains(p) {
             seen.insert(p)
             parts.append(p)
-            pid = kernel.agent(AgentId(p))?.parentId?.value
+            pid = whereIs(agent, kernel, p, &disk).parent
         }
         var path = loaderRoot(agent)
         let children = childrenName(agent)
@@ -292,19 +327,28 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// record. An OPERATOR (no origin: the loader's own flush, the CLI, a bridge
     /// hydrating at boot) is the bookkeeping these verbs exist for and stays
     /// ungated. An AGENT may name ITSELF or something it owns.
-    static func guardRecordOwner(
-        _ verb: String, _ recordId: String, _ parentId: String?, _ kernel: Kernel
+    ///
+    /// THE CHAIN IS WALKED WHERE IT REALLY IS: the live tree, then this loader's
+    /// own persisted records (a federated kernel's records are not live here — a
+    /// canvas's nested agents used to stop the walk at the canvas and be
+    /// refused). A record that already exists is placed by the live tree or its
+    /// disk position, never by the payload — else naming a sibling's id with
+    /// `parent_id` = yourself passed. The payload's `parent_id` places only a
+    /// record that exists in neither. Python `_guard_record_owner`.
+    private func guardRecordOwner(
+        _ verb: String, _ recordId: String, _ parentId: String?, _ agent: Agent,
+        _ kernel: Kernel
     ) -> JSON? {
         guard let caller = KernelTaskLocals.currentOrigin else { return nil }
         if caller.value == recordId { return nil }
+        var disk: [String: String?]? = nil
+        var (known, node) = whereIs(agent, kernel, recordId, &disk)
+        if !known { node = (parentId?.isEmpty == false) ? parentId : nil }
         var seen = Set<String>()
-        var node =
-            (parentId?.isEmpty == false)
-            ? parentId : kernel.agent(AgentId(recordId))?.parentId?.value
         while let n = node, !n.isEmpty, !seen.contains(n) {
             if n == caller.value { return nil }
             seen.insert(n)
-            node = kernel.agent(AgentId(n))?.parentId?.value
+            node = whereIs(agent, kernel, n, &disk).parent
         }
         return Refusal.make(
             Refusal.unauthorized,

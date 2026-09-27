@@ -3,9 +3,8 @@
 // minted at the append, turns = rows with a chat role), reply bodies are never
 // persisted (the origin line), and context is shared by GRANT (fork_from with
 // the owner verified, third-owner stubs, request_share, watch/unwatch).
-// Mirrors the store/grant parts of python ai_core/tests/test_memory_features.py;
-// the fold/compaction parts have no ts counterpart (the ts backend has no
-// compaction subsystem).
+// Mirrors the store/grant parts of python ai_core/tests/test_memory_features.py
+// (its fold/compaction parts are in ai_compaction.test.ts).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,9 +14,12 @@ import type { Payload } from "../src/kernel/json.ts";
 import { registerRamStore } from "../src/bundles/memory/ram_store.ts";
 import { makeAIBackend, type AIRecord, type Message, type Provider } from "../src/bundles/ai/ai_backend.ts";
 import { loadHistory, renderShared, saveHistory } from "../src/bundles/ai/memory.ts";
+import { PID_TAG } from "../src/bundles/ai/replies.ts";
+import { renderCall } from "../src/bundles/ai/tool_parse.ts";
+import type { Value } from "../src/bundles/ai/tool_parse.ts";
+import { DONE, settle, until } from "./ai_world.ts";
 
 const ROOT = "kernel_state";
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Per-agent scripted turns; records every message list a provider was handed. */
 interface Script {
@@ -38,7 +40,7 @@ function world(opts: { aiMeta?: Payload; storeCallable?: Payload } = {}): { k: K
           seen.push(messages.map((m) => ({ ...m })));
           s.seen.set(id, seen);
           const list = s.turns.get(id) ?? [];
-          yield list.length > 0 ? (list.shift() as string) : "done.";
+          yield list.length > 0 ? (list.shift() as string) : DONE;
         },
       }),
     }),
@@ -80,11 +82,13 @@ function world(opts: { aiMeta?: Payload; storeCallable?: Payload } = {}): { k: K
   return { k, s };
 }
 
-const call = (id: string, payload: object) =>
-  `<tool_call>${JSON.stringify({ name: "send", arguments: { target_id: id, payload } })}</tool_call>`;
+const call = (id: string, payload: { [k: string]: Value }) => renderCall("send", { target_id: id, payload });
 
+/** One send, then the chain it started runs to its `done`. */
 async function send(k: Kernel, id: string, text: string): Promise<Payload> {
-  return (await k.send([{ target: id, payload: { type: "send", text } }]))[0]!.result as Payload;
+  const out = (await k.send([{ target: id, payload: { type: "send", text } }]))[0]!.result as Payload;
+  await settle(k);
+  return out;
 }
 
 async function storeRows(k: Kernel, owner: string): Promise<Payload[]> {
@@ -92,13 +96,6 @@ async function storeRows(k: Kernel, owner: string): Promise<Payload[]> {
   return r["rows"] as Payload[];
 }
 
-async function until(fn: () => Promise<boolean> | boolean, ms = 2000): Promise<void> {
-  const t0 = Date.now();
-  while (!(await fn())) {
-    if (Date.now() - t0 > ms) throw new Error("condition never held");
-    await sleep(5);
-  }
-}
 
 // ── no store, no turn ──────────────────────────────────────────────────
 
@@ -126,9 +123,9 @@ test("boot is LAZY — it never calls the store", async () => {
 
 test("a turn's rows land in the store in id order; the next turn reads them back", async () => {
   const { k, s } = world();
-  s.turns.set("alice", [call("tool", { type: "ping" }), "pong received"]);
+  s.turns.set("alice", [call("tool", { type: "ping" }), "pong received " + DONE]);
   const out = await send(k, "alice", "check the tool");
-  assert.equal(out["response"], "pong received");
+  assert.equal(out["response"], call("tool", { type: "ping" }), "one send is ONE pass");
   const rows = await storeRows(k, "alice");
   assert.deepEqual(rows.map((r) => r["role"]), ["user", "assistant", "user", "assistant"]);
   const ids = rows.map((r) => r["id"] as number);
@@ -136,9 +133,9 @@ test("a turn's rows land in the store in id order; the next turn reads them back
   assert.equal(rows[0]!["content"], "check the tool");
   assert.equal(rows[1]!["parent"], rows[0]!["id"], "the answer names what it answers");
   assert.equal(rows[2]!["parent"], rows[1]!["id"], "a reply names the turn that made the call");
-  assert.match(String(rows[2]!["content"]), /"ok":true/, "a small reply stays inline");
+  assert.match(String(rows[2]!["content"]), /^\[reply to \d+ · tool ping · ↑\d+\]\n<ok>true<\/ok>$/, "a small reply stays inline, in the tag notation");
 
-  s.turns.set("alice", ["second"]);
+  s.turns.set("alice", ["second " + DONE]);
   await send(k, "alice", "again");
   const second = s.seen.get("alice")!.at(-1)!;
   assert.equal(second[0]!.role, "system");
@@ -182,19 +179,20 @@ test("a note the agent appends itself is memory, not a turn", async () => {
 // ── bodies are never persisted ─────────────────────────────────────────
 
 test("a reply over the inline cap is held in RAM and digested to its origin line; grep reaches it", async () => {
-  // window 2400, no reserve → budget 2400 → inline cap 300 tokens
-  const { k, s } = world({ aiMeta: { context_window: 2400, output_reserve: 0 } });
-  s.turns.set("alice", [call("tool", { type: "big", path: "a.txt" }), call("tool", { type: "sourced" }), "read both"]);
+  // window 8000, no reserve → budget 8000 → inline cap 1000 tokens (a 6000-char
+  // body is ~1500); the system block (~4000) still leaves room for the turns
+  const { k, s } = world({ aiMeta: { context_window: 8000, output_reserve: 0 } });
+  s.turns.set("alice", [call("tool", { type: "big", path: "a.txt" }), call("tool", { type: "sourced" }), "read both " + DONE]);
   await send(k, "alice", "read the files");
   const rows = await storeRows(k, "alice");
-  const replies = rows.filter((r) => r["role"] === "user" && String(r["content"]).startsWith("<tool_response>"));
+  const replies = rows.filter((r) => r["role"] === "user" && String(r["content"]).startsWith("[reply to "));
   assert.equal(replies.length, 2);
   assert.ok(!String(replies[0]!["content"]).includes("xxxxxxxx"), "the body was persisted");
   assert.match(String(replies[0]!["content"]), /NOT inlined, held in memory only until this agent restarts/);
-  const pid = (replies[0]!["reply"] as Payload)["pid"] as number;
-  assert.deepEqual(replies[0]!["reply"], { pid, target: "tool", verb: "big" }, "the row names the call it answered");
-  assert.match(String(replies[0]!["content"]), new RegExp(`"ids":\\[${pid}\\]`), "the grep hint names the pid");
-  assert.match(String(replies[0]!["content"]), /origin: tool big \{"path":"a\.txt"\} — re-send it; the output may differ/);
+  const pid = Number(PID_TAG.exec(String(replies[0]!["content"]))![1]);
+  assert.ok(String(replies[0]!["content"]).startsWith(`[reply to ${pid} · tool big`), "the tag names the call it answered");
+  assert.ok(String(replies[0]!["content"]).includes(`<ids><item>${pid}</item></ids>`), "the grep hint names the pid");
+  assert.match(String(replies[0]!["content"]), /origin: tool big \{"path": "a\.txt"\} — re-send it; the output may differ/);
   assert.match(String(replies[1]!["content"]), /origin: notes\.md lines 1–200 v3f2a — read \{path, range\}/,
     "the replying agent's own origin wins");
   // the pass after the call saw the DIGEST — the view is rebuilt from the store
@@ -219,7 +217,7 @@ test("fork_from reads the owner's rows under the grant and kickstarts; unshare f
   const { k, s } = world();
   await saveHistory("alice", k, [{ role: "user", content: "the vault code is 4711" }]);
   const g = await share(k, "alice", "bob", { head_until: 1_000_000_000 });
-  s.turns.set("bob", ["on it"]);
+  s.turns.set("bob", ["on it " + DONE]);
   const out = (await k.send([
     { target: "bob", payload: { type: "fork_from", owner: "alice", grant: g["grant"] as number, message: "what is the code?" } },
   ]))[0]!.result as Payload;
@@ -261,7 +259,7 @@ test("fork_from refuses an owner the grant does not name, and an unknown grant",
 
 test("request_share reaches the OWNER's model as a turn", async () => {
   const { k, s } = world();
-  s.turns.set("alice", ["I will think about it"]);
+  s.turns.set("alice", ["I will think about it " + DONE]);
   const out = (await k.scopedFor("bob", null).send([
     { target: "alice", payload: { type: "request_share", row: 42, why: "need it" } },
   ]))[0]!.result as Payload;
@@ -269,7 +267,8 @@ test("request_share reaches the OWNER's model as a turn", async () => {
   await until(async () => (await storeRows(k, "alice")).some((r) => r["role"] === "assistant"));
   const turn = (await storeRows(k, "alice")).find((r) => r["role"] === "user")!;
   assert.match(String(turn["content"]), /^\[request_share from bob · row 42\] need it/);
-  assert.match(String(turn["content"]), /"type":"share","with":"bob","scope":\{"row":42\}/);
+  assert.ok(String(turn["content"]).includes("<type>share</type> <with>bob</with> <scope><row>42</row></scope>"), String(turn["content"]));
+  await settle(k);
 });
 
 test("a shared scope shows a third owner's row as a stub naming ITS row id", () => {
@@ -298,7 +297,7 @@ test("watch: a digest per row; bodies only under a live grant; unwatch stops", a
   assert.equal((got[0]!["row"] as Payload)["role"], "user");
   assert.equal("content" in (got[0]!["row"] as Payload), false, "no grant, no body");
   // the MODEL shares through its own store call — the grants cache refreshes
-  s.turns.set("alice", [call("memory", { type: "share", with: "bob", scope: { head_until: 1_000_000_000 }, mode: "live" }), "shared"]);
+  s.turns.set("alice", [call("memory", { type: "share", with: "bob", scope: { head_until: 1_000_000_000 }, mode: "live" }), "shared " + DONE]);
   await send(k, "alice", "share your thread with bob");
   const withBody = got.filter((e) => "content" in (e["row"] as Payload));
   assert.ok(withBody.length > 0, "a live grant covering the row carries its body");
@@ -314,7 +313,7 @@ test("watch: a digest per row; bodies only under a live grant; unwatch stops", a
 
 test("a store that refuses mid-turn fails the turn fast", async () => {
   const { k, s } = world();
-  s.turns.set("alice", ["hello"]);
+  s.turns.set("alice", ["hello " + DONE]);
   await send(k, "alice", "first"); // warm
   k.updateMeta("memory", { callable_by: {} }); // the store now refuses alice
   const out = await send(k, "alice", "second");

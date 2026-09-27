@@ -17,14 +17,20 @@
 import type { Json, Payload } from "./json.ts";
 import { UNAUTHORIZED, refusal } from "./refusal.ts";
 
-/** Verbs that MUTATE THE GRAPH. A wildcard never covers them — only an explicit
- *  list entry names one, so a broad `$parent:"*"` can never silently become
- *  "mutate the graph through my parent". */
+/** Verbs a WILDCARD never covers (python `_authz.PRIVILEGED_VERBS`) — only an
+ *  explicit list entry names one, so a broad `$parent:"*"` can never silently
+ *  become "mutate the graph through my parent". The mutators change the tree;
+ *  `state_subscribe` reads the WHOLE tree's stream; `rows_read`/`rows_write` are
+ *  hydration's pair (a conversation read whole / written into an agent). This
+ *  kernel answers none of the last two — the set is gate POLICY, the same in
+ *  every runtime, so a grant means one thing wherever it is read. */
 export const PRIVILEGED_VERBS: ReadonlySet<string> = new Set([
   "create_agent",
   "delete_agent",
   "update_agent",
   "state_subscribe",
+  "rows_read",
+  "rows_write",
 ]);
 
 /** Structural baseline, merged UNDER any explicit grant on every agent: reach
@@ -56,6 +62,8 @@ export interface GrantContext {
   holderId: string;
   holderParent: string | null;
   holderChildren: ReadonlySet<string>;
+  /** What `$loader` resolves to — the persistence root, i.e. this kernel's root. */
+  loaderId?: string | null;
   /** EGRESS only. On INGRESS the escalation is already blocked at egress, so a
    *  callee's `$children:"*"` ("I trust my own subtree") legitimately accepts a
    *  privileged verb. */
@@ -74,6 +82,10 @@ export function authorizeCall(
   otherId: string,
   ctx: GrantContext,
 ): boolean {
+  // A malformed grant (a bare "*" string, a list) is DENY, never a crash and
+  // never a character-by-character walk: the gate judges what is there; refusing
+  // the shape is the writer's job.
+  if (grant !== null && grant !== undefined && (typeof grant !== "object" || Array.isArray(grant))) return false;
   const g = grant ?? {};
   // Acting on your OWN subtree is baseline, not escalation — egress only.
   const privileged =
@@ -86,6 +98,7 @@ export function authorizeCall(
     if (key === "$children") matched = ctx.holderChildren.has(otherId);
     else if (key === "$self") matched = otherId === ctx.holderId;
     else if (key === "$parent") matched = otherId === ctx.holderParent;
+    else if (key === "$loader") matched = ctx.loaderId !== undefined && ctx.loaderId !== null && otherId === ctx.loaderId;
     else if (key.startsWith("$")) matched = false; // unknown token matches nothing
     else matched = key === otherId;
     if (matched && verbAllowed(value, verb, privileged)) return true;

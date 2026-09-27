@@ -527,3 +527,7 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
     kernel.shutdown().await;
     fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
 }
+
+/// Records nested under a federated record (python `test_nested_records.py`).
+#[path = "tests_nested_records.rs"]
+mod nested_records;

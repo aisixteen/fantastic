@@ -7,6 +7,7 @@
 
 import type { Json, Payload } from "./json.ts";
 import { page } from "./paging.ts";
+import { nowSeconds } from "./timers.ts";
 
 export interface TaskRow {
   id: number;
@@ -18,6 +19,8 @@ export interface TaskRow {
    *  takes the subtree with it. */
   children: Set<number>;
   parent: number | null;
+  /** seconds since the epoch, when the dispatch started */
+  startedAt: number;
   onCancel: (() => void)[];
 }
 
@@ -26,7 +29,7 @@ export class TaskTable {
 
   register(id: number, agent: string, verb: string, parent: number | null): TaskRow {
     const row: TaskRow = {
-      id, agent, verb, killed: false, children: new Set(), parent, onCancel: [],
+      id, agent, verb, killed: false, children: new Set(), parent, startedAt: nowSeconds(), onCancel: [],
     };
     this.rows.set(id, row);
     if (parent !== null) this.rows.get(parent)?.children.add(id);
@@ -52,10 +55,11 @@ export class TaskTable {
     this.rows.delete(id);
   }
 
-  /** `ps` — the live table, paged, oldest first. */
+  /** `ps` — the live table `{id, agent, parent, verb, started_at}`, paged, oldest
+   *  first; `parent` chains the rows into the send tree. */
   list(payload: Payload): { tasks: Json; next: string | null } {
     const all = [...this.rows.values()].map((r) => ({
-      id: r.id, agent: r.agent, verb: r.verb,
+      id: r.id, agent: r.agent, parent: r.parent, verb: r.verb, started_at: r.startedAt,
     }));
     const p = page(all, payload, (t) => String(t.id));
     return { tasks: p.page as unknown as Json, next: p.next };

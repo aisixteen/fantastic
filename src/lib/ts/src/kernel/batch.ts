@@ -21,7 +21,7 @@ import type { Json, Payload } from "./json.ts";
 import type { Kernel } from "./kernel.ts";
 import type { Item, Outcome } from "./outcome.ts";
 import type { Exec } from "./ledger.ts";
-import { refused } from "./outcome.ts";
+import { errorShaped, refused } from "./outcome.ts";
 import { BAD_ARG, DRAINING, bad, refusal, missing, unknown } from "./refusal.ts";
 import { isKernelVerb } from "./kernel_verbs.ts";
 import { timers } from "./timers.ts";
@@ -312,7 +312,9 @@ async function runOnce(k: Kernel, l: Launched, pid: number, attempt: number): Pr
     if (result === CANCELLED || task.killed) {
       return { pid, status: "cancelled", result: { cancelled: true }, attempts: attempt };
     }
-    return { pid, status: "completed", result: result as Json, attempts: attempt };
+    // FAILURE IS A STATUS: a handler that ran and said no settles `errored`.
+    const status = errorShaped(result as Json) ? "errored" : "completed";
+    return { pid, status, result: result as Json, attempts: attempt };
   } catch (err) {
     // A handler THROWING settles as a failed outcome — `send` itself raises
     // nothing. A thrown error that propagated would kill every sibling item in

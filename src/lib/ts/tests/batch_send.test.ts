@@ -123,3 +123,79 @@ test("the whole batch is visible in `ps` before any of it settles", async () => 
   assert.equal(tasks.length, 2, "launch was not synchronous for the whole batch");
   await inflight;
 });
+
+// ── FAILURE IS A STATUS: `errored` ───────────────────────────────────────
+// python `kernel/_kernel.py` outcome vocabulary: a handler that RAN and said NO
+// (a dict carrying a truthy `error`) settles `errored` — not `completed`, not
+// retried, not a dead letter. Python truthiness decides what "truthy" means.
+
+test("a handler that answers with a truthy `error` settles errored, reply verbatim", async () => {
+  const k = kernelWith({
+    vault: async (p) => (p["type"] === "open" ? { ok: true } : { error: "unknown verb", reason: "unhandled" }),
+  });
+  const [no, yes] = await k.send([
+    { target: "vault", payload: { type: "privileged" } },
+    { target: "vault", payload: { type: "open" } },
+  ]);
+  assert.equal(no!.status, "errored");
+  assert.deepEqual(no!.result, { error: "unknown verb", reason: "unhandled" });
+  assert.equal(typeof no!.pid, "number", "it reached the task table: the handler ran");
+  assert.equal(yes!.status, "completed");
+});
+
+test("a falsy `error` (null, \"\", 0, false, [], {}) is not a failure", async () => {
+  for (const e of [null, "", 0, false, [], {}]) {
+    const k = kernelWith({ t: async () => ({ error: e, value: 1 }) });
+    const [o] = await k.send([{ target: "t", payload: { type: "go" } }]);
+    assert.equal(o!.status, "completed", JSON.stringify(e));
+  }
+  for (const e of ["no", 1, true, ["x"], { why: "x" }]) {
+    const k = kernelWith({ t: async () => ({ error: e }) });
+    const [o] = await k.send([{ target: "t", payload: { type: "go" } }]);
+    assert.equal(o!.status, "errored", JSON.stringify(e));
+  }
+});
+
+test("errored is not retried and is not a dead letter", async () => {
+  let runs = 0;
+  const k = kernelWith({ t: async () => { runs++; return { error: "no such path" }; } });
+  const [o] = await k.send([{ target: "t", id: "job-1", retries: 3, payload: { type: "read" } }]);
+  assert.equal(o!.status, "errored");
+  assert.equal(o!.attempts, 1);
+  assert.equal(runs, 1, "a semantic no is not transient — it is not retried");
+  const led = (await k.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result as Payload;
+  const row = (led["executions"] as Payload[]).find((r) => r["name"] === "job-1")!;
+  assert.equal(row["status"], "errored");
+  // ack_deadletter retires DEAD letters only
+  const ack = (await k.send([{ target: "kernel", payload: { type: "ack_deadletter", id: "job-1" } }]))[0]!;
+  assert.notEqual((ack.result as Payload)["acked"], true, JSON.stringify(ack.result));
+});
+
+// ── `ps` rows carry parent and started_at (python's task table) ─────────
+
+test("ps rows are {id, agent, parent, verb, started_at}; a nested send parents to its caller", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state" }));
+  k.registerBundle("inner.tools", async () => { await gate; return { ok: true }; });
+  k.registerBundle("outer.tools", async (_id, _p, kk) => (await kk.send([{ target: "inner", payload: { type: "work" } }]))[0]!.result);
+  k.register(new Agent({ id: "inner", parentId: "kernel_state", handlerModule: "inner.tools", meta: { callable_by: { outer: "*" } } }));
+  k.register(new Agent({ id: "outer", parentId: "kernel_state", handlerModule: "outer.tools", meta: { can_call: { inner: "*" } } }));
+  const before = Date.now() / 1000;
+  const running = k.send([{ target: "outer", payload: { type: "go" } }]);
+  await sleep(10);
+  const ps = (await k.send([{ target: "kernel", payload: { type: "ps" } }]))[0]!.result as Payload;
+  const rows = ps["tasks"] as Payload[];
+  const outer = rows.find((r) => r["agent"] === "outer")!;
+  const inner = rows.find((r) => r["agent"] === "inner")!;
+  for (const r of [outer, inner]) {
+    assert.deepEqual(Object.keys(r).sort(), ["agent", "id", "parent", "started_at", "verb"]);
+    assert.ok((r["started_at"] as number) >= before - 1 && (r["started_at"] as number) <= Date.now() / 1000 + 1);
+  }
+  assert.equal(outer["parent"], null, "an operator send is a root");
+  assert.equal(inner["parent"], outer["id"], "`parent` chains the rows into the send tree");
+  assert.equal(inner["verb"], "work");
+  release();
+  await running;
+});

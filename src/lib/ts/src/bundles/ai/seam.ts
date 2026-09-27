@@ -75,7 +75,7 @@ export function toCaller(kernel: Kernel, selfId: string, clientId: string, ev: P
  * then every row appended since, trimmed; otherwise the trimmed head. Trimmed =
  * repeat bodies stubbed, stale whole-state reads deduped, answered reflects
  * dropped — the VIEW only; the store keeps every turn. `live` is the incoming
- * message not yet stored (the first pass of a `send`), or null.
+ * message, stored with the answer once the pass succeeds.
  *
  * Returns the messages and `storeLen` — how many turns the head held; the view is
  * deduped, so its length is NOT a store index, and the reaction cursor needs one.
@@ -83,7 +83,7 @@ export function toCaller(kernel: Kernel, selfId: string, clientId: string, ev: P
 export async function assemble(
   selfId: string,
   kernel: Kernel,
-  live: string | null,
+  live: string,
   systemContent: string,
 ): Promise<{ messages: Turn[]; storeLen: number }> {
   const messages: Turn[] = [{ role: "system", content: systemContent }];
@@ -106,7 +106,7 @@ export async function assemble(
     messages.push(...dropAnsweredReflects(dedupeStaleReads(dedupeRepeatBodies(hist))));
     mem.viewSource.set(selfId, view === null || entries.length === 0 ? "store" : "store (stale array)");
   }
-  if (live !== null) messages.push({ role: "user", content: live });
+  messages.push({ role: "user", content: live });
   return { messages, storeLen: hist.length };
 }
 
@@ -154,16 +154,16 @@ export function contextNotice(
   else if (omittedMarker) lines.push("An earlier span was omitted in place.");
   if (stripped > 0) {
     lines.push(
-      `${stripped} reply bod(ies) were STRIPPED to their tag line (${strippedBytes} bytes left ` +
-        "your view); grep finds a line in a body held this run — after a restart, re-read it " +
-        "from its origin.",
+      `${stripped} reply bod(ies) were STRIPPED to their tag+title line ` +
+        `(${strippedBytes} bytes left your view); grep finds a line in a body held ` +
+        "this run — after a restart, re-read it from its origin.",
     );
   }
   lines.push(
-    "The full transcript is intact in your memory store. To page dropped turns back, send " +
-      'your OWN id {"type":"recall"} (optional "query", "limit"). If the dropped span holds ' +
-      "durable facts (names, decisions, preferences), persist them to your memory agent now " +
-      "via the send tool — the earlier turns are leaving your live view.",
+    "The full transcript is intact in your memory store. To page dropped turns back, " +
+      "send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`). If the dropped span holds " +
+      "durable facts (names, decisions, preferences), persist them to your memory agent " +
+      "now via the send tool — the earlier turns are leaving your live view.",
   );
   return { role: "user", content: lines.join("\n") };
 }

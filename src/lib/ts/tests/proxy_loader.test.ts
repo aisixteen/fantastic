@@ -122,6 +122,7 @@ test("the root record's guid and id bound persist through the proxy_loader like 
     .filter((c) => c.payload["type"] === "persist_record")
     .map((c) => c.payload["record"] as { id: string; guid?: string; next_id?: number });
   assert.ok(persisted.some((r) => r.id === "canvas" && r.guid === "g1" && r.next_id === 5000));
+  await loader.stop(); // clears the debounce timer start() armed — a live timer keeps the process up
 
   const k2 = new Kernel();
   k2.registerBundle("canvas.ts", () => null);
