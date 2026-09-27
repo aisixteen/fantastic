@@ -1,6 +1,5 @@
-import type { Handler } from "../../kernel/agent.ts";
-import type { Json } from "../../kernel/json.ts";
-import { str } from "../../kernel/json.ts";
+import { str } from "../../lib.ts";
+import type { Handler, Json } from "../../lib.ts";
 
 // gl_agent — a JS view-agent holding a MUTABLE GL source (THREE/GLSL text).
 // Ported from the (deleted) host python bundle: GL content is frontend state

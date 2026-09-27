@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import { ProxyLoader } from "../src/bundles/loader/proxy_loader.ts";
-import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import type { Bridge } from "../src/kernel/kernel.ts";
 import type { AgentRecord } from "../src/kernel/state.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
@@ -49,11 +48,14 @@ class InMemoryHostBridge implements Bridge {
   }
 }
 
+/** A frontend kernel with two TEST-LOCAL stub bundles in the shape an app
+ *  registers (a compositor root and a content agent) — the round-trip is the
+ *  library's; which bundles ride it is the app's. */
 function frontend(host: Bridge): Kernel {
   const k = new Kernel();
   k.bridge = host;
   k.registerBundle("canvas.ts", () => null);
-  registerHtmlAgent(k);
+  k.registerBundle("note.ts", () => null);
   return k;
 }
 
@@ -67,7 +69,7 @@ test("two-tree: a frontend tree persists through the host + rehydrates identical
     new Agent({
       id: "panel",
       parentId: "canvas",
-      handlerModule: "html_agent.ts",
+      handlerModule: "note.ts",
       meta: { html: "<p>x</p>" },
     }),
   );
@@ -85,7 +87,7 @@ test("two-tree: a frontend tree persists through the host + rehydrates identical
 
   assert.equal(k2.rootId, "canvas");
   assert.deepEqual([...k2.agents.keys()].sort(), ["canvas", "panel", "term"]);
-  assert.equal(k2.get("panel")?.handlerModule, "html_agent.ts");
+  assert.equal(k2.get("panel")?.handlerModule, "note.ts");
   assert.equal(k2.get("panel")?.meta["html"], "<p>x</p>"); // content round-tripped
   assert.equal(k2.get("term")?.meta["backend_id"], "tb_1"); // weak peer ref round-tripped
   assert.ok(k2.get("canvas")?.children.has("panel"));
@@ -99,7 +101,7 @@ test("two-tree: removing a member on one kernel drops it for the next reload", a
   const k1 = frontend(host);
   k1.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   k1.register(
-    new Agent({ id: "panel", parentId: "canvas", handlerModule: "html_agent.ts" }),
+    new Agent({ id: "panel", parentId: "canvas", handlerModule: "note.ts" }),
   );
   const loader1 = new ProxyLoader(k1, "web_loader", { debounceMs: 100000 });
   loader1.start();

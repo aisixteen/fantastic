@@ -9,6 +9,17 @@ import type { Json, Payload } from "../kernel/json.ts";
 //   t.watch(src); t.on(type, fn) -> host.on(src, type, fn)
 // (Note: the bridge keys event streams by their source socket, so `on` takes
 // the src explicitly rather than dispatching globally by type.)
+//
+// TODO(rights): every call here goes out as the OPERATOR — `kernel.send` /
+// `kernel.callHost` with no sender, although `selfId` is held. The page gate
+// never checks an operator send, and the host sees it as the socket LEG
+// (`wws`), which reaches all of its own children — so a view built on Host can
+// reach ANY backend the leg reaches, not just its own. The fix (planned with
+// the canvas move to the CLI project): send AS `selfId` (the view's own id as
+// sender), and have the canvas create each view with an explicit
+// `can_call: {<its backend_id>: [the verbs it fronts]}` — then the ts egress
+// gate refuses view A → backend B on the page, before anything reaches the
+// host. No kernel change needed; the gate already enforces agent senders.
 export class Host {
   private readonly kernel: Kernel;
   private readonly selfId: string;

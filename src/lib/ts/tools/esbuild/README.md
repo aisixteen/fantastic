@@ -1,6 +1,7 @@
 # Vendored esbuild — sovereign packer (NO npm)
 
-`pack.sh` bundles the frontend kernel with **this** esbuild binary, never the
+`scripts/pack.sh` bundles an app's page (the entry the app names — the canvas
+packs `src/tui/web/canvas/src/bundle.ts`) with **this** esbuild binary, never the
 npm `esbuild` wrapper. esbuild is a single dependency-free Go executable; the npm
 package merely downloads it. We build it from pinned source instead, so the build
 path touches **no npm registry and no node_modules** (active npm supply-chain

@@ -15,94 +15,45 @@ One duck-typed alias in `python/bundled_agents/web/host/src/web/app.py` does all
 |---|---|---|
 | `read{path}` | `GET /{id}/file/{path}` | a `file_bridge` agent → static file server rooted at a dir |
 
-## Distribution — the sovereign artifact
+## The page lives in the APP, not here
 
-The canonical production artifact is **`ts/dist/js_kernel.zip`** — a single
-self-describing zip that contains the full kernel in ONE inlined bundle
-(`bundle.min.js` + its `.map`) and the `readme.md` that describes how to revive
-it. Build it with:
+This library has no page. An app packs its own — the canvas is
+`src/tui/web/canvas/` — with the library's vendored esbuild:
 
 ```bash
-cd ts && sh scripts/pack.sh      # → ts/dist/js_kernel.zip
+sh src/tui/web/canvas/scripts/pack.sh   # → src/tui/web/canvas/dist/canvas.zip
+# any app:  sh src/lib/ts/scripts/pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]
 ```
 
-The zip's only pinned dependency is the **vendored esbuild Go binary** (checked
-into `ts/src/vendor/` — see `ts/readme.md` and `ts/tools/esbuild/README.md`).
-There is **no npm step** and no import map, because every vendor (`three`,
-`@xterm/*`, `xterm.css`) is inlined by esbuild into `bundle.min.js`. Operators
-pull the zip on demand and serve `bundle.min.js` through a generic `file_bridge` agent
-— the mount page is a single `<script type="module">` tag, no import map, no
-`<link rel="stylesheet">` (the xterm CSS is injected at runtime by a shim inside
-the bundle). See [`ts/readme.md`](readme.md) for the full revive recipe and
-integrity-check instructions.
+The zip is `readme.md` (the app's revive guide) + ONE inlined `bundle.min.js`
+(the app, this library, the app's vendors) + its map. There is **no npm step**
+and no import map: esbuild inlines everything, so the mount page is a single
+`<script type="module">` tag served by a generic `file_bridge` agent. The canvas
+app's `readme.md` is the full revive recipe (inspect the zip without unpacking,
+pull `bundle.min.js`, open a `file_bridge` leg on it, provide the one-tag page).
+
+An app's page boots this library with `boot` (`src/index.ts`): it dials the
+host's loader alias (e.g. `web_loader` — a `kernel_state` the operator created at
+`.fantastic/web`), hydrates the app's OWN tree from there, seeds an empty
+namespace the way the app decides, and persists every change back through that
+loader. The host never learns what the page is; it just serves bytes.
 
 ## Dev path (scattered ESM modules)
 
+`npm run build` (the one pinned dev dep, `typescript`) emits this library as ES
+modules into `dist/`. A page that imports those modules instead of a packed
+bundle is served the same way — a `file_bridge` agent rooted at a copy of the
+build output inside the kernel's running dir (the bridge is SEALED by default and
+its root CLAMPED to the running dir):
+
 ```bash
-# 0. build the scattered ESM modules (one pinned dep for this path: typescript)
-cd ts && npm install && npm run build        # → ts/dist/*.js  (ES modules)
-
-# 1. a GENERIC file_bridge agent rooted at the build output. The bridge is
-#    SEALED by default (open with ingress_rule=allow_all_ingress) and its root is
-#    CLAMPED to the running dir — copy the dist INTO the kernel's workdir
-#    and root it relatively. /ts_dist/file/<path> then serves every dist
-#    module; relative ESM imports (./kernel/kernel.js, ./transport/bridge.js,
-#    …) resolve under it.
-cp -R /PATH/TO/ts/dist ./ts_dist_src
-fantastic kernel_state create_agent handler_module=file_bridge.tools id=ts_dist root=ts_dist_src ingress_rule=allow_all_ingress
+cp -R /PATH/TO/src/lib/ts/dist ./ts_dist_src
+fantastic kernel_state create_agent handler_module=file_bridge.tools id=ts_dist \
+  root=ts_dist_src ingress_rule=allow_all_ingress
+# → /ts_dist/file/index.js is the public entry; relative imports resolve under it
 ```
 
-The build emits **no** mount page — only the ESM modules and vendored bytes
-(`ts/dist/*.js`, `ts/dist/vendor/`). The caller provides the mount HTML (a tiny
-`<script type="module">` host page). The repo ships demo fixtures
-(`ts/dist/_test_canvas.html`, `ts/dist/_dawee_canvas.html`) you can serve as-is
-or copy from. A minimal no-canvas mount page is just:
-
-```html
-<!doctype html><html><head><meta charset="utf-8"><title>fantastic · ts</title></head>
-<body><script type="module" src="/ts_dist/file/hello.js"></script></body></html>
-```
-
-Serve that page over `/ts_dist/file/<your-page>.html`. It loads `hello.js`,
-which `new WsBridge(...)`s to `/kernel_state/ws`, reflects the kernel, and renders
-the live tree. The host never learned what `hello.js` is; it's just bytes served
-by the `file_bridge` agent.
-
-### The canvas mount page (with vendored three/xterm)
-
-`main.js` is the canvas bootstrap; `hello.js` is the no-canvas starter — both
-emitted by the same build and served by the same `file_bridge` agent (the build emits
-the modules only; you supply the mount page). The canvas boots against the
-host's **`web_loader` alias** (a `web/kernel_state` the operator created — see the
-root readme ["The frontend is decoupled"](../README.md#the-frontend-is-decoupled)):
-its JS-side `proxy_loader` hydrates the canvas's OWN member tree from the host's
-`.fantastic/web/` store and persists changes back through that alias — **no
-per-page `upstream`/session config**. The page needs only (a) an **import map**
-binding the bare `three`/`@xterm/*` specifiers to the vendored files, and (b) the
-xterm stylesheet. All vendored bytes serve from `…/file/vendor/` (hermetic, no
-CDN — see `src/vendor/VENDOR.md`). `html_agent` iframe panels need NO served
-bridge: the canvas injects a `fantastic` connector into each panel's srcdoc that
-reaches the JS kernel via `postMessage` only (the kernel does the local-vs-host
-routing — frontend code never dials the host). The repo ships such a page as a
-fixture (`ts/dist/_test_canvas.html`); a minimal one is:
-
-```html
-<!doctype html><html><head><meta charset="utf-8"><title>fantastic · canvas</title>
-<link rel="stylesheet" href="/ts_dist/file/vendor/xterm.css">
-<script type="importmap">{ "imports": {
-  "three": "/ts_dist/file/vendor/three.module.js",
-  "@xterm/xterm": "/ts_dist/file/vendor/xterm.js",
-  "@xterm/addon-fit": "/ts_dist/file/vendor/addon-fit.js"
-}}</script>
-</head><body>
-<script type="module" src="/ts_dist/file/main.js"></script>
-</body></html>
-```
-
-Prereq: the operator created the `web_loader` store (`fantastic <web>
-create_agent handler_module=kernel_state.tools root=.fantastic/web watch=false
-alias=web_loader`). Heavy vendor loads lazily — `three` only when a `gl_view`
-mounts, xterm only when a terminal opens — so the canvas shell stays light.
+The build emits no page — the app provides one.
 
 ## Same trick, other views
 

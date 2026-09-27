@@ -1,6 +1,5 @@
-import type { Handler } from "../../kernel/agent.ts";
-import type { Json } from "../../kernel/json.ts";
-import { str } from "../../kernel/json.ts";
+import { str } from "../../lib.ts";
+import type { Handler, Json } from "../../lib.ts";
 
 // html_agent — a JS view-agent holding MUTABLE HTML content. Ported from the
 // (deleted) host python bundle: UI-as-record is frontend state now. The body

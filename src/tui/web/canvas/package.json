@@ -1,0 +1,12 @@
+{
+  "name": "fantastic-canvas",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "description": "The canvas page — the frontend compositor, its view bundles (terminal_view, ai_view) and content agents (html_agent, gl_agent) — on the ts kernel library (src/lib/ts, reached through src/lib.ts). No dependencies: node --test runs the tests with no build step, and scripts/pack.sh bundles the page with the library's vendored esbuild.",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "typecheck": "node ../../../lib/ts/node_modules/typescript/bin/tsc -p tsconfig.json",
+    "pack": "sh scripts/pack.sh"
+  }
+}

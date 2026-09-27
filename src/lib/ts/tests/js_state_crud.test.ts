@@ -3,17 +3,37 @@ import assert from "node:assert/strict";
 import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import { ProxyLoader } from "../src/bundles/loader/proxy_loader.ts";
-import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
-import { registerGlAgent } from "../src/bundles/gl_agent/gl_agent.ts";
+import type { Handler } from "../src/kernel/agent.ts";
 import type { Bridge } from "../src/kernel/kernel.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
+import { str } from "../src/kernel/json.ts";
 
 // How JS STATE regulates under agentic CRUD, end to end, with a MOCK loader.
-// The JS kernel runs content view-agents (html_agent / gl_agent) that hold
-// mutable content in their records; a ProxyLoader watches the local state
-// stream and persists/forgets over a fake bridge that stands in for the host
-// session kernel_state. We assert the loader sees exactly the right, coalesced
-// CRUD — no stale writes, create+delete nets to a forget.
+// An app's CONTENT agents hold mutable content in their records (the canvas's
+// html_agent / gl_agent do — their own tests live with them); here two
+// TEST-LOCAL stubs of that shape stand in, so the library proves its half: a
+// ProxyLoader watches the local state stream and persists/forgets over a fake
+// bridge that stands in for the host session kernel_state. We assert the loader
+// sees exactly the right, coalesced CRUD — no stale writes, create+delete nets
+// to a forget.
+
+/** A content agent holding one mutable `field` on its record: `set_<verb>`
+ *  writes it (→ an `updated` event → a persist), `get_<verb>` reads it. */
+function contentStub(verb: string, field: string): Handler {
+  return (id, payload, kernel): Json => {
+    switch (str(payload, "type")) {
+      case `get_${verb}`:
+        return { id, [field]: String(kernel.get(id)?.meta[field] ?? "") };
+      case `set_${verb}`: {
+        const v = str(payload, "value");
+        kernel.updateMeta(id, { [field]: v });
+        return { ok: true, bytes: v.length };
+      }
+      default:
+        return { error: `stub: unknown verb '${str(payload, "type")}'` };
+    }
+  };
+}
 
 class MockLoaderBridge implements Bridge {
   calls: { target: string; payload: Payload }[] = [];
@@ -54,8 +74,8 @@ class MockLoaderBridge implements Bridge {
 function jsKernel(bridge: Bridge): Kernel {
   const k = new Kernel();
   k.bridge = bridge;
-  registerHtmlAgent(k);
-  registerGlAgent(k);
+  k.registerBundle("note.ts", contentStub("text", "text"));
+  k.registerBundle("shader.ts", contentStub("source", "source"));
   k.setRoot(new Agent({ id: "canvas" })); // bare local root
   return k;
 }
@@ -73,32 +93,32 @@ async function freshLoader(
   return loader;
 }
 
-test("html_agent: agentic CRUD persists the LATEST content, coalesced", async () => {
+test("content agent: agentic CRUD persists the LATEST content, coalesced", async () => {
   const bridge = new MockLoaderBridge();
   const k = jsKernel(bridge);
   const loader = await freshLoader(k, bridge);
   try {
     // CREATE a content agent (added → dirty persist)
     k.register(
-      new Agent({ id: "panel", parentId: "canvas", handlerModule: "html_agent.ts" }),
+      new Agent({ id: "panel", parentId: "canvas", handlerModule: "note.ts" }),
     );
     // UPDATE twice via the agent's own verb (agentic CRUD over send)
-    const r1 = (await k.send([{ target: "panel", payload: { type: "set_html", html: "<h1>v1</h1>" } }]))[0]!.result;
+    const r1 = (await k.send([{ target: "panel", payload: { type: "set_text", value: "<h1>v1</h1>" } }]))[0]!.result;
     assert.deepEqual(r1, { ok: true, bytes: "<h1>v1</h1>".length });
-    (await k.send([{ target: "panel", payload: { type: "set_html", html: "<h1>v2</h1>" } }]))[0]!.result;
+    (await k.send([{ target: "panel", payload: { type: "set_text", value: "<h1>v2</h1>" } }]))[0]!.result;
     await loader.flush();
 
     // one coalesced persist carrying the latest content + structure
     const persists = bridge.persistsOf("panel");
     assert.equal(persists.length, 1, "coalesced to a single persist");
-    assert.equal(persists[0]["html"], "<h1>v2</h1>", "latest content, not stale");
-    assert.equal(persists[0]["handler_module"], "html_agent.ts");
+    assert.equal(persists[0]["text"], "<h1>v2</h1>", "latest content, not stale");
+    assert.equal(persists[0]["handler_module"], "note.ts");
     assert.equal(persists[0]["parent_id"], "canvas");
 
     // the live record + the get verb agree with what was persisted
-    assert.equal(k.get("panel")?.meta["html"], "<h1>v2</h1>");
-    const got = ((await k.send([{ target: "panel", payload: { type: "get_html" } }]))[0]!.result) as Payload;
-    assert.equal(got["html"], "<h1>v2</h1>");
+    assert.equal(k.get("panel")?.meta["text"], "<h1>v2</h1>");
+    const got = ((await k.send([{ target: "panel", payload: { type: "get_text" } }]))[0]!.result) as Payload;
+    assert.equal(got["text"], "<h1>v2</h1>");
 
     // DELETE → forget (with parent_id so the host rmtrees the nested dir)
     k.remove("panel");
@@ -111,25 +131,25 @@ test("html_agent: agentic CRUD persists the LATEST content, coalesced", async ()
   }
 });
 
-test("gl_agent: source mutation persists; get_gl_view reflects it", async () => {
+test("a second content bundle: its field persists; its get verb reflects it", async () => {
   const bridge = new MockLoaderBridge();
   const k = jsKernel(bridge);
   const loader = await freshLoader(k, bridge);
   try {
     k.register(
-      new Agent({ id: "vfx", parentId: "canvas", handlerModule: "gl_agent.ts" }),
+      new Agent({ id: "vfx", parentId: "canvas", handlerModule: "shader.ts" }),
     );
     const src = "void main(){ gl_FragColor = vec4(1.0); }";
-    (await k.send([{ target: "vfx", payload: { type: "set_gl_source", source: src } }]))[0]!.result;
+    (await k.send([{ target: "vfx", payload: { type: "set_source", value: src } }]))[0]!.result;
     await loader.flush();
 
     const persists = bridge.persistsOf("vfx");
     assert.equal(persists.length, 1);
-    assert.equal(persists[0]["gl_source"], src);
-    assert.equal(persists[0]["handler_module"], "gl_agent.ts");
+    assert.equal(persists[0]["source"], src);
+    assert.equal(persists[0]["handler_module"], "shader.ts");
 
-    const view = ((await k.send([{ target: "vfx", payload: { type: "get_gl_view" } }]))[0]!.result) as Payload;
-    assert.equal(view["source"], src); // GlView contract shape ({source})
+    const view = ((await k.send([{ target: "vfx", payload: { type: "get_source" } }]))[0]!.result) as Payload;
+    assert.equal(view["source"], src);
   } finally {
     await loader.stop();
   }
@@ -144,7 +164,7 @@ test("create-then-delete in one window nets to a forget, never a persist", async
       new Agent({
         id: "ephemeral",
         parentId: "canvas",
-        handlerModule: "html_agent.ts",
+        handlerModule: "note.ts",
       }),
     );
     k.remove("ephemeral"); // gone before the debounce window closes
@@ -163,7 +183,7 @@ test("unknown verb on a content agent errors without mutating state", async () =
   const loader = await freshLoader(k, bridge);
   try {
     k.register(
-      new Agent({ id: "p", parentId: "canvas", handlerModule: "html_agent.ts" }),
+      new Agent({ id: "p", parentId: "canvas", handlerModule: "note.ts" }),
     );
     await loader.flush();
     bridge.calls.length = 0;

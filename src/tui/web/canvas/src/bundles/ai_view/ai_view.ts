@@ -1,5 +1,5 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
-import { Host } from "../host.ts";
+import { Host } from "../../lib.ts";
 
 // ai_view — inline, MULTI-MODE AI view (chat mode = provider-agnostic chat UI). Ported from
 // ai_chat_webapp/index.html, rendered INLINE into a canvas frame, fronting any
@@ -117,6 +117,9 @@ export const aiView: ViewBundle = {
   // record selects the renderer: `chat` is fully wired; `agent-prompt` and
   // `dynamic-buttons` are scaffolded seams (mountStub) for later.
   handles: ["ai_view.ts"],
+  // Fronts a backend it never spawns; cancels a turn through the host root's
+  // task table.
+  grants: (backend) => ({ [backend]: ["reflect", "history", "status", "send"], kernel: ["ps", "cancel"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
