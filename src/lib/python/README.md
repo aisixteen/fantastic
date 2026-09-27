@@ -32,6 +32,16 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   persistence/hydration root that owns `.fantastic/`. A fresh dir
   seeds `{id:"kernel_state", handler_module:"kernel_state.tools"}`. The
   bootstrap composes a stdout renderer child when stdin is a tty.
+- **memory store** — the kernel keeps NO conversation: every message is a
+  row in a MEMORY STORE agent (`ram_store` ships here — in RAM, gone with the
+  process; a durable store answers the same verbs). The root names it in
+  `memory_store_id`, and `kernel_start` refuses to run without one; the kernel
+  flushes its execution rows (`call`/`settle`/`ack`/`flush`) there, and
+  `ledger`, dead letters (`on_deadletter`, `ack_deadletter`) and named-call
+  dedup read them back. Each AI agent names its own store for its
+  conversation; context moves between agents only by GRANT (`share` in the
+  store → `fork_from` on the reader). Lifecycle verbs: `kernel_start`,
+  `shutdown_agents`, `kernel_stop`. See `reflect kernel readme=memory`.
 - **send** — the one primitive. `kernel.send(target_id, payload) →
   reply | None` (from outside any handler) or `agent.send(...)`
   (from inside) resolves the target via the flat index and
@@ -107,7 +117,7 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   (`send(<id>, {...})`), so compute, inference, and memory share one
   calling convention.
 - **terminal_backend** — PTY shell session. The browser xterm view
-  (`terminal_view`) lives in the TS frontend kernel. The backend
+  (`terminal_view`) lives in the canvas app (the CLI's), not here. The backend
   ports VSCode's terminal robustness: streaming **flow control** (the
   PTY reader pauses past 100K unacknowledged chars and resumes on the
   consumer's `ack` verb — backpressure so a flood can't lock up a
@@ -127,18 +137,17 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   address spaces, and `watch_remote` streams a remote agent's emits
   back onto the bridge's inbox. Weak proxy: local→local comms stay
   direct.
-- **TS frontend kernel** — the browser frontend is a TypeScript
-  kernel in the repo's top-level `ts/` package. It runs as a pure
-  peer and federates to the host over the SAME WS bridge wire
-  (`web_ws`) — bringing its own typed WS bridge, not a server-injected
-  script. It is a canvas compositor + view-agents for terminal/chat/GL
-  content, vendored hermetically (no CDN). Python knows
-  nothing of the `ts/` package — it's served weakly through a `file_bridge`
-  agent rooted at a copy of the built `ts/dist` inside the running dir, which serves both the bundle and
-  a static `index.html` mount page over the web host's
-  `/<file_id>/file/<path>` proxy. Frontend records persist back to host
-  disk under `.fantastic/web/<session>/` via the frontend's
-  `proxy_loader`. Recipe: [`ts/SERVE.md`](ts/SERVE.md).
+- **TS frontend kernel** — the browser runs a TypeScript kernel LIBRARY
+  (`src/lib/ts`): the same protocol, a pure peer that federates to the host
+  over the SAME WS bridge wire (`web_ws`) with its own typed bridge. It is base
+  only — no page, no views: an APP boots it (`boot({origin, loader, register})`),
+  registers its own `*.ts` bundles and renders what it wants. The canvas
+  compositor and its terminal/chat/GL views are such an app, the CLI's
+  (`src/tui/web/canvas`). Python knows nothing of either — an app's page is
+  served weakly through a `file_bridge` agent over the web host's
+  `/<file_id>/file/<path>` proxy, and its records persist back to host disk
+  through a `web_loader` (a `kernel_state` with a `root`) via the frontend's
+  `proxy_loader`. Recipe: [`src/lib/ts/SERVE.md`](../ts/SERVE.md).
 
 Message flow:
 
@@ -179,9 +188,9 @@ REPL example:
 ```
 fantastic> add web port=8888                        # uvicorn boots
 fantastic> add file_bridge
-fantastic> add terminal_backend                      # PTY shell (xterm view lives in the TS frontend)
+fantastic> add terminal_backend                      # PTY shell (its xterm view lives in the canvas app)
 # browse http://localhost:8888/  → tree view with ↗ visit links
-# the TS frontend kernel renders the canvas + its members (see ts/SERVE.md)
+# a browser app (the CLI's canvas) boots the ts kernel and renders its members (see src/lib/ts/SERVE.md)
 ```
 
 ## Drive from outside
@@ -300,6 +309,7 @@ uv run pytest -n auto
     ├── file/, scheduler/                     # filesystem + recurring tasks
     ├── io/exec_bridge/                       # the PROCESS edge — sealed-by-default command runner, regex command ALLOWLIST (`allowed`), one spawn surface (proc.py), control wire; a program is a FILE + a command
     ├── text_file/                            # stateless text-document agent — file memory, patch, checkpoints (text_file.tools)
+    ├── memory/ram_store/                     # the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), grants, inject/dump (ram_store.tools)
     ├── terminal/                             # PTY shell (handler_module terminal_backend.tools; xterm view lives in ts/)
     ├── ai/ai_core/                           # shared AI agent loop/state (queue/FIFO lock/menu cache, prompt assembly, agentic _run loop, verb bodies); all three AI backends bind to it
     ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core
@@ -310,9 +320,9 @@ uv run pytest -n auto
     ├── io/relay_connector/               # cross-kernel bridge through a relay-KERNEL router — dial ws://host/<guid>, X-Fantastic-Auth, reach a partner_guid; tunnels io_bridge frames; auto-reconnect + keepalive + directory (list_peers/watch) + kernelgroup typing (role/owner_guid/exposes via set_identity)
 ```
 
-The browser view layer (canvas compositor + terminal/chat views) is
-the TypeScript frontend kernel in the repo's top-level `ts/` package,
-served weakly through generic agents — see [`ts/SERVE.md`](ts/SERVE.md).
+The browser view layer (canvas compositor + terminal/chat views) is an
+app on the TypeScript kernel library (`src/lib/ts`) — the CLI's canvas —
+served weakly through generic agents; see [`src/lib/ts/SERVE.md`](../ts/SERVE.md).
 
 ## Universal verb
 

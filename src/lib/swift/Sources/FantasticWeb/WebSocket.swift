@@ -90,9 +90,11 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// issued from inside this lock; the critical sections only enqueue, so the
     /// loop never blocks on real IO.
     private let outLock = OutboundLock()
-    /// Sources watched onto this client's inbox. Mutated ONLY on the event
-    /// loop (handlerAdded / channelRead / teardown all run there).
-    private var watching: Set<AgentId> = []
+    /// The name the client watched → the RESOLVED agent id actually watched.
+    /// Only a watch that REALLY registered is recorded (see `watchPath`).
+    /// Mutated ONLY on the event loop (handlerAdded / channelRead / teardown all
+    /// run there).
+    private var watching: OrderedDictionary<String, AgentId> = [:]
     /// The kernel task ids of the two REGISTERED loops python spawns on the HOST
     /// agent — `ws_drain` (the inbox pump) and one `ws_call` per dispatching
     /// frame. A bare `Task` was in no `ps` row and no `cancel` reached it.
@@ -133,16 +135,13 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // a client that merely completed the handshake would otherwise receive
         // every event the host sees without ever passing the gate — measured,
         // the sealed swift socket delivered term boot/output/write/stop events
-        // python never sent.
-        if kernel.agent(hostAgent) != nil,
-            gateWebLeg(
-                kernel: kernel, legId: legId, kind: "watch", target: hostId, verb: "watch",
-                token: nil) == nil
+        // python never sent. It goes through THE ONE WATCH PATH, so an alias
+        // resolves and a refusal is an `error` frame, never silence.
+        if gateWebLeg(
+            kernel: kernel, legId: legId, kind: "watch", target: hostId, verb: "watch",
+            token: nil) == nil
         {
-            _ = KernelTaskLocals.$currentSender.withValue(legId) {
-                kernel.watch(src: hostAgent, watcher: clientId)
-            }
-            watching.insert(hostAgent)
+            watchPath(hostId, frameId: .string(""), channel: channel)
         }
         // Drain the inbox → `{type:"event", payload}` text frames. REGISTERED as
         // the kernel task `ws_drain` on the HOST agent (python
@@ -210,13 +209,13 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         callTasks.removeAll()
         let drain = drainTask
         drainTask = nil
-        let srcs = watching
+        let watched = Array(watching.values)
         watching.removeAll()
         let tokens = stateTokens
         stateTokens.removeAll()
         for t in tokens { kernel.unsubscribe(t) }
-        for src in srcs {
-            kernel.unwatch(src: src, watcher: clientId)
+        for aid in watched {
+            kernel.unwatch(src: aid, watcher: clientId)
         }
         let kernel = self.kernel
         let clientId = self.clientId
@@ -358,6 +357,48 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
 
     /// python `{"type": "error", "id": <frame id or "">, **denial}` — the
     /// denial's own keys are FLATTENED onto the frame, not wrapped in `data`.
+    /// THE ONE WATCH PATH — the connect-time auto-watch and an explicit `watch`
+    /// frame both come here. FAIL LOUD: a name that resolves to no agent, or a
+    /// gate refusal, is answered with an `error` frame and NOT recorded as
+    /// watched. (The connect-time watch used to discard the result and mark the
+    /// name watched anyway; a name the kernel's `watch` did not resolve — an
+    /// alias like `exec` for `exec_real` — mirrored nothing, said nothing, and
+    /// the explicit watch that followed was then skipped as a duplicate.)
+    ///
+    /// The name resolves the way `send` resolves a target (`kernel`, a declared
+    /// `alias`, a literal id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
+    /// sees a real caller: without it `currentSender` is nil, the kernel reads the
+    /// watch as an OPERATOR's, and the two-sided gate never runs — which is
+    /// exactly how a leg granted only `assistant:[send]` could mirror any agent's
+    /// inbox and read the model's prompt out of it. THE LEG, not the host agent:
+    /// the ingress rule and the `can_call` grants both hang off the `web_ws`
+    /// record. Python `_proxy._watch`. Runs on the event loop.
+    private func watchPath(_ src: String, frameId: JSON, channel: Channel) {
+        if src.isEmpty || watching[src] != nil { return }
+        guard let target = kernel.resolveAgent(src) else {
+            let r = Refusal.make(
+                Refusal.unknownAgent,
+                "watch: no agent \(pyRepr(src)) (an id, a declared alias, or `kernel`)",
+                extra: [("src", .string(src))])
+            outLock.sync {
+                Self.writeText(
+                    channel: channel, text: Codec.encodeText(Self.errorFrame(id: frameId, denial: r)))
+            }
+            return
+        }
+        let denial = KernelTaskLocals.$currentSender.withValue(legId) {
+            kernel.watch(src: target.id, watcher: clientId)
+        }
+        if let d = denial {
+            outLock.sync {
+                Self.writeText(
+                    channel: channel, text: Codec.encodeText(Self.errorFrame(id: frameId, denial: d)))
+            }
+            return
+        }
+        watching[src] = target.id
+    }
+
     private static func errorFrame(id: JSON, denial: JSON) -> JSON {
         var out: OrderedDictionary<String, JSON> = ["type": .string("error"), "id": id]
         if case .object(let d) = denial {
@@ -526,36 +567,13 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             {
                 return
             }
-            guard let src = frame["src"].asString, !src.isEmpty else { return }
-            let s = AgentId(src)
-            if watching.contains(s) { return }
-            // UNDER THE LEG'S OWN IDENTITY, so the kernel's gate sees a real
-            // caller. Without this `currentSender` is nil, the kernel reads the
-            // frame as an OPERATOR watch, and the two-sided gate never runs —
-            // which is exactly how a leg granted only `assistant:[send]` could
-            // mirror any agent's inbox and read the model's prompt out of it.
-            // THE LEG, not the host agent: the ingress rule and the `can_call`
-            // grants both hang off the `web_ws` record.
-            let denial = KernelTaskLocals.$currentSender.withValue(legId) {
-                kernel.watch(src: s, watcher: clientId)
-            }
-            if let d = denial {
-                outLock.sync {
-                    Self.writeText(
-                        channel: channel,
-                        text: Codec.encodeText(Self.errorFrame(id: fid, denial: d)))
-                }
-                return
-            }
-            watching.insert(s)
+            watchPath(frame["src"].asString ?? "", frameId: fid, channel: channel)
         case "unwatch":
             // NO GATE — python gates the four inbound actions and leaves
             // `unwatch` (a client giving something up) ungated.
             guard let src = frame["src"].asString, !src.isEmpty else { return }
-            let s = AgentId(src)
-            if watching.contains(s) {
-                kernel.unwatch(src: s, watcher: clientId)
-                watching.remove(s)
+            if let aid = watching.removeValue(forKey: src) {
+                kernel.unwatch(src: aid, watcher: clientId)
             }
         case "state_subscribe":
             // A SEALED LEG LEAKS NO TELEMETRY, not merely no dispatch.

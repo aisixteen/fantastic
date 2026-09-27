@@ -33,7 +33,7 @@ import logging
 import secrets
 
 from kernel import sender_context
-from kernel._refusal import bad
+from kernel._refusal import UNKNOWN_AGENT, bad, refusal
 
 from io_bridge import (
     decode_frame,
@@ -88,13 +88,12 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     # without ever passing the gate (the seal bypass). A client on a gated leg must
     # send an explicit `watch` frame, which IS gated per-frame (and can carry a token
     # on the envelope). Resolved here at connect; explicit frames re-resolve live.
-    if gate_inbound(
+    auto_watch = gate_inbound(
         resolve_ingress(kernel.get(web_agent_id) or {}), "watch", {"src": host_agent_id}
-    ).allowed:
-        kernel.watch(host_agent_id, client_id)
-        watching = {host_agent_id}
-    else:
-        watching = set()
+    ).allowed
+    # name the client used → the RESOLVED agent id actually watched. Only a watch
+    # that REALLY registered is recorded here (see `_watch`).
+    watching: dict[str, str] = {}
 
     async def drain_outbound() -> None:
         q = kernel.ctx.ensure_inbox(client_id)
@@ -199,29 +198,54 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         with sender_context(web_agent_id):
             await kernel.emit(frame.get("target", ""), frame.get("payload", {}))
 
+    async def _watch(src: str, frame_id: str) -> None:
+        """THE ONE WATCH PATH — the connect-time auto-watch and an explicit
+        `watch` frame both come here. FAIL LOUD: a name that resolves to no agent,
+        or a gate refusal, is answered with an `error` frame and NOT recorded as
+        watched. (The connect-time watch used to discard the result and mark the
+        name watched anyway; a name the kernel's `watch` did not resolve — an
+        alias like `exec` for `exec_real` — mirrored nothing, said nothing, and
+        the explicit watch that followed was then skipped as a duplicate:
+        measured, a page watching a python host agent by alias got zero events.)
+
+        The name resolves the way `send` resolves a target (`kernel`, a declared
+        `alias`, a literal id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
+        sees a real caller: without it `_current_sender` is None, the kernel reads
+        the watch as an OPERATOR's, and the two-sided gate never runs — which is
+        exactly how a leg granted only `assistant:[send]` could mirror any
+        agent's inbox and read the model's prompt out of it."""
+        if not src or src in watching:
+            return
+        target = kernel._resolve_agent(src)
+        if target is None:
+            await _send_envelope(
+                {
+                    "type": "error",
+                    "id": frame_id,
+                    **refusal(
+                        UNKNOWN_AGENT,
+                        f"watch: no agent {src!r} (an id, a declared alias, or `kernel`)",
+                        src=src,
+                    ),
+                }
+            )
+            return
+        with sender_context(web_agent_id):
+            denial = kernel.watch(target.id, client_id)
+        if denial is not None:
+            await _send_envelope({"type": "error", "id": frame_id, **denial})
+            return
+        watching[src] = target.id
+
     async def _on_watch(frame):
         if not _gate("watch", frame).allowed:
             return
-        src = frame.get("src", "")
-        if not src or src in watching:
-            return
-        # UNDER THE LEG'S OWN IDENTITY, so the kernel's gate sees a real caller.
-        # Without this `_current_sender` is None, the kernel reads the frame as
-        # an OPERATOR watch, and the two-sided gate never runs — which is exactly
-        # how a leg granted only `assistant:[send]` could mirror any agent's
-        # inbox and read the model's prompt out of it.
-        with sender_context(web_agent_id):
-            denial = kernel.watch(src, client_id)
-        if denial is not None:
-            await _send_envelope({"type": "error", "id": frame.get("id", ""), **denial})
-            return
-        watching.add(src)
+        await _watch(frame.get("src", ""), frame.get("id", ""))
 
     async def _on_unwatch(frame):
         src = frame.get("src", "")
         if src in watching:
-            kernel.unwatch(src, client_id)
-            watching.discard(src)
+            kernel.unwatch(watching.pop(src), client_id)
 
     # ─── state stream bridge ───────────────────────────────────
     # Mirror of the watch/unwatch lifecycle but for the kernel's
@@ -295,6 +319,10 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     }
 
     try:
+        # THE CONNECT-TIME AUTO-WATCH of the endpoint the socket named — through
+        # the one watch path, so a refusal is an `error` frame, never silence.
+        if auto_watch:
+            await _watch(host_agent_id, "")
         while True:
             try:
                 msg = await ws.receive()
@@ -355,8 +383,8 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             t.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        for src in watching:
-            kernel.unwatch(src, client_id)
+        for aid in watching.values():
+            kernel.unwatch(aid, client_id)
         # Unregister any state-stream callbacks tied to this WS.
         for fn in state_unsubs:
             fn()

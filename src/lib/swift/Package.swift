@@ -71,7 +71,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
-        // Yams: the YAML PARSER for every kernel-written file (`MessagesYAML`);
+        // Yams: the YAML PARSER for every kernel-written file (`YamlIO`);
         // pinned EXACT — the on-disk bytes are a cross-runtime contract.
         .package(url: "https://github.com/jpsim/Yams.git", exact: "5.4.0"),
         // swift-nio: the cross-platform (macOS + Linux) event-driven networking

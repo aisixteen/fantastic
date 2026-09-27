@@ -182,6 +182,27 @@ struct Route: Sendable {
     let target: RouteTarget
 }
 
+/// A LITERAL PATH BEATS A PATTERN. Routing is first-match-wins in table order,
+/// and legs append their routes in MOUNT order — which on a hydrated host is the
+/// children's folder order. A `web_ws` leg declares the catch-all
+/// `/{host_id}/ws`; mounted before a leg that declares the literal `/web_ui/ws`,
+/// it swallowed it (measured on python: a CLI canvas leg sorted first and the UI
+/// socket went dead on every rehydrate, while a first run's creation order
+/// happened to be right). So the live table is ordered by how many PARAMETERS a
+/// path has — the `{` count, fewer first; equal counts keep their mount order (a
+/// STABLE sort, made explicit by the index tie-break). Python `_order_routes`.
+func orderRoutes(_ routes: [RouteSpec]) -> [RouteSpec] {
+    stableByParams(routes, path: { $0.path })
+}
+
+/// `items` stably sorted by the `{` count of each one's path.
+func stableByParams<T>(_ items: [T], path: (T) -> String) -> [T] {
+    items.enumerated()
+        .map { (n: path($0.element).reduce(0) { c, ch in ch == "{" ? c + 1 : c }, i: $0.offset, x: $0.element) }
+        .sorted { ($0.n, $0.i) < ($1.n, $1.i) }
+        .map { $0.x }
+}
+
 /// Server lifecycle owner. Started by `WebBundle.boot`, stopped by
 /// `WebBundle.stop`. One instance per `web.tools` agent.
 public final class WebServer: @unchecked Sendable {
@@ -201,8 +222,12 @@ public final class WebServer: @unchecked Sendable {
 
     /// Dynamic routes contributed by child surface agents (web_ws /
     /// web_rest), pulled at host boot via each child's `get_routes`, in mount
-    /// order. The host serves only the four python rendering routes natively.
+    /// order — python's `routes_by_child`. The host serves only the four python
+    /// rendering routes natively.
     private var dynamicRoutes: [RouteSpec] = []
+    /// The LIVE table requests resolve against: `dynamicRoutes` re-ordered by
+    /// `orderRoutes` after every mount and unmount (python's `router.routes`).
+    private var liveRoutes: [RouteSpec] = []
 
     public init(kernel: Kernel, agentId: AgentId, port: UInt16) {
         self.kernel = kernel
@@ -219,6 +244,7 @@ public final class WebServer: @unchecked Sendable {
         defer { lock.unlock() }
         dynamicRoutes.removeAll { $0.ownerId == owner }
         dynamicRoutes.append(contentsOf: specs)
+        liveRoutes = orderRoutes(dynamicRoutes)
     }
 
     /// Drop every route owned by `owner`.
@@ -226,6 +252,7 @@ public final class WebServer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         dynamicRoutes.removeAll { $0.ownerId == owner }
+        liveRoutes = orderRoutes(dynamicRoutes)
     }
 
     /// python's `handle.routes_by_child` — child id → the paths it owns, in
@@ -247,7 +274,7 @@ public final class WebServer: @unchecked Sendable {
 
     func matchWebSocket(segments: [String]) -> (RouteSpec, [String: String])? {
         lock.lock()
-        let routes = dynamicRoutes
+        let routes = liveRoutes
         lock.unlock()
         for spec in routes where spec.kind == .websocket {
             if let params = spec.match(segments: segments) { return (spec, params) }
@@ -257,31 +284,43 @@ public final class WebServer: @unchecked Sendable {
 
     /// The ORDERED route table a request walks: python's four baked routes
     /// first (FastAPI appends user routes after its own `setup()` ones), then
-    /// each mounted child's declared routes in order.
+    /// each mounted child's declared routes — the WHOLE table under the one
+    /// ordering rule (`orderRoutes`), as python sorts `app.router.routes`.
     func routeTable() -> [Route] {
         lock.lock()
-        let dynamic = dynamicRoutes
+        let dynamic = liveRoutes
         lock.unlock()
-        var out: [Route] = [
-            Route(
-                kind: .http, methods: ["GET"], template: parseTemplate("/"), target: .index),
-            Route(
-                kind: .http, methods: ["GET"], template: parseTemplate("/_assets/favicon.png"),
-                target: .favicon),
-            Route(
-                kind: .http, methods: ["GET"], template: parseTemplate("/favicon.png"),
-                target: .favicon),
-            Route(
-                kind: .http, methods: ["GET"],
-                template: parseTemplate("/{agent_id}/file/{path:path}"), target: .fileProxy),
+        var table: [(path: String, route: Route)] = [
+            ("/", Route(kind: .http, methods: ["GET"], template: parseTemplate("/"), target: .index)),
+            (
+                "/_assets/favicon.png",
+                Route(
+                    kind: .http, methods: ["GET"], template: parseTemplate("/_assets/favicon.png"),
+                    target: .favicon)
+            ),
+            (
+                "/favicon.png",
+                Route(
+                    kind: .http, methods: ["GET"], template: parseTemplate("/favicon.png"),
+                    target: .favicon)
+            ),
+            (
+                "/{agent_id}/file/{path:path}",
+                Route(
+                    kind: .http, methods: ["GET"],
+                    template: parseTemplate("/{agent_id}/file/{path:path}"), target: .fileProxy)
+            ),
         ]
         for spec in dynamic {
-            out.append(
-                Route(
-                    kind: spec.kind, methods: [spec.method], template: spec.template,
-                    target: .leg(spec.ownerId)))
+            table.append(
+                (
+                    spec.path,
+                    Route(
+                        kind: spec.kind, methods: [spec.method], template: spec.template,
+                        target: .leg(spec.ownerId))
+                ))
         }
-        return out
+        return stableByParams(table, path: { $0.path }).map { $0.route }
     }
 
     /// Start the listener on exactly `port`. Synchronous (binds + waits) so

@@ -47,15 +47,26 @@ no foreign-language bindings.
                          │
                          ▼ HTTP + WS frames (text + binary)
    ┌─────────────────────────────────────────────────────────────────────┐
-   │           ts/ FRONTEND (weak-bound 4th kernel, served generically)  │
-   │  No native view bundles here — the host serves ts/dist via a file   │
-   │  agent and never names the frontend.                                │
+   │   BROWSER: the ts kernel LIBRARY (src/lib/ts), booted by an app    │
+   │  (the CLI's canvas). No view bundles here — the host serves the     │
+   │  app's page through a file agent and never names the frontend.    │
    └─────────────────────────────────────────────────────────────────────┘
 ```
 
 Host kernels render no UI and ship no view bundles. The frontend is the
-weak-bound `ts/` 4th kernel, served generically from `ts/dist` via a
-`file` agent — the host never names it. A static `readme-contract` lint
+weak-bound ts kernel LIBRARY (`src/lib/ts`), booted in the browser by an app
+(the CLI's canvas, `src/tui/web/canvas`) whose page is served generically via a
+`file` agent — the host never names it.
+
+THE KERNEL KEEPS NO CONVERSATION. Every message is a row in a MEMORY STORE agent
+(`fantastic-ram-store`: in RAM, gone with the process; a durable store answers
+the same verbs). The root names it in `memory_store_id` and `kernel_start`
+refuses without one; the kernel flushes its execution rows (call/settle/ack/
+flush) there, and `ledger`, dead letters (`on_deadletter`, `ack_deadletter`) and
+named-call dedup read them back. Each AI agent names its own store; context moves
+between agents only by grant (`share` → `fork_from`). Lifecycle verbs:
+`kernel_start`, `shutdown_agents`, `kernel_stop`. Manual: `reflect kernel
+readme=memory`. A static `readme-contract` lint
 (`integration_tests/decoupling/test_readme_contract.py`) scans every host
 bundle's readme/sentence across python/rust/swift and fails on any
 client-intent word (iframe, transport.js, browser, …), so the host stays
@@ -118,42 +129,44 @@ cargo check  -p fantastic-cli    --no-default-features --features embedded
 Passes clean — that's the contract the sandboxed/no-subprocess tier
 ships against.
 
-## Bundle map (14 — 10 iOS-safe + 4 full-tier)
+## Bundle map
 
-The frontend ships no native view bundles — it is served generically
-from `ts/dist` via a `file` agent (the host never names the frontend).
+The frontend ships no native view bundles — an app's page is served
+generically via a `file` agent (the host never names the frontend).
 
-iOS-safe bundles (compile under either tier):
+Bundles that compile under either tier:
 
-| crate                       | role                                                          |
-|-----------------------------|---------------------------------------------------------------|
-| `fantastic-core`            | the `kernel_state.tools` root loader (id="kernel_state")      |
-| `fantastic-file`            | filesystem-as-agent                                           |
-| `fantastic-yaml-state`      | durable YAML memory agent (`state.yaml`; mem/data); persists THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
-| `fantastic-web`             | axum HTTP host + WS + REST (dynamic mounting)                 |
-| `fantastic-web-ws`          | WS verb-channel routes (mounted onto parent web); sealed by default |
-| `fantastic-web-rest`        | REST verb-channel routes (mounted onto parent web); sealed by default |
-| `fantastic-scheduler`       | tokio-tick recurring tasks; persists `schedules.yaml`/`schedule_events.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
-| `fantastic-ollama-backend`  | local LLM via ollama; LLM contract reference impl             |
-| `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible, api_key sidecar, 429 retry) |
-| `fantastic-kernel-bridge`   | cross-kernel comms over memory / WS (asymmetric, WS-only)      |
+| crate                          | role |
+|--------------------------------|------|
+| `fantastic-core`               | the `kernel_state.tools` root loader (id="kernel_state") — records, blobs, the record-owner guard |
+| `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, grants, search, inject/dump |
+| `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents as operator at boot |
+| `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default) |
+| `fantastic-text-file`          | stateless text-document agent — read/write/patch/append, version/if_match, checkpoints; every byte a gated send |
+| `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces |
+| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default |
+| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default |
+| `fantastic-scheduler`          | recurring tasks on a tokio tick |
+| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS; SSH+WS in full tier) |
+| `fantastic-ollama-backend`     | local LLM via ollama |
+| `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible) |
+| `fantastic-llamacpp-backend`   | local LLM via llama-server (OpenAI-compatible) |
+| `fantastic-anthropic-backend`  | Claude via the Anthropic Messages API |
+| `fantastic-cli-bundle`         | the `cli` render sink (token/done/say/error/status/context to stdout) |
 
-Full-tier-only bundles (subprocess; excluded from embedded slice):
+Full-tier-only bundles (subprocess; excluded from the embedded slice):
 
-| crate                       | role                                                          |
-|-----------------------------|---------------------------------------------------------------|
-| `fantastic-terminal-backend`| PTY shell + flow control + UTF-8 + image-paste over binary WS |
-| `fantastic-python-runtime`  | subprocess `python -c <code>` with interpreter resolution ladder |
-| `fantastic-local-runner`    | supervises a child `fantastic` in another workdir             |
-| `fantastic-ssh-runner`      | remote `fantastic` lifecycle + SSH port-forward (ssh -L) tunnel |
-| `fantastic-kernel-bridge` (SSH transport) | `ssh -L` tunnel chained over WsTransport          |
+| crate                          | role |
+|--------------------------------|------|
+| `fantastic-terminal-backend`   | PTY shell + flow control + UTF-8 incremental decode + image-paste |
+| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist |
 
-Internal shared crates (not standalone kernel bundles — linked into the backends/runners above):
+Internal / test crates:
 
-| crate                       | role                                                          |
-|-----------------------------|---------------------------------------------------------------|
-| `fantastic-ai-core`         | shared LLM machinery (FIFO lock, chat threads, menu cache, history, prompt assembly, agentic loop) behind a `Provider` seam; AI backends bind to this |
-| `fantastic-runner-core`     | shared `fantastic` lifecycle dispatch (verb routing, boot=null, restart=stop+start) behind a `Transport` seam; runner bundles bind to this |
+| crate                          | role |
+|--------------------------------|------|
+| `fantastic-ai-core`            | shared LLM-agent machinery behind a `Provider` seam — memory-store conversation, `<call>` tag grammar, compaction (folds), grants; the AI backends bind to it |
+| `fantastic-scenario-probes`    | TEST-ONLY fixture agents the shared e2e scenarios name (behind a feature) |
 
 ## Workspace layout
 
@@ -166,21 +179,24 @@ rust/
 │   ├── fantastic-cli/                 the `fantastic_kernel` headless host binary
 │   └── bundles/
 │       ├── fantastic-core/                kernel_state.tools root loader
+│       ├── fantastic-ram-store/           the memory store (in RAM)
+│       ├── fantastic-static-loader/       declarative YAML roster loader
 │       ├── fantastic-file/                fs-as-agent
-│       ├── fantastic-yaml-state/          durable YAML memory
+│       ├── fantastic-text-file/           text-document agent
 │       ├── fantastic-web/                 axum host + WS/REST router
 │       ├── fantastic-web-ws/              WS verb channel
 │       ├── fantastic-web-rest/            REST verb channel
 │       ├── fantastic-scheduler/           recurring tasks
+│       ├── fantastic-bridge/              cross-kernel bridge
 │       ├── fantastic-ai-core/             shared LLM machinery (Provider seam; internal)
 │       ├── fantastic-ollama-backend/      local LLM (thin binding over ai-core)
 │       ├── fantastic-nvidia-nim-backend/  NVIDIA NIM LLM (thin binding over ai-core)
-│       ├── fantastic-kernel-bridge/       cross-kernel comms
-│       ├── fantastic-runner-core/         shared runner lifecycle (Transport seam; internal)
+│       ├── fantastic-llamacpp-backend/    llama-server LLM (thin binding over ai-core)
+│       ├── fantastic-anthropic-backend/   Claude (thin binding over ai-core)
+│       ├── fantastic-cli-bundle/          the cli render sink
 │       ├── fantastic-terminal-backend/    PTY  (full-tier only)
-│       ├── fantastic-python-runtime/      python -c (full-tier only)
-│       ├── fantastic-local-runner/        supervises child fantastic (thin binding over runner-core; full-tier)
-│       └── fantastic-ssh-runner/          remote fantastic via SSH (thin binding over runner-core; full-tier)
+│       ├── fantastic-exec-bridge/         command runner (full-tier only)
+│       └── fantastic-scenario-probes/     e2e fixture agents (test-only feature)
 ├── scripts/
 │   ├── build-cli.sh                       cargo build --release --bin fantastic_kernel
 │   ├── bench-coldstart.sh                 3-metric boot benchmark

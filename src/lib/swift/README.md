@@ -7,7 +7,7 @@ UniFFI, no XCFramework, no native subprocess required.
 **Python (`../python/`) is the canonical reference for the Fantastic
 protocol.** This Swift kernel mirrors Python's wire shape (HTTP
 routes, WS frames, system verb payloads), on-disk format
-(`.fantastic/` layout, `agent.yaml` / `messages.yaml` byte-identical YAML), and reflect
+(`.fantastic/` layout, `agent.yaml` byte-identical YAML), and reflect
 contract. Drift from Python is a bug. Mechanical drift detection
 runs in [`Tests/FantasticParityTests`](Tests/FantasticParityTests/) —
 spawns the Python kernel as a subprocess and byte-diffs JSON replies
@@ -22,13 +22,20 @@ env var; skipped cleanly when unset.
   variant so on-disk JSON matches Python's `dict` key order
 - 1 bootstrap target (`FantasticKernelStartup`) — `startKernel(...)`
   / `startKernelInMemory(...)` entry points
-- 2 shared core targets — `FantasticAICore` (shared LLM machinery:
-  history, epoch cancellation, verb dispatch) and `FantasticRunnerCore`
-  (shared runner lifecycle: reflect/boot/start/stop dispatch)
-- 17 bundle targets (13 multi-platform + 4 macOS-Pro) — see
-  scoreboard below. The browser frontend is no longer a native
-  bundle: it is served generically from `ts/dist` via a `file`
-  agent (weak binding — the host never names the frontend)
+- 1 shared core target — `FantasticAICore` (shared LLM machinery: the
+  conversation in the agent's memory store, the `<call>` tag grammar,
+  compaction/folds, grants, verb dispatch); the AI backends are thin over it
+- the MEMORY STORE (`FantasticRamStore`): the kernel keeps NO conversation —
+  every message (AI conversations, the kernel's execution rows) is a row in a
+  memory store agent. The root names it in `memory_store_id` and
+  `kernel_start` refuses without one; `ledger`, dead letters
+  (`on_deadletter`, `ack_deadletter`) and named-call dedup read the store back;
+  context moves between agents only by grant (`share` → `fork_from`).
+  Lifecycle verbs: `kernel_start`, `shutdown_agents`, `kernel_stop`
+- the bundle targets in the scoreboard below. The browser frontend is not a
+  native bundle: it is the ts kernel LIBRARY (`src/lib/ts`) booted by an app
+  (the CLI's canvas), whose page a host serves generically via a `file` agent
+  (weak binding — the host never names the frontend)
 - 2 umbrella targets (`FantasticKernelEmbedded`,
   `FantasticKernelFull`) — Apple-app entry points
 - 1 CLI executable (`fantastic`)
@@ -65,18 +72,24 @@ kernel modules.
 
 | bundle | target | tier | role |
 |---|---|---|---|
+| kernel_state | `FantasticKernelState` | both | the ROOT loader + persistence (records, blobs, the record-owner guard; a `root` meta serves a sub-namespace, e.g. a browser app's records) |
+| ram_store | `FantasticRamStore` | both | the MEMORY STORE in RAM — every message, fold refs, grants (anchor cascade), search, inject/dump; one lock over all tables |
+| static_loader | `FantasticStaticLoader` | both | declarative YAML roster loader — hydrates the declared agents as operator at boot |
 | file_bridge | `FantasticFile` | both | the gated fs edge — sealed by default, running-dir clamp; read/write + read_stream/write_stream/pump (raw bytes) |
-| yaml_state | `FantasticYamlState` | both | durable YAML memory (`mem`/`data`); persists `state.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) — owns no disk of its own |
+| text_file | `FantasticTextFile` | both | stateless text-document agent — read/write/patch/append, version/if_match, checkpoints; every byte a gated send |
 | scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.yaml`/`schedule_events.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | cli | `FantasticCliBundle` | both | terminal render sink (`cli.tools`): token/done/say/error/status/context + the PTY intro to stdout; unknown verbs dropped |
-| ws_bridge / relay_connector | `FantasticKernelBridge` | both | cross-kernel comms, two io_bridge derivations (sealed by default). `ws_bridge`: in-memory + WS (asymmetric; targets remote `web_ws`). `relay_connector`: dials a relay-KERNEL router (`ws://host/<guid>`, group password in `X-Fantastic-Auth`, subprotocol `fantastic.relay.v1`), reaches a `partner_guid` and TUNNELS io_bridge frames over it; our `guid` auto-mints + persists on first boot if absent (explicit wins); auto-reconnect + keepalive + directory (`list_peers`/`watch_directory`); directory typing for the kernelgroup model — advertises an opaque attrs blob (`role` manager\|kernel, `owner_guid`, `exposes`) to the relay, `set_identity` updates it live; raw `read_stream` chunks ride as native binary WS frames (no base64) |
+| ws_bridge / relay_connector | `FantasticKernelBridge` + `FantasticIoBridge` | both | cross-kernel comms, io_bridge derivations (sealed by default); frames carry a qualified `caller` (`<guid>|<agent>`), ingress refuses the local guid. `relay_connector` dials a relay-KERNEL router (`ws://host/<guid>`, `X-Fantastic-Auth`), reaches a `partner_guid` and tunnels io_bridge frames |
 | web | `FantasticWeb` | both | HTTP + WS server (swift-nio — serves on macOS + Linux) |
 | web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
 | web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |
-| ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE (thin over `FantasticAICore`) |
-| nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry (thin over `FantasticAICore`) |
-| exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the ONE executor: spawns an allowlisted interpreter as a background job (`start` → `{job_id}`); `shim:'python'` prepends the kernel connector; sealed by default |
+| ollama_backend | `FantasticOllamaBackend` | both | local LLM (thin over `FantasticAICore`) |
+| nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, OpenAI-compatible, bearer auth + 429 retry (thin over `FantasticAICore`) |
+| llamacpp_backend | `FantasticLlamaCppBackend` | both | local LLM via llama-server, OpenAI-compatible (thin over `FantasticAICore`) |
+| anthropic_backend | `FantasticAnthropicBackend` | both | Claude via the Anthropic Messages API (thin over `FantasticAICore`) |
+| exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the process edge: a general-purpose command runner gated by a regex allowlist (`allowed`), sealed by default; jobs are kernel tasks |
 | terminal_backend | `FantasticTerminalBackend` | Pro | macOS-only — `forkpty` + DispatchIO |
+| scenario probes | `FantasticScenarioProbes` | test | fixture agents the shared e2e scenarios name |
 
 ## Wire compatibility
 
@@ -87,7 +100,7 @@ mixed-runtime tests.
 
 `OrderedDictionary` (from swift-collections) backs the `JSON.object`
 variant so `agent.yaml` byte-for-byte parity holds across runtimes (the
-YAML emitter is `FantasticKernel/MessagesYAML.swift`, by hand; Yams parses).
+YAML emitter is `FantasticKernel/YamlIO.swift`, by hand; Yams parses).
 
 ## Building
 
@@ -113,17 +126,18 @@ swift/
                                        BundleRegistry, persistence, lock, system verbs
     FantasticKernelStartup/            startKernel / startKernelInMemory
     FantasticWeb/                      HTTP + WS server (swift-nio; macOS + Linux)
-    FantasticAICore/                   shared LLM machinery (history, cancellation,
-                                       verb dispatch); AI backends are thin over this
-    FantasticOllamaBackend/            local LLM SSE
-    FantasticNvidiaNimBackend/         hosted LLM SSE
-    FantasticRunnerCore/               shared runner lifecycle (reflect/boot/start/stop);
-                                       runner bundles are thin over this
-    Fantastic{File,TextFile,Scheduler,
-              CliBundle,KernelBridge}/
+    FantasticKernelState/              the root loader + persistence
+    FantasticRamStore/                 the memory store (in RAM)
+    FantasticAICore/                   shared LLM machinery (memory-store conversation,
+                                       tag grammar, folds, grants); AI backends are thin over this
+    Fantastic{Ollama,NvidiaNim,LlamaCpp,Anthropic}Backend/
+                                       the AI backends
+    Fantastic{File,TextFile,Scheduler,StaticLoader,
+              CliBundle,IoBridge,KernelBridge,WebWS,WebRest}/
                                        supporting bundles
-    Fantastic{Terminal,Local,Python,Ssh}{Backend,Runner,Runtime}/
+    Fantastic{Terminal,Exec}{Backend,Bridge}/
                                        macOS-only Pro-tier bundles
+    FantasticScenarioProbes/           e2e fixture agents (test)
     Fantastic/                         `fantastic` CLI executable
     FantasticKernelEmbedded/           Apple-app umbrella target (Lite tier)
     FantasticKernelFull/                Apple-app umbrella target (Pro tier, macOS-only consumer)
@@ -160,7 +174,7 @@ What the embedding surface is now:
 - [swift-collections](https://github.com/apple/swift-collections) 1.1+
   — `OrderedDictionary` for `JSON.object` key-order preservation
 - [Yams](https://github.com/jpsim/Yams) 5.1+
-  — YAML serialization for the `yaml_state` durable-memory agent
+  — the YAML parser for every kernel-written file (records, sidecars; `YamlIO`)
 - [swift-nio](https://github.com/apple/swift-nio) 2.x
   — the cross-platform event-driven networking core; HTTP + WS server
   (`FantasticWeb`) and the relay/WS bridge clients run on it, so the kernel

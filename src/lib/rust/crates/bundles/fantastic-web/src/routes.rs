@@ -148,18 +148,22 @@ fn match_segs(segs: &[Seg], path: &str) -> Option<Vec<String>> {
 
 /// The live ordered route table: python's four baked routes, then each mounted
 /// child's specs in mount order (`web/tools.py` keeps `routes_by_child` beside
-/// the one `app.routes` list; unmount removes that child's entries).
+/// the one `app.routes` list; unmount removes that child's entries) — then
+/// ORDERED, a literal path before a pattern (see [`RouteTable::order`]).
 #[derive(Default)]
 pub(crate) struct RouteTable {
     base: Vec<Route>,
     children: Vec<(AgentId, Vec<Route>)>,
+    /// What resolution walks: `base` + `children`, ordered. Python's
+    /// `app.router.routes` after `_order_routes`.
+    live: Vec<Route>,
 }
 
 impl RouteTable {
     /// python `make_app` — the four baked rendering routes, in FastAPI's
     /// declaration order.
     pub(crate) fn base() -> Self {
-        Self {
+        let mut t = Self {
             base: vec![
                 Route::http(Method::GET, "/", Handler::Index),
                 Route::http(Method::GET, "/_assets/favicon.png", Handler::Favicon),
@@ -171,14 +175,33 @@ impl RouteTable {
                 ),
             ],
             children: Vec::new(),
-        }
+            live: Vec::new(),
+        };
+        t.order();
+        t
     }
 
-    /// Every route, base first, then children in mount order.
+    /// Every route, in the order resolution walks them (first match wins).
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Route> {
-        self.base
+        self.live.iter()
+    }
+
+    /// A LITERAL PATH BEATS A PATTERN — python `_order_routes`. Routing is
+    /// first-match-wins in list order, and legs append their routes in MOUNT
+    /// order, which on a hydrated host is the children's folder order. A `web_ws`
+    /// leg declares the catch-all `/{host_id}/ws`; mounted before a leg that
+    /// declares the literal `/web_ui/ws`, it swallowed it. So the live table is
+    /// ordered by how many PARAMETERS a path has (python counts its `{`) — fewer
+    /// first; equal counts keep their mount order (`sort_by_key` is stable).
+    fn order(&mut self) {
+        let mut all: Vec<Route> = self
+            .base
             .iter()
             .chain(self.children.iter().flat_map(|(_, r)| r.iter()))
+            .cloned()
+            .collect();
+        all.sort_by_key(|r| r.path.matches('{').count());
+        self.live = all;
     }
 
     /// The paths currently mounted for one child (python's
@@ -200,15 +223,17 @@ impl RouteTable {
     /// Replace one child's routes; an empty `routes` mounts nothing (python
     /// only records a child that returned at least one mountable spec).
     pub(crate) fn mount(&mut self, child: AgentId, routes: Vec<Route>) {
-        self.unmount(&child);
+        self.children.retain(|(c, _)| *c != child);
         if !routes.is_empty() {
             self.children.push((child, routes));
         }
+        self.order();
     }
 
     /// python `_unmount_surface` — drop every route belonging to a child.
     pub(crate) fn unmount(&mut self, child: &AgentId) {
         self.children.retain(|(c, _)| c != child);
+        self.order();
     }
 }
 

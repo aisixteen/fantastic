@@ -2,9 +2,11 @@
 
 # Two kernels — host + browser frontend
 
-This is the HOST kernel (Python, `*.tools` bundles). A second kernel — a
-browser FRONTEND (`ts/`, `*.ts` bundles) — federates over the SAME WS and
-renders all UI. The `handler_module` SUFFIX says where an agent runs:
+This is the HOST kernel (`*.tools` bundles). A second kernel — the ts kernel
+LIBRARY (`src/lib/ts`), booted in the browser by an APP that registers its own
+`*.ts` bundles (the canvas and its views are such an app, the CLI's) —
+federates over the SAME WS and renders all UI. The `handler_module` SUFFIX says
+where an agent runs:
 
 - `*.tools` → HERE. `create_agent parent_id=<owner> handler_module=<x>.tools` on the host tree.
 - `*.ts`    → the FRONTEND. Do NOT `create_agent` these here (the host
