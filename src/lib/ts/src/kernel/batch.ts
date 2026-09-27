@@ -152,10 +152,13 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
 
   // ── CALL GATE — fully gated, two-sided, from above ───────────────
   // An OPERATOR send (no origin) is the root of trust and never reaches here.
-  // Every AGENT send — ANY verb, `reflect` included — needs BOTH ends.
+  // Every AGENT send — ANY verb, `reflect` included — needs BOTH ends. A
+  // HOST-BOUND send (no local target: it will be forwarded) passes the SENDER's
+  // half here, before the bridge sees it; the target's half is the host's, on
+  // the call as it arrives there.
   const origin = k.currentOrigin;
-  if (origin !== null && target !== undefined) {
-    const d = k.gate(origin, verb, resolvedId);
+  if (origin !== null) {
+    const d = target !== undefined ? k.gate(origin, verb, resolvedId) : k.egressGate(origin, verb, resolvedId);
     if (d !== null) return { index, settled: refused(d) };
   }
 

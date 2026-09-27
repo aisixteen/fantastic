@@ -6,6 +6,7 @@ import { WsBridge } from "../src/transport/bridge.ts";
 import type { WebSocketLike } from "../src/transport/bridge.ts";
 import { encodeFrame, decodeFrame } from "../src/transport/frame.ts";
 import type { Envelope } from "../src/transport/frame.ts";
+import type { Payload } from "../src/kernel/json.ts";
 
 // ─── frame codec ──────────────────────────────────────────────────────────
 
@@ -270,6 +271,9 @@ test("a call frame carries the QUALIFIED caller once the kernel has a guid", asy
   await until(() => (sock.lastCall()!["payload"] as { n?: number }).n === 2);
   assert.equal(sock.lastCall()!["caller"], "g-local|kernel");
 
+  // an AGENT's host-bound call: it passes its own egress gate first, so the
+  // sender is a real agent holding the edge
+  k.register(new Agent({ id: "frontend", parentId: "kernel_state", meta: { can_call: { file_x: ["list"] } } }));
   void k.scopedFor("frontend", null)
     .send([{ target: "file_x", payload: { type: "list", n: 3 } }])
     .catch(() => undefined);
@@ -295,5 +299,84 @@ test("the state stream has no body option — row events are not on it", async (
   assert.deepEqual(sub, { type: "state_subscribe" });
   off();
   await until(() => sock.sent.some((f) => f["type"] === "state_unsubscribe"));
+  bridge.close();
+});
+
+// ─── host-bound sends pass the SENDER's half of the gate here ───────────────
+// python `authorize_call` (egress, `enforce_privileged=True`) decides whether an
+// agent may SEND; the target's `callable_by` lives on the host and is the host's
+// to apply. Refused locally means NOTHING reaches the transport.
+
+function hostKernel(): { k: Kernel; bridge: WsBridge; fk: ReturnType<typeof fakeFactory>; frames: () => Envelope[] } {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
+  const frames = (): Envelope[] => fk.forEndpoint("kernel_state").flatMap((s) => s.sent.filter((f) => f["type"] === "call"));
+  return { k, bridge, fk, frames };
+}
+
+test("an agent WITHOUT can_call on a host agent is refused locally — no frame reaches the bridge", async () => {
+  const { k, bridge, frames } = hostKernel();
+  k.register(new Agent({ id: "view", parentId: "kernel_state" }));
+  // `$parent: "*"` (the baseline) names the LOCAL root, never a host agent
+  const [out] = await k.scopedFor("view", null).send([{ target: "pty1", payload: { type: "write", data: "ls" } }]);
+  assert.equal(out!.status, "failed");
+  assert.equal((out!.result as Payload)["reason"], "unauthorized");
+  assert.equal((out!.result as Payload)["side"], "egress");
+  assert.equal(out!.pid, null, "refused before a message id was minted");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(frames(), [], "the transport saw no frame");
+  bridge.close();
+});
+
+test("WITH the grant the call is forwarded, carrying the agent as its caller", async () => {
+  const { k, bridge, fk } = hostKernel();
+  k.updateMeta(k.rootId!, { guid: "g1" });
+  k.register(new Agent({ id: "view", parentId: "kernel_state", meta: { can_call: { pty1: ["write"] } } }));
+  const p = k.scopedFor("view", null).send([{ target: "pty1", payload: { type: "write", data: "ls" } }]);
+  await until(() => fk.forEndpoint("kernel_state")[0]?.lastCall() !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  const call = sock.lastCall()!;
+  assert.equal(call["target"], "pty1");
+  assert.equal(call["caller"], "g1|view");
+  sock.deliver({ type: "reply", id: call["id"], data: { ok: true } });
+  const [out] = await p;
+  assert.equal(out!.status, "completed");
+  // the grant is per VERB: another verb to the same host agent is refused here
+  const [other] = await k.scopedFor("view", null).send([{ target: "pty1", payload: { type: "resize" } }]);
+  assert.equal((other!.result as Payload)["side"], "egress");
+  bridge.close();
+});
+
+test("a PRIVILEGED verb to a host agent is never covered by a `*` grant", async () => {
+  const { k, bridge, frames } = hostKernel();
+  k.register(new Agent({ id: "view", parentId: "kernel_state", meta: { can_call: { host_root: "*" } } }));
+  for (const verb of ["create_agent", "update_agent", "delete_agent", "state_subscribe", "rows_read", "rows_write"]) {
+    const [out] = await k.scopedFor("view", null).send([{ target: "host_root", payload: { type: verb } }]);
+    assert.equal((out!.result as Payload)["side"], "egress", verb);
+  }
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(frames(), [], "no privileged call left the kernel");
+  // an explicit NAME covers it
+  k.updateMeta("view", { can_call: { host_root: ["delete_agent"] } });
+  void k.scopedFor("view", null).send([{ target: "host_root", payload: { type: "delete_agent", id: "x" } }]).catch(() => undefined);
+  await until(() => frames().length === 1);
+  assert.equal(frames()[0]!["target"], "host_root");
+  bridge.close();
+});
+
+test("the operator forwards ungated; callHost and forwardBinary are host-bound sends too", async () => {
+  const { k, bridge, frames } = hostKernel();
+  void k.send([{ target: "pty1", payload: { type: "write" } }]).catch(() => undefined);
+  void k.callHost("kernel", { type: "reflect" }).catch(() => undefined);
+  await until(() => frames().length === 2);
+  k.register(new Agent({ id: "view", parentId: "kernel_state" }));
+  const asView = k.scopedFor("view", null);
+  const viaCallHost = await asView.callHost("kernel", { type: "create_agent", handler_module: "x.tools" });
+  assert.equal((viaCallHost as Payload)["side"], "egress");
+  const viaBinary = await asView.forwardBinary("pty1", { type: "paste_image", image: new Uint8Array([1]) });
+  assert.equal((viaBinary as Payload)["side"], "egress");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(frames().length, 2, "the refused agent calls never reached the bridge");
   bridge.close();
 });
