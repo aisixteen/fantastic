@@ -1,10 +1,10 @@
 // web_rest — REST verb-invocation surface as a child of `web`.
 //
 // Mirrors Python's `web_rest`: a route-contributor child that runs no
-// server. The parent `web` pulls `get_routes` at boot and mounts the
-// returned HTTP descriptors; when one matches, the host calls this
-// bundle's `serveRoute` (the `WebRouteOwner` seam — python hands the host
-// a callable there, and a served request is NOT an agent send on the leg).
+// server. The parent `web` pulls `get_routes` at boot (the DECLARATION) and
+// mounts each declared path with the live endpoint this bundle hands over
+// through `routeEndpoints` (python `route_endpoints(agent)`) — a served
+// request is NOT an agent send on the leg.
 // Canonical wire shape (Python parity):
 //
 //   POST /<self_id>/<target_id>           body={type:verb,...} → JSON reply
@@ -24,7 +24,7 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "web_rest.tools"
 
-public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendable {
+public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sendable {
     public let name = "web_rest"
     public var verbs: [String] { Array(Self.verbDocs.keys) }
     public init() {}
@@ -72,8 +72,8 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
         case "get_routes":
             // Paths namespaced by this agent's own id (concrete), with
             // `{target_id}` as the only captured param — python's
-            // `f"/{id}/{{target_id}}"`. python's descriptors also carry
-            // `endpoint` (a live callable), which JSON cannot hold.
+            // `f"/{id}/{{target_id}}"`. Pure data: the live endpoints go over
+            // through `routeEndpoints`, never a reply.
             let me = agentId.value
             return .object([
                 "routes": .array([
@@ -94,16 +94,31 @@ public final class WebRestBundle: AgentBundle, WebRouteOwner, @unchecked Sendabl
         default:
             // python `refusal(UNHANDLED, f"web_rest: unknown type {t!r}", verb=t)`.
             // `handle_route` is deliberately absent — serving a route is the
-            // `WebRouteOwner` seam, not an agent verb.
+            // endpoint handed over through `routeEndpoints`, not an agent verb.
             return Refusal.make(
                 Refusal.unhandled, "web_rest: unknown type \(pyRepr(type))",
                 extra: [("verb", type)])
         }
     }
 
-    // MARK: - WebRouteOwner (python's mounted endpoints)
+    // MARK: - the live endpoints (python `route_endpoints(agent)`)
 
-    public func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> (JSON, Data?) {
+    /// One endpoint per declared path, all served by `serveRoute` as THIS leg.
+    public func routeEndpoints(agent: Agent, kernel: Kernel) -> [String: WebEndpoint] {
+        let me = agent.id.value
+        let legId = agent.id
+        let endpoint: WebEndpoint = .http { [self] request in
+            await self.serveRoute(legId: legId, request: request, kernel: kernel)
+        }
+        return [
+            "/\(me)/{target_id}": endpoint,
+            "/\(me)/_reflect": endpoint,
+            "/\(me)/_reflect/{target_id}": endpoint,
+        ]
+    }
+
+    /// Serve one matched request (see `WebEndpoint.http`).
+    func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> (JSON, Data?) {
         let method = request["method"].asString ?? "GET"
         let target = request["params"]["target_id"].asString
         if method == "POST" {

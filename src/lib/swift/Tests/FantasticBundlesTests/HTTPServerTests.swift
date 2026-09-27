@@ -962,16 +962,13 @@ struct HTTPServerTests {
         }
     }
 
-    /// TWO MEASURED DIVERGENCES FROM PYTHON, PINNED RATHER THAN HIDDEN — both
-    /// come from what the python HOST is (a bare `FastAPI()`), not from the leg,
-    /// and neither can be mirrored by spelling a different answer here.
+    /// `get_routes` over REST, and ONE MEASURED DIVERGENCE FROM PYTHON, PINNED
+    /// RATHER THAN HIDDEN.
     ///
-    /// • `get_routes` over REST: python's descriptors carry `endpoint`, a LIVE
-    ///   CALLABLE, so `JSONResponse(reply)` raises and uvicorn answers **500**.
-    ///   Swift's descriptors carry no callable (JSON cannot hold one — the host
-    ///   reaches the owner through the `WebRouteOwner` seam), so the same
-    ///   request renders and answers 200. Manufacturing a 500 would be faking a
-    ///   failure python only has because of its carrier.
+    /// • `get_routes` over REST: the descriptors are pure data on both sides
+    ///   (python hands its live endpoints over through `route_endpoints(agent)`,
+    ///   swift through `WebRouteEndpoints`), so the request renders and answers
+    ///   200 with no `endpoint` in any descriptor.
     /// • `/openapi.json`, `/docs`, `/redoc`: a bare `FastAPI()` mounts all three
     ///   (200). The swift host declares python's FOUR routes and 404s the rest,
     ///   so the schema/docs surface does not exist here — a HOST gap
@@ -986,7 +983,7 @@ struct HTTPServerTests {
         req.httpMethod = "POST"
         req.httpBody = Data("{\"type\":\"get_routes\"}".utf8)
         let (data, response) = try await session.data(for: req)
-        #expect((response as? HTTPURLResponse)?.statusCode == 200, "python: 500")
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
         let routes = try JSON.parse(data)["routes"].asArray ?? []
         #expect(routes.count == 3, "\(String(data: data, encoding: .utf8) ?? "")")
         #expect(routes.allSatisfy { $0["endpoint"].isNull }, "a descriptor cannot hold a callable")

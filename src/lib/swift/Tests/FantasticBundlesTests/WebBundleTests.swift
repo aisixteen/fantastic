@@ -39,8 +39,14 @@ final class SayProbe: AgentBundle, @unchecked Sendable {
 /// A route contributor that reports whether the host's port was ALREADY
 /// accepting when `get_routes` was pulled — python mounts every child surface
 /// before uvicorn starts serving.
-final class MountOrderProbe: AgentBundle, @unchecked Sendable {
+final class MountOrderProbe: AgentBundle, WebRouteEndpoints, @unchecked Sendable {
     let name = "mount_order_probe"
+
+    /// The live endpoint of the one declared path (a leg that declares a route
+    /// hands its endpoint over, or the host's boot fails).
+    func routeEndpoints(agent: Agent, kernel: Kernel) -> [String: WebEndpoint] {
+        ["/probe/ping": .http { _ in (.object(["status": .integer(204)]), nil) }]
+    }
     private let lock = NSLock()
     private var acceptingAtMount: Bool?
     let port: UInt16

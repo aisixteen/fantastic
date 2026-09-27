@@ -1,11 +1,12 @@
 // web_ws — WebSocket verb-invocation surface as a child of `web`.
 //
 // Mirrors Python's `web_ws` bundle: it runs no server. It is a
-// route-contributor — at host boot, the parent `web` pulls this
-// agent's `get_routes` and mounts the returned descriptor. The actual
-// WS handling is the host's shared proxy (`FantasticWeb.runWebSocketProxy`,
-// the analog of Python's `web_ws/_proxy.run`); this bundle only declares
-// the `/{host_id}/ws` route.
+// route-contributor — at host boot, the parent `web` pulls this agent's
+// `get_routes` (the DECLARATION, pure data) and mounts the `/{host_id}/ws`
+// route with the LIVE endpoint this bundle hands over through
+// `routeEndpoints` (python `route_endpoints(agent)`): the WS proxy
+// (`Proxy.swift`, python `web_ws/_proxy.run`), bound to this leg and to the
+// `host_id` the path captured.
 //
 // Opt-in: a `web` agent serves WS only when a `web_ws` child exists —
 // exactly like Python. Create one with:
@@ -19,10 +20,25 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "web_ws.tools"
 
-public final class WebWSBundle: AgentBundle, @unchecked Sendable {
+public final class WebWSBundle: AgentBundle, WebRouteEndpoints, @unchecked Sendable {
     public let name = "web_ws"
     public var verbs: [String] { Array(Self.verbDocs.keys) }
     public init() {}
+
+    /// python `route_endpoints(agent)`: the live endpoint of the one declared
+    /// path — the proxy, run as THIS leg for the `host_id` the upgrade captured
+    /// (python `_make_endpoint(agent.id, kernel)` → `run(ws, kernel, host_id,
+    /// leg_id)`).
+    public func routeEndpoints(agent: Agent, kernel: Kernel) -> [String: WebEndpoint] {
+        let legId = agent.id
+        return [
+            "/{host_id}/ws": .websocket { upgrade in
+                WebSocketProxyHandler(
+                    hostId: upgrade.params["host_id"] ?? "", legId: legId, kernel: kernel,
+                    bootParent: upgrade.bootParent)
+            }
+        ]
+    }
 
     public var readme: String? { Self.readmeText }
 
@@ -55,8 +71,8 @@ public final class WebWSBundle: AgentBundle, @unchecked Sendable {
         case "get_routes":
             // `{host_id}` is a path template captured by the host's route
             // matcher — one web_ws serves WS for every agent id, matching
-            // python's `path: "/{host_id}/ws"`. python's descriptor also
-            // carries `endpoint` (a live callable) and NO `method`.
+            // python's `path: "/{host_id}/ws"`. Pure data, NO `method`: the
+            // live endpoint goes over through `routeEndpoints`, never a reply.
             return .object([
                 "routes": .array([
                     .object([

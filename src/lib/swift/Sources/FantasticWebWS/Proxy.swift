@@ -1,10 +1,12 @@
-// WebSocket proxy handler (swift-nio).
+// WebSocket proxy handler (swift-nio) — python `web_ws/_proxy.py`, and like it
+// it lives in the `web_ws` leg, not in the host: the leg hands this handler to
+// its parent `web` as the LIVE endpoint of its declared `/{host_id}/ws` route
+// (`WebWSBundle.routeEndpoints`, python `route_endpoints(agent)`).
 //
-// Replaces the former hand-rolled RFC-6455 framing over NWConnection.
-// NIO's WebSocket upgrader (installed in HTTPServer.swift's pipeline)
-// owns the handshake (Sec-WebSocket-Accept) + frame codec; this handler
-// only carries the PROXY semantics — relaying JSON/binary frames to the
-// kernel and streaming watched events back. Cross-platform (Linux too).
+// NIO's WebSocket upgrader (installed in the host's pipeline) owns the
+// handshake (Sec-WebSocket-Accept) + frame codec; this handler only carries the
+// PROXY semantics — relaying JSON/binary frames to the kernel and streaming
+// watched events back. Cross-platform (Linux too).
 //
 // Frame protocol (matches python `PB/io/web_ws/src/web_ws/_proxy.py::run`):
 //   client → server : {"type":"call",   "target":"<id>", "payload":{...}, "id":"<id>"}
@@ -45,8 +47,8 @@ import NIOFoundationCompat
 import NIOWebSocket
 import OrderedCollections
 
-/// Shared WebSocket proxy — installed by the host's pipeline after a
-/// `/{host_id}/ws` upgrade. `hostId` is the auto-watched agent; `legId`
+/// The WebSocket proxy — the endpoint the host installs after an upgrade onto
+/// the leg's `/{host_id}/ws` route. `hostId` is the auto-watched agent; `legId`
 /// is the `web_ws` leg whose `ingress_rule` gates every inbound call.
 final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = WebSocketFrame

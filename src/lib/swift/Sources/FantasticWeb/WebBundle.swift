@@ -75,31 +75,65 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     // ── Route-provider composition (python's get_routes pull) ──
 
     /// Walk the web agent's children and mount each one's surface — python
-    /// `_mount_all_surfaces`.
-    private func mountAllSurfaces(server: WebServer, webId: AgentId, kernel: Kernel) async {
+    /// `_mount_all_surfaces`. A broken leg fails the walk (and so the boot).
+    private func mountAllSurfaces(server: WebServer, webId: AgentId, kernel: Kernel) async throws {
         guard let web = kernel.agent(webId) else { return }
         for child in web.childIds() {
-            await mountSurface(server: server, childId: child, kernel: kernel)
+            try await mountSurface(server: server, childId: child, kernel: kernel)
         }
     }
 
-    /// Pull one child's `get_routes` and mount the returned specs — python
-    /// `_mount_surface`. A child that doesn't answer is silently skipped (weak).
-    private func mountSurface(server: WebServer, childId: AgentId, kernel: Kernel) async {
+    /// Mount one child's surface — python `_mount_surface`. Two halves:
+    ///
+    /// - the DECLARATION — the `get_routes` reply, pure JSON data, so it renders
+    ///   over REST and persists into the ledger like any other reply;
+    /// - the LIVE endpoints — the child bundle's `routeEndpoints(agent:kernel:)`
+    ///   hook (python `route_endpoints(agent)`), keyed by the declared path.
+    ///
+    /// A child that answers no routes has no surface (no-op). A child that
+    /// DECLARES routes but exposes no hook — or no endpoint for a declared path —
+    /// is a broken leg: fail loud (python's RuntimeError), never mount half a
+    /// surface. Every declared route is checked before any of them is mounted.
+    private func mountSurface(server: WebServer, childId: AgentId, kernel: Kernel) async throws {
         let reply = await kernel.send([Item(childId, .object(["type": .string("get_routes")]))])[0]
             .result
         guard case .object = reply else { return }
-        let routes = reply["routes"].asArray ?? []
+        let routes = pyTruthy(reply["routes"]) ? (reply["routes"].asArray ?? []) : []
+        if routes.isEmpty { return }
+        guard let child = kernel.agent(childId), let hm = child.handlerModule,
+            let hook = kernel.bundles.get(hm) as? WebRouteEndpoints
+        else {
+            throw PyError(
+                "RuntimeError",
+                "web: \(childId.value) declares \(routes.count) route(s) but its bundle "
+                    + "exposes no route_endpoints(agent) hook")
+        }
+        let endpoints = hook.routeEndpoints(agent: child, kernel: kernel)
         var specs: [RouteSpec] = []
         for r in routes {
-            guard let path = r["path"].asString, !path.isEmpty else { continue }
-            // python keys the handler off `kind`; `websocket` runs the shared WS
-            // proxy, anything else is an HTTP route whose method defaults to GET.
+            // python keys the mount off `kind`: `websocket` mounts a websocket
+            // route, anything else an HTTP route whose method defaults to GET.
             let kind: RouteKind = r["kind"].asString == "websocket" ? .websocket : .http
-            let method = (r["method"].asString ?? "GET").uppercased()
-            specs.append(RouteSpec(kind: kind, method: method, path: path, ownerId: childId))
+            // An endpoint of the other kind is no endpoint for this route: a
+            // websocket declaration cannot be served by an HTTP callable.
+            let path = r["path"].asString ?? ""
+            let endpoint = endpoints[path]
+            let matches: Bool
+            switch (kind, endpoint) {
+            case (.websocket, .websocket?), (.http, .http?): matches = true
+            default: matches = false
+            }
+            guard !path.isEmpty, matches, let endpoint else {
+                throw PyError(
+                    "RuntimeError",
+                    "web: \(childId.value) declares route \(pyRepr(r["path"])) but "
+                        + "route_endpoints() hands over no endpoint for it")
+            }
+            let method = (pyTruthy(r["method"]) ? pyStr(r["method"]) : "GET").uppercased()
+            specs.append(
+                RouteSpec(
+                    kind: kind, method: method, path: path, ownerId: childId, endpoint: endpoint))
         }
-        guard !specs.isEmpty else { return }
         server.mountRoutes(specs)
     }
 
@@ -130,7 +164,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             }
             // Idempotent: unmount-first, then re-pull.
             server.unmountRoutes(for: AgentId(childId))
-            await mountSurface(server: server, childId: AgentId(childId), kernel: kernel)
+            try await mountSurface(server: server, childId: AgentId(childId), kernel: kernel)
             return .object([
                 "mounted": .array(server.paths(for: AgentId(childId)).map { .string($0) })
             ])
@@ -224,8 +258,9 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             server = built
         }
         guard let handle = server else { return .object(["running": .bool(false)]) }
-        // Mount all child surfaces BEFORE the listener starts accepting.
-        await mountAllSurfaces(server: handle, webId: agent.id, kernel: kernel)
+        // Mount all child surfaces BEFORE the listener starts accepting. A
+        // broken leg raises out of `boot` (python's RuntimeError).
+        try await mountAllSurfaces(server: handle, webId: agent.id, kernel: kernel)
         do {
             try handle.start()
         } catch {
