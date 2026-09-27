@@ -1,4 +1,4 @@
-import type { Kernel } from "../kernel/kernel.ts";
+import type { Kernel } from "../lib.ts";
 
 // The contract for an INLINE view-agent — DOM logic the frontend kernel mounts
 // directly into a canvas frame body (vs an iframe, which is reserved for
@@ -7,6 +7,8 @@ import type { Kernel } from "../kernel/kernel.ts";
 // handler_module and picks the matching bundle.
 
 export interface ViewContext {
+  /** the page kernel SCOPED TO THIS VIEW: every send through it is the view's
+   *  own, checked against the view's `can_call` before the bridge sees it */
   kernel: Kernel;
   /** the frame body element to render into */
   mount: HTMLElement;
@@ -37,7 +39,16 @@ export interface ViewHandle {
 }
 
 export interface ViewBundle {
-  /** host handler_modules this renders inline, e.g. "terminal_backend.tools" */
+  /** the frontend handler_modules this renders inline, e.g. "terminal_view.ts" */
   readonly handles: readonly string[];
+  /** The EXACT host handler_module this view SPAWNS a backend of and fronts
+   *  (e.g. "terminal_backend.tools") — declared, never matched by name.
+   *  Absent: the view fronts a backend someone else made; it never spawns. */
+  readonly fronts?: string;
+  /** This view's OWN egress grant — the host targets and verbs it calls — for
+   *  a bound backend. The canvas writes it into the view's `can_call` when it
+   *  binds the backend: a view SENDS AS ITSELF, so it reaches its own backend
+   *  and nothing else the socket leg reaches. */
+  grants(backend: string): Record<string, readonly string[]>;
   mount(ctx: ViewContext): Promise<ViewHandle> | ViewHandle;
 }

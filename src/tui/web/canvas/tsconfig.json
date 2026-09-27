@@ -1,0 +1,23 @@
+{
+  // The canvas app. It reaches the ts kernel library ONLY through `src/lib.ts`
+  // (the library's public entry); tsc follows that import and typechecks the
+  // library modules the app uses along with the app.
+  //
+  //   node ../../../lib/ts/node_modules/typescript/bin/tsc -p tsconfig.json
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"],
+  // the esbuild-only entry: its css default import is typed by no one
+  "exclude": ["src/bundle.ts"]
+}

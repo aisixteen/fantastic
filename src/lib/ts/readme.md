@@ -1,120 +1,96 @@
-# Fantastic frontend kernel — `ts/`
+# Fantastic ts kernel — `src/lib/ts`
 
-> **This file is universal.** It is the `ts/` package doc when you browse the
-> source tree, **and** the self-describing revive guide that travels *inside*
-> `dist/js_kernel.zip`. An LLM reviving the artifact reads ONLY this file out of
-> the zip (`unzip -p js_kernel.zip readme.md`) — it never unpacks the fat bundle.
-
-The frontend kernel is the **view layer** of Fantastic, and it is a *real kernel*
-— same `send`/`reflect`/`watch` protocol as the host, running in the browser as a
-**peer**. The host (Python/Swift) knows nothing about it (weak binding). It dials
-the host over a WebSocket bridge, hydrates its own agent tree, and renders it.
+The **ts kernel library**: a real Fantastic kernel — the same `send`/`reflect`/
+`watch` protocol as the host runtimes — that runs in a browser (or under node) as
+a **peer** of the host. It is the BASE ONLY: no page, no views, nothing mounted.
+An **app** boots it, registers its own bundles, decides what an empty tree is
+seeded with, and renders what it wants. The canvas is such an app — it lives in
+`src/tui/web/canvas/` (its page, its views, its vendored three/xterm, its packed
+zip and revive guide).
 
 ## What's in it
 
-- **canvas** — the compositor root; renders the frontend's own member tree, each
-  member mounted inline (its view bundle) or as an iframe (external content).
-- **terminal_view** — xterm CLIENT for a host PTY backend. Bound to any agent
-  answering the PTY surface (`boot`/`write`/`ack`/`resize`/`interrupt`/`stop`) by
-  a `backend_id` peer ref.
-- **ai_view** — chat CLIENT for a host LLM backend. Bound to any agent answering
-  `send`/`history`/`interrupt`/`status` by `backend_id`.
-- **html_agent** / **gl_agent** — frontend CONTENT agents (a mutable HTML body in
-  a sandboxed frame; a WebGL shader). Content, not host clients.
+| path | what |
+|---|---|
+| `src/index.ts` | **the public entry** — everything an app imports, and `boot` |
+| `src/kernel/` | the pure kernel core: agents, the two-sided call gate, the array-only batch send, the execution ledger, `ps`/`cancel`, reflect, the lifecycle (`kernel_start`/`kernel_stop`). No DOM — `check:pure` compiles it without one |
+| `src/transport/` | the WS bridge to the host (`WsBridge`) and its frame codec |
+| `src/bundles/loader/proxy_loader.ts` | persists this kernel's tree THROUGH the host's loader, and hydrates it back |
+| `src/bundles/memory/ram_store.ts` | the memory store (`kernel_start` needs the root to name one) |
+| `src/bundles/ai/` | the AI backend — an LLM agent that runs in this kernel (raw `<call>` tag grammar, memory-store conversation, compaction) |
+| `src/bundles/host.ts` | `Host` — a view's call/watch surface over the kernel |
+| `tools/esbuild/` | the vendored, sha256-pinned esbuild that `scripts/pack.sh` packs an app's page with |
 
-The view↔backend pairing is **never hardcoded** — each view's reflect names the
-host capability + verb surface it fronts; an LLM weaves the binding from that plus
-the host's capability readme.
+## The public API (`src/index.ts`)
 
-## Two ways to run it
+`Kernel`, `Agent`, `WsBridge`, `ProxyLoader`, `Host`, `registerRamStore`,
+`registerAIBackend` / `makeAIBackend` / `OpenAIProvider`, `str`, the types an app
+needs (`Json`, `Payload`, `Handler`, `AgentRecord`, `Bridge`, `Item`, `Outcome`,
+`AIRecord`, …) and:
 
-**A) From source (dev).** Build the scattered ESM with the one pinned dev dep
-(`typescript`) and serve `dist/` behind an import map — see `SERVE.md`:
-
-```sh
-cd ts && npm install && npm run build          # → ts/dist/*.js (ES modules)
+```ts
+boot({ origin, loader, register, seed?, makeSocket? }) → Promise<{ kernel, loader }>
 ```
 
-**B) From the sovereign artifact `js_kernel.zip` (this guide).** One rolled-up,
-self-contained file — no import map, no external CSS, no CDN, no npm. This is the
-distribution form; the rest of this readme is its revive recipe.
+1. creates the `Kernel` and registers the library's own bundles (the memory store;
+   the AI backend only if the app registers it — `registerAIBackend`),
+2. calls `register(kernel)` — the app registers ITS bundles and readmes
+   (`kernel.registerBundle`, `kernel.setBundleReadme`) before anything loads,
+3. dials the host with a `WsBridge` whose control endpoint is `loader`, and names
+   `loader` as the root's `persistence.provider`,
+4. `loadTree()` from that loader → `kernel.load(records)` when there are any; on an
+   EMPTY namespace it calls the app's `seed(kernel)` if given (an empty tree
+   stays empty otherwise — the library seeds nothing),
+5. `loader.start()` — every local change persists back through the host,
+6. returns the handles. Mounting is the app's.
 
-## The artifact
+```ts
+import { Agent, boot } from "../../../lib/ts/src/index.ts";
+const { kernel } = await boot({
+  origin: "ws://127.0.0.1:8888",
+  loader: "web_loader",
+  register: (k) => k.registerBundle("my_view.ts", () => null),
+  seed: (k) => k.setRoot(new Agent({ id: "app", handlerModule: "my_view.ts" })),
+});
+```
 
-`dist/js_kernel.zip` (built by `scripts/pack.sh`) holds exactly three entries:
+An app imports from `src/index.ts`, never from the modules behind it (the canvas
+keeps that to one file, its `src/lib.ts`).
 
-| entry | what it is |
-|---|---|
-| `readme.md` | this file (the revive guide) |
-| `bundle.min.js` | the WHOLE frontend kernel in ONE minified ESM file — all TS + three.js + xterm + xterm.css **inlined**. No chunks, no import map, no external assets. (Not a website; size is irrelevant — it is never read by an LLM, only served.) |
-| `bundle.min.js.map` | source map → browser stack traces map back to TS |
+## Packing an app's page
 
-Built with a **vendored, sha256-pinned esbuild Go binary** (`tools/esbuild/`), so
-the build path touches no npm registry and no node. The npm supply chain is never
-on the critical path.
+The library has no page, so `scripts/pack.sh` has no default: the app names its
+entry, its output zip and its readme (the revive guide that travels inside the
+zip), plus any esbuild flags its page needs:
 
-## Revive recipe (for an LLM — without unpacking the bundle)
+```sh
+sh src/lib/ts/scripts/pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]
+```
 
-1. **Inspect, don't unpack.** List the zip from its central directory and read
-   only this readme — the fat `bundle.min.js` is never opened:
-   ```sh
-   unzip -l js_kernel.zip          # lists the 3 entries
-   unzip -p js_kernel.zip readme.md   # prints THIS file (KBs), bundle untouched
-   ```
-2. **Pull the members you serve — ON DEMAND, never a full unzip.** Make a serve
-   dir and stream ONLY the files you actually serve straight out of the archive
-   (`unzip -p` copies one member byte-for-byte to stdout; the archive is never
-   extracted and the fat bundle is never *read*, only copied):
-   ```sh
-   mkdir -p serve            # INSIDE the kernel's running dir — file_bridge
-                             # clamps every root to the dir the kernel runs in
-   unzip -p js_kernel.zip bundle.min.js      > serve/bundle.min.js
-   unzip -p js_kernel.zip bundle.min.js.map  > serve/bundle.min.js.map  # optional: debuggable stack traces
-   ```
-   That's it — no `unzip -d`, no extracted tree, nothing on disk you didn't ask for.
-3. **Serve that dir through the host's generic `file_bridge` agent** — the host
-   stays ignorant of the frontend; it just serves bytes. The fs edge is SEALED
-   by default — open it consciously:
-   ```sh
-   fantastic kernel_state create_agent handler_module=file_bridge.tools id=js_kernel \
-     root=serve ingress_rule=allow_all_ingress
-   # → GET /js_kernel/file/bundle.min.js now serves the kernel
-   ```
-4. **Prereq (operator, one-time)** — the host must expose HTTP + a WS surface +
-   the loader the frontend federates to: a `web` agent (HTTP), a `web_ws` child
-   (the WS verb surface), and an `kernel_state` rooted at `.fantastic/web` aliased
-   `web_loader`. (See the host root readme — `reflect readme=true`.)
-5. **Provide a trivial mount page** and serve it from the same file root. Because
-   the CSS and all vendors are inlined, the page needs **NO import map and NO
-   stylesheet link** — just the one script tag:
-   ```html
-   <!doctype html><html><head><meta charset="utf-8"><title>fantastic · canvas</title></head>
-   <body><script type="module" src="/js_kernel/file/bundle.min.js"></script></body></html>
-   ```
-   Open it. The bundle injects `xterm.css`, opens the WS bridge to `web_ws`,
-   hydrates the frontend's own tree from `web_loader` (`proxy_loader`), and mounts
-   the canvas. Host backends (PTY, LLM) appear as weak peers referenced by id.
+It verifies the vendored esbuild against `tools/esbuild/SHA256SUMS`, bundles the
+entry (and everything it imports — this library included) into ONE
+`bundle.min.js` + map, stamps the bundle's sha256 into the readme copy, and zips
+the three. No npm, no node. The canvas: `sh src/tui/web/canvas/scripts/pack.sh`
+→ `src/tui/web/canvas/dist/canvas.zip`.
+
+## Tests
+
+```sh
+node --test "tests/**/*.test.ts"                     # no build step — node strips the types
+npx --no-install tsc --noEmit -p tsconfig.json       # typecheck
+npx --no-install tsc --noEmit -p src/kernel/tsconfig.json   # check:pure — the core has no DOM
+```
+
+The contract corpus (`contract/agentic`, `contract/conformance`) is replayed here
+by `tests/contract_corpus.test.ts` and `tests/c21_conformance.test.ts`.
 
 ## Host contract (weak binding)
 
-- Every agent answers `{type:"reflect"}` — the universal discovery verb. One
-  round-trip describes the frontend tree and each view's verb surface.
-- The frontend federates to the host's **`web_loader`** alias over the WS bridge;
-  it persists every local change back through that loader. No per-page session id.
-- Direction is **frontend → host**: a view knows it fronts a host capability; the
-  host never references the frontend. Same rule as `ws_bridge` — addressed by
-  URL + id only, no shared types.
-
-## Integrity (verify before serving — it runs in a browser)
-
-```sh
-shasum -a 256 bundle.min.js
-# expected: __BUNDLE_SHA256__
-```
-
-> In the source tree `__BUNDLE_SHA256__` is a literal placeholder. `scripts/pack.sh`
-> substitutes the real digest into the `readme.md` copy it places **inside**
-> `js_kernel.zip`, so the artifact carries its own integrity check.
+- Every agent answers `{type:"reflect"}` — the universal discovery verb.
+- This kernel federates to a host **loader** alias over the WS bridge and persists
+  every local change back through it. No per-page session id.
+- Direction is **this kernel → host**: the host never references it. Same rule as
+  `ws_bridge` — addressed by URL + id only, no shared types.
 
 ---
 

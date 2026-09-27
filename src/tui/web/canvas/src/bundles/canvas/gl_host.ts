@@ -1,4 +1,4 @@
-import { Host } from "../host.ts";
+import { Host } from "../../lib.ts";
 
 // The canvas WebGL host — ported from canvas_webapp/index.html's GL scaffolding.
 // A shared THREE renderer/scene/camera (locked to the canvas pan/zoom) hosting

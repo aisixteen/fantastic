@@ -1,5 +1,5 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
-import type { Payload } from "../../kernel/json.ts";
+import type { Payload } from "../../lib.ts";
 import { CONNECTOR_SRC } from "./connector.ts";
 
 // html_view — renders an html_agent's MUTABLE body (`meta.html`) as a FULLY
@@ -14,6 +14,8 @@ import { CONNECTOR_SRC } from "./connector.ts";
 export const htmlView: ViewBundle = {
   // The frontend member IS an `html_agent.ts` agent holding its own content.
   handles: ["html_agent.ts"],
+  // Content, not a host client: its reach is whatever its creator wrote.
+  grants: () => ({}),
 
   mount(ctx: ViewContext): ViewHandle {
     const { kernel, mount, selfId } = ctx;

@@ -4,8 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Kernel } from "../src/kernel/kernel.ts";
-import { Agent } from "../src/kernel/agent.ts";
+import { Agent, Kernel } from "../src/lib.ts";
 
 test("reflect readme=true surfaces a view bundle's registered readme", async () => {
   const kernel = new Kernel();

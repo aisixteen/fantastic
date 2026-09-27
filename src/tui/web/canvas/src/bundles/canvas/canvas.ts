@@ -1,7 +1,5 @@
-import type { Kernel } from "../../kernel/kernel.ts";
-import { Agent } from "../../kernel/agent.ts";
-import type { Payload } from "../../kernel/json.ts";
-import { Host } from "../host.ts";
+import { Agent, Host } from "../../lib.ts";
+import type { Kernel, Payload } from "../../lib.ts";
 import { CANVAS_CSS } from "./styles.ts";
 import type { ViewBundle, ViewHandle } from "../view.ts";
 import { terminalView } from "../terminal_view/terminal_view.ts";
@@ -23,18 +21,23 @@ function viewFor(handlerModule: unknown): ViewBundle | undefined {
   return VIEW_BUNDLES.find((b) => b.handles.includes(handlerModule));
 }
 
-// The canvas names NO host bundle id or type. To spawn a host peer it calls the
-// HOST ROOT via `host.callHost("kernel", …)` — the host resolves `kernel` to its
-// OWN root (`kernel_state`/`core`) — and it DISCOVERS which bundle provides a
-// capability from the live host catalog (`reflect bundles=all`) by matching a
-// capability name, instead of hardcoding a handler_module. (An LLM does the same
-// from the host + view readmes; this dblclick is just the deterministic shortcut.)
-const PTY_HINT = /(^|[._/-])(terminal_backend|pty)([._]|$)/i;
+// THE VIEW A DOUBLE CLICK SPAWNS: a terminal. What it spawns on the host is the
+// view's own declaration (`fronts`), looked up by that exact name in the host
+// catalog — never matched, never guessed.
+const DEFAULT_VIEW = terminalView;
 
 export interface MountOptions {
   kernel: Kernel;
   mount: HTMLElement;
   selfId: string;
+  /** The host socket LEG this page speaks through, in the host's own words
+   *  (its loader's parent). Every backend the canvas spawns for a view is the
+   *  leg's CHILD — its own subtree, both gates covered by the born-with
+   *  baseline. Absent ⇒ the canvas spawns nothing, and says so. */
+  leg?: string;
+  /** Land every pending record through the loader NOW — a view is on disk
+   *  before its backend exists, so no page ever sees a backend without one. */
+  flush: () => Promise<void>;
 }
 
 interface Rec {
@@ -61,8 +64,119 @@ const str = (r: Rec, k: string): string | undefined =>
 const bool = (r: Rec, k: string): boolean => r[k] === true;
 
 export async function mountCanvas(opts: MountOptions): Promise<void> {
-  const { kernel, mount, selfId } = opts;
+  const { kernel, mount, selfId, leg, flush } = opts;
   const host = new Host(kernel, selfId);
+
+  // THE PAIR: a view the canvas spawned a backend for, and that backend. The
+  // backend is a child of the leg carrying its view's id and this canvas's
+  // (`view_id`, `canvas_id`); the view carries the backend's (`backend_id`,
+  // `owns_backend`) and the grant to call it (`can_call`). The leg lives its
+  // own life — a page connecting, leaving or reloading never touches the
+  // backends behind it; only closing the view deletes its backend.
+
+  // The host catalog, paged to the end, for ONE exact handler_module.
+  const inCatalog = async (module: string): Promise<boolean> => {
+    let cursor: unknown = "all";
+    while (cursor !== undefined && cursor !== null) {
+      const cat = (await host.callHost("kernel", { type: "reflect", tree: "none", bundles: cursor } as unknown as Payload)) as {
+        bundles?: Array<{ handler_module?: string }>;
+        bundles_next?: unknown;
+      };
+      if ((cat?.bundles ?? []).some((b) => b.handler_module === module)) return true;
+      cursor = cat?.bundles_next;
+    }
+    return false;
+  };
+
+  // Spawn the backend `bundle` fronts, for view `viewId`, as a child of the leg.
+  // Returns its id, or null (said why).
+  const spawnBackend = async (bundle: ViewBundle, viewId: string): Promise<string | null> => {
+    if (leg === undefined) {
+      console.error("[canvas] the host loader names no parent leg — cannot spawn a backend");
+      return null;
+    }
+    const module = bundle.fronts;
+    if (module === undefined) {
+      console.error(`[canvas] ${bundle.handles.join(",")} declares no backend it fronts — cannot spawn one`);
+      return null;
+    }
+    if (!(await inCatalog(module))) {
+      console.error(`[canvas] the host does not link ${module}`);
+      return null;
+    }
+    const created = (await host.callHost("kernel", {
+      type: "create_agent",
+      parent_id: leg,
+      handler_module: module,
+      view_id: viewId,
+      canvas_id: selfId,
+    } as unknown as Payload)) as { id?: string; error?: string };
+    if (!created || created.error || typeof created.id !== "string") {
+      console.error("[canvas] backend create failed:", JSON.stringify(created));
+      return null;
+    }
+    return created.id;
+  };
+
+  // BIND a spawned backend to its view: the id, and the view's own grant.
+  const bind = (viewId: string, bundle: ViewBundle, backendId: string): void => {
+    kernel.updateMeta(viewId, {
+      backend_id: backendId,
+      backend_lost: false,
+      can_call: { ...bundle.grants(backendId) },
+    } as unknown as Payload);
+  };
+
+  // Every agent on the host, paged to the end.
+  const hostAgents = async (): Promise<Array<Record<string, unknown>>> => {
+    const out: Array<Record<string, unknown>> = [];
+    let after: unknown = null;
+    for (;;) {
+      const page = (await host.callHost("kernel", { type: "list_agents", limit: 200, after } as unknown as Payload)) as {
+        agents?: Array<Record<string, unknown>>;
+        next?: unknown;
+      };
+      out.push(...(page?.agents ?? []));
+      if (page?.next === null || page?.next === undefined) return out;
+      after = page.next;
+    }
+  };
+
+  // RECONCILE THIS CANVAS'S PAIRS, once, before the first render. Nothing on
+  // the host enforces the pairing, so the one party that sees both sides keeps
+  // it by rule — and only for backends carrying ITS canvas id:
+  //   · a backend whose view is gone, or whose view is bound to another
+  //     backend, is DELETED (a crash, or a close while the host was down);
+  //   · a backend whose view exists but is not bound yet is LEFT (a spawn in
+  //     flight in another tab — the view lands on disk before its backend);
+  //   · a spawned view whose backend is gone is marked `backend_lost` and waits
+  //     for ⟳ — never respawned silently.
+  const reconcile = async (): Promise<void> => {
+    if (leg === undefined) return;
+    const backends = new Map<string, string>(); // backend id → its view id
+    for (const a of await hostAgents()) {
+      if (a["parent_id"] === leg && a["canvas_id"] === selfId && typeof a["id"] === "string" && typeof a["view_id"] === "string") {
+        backends.set(a["id"], a["view_id"]);
+      }
+    }
+    const root = kernel.rootId !== null ? kernel.get(kernel.rootId) : undefined;
+    const views = new Map<string, Rec>(
+      root !== undefined ? [...root.children.values()].map((a) => [a.id, a.record() as Rec]) : [],
+    );
+    for (const [bid, vid] of backends) {
+      const v = views.get(vid);
+      const bound = v === undefined ? undefined : str(v, "backend_id");
+      if (v === undefined || (bound !== undefined && bound !== bid)) {
+        await host.callHost("kernel", { type: "delete_agent", id: bid });
+      }
+    }
+    for (const v of views.values()) {
+      const bid = str(v, "backend_id");
+      if (bool(v, "owns_backend") && bid !== undefined && !backends.has(bid) && !bool(v, "backend_lost")) {
+        kernel.updateMeta(v.id, { backend_lost: true });
+      }
+    }
+  };
 
   // ─── DOM scaffold ───────────────────────────────────────────────
   const style = document.createElement("style");
@@ -339,14 +453,44 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const rect = rectFromRec(rec, 480, 320, idx);
     let reload = (): void => {};
     const { el, body, actions } = makeShell(rec, str(rec, "display_name") ?? rec.id, rect, () => reload());
+    if (bool(rec, "owns_backend") && str(rec, "backend_id") === undefined && !bool(rec, "backend_lost")) {
+      // Saved, its backend not spawned (or not bound) yet: a placeholder until
+      // `bind` lands and the refresh remounts it.
+      const note = document.createElement("div");
+      note.className = "backend-starting";
+      note.textContent = "starting its backend…";
+      body.appendChild(note);
+      frames.set(rec.id, { el, rec, kind: "inline" });
+      return;
+    }
+    if (bool(rec, "backend_lost")) {
+      // Its backend is gone: say so, mount nothing, and let ⟳ respawn it (a
+      // fresh child of the leg, bound to this same view).
+      const note = document.createElement("div");
+      note.className = "backend-lost";
+      note.textContent = `backend ${str(rec, "backend_id") ?? "?"} is gone — ⟳ respawns it`;
+      body.appendChild(note);
+      frames.set(rec.id, { el, rec, kind: "inline" });
+      reload = (): void => {
+        void spawnBackend(bundle, rec.id).then((bid) => {
+          if (bid === null) return;
+          removeFrame(rec.id);
+          bind(rec.id, bundle, bid);
+        });
+      };
+      return;
+    }
     const backend = str(rec, "backend_id") ?? rec.id; // weak peer ref to a host backend (or self)
-    const handle = await bundle.mount({ kernel, mount: body, selfId: rec.id, backend, record: rec });
+    // THE VIEW SENDS AS ITSELF: its kernel is scoped to its own id, so the
+    // page's egress gate checks the view's `can_call` before anything leaves.
+    const asView = kernel.scopedFor(rec.id, null);
+    const handle = await bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: rec });
     frames.set(rec.id, { el, rec, kind: "inline", handle });
     // reload = remount the inline view in place
     reload = (): void => {
       handle.unmount();
       body.innerHTML = "";
-      void Promise.resolve(bundle.mount({ kernel, mount: body, selfId: rec.id, backend, record: rec })).then((h) => {
+      void Promise.resolve(bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: rec })).then((h) => {
         const f = frames.get(rec.id);
         if (f) f.handle = h;
       });
@@ -418,7 +562,17 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const seenGl = new Set<string>();
     for (const rec of members) {
       const mid = rec.id;
-      const existing = frames.get(mid);
+      let existing = frames.get(mid);
+      // A pair that changed state (bound, lost, respawned) is REMOUNTED: the
+      // view fronts a different backend now, or none.
+      if (
+        existing !== undefined &&
+        (str(existing.rec, "backend_id") !== str(rec, "backend_id") ||
+          bool(existing.rec, "backend_lost") !== bool(rec, "backend_lost"))
+      ) {
+        removeFrame(mid);
+        existing = undefined;
+      }
       if (existing !== undefined) {
         existing.rec = rec;
         applyRectFromRec(existing.el, rec);
@@ -468,45 +622,36 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // its membership; the proxy_loader syncs it to the host independently.
   kernel.addStateSubscriber(() => void refresh());
 
-  // dblclick → spawn a terminal: create a host terminal_backend PEER (by id on
-  // the host), then a LOCAL member that fronts it via the terminal view.
+  // dblclick → the DEFAULT VIEW and its backend, in THIS order: the view
+  // record lands on disk first (flushed through the loader), then the backend
+  // is spawned for it, then the view is bound. A crash in between leaves a view
+  // without a backend (shown lost, ⟳ respawns), never a backend without a view
+  // — so no page's reconcile can delete a live backend another page is binding.
   canvas.addEventListener("dblclick", async (e) => {
     if ((e.target as Element).closest(".agent-frame")) return;
     const w = screenToWorld(e.clientX, e.clientY);
-    // Discover a PTY-capable bundle from the live host catalog (no hardcoded
-    // handler_module), then create it on the host root.
-    const cat = (await host.callHost("kernel", { type: "reflect", bundles: "all" })) as {
-      bundles?: Array<{ name?: string; handler_module?: string }>;
-    };
-    const pty = (cat?.bundles ?? []).find(
-      (b) => PTY_HINT.test(b.handler_module ?? "") || PTY_HINT.test(b.name ?? ""),
-    );
-    if (!pty || typeof pty.handler_module !== "string") {
-      console.warn("[canvas] no PTY-capable bundle in host catalog; skipping terminal spawn");
-      return;
-    }
-    const created = (await host.callHost("kernel", {
-      type: "create_agent",
-      handler_module: pty.handler_module,
-    })) as { id?: string; error?: string };
-    if (!created || created.error || typeof created.id !== "string") {
-      console.error("[canvas] backend create failed:", created);
-      return;
-    }
+    const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
     kernel.register(
       new Agent({
-        id: `term_${created.id}`,
+        id: viewId,
         parentId: kernel.rootId ?? selfId,
-        handlerModule: "terminal_view.ts", // a real frontend bundle; viewFor → terminalView
+        handlerModule: DEFAULT_VIEW.handles[0]!,
         meta: {
-          backend_id: created.id, // weak peer ref to the host terminal_backend
-          owns_backend: true, // dblclick spawned it → delete removes the pair together
+          owns_backend: true, // this canvas spawns it → closing removes the pair together
           x: Math.round(w.x),
           y: Math.round(w.y),
         },
       }),
     );
+    await flush();
+    const backendId = await spawnBackend(DEFAULT_VIEW, viewId);
+    if (backendId === null) {
+      kernel.remove(viewId);
+      return;
+    }
+    bind(viewId, DEFAULT_VIEW, backendId);
   });
 
+  await reconcile();
   await refresh();
 }

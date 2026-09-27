@@ -1,5 +1,5 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
-import { Host } from "../host.ts";
+import { Host } from "../../lib.ts";
 
 // terminal_view — inline xterm.js view-agent. Ported from
 // terminal_webapp/index.html, but rendered INLINE into a canvas frame body
@@ -31,6 +31,8 @@ export const terminalView: ViewBundle = {
   // The frontend member IS a `terminal_view.ts` agent (carrying a `backend_id`
   // peer ref to a host terminal_backend); this bundle renders it.
   handles: ["terminal_view.ts"],
+  fronts: "terminal_backend.tools",
+  grants: (backend) => ({ [backend]: ["boot", "write", "ack", "resize", "output", "paste_image"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend } = ctx;

@@ -1,25 +1,48 @@
 #!/bin/sh
-# pack.sh — roll the ts/ frontend kernel into a sovereign, self-describing
-# artifact: dist/js_kernel.zip = readme.md + ONE bundle.min.js (all TS + three +
-# xterm + xterm.css inlined, no chunks) + bundle.min.js.map.
+# pack.sh — roll an APP's page into a sovereign, self-describing artifact with
+# the library's vendored esbuild: <out.zip> = readme.md + ONE bundle.min.js (the
+# entry and everything it imports — the library included — inlined, no chunks)
+# + bundle.min.js.map.
+#
+# The library has no page of its own: the APP names its entry, its output and
+# its readme (the revive guide that travels inside the zip), and passes any
+# esbuild flags its page needs (vendor aliases, loaders) after them:
+#
+#   sh pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]
+#
+# e.g. the canvas app (src/tui/web/canvas/scripts/pack.sh):
+#   sh ../../../lib/ts/scripts/pack.sh src/bundle.ts dist/canvas.zip readme.md \
+#     --alias:three=./src/vendor/three.module.js --loader:.css=text …
+#
+# Paths are relative to the CALLER's directory. PACK_PROFILE=release (default,
+# minified) | debug (the same bundle, unminified — real identifiers in traces).
 #
 # NO npm, NO node, NO Python. The packer is the vendored, sha256-pinned esbuild
 # Go binary under tools/esbuild/ (see tools/esbuild/README.md). The only other
 # deps are coreutils: shasum/sha256sum, awk, grep, sed, zip.
-#
-# An LLM revives the artifact by reading ONLY readme.md out of the zip (unzip -l
-# + unzip -p) and serving bundle.min.js through the host's generic `file` agent —
-# see readme.md.
 set -eu
 
-# ── locate ts/ (this script lives in ts/scripts/) ────────────────────────────
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-TS=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-cd "$TS"
+if [ "$#" -lt 3 ]; then
+  echo "usage: sh pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]" >&2
+  echo "  the library has no default page — the app names what it packs" >&2
+  exit 2
+fi
 
-OUT="dist/pack"              # isolated staging dir (keeps dev tsc output out)
-ZIP="dist/js_kernel.zip"
+# ── the caller's paths, made absolute before anything moves ─────────────────
+CALLER=$(pwd)
+abs() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "$CALLER/$1" ;; esac; }
+ENTRY=$(abs "$1")
+ZIP=$(abs "$2")
+README=$(abs "$3")
+shift 3
+[ -f "$ENTRY" ] || { echo "pack.sh: no entry at $ENTRY" >&2; exit 1; }
+[ -f "$README" ] || { echo "pack.sh: no readme at $README" >&2; exit 1; }
+OUT="$(dirname "$ZIP")/pack"   # isolated staging dir beside the zip
 PLACEHOLDER="__BUNDLE_SHA256__"
+
+# ── locate the library (this script lives in <lib>/scripts/) ────────────────
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+LIB=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 # ── portable sha256 (darwin: shasum -a 256 / linux: sha256sum) ───────────────
 sha256() {
@@ -36,12 +59,12 @@ case "$(uname -sm)" in
   *) echo "pack.sh: unsupported platform '$(uname -sm)'. Vendor esbuild for it" \
           "under tools/esbuild/<platform>/ and add it to SHA256SUMS." >&2; exit 1 ;;
 esac
-ESBUILD="tools/esbuild/$PLAT/esbuild"
-SUMS="tools/esbuild/SHA256SUMS"
+ESBUILD="$LIB/tools/esbuild/$PLAT/esbuild"
+SUMS="$LIB/tools/esbuild/SHA256SUMS"
 if [ ! -x "$ESBUILD" ]; then
   echo "pack.sh: missing vendored esbuild: $ESBUILD" >&2
-  echo "  rebuild it (sha-verified below) — see tools/esbuild/README.md:" >&2
-  echo "    GOBIN=\"\$PWD/tools/esbuild/$PLAT\" go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0" >&2
+  echo "  rebuild it (sha-verified below) — see $LIB/tools/esbuild/README.md:" >&2
+  echo "    GOBIN=\"$LIB/tools/esbuild/$PLAT\" go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0" >&2
   exit 1
 fi
 
@@ -59,10 +82,6 @@ echo "pack.sh: esbuild $("$ESBUILD" --version) ($PLAT) verified."
 
 # ── bundle: one file, everything inlined, no chunks ─────────────────────────
 rm -rf "$OUT"; mkdir -p "$OUT"
-# PROFILE. `release` (the default, and what the release workflow builds) is
-# MINIFIED; `debug` is the SAME bundle, same entry, same aliases, same single
-# output file — only unminified, so a stack trace names real identifiers. e2e
-# builds debug so it exercises this exact path rather than a second one.
 case "${PACK_PROFILE:-release}" in
   release) MIN_FLAG="--minify" ;;
   debug)   MIN_FLAG="" ;;
@@ -70,14 +89,12 @@ case "${PACK_PROFILE:-release}" in
 esac
 echo "pack.sh: profile ${PACK_PROFILE:-release}."
 
-"$ESBUILD" src/bundle.ts \
+# The app's own flags ride after ours; they resolve against the CALLER's dir.
+( cd "$CALLER" && "$ESBUILD" "$ENTRY" \
   --bundle --format=esm --platform=browser --target=esnext \
   $MIN_FLAG --sourcemap \
-  --alias:three=./src/vendor/three.module.js \
-  --alias:@xterm/xterm=./src/vendor/xterm.js \
-  --alias:@xterm/addon-fit=./src/vendor/addon-fit.js \
-  --loader:.css=text \
-  --outfile="$OUT/bundle.min.js"
+  "$@" \
+  --outfile="$OUT/bundle.min.js" )
 
 # ── assert exactly one .js (no chunk files) ─────────────────────────────────
 JS_COUNT=$(ls "$OUT"/*.js 2>/dev/null | wc -l | tr -d ' ')
@@ -87,28 +104,16 @@ if [ "$JS_COUNT" != "1" ]; then
 fi
 [ -f "$OUT/bundle.min.js.map" ] || { echo "pack.sh: missing sourcemap" >&2; exit 1; }
 
-# ── assert no residual bare vendor imports (all must be inlined) ─────────────
-if grep -Eq 'import\(["'\''](three|@xterm/)' "$OUT/bundle.min.js" \
-   || grep -Eq 'from[[:space:]]*"(three|@xterm/)' "$OUT/bundle.min.js"; then
-  echo "pack.sh: residual bare vendor import in bundle — NOT fully inlined." >&2
-  exit 1
-fi
-
-# ── sanity: vendors actually inlined (three ~1.2MB + xterm ~0.5MB) ──────────
-BYTES=$(wc -c < "$OUT/bundle.min.js" | tr -d ' ')
-if [ "$BYTES" -lt 500000 ]; then
-  echo "pack.sh: bundle is only ${BYTES}B — vendors likely NOT inlined." >&2
-  exit 1
-fi
-
 # ── stamp the bundle's sha256 into the readme (zip copy only) ───────────────
 BUNDLE_SHA=$(sha256 "$OUT/bundle.min.js")
-sed "s/$PLACEHOLDER/$BUNDLE_SHA/g" readme.md > "$OUT/readme.md"
+sed "s/$PLACEHOLDER/$BUNDLE_SHA/g" "$README" > "$OUT/readme.md"
 
 # ── zip (flat: readme.md + bundle.min.js + bundle.min.js.map) ───────────────
+mkdir -p "$(dirname "$ZIP")"
 rm -f "$ZIP"
-( cd "$OUT" && zip -q -j "$TS/$ZIP" readme.md bundle.min.js bundle.min.js.map )
+( cd "$OUT" && zip -q -j "$ZIP" readme.md bundle.min.js bundle.min.js.map )
 
+BYTES=$(wc -c < "$OUT/bundle.min.js" | tr -d ' ')
 echo "pack.sh: wrote $ZIP"
 echo "  bundle.min.js  ${BYTES}B  sha256=$BUNDLE_SHA"
 unzip -l "$ZIP"
