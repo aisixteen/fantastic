@@ -6,7 +6,7 @@
 `web_loader`; created once — see `readme=daemon`). The browser `load_tree`s
 it on boot and `persist_record`s changes back. These records are stored
 OPAQUELY here (`handler_module` ending in `.ts` → inert on the host); the TS
-frontend kernel served from `ts/dist` is what hydrates + renders them.
+app's page (the ts kernel booted by an app that registered the `*.ts` bundle) is what hydrates + renders them.
 Reflect that frontend over the bridge to discover its compositor root and
 view-agent kinds. The store holds ONE compositor root the frontend renders,
 seeded once at setup — `load_tree` and look for it. Panels are its children.

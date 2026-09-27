@@ -296,7 +296,7 @@ pub(crate) async fn ws_loop(
     host_agent_id: AgentId,
     leg_agent_id: AgentId,
 ) {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     let client_id = AgentId::from(make_client_id().as_str());
 
     let (mut sink, mut stream) = socket.split();
@@ -336,12 +336,9 @@ pub(crate) async fn ws_loop(
         ),
         Decision::Allow
     );
-    let watching: Arc<tokio::sync::Mutex<HashSet<AgentId>>> =
-        Arc::new(tokio::sync::Mutex::new(HashSet::new()));
-    if admits_autowatch {
-        state.kernel.watch(&host_agent_id, client_id.clone()).await;
-        watching.lock().await.insert(host_agent_id.clone());
-    }
+    // The name the client used → the RESOLVED agent id actually watched. Only a
+    // watch that REALLY registered is recorded (see [`watch_path`]).
+    let mut watching: HashMap<String, AgentId> = HashMap::new();
 
     // Pending `call` tasks — cancelled on disconnect so long-lived sends
     // release their locks immediately.
@@ -403,6 +400,21 @@ pub(crate) async fn ws_loop(
             }
         }
     });
+
+    // THE CONNECT-TIME AUTO-WATCH of the endpoint the socket named — through the
+    // one watch path, so a refusal is an `error` frame, never silence.
+    if admits_autowatch {
+        watch_path(
+            &state.kernel,
+            &leg_agent_id,
+            &client_id,
+            &mut watching,
+            &out_tx,
+            &host_agent_id.0,
+            &json!(""),
+        )
+        .await;
+    }
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -572,50 +584,15 @@ pub(crate) async fn ws_loop(
                 if !matches!(gate_leg(&kernel, &leg, "watch", &frame), Decision::Allow) {
                     continue;
                 }
-                let Some(src) = frame
-                    .get("src")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(AgentId::from)
-                else {
-                    continue;
-                };
-                let mut w = watching.lock().await;
-                if !w.contains(&src) {
-                    // UNDER THE LEG'S OWN IDENTITY, so the kernel's gate sees a
-                    // real caller. Without it the kernel reads the frame as an
-                    // OPERATOR watch and the two-sided gate never runs.
-                    let denial = fantastic_kernel::send::with_sender(
-                        leg,
-                        kernel.watch(&src, client_id.clone()),
-                    )
-                    .await;
-                    if let Some(d) = denial {
-                        // python `{"type":"error", "id":…, **denial}` — the
-                        // denial's keys are FLATTENED onto the frame, not
-                        // wrapped in `data`.
-                        let _ = out
-                            .send(Out::Text(encode_frame(&error_frame(&fid, &d))))
-                            .await;
-                        continue;
-                    }
-                    w.insert(src);
-                }
+                let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+                watch_path(&kernel, &leg, &client_id, &mut watching, &out, src, &fid).await;
             }
             "unwatch" => {
                 // NO GATE — python gates the four inbound actions and leaves
                 // `unwatch` (a client giving something up) ungated.
-                let Some(src) = frame
-                    .get("src")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(AgentId::from)
-                else {
-                    continue;
-                };
-                let mut w = watching.lock().await;
-                if w.remove(&src) {
-                    kernel.unwatch(&src, &client_id).await;
+                let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+                if let Some(id) = watching.remove(src) {
+                    kernel.unwatch(&id, &client_id).await;
                 }
             }
             "state_subscribe" => {
@@ -726,9 +703,8 @@ pub(crate) async fn ws_loop(
     }
     // 2. Unwatch every src this WS subscribed to.
     {
-        let srcs: Vec<AgentId> = watching.lock().await.drain().collect();
-        for src in srcs {
-            state.kernel.unwatch(&src, &client_id).await;
+        for (_, id) in watching.drain() {
+            state.kernel.unwatch(&id, &client_id).await;
         }
     }
     // 3. Unregister any state-stream callbacks tied to this WS.
@@ -747,6 +723,58 @@ pub(crate) async fn ws_loop(
     state.kernel.cancel_task(&drain_task).await;
     drop(out_tx);
     let _ = send_task.await;
+}
+
+/// THE ONE WATCH PATH — the connect-time auto-watch and an explicit `watch`
+/// frame both come here. Python `web_ws._proxy._watch`.
+///
+/// FAIL LOUD: a name that resolves to no agent, or a gate refusal, is answered
+/// with an `error` frame and NOT recorded as watched. (The connect-time watch
+/// used to discard the result and mark the name watched anyway; a name the
+/// kernel's `watch` did not resolve — an alias like `exec` for `exec_real` —
+/// mirrored nothing, said nothing, and the explicit watch that followed was then
+/// skipped as a duplicate.)
+///
+/// The name resolves the way `send` resolves a target (`kernel`, a declared
+/// `alias`, a literal id), and the watch runs UNDER THE LEG'S OWN IDENTITY, so
+/// the kernel's gate sees a real caller — without it the kernel reads the watch
+/// as an OPERATOR's and the two-sided gate never runs.
+async fn watch_path(
+    kernel: &Arc<fantastic_kernel::Kernel>,
+    leg: &AgentId,
+    client_id: &AgentId,
+    watching: &mut std::collections::HashMap<String, AgentId>,
+    out: &tokio::sync::mpsc::Sender<Out>,
+    src: &str,
+    fid: &Value,
+) {
+    if src.is_empty() || watching.contains_key(src) {
+        return;
+    }
+    let Some(target) = kernel.resolve_target(src) else {
+        let mut r = fantastic_kernel::refusal(
+            fantastic_kernel::refusal::UNKNOWN_AGENT,
+            format!(
+                "watch: no agent {} (an id, a declared alias, or `kernel`)",
+                fantastic_bundle::py_repr(src)
+            ),
+        );
+        fantastic_kernel::refusal::with(&mut r, "src", json!(src));
+        let _ = out.send(Out::Text(encode_frame(&error_frame(fid, &r)))).await;
+        return;
+    };
+    let denial = fantastic_kernel::send::with_sender(
+        leg.clone(),
+        kernel.watch(&target.id, client_id.clone()),
+    )
+    .await;
+    if let Some(d) = denial {
+        // python `{"type":"error", "id":…, **denial}` — the denial's keys are
+        // FLATTENED onto the frame, not wrapped in `data`.
+        let _ = out.send(Out::Text(encode_frame(&error_frame(fid, &d)))).await;
+        return;
+    }
+    watching.insert(src.to_string(), target.id.clone());
 }
 
 /// python `{"type": "error", "id": <id or "">, **denial}` — the denial's own

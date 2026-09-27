@@ -84,3 +84,47 @@ async def test_a_leg_that_declares_a_route_without_the_hook_fails_loud(
             await _mount_all_surfaces(handle, seeded_kernel, host)
     finally:
         sys.modules.pop("hookless_leg.tools", None)
+
+
+async def test_a_literal_route_beats_a_catch_all_mounted_before_it(seeded_kernel, host):
+    """Mount order is folder order on a hydrated host; the literal must still win."""
+    from starlette.routing import Match
+
+    mod = types.ModuleType("literal_leg.tools")
+
+    async def _handler(id, payload, kernel):
+        if payload.get("type") == "get_routes":
+            return {"routes": [{"kind": "websocket", "path": "/z_literal/ws"}]}
+        return None
+
+    async def _literal(websocket):
+        await websocket.accept()
+        await websocket.send_text("literal")
+        await websocket.close()
+
+    mod.handler = _handler
+    mod.VERBS = {}
+    mod.route_endpoints = lambda agent: {"/z_literal/ws": _literal}
+    sys.modules["literal_leg.tools"] = mod
+    try:
+        # the catch-all leg sorts (and mounts) FIRST
+        await _mk(
+            seeded_kernel,
+            "web_ws.tools",
+            "a_ws",
+            parent_id=host,
+            ingress_rule="allow_all_ingress",
+        )
+        await _mk(seeded_kernel, "literal_leg.tools", "z_literal", parent_id=host)
+        handle = await _spawn(host, seeded_kernel)
+        await _mount_all_surfaces(handle, seeded_kernel, host)
+        paths = [r.path for r in handle.app.routes]
+        assert paths.index("/z_literal/ws") < paths.index("/{host_id}/ws"), paths
+        # starlette's own first-FULL-match walk over the live table
+        scope = {"type": "websocket", "path": "/z_literal/ws", "path_params": {}}
+        first = next(
+            r for r in handle.app.router.routes if r.matches(scope)[0] == Match.FULL
+        )
+        assert first.path == "/z_literal/ws", first.path
+    finally:
+        sys.modules.pop("literal_leg.tools", None)

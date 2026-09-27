@@ -35,7 +35,8 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     private let serversLock = NSLock()
     private var servers: [AgentId: WebServer] = [:]
 
-    private func serverFor(_ id: AgentId) -> WebServer? {
+    /// The live server of web agent `id` (internal: a test reads its route table).
+    func serverFor(_ id: AgentId) -> WebServer? {
         serversLock.lock()
         defer { serversLock.unlock() }
         return servers[id]

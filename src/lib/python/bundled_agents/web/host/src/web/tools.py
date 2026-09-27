@@ -106,6 +106,19 @@ async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
     if mounted:
         handle.routes_by_child[child_id] = mounted
         logger.info("web: mounted %d route(s) for %s", len(mounted), child_id)
+    _order_routes(handle)
+
+
+def _order_routes(handle: _ServerHandle) -> None:
+    """A LITERAL PATH BEATS A PATTERN. Routing is first-match-wins in list order
+    (starlette), and legs append their routes in MOUNT order — which on a hydrated
+    host is the children's folder order. A `web_ws` leg declares the catch-all
+    `/{host_id}/ws`; mounted before a leg that declares the literal
+    `/web_ui/ws`, it swallowed it (measured: a CLI canvas leg sorted first and the
+    UI socket went dead on every rehydrate, while a first run's creation order
+    happened to be right). So the live table is ordered by how many PARAMETERS a
+    path has — fewer first; equal counts keep their mount order (a stable sort)."""
+    handle.app.router.routes.sort(key=lambda r: str(getattr(r, "path", "")).count("{"))
 
 
 def _unmount_surface(handle: _ServerHandle, child_id: str) -> None:

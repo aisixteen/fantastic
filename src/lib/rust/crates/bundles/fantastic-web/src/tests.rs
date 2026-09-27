@@ -3077,3 +3077,11 @@ async fn foreign_websocket_upgrade_is_refused_listed_origin_passes() {
         .expect("listed origin upgrades");
     stop(&kernel, "web_ow").await;
 }
+
+/// The one watch path (python `web_ws/tests/test_watch_path.py`).
+#[path = "tests_watch_path.rs"]
+mod watch_path;
+
+/// Literal routes before patterns (python `test_mount.py`).
+#[path = "tests_route_order.rs"]
+mod route_order;
