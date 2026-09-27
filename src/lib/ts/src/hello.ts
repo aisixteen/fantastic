@@ -66,7 +66,9 @@ const bridge = new WsBridge(kernel, { origin, controlEndpoint: "kernel_state" })
 
 try {
   const reply = (await kernel.send([
-    { target: "kernel", payload: { type: "reflect", tree: "all" } as Payload },
+    // `detail: "full"` — the WIRING tree (handler_module per node) this page
+    // renders; the default distilled roster carries sentences, not modules.
+    { target: "kernel", payload: { type: "reflect", detail: "full", tree: "all" } as Payload },
   ]))[0]!.result as { tree?: TreeNode; sentence?: string };
   const dot = document.getElementById("dot");
   if (dot) dot.classList.add("ok");

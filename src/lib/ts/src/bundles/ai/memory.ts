@@ -1,6 +1,7 @@
 import type { Kernel } from "../../kernel/kernel.ts";
 import type { Json, Payload } from "../../kernel/json.ts";
 import { nowSeconds } from "../../kernel/timers.ts";
+import type { Provider } from "./seam.ts";
 
 // THE AI AGENT'S MEMORY STORE — port of the memory-store parts of python
 // `ai_core/core.py` (this bundle owns no rows and no files).
@@ -32,6 +33,44 @@ export type Row = Payload & { id?: number };
 /** This bundle's RAM for ONE kernel — kept on the kernel, so two kernels in one
  *  page (tests) never share it. All of it is scratch: reconstructible from the
  *  store, never persisted. */
+/** One user submission waiting for, or holding, the agent's FIFO lock. */
+export interface QueueEntry {
+  client_id: string;
+  text: string;
+  send_id: string;
+  queued_at: number;
+}
+
+/** The generation that holds the lock: the entry plus its phase, the text
+ *  streamed so far and the kernel task it runs as (what `cancel` addresses). */
+export interface CurrentEntry extends QueueEntry {
+  started_at: number;
+  phase: string;
+  text_so_far: string;
+  task_id: number | null;
+  last_tool?: Json;
+}
+
+/** A per-agent FIFO serializer: one generation at a time; callers queue. */
+export class FifoLock {
+  locked = false;
+  private readonly waiters: (() => void)[] = [];
+
+  acquire(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true;
+      return Promise.resolve();
+    }
+    return new Promise((res) => this.waiters.push(res));
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    if (next !== undefined) next(); // hand the lock over, still held
+    else this.locked = false;
+  }
+}
+
 export interface AIMem {
   heads: Map<string, Row[]>;
   grants: Map<string, Payload[]>;
@@ -53,6 +92,18 @@ export interface AIMem {
   calib: Map<string, number>;
   /** agent → the endpoint's last reported prompt size */
   reported: Map<string, number>;
+  /** agent → submissions waiting on its lock, in arrival order */
+  queue: Map<string, QueueEntry[]>;
+  /** agent → the generation holding its lock (present ⇔ in flight) */
+  current: Map<string, CurrentEntry>;
+  locks: Map<string, FifoLock>;
+  /** agent → its INCARNATION, bumped on every boot: a reply to a call an earlier
+   *  incarnation made is recorded, never acted on */
+  incarnation: Map<string, number>;
+  /** agent → its routing batches still settling (what `await` asks about) */
+  inflight: Map<string, number>;
+  /** agent → its provider, built once */
+  providers: Map<string, Provider>;
 }
 
 export function aiMem(kernel: Kernel): AIMem {
@@ -70,6 +121,12 @@ export function aiMem(kernel: Kernel): AIMem {
       foldsSince: new Map(),
       calib: new Map(),
       reported: new Map(),
+      queue: new Map(),
+      current: new Map(),
+      locks: new Map(),
+      incarnation: new Map(),
+      inflight: new Map(),
+      providers: new Map(),
     };
     kernel.bundleMem.set("ai_backend", m);
   }

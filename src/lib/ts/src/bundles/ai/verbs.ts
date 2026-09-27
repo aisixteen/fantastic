@@ -11,7 +11,7 @@ import {
 } from "./context.ts";
 import type { Turn } from "./context.ts";
 import { expandIds, render as foldRender } from "./folds.ts";
-import { applyRes, isReply, replyMeta, resOf } from "./replies.ts";
+import { PID_TAG, REPLY_TAG, applyRes, isReply, replyBlocks, resOf } from "./replies.ts";
 import {
   aiMem,
   asId,
@@ -208,9 +208,13 @@ export async function grep(id: string, payload: Payload, kernel: Kernel): Promis
     const scope = new Set(expandIds(rows, ids) as number[]);
     inReach = new Set([...ids, ...scope]);
     for (const m of rows) {
-      if (scope.has(m.id as number) && isReply(m)) {
-        const pid = replyMeta(m)?.pid;
-        if (typeof pid === "number") inReach.add(pid);
+      if (scope.has(m.id as number) && m["role"] === "user") {
+        const c = m["content"];
+        for (const block of replyBlocks(typeof c === "string" ? c : "")) {
+          const pm = PID_TAG.exec(block);
+          const p = pm !== null ? asId(pm[1]) : null;
+          if (p !== null) inReach.add(p);
+        }
       }
     }
   }
@@ -267,7 +271,7 @@ function firstJson(text: string): Payload | null {
   return null;
 }
 
-async function compose(provider: Provider, prompt: string): Promise<string> {
+export async function compose(provider: Provider, prompt: string): Promise<string> {
   const parts: string[] = [];
   for await (const chunk of provider.chat([{ role: "user", content: prompt }])) parts.push(chunk);
   return withoutThinking(parts.join(""));
@@ -332,12 +336,15 @@ export async function contextRecall(
       const title = (r["title"] as string | undefined) ?? (m !== null ? m[1] : c.slice(0, 80).replace(/\n/g, " "));
       return `${String(r["id"])} · ${String(r["kind"] ?? r["role"])} · "${title}" · ${c.length}B · ↑${String(r["parent"] ?? "-")}`;
     });
-    // what the store already answers: every reply row names the call it closed
+    // what the store already answers: every reply row names the call it closed,
+    // so a rebooted model does not re-run reads whose results it is about to see
     const done: string[] = [];
     for (const r of view) {
-      const meta = isReply(r) ? replyMeta(r) : null;
-      if (meta === null) continue;
-      const line = `${meta.target} ${meta.verb}`;
+      const c = String(r["content"] ?? "");
+      const m = REPLY_TAG.exec(c);
+      if (m === null) continue;
+      const t = /· "([^"]{1,140})"/.exec(c);
+      const line = `${m[1]} ${m[2]}` + (t !== null ? ` · "${t[1]}"` : "");
       if (!done.includes(line)) done.push(line);
     }
     let ans: Payload | null = null;
@@ -379,7 +386,7 @@ export async function contextRecall(
     r["role"] === "user" &&
     !r["parent"] &&
     (r["kind"] === undefined || r["kind"] === null || r["kind"] === "" || r["kind"] === "user") &&
-    !isReply(r)
+    !REPLY_TAG.test(String(r["content"] ?? ""))
   );
   const liveTxt = live !== undefined
     ? ` · live task: ${String(live.id)} "` + String(live["content"] ?? "").split(/\s+/).filter(Boolean).join(" ").slice(0, 100) + '"'

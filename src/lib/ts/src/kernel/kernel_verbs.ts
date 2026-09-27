@@ -45,11 +45,11 @@ export function isKernelVerb(verb: string): boolean {
 export const KERNEL_VERB_DOCS: { [verb: string]: string } = {
   _:
     "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge.",
-  ps: "args: limit:int?, after:int? — lists the LIVE dispatches (id, agent, verb), paged; an id is the message id of the call that started it.",
+  ps: "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch; an id is the message id of the call that started it, `parent` chains the rows into the send tree. Paged.",
   cancel:
-    "args: task_id:int|str — kills that task AND ITS SUBTREE (a name kills the execution it names); returns {cancelled, killed:[ids]}; the blocked caller's item settles status:'cancelled'. An unknown or finished id kills nothing and says so.",
+    "args: task_id:int|str. Kills that task AND ITS SUBTREE (a name kills the execution it names) — returns {cancelled, killed:[ids]}; the blocked caller's item settles status:'cancelled'. An unknown or finished id kills nothing and says so.",
   ledger:
-    "args: limit:int?, after:int? — every execution YOU originated and what it became (id, target, status, attempts, retries, named, name?, outcome?, acked?), read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes}. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it.",
+    "No args. EVERY execution YOU originated and what it became — {executions:[{id, target, status, attempts, retries, named, name?, outcome?, acked?}]}, paged, read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes}. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it.",
   ack_deadletter:
     "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD LETTER you originated — recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}.",
   kernel_start:

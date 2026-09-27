@@ -1,9 +1,8 @@
 // Deterministic, no-LLM tests for the context-budget primitives, the overflow
 // strategies, and the seam + verbs (the ONE notice, the `context` events,
 // `recall`, the derived `last_reaction`, `context_clear`). Mirrors python
-// ai_core/tests/test_context.py. Cases python pins on its `[reply to …]` tag
-// grammar (per-block trimming of a batch turn, the tag regex) have no ts
-// counterpart: a ts reply is one row carrying its call as metadata.
+// ai_core/tests/test_context.py (its cli-renderer case has no ts counterpart:
+// this kernel has no `cli` agent).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,13 +22,14 @@ import { assemble, contextNotice, projectContext } from "../src/bundles/ai/seam.
 import type { Provider } from "../src/bundles/ai/seam.ts";
 import {
   REFLECT_NUDGE,
+  REPLY_TAG,
   dedupeStaleReads,
   distilled,
   dropAnsweredReflects,
 } from "../src/bundles/ai/replies.ts";
 import { aiMem, loadHistory, loadView, saveHistory } from "../src/bundles/ai/memory.ts";
 import { contextClear, deriveReaction, grep, recall } from "../src/bundles/ai/verbs.ts";
-import { CONTEXT_HOWTO } from "../src/bundles/ai/ai_backend.ts";
+import { SEND_TO_HOWTO } from "../src/bundles/ai/howtos.ts";
 import { World, body, callText, turn } from "./ai_world.ts";
 
 test.beforeEach(() => stripped.clear());
@@ -384,7 +384,51 @@ test("the distillation instruction rides on the reflect reply itself", () => {
   assert.ok(REFLECT_NUDGE.includes("SEEN"));
   assert.ok(REFLECT_NUDGE.trimEnd().endsWith("]"));
   assert.ok(distilled("SEEN notes — durable key/value store; verbs: read/set/keys"));
-  assert.ok(!CONTEXT_HOWTO.includes("SEEN"), "the format lives at point of use only");
+  assert.ok(!SEND_TO_HOWTO.includes("SEEN"), "the format lives at point of use only");
+});
+
+test("a combined turn trims per block, never whole", () => {
+  const combined =
+    "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch ab12]\n" +
+    "TREE".repeat(500) +
+    "\n\n[reply to tot:b1 · totals read · 2 of 2 in batch ab12]\n" +
+    "reading_1 = 41";
+  const b = [
+    turn("user", combined),
+    turn("assistant", "SEEN kernel_state — the root; verbs create/list."),
+    turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
+  ];
+  const out = dropAnsweredReflects(b);
+  assert.ok(!String(out[0]!["content"]).includes("TREE".repeat(5)), "distilled reflect block drops");
+  assert.ok(String(out[0]!["content"]).includes("reading_1 = 41"), "sibling block must SURVIVE");
+  const out2 = dedupeStaleReads(b);
+  const first = String(out2[0]!["content"]);
+  assert.ok(!first.includes("TREE".repeat(5)), "older whole-state block is superseded");
+  assert.ok(first.includes("reading_1 = 41"), "parameterised sibling must survive");
+  assert.ok(out2.some((m) => String(m["content"]).includes("NEW TREE")));
+});
+
+test("a turn whose every block is superseded drops entirely", () => {
+  const out = dedupeStaleReads([
+    turn(
+      "user",
+      "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch cd34]\nOLD" +
+        "\n\n[reply to k:a2 · kernel ps · 2 of 2 in batch cd34]\nOLD ROWS",
+    ),
+    turn("assistant", "noted"),
+    turn("user", "[reply to ks:a3 · kernel_state reflect]\nNEW"),
+    turn("user", "[reply to k:a4 · kernel ps]\nNEW ROWS"),
+  ]);
+  assert.ok(!out.some((m) => String(m["content"]).includes("OLD")));
+  assert.equal(out.length, 3, "the emptied turn leaves no husk behind");
+});
+
+test("the verb group stops at the tag's own bracket", () => {
+  const verb = (s: string): string | undefined => REPLY_TAG.exec(s)?.[2];
+  assert.equal(verb('[reply to notes:aa · notes reflect]\nverbs=["read", "write"]  root=.'), "reflect");
+  assert.equal(verb('[reply to notes:aa · notes reflect · 2 of 3 in batch ab12]\nv=["x"]'), "reflect");
+  assert.equal(verb("[reply to a:1 · notes read]\nplain body"), "read");
+  assert.equal(REPLY_TAG.exec("[reply to a:1 notes reflect]"), null);
 });
 
 test("a stale reflect whose body has brackets still dedupes", () => {

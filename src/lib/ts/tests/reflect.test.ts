@@ -16,6 +16,9 @@ interface AgentSpec {
 }
 interface Case {
   name: string;
+  /** reflect AS this agent (gated — the roster hides what it may not reflect);
+   *  absent = the operator */
+  from?: string;
   target: string;
   payload: Payload;
   expect: Json;
@@ -41,7 +44,7 @@ function buildKernel(fx: Fixture): Kernel {
       handlerModule: spec.handlerModule ?? null,
       sentence: spec.sentence ?? null,
       verbs: spec.verbs ?? null,
-      meta: spec.meta ?? {},
+      meta: structuredClone(spec.meta ?? {}),
     });
     k.register(agent);
     if (spec.root) k.setRoot(agent);
@@ -53,7 +56,8 @@ test("reflect matches the cross-language conformance fixture", async () => {
   const fx = JSON.parse(await readFile(fixtureUrl, "utf8")) as Fixture;
   const k = buildKernel(fx);
   for (const c of fx.cases) {
-    const got = (await k.send([{ target: c.target, payload: c.payload }]))[0]!.result;
+    const view = c.from !== undefined ? k.scopedFor(c.from, null) : k;
+    const got = (await view.send([{ target: c.target, payload: c.payload }]))[0]!.result;
     assert.deepEqual(got, c.expect, `case: ${c.name}`);
   }
 });

@@ -10,6 +10,15 @@
 // it from the bundle. An agent without them reflects as "Bare agent — answers
 // substrate verbs only" and the model cannot discover it, so the scenario's
 // declared verbs are put on the record here.
+//
+// THE AI IS AN AGENT OF THIS KERNEL, wired the way the host runner wires it
+// (`runners/host.py`): the ts `ai_backend` bundle, its conversation in the
+// kernel's MEMORY STORE (a `ram_store`, named by the root and by the agent —
+// `kernel_start` refuses to run without one), and DENY-ALL gates — the AI may
+// call exactly `grants.ai_can_call` plus its store, and every roster agent
+// accepts it back. One `send` is ONE model pass; what that pass called is routed
+// after it and comes back as the next turn, so the runner gives the task once
+// and then WAITS for the chain (the model ends it with `done`).
 
 import * as nodeCrypto from "node:crypto";
 import { createHash, randomBytes } from "node:crypto";
@@ -18,12 +27,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Kernel } from "../../src/lib/ts/src/kernel/kernel.ts";
-import { Agent } from "../../src/lib/ts/src/bundles/../kernel/agent.ts";
-import {
-  OpenAIProvider,
-  runLoop,
-  systemPrompt,
-} from "../../src/lib/ts/src/bundles/ai/ai_backend.ts";
+import { Agent } from "../../src/lib/ts/src/kernel/agent.ts";
+import { registerRamStore } from "../../src/lib/ts/src/bundles/memory/ram_store.ts";
+import { registerAIBackend } from "../../src/lib/ts/src/bundles/ai/ai_backend.ts";
 
 const E2E = dirname(dirname(fileURLToPath(import.meta.url)));
 const MARKER = "E2E-VERDICT:";
@@ -129,7 +135,25 @@ const stores = {};
 // Role state the assertions read — how many times a side effect really ran.
 const sideEffects = {};
 const k = new Kernel();
-k.setRoot(new Agent({ id: "kernel_state" }));
+const ROOT = "kernel_state";
+// The kernel's MEMORY STORE — the AI's conversation and the kernel's own
+// execution rows live here, never in the runner.
+const MEMORY = "memory";
+registerRamStore(k);
+// The AI reads its endpoint / model / key off its own RECORD.
+registerAIBackend(k, "ai_backend.ts", (aid) => k.get(aid).meta);
+k.setRoot(new Agent({ id: ROOT, meta: { memory_store_id: MEMORY } }));
+k.register(new Agent({
+  id: MEMORY, parentId: ROOT, handlerModule: "ram_store.ts",
+  // the kernel writes as operator; the AI keeps its conversation here
+  meta: { operator: true, admins: ["kernel"], callable_by: { ai: "*" } },
+}));
+// DENY-ALL: every roster agent accepts the AI (host.py seeds the same ingress);
+// whether the AI may CALL it is `grants.ai_can_call`, decided on the AI's side.
+const ACCEPTS_AI = { callable_by: { ai: "*" } };
+// `kernel_start` boots every agent; a fixture has no state to bring up or wind
+// down, so it answers the lifecycle verbs with nothing (the python probes do).
+const LIFECYCLE = new Set(["boot", "shutdown"]);
 
 for (const entry of sc.roster) {
   if (entry.role === "render_sink") continue; // no stdout sink needed in process
@@ -139,6 +163,7 @@ for (const entry of sc.roster) {
     // surface that silently lacks a stdlib invites the model to hand-roll
     // SHA-256 in one expression, which it did, returning `undefined`.
     k.registerBundle("compute.tools", (_id, p) => {
+      if (LIFECYCLE.has(p.type)) return null;
       if (p.type !== "run") return { error: `unknown verb ${p.type}` };
       try {
         let fn;
@@ -158,6 +183,7 @@ for (const entry of sc.roster) {
         id: entry.id,
         parentId: "kernel_state",
         handlerModule: "compute.tools",
+        meta: ACCEPTS_AI,
         sentence: "Runs JavaScript and returns its value.",
         verbs: {
           run:
@@ -175,6 +201,7 @@ for (const entry of sc.roster) {
     const state = { count: 0, receipts: [] };
     sideEffects[entry.id] = state;
     k.registerBundle("dispenser.tools", (_id, p) => {
+      if (LIFECYCLE.has(p.type)) return null;
       if (p.type === "dispense") {
         state.count += 1;
         const receipt = Math.random().toString(16).slice(2, 10);
@@ -185,7 +212,7 @@ for (const entry of sc.roster) {
       return { error: `unknown verb ${p.type}` };
     });
     k.register(new Agent({
-      id: entry.id, parentId: "kernel_state", handlerModule: "dispenser.tools",
+      id: entry.id, parentId: "kernel_state", handlerModule: "dispenser.tools", meta: ACCEPTS_AI,
       sentence: "Coin dispenser — one coin per `dispense` call. A coin must never be issued twice for one job.",
       verbs: {
         dispense: "args: job:str — issues ONE coin, returns {coin, receipt}. Issuing is a side effect: calling twice dispenses twice.",
@@ -200,6 +227,7 @@ for (const entry of sc.roster) {
     const state = { count: 0, receipts: [] };
     sideEffects[entry.id] = state;
     k.registerBundle("plant.tools", (_id, p) => {
+      if (LIFECYCLE.has(p.type)) return null;
       if (p.type === "pump") {
         state.count += 1;
         if (state.count < 3) throw new Error("pump stalled");
@@ -212,7 +240,7 @@ for (const entry of sc.roster) {
       return { error: `unknown verb ${p.type}` };
     });
     k.register(new Agent({
-      id: entry.id, parentId: "kernel_state", handlerModule: "plant.tools",
+      id: entry.id, parentId: "kernel_state", handlerModule: "plant.tools", meta: ACCEPTS_AI,
       sentence: "Industrial plant. Its pump is unreliable; its valve has seized.",
       verbs: {
         pump: "no args — runs the pump. Fails intermittently.",
@@ -227,6 +255,7 @@ for (const entry of sc.roster) {
     const state = { count: 0, receipts: [] };
     sideEffects[entry.id] = state;
     k.registerBundle("purchase.tools", (_id, p) => {
+      if (LIFECYCLE.has(p.type)) return null;
       if (p.type === "buy") {
         state.count += 1;
         const receipt = Math.random().toString(16).slice(2, 10);
@@ -236,7 +265,7 @@ for (const entry of sc.roster) {
       return { error: `unknown verb ${p.type}` };
     });
     k.register(new Agent({
-      id: entry.id, parentId: "kernel_state", handlerModule: "purchase.tools",
+      id: entry.id, parentId: "kernel_state", handlerModule: "purchase.tools", meta: ACCEPTS_AI,
       sentence: "Purchase desk. Spends real money — only a person may press the button.",
       verbs: { buy: "args: item:str — buys ONE. Spending is a side effect." },
     }));
@@ -257,7 +286,10 @@ for (const entry of sc.roster) {
     // actually received rather than from the model's prose.
     const received = { n: 0, proposals: [] };
     sideEffects[entry.id] = received;
-    k.registerBundle("user_probe.tools", async (id, p) => {
+    // `kk` is the view this dispatch runs under: its sends are THIS agent's —
+    // gated, and the ledger row names `user` (python's `agent.send`).
+    k.registerBundle("user_probe.tools", async (id, p, kk) => {
+      if (LIFECYCLE.has(p.type)) return null;
       if (p.type === "inquiry") {
         const q = p.text;
         if (typeof q !== "string" || !q.trim()) {
@@ -280,19 +312,22 @@ for (const entry of sc.roster) {
         // be answered over: saying "granted" over a door that never opened
         // sends the sender back to an unchanged wall.
         const grants = k.get(id)?.meta?.grants;
+        let applied = 0;
         if (Array.isArray(grants)) {
           for (const g of grants) {
             if (!g || typeof g !== "object") continue;
-            const out = (await k.send([{ target: "kernel_state", payload: g }]))[0].result;
+            // THE ROOT'S REAL ID, not the `kernel` alias (python user_probe).
+            const out = (await kk.send([{ target: ROOT, payload: g }]))[0].result;
             if (out?.error) {
               return { error: `user_probe: grant refused, so the answer would be false: ${out.error}`,
                        reason: "unauthorized", grant: g };
             }
+            applied += 1;
           }
         }
         if (p.action && typeof p.action === "object") received.proposals.push(p.action);
         received.n += 1;
-        return { answer, request_id: p.request_id ?? null, inquiries: received.n };
+        return { answer, request_id: p.request_id ?? null, inquiries: received.n, granted: applied };
       }
       if (p.type === "inquiries") return { inquiries: received.n, proposals: received.proposals };
       // EVERY AGENT CAN DO EVERYTHING TO EVERYONE. One verb: any payload, any
@@ -309,7 +344,7 @@ for (const entry of sc.roster) {
         }
         // The send is issued BY this agent, so it is gated and its ledger row
         // names `user` as the sender.
-        const out = await k.send([{ target: p.target, payload: p.payload }]);
+        const out = await kk.send([{ target: p.target, payload: p.payload }]);
         return { sent: p.target, result: out[0].result };
       }
       return { error: `user_probe: unknown verb ${p.type}`, reason: "unhandled", verb: p.type };
@@ -318,7 +353,7 @@ for (const entry of sc.roster) {
       id: entry.id, parentId: "kernel_state", handlerModule: "user_probe.tools",
       // Record fields live in `meta` on this kernel's Agent (python's record is
       // one flat dict); a top-level `answer` on the init was silently dropped.
-      meta: { answer: entry.answer },
+      meta: { answer: entry.answer, ...ACCEPTS_AI },
       sentence: "The human. Send me an inquiry when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
       verbs: {
         inquiry: "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the sender may not perform itself: it is HELD, never run here.",
@@ -339,7 +374,11 @@ for (const entry of sc.roster) {
   const data = {};
   stores[entry.id] = data;
   k.registerBundle(`${entry.id}.tools`, (_id, p) => {
-    const body = p.bytes ?? p.bytes_utf8;
+    if (LIFECYCLE.has(p.type)) return null;
+    // `<bytes>` in the call grammar is VERBATIM utf-8 — it arrives as bytes, the
+    // way the real text_file receives it; a string body is taken as written.
+    const raw = p.bytes ?? p.bytes_utf8;
+    const body = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : raw;
     if (p.type === "write") {
       if (!p.path) return { error: "write: path required", reason: "missing_arg" };
       data[p.path] = String(body ?? "");
@@ -372,13 +411,35 @@ for (const entry of sc.roster) {
       id: entry.id,
       parentId: "kernel_state",
       handlerModule: `${entry.id}.tools`,
+      meta: ACCEPTS_AI,
       sentence: entry.sentence ?? null,
       verbs: entry.verbs ?? null,
     }),
   );
 }
 
+// THE AI. Its record carries the route (nothing is guessed: an unset endpoint
+// is refused below, before any turn), its memory store, and its toolset — the
+// grant half that is the AI's own: `grants.ai_can_call` plus its store.
 const endpoint = process.env.AI_ENDPOINT;
+const aiCanCall = { [MEMORY]: "*" };
+for (const peer of sc.grants.ai_can_call ?? []) aiCanCall[peer] = "*";
+const aiRecord = { memory_store_id: MEMORY, can_call: aiCanCall };
+if (endpoint) aiRecord.endpoint = endpoint;
+if (process.env.AI_MODEL) aiRecord.model = process.env.AI_MODEL;
+if (process.env.AI_KEY) aiRecord.api_key = process.env.AI_KEY;
+k.register(new Agent({ id: "ai", parentId: ROOT, handlerModule: "ai_backend.ts", meta: aiRecord }));
+
+// THE START SEQUENCE: the root, its store, then every agent (the AI's boot
+// starts its incarnation and marks its view for rebuilding).
+const started = (await k.send([{ target: "kernel", payload: { type: "kernel_start" } }]))[0].result;
+if (started?.started !== true) {
+  console.log(`  kernel_start refused: ${JSON.stringify(started)}`);
+  console.log(`\n${MARKER} FAIL — kernel did not start`);
+  process.exit(1);
+}
+console.log(`  kernel started · store ${started.store} · booted ${started.booted.join(", ")}`);
+
 if (!endpoint) {
   console.log("  AI_ENDPOINT is unset — name the OpenAI-compatible route.");
   process.exit(2);
@@ -387,31 +448,64 @@ console.log("=".repeat(74));
 console.log(`  JS kernel  ·  ${process.env.AI_MODEL ?? "(server default)"}  ·  ${sc.title}`);
 console.log("=".repeat(74));
 
-const hist = [
-  { role: "system", content: systemPrompt("ai") },
-  { role: "user", content: sc.task },
-];
-const out = await runLoop(
-  "ai",
-  k,
-  new OpenAIProvider({ endpoint, model: process.env.AI_MODEL, api_key: process.env.AI_KEY }),
-  hist,
-  { maxPasses: sc.limits.max_turns ?? 10 },
-);
-console.log(`\n  passes: ${out.passes}   calls: ${out.calls}`);
-// THE TRANSCRIPT, as the host runner prints it: a verdict with nothing to
-// explain it is not a measurement. `hist` is the live message list the loop
-// appended to — every user turn (the task, each delivered reply) and every
-// assistant turn, in order.
+// THE TURN BUDGET — `max_turns`, the bound the in-line loop used to enforce.
+// Turns are counted off the AI's own status events (a turn opens `thinking`),
+// never off the model's prose. A turn that opens PAST the budget is cancelled
+// at once through the kernel, the way any in-flight send is (`ps` → `cancel`):
+// the model's reply takes a network round trip, the kill does not, so the
+// over-budget pass never routes a call. The turns inside the budget ran whole.
+const maxTurns = sc.limits.max_turns ?? 10;
+let turns = 0;
+let cut = false;
+async function cancelAiTurns() {
+  const ps = (await k.send([{ target: "kernel", payload: { type: "ps" } }]))[0].result;
+  for (const t of ps?.tasks ?? []) {
+    if (t.agent === "ai" && t.verb === "send") {
+      await k.send([{ target: "kernel", payload: { type: "cancel", task_id: t.id } }]);
+    }
+  }
+}
+k.onInbox("ai", (e) => {
+  if (e?.type !== "status" || e.source !== "ai" || e.phase !== "thinking") return;
+  turns += 1;
+  if (turns > maxTurns) {
+    cut = true;
+    void cancelAiTurns();
+  }
+});
+
+// GIVE THE TASK — one send; it returns after ONE pass.
+const first = (await k.send([{ target: "ai", payload: { type: "send", text: sc.task, client_id: "probe" } }]))[0];
+console.log(`\n  pass 1: ${first.status} ${JSON.stringify(first.result).slice(0, 400)}`);
+
+// WAIT FOR THE CHAIN. Routing runs detached: the calls of a pass dispatch after
+// it, and their replies arrive as the next turn. The chain has ended when the
+// kernel's task table stays empty (the model said `done`, or the budget cut it);
+// `idle_seconds` bounds the wait, as in the host runner.
+const deadline = Date.now() + 1000 * Number(process.env.IDLE ?? sc.limits.idle_seconds ?? 100);
+let quiet = 0;
+while (Date.now() < deadline) {
+  await new Promise((r) => setTimeout(r, 200));
+  quiet = k.tasks.ids().length === 0 ? quiet + 1 : 0;
+  if (quiet >= 3) break;
+}
+const ran = Math.min(turns, maxTurns);
+console.log(`\n  turns: ${ran}${cut ? `   (cut at max_turns ${maxTurns})` : ""}${quiet >= 3 ? "" : "   (idle deadline reached with work in flight)"}`);
+
+// THE TRANSCRIPT, read back from the AI's MEMORY STORE — the conversation lives
+// there, not in the runner: every user turn (the task, each delivered reply,
+// every nudge) and every assistant turn, in the order the agent lived them.
+const conv = (await k.send([{ target: MEMORY, payload: { type: "read", owner: "ai" } }]))[0].result;
 let turnNo = 0;
-for (const m of hist.slice(2)) {
+for (const m of conv?.rows ?? []) {
+  if (m.role !== "user" && m.role !== "assistant") continue;
   const text = String(m.content ?? "");
   if (m.role === "assistant") {
     turnNo++;
     console.log(`\n-- turn ${turnNo} - ASSISTANT <-`);
     for (const line of text.split("\n")) console.log(`  > ${line}`);
   } else {
-    console.log(`\n-- ${String(m.role).toUpperCase()} ->`);
+    console.log(`\n-- ${String(m.role).toUpperCase()}${m.kind ? ` (${m.kind})` : ""} ->`);
     for (const line of text.split("\n")) console.log(`  < ${line}`);
   }
 }

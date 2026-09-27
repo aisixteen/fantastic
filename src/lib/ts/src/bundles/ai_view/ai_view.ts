@@ -3,9 +3,11 @@ import { Host } from "../host.ts";
 
 // ai_view — inline, MULTI-MODE AI view (chat mode = provider-agnostic chat UI). Ported from
 // ai_chat_webapp/index.html, rendered INLINE into a canvas frame, fronting any
-// backend that answers send/history/interrupt/status (ollama_backend,
-// nvidia_nim_backend). Preserves the full queue/inflight state machine, tool
-// blocks, status phases, history+snapshot rebuild, lifecycle reset, ESC-interrupt.
+// backend that answers send/history/status (ollama_backend, nvidia_nim_backend,
+// the browser-resident ai_backend). Preserves the full queue/inflight state
+// machine, tool blocks, status phases, history+snapshot rebuild, lifecycle reset,
+// ESC-to-cancel (there is no `interrupt` verb: an in-flight `send` IS a kernel
+// task, killed with `ps` → `cancel` on the kernel that runs the backend).
 // ids → scoped classes so many chat frames coexist on one canvas page.
 
 const CHAT_CSS = `
@@ -412,8 +414,18 @@ export const aiView: ViewBundle = {
         refreshBusy();
       });
     };
+    // An in-flight `send` IS a kernel task: find its row in `ps` and `cancel` it,
+    // on the kernel that runs the backend — this page's own for a browser-resident
+    // backend, the host's (reached as `kernel` over the bridge) for a host one.
+    const onBackendKernel = (p: Dict): Promise<unknown> =>
+      kernel.get(backend) !== undefined ? host.call("kernel", p as never) : host.callHost("kernel", p as never);
     const interrupt = (): void => {
-      void host.call(backend, { type: "interrupt" }).catch((e: Error) => console.warn("[chat] interrupt failed:", e));
+      void (async () => {
+        const ps = (await onBackendKernel({ type: "ps" })) as Dict;
+        const tasks = Array.isArray(ps["tasks"]) ? (ps["tasks"] as Dict[]) : [];
+        const turn = tasks.find((t) => t["agent"] === backend && t["verb"] === "send");
+        if (turn !== undefined) await onBackendKernel({ type: "cancel", task_id: turn["id"] as never });
+      })().catch((e: Error) => console.warn("[chat] cancel failed:", e));
     };
 
     sendBtn.addEventListener("click", () => (inflight !== null ? interrupt() : submit()));

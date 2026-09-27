@@ -209,19 +209,47 @@ def _children_name(agent) -> str:
     return cd if isinstance(cd, str) and cd else "agents"
 
 
+def _disk_parents(agent) -> dict[str, str | None]:
+    """This loader's PERSISTED records → `{id: parent_id}`, the parent taken from DISK
+    POSITION under its root (authoritative, as `read_tree` does): a record directly
+    under the root's children dir is parented to the loader itself. A record the
+    host never runs — a federated kernel's, sent through a bridge — exists only
+    here, so a walk that stops at the live tree loses every record nested under it."""
+    out: list[dict] = []
+    cd = _children_name(agent)
+    _walk(str(_root(agent)), cd, agent.id, out, cd)
+    return {r["id"]: r.get("parent_id") for r in out if isinstance(r.get("id"), str)}
+
+
+def _where(agent, node: str, disk: dict | None) -> tuple[bool, str | None, dict | None]:
+    """(known, parent, disk) for one id: the LIVE tree first, then this loader's
+    persisted records (read once per walk, cached in `disk`). Unknown in both ⇒
+    (False, None) — the caller decides; nothing is guessed."""
+    live = agent.ctx.get(node)
+    if live is not None:
+        return True, live.get("parent_id"), disk
+    if disk is None:
+        disk = _disk_parents(agent)
+    if node in disk:
+        return True, disk[node], disk
+    return False, None, disk
+
+
 def _resolve_path(agent, record: dict) -> Path:
-    """Compute a record's on-disk dir under this loader's root by walking
-    the record's parent chain in the kernel. Used when the agent isn't (or
-    is no longer) live (e.g. a removed agent, or a bridge-sent record)."""
+    """Compute a record's on-disk dir under this loader's root by walking its parent
+    chain: the live tree, then this loader's persisted records (so a record nested
+    2+ levels under a federated record lands where it belongs). A record that
+    already exists keeps ITS position; the payload's `parent_id` places only a NEW
+    one. Used when the agent isn't (or is no longer) live."""
     parts: list[str] = [record["id"]]
-    pid = record.get("parent_id")
-    k = agent.ctx
+    known, pid, disk = _where(agent, record["id"], None)
+    if not known:
+        pid = record.get("parent_id")
     seen: set[str] = set()
     while pid and pid != agent.id and pid not in seen:
         seen.add(pid)
         parts.append(pid)
-        prec = k.get(pid)
-        pid = prec.get("parent_id") if prec else None
+        _, pid, disk = _where(agent, pid, disk)
     path = _root(agent)
     children_dir = _children_name(agent)
     for part in reversed(parts):
@@ -861,21 +889,26 @@ def _guard_record_owner(
     An OPERATOR (`current_origin()` is None: the loader's own flush, the CLI, a
     bridge hydrating at boot) is the bookkeeping this verb exists for and stays
     ungated. An AGENT may name ITSELF or something it owns.
+
+    THE CHAIN IS WALKED WHERE IT REALLY IS: the live tree, then this loader's own
+    persisted records (a federated kernel's records are not live here — a canvas's
+    nested agents used to stop the walk at the canvas and be refused). A record
+    that already exists is placed by the live tree or its disk position, never by
+    the payload — else naming a sibling's id with `parent_id` = yourself passed.
+    The payload's `parent_id` places only a record that exists in neither.
     """
     caller = current_origin()
     if caller is None or caller == record_id:
         return None
-    # Walk up from the named record: the payload's `parent_id` first (a foreign
-    # record is not in the tree), then the live chain.
+    known, node, disk = _where(agent, record_id, None)
+    if not known:
+        node = parent_id if isinstance(parent_id, str) and parent_id else None
     seen: set[str] = set()
-    node = parent_id if isinstance(parent_id, str) and parent_id else None
-    if node is None:
-        node = (agent.ctx.get(record_id) or {}).get("parent_id")
     while node and node not in seen:
         if node == caller:
             return None
         seen.add(node)
-        node = (agent.ctx.get(node) or {}).get("parent_id")
+        _, node, disk = _where(agent, node, disk)
     return refusal(
         UNAUTHORIZED,
         f"{caller!r} may not {verb} {record_id!r} — a record verb is scoped to "

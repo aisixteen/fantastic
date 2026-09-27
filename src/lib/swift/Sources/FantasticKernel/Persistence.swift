@@ -103,7 +103,6 @@ public enum Persistence {
     /// whole tree behind a reseed).
     public static func readTree(rootDir: URL, fallbackRootId: String = "kernel_state") -> [AgentRecord]
     {
-        let fm = FileManager.default
         let rootFile = rootDir.appendingPathComponent(RECORD_FILE)
         var rootRec: AgentRecord? = nil
         if let obj = readRecord(rootFile), let rec = try? AgentRecord(json: .object(obj)) {
@@ -113,24 +112,44 @@ public enum Persistence {
         let childrenDir = (declared?.isEmpty == false) ? declared! : "agents"
 
         var records: [AgentRecord] = rootRec.map { [$0] } ?? []
-
-        func walk(_ dir: URL, parentId: String?) {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
-                let entries = try? fm.contentsOfDirectory(
-                    at: dir, includingPropertiesForKeys: nil, options: [])
-            else { return }
-            for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-                guard let obj = readRecord(entry.appendingPathComponent(RECORD_FILE)),
-                    var rec = try? AgentRecord(json: .object(obj))
-                else { continue }
-                rec.parentId = parentId
-                records.append(rec)
-                walk(entry.appendingPathComponent(childrenDir), parentId: rec.id)
-            }
-        }
-
-        walk(rootDir.appendingPathComponent(childrenDir), parentId: rootRec?.id ?? fallbackRootId)
+        walk(
+            rootDir.appendingPathComponent(childrenDir), childrenDir: childrenDir,
+            parentId: rootRec?.id ?? fallbackRootId, into: &records)
         return records
+    }
+
+    /// The records under one children dir, depth-first in sorted order, each
+    /// parented by its DISK POSITION (`parentId` at this level, the enclosing
+    /// record below it). A missing or unparseable record is skipped and its
+    /// subtree with it. `readTree` walks from a root; a loader walks its own
+    /// namespace with itself as the top-level parent (`_disk_parents`). Python
+    /// `_walk`.
+    public static func walkRecords(_ dir: URL, childrenDir: String, parentId: String?)
+        -> [AgentRecord]
+    {
+        var out: [AgentRecord] = []
+        walk(dir, childrenDir: childrenDir, parentId: parentId, into: &out)
+        return out
+    }
+
+    private static func walk(
+        _ dir: URL, childrenDir: String, parentId: String?, into out: inout [AgentRecord]
+    ) {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
+            let entries = try? fm.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil, options: [])
+        else { return }
+        for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard let obj = readRecord(entry.appendingPathComponent(RECORD_FILE)),
+                var rec = try? AgentRecord(json: .object(obj))
+            else { continue }
+            rec.parentId = parentId
+            out.append(rec)
+            walk(
+                entry.appendingPathComponent(childrenDir), childrenDir: childrenDir,
+                parentId: rec.id, into: &out)
+        }
     }
 }

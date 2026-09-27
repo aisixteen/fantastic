@@ -1,16 +1,16 @@
 // The compaction loop end to end, and the provider contract it relies on.
 // Mirrors python ai_core/tests/test_memory_features.py (calibrated trigger,
 // repeat-read dedupe, the fold summary's budget / re-summarise / cut / refusal,
-// the mechanical index, ids minted at the append) plus what is ts-specific: the
-// view is projected before EVERY pass of the in-line loop, the window is re-read
-// every pass, and the OpenAI provider reports usage + stop reason and takes a
-// per-call `maxTokens`.
+// the mechanical index, ids minted at the append), plus: the view is projected
+// before EVERY turn of a chain (each delivered reply is its own turn), the window
+// is re-read every turn, and the OpenAI provider reports usage + stop reason and
+// takes a per-call `maxTokens`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Kernel } from "../src/kernel/kernel.ts";
-import { Agent } from "../src/kernel/agent.ts";
+import type { Kernel } from "../src/kernel/kernel.ts";
 import type { Payload } from "../src/kernel/json.ts";
+import { estimateOne } from "../src/bundles/ai/context.ts";
 import type { ProjectionCtx, Summarizer, Turn } from "../src/bundles/ai/context.ts";
 import { stripped } from "../src/bundles/ai/strategies/strip.ts";
 import {
@@ -20,11 +20,11 @@ import {
   summaryBudget,
 } from "../src/bundles/ai/strategies/fold.ts";
 import { projectContext } from "../src/bundles/ai/seam.ts";
-import { dedupeRepeatBodies, wrap } from "../src/bundles/ai/replies.ts";
+import { dedupeRepeatBodies } from "../src/bundles/ai/replies.ts";
 import { aiMem, loadHistory, saveHistory } from "../src/bundles/ai/memory.ts";
-import { OpenAIProvider, makeAIBackend, type AIRecord, type Message, type Provider } from "../src/bundles/ai/ai_backend.ts";
-import { registerRamStore } from "../src/bundles/memory/ram_store.ts";
-import { World, callText, turn } from "./ai_world.ts";
+import { defaultSystemContent } from "../src/bundles/ai/howtos.ts";
+import { OpenAIProvider, type Message } from "../src/bundles/ai/ai_backend.ts";
+import { DONE, Mind, World, backendWorld, callText, settle, turn } from "./ai_world.ts";
 
 test.beforeEach(() => stripped.clear());
 
@@ -46,47 +46,21 @@ test("the endpoint's count calibrates the estimate", async () => {
   assert.equal(aiMem(w.k).projection.get("ai")!["calibration"], 10);
 });
 
-interface Script {
-  turns: string[];
-  seen: Message[][];
-  reported?: number;
-  midTurn?: (k: Kernel) => Promise<void>;
-}
-
-function backend(meta: Payload, script: Script): Kernel {
-  const k = new Kernel();
-  registerRamStore(k);
-  k.registerBundle(
-    "ai.ts",
-    makeAIBackend((id) => k.get(id)!.meta as AIRecord, {
-      makeProvider: (): Provider => {
-        const p: Provider = {
-          async *chat(messages) {
-            script.seen.push(messages.map((m) => ({ ...m })));
-            if (script.midTurn !== undefined) await script.midTurn(k);
-            if (script.reported !== undefined) p.lastPromptTokens = script.reported;
-            yield script.turns.length > 0 ? (script.turns.shift() as string) : "done.";
-          },
-        };
-        return p;
-      },
-    }),
-  );
-  k.registerBundle("tool.tools", (_id, p) => ({ text: "t".repeat(Number(p["size"] ?? 10)) }));
-  k.setRoot(new Agent({ id: "kernel_state", meta: { guid: "g1" } }));
-  k.register(new Agent({ id: "mem", parentId: "kernel_state", handlerModule: "ram_store.ts", meta: { operator: true, admins: ["kernel"], callable_by: { ai: "*" } } }));
-  k.register(new Agent({ id: "tool", parentId: "kernel_state", handlerModule: "tool.tools", meta: { callable_by: { ai: "*" } } }));
-  k.register(new Agent({ id: "ai", parentId: "kernel_state", handlerModule: "ai.ts", meta: { memory_store_id: "mem", can_call: { mem: "*", tool: "*" }, ...meta } }));
-  return k;
-}
-
 async function send(k: Kernel, text: string): Promise<Payload> {
-  return (await k.send([{ target: "ai", payload: { type: "send", text } }]))[0]!.result as Payload;
+  const out = (await k.send([{ target: "ai", payload: { type: "send", text } }]))[0]!.result as Payload;
+  await settle(k); // the chain the turn started runs to its `done`
+  return out;
+}
+
+/** What the system block costs in this world — windows below are sized off it. */
+async function systemTokens(k: Kernel): Promise<number> {
+  return estimateOne({ role: "system", content: await defaultSystemContent("ai", k) });
 }
 
 test("a turn records what the endpoint reported", async () => {
-  const script: Script = { turns: ["ok"], seen: [], reported: 777 };
-  const k = backend({ context_window: 32000, output_reserve: 0 }, script);
+  const mind = new Mind(["ok " + DONE]);
+  mind.reported = 777;
+  const k = backendWorld(mind, { context_window: 32000, output_reserve: 0 });
   await send(k, "hello");
   const st = (await k.send([{ target: "ai", payload: { type: "context_status" } }]))[0]!.result as Payload;
   assert.equal(st["reported_prompt_tokens"], 777);
@@ -100,8 +74,12 @@ test("a turn records what the endpoint reported", async () => {
 
 test("a repeated body is a stub citing the first", () => {
   const body = "line\n".repeat(200);
-  const reply = (id: number, text: string): Turn => ({ role: "user", id, content: wrap(text), reply: { pid: 100 + id, target: "notes", verb: "read" } });
-  const hist = [reply(1, body), { role: "assistant", id: 2, content: "again" }, reply(3, body), reply(4, "small")];
+  const hist: Turn[] = [
+    { role: "user", id: 1, content: `[reply to 10 · notes read]\n${body}` },
+    { role: "assistant", id: 2, content: "again" },
+    { role: "user", id: 3, content: `[reply to 11 · notes read]\n${body}` },
+    { role: "user", id: 4, content: "[reply to 12 · notes read]\nsmall" },
+  ];
   const out = dedupeRepeatBodies(hist);
   assert.deepEqual(out[0], hist[0], "the first copy stays whole");
   assert.match(String(out[2]!["content"]), /identical to the reply in row 1/);
@@ -147,13 +125,13 @@ test("the mechanical index keeps files, identifiers and the user's words", () =>
   const r: Turn[] = [
     { role: "user", id: 1, content: "please check filler_3.txt for deadbeef99" },
     { role: "assistant", id: 2, content: "reading notes/a.md" },
-    { role: "user", id: 3, content: wrap('{"text":"body"}'), reply: { pid: 9, target: "notes", verb: "read" } },
+    { role: "user", id: 3, content: "[reply to 9 · notes read]\nbody" },
   ];
   const idx = mechanicalIndex(r, [0, 1, 2]);
   assert.ok(idx.includes("filler_3.txt") && idx.includes("notes/a.md"));
   assert.ok(idx.includes("deadbeef99"));
   assert.ok(idx.includes("user said: please check filler_3.txt for deadbeef99"));
-  assert.ok(!idx.includes("<tool_response>"), "runtime lines are not the user's words");
+  assert.ok(!idx.includes("[reply to"), "runtime lines are not the user's words");
 });
 
 function cutThenFit(cuts: number): Summarizer & { asked: (number | undefined)[] } {
@@ -180,18 +158,14 @@ test("a summary cut twice is refused — nothing folded", async () => {
   assert.equal(await summarizeSpan(ctx(cutThenFit(2)), rows(), [1, 2, 3, 4, 5]), null);
 });
 
-// ── the loop: ids at the append, a projection per pass, the window per pass ──
+// ── the turn: ids at the append, a projection per turn, the window per turn ──
 
 test("a turn's rows are minted when appended, so id order is append order", async () => {
-  const script: Script = {
-    turns: ["ok"],
-    seen: [],
-    midTurn: async (k) => {
-      script.midTurn = undefined; // once
-      await saveHistory("ai", k, [{ role: "user", content: "mid" }]);
-    },
+  const mind = new Mind(["ok " + DONE]);
+  const k = backendWorld(mind, { context_window: 32000, output_reserve: 0 });
+  mind.midTurn = async () => {
+    await saveHistory("ai", k, [{ role: "user", content: "mid" }]);
   };
-  const k = backend({ context_window: 32000, output_reserve: 0 }, script);
   await send(k, "hello");
   const hist = await loadHistory("ai", k);
   const ids = hist.map((r) => r["id"] as number);
@@ -199,35 +173,38 @@ test("a turn's rows are minted when appended, so id order is append order", asyn
   assert.deepEqual(hist.slice(0, 2).map((r) => r["content"]), ["mid", "hello"]);
 });
 
-test("the view is projected before EVERY pass of one send", async () => {
+test("the view is projected before EVERY turn of a chain", async () => {
   // distinct bodies — identical ones would be deduped to one copy in view
   const calls = Array.from({ length: 6 }, (_, i) => callText("tool", { type: "go", size: 1200 + i })).join(" ");
-  const script: Script = { turns: [calls, "read them all"], seen: [] };
-  const k = backend({ context_window: 3000, output_reserve: 0, context_strategy: "truncate" }, script);
+  const mind = new Mind([calls, "read them all " + DONE]);
+  const k = backendWorld(mind, { context_window: 100_000, output_reserve: 0, context_strategy: "truncate" });
+  // the first turn fits; the turn the six replies arrive in (~1950 tokens) is past
+  // the trigger, yet leaves room for the live message itself
+  k.updateMeta("ai", { context_window: (await systemTokens(k)) + 2500 });
   const events: Payload[] = [];
   k.onInbox("ai", (e) => {
     if (e["type"] === "context") events.push(e);
   });
   const out = await send(k, "call the tool six times");
   assert.equal(out["error"], undefined, JSON.stringify(out));
-  assert.equal(script.seen.length, 2);
+  assert.equal(mind.seen.length, 2);
   // (the system block teaches the notice by name; the notice itself is a user turn)
   const noticed = (pass: Message[]) => pass.some((m) => m.role === "user" && m.content.startsWith("[context-notice]"));
-  assert.ok(!noticed(script.seen[0]!), "pass 1 fit");
-  assert.ok(noticed(script.seen[1]!), "pass 2 was projected");
+  assert.ok(!noticed(mind.seen[0]!), "turn 1 fit");
+  assert.ok(noticed(mind.seen[1]!), "turn 2 was projected");
   assert.ok(events.some((e) => e["phase"] === "compacted"));
 });
 
 test("a window switched smaller is fitted on the very next turn (downshift)", async () => {
-  const script: Script = { turns: [], seen: [] };
-  const k = backend({ context_window: 131072, output_reserve: 0, context_strategy: "fold" }, script);
+  const mind = new Mind();
+  const k = backendWorld(mind, { context_window: 131072, output_reserve: 0, context_strategy: "fold" });
   for (let i = 0; i < 4; i++) {
-    script.turns.push(`${callText("tool", { type: "go", size: 2000 + i })}`, `noted ${i}`);
+    mind.turns.push(callText("tool", { type: "go", size: 2000 + i }), `noted ${i} ${DONE}`);
     await send(k, `task ${i}`);
   }
   assert.equal(aiMem(k).projection.get("ai")!["fired"], false, "a large window never compacted");
-  k.updateMeta("ai", { context_window: 3000 });
-  script.turns.push("ok");
+  k.updateMeta("ai", { context_window: (await systemTokens(k)) + 1200 });
+  mind.turns.push("ok " + DONE);
   const out = await send(k, "and now?");
   assert.equal(out["error"], undefined, JSON.stringify(out));
   assert.equal(aiMem(k).projection.get("ai")!["fired"], true, "the smaller window was fitted on the next turn");
