@@ -401,6 +401,7 @@ dependencies = [
  "fantastic-nvidia-nim-backend",
  "fantastic-ollama-backend",
  "fantastic-ram-store",
+ "fantastic-responses-backend",
  "fantastic-scenario-probes",
  "fantastic-scheduler",
  "fantastic-static-loader",
@@ -563,6 +564,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "fantastic-responses-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "fantastic-ram-store",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

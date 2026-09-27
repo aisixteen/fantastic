@@ -17,6 +17,7 @@ members = [
     "fantastic-ollama-backend",
     "fantastic-ram-store",
     "fantastic-relay-connector",
+    "fantastic-responses-backend",
     "fantastic-scheduler",
     "fantastic-static-loader",
     "fantastic-terminal-backend",
@@ -270,6 +271,7 @@ dependencies = [
     { name = "fantastic-ollama-backend" },
     { name = "fantastic-ram-store" },
     { name = "fantastic-relay-connector" },
+    { name = "fantastic-responses-backend" },
     { name = "fantastic-scheduler" },
     { name = "fantastic-static-loader" },
     { name = "fantastic-terminal-backend" },
@@ -304,6 +306,7 @@ requires-dist = [
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
     { name = "fantastic-ram-store", editable = "bundled_agents/memory/ram_store" },
     { name = "fantastic-relay-connector", editable = "bundled_agents/io/relay_connector" },
+    { name = "fantastic-responses-backend", editable = "bundled_agents/ai/responses/responses_backend" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
     { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal" },
@@ -402,6 +405,21 @@ dependencies = [
 requires-dist = [
     { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "websockets", specifier = ">=12,<17" },
+]
+
+[[package]]
+name = "fantastic-responses-backend"
+version = "0.1.0"
+source = { editable = "bundled_agents/ai/responses/responses_backend" }
+dependencies = [
+    { name = "fantastic-ai-core" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "httpx" },
 ]
 
 [[package]]

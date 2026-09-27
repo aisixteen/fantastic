@@ -39,6 +39,7 @@ export { Host } from "./bundles/host.ts";
 export { registerRamStore, RAM_STORE_README } from "./bundles/memory/ram_store.ts";
 export { registerAIBackend, makeAIBackend, OpenAIProvider, AI_README, SEND_TIMEOUT } from "./bundles/ai/ai_backend.ts";
 export type { AIRecord, AIBackendOptions } from "./bundles/ai/ai_backend.ts";
+export { ResponsesProvider } from "./bundles/ai/responses.ts";
 
 export interface BootOptions {
   /** The host's WS origin, e.g. `ws://127.0.0.1:8888` — never guessed. */
