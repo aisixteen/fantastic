@@ -114,6 +114,10 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_anthropic_backend::HANDLER_MODULE,
         fantastic_anthropic_backend::AnthropicBundle,
     );
+    reg.register(
+        fantastic_responses_backend::HANDLER_MODULE,
+        fantastic_responses_backend::ResponsesBundle,
+    );
     // ── Full-tier-only bundles (subprocess / dynamic-loading / etc.).
     //
     // These spawn child processes (`std::process::Command` /

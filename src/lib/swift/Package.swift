@@ -55,6 +55,7 @@ let package = Package(
             "FantasticOllamaBackend",
             "FantasticNvidiaNimBackend",
             "FantasticAnthropicBackend",
+            "FantasticResponsesBackend",
             "FantasticLlamaCppBackend",
             "FantasticRamStore",
         ]),
@@ -278,6 +279,13 @@ let package = Package(
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
         ),
+        .target(
+            name: "FantasticResponsesBackend",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
+        ),
         // ── Shared runner lifecycle (mirrors FantasticAICore) ────
         // Cross-platform dispatch skeleton (reflect/boot/shutdown/
         // start/stop) behind a `RunnerTransport` seam. The local + ssh
@@ -316,6 +324,7 @@ let package = Package(
                 "FantasticRamStore",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
+                "FantasticResponsesBackend",
                 "FantasticLlamaCppBackend",
                 "FantasticExecBridge", "FantasticTerminalBackend",
             ]
@@ -402,6 +411,7 @@ let package = Package(
             dependencies: [
                 "FantasticAICore", "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
+                "FantasticResponsesBackend",
             "FantasticLlamaCppBackend", "FantasticJSON",
             ]
         ),

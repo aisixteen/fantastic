@@ -315,6 +315,7 @@ uv run pytest -n auto
     ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core
     ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible) — thin binding over ai_core + NIM-specific key/retry verbs
     ├── ai/anthropic/anthropic_backend        # Anthropic LLM (anthropic_backend.tools) — thin binding over ai_core
+    ├── ai/responses/responses_backend        # OpenAI Responses-API LLM (responses_backend.tools) — thin binding over ai_core
     ├── io/io_bridge/                         # the IO base — a reflectable keystone agent (channel model, rule registries, read loop/verbs/lifecycle, MemoryTransport); bridges + web faces derive from it; IO legs sealed by default
     ├── io/ws_bridge/                     # cross-kernel WS bridge (asymmetric) — ws / ssh+ws transports
     ├── io/relay_connector/               # cross-kernel bridge through a relay-KERNEL router — dial ws://host/<guid>, X-Fantastic-Auth, reach a partner_guid; tunnels io_bridge frames; auto-reconnect + keepalive + directory (list_peers/watch) + kernelgroup typing (role/owner_guid/exposes via set_identity)

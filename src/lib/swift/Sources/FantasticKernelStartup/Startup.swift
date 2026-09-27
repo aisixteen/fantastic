@@ -20,6 +20,7 @@ import FantasticKernelState
 import FantasticScenarioProbes
 import FantasticKernelBridge
 import FantasticAnthropicBackend
+import FantasticResponsesBackend
 import FantasticLlamaCppBackend
 import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
@@ -84,6 +85,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("ollama_backend.tools", OllamaBackendBundle())
     r.register("nvidia_nim_backend.tools", NvidiaNimBundle())
     r.register("anthropic_backend.tools", AnthropicBundle())
+    r.register("responses_backend.tools", ResponsesBundle())
     r.register("llamacpp_backend.tools", LlamaCppBundle())
     #if os(macOS)
         r.register("exec_bridge.tools", ExecBridgeBundle())

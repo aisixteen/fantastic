@@ -71,6 +71,10 @@ export interface AIRecord {
    *  `enable_thinking`. Undefined means DO NOT SEND it — a model without a
    *  thinking gate rejects an unknown kwarg. */
   think?: boolean;
+  /** ResponsesProvider: the per-turn output budget (`max_output_tokens`). */
+  max_tokens?: number;
+  /** ResponsesProvider: request-body knobs merged verbatim after the fixed fields. */
+  sampling?: { [k: string]: unknown };
 }
 
 /** One chat message as the wire wants it. */

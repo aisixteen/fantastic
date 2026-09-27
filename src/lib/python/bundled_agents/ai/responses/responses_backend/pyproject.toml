@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-responses-backend"
+version = "0.1.0"
+description = "Fantastic responses backend — reflect-driven LLM agent over the OpenAI Responses API, RAW tool-calling owned by ai_core."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = ["httpx", "fantastic-ai-core"]
+
+[project.entry-points."fantastic.bundles"]
+responses_backend = "responses_backend.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/responses_backend"]
