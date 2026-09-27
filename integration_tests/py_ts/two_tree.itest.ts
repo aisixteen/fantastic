@@ -14,7 +14,6 @@ import { Kernel } from "../../src/lib/ts/src/kernel/kernel.ts";
 import { Agent } from "../../src/lib/ts/src/kernel/agent.ts";
 import { WsBridge } from "../../src/lib/ts/src/transport/bridge.ts";
 import { ProxyLoader } from "../../src/lib/ts/src/bundles/loader/proxy_loader.ts";
-import { registerHtmlAgent } from "../../src/lib/ts/src/bundles/html_agent/html_agent.ts";
 import { bootHost, teardownHost } from "./_host.ts";
 import type { Host } from "./_host.ts";
 
@@ -40,12 +39,14 @@ interface Frontend {
   bridge: WsBridge;
 }
 
-/** A browser-side kernel: the view bundles registered + a real WsBridge dialing
- *  the host, and the ONE auto-added ProxyLoader proxying to `web_loader`. */
+/** A browser-side kernel: STUB bundles for the two record kinds this test
+ *  round-trips (the real canvas + html_agent are the CLI's app now — this proves
+ *  the lib's persistence link, not a view) + a real WsBridge dialing the host,
+ *  and the ONE auto-added ProxyLoader proxying to `web_loader`. */
 function frontend(h: Host): Frontend {
   const kernel = new Kernel();
   kernel.registerBundle("canvas.ts", () => null);
-  registerHtmlAgent(kernel);
+  kernel.registerBundle("html_agent.ts", () => null);
   const bridge = new WsBridge(kernel, {
     origin: h.origin,
     controlEndpoint: "web_loader",
@@ -97,7 +98,7 @@ test("E2E: a frontend persists over a REAL WS to web_loader + rehydrates", async
     "canvas",
     "agents",
     "panel",
-    "agent.json",
+    "agent.yaml",
   );
   assert.ok(await waitForFile(panelJson, 3000), `expected ${panelJson} on host disk`);
 

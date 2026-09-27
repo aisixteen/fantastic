@@ -2,8 +2,8 @@
 #
 # ONE fat OCI image (podman AND docker), tag `fantastic`,
 # carrying THREE execution runtimes (python canonical, rust prebuilt, swift
-# prebuilt) + ONE bundled runtime (the static js_kernel.zip, copied prebuilt
-# from ts/). The runtime is chosen at launch via FANTASTIC_RUNTIME
+# prebuilt) + ONE bundled runtime (the static js_kernel.zip — the js kernel
+# LIBRARY, no page — copied prebuilt from src/lib/ts). The runtime is chosen at launch via FANTASTIC_RUNTIME
 # (entrypoint.sh).
 #
 # SWIFT IS A FULL RUNTIME HERE — its web server is swift-nio (cross-platform),

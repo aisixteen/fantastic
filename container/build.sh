@@ -12,8 +12,9 @@
 # mirror of the per-arch CI release jobs. `PLATFORM` (a list) still does the
 # combined manifest path. All three modes share the same prereqs below.
 #
-# Works with podman OR docker. The prebuilt ts/dist/js_kernel.zip is COPIED into
-# the image (not built there) — this script ensures it exists first.
+# Works with podman OR docker. The prebuilt src/lib/ts/dist/js_kernel.zip (the js
+# kernel LIBRARY — no page) is COPIED into the image (not built there) — this
+# script ensures it exists first.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -26,10 +27,10 @@ PUSH="${PUSH:-0}"
 # Defaults to "dev" for local builds; CI passes the release tag (e.g. v0.5.3).
 VERSION="${FANTASTIC_VERSION:-dev}"
 
-# ── prereq: the bundled JS runtime (copied prebuilt from ts/) ──────────────
+# ── prereq: the bundled js kernel library (copied prebuilt from src/lib/ts) ──
 if [ ! -f "$REPO/src/lib/ts/dist/js_kernel.zip" ]; then
-  echo "build.sh: ts/dist/js_kernel.zip missing — building it (cd src/lib/ts && sh scripts/pack.sh)"
-  ( cd "$REPO/src/lib/ts" && sh scripts/pack.sh )
+  echo "build.sh: src/lib/ts/dist/js_kernel.zip missing — building it (scripts/build/ts.sh)"
+  sh "$REPO/scripts/build/ts.sh" --out "$REPO/src/lib/ts/dist/js_kernel.zip"
 fi
 
 # ── prereq: generate the descriptive head page from the repo readmes ───────

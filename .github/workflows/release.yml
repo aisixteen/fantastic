@@ -3,7 +3,8 @@
 # that anyone can verify):
 #   1) kernel hosts  — rust (linux amd64/arm64, macOS arm64) + swift (macOS arm64)
 #                      prebuilt binaries; python kernel source tarball
-#   2) js archive    — ts/dist/js_kernel.zip (built with the vendored esbuild)
+#   2) js archive    — src/lib/ts/dist/js_kernel.zip: the js kernel LIBRARY (ESM,
+#                      no page; built with the vendored esbuild)
 #   3) docker cont.  — TWO per-arch tags: ghcr.io/<owner>/fantastic:amd64 + :arm64
 #                      (+ :<version>-amd64 / :<version>-arm64). NOT a merged manifest.
 # Each artifact gets a SLSA build-provenance attestation (actions/attest-build-
@@ -41,7 +42,7 @@ concurrency:
 jobs:
   # ── 2) JS archive ─────────────────────────────────────────────────────────
   js:
-    name: js archive (js_kernel.zip)
+    name: js kernel library (js_kernel.zip)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,7 +53,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-      - name: Build vendored esbuild (linux-x64) + pack the bundle
+      - name: Build vendored esbuild (linux-x64) + pack the js kernel library
         run: |
           GOBIN="$PWD/src/lib/ts/tools/esbuild/linux-x64" \
             go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
@@ -270,4 +271,4 @@ jobs:
 
             **Kernel hosts:** rust (linux amd64/arm64, macOS arm64) + swift (macOS arm64)
             prebuilt binaries; python kernel source tarball (install via `uv sync`).
-            **JS:** `js_kernel.zip` (self-contained frontend bundle).
+            **JS:** `js_kernel.zip` (the js kernel library — one ESM bundle + readme; no page).
