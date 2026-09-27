@@ -89,20 +89,20 @@ test("watchRemote streams a host agent's inbox events to a local watcher", async
     kernel.onInbox("viewer", (p) => events.push(p));
     kernel.watch(host.webId, "viewer"); // remote → bridge.watchRemote(web)
 
-    // create a child agent under the web agent → web emits `agent_created`
-    // on its own inbox (see _verb_create_agent), which our socket mirrors.
-    await bridge.forward(host.webId, {
-      type: "create_agent",
-      handler_module: "web_rest.tools",
-    });
+    // EMIT to the web agent's inbox over the wire; the watch mirrors it back.
+    // (A child created under `web` no longer announces `agent_created` on the
+    // parent's inbox — kernel verbs are the root's, and creation is a state
+    // event — so the stream is driven directly.)
+    await new Promise((r) => setTimeout(r, 200)); // let the watch socket open
+    bridge.emitRemote(host.webId, { type: "itest_ping", n: 1 });
 
     const start = Date.now();
     while (events.length === 0 && Date.now() - start < 5000) {
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.ok(
-      events.some((e) => e["type"] === "agent_created"),
-      `expected an agent_created event, got ${JSON.stringify(events)}`,
+      events.some((e) => e["type"] === "itest_ping"),
+      `expected the emitted itest_ping event, got ${JSON.stringify(events)}`,
     );
   } finally {
     bridge.close();

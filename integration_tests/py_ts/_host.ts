@@ -309,17 +309,34 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   // auto-persists ONLY through a discovered file_bridge@.fantastic; without one the
   // one-shot seeds below stay in RAM and never reach disk, so the spawned daemon
   // boots empty. Seeding the store first makes the whole seeded tree durable.
+  // Kernel verbs are answered by the ROOT and take an explicit `parent_id` (the
+  // agent named is the operand, not the actor).
   runCli(tmp, [
-    "kernel_state",
+    "kernel",
     "create_agent",
+    "parent_id=kernel_state",
     "handler_module=file_bridge.tools",
     "id=store",
     "root=.fantastic",
     "ingress_rule=allow_all_ingress",
   ]);
-  const webOut = runCli(tmp, [
-    "kernel_state",
+  // THE MEMORY STORE: a started kernel (the daemon) refuses to run without one —
+  // the root names it in `memory_store_id`. A ram_store serves the operator
+  // (`kernel`) and lives as long as the daemon, which is all a test needs.
+  runCli(tmp, [
+    "kernel",
     "create_agent",
+    "parent_id=kernel_state",
+    "handler_module=ram_store.tools",
+    "id=memory",
+    "operator=true",
+    'admins=["kernel"]',
+  ]);
+  runCli(tmp, ["kernel", "update_agent", "id=kernel_state", "memory_store_id=memory"]);
+  const webOut = runCli(tmp, [
+    "kernel",
+    "create_agent",
+    "parent_id=kernel_state",
     "handler_module=web.tools",
     `port=${port}`,
   ]);
@@ -329,21 +346,43 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   // bare web_ws refuses every forwarded call. Open it (allow_all): this is the
   // drivable test surface, mirroring the python `seed_web_ws` helper.
   const wsOut = runCli(tmp, [
-    webId,
+    "kernel",
     "create_agent",
+    `parent_id=${webId}`,
     "handler_module=web_ws.tools",
     "ingress_rule=allow_all_ingress",
   ]);
   const webWsId = extractId(wsOut, "web_ws");
+  // THE LEG'S RIGHTS, both halves (deny-all everywhere): every ws frame is
+  // dispatched AS this leg, so the driver reaches the root only if the leg may
+  // (its `can_call`; privileged verbs named — never under `*`) and the root
+  // accepts it (`callable_by`). Mirrors the e2e driver's seed.
+  const BASE = { $self: "*", $parent: "*", $children: "*" };
+  const ROOT_VERBS = ["*", "create_agent", "update_agent", "delete_agent"];
+  runCli(tmp, [
+    "kernel",
+    "update_agent",
+    `id=${webWsId}`,
+    `can_call=${JSON.stringify({ ...BASE, kernel_state: ROOT_VERBS, [webId]: "*", memory: "*" })}`,
+  ]);
+  runCli(tmp, [
+    "kernel",
+    "update_agent",
+    "id=kernel_state",
+    `callable_by=${JSON.stringify({ ...BASE, [webWsId]: "*" })}`,
+  ]);
 
   // optional frontend store: a SECOND kernel_state rooted at .fantastic/web,
   // reachable over WS by its `web_loader` alias. Created BEFORE spawn (the
-  // one-shot CLI is locked out once the daemon owns the dir).
+  // one-shot CLI is locked out once the daemon owns the dir). A CHILD OF THE WS
+  // LEG: the page's record verbs arrive as the leg, and the record-owner guard
+  // admits only records inside the caller's own subtree.
   let webLoaderId: string | undefined;
   if (opts.webLoader === true) {
     const wlOut = runCli(tmp, [
-      webId,
+      "kernel",
       "create_agent",
+      `parent_id=${webWsId}`,
       "handler_module=kernel_state.tools",
       "root=.fantastic/web",
       "watch=false",
@@ -368,8 +407,9 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       distRoot = "ts_dist_src";
     }
     runCli(tmp, [
-      webId,
+      "kernel",
       "create_agent",
+      `parent_id=${webId}`,
       "handler_module=file_bridge.tools",
       "id=ts_dist",
       `root=${distRoot}`,
@@ -381,8 +421,9 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   let pyId: string | undefined;
   if (opts.execBridge === true || opts.llm !== undefined) {
     const pyOut = runCli(tmp, [
-      "kernel_state",
+      "kernel",
       "create_agent",
+      "parent_id=kernel_state",
       "handler_module=exec_bridge.tools",
       // sealed + no-default-interpreter: both must be named to run anything.
       `interpreters=["${PY_INTERP}"]`,
@@ -399,16 +440,18 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   if (opts.llm !== undefined) {
     const bundle = opts.llm.bundle ?? "ollama_backend.tools";
     runCli(tmp, [
-      "kernel_state",
+      "kernel",
       "create_agent",
+      "parent_id=kernel_state",
       "handler_module=file_bridge.tools",
       "id=llm_files",
       "root=.fantastic",
       "ingress_rule=allow_all_ingress", // the fs edge seals by default — open the backing
     ]);
     const args = [
-      "kernel_state",
+      "kernel",
       "create_agent",
+      "parent_id=kernel_state",
       `handler_module=${bundle}`,
       "file_bridge_id=llm_files",
     ];
@@ -423,16 +466,18 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   let schedulerId: string | undefined;
   if (opts.scheduler === true) {
     runCli(tmp, [
-      "kernel_state",
+      "kernel",
       "create_agent",
+      "parent_id=kernel_state",
       "handler_module=file_bridge.tools",
       "id=sched_files",
       "root=.fantastic",
       "ingress_rule=allow_all_ingress", // the fs edge seals by default — open the backing
     ]);
     const schedOut = runCli(tmp, [
-      "kernel_state",
+      "kernel",
       "create_agent",
+      "parent_id=kernel_state",
       "handler_module=scheduler.tools",
       "file_bridge_id=sched_files",
     ]);
