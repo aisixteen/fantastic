@@ -43,7 +43,7 @@ compose_web() {
   # unwired), so without this the web/web_ws/rest one-shots would never reach disk
   # and the daemon would boot empty. The store self-persists (survives to the next
   # one-shot). Idempotent across the calls below.
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=store root=.fantastic ingress_rule=allow_all_ingress >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=store root=.fantastic 'allow=["."]' ingress_rule=allow_all_ingress >/dev/null 2>&1
   $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=web.tools id=web "port=$4" >/dev/null 2>&1
   $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_ws.tools id=web_ws ingress_rule=allow_all_ingress >/dev/null 2>&1
   $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_rest.tools id=rest ingress_rule=allow_all_ingress >/dev/null 2>&1
@@ -55,7 +55,7 @@ compose_web() {
 # a read-only file_bridge rooted at the relative `head`. $1=workdir $2=bin $3=root
 compose_head() {
   $ENGINE run --rm -v "$1:/work" --entrypoint sh "$TAG" -c 'mkdir -p /work/head && cp /opt/fantastic/head/index.html /work/head/index.html' >/dev/null 2>&1
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=head root=head readonly=true ingress_rule=allow_all_ingress >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=head root=head 'allow=["index.html"]' readonly=true ingress_rule=allow_all_ingress >/dev/null 2>&1
 }
 
 # ── build ──────────────────────────────────────────────────────────────────
@@ -95,10 +95,10 @@ for rt in python rust swift; do
     -e FANTASTIC_RUNTIME="$rt" -e FANTASTIC_PORT="$P" "$TAG" >/dev/null
   up=""
   i=0; while [ $i -lt 100 ]; do
-    if curl -sf -o /dev/null "http://127.0.0.1:$P/"; then up=1; break; fi
+    if curl -sf -o /dev/null "http://127.0.0.1:$P/_assets/favicon.png"; then up=1; break; fi
     sleep 0.5; i=$((i+1))
   done
-  if [ -n "$up" ]; then ok "$rt daemon serves http://127.0.0.1:$P/ (200)"
+  if [ -n "$up" ]; then ok "$rt daemon serves http://127.0.0.1:$P/ (favicon 200)"
   else bad "$rt daemon never bound :$P ($($ENGINE logs "$c" 2>&1 | tail -3 | tr '\n' '|'))"; fi
   # Call a verb over the wire (web_rest surface) — proves the kernel is callable,
   # not just rendering, and dispatch works end-to-end.
@@ -134,7 +134,7 @@ CONTAINERS="$CONTAINERS $c"
 compose_web "$tmp" "$PYBIN" kernel_state "$P"
 $ENGINE run -d --rm --name "$c" -p "127.0.0.1:$P:$P" -v "$tmp:/work" \
   -e FANTASTIC_RUNTIME=python -e FANTASTIC_PORT="$P" "$TAG" >/dev/null
-up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
+up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/_assets/favicon.png" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
 if [ -z "$up" ]; then
   bad "shutdown_kernel: container never bound :$P ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
 else
@@ -186,11 +186,11 @@ else
   ok "no node/bun/deno/cargo/go/rustc/gcc in the final image"
 fi
 
-# ── `/` is the agent-tree index (both runtimes); the head rides the gated route ─
-# No FANTASTIC_WEB_INDEX env: `/` is ALWAYS the live agent-tree index. The
+# ── `/` is a 404 (both runtimes); the head rides the gated route ──────────────
+# No FANTASTIC_WEB_INDEX env: `/` is ALWAYS a 404 (the host renders nothing). The
 # all-readmes head page is served the one gated way — a read-only file_bridge
 # over /opt/fantastic/head, reached at /head/file/index.html (read_stream).
-echo "== / is the agent index; head served via /head/file/index.html (gated) =="
+echo "== / is a 404; head served via /head/file/index.html (gated) =="
 for spec in "python:$PYBIN:kernel_state:" "rust:$RUSTBIN:core:-e FANTASTIC_RUNTIME=rust"; do
   rt=${spec%%:*}; rest=${spec#*:}; bin=${rest%%:*}; rest=${rest#*:}; root=${rest%%:*}; envflag=${rest#*:}
   P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-head-$rt-$$"
@@ -199,13 +199,13 @@ for spec in "python:$PYBIN:kernel_state:" "rust:$RUSTBIN:core:-e FANTASTIC_RUNTI
   compose_head "$tmp" "$bin" "$root"
   # shellcheck disable=SC2086
   $ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" $envflag "$TAG" >/dev/null
-  up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
-  page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
-  # `/` must be the agent index (NOT the head page).
-  if [ -n "$up" ] && ! printf '%s' "$page" | grep -q "KERNEL HEAD"; then
-    ok "$rt: / serves the plain agent-tree index (no head back-channel)"
+  up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/_assets/favicon.png" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$P/" 2>/dev/null || true)
+  # `/` is not a page: the host renders nothing of its own (no tree index, no head).
+  if [ -n "$up" ] && [ "$code" = "404" ]; then
+    ok "$rt: / is a 404 (the host renders nothing of its own)"
   else
-    bad "$rt: / unexpectedly served the head page or never came up ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+    bad "$rt: / answered $code or never came up ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
   fi
   # The head page is reachable through the gated file_bridge route.
   hp=$(curl -s "http://127.0.0.1:$P/head/file/index.html" 2>/dev/null || true)

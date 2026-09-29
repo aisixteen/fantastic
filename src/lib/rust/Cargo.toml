@@ -16,7 +16,6 @@ members = [
     "crates/bundles/fantastic-web-rest",
     "crates/bundles/fantastic-file",
     "crates/bundles/fantastic-ram-store",
-    "crates/bundles/fantastic-text-file",
     "crates/bundles/fantastic-static-loader",
     "crates/bundles/fantastic-scheduler",
     "crates/bundles/fantastic-ai-core",
@@ -28,7 +27,6 @@ members = [
     "crates/bundles/fantastic-llamacpp-backend",
     "crates/bundles/fantastic-cli-bundle",
     "crates/bundles/fantastic-scenario-probes",
-    "crates/bundles/fantastic-terminal-backend",
     "crates/bundles/fantastic-exec-bridge",
 ]
 

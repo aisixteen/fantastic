@@ -1,9 +1,8 @@
 // HTTP host bundle (python `web.tools`).
 //
-// `web` owns the listener. Rendering routes are baked in (`/`,
-// `/_assets/favicon.png`, `/favicon.png`, `/<id>/file/<path>` — no
-// server-side `/<id>/` render route, no transport.js, no vendored asset
-// tree; all UI is the TS frontend). Verb-invocation routes are NOT —
+// `web` owns the listener and renders nothing of its own: the baked-in
+// routes are `/_assets/favicon.png` and `/<id>/file/<path>` (an undeclared
+// `/` is a 404; all UI is an app on the TS kernel). Verb-invocation routes are NOT —
 // those live in sub-agent bundles (`web_ws`, `web_rest`) that declare
 // their routes via the duck-typed `get_routes` verb. On boot, web walks
 // its children and mounts whatever they return onto the live router.
@@ -273,24 +272,18 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
         }
         // Announce OURSELVES to the cli renderer (the boot-event convention):
         // the web host owns its port, so it tells the terminal where to attach —
-        // the renderer never reaches in for it. Best-effort: cli's `say` returns
-        // None; if there is no cli (non-tty), fall back to a stderr log so
-        // container logs still record the bind.
+        // the renderer never reaches in for it. No cli (non-tty) ⇒ nobody is
+        // told; the bound port is on this agent's reflect.
         let line =
             "listening on http://127.0.0.1:\(handle.port)/"
             + " · rest/ws are children (reflect kernel for ids)"
-        let reply = await kernel.send([
+        _ = await kernel.send([
             Item(
                 AgentId("cli"),
                 .object([
                     "type": .string("say"), "source": .string("web"), "text": .string(line),
                 ]))
-        ])[0].result
-        if !reply.isNull {
-            FileHandle.standardError.write(
-                "  [web] \(agent.id.value) listening on http://localhost:\(handle.port)/\n"
-                    .data(using: .utf8) ?? Data())
-        }
+        ])
         return .object([
             "running": .bool(true),
             "surfaces": .array(handle.routesByChild().keys.map { .string($0.value) }),
@@ -322,11 +315,18 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                 grant: web.metaValue(forKey: "can_call") ?? .null, verb: "read_stream",
                 otherId: agent.id.value, holderId: webId.value, parentId: web.parentId?.value,
                 childIds: Set(web.childIds().map { $0.value }), loaderId: nil)
-            if !egress.allowed { continue }
+            // the heritable half — an ancestor's `{aid: {verbs, for: descendants}}`
+            if !egress.allowed
+                && !kernel.heritableEgress(
+                    sender: webId, verb: "read_stream", targetId: agent.id.value)
+            {
+                continue
+            }
             let ingress = authorizeCall(
                 grant: meta["callable_by"] ?? .null, verb: "read_stream", otherId: webId.value,
                 holderId: agent.id.value, parentId: agent.parentId?.value,
-                childIds: Set(agent.childIds().map { $0.value }), loaderId: nil)
+                childIds: Set(agent.childIds().map { $0.value }), loaderId: nil,
+                inSubtree: { kernel.inSubtree($0, of: $1) })
             if !ingress.allowed { continue }
             guard
                 let rule = try? resolveIngress(
@@ -360,7 +360,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     /// python `PB/web/host/src/web/readme.md`, byte for byte.
     static let readmeText = """
         # web — uvicorn HTTP host
-        Serves rendering only: `/` (tree), `/<id>/file/<path>` (static file proxy), favicon. No server-side `/<id>/` render route — frontend panels live in the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest): they DECLARE routes via the duck-typed `get_routes` verb (pure data — `{kind, method?, path}`) and hand the live endpoint for each path to this host through the duck-typed `route_endpoints(agent)` module hook. A leg declaring a route without that hook fails web boot. `port` field on the record is where it binds; `host` is the bind address — absent ⇒ `127.0.0.1` (loopback), set `0.0.0.0` explicitly to publish (a container). Websocket upgrades and non-GET/HEAD/OPTIONS requests from a browser `Origin` that is not this host's own (`http://<host>:<port>`, both loopback spellings when loopback) nor listed in the record's `allowed_origins` (exact strings) are refused — 403 / refused upgrade, logged. No Origin header (CLI, curl, a bridge) passes; the leg's `ingress_rule` still gates it. Both fields are ordinary record meta: create_agent, a roster yaml, update_agent.
+        Renders nothing of its own (an undeclared `/` is a 404): it serves `/<id>/file/<path>` (the `read_stream` file proxy) and the favicon (`/_assets/favicon.png`). Frontend panels live in an app on the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest): they DECLARE routes via the duck-typed `get_routes` verb (pure data — `{kind, method?, path}`) and hand the live endpoint for each path to this host through the duck-typed `route_endpoints(agent)` module hook. A leg declaring a route without that hook fails web boot. `port` field on the record is where it binds; `host` is the bind address — absent ⇒ `127.0.0.1` (loopback), set `0.0.0.0` explicitly to publish (a container). Websocket upgrades and non-GET/HEAD/OPTIONS requests from a browser `Origin` that is not this host's own (`http://<host>:<port>`, both loopback spellings when loopback) nor listed in the record's `allowed_origins` (exact strings) are refused — 403 / refused upgrade, logged. No Origin header (CLI, curl, a bridge) passes; the leg's `ingress_rule` still gates it. Both fields are ordinary record meta: create_agent, a roster yaml, update_agent.
 
         """
 }

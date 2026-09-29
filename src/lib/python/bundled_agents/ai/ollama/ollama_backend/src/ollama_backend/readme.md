@@ -10,13 +10,8 @@ assembly, the ONE-PASS `_run`, and all the context machinery live in
 model from the agent record) and `ai_core.build()` wires the rest into
 `(VERBS, handler)`.
 
-## Bare completion — the tool loop is the CALLER's
-This backend does NOT parse tool calls and does NOT loop. `send` performs exactly
-ONE provider pass: it streams the model's pure text and returns it. Any tool
-convention is the caller's: an authored agent teaches its convention in the
-prompt (via `system_prompt`), reads the completion, dispatches, and feeds the
-result back as the next `{send, text}` turn. The `OllamaProvider` never receives a
-`tools` array and no `message.tool_calls` are read — model-agnostic.
+## Bare completion + the `<call>` grammar — no native tool API
+`send` performs exactly ONE provider pass: the `OllamaProvider` streams the model's text and never receives a `tools` array nor reads `message.tool_calls`. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
 ## Context management — owned HERE
 The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record

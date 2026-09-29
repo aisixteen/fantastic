@@ -126,6 +126,13 @@ class _LlamaCpp(Backend):
         return lt.make_provider(agent_id, root)
 
 
+class _Responses(Backend):
+    async def provider(self, agent_id: str, root):
+        import responses_backend.tools as rt
+
+        return rt.make_provider(agent_id, root)
+
+
 def _model_or_die(name: str) -> str:
     m = os.environ.get("FANTASTIC_AI_MODEL")
     if not m:
@@ -243,11 +250,34 @@ def _llamacpp() -> Backend:
     )
 
 
+def _responses() -> Backend:
+    # The OpenAI Responses wire (`…/v1/responses`). Its URL is the operator's to
+    # name — nothing guessed, the plug refuses to run without it.
+    extra: dict[str, Any] = {"max_tokens": int(os.environ.get("MAX_TOKENS") or THINK_BUDGET)}
+    if ep := os.environ.get("RESPONSES_ENDPOINT"):
+        extra["endpoint"] = ep
+    # NO `sampling` from the JSON beside this file: those knobs are the
+    # anthropic-wire proxy's whitelist (`no_repeat_ngram_size`,
+    # `thinking_token_budget`, …) and are not Responses fields. A Responses run that
+    # wants a knob names it in its own record.
+    return _Responses(
+        name="responses",
+        handler_module="responses_backend.tools",
+        model=_model_or_die("responses"),
+        extra=extra,
+        requires=(
+            ("RESPONSES_ENDPOINT", "the full …/v1/responses URL; no host is guessed"),
+            ("OPENAI_API_KEY", "the backend refuses to send without one"),
+        ),
+    )
+
+
 REGISTRY = {
     "anthropic": _anthropic,
     "nvidia": _nvidia,
     "ollama": _ollama,
     "llamacpp": _llamacpp,
+    "responses": _responses,
 }
 
 

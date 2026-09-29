@@ -21,7 +21,7 @@ struct NimStreamDecodeTests {
         var out: [String] = []
         var sawDone = false
         for line in lines {
-            let decoded = decodeNimSSELine(line, wrap: &wrap)
+            let decoded = decodeOpenAISSELine(line, wrap: &wrap)
             out += decoded.tokens
             if decoded.done {
                 sawDone = true
@@ -69,25 +69,25 @@ struct NimStreamDecodeTests {
         // Requiring `"data: "` would silently drop a compliant line, which is the
         // same class of bug as reading one channel.
         var wrap = ThinkingWrap()
-        let d = decodeNimSSELine(#"data:{"choices":[{"delta":{"content":"x"}}]}"#, wrap: &wrap)
-        #expect(d == NimDecoded(tokens: ["x"], done: false))
-        #expect(decodeNimSSELine("data:[DONE]", wrap: &wrap) == NimDecoded(tokens: [], done: true))
+        let d = decodeOpenAISSELine(#"data:{"choices":[{"delta":{"content":"x"}}]}"#, wrap: &wrap)
+        #expect(d == OpenAIDecoded(tokens: ["x"], done: false))
+        #expect(decodeOpenAISSELine("data:[DONE]", wrap: &wrap) == OpenAIDecoded(tokens: [], done: true))
     }
 
     @Test func nonDataAndEmptyAndMalformedLinesAreSkipped() {
         var wrap = ThinkingWrap()
-        let nothing = NimDecoded(tokens: [], done: false)
-        #expect(decodeNimSSELine("", wrap: &wrap) == nothing)
-        #expect(decodeNimSSELine(": keep-alive comment", wrap: &wrap) == nothing)
-        #expect(decodeNimSSELine("event: message", wrap: &wrap) == nothing)
-        #expect(decodeNimSSELine("data:", wrap: &wrap) == nothing)
-        #expect(decodeNimSSELine("data: {not json", wrap: &wrap) == nothing)
+        let nothing = OpenAIDecoded(tokens: [], done: false)
+        #expect(decodeOpenAISSELine("", wrap: &wrap) == nothing)
+        #expect(decodeOpenAISSELine(": keep-alive comment", wrap: &wrap) == nothing)
+        #expect(decodeOpenAISSELine("event: message", wrap: &wrap) == nothing)
+        #expect(decodeOpenAISSELine("data:", wrap: &wrap) == nothing)
+        #expect(decodeOpenAISSELine("data: {not json", wrap: &wrap) == nothing)
         // A chunk with no choices (NIM opens some streams with a usage-only
         // frame) carries no text.
-        #expect(decodeNimSSELine(#"data: {"choices":[]}"#, wrap: &wrap) == nothing)
+        #expect(decodeOpenAISSELine(#"data: {"choices":[]}"#, wrap: &wrap) == nothing)
         // A null channel is the wire saying "not this one".
         #expect(
-            decodeNimSSELine(
+            decodeOpenAISSELine(
                 #"data: {"choices":[{"delta":{"content":null,"reasoning_content":null}}]}"#,
                 wrap: &wrap) == nothing)
         // …and none of that opened a span.

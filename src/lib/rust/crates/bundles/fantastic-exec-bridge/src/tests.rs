@@ -58,6 +58,8 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     let mut extra = Map::new();
     extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     extra.insert("allowed".to_string(), json!([".*"]));
+    // a bare command is found on the CHILD's PATH only
+    extra.insert("inherit_env".to_string(), json!(["PATH"]));
     mk_kernel_with(tmp, extra).await
 }
 
@@ -77,10 +79,13 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let pid = agent_id_for(tmp);
+    // WHERE a command runs is the record's, required — never guessed. A test that
+    // names its own `cwd` (or refuses one) passes it in `extra`.
     let mut create = json!({
         "type": "create_agent", "parent_id": "kernel",
         "handler_module": HANDLER_MODULE,
         "id": pid,
+        "cwd": tmp.path().to_string_lossy(),
     });
     let obj = create.as_object_mut().expect("object");
     for (k, v) in extra {
@@ -148,27 +153,8 @@ fn command_permitted_fullmatches_and_refuses() {
 }
 
 #[test]
-fn validate_meta_refuses_withdrawn_fields_and_bad_allowed() {
+fn validate_meta_refuses_a_bad_allowed() {
     let b = ExecBridgeBundle;
-    // The withdrawn code-runner fields are refused at the WRITE.
-    for gone in [
-        "code",
-        "shim",
-        "interpreter",
-        "interpreters",
-        "argv_template",
-    ] {
-        let mut meta = Map::new();
-        meta.insert(gone.to_string(), json!("whatever"));
-        let e = b
-            .validate_meta(&meta, &Map::new())
-            .unwrap_or_else(|| panic!("{gone} must be refused"));
-        assert!(e.contains(gone), "refusal must name the field: {e}");
-        assert!(
-            e.contains("allowed"),
-            "refusal must point to `allowed`: {e}"
-        );
-    }
     // `allowed` must be a non-empty list of compilable regexes.
     let mut empty = Map::new();
     empty.insert("allowed".to_string(), json!([]));
@@ -231,10 +217,8 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
         "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd."
     );
     assert_eq!(r["running"], 0);
-    // THE GATE is advertised; the retired interpreter/shim keys are gone.
+    // THE GATE is advertised.
     assert_eq!(r["allowed"], json!(["ls( .*)?"]));
-    assert!(r.get("interpreters").is_none(), "{r}");
-    assert!(r.get("shims").is_none(), "{r}");
     assert!(r["wire"]
         .as_str()
         .unwrap_or("")
@@ -250,27 +234,6 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
     ] {
         assert!(r["verbs"][v].is_string(), "verb {v} missing from reflect");
     }
-}
-
-/// A `code` field is refused explicitly — this runs COMMANDS, not code.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn start_refuses_a_code_field() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
-            a.clone(),
-            json!({"type": "start", "code": "x = 1"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["arg"], "code", "{r}");
-    assert_eq!(
-        r["error"], "start: code must be absent — run a command instead",
-        "{r}"
-    );
 }
 
 /// EVERY refusal on `start` carries a CODE. Sibling argument errors used to split —
@@ -563,7 +526,7 @@ print("fd", fd, "sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ[
     ];
     let mut env = Map::new();
     env.insert("MYVAR".to_string(), json!("hello"));
-    let sp = crate::spawn::spawn_job(&argv, "owner_agent", &env, None).expect("spawn");
+    let sp = crate::spawn::spawn_job(&argv, "owner_agent", &env, ".").expect("spawn");
     let out = sp.child.wait_with_output().await.expect("wait");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -596,7 +559,7 @@ async fn the_child_self_reaps_when_the_control_socket_closes() {
         "-c".to_string(),
         program,
     ];
-    let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", &Map::new(), None).expect("spawn");
+    let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", &Map::new(), ".").expect("spawn");
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         sp.child.try_wait().expect("try_wait").is_none(),
@@ -632,6 +595,67 @@ async fn until(
         }
     }
     None
+}
+
+/// A bare command is found on the CHILD's `PATH` only (python `proc.resolve`): no
+/// `PATH` in the child env refuses naming it, and the kernel's own PATH is never
+/// searched — std's own lookup would fall back to it, or to `/usr/bin:/bin`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_command_is_found_on_the_childs_path_only() {
+    let tmp = TempDir::new().unwrap();
+    let bin = TempDir::new().unwrap();
+    let tool = bin.path().join("ft_only_here");
+    std::fs::write(&tool, "#!/bin/sh\necho found-by-child-path\n").unwrap();
+    std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut extra = Map::new();
+    extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    extra.insert("allowed".to_string(), json!([".*"]));
+    let (kernel, a) = mk_kernel_with(&tmp, extra.clone()).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "start", "command": "echo", "args": ["x"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        (&r["reason"], &r["arg"]),
+        (&json!("missing_arg"), &json!("PATH")),
+        "{r}"
+    );
+
+    let tmp2 = TempDir::new().unwrap();
+    extra.insert(
+        "env".to_string(),
+        json!({"PATH": bin.path().to_string_lossy()}),
+    );
+    let (k2, b) = mk_kernel_with(&tmp2, extra).await;
+    let mut rx = inbox(&k2, &b);
+    let r = k2
+        .send(vec![Item::new(
+            b.clone(),
+            json!({"type": "start", "command": "ft_only_here"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r["job_id"].is_string(), "{r}");
+    let done = until(&mut rx, |p| p["type"] == "job_done", 10)
+        .await
+        .expect("job_done");
+    assert_eq!(done["stdout"], json!("found-by-child-path\n"), "{done}");
+    // …and one only the kernel's PATH holds is not found.
+    let r = k2
+        .send(vec![Item::new(
+            b.clone(),
+            json!({"type": "start", "command": "echo", "args": ["x"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "transport_error", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("No such file"), "{r}");
 }
 
 /// `start` returns AT ONCE — that is the contract. It also RECORDS what ran:
@@ -940,6 +964,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
             json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
                    "handler_module": HANDLER_MODULE,
                    "ingress_rule": "allow_all_ingress", "allowed": [".*"],
+                   "cwd": tmp.path().to_string_lossy(),
                    "can_call": {"blob": "*"}}),
         )])
         .await
@@ -1384,6 +1409,11 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
             "stop",
             "interrupt",
             "clear",
+            "write",
+            "resize",
+            "ack",
+            "output",
+            "paste_image",
             "connector",
             "reflect",
             "boot"
@@ -1391,7 +1421,7 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["start"],
-        "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes."
+        "args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."
     );
     assert_eq!(
         verbs["clear"],
@@ -1407,27 +1437,32 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
 }
 
-/// A4.10 — reflect coerces like python: a falsy `cwd` reads `<process default>` and
-/// a truthy one is reported AS WRITTEN; `allowed` items go through `str()`.
+/// A4.10 — reflect reports the record's `cwd` as written (null when unset — there
+/// is no process default any more) and the `inherit_env` it runs with; `allowed`
+/// items go through `str()`.
 #[tokio::test]
 async fn reflect_coerces_like_python() {
     let tmp = TempDir::new().unwrap();
     let mut meta = Map::new();
     meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
-    meta.insert("cwd".to_string(), json!(""));
+    meta.insert("cwd".to_string(), json!("/wd"));
+    meta.insert("inherit_env".to_string(), json!(["PATH"]));
     meta.insert("allowed".to_string(), json!(["ls", 7, true]));
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let r = reflect_reply(&a, &kernel);
-    assert_eq!(r["cwd"], "<process default>");
+    assert_eq!(r["cwd"], "/wd");
+    assert_eq!(r["inherit_env"], json!(["PATH"]));
     // `str(7)` and `str(True)` — not JSON's `7`/`true`.
     assert_eq!(r["allowed"], json!(["ls", "7", "True"]));
 
     let tmp2 = TempDir::new().unwrap();
     let mut m2 = Map::new();
     m2.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
-    m2.insert("cwd".to_string(), json!(5));
+    m2.insert("cwd".to_string(), Value::Null);
     let (k2, b) = mk_kernel_with(&tmp2, m2).await;
-    assert_eq!(reflect_reply(&b, &k2)["cwd"], json!(5));
+    let r2 = reflect_reply(&b, &k2);
+    assert_eq!(r2["cwd"], Value::Null);
+    assert_eq!(r2["inherit_env"], json!([]));
 }
 
 /// A4.3 — `shutdown` is not a verb here: python's `VERBS` has no such key, so it is
@@ -1614,19 +1649,27 @@ async fn start_coerces_args_env_and_cwd_like_python() {
     let r = call(json!({"type": "start", "command": "ls", "args": null})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "args", "{r}");
-    // A falsy `env` is an EMPTY block, not a refusal (py `payload.get("env") or {}`).
+    // `env` and `cwd` are the RECORD's: any per-call value refuses (py `is not
+    // None`), even an empty one; only an explicit null is "absent".
     let Some(py) = find_real_python() else {
         return;
     };
-    for falsy in [json!(null), json!({}), json!(0), json!("")] {
-        let r = call(json!({"type": "start", "command": py.to_string_lossy(),
-                            "args": ["-c", "pass"], "env": falsy}))
-        .await;
-        assert!(r["job_id"].is_string(), "falsy env must be accepted: {r}");
+    for (arg, val) in [
+        ("env", json!({})),
+        ("env", json!(["A=1"])),
+        ("cwd", json!("/")),
+    ] {
+        let r = call(json!({"type": "start", "command": "ls", arg: val})).await;
+        assert_eq!(
+            (&r["reason"], &r["arg"]),
+            (&json!("bad_arg"), &json!(arg)),
+            "{r}"
+        );
     }
-    // A truthy non-dict `env` refuses.
-    let r = call(json!({"type": "start", "command": "ls", "env": ["A=1"]})).await;
-    assert_eq!(r["arg"], "env", "{r}");
+    let r = call(json!({"type": "start", "command": py.to_string_lossy(),
+                        "args": ["-c", "pass"], "env": null, "cwd": null}))
+    .await;
+    assert!(r["job_id"].is_string(), "an explicit null is absent: {r}");
     // Bools are ints in python, so they are legal argv items — as `True`/`False`.
     let r = call(json!({"type": "start", "command": py.to_string_lossy(),
                         "args": ["-c", "import sys; print(sys.argv[1:])", true, 2, 1.5]}))
@@ -1968,7 +2011,7 @@ async fn spawn_failure_text_matches_python() {
     assert_eq!(r["reason"], "transport_error");
 }
 
-/// A4.23 — the two control vars are written OVER the caller's `env`, so a program
+/// A4.23 — the two control vars are written OVER the record's `env`, so a program
 /// cannot claim another agent's identity or point the control fd somewhere else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn caller_env_cannot_override_the_control_vars() {
@@ -1976,7 +2019,15 @@ async fn caller_env_cannot_override_the_control_vars() {
         return;
     };
     let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut meta = Map::new();
+    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    meta.insert("allowed".to_string(), json!([".*"]));
+    // the operator's record `env` cannot claim the control vars either
+    meta.insert(
+        "env".to_string(),
+        json!({"FANTASTIC_SELF_ID": "root", "FANTASTIC_CTRL_FD": "0", "MINE": "kept"}),
+    );
+    let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let mut rx = inbox(&kernel, &a);
     let _ = kernel
         .send(vec![Item::new(
@@ -1985,7 +2036,6 @@ async fn caller_env_cannot_override_the_control_vars() {
                 "type": "start",
                 "command": py.to_string_lossy(),
                 "args": ["-u", "-c", "import os; print('ID', os.environ['FANTASTIC_SELF_ID'], 'FD', os.environ['FANTASTIC_CTRL_FD'])"],
-                "env": {"FANTASTIC_SELF_ID": "root", "FANTASTIC_CTRL_FD": "0", "MINE": "kept"},
             }),
         )])
         .await
@@ -2046,21 +2096,21 @@ async fn relay_coerces_falsy_payload_and_target() {
     // required`. The second one is the proof that `null` became `{}`.
     assert_eq!(reply["data"]["arg"], "payload.type", "{reply}");
 
-    // No target at all ⇒ the OWNER, with an empty payload.
+    // An emit lands on the OWNER; a falsy payload is `{}`.
     wire_write(&mut child, &json!({"op": "emit"})).await;
     let ev = until(&mut owner_rx, |_| true, 5)
         .await
         .expect("no emit reached the owner");
     assert_eq!(ev, json!({}), "a falsy payload must become {{}}: {ev}");
-    // An EMPTY target is falsy, so it is the owner too.
+    // A `target` names nothing: the owner is the only place a program emits.
     wire_write(
         &mut child,
-        &json!({"op": "emit", "target": "", "payload": {"type": "ping"}}),
+        &json!({"op": "emit", "target": "elsewhere", "payload": {"type": "ping"}}),
     )
     .await;
     let ev = until(&mut owner_rx, |v| v["type"] == "ping", 5)
         .await
-        .expect("an empty target did not fall back to the owner");
+        .expect("the emit did not land on the owner");
     assert_eq!(ev["type"], "ping");
 
     stop.notify_one();

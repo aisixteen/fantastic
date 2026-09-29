@@ -64,10 +64,14 @@ final class BridgeState: @unchecked Sendable {
     /// Empty until `boot` succeeds — reflect falls through to the record.
     var transportKind: String = ""
     var readTask: TaskId?
-    /// Transport-specific teardown a builder registers (the ssh tunnel).
+    /// Transport-specific teardown a builder registers.
     var cleanup: (@Sendable () async -> Void)?
-    /// Bundle-specific reflect state (the ssh `tunnel_pid`).
+    /// Bundle-specific reflect state.
     var extra: [String: JSON] = [:]
+    /// The remote agents this leg SUBSCRIBED to (`watch_remote`). An inbound
+    /// `event` frame is re-emitted only when its `src` is here — nothing flows
+    /// until subscribed, and nothing after an unwatch.
+    private var watching: Set<String> = []
     /// Per-leg rules, symmetric and independent. Sealed inbound, silent
     /// outbound — boot ALWAYS overwrites them from the record.
     var ingress: IngressRule = IngressRules.DenyInbound()
@@ -117,6 +121,15 @@ final class BridgeState: @unchecked Sendable {
     }
 
     /// Python's `for _cid, fut in st.pending: fut.set_exception(ConnectionError(...))`.
+    func watch(_ src: String) { lock.lock(); watching.insert(src); lock.unlock() }
+    func unwatch(_ src: String) { lock.lock(); watching.remove(src); lock.unlock() }
+    func clearWatching() { lock.lock(); watching.removeAll(); lock.unlock() }
+    func isWatching(_ src: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return watching.contains(src)
+    }
+
     func failAll(_ reason: String) {
         lock.lock()
         let all = pending
@@ -285,6 +298,7 @@ extension KernelBridgeBundle {
         st.readTask = nil
         st.cleanup = nil
         st.extra = [:]
+        st.clearWatching()
         st.ingress = IngressRules.DenyInbound()
         st.egress = EgressRules.Silent()
     }
@@ -332,11 +346,14 @@ extension KernelBridgeBundle {
                             ]), Data()))
                 }
             case "event":
-                // The `watch_remote` RETURN half: WE dialed out to a chosen peer
-                // and asked it to stream, so this re-emit is trusted by
-                // association, not a sealed-ingress inbound leak.
-                let payload = frame["payload"]
-                let inner = pyTruthy(payload) ? payload : .object([:])
+                // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
+                // inbox for local watchers ONLY when its `src` is a remote agent
+                // this leg subscribed to. An event nobody asked for is dropped.
+                guard let src = frame["src"].asString, st.isWatching(src),
+                    case .object(var obj) = frame["payload"]
+                else { continue }
+                obj["src"] = .string(src)
+                let inner: JSON = .object(obj)
                 // A BINARY event re-emits WHOLE. The envelope's `_binary_path` is
                 // `payload.<p>`; the inbox carrier wants `<p>`, the path INSIDE
                 // the payload, so the body reaches a local watcher as the frame
@@ -356,6 +373,7 @@ extension KernelBridgeBundle {
         // The transport is gone — every in-flight inbound dispatch has nowhere
         // to send its reply.
         st.cancelCalls()
+        st.clearWatching()
         await kernel.emit(agentId, .object(["type": .string("bridge_down")]))
         st.failAll("bridge transport closed")
     }
@@ -382,19 +400,31 @@ extension KernelBridgeBundle {
             // FORWARDED, not re-worded — the rule's own reason and repair, so a
             // peer hitting a sealed leg learns how to open it.
             reply = denial.asRefusal
-        } else if let bad = checkCaller(kernel, frame["caller"]) {
+        } else if let bad = checkCaller(
+            pin: kernel.agent(agentId)?.metaValue(forKey: "peer_guid")?.asString,
+            frame["caller"])
+        {
             // THE QUALIFIED CALLER IS CHECKED ON INGRESS, before the kernel sees
-            // the frame: malformed, or claiming THIS kernel's guid ⇒ refused.
+            // the frame: from the ONE pinned peer, or refused.
             reply = bad
+        } else if kernel.agent(agentId)?.metaValue(forKey: "peer_guid")?.asString
+            == localGuid(kernel)
+        {
+            reply = .object([
+                "error": .string("bridge: this leg's peer_guid is THIS kernel's own guid — refused"),
+                "reason": .string("unauthorized"),
+                "hint": .string("pin the PEER kernel's guid"),
+            ])
         } else {
             // UNDER THE LEG'S OWN IDENTITY: a peer frame reaching `kernel.send`
             // with a nil sender would be an OPERATOR call and the two-sided gate
             // would bound nothing.
             let targetId = AgentId(target.asString ?? "")
             let item = Item.fromFrame(targetId, inner, frameId: frame["id"].asString)
-            // THE QUALIFIED CALLER rides into the dispatch: a memory store keys
-            // what this call writes by `<remote guid>|<remote agent>`, not by
-            // this leg. Python `remote_caller_context(kernel.id, caller)`.
+            // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
+            // target's `callable_by` against `<peer guid>|<remote agent>` (never
+            // the leg), and a memory store keys what it writes by it. Python
+            // `remote_caller_context(kernel.id, caller)`.
             let caller: String? = pyTruthy(frame["caller"]) ? frame["caller"].asString : nil
             let run: @Sendable () async -> (JSON, Data?) = {
                 if !isBinary {
@@ -433,23 +463,34 @@ extension KernelBridgeBundle {
         return g
     }
 
-    /// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it:
-    /// it must read `<guid>|<agent id>`, and the guid must NOT be this kernel's
-    /// own — a remote cannot pose as a local agent. (A remote naming some THIRD
-    /// kernel's guid is not detectable here; accepted.) Python `_check_caller`.
-    public func checkCaller(_ kernel: Kernel, _ caller: JSON) -> JSON? {
-        if caller == .null { return nil }
+    /// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it.
+    /// Every inbound call names its sender as `<guid>|<agent id>`, and the guid
+    /// must be the ONE peer this leg is pinned to (`peer_guid` on the record): a
+    /// peer cannot pose as a third kernel's agent. No pin, no inbound call.
+    /// Python `_check_caller`.
+    public func checkCaller(pin: String?, _ caller: JSON) -> JSON? {
         let parts = caller.asString.map { $0.split(separator: "|", omittingEmptySubsequences: false) }
         guard let parts, parts.count == 2, parts.allSatisfy({ !$0.isEmpty }) else {
             return .object([
-                "error": .string("bridge: frame caller \(pyRepr(caller)) is not `<guid>|<agent id>`"),
+                "error": .string(
+                    "bridge: an inbound call must name its caller as `<guid>|<agent id>`; got \(pyRepr(caller))"
+                ),
                 "reason": .string("unauthorized"),
             ])
         }
-        if String(parts[0]) == localGuid(kernel) {
+        guard let pin, !pin.isEmpty else {
+            return .object([
+                "error": .string("bridge: this leg pins no peer, so it serves no inbound call"),
+                "reason": .string("unauthorized"),
+                "hint": .string(
+                    "update_agent <this leg> peer_guid=<the peer kernel's guid> (its root reflect shows `guid`)"
+                ),
+            ])
+        }
+        if String(parts[0]) != pin {
             return .object([
                 "error": .string(
-                    "bridge: a remote frame claims THIS kernel's guid as its caller — refused"),
+                    "bridge: caller \(pyRepr(caller)) is not from the pinned peer \(pyRepr(.string(pin)))"),
                 "reason": .string("unauthorized"),
             ])
         }
@@ -580,12 +621,14 @@ extension KernelBridgeBundle {
             return Refusal.make(
                 Refusal.notConnected, "bridge.\(verb): not connected", hint: "call boot first")
         }
+        if frameType == "unwatch" { st.unwatch(target) }
         do {
             try await transport.send(
                 .object(["type": .string(frameType), "src": .string(target)]))
         } catch {
             return .object(["error": .string("bridge.\(verb): send failed: \(error)")])
         }
+        if frameType == "watch" { st.watch(target) }
         var out: JSON = .object(["ok": .bool(true)])
         out[replyKey] = .string(target)
         return out

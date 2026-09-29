@@ -42,7 +42,7 @@ struct WebOriginGuardTests {
     private func request(
         _ port: UInt16, _ method: String, _ origin: String?
     ) async throws -> (Int, Data) {
-        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/_assets/favicon.png")!)
         req.httpMethod = method
         if let origin { req.setValue(origin, forHTTPHeaderField: "Origin") }
         let (data, resp) = try await URLSession(configuration: .ephemeral).data(for: req)
@@ -59,7 +59,7 @@ struct WebOriginGuardTests {
             String(decoding: body, as: UTF8.self)
                 == "{\"error\": \"origin 'http://evil.example' is not allowed on this host\", "
                 + "\"reason\": \"unauthorized\", \"hint\": \"add it to the web record's allowed_origins\"}")
-        // Past the guard, `/` is GET-only → the router's 405, not the guard's 403.
+        // Past the guard, the favicon is GET-only → the router's 405, not the guard's 403.
         #expect(try await request(port, "POST", "http://localhost:\(port)").0 == 405)
         #expect(try await request(port, "POST", nil).0 == 405)
         #expect(try await request(port, "GET", "http://evil.example").0 == 200)

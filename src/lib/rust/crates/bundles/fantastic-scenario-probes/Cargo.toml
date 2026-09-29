@@ -13,6 +13,8 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 # `getentropy` — the OS CSPRNG behind python's `secrets` module.
 libc = { workspace = true }
+# `slow_probe`'s `slow`/`sleep` — the in-flight work a timeout or a boot lands on.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

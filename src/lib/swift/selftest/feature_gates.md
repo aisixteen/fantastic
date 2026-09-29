@@ -13,7 +13,6 @@ compiles to empty off macOS):
 
 | handler_module | tier |
 |---|---|
-| `terminal_backend.tools` | Full only |
 | `exec_bridge.tools` | Full only |
 
 The `.build/debug/fantastic` binary IS the Full tier. The Embedded
@@ -32,7 +31,7 @@ echo "$SIM_SDK"   # must print an iPhoneSimulator*.sdk path
 
 ## Tests
 
-### Test 1: Full tier registers all four subprocess bundles
+### Test 1: Full tier registers the subprocess bundle
 
 The default (macOS) build links them; a `create_agent` against each
 returns a real agent record (not a weak-load shell).
@@ -40,8 +39,8 @@ returns a real agent record (not a weak-load shell).
 ```bash
 BIN=/Users/oleksandr/Projects/fantastic_canvas/swift/.build/debug/fantastic
 rm -rf /tmp/fa_full && mkdir -p /tmp/fa_full && cd /tmp/fa_full
-for hm in terminal_backend exec_bridge; do
-  ID=$("$BIN" core create_agent handler_module=$hm.tools \
+for hm in exec_bridge; do
+  ID=$("$BIN" core create_agent handler_module=$hm.tools cwd=. \
     | python3 -c "import json,sys;print(json.load(sys.stdin).get('id','?'))")
   KIND=$("$BIN" "$ID" reflect \
     | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('kind') or d.get('error'))")
@@ -49,14 +48,14 @@ for hm in terminal_backend exec_bridge; do
 done
 ```
 Expected: each line prints a real id and a `kind` (e.g.
-`terminal_backend`), NOT `no bundle for handler_module "...tools"`.
+`exec_bridge`), NOT `no bundle for handler_module "...tools"`.
 Regression signal: a `no bundle` error means a Full-tier bundle fell
 out of `defaultBundleRegistry()` on macOS.
 
 ### Test 2: Embedded slice cross-compiles without the subprocess bundles
 
 Cross-compile the Embedded umbrella to the iOS Simulator triple. The
-`#if os(macOS)` gates exclude all four subprocess bundles' source and
+`#if os(macOS)` gates exclude the subprocess bundle's source and
 their registry lines; the build must succeed and pull none of them.
 
 ```bash
@@ -76,8 +75,8 @@ cross-build fails here — the iOS Lite tier breaks.
 ### Test 3: the pro-tier handler_modules are absent from the Embedded registry
 
 The Embedded umbrella's dep graph (`FantasticKernelEmbedded` target in
-`Package.swift`) must NOT list `FantasticTerminalBackend` or
-`FantasticExecBridge`; only `FantasticKernelFull` does. This is the
+`Package.swift`) must NOT list `FantasticExecBridge`; only
+`FantasticKernelFull` does. This is the
 static contract behind the runtime weak-load skip.
 
 ```bash
@@ -85,7 +84,7 @@ cd /Users/oleksandr/Projects/fantastic_canvas/swift
 python3 - <<'PY'
 import re
 src = open("Package.swift").read()
-pro = {"FantasticTerminalBackend","FantasticExecBridge"}
+pro = {"FantasticExecBridge"}
 def target_deps(name):
     # anchor on the `.target(name: "X", dependencies: [...]` form
     # (not the `.library(...)` product decl that shares the name).
@@ -102,11 +101,11 @@ print("full has:", full_has)
 print("PASS" if not emb_has and full_has == pro else "FAIL")
 PY
 ```
-Expected: `embedded leaks: none`, `full has:` all four, and `PASS`.
+Expected: `embedded leaks: none`, `full has:` it, and `PASS`.
 
 ### Test 4: Full-tier handler_modules weak-load-skip when their bundle isn't registered
 
-Boot a workdir that has a `terminal_backend.tools` record persisted but
+Boot a workdir that has an `exec_bridge.tools` record persisted but
 run it through a runtime where that bundle isn't registered (the
 Embedded contract). The agent SHELL still registers (so children can
 wire) but a verb against it returns the no-bundle error — the kernel
@@ -146,7 +145,7 @@ Expected: `tb registered: True` (boot did not abort on the unknown
 bundle — the shell loaded under `core`) and `PASS` (the verb returns
 `no bundle for handler_module "made_up_embedded_excluded.tools"`).
 This is the exact path a Full-tier workdir hits on the Embedded tier:
-`terminal_backend`/`exec_bridge` records
+`exec_bridge` records
 load as inert shells, verbs against them failfast, the rest of the tree
 boots normally.
 
@@ -159,7 +158,7 @@ above, not a log grep.
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | Full tier registers all four subprocess bundles | |
+| 1 | Full tier registers the subprocess bundle | |
 | 2 | Embedded slice cross-compiles to iOS Simulator | |
 | 3 | pro-tier handler_modules absent from Embedded dep graph | |
 | 4 | unknown-bundle record weak-load-skips (shell loads, verb fails) | |

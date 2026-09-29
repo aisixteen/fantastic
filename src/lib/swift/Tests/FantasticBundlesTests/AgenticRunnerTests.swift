@@ -14,7 +14,6 @@ import FantasticFile
 import FantasticJSON
 import FantasticKernel
 import FantasticStaticLoader
-import FantasticTextFile
 import Foundation
 import OrderedCollections
 import FantasticKernelState
@@ -147,7 +146,6 @@ private func makeKernel(workdir: URL) -> Kernel {
     registry.register(ROOT_HANDLER_MODULE, KernelStateBundle())
     registry.register("static_loader.tools", StaticLoaderBundle())
     registry.register("file_bridge.tools", FileBundle())
-    registry.register("text_file.tools", TextFileBundle())
     registry.register("exec_bridge.tools", ExecBridgeBundle())
     registry.register("lifecycle_probe.tools", LifecycleProbe())
     let kernel = Kernel(storage: .disk(workdir), bundles: registry)
@@ -256,7 +254,7 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
 {
     await KernelTaskLocals.$currentSender.withValue(sender) {
         // Any payload carrying `bytes_utf8` rides the BINARY channel — the
-        // text_file byte verbs (write/patch/append) alongside write_stream.
+        // file_bridge's text verbs (write/edit/append) alongside write_stream.
         // Mirror of the rust runner's dispatch.
         if !payload["bytes_utf8"].isNull, payload["type"].asString != "write_stream" {
             var header = payload
@@ -616,7 +614,7 @@ private func coreTheRosterIsClosedAfterBoot(_ h: Hydration, _ sc: Scenario, _ pi
     let before = dehydrate(h.kernel).ids
     let r = await reach(h.kernel, sender, ROOT, .object([
         "type": .string("create_agent"), "parent_id": .string(ROOT),
-        "handler_module": .string("file_bridge.tools"), "id": .string("smuggled"),
+        "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("smuggled"),
     ]))
     check(&pinned, "PC-3", denied(r), "\(sender) could create_agent on the root: \(r.serialize())")
     check(&pinned, "PC-3", denialSide(r) == "egress", "expected an egress refusal, got \(r.serialize())")
@@ -628,7 +626,7 @@ private func coreTheRosterIsClosedAfterBoot(_ h: Hydration, _ sc: Scenario, _ pi
     check(&pinned, "PC-3", denied(s), "\(sender) raised its own authority: \(s.serialize())")
     check(&pinned, "PC-3", denialSide(s) == "self-grant", "expected a self-grant refusal, got \(s.serialize())")
     let r2 = await reach(h.kernel, sender, ROOT, .object([
-        "type": .string("create_agent"), "handler_module": .string("file_bridge.tools"), "id": .string("smuggled"),
+        "type": .string("create_agent"), "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("smuggled"),
     ]))
     check(&pinned, "PC-3", denied(r2), "the self-grant took effect after all: \(r2.serialize())")
 }
@@ -639,10 +637,9 @@ private func coreARebootRehydratesTheIdenticalRoster(_ h: Hydration, _ sc: Scena
     if sc.spec["expect"]["reboot"].asBool == false { return nil }
     let before = dehydrate(h.kernel).ids
     let mintedBefore = before.filter(isMintedId)
-    let snapshot = h.kernel.save()
     let fresh = makeKernel(workdir: h.workdir)
-    do { try fresh.load(json: snapshot) } catch {
-        Issue.record("\(sc.name): reload refused the snapshot: \(error)")
+    do { try fresh.loadJSON(h.kernel.saveJSON()) } catch {
+        Issue.record("\(sc.name): the snapshot did not round-trip: \(error)")
         return nil
     }
     var boots: [String: JSON] = [:]
@@ -693,10 +690,9 @@ private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: 
             // PERSIST + REHYDRATE. The kernel is rebuilt from its own saved
             // state and each loader re-booted, so a step after this one asks
             // about what SURVIVED — not about what is still in RAM.
-            let snapshot = h.kernel.save()
             let fresh = makeKernel(workdir: h.workdir)
-            do { try fresh.load(json: snapshot) } catch {
-                Issue.record("\(label): reload refused the snapshot: \(error)")
+            do { try fresh.loadJSON(h.kernel.saveJSON()) } catch {
+                Issue.record("\(label): the snapshot did not round-trip: \(error)")
             }
             for lid in h.creates.keys {
                 _ = await operatorSend(fresh, lid, .object(["type": .string("boot")]))

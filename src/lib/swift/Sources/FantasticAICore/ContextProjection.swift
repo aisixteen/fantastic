@@ -34,21 +34,21 @@ public let TRIGGER = 0.8
 /// like every other AI side table.
 enum AICalibration {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var calib: [ObjectIdentifier: [String: Double]] = [:]
-    nonisolated(unsafe) private static var reported: [ObjectIdentifier: [String: Int]] = [:]
+    nonisolated(unsafe) private static var calib: [UInt64: [String: Double]] = [:]
+    nonisolated(unsafe) private static var reported: [UInt64: [String: Int]] = [:]
 
     static func calibration(_ kernel: Kernel, _ id: String) -> Double {
-        lock.withLock { calib[ObjectIdentifier(kernel)]?[id] ?? 1.0 }
+        lock.withLock { calib[kernel.serial]?[id] ?? 1.0 }
     }
 
     static func reportedTokens(_ kernel: Kernel, _ id: String) -> Int? {
-        lock.withLock { reported[ObjectIdentifier(kernel)]?[id] }
+        lock.withLock { reported[kernel.serial]?[id] }
     }
 
     static func record(_ kernel: Kernel, _ id: String, reported r: Int, estimate: Int64) {
         lock.withLock {
-            calib[ObjectIdentifier(kernel), default: [:]][id] = Double(r) / Double(max(1, estimate))
-            reported[ObjectIdentifier(kernel), default: [:]][id] = r
+            calib[kernel.serial, default: [:]][id] = Double(r) / Double(max(1, estimate))
+            reported[kernel.serial, default: [:]][id] = r
         }
     }
 
@@ -56,18 +56,18 @@ enum AICalibration {
     static func set(_ kernel: Kernel, _ id: String, _ c: Double?) {
         lock.withLock {
             if let c {
-                calib[ObjectIdentifier(kernel), default: [:]][id] = c
+                calib[kernel.serial, default: [:]][id] = c
             } else {
-                calib[ObjectIdentifier(kernel)]?.removeValue(forKey: id)
-                reported[ObjectIdentifier(kernel)]?.removeValue(forKey: id)
+                calib[kernel.serial]?.removeValue(forKey: id)
+                reported[kernel.serial]?.removeValue(forKey: id)
             }
         }
     }
 
     static func forget(_ kernel: Kernel) {
         lock.withLock {
-            calib.removeValue(forKey: ObjectIdentifier(kernel))
-            reported.removeValue(forKey: ObjectIdentifier(kernel))
+            calib.removeValue(forKey: kernel.serial)
+            reported.removeValue(forKey: kernel.serial)
         }
     }
 }
@@ -250,13 +250,13 @@ extension AIBackend {
         var outBody = proj.body
         let stable = systemBlock + factBlock
         while outBody.count > 2 && AIContext.estimateTokens(stable + [notice] + outBody) > b {
-            outBody = AIStrategies.dropOrphanTools([outBody[0]] + Array(outBody[2...]))
+            outBody = [outBody[0]] + Array(outBody[2...])
         }
         // Last resort, and only when nothing else is left to give: [goal, live]
         // still over budget. The live turn is what the model must answer, so the
         // goal is what goes — loudly, in the notice's own count, not silently.
         while outBody.count > 1 && AIContext.estimateTokens(stable + [notice] + outBody) > b {
-            outBody = AIStrategies.dropOrphanTools(Array(outBody[1...]))
+            outBody = Array(outBody[1...])
         }
         let droppedN = max(0, body.count - outBody.count)
         let summarized = proj.summary != nil
@@ -369,11 +369,9 @@ extension AIBackend {
     /// (its cursor), did the model react? Scans the same client's thread for
     /// `send` tool-calls — a `recall` to its OWN id, or a memory write.
     ///
-    /// THE MEMORY VERBS ARE `text_file`'s (`write`/`patch`/`append`). They were
-    /// durable_memory's (`set`/`replace`) until 2026-09-02 — a bundle that no longer
-    /// exists — so a model that DID persist, in the only way the substrate now
-    /// offers, was scored as not having reacted at all. `nil` if no compaction has
-    /// fired.
+    /// THE MEMORY VERBS are a file_bridge's MUTATING text verbs
+    /// (`write`/`edit`/`append`) — a model persists what it must keep as plain
+    /// files. `nil` if no compaction has fired.
     func deriveReaction(agent: Agent, kernel: Kernel) async throws -> JSON? {
         let key = agent.id.value
         let fired = getProjection(key)["fired"].asBool ?? false
@@ -399,7 +397,7 @@ extension AIBackend {
                 if target == key && ptype == "recall" {
                     recalled = true
                     recallCount += 1
-                } else if ptype == "write" || ptype == "patch" || ptype == "append" {
+                } else if ptype == "write" || ptype == "edit" || ptype == "append" {
                     persisted = true
                 }
             }

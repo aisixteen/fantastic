@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.resources
+import posixpath
 import secrets
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -61,7 +63,7 @@ _RECORD_FILE = "agent.yaml"
 ROOT_ID = "kernel_state"
 
 
-def _read_record(root_dir: str, rel: str) -> dict | None:
+def _read_record(root_dir: fs.Root, rel: str) -> dict | None:
     """One `agent.yaml` → its mapping, or None when absent/corrupt/not a mapping."""
     if not fs.exists(root_dir, rel):
         return None
@@ -72,11 +74,11 @@ def _read_record(root_dir: str, rel: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def read_tree(root_dir: Path) -> list[dict]:
+def read_tree(root_dir: fs.Root) -> list[dict]:
     """Walk a `.fantastic` tree → flat list of records (root + descendants).
     `parent_id` comes from disk position (authoritative). Pure read; the
     bootstrap calls this BEFORE any agent exists. Corrupt records skip."""
-    rd = str(root_dir)
+    rd = root_dir
     root_rec = _read_record(rd, _RECORD_FILE)
     # A MISSING OR CORRUPT ROOT RECORD DOES NOT HIDE THE TREE. It used to return
     # `[]`, so the boot reseeded a fresh root and hydrated none of the children
@@ -96,7 +98,7 @@ def read_tree(root_dir: Path) -> list[dict]:
 
 
 def _walk(
-    root_dir: str,
+    root_dir: fs.Root,
     rel_dir: str,
     parent_id: str | None,
     out: list[dict],
@@ -118,19 +120,19 @@ def _walk(
         _walk(root_dir, f"{rel}/{children_dir}", rec.get("id"), out, children_dir)
 
 
-def write_record(root_path: Path, record: dict) -> None:
+def write_record(root_path: fs.Root, record: dict) -> None:
     """Merge-write one record's `agent.yaml` at `root_path` (the agent's own dir),
     THROUGH `fs` (atomic temp+rename). Reads any existing file and overlays only the
     kernel-managed keys, preserving unknown fields + sidecars. Also seeds the bundle's
     `readme.md` (copy-if-missing) — the loader owns ALL of an agent's disk sidecars."""
-    rp = str(root_path)
+    rp = root_path
     on_disk: dict[str, Any] = _read_record(rp, _RECORD_FILE) or {}
     on_disk.update(record)
     fs.write_text(rp, _RECORD_FILE, yaml_io.dump(on_disk))  # atomic
     _seed_readme(rp, record.get("handler_module"))
 
 
-def _seed_readme(root_path: Path | str, handler_module: str | None) -> None:
+def _seed_readme(root_path: fs.Root, handler_module: str | None) -> None:
     """Copy a bundle's shipped `readme.md` AND its `docs/` topic tree into the
     agent's dir on first persist, THROUGH `fs`. Copy-if-missing per file (never
     clobbers operator edits). The SOURCE is a package resource (installed code via
@@ -138,7 +140,7 @@ def _seed_readme(root_path: Path | str, handler_module: str | None) -> None:
     is what `reflect readme=index`/`readme=<key>` serves back."""
     if not handler_module:
         return
-    rp = str(root_path)
+    rp = root_path
     pkg = handler_module.split(".")[0]
     try:
         base = importlib.resources.files(pkg)
@@ -159,7 +161,7 @@ def _seed_readme(root_path: Path | str, handler_module: str | None) -> None:
         pass
 
 
-def _seed_docs_local(src_dir, rp: str, rel: str) -> None:
+def _seed_docs_local(src_dir, rp: fs.Root, rel: str) -> None:
     """Recursively copy a `docs/` topic tree (`.md` files; nested dirs = tiers)
     into the agent's dir THROUGH `fs`. Copy-if-missing; `src_dir` is an importlib
     Traversable (absent ⇒ `is_dir()` False ⇒ no-op)."""
@@ -180,9 +182,9 @@ def _seed_docs_local(src_dir, rp: str, rel: str) -> None:
             fs.write_text(rp, childrel, child.read_text(encoding="utf-8"))
 
 
-def rmtree(path: Path) -> None:
-    """Recursive delete of an agent's dir, THROUGH `fs` (clamped to cwd)."""
-    rp = str(path)
+def rmtree(path: fs.Root) -> None:
+    """Recursive delete of an agent's dir, THROUGH `fs` (clamped to the running dir)."""
+    rp = path
     if not fs.exists(rp, ""):
         return
     try:
@@ -217,7 +219,7 @@ def _disk_parents(agent) -> dict[str, str | None]:
     here, so a walk that stops at the live tree loses every record nested under it."""
     out: list[dict] = []
     cd = _children_name(agent)
-    _walk(str(_root(agent)), cd, agent.id, out, cd)
+    _walk(fs.Root(agent.ctx.workdir, _root(agent)), cd, agent.id, out, cd)
     return {r["id"]: r.get("parent_id") for r in out if isinstance(r.get("id"), str)}
 
 
@@ -276,11 +278,11 @@ def _find_store(agent) -> str | None:
     previous behaviour whenever a direct child matches.
     """
     kernel = agent.ctx
+    base = kernel.workdir
     try:
-        want = _root(agent).resolve()
+        want = fs.resolve_root(fs.Root(base, _root(agent)))
     except (OSError, ValueError):
         return None
-    base = Path.cwd().resolve()
     queue: list[str] = list(agent.child_ids())
     seen: set[str] = set()
     while queue:
@@ -294,9 +296,8 @@ def _find_store(agent) -> str | None:
         rec = kernel.get(cid) or {}
         if rec.get("handler_module") != "file_bridge.tools":
             continue
-        r = rec.get("root", "") or ""
         try:
-            root = (Path(r) if Path(r).is_absolute() else base / r).resolve()
+            root = fs.resolve_root(fs.Root(base, rec.get("root", "") or ""))
         except (OSError, ValueError):
             continue
         if root == want:
@@ -315,14 +316,61 @@ def _store_reldir(agent, abs_path: Path) -> str:
     return "" if s == "." else s
 
 
+def _covers(allow, path: str) -> bool:
+    """Does a store's `allow` list expose `path` (a listed path, or under a listed
+    directory)? The file_bridge's own rule, read off its record."""
+    for s in allow if isinstance(allow, list) else []:
+        if not isinstance(s, str) or s.startswith("/"):
+            continue
+        e = posixpath.normpath(s or ".")
+        if e == "." or path == e or path.startswith(e + "/"):
+            return True
+    return False
+
+
+def _persist_failed(agent, store_id: str, path: str, why) -> None:
+    """A refused/failed persist write is LOUD: stderr, and `persistence.error` on the
+    root reflect (which then reports no provider) until a write lands again."""
+    msg = why.get("error", why) if isinstance(why, dict) else why
+    print(
+        f"  [{agent.id}] persist through {store_id!r} failed: {path}: {msg}",
+        file=sys.stderr,
+    )
+    agent._persist_error = {"store": store_id, "path": path, "error": msg}
+
+
+def _persist_landed(agent) -> None:
+    agent._persist_error = None
+
+
+def _check_store_allow(agent) -> None:
+    """At boot: a discovered store whose `allow` does not expose the records
+    (`agent.yaml` and the children dir) would refuse every write — say so now."""
+    store_id = _find_store(agent)
+    if store_id is None:
+        return
+    allow = (agent.ctx.get(store_id) or {}).get("allow")
+    missing_paths = [
+        p for p in (_RECORD_FILE, _children_name(agent)) if not _covers(allow, p)
+    ]
+    if missing_paths:
+        _persist_failed(
+            agent,
+            store_id,
+            ", ".join(missing_paths),
+            "the store's `allow` does not expose the records "
+            f"(add them, or `.`): allow={allow!r}",
+        )
+
+
 async def _persist_via_store(
     agent, store_id: str, abs_path: Path, record: dict
 ) -> None:
     """Write one record's agent.yaml (+ seed its readme) THROUGH the provider's
     stream verbs. Merge-not-overwrite: read the existing bytes, overlay the
     kernel-managed keys, write back — so sidecar fields survive. If the provider
-    refuses (sealed), the write simply doesn't land — NO fallback; gating the store
-    is the operator's choice and its consequences are theirs."""
+    refuses (sealed, unexposed), the write doesn't land — NO fallback — and the
+    refusal is LOUD (`_persist_failed`)."""
     kernel = agent.ctx
     reldir = _store_reldir(agent, abs_path)
     af = f"{reldir}/{_RECORD_FILE}" if reldir else _RECORD_FILE
@@ -370,8 +418,7 @@ async def _persist_via_store(
     # `agent.yaml` — the record is gone and the next boot hydrates a tree with a
     # hole in it. `rename` is the leg's own single atomic op, and it creates
     # parents, so the failure modes are "the old record survives" or "the new one
-    # is complete", never a torn file. Same protocol `text_file._write_atomic`
-    # uses for a document.
+    # is complete", never a torn file.
     tmp = f"{af}.tmp.{secrets.token_hex(4)}"
     w = (
         await kernel.send(
@@ -388,10 +435,11 @@ async def _persist_via_store(
             ]
         )
     )[0]["result"]
-    if isinstance(w, dict) and w.get("error"):
+    if not isinstance(w, dict) or w.get("error"):
         # Leave the previous record untouched; a debris tmp is visible in `list`.
+        _persist_failed(agent, store_id, af, w)
         return
-    (
+    mv = (
         await kernel.send(
             [
                 {
@@ -405,6 +453,10 @@ async def _persist_via_store(
             ]
         )
     )[0]["result"]
+    if not isinstance(mv, dict) or mv.get("error"):
+        _persist_failed(agent, store_id, af, mv)
+        return
+    _persist_landed(agent)
     await _seed_readme_via_store(agent, store_id, reldir, record.get("handler_module"))
 
 
@@ -477,7 +529,7 @@ async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
     reldir = _store_reldir(agent, abs_path)
     if not reldir:
         return  # never remove the root
-    (
+    out = (
         await agent.ctx.send(
             [
                 {
@@ -487,6 +539,8 @@ async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
             ]
         )
     )[0]["result"]
+    if isinstance(out, dict) and out.get("error"):
+        _persist_failed(agent, store_id, reldir, out)
 
 
 # ─── the auto-flush loop (the root subscribes the live tree) ────────
@@ -618,8 +672,12 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
     token-annotated topic index) + `docs` (a one-liner teaching keyed fetch).
     So the manual's map is in front of a caller from the first root reflect —
     it drills with `readme=index` / `readme=<key>` instead of eating a monolith."""
+    err = getattr(agent, "_persist_error", None)
+    persistence = {"provider": None if err else _find_store(agent)}
+    if err:
+        persistence["error"] = err
     base = {
-        "persistence": {"provider": _find_store(agent)},
+        "persistence": persistence,
         "guid": agent.record.get("guid"),
     }
     if not full:
@@ -633,7 +691,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         # program is a FILE plus a command; the two halves a model has to get right:
         #
         # 1. THE FILE IS BYTES, NOT JSON. A program squeezed into a JSON string is
-        #    lost to one stray quote (the old `code` field's whole failure). The
+        #    lost to one stray quote. The
         #    program's bytes ride a STREAM — `write_stream`, whose `bytes` is verbatim — so
         #    nothing is escaped. A model told only "write the program" reaches for a
         #    JSON string; the string names the stream path so it does not.
@@ -674,16 +732,16 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         ),
         "self_extension": (
             "A DURABLE PROGRAM is a FILE you write plus a command that runs it — "
-            "not a `code`-carrying agent. There is no `code` field: a program used "
-            "to be embedded as a JSON string, which is exactly how a call gets lost "
-            "to escaping. Assemble these THREE pieces and you have built something "
-            "that persists and re-runs, with no `code` field at all:\n"
+            "not a `code`-carrying agent (there is no `code` field). A program "
+            "carried as a JSON string is exactly how a call gets lost to escaping. "
+            "Assemble these THREE pieces and you have built something that "
+            "persists and re-runs:\n"
             "1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON "
             "string. Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> "
             "<truncate>true</truncate> <bytes>…</bytes> to write, <type>read_stream</type> <path>…</path> <offset>0</offset> to "
             "read, one raw chunk at a time. `bytes` is VERBATIM: the program between "
-            "`<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped. That is "
-            "the only byte path; the string read/write verbs are gone.\n"
+            "`<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped. The "
+            "text verbs (`write`, `edit`, `append`) take `bytes` the same way.\n"
             "2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect "
             "it, read its `allowed` regexes, then send "
             "<type>start</type> <command>path</command> <args><item>…</item></args>; poll <type>status</type>. "
@@ -724,13 +782,15 @@ async def _boot(id, payload, agent):
     (`<root>/agent.yaml`) so `read_tree` has a root to walk from — the
     federated JS kernel's records nest under `<root>/agents/`."""
     root_dir = _root(agent)
-    if root_dir != agent._root_path and not (root_dir / _RECORD_FILE).exists():
-        write_record(root_dir, agent.record)
+    anchor = fs.Root(agent.ctx.workdir, root_dir)
+    if root_dir != agent._root_path and not fs.exists(anchor, _RECORD_FILE):
+        write_record(anchor, agent.record)
     rec = agent.record
     if rec.get("watch", True) is False:
         return
     if getattr(agent, "_fs_flush_loop", None) is not None:
         return
+    _check_store_allow(agent)
     loop = _FlushLoop(agent)
     agent._fs_flush_loop = loop
     loop.start()
@@ -751,7 +811,10 @@ async def _load_tree(id, payload, agent):
     """args: none. Read this loader's subtree from disk → {records, version}.
     Flat list; parent_id encodes structure. Reads `root` if set (a session
     loader serving a sub-namespace), else the loader's own dir."""
-    return {"records": read_tree(_root(agent)), "version": CURRENT_VERSION}
+    return {
+        "records": read_tree(fs.Root(agent.ctx.workdir, _root(agent))),
+        "version": CURRENT_VERSION,
+    }
 
 
 def _guard_parent_chain(verb: str, parent_id: object) -> dict | None:
@@ -762,11 +825,31 @@ def _guard_parent_chain(verb: str, parent_id: object) -> dict | None:
     return guard_agent_id(verb, parent_id)
 
 
+def _guard_own_tree(verb: str, agent) -> dict | None:
+    """The ROOT loader's tree is the one this kernel HYDRATES at boot, so only the
+    operator (its own flush, the CLI, boot) writes it. An agent's record changes
+    through `update_agent`, where the conferral rule runs — a record written here
+    by an agent would be hydrated with whatever grants it named (audit
+    2026-09-28). A session loader (a remote's sub-namespace, never hydrated here)
+    keeps serving its remote."""
+    if agent.parent is None and current_origin() is not None:
+        return refusal(
+            UNAUTHORIZED,
+            f"{verb}: the kernel's own tree is written only by the operator — "
+            "an agent's record changes through update_agent",
+            hint="update_agent id=<id> …  (the conferral rule applies there)",
+            side="store",
+        )
+    return None
+
+
 async def _persist_record(id, payload, agent):
     """args: record:dict (req). Merge-write one agent.yaml. Location is the
     live agent's _root_path if present, else computed under this loader's
     root from the record's parent chain."""
     record = payload.get("record")
+    if (denied := _guard_own_tree("persist_record", agent)) is not None:
+        return denied
     if not isinstance(record, dict) or not record.get("id"):
         return missing("persist_record", "record (dict with id)")
     # DEFENCE IN DEPTH. `create_agent` guards the id at the mint, but this verb
@@ -786,9 +869,8 @@ async def _persist_record(id, payload, agent):
     ) is not None:
         return bad_pid
     a = agent.ctx.get_agent(record["id"])
-    write_record(
-        a._root_path if a is not None else _resolve_path(agent, record), record
-    )
+    path = a._root_path if a is not None else _resolve_path(agent, record)
+    write_record(fs.Root(agent.ctx.workdir, path), record)
     return {"ok": True}
 
 
@@ -797,6 +879,8 @@ async def _forget_record(id, payload, agent):
     live host agent the path is its own `_root_path`; for a foreign (bridge-
     sent) record the `parent_id` lets the loader resolve the NESTED path under
     its root — a removed agent is no longer in the tree to walk."""
+    if (denied := _guard_own_tree("forget_record", agent)) is not None:
+        return denied
     target = payload.get("id")
     if not target:
         return missing("forget_record", "id")
@@ -822,7 +906,7 @@ async def _forget_record(id, payload, agent):
         path = _resolve_path(
             agent, {"id": target, "parent_id": payload.get("parent_id")}
         )
-    rmtree(path)
+    rmtree(fs.Root(agent.ctx.workdir, path))
     return {"ok": True}
 
 
@@ -930,7 +1014,7 @@ def _guard_blob_owner(aid: str) -> str | None:
     an operator creates at the root is a direct child. Position bounds who can
     reach the verb; it says nothing about which namespace they may name.
 
-    An OPERATOR send (`sender` is None: the loader's own flush, `text_file`
+    An OPERATOR send (`sender` is None: the loader's own flush, a bundle
     persisting itself under `operator_context`, the CLI) is the bookkeeping this
     verb exists for and stays ungated — that is the origin root of trust, and an
     agent cannot forge it. An AGENT may only name ITSELF.

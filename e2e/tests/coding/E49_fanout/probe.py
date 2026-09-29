@@ -47,14 +47,14 @@ async def main():
         for payload in (
             {
                 "type": "create_agent", "parent_id": root.id, "id": FB,
-                "handler_module": "file_bridge.tools", "root": ".",
+                "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "notes": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent", "parent_id": root.id, "id": "notes",
-                "handler_module": "text_file.tools", "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         ):

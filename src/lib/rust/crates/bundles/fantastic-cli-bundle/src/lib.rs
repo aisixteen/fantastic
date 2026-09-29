@@ -253,7 +253,7 @@ pub fn intro_booting_lines(kernel: &Kernel) -> Vec<String> {
             .to_string(),
         concat!(
             "  REACH one call by id, any unit: ",
-            "compute(exec_bridge) · infer(ai) · memory(text_file) · shell(terminal_backend)"
+            "compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)"
         )
         .to_string(),
     ]

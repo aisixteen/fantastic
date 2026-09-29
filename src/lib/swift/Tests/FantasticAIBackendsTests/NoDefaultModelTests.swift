@@ -1,9 +1,9 @@
-// The connectors never guess a network-reaching model (by default, no defaults).
-// DEFAULT_MODEL is a fail-loud SENTINEL, not a real id — it exists only so
-// reflect can say what is true, and the provider's stream path raises loud when
-// the resolved model is empty or still the sentinel. Mirrors python's
-// `{anthropic,nvidia_nim}_backend.provider` guard.
+// The connectors never guess a network-reaching endpoint or model (by default,
+// no defaults). Both are REQUIRED on the record: building the provider fails
+// loud naming the missing field (python `ai_core.required_meta`), and the
+// provider's stream path still refuses an empty model before any network I/O.
 
+import FantasticAICore
 import FantasticJSON
 import FantasticKernel
 import OrderedCollections
@@ -13,27 +13,54 @@ import Testing
 @testable import FantasticLlamaCppBackend
 @testable import FantasticNvidiaNimBackend
 @testable import FantasticOllamaBackend
+@testable import FantasticResponsesBackend
 
 @Suite("NoDefaultModel")
 struct NoDefaultModelTests {
 
-    // A bare construction yields the sentinel, never a real model id.
-    @Test("anthropic DEFAULT_MODEL is the fail-loud sentinel")
-    func anthropicSentinel() {
-        #expect(FantasticAnthropicBackend.DEFAULT_MODEL == "(no default — set the `model` meta)")
+    private static func build(_ cfg: AIBackendConfig, _ meta: OrderedDictionary<String, JSON>)
+        async -> String?
+    {
+        let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+        let a = Agent(id: AgentId("a"), handlerModule: nil, parentId: nil, meta: meta)
+        do {
+            _ = try await cfg.makeProvider(a, "c", kernel)
+            return nil
+        } catch {
+            return "\(error)"
+        }
     }
 
-    @Test("nvidia DEFAULT_MODEL is the fail-loud sentinel")
-    func nvidiaSentinel() {
-        #expect(FantasticNvidiaNimBackend.DEFAULT_MODEL == "(no default — set the `model` meta)")
+    // Every backend names the FIRST missing connector field, in python's words.
+    @Test("an absent endpoint or model fails loud, naming the field")
+    func requiredFields() async {
+        let cases: [(String, AIBackendConfig, Bool)] = [
+            ("ollama_backend", OllamaBackendBundle().core.config, true),
+            ("anthropic_backend", AnthropicBundle().core.config, true),
+            ("responses_backend", ResponsesBundle().core.config, true),
+            ("llamacpp_backend", LlamaCppBundle().core.config, false),
+        ]
+        for (kind, cfg, needsModel) in cases {
+            #expect(
+                await Self.build(cfg, [:])
+                    == "ValueError: \(kind): `endpoint` is required on the agent record — "
+                    + "nothing is guessed (update_agent <id> endpoint=…)", "\(kind)")
+            let noModel = await Self.build(cfg, ["endpoint": .string("http://h.invalid")])
+            if needsModel {
+                #expect(
+                    noModel
+                        == "ValueError: \(kind): `model` is required on the agent record — "
+                        + "nothing is guessed (update_agent <id> model=…)", "\(kind)")
+            }
+        }
     }
 
     // The stream path raises loud — naming `model` — before any network I/O.
-    @Test("anthropic chat raises loud when the model is the sentinel")
+    @Test("anthropic chat raises loud when the model is empty")
     func anthropicGuard() async {
         let provider = AnthropicProvider(
-            endpoint: FantasticAnthropicBackend.DEFAULT_ENDPOINT,
-            model: FantasticAnthropicBackend.DEFAULT_MODEL,
+            endpoint: "http://h.invalid/v1/messages",
+            model: "",
             apiKey: "unused",
             maxTokens: 64,
             sampling: [:])
@@ -44,11 +71,11 @@ struct NoDefaultModelTests {
         }
     }
 
-    @Test("nvidia chat raises loud when the model is the sentinel")
+    @Test("nvidia chat raises loud when the model is empty")
     func nvidiaGuard() async {
         let provider = NvidiaNimProvider(
-            endpoint: FantasticNvidiaNimBackend.DEFAULT_ENDPOINT,
-            model: FantasticNvidiaNimBackend.DEFAULT_MODEL,
+            endpoint: "http://h.invalid/v1",
+            model: "",
             apiKey: "unused")
         await #expect(throws: Error.self) {
             for try await _ in provider.chat(messages: [
@@ -68,8 +95,6 @@ struct NoDefaultModelTests {
     @Test("ollama reflect extras match python")
     func reflectExtrasMatchPython() {
         let cfg = OllamaBackendBundle().core.config
-        #expect(cfg.defaultModel == "(no default — set the `model` meta)")
-        #expect(cfg.defaultEndpoint == "http://localhost:11434")
         let bare = cfg.reflectExtra(agent([:]))
         #expect(Array(bare.keys) == ["temperature", "num_ctx", "num_predict", "think"])
         #expect(bare["temperature"] == .double(0.3))
@@ -85,14 +110,11 @@ struct NoDefaultModelTests {
         #expect(set["think"] == .bool(false))
     }
 
-    // B1.25: llama-server owns the model, so `reflect.model` says so; the extras
-    // are temperature / num_predict / think / has_api_key, and `num_ctx` is
-    // deliberately ABSENT.
+    // B1.25: the extras are temperature / num_predict / think / has_api_key, and
+    // `num_ctx` is deliberately ABSENT (llama-server fixes the window at start).
     @Test("llamacpp reflect extras match python")
     func llamacppReflectExtrasMatchPython() {
         let cfg = LlamaCppBundle().core.config
-        #expect(cfg.defaultModel == "(server-loaded)")
-        #expect(cfg.defaultEndpoint == "http://127.0.0.1:8080/v1")
         let bare = cfg.reflectExtra(agent([:]))
         #expect(Array(bare.keys) == ["temperature", "num_predict", "think", "has_api_key"])
         #expect(bare["temperature"] == .double(0.3))

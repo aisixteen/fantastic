@@ -53,7 +53,7 @@ public enum Bootstrap {
             let json = String(data: data, encoding: .utf8)
         {
             do {
-                try kernel.load(json: json)
+                try kernel.loadJSON(json)
             } catch {
                 // Weak-load: log + continue. Don't abort daemon boot
                 // on a half-corrupted snapshot.
@@ -79,7 +79,7 @@ public enum Bootstrap {
         if let data = try? Data(contentsOf: stateFile),
             let json = String(data: data, encoding: .utf8)
         {
-            try? kernel.load(json: json)
+            try? kernel.loadJSON(json)
         }
         return kernel
     }

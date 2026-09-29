@@ -23,8 +23,8 @@ carrying a raw `read_stream` chunk goes as a BINARY WS frame
 `[4B len | JSON header | raw body]` — bytes ride RAW, never base64.
 
 Resilience: the connection is SELF-HEALING. `recv()` owns the socket lifecycle —
-on a drop it re-dials after `reconnect` seconds (default 10; `0` = one-shot, the
-legacy behavior) and keeps trying, transparently to the engine's read loop. The
+on a drop it re-dials after `reconnect` seconds (default 10; `0` = one-shot) and
+keeps trying, transparently to the engine's read loop. The
 initial dial is attempted eagerly at boot; if it fails AND reconnect is on, boot
 still succeeds and the leg connects in the background (auto-connect). `reflect`
 surfaces the LIVE socket state via `connected`.

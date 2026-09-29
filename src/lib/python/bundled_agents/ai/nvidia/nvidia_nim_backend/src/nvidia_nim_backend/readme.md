@@ -4,13 +4,8 @@ OpenAI-compatible LLM backend. The api key comes from the ENVIRONMENT (`NVIDIA_A
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `NvidiaNimProvider` builder and the NIM-specific extras below, and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
-## Bare completion — the tool loop is the CALLER's
-This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-provider pass. It NEVER sends the OpenAI `tools`/`tool_choice` fields nor reads
-`delta.tool_calls`; the `NvidiaNimProvider` streams plain `content` text, returned
-verbatim. Any tool convention is the caller's — an authored agent teaches it in the
-prompt (via `system_prompt`), reads the completion, dispatches, and feeds the result
-back as the next `{send, text}` turn.
+## Bare completion + the `<call>` grammar — no native tool API
+`send` performs exactly ONE provider pass: the `NvidiaNimProvider` streams plain `content` text and never sends the OpenAI `tools`/`tool_choice` fields nor reads `delta.tool_calls`. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
 ## Context management — owned HERE
 The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record

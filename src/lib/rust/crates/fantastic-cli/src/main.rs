@@ -46,7 +46,7 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_core::HANDLER_MODULE,
         fantastic_core::KernelStateBundle::default(),
     );
-    reg.register("file_bridge.tools", fantastic_file::FileBundle);
+    reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
     // THE MEMORY STORE in RAM — the root's `memory_store_id` and every AI agent's
     // name one. Ephemeral: gone with the process.
     reg.register(
@@ -78,11 +78,10 @@ fn register_default_bundles() -> BundleRegistry {
         // instead of an operator injection from outside the kernel.
         reg.register_unlisted(probes::USER_MODULE, probes::UserProbe::default());
         reg.register_unlisted(probes::ORACLE_MODULE, probes::OracleProbe::default());
+        // In-flight, failing and timed work: what a timeout, a stop or a
+        // reboot lands on.
+        reg.register_unlisted(probes::SLOW_MODULE, probes::SlowProbe::default());
     }
-    reg.register(
-        fantastic_text_file::HANDLER_MODULE,
-        fantastic_text_file::TextFileBundle,
-    );
     reg.register("web.tools", fantastic_web::WebBundle);
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);
@@ -127,10 +126,6 @@ fn register_default_bundles() -> BundleRegistry {
     // that at compile time.
     #[cfg(feature = "full")]
     {
-        reg.register(
-            "terminal_backend.tools",
-            fantastic_terminal_backend::TerminalBackendBundle,
-        );
         // Via the exported const: the root reflect's `self_extension`
         // advertises executors by intersecting its table with THIS registry,
         // so a typo'd literal here would silently drop the one executor from
@@ -465,7 +460,7 @@ async fn dispatch(
                 json!({
                     "type": "create_agent",
                     // python `"parent_id": kernel.root.id` — the ROOT'S OWN
-                    // id, not the `kernel` alias.
+                    // id, not the reserved `kernel` address.
                     "parent_id": root_id.as_str(),
                     "handler_module": format!("{loader_name}.tools"),
                     "id": loader_name,
@@ -590,9 +585,15 @@ async fn dispatch(
     // start: fail loud, exit non-zero — the lock released and the agents torn
     // down on the way out, as python's `with FantasticLock()` + atexit do.
     let started = kernel.start(true).await;
-    if let Some(err) = started.get("error").filter(|e| fantastic_bundle::py_truthy(e)) {
+    if let Some(err) = started
+        .get("error")
+        .filter(|e| fantastic_bundle::py_truthy(e))
+    {
         let mut msg = fantastic_bundle::py_str(err);
-        if let Some(hint) = started.get("hint").filter(|h| fantastic_bundle::py_truthy(h)) {
+        if let Some(hint) = started
+            .get("hint")
+            .filter(|h| fantastic_bundle::py_truthy(h))
+        {
             msg.push_str(&format!("\n  hint: {}", fantastic_bundle::py_str(hint)));
         }
         kernel.shutdown().await;
@@ -748,6 +749,7 @@ mod catalog_tests {
             probes::PURCHASE_MODULE,
             probes::USER_MODULE,
             probes::ORACLE_MODULE,
+            probes::SLOW_MODULE,
         ] {
             assert!(reg.get(hm).is_some(), "{hm} must still dispatch");
             assert!(

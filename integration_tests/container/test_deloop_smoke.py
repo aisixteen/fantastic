@@ -61,7 +61,7 @@ async def test_container_deloop_backends_and_mind_boot(
     seed_create(
         python_binary,
         wd,
-        handler_module="file_bridge.tools",
+        handler_module="file_bridge.tools", allow=["."],
         agent_id="store",
         ingress_rule="allow_all_ingress",
     )

@@ -11,7 +11,7 @@ import pytest
 
 
 async def _mk_target(kernel, mode="mem"):
-    """A live child agent to own the sidecars (text_file is the real consumer)."""
+    """A live child agent to own the sidecars (the scheduler is a real consumer)."""
     rec = (
         await kernel.send(
             [
@@ -20,7 +20,7 @@ async def _mk_target(kernel, mode="mem"):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "text_file.tools",
+                        "handler_module": "file_bridge.tools",
                         "mode": mode,
                     },
                 }
@@ -146,6 +146,7 @@ async def test_sealed_store_surfaces_denied_write(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": seeded_kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": ".fantastic",
                     },
                 }
@@ -192,6 +193,7 @@ async def test_a_non_utf8_sidecar_is_refused_not_mangled(seeded_kernel, store_ag
                         "parent_id": seeded_kernel.id,
                         "id": "blob_bin_owner",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -235,9 +237,10 @@ async def test_a_non_utf8_sidecar_is_refused_not_mangled(seeded_kernel, store_ag
 
 
 async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
-    """The record id arrives in the PAYLOAD, so without an owner guard any agent
-    granted `persist_record` could rewrite a sibling's record — the same hole
-    `_guard_blob_owner` closed one field over."""
+    """The ROOT loader's tree is hydrated at boot, so no agent writes it — not a
+    sibling's record and not its OWN (audit 2026-09-28, a15: a record an agent
+    persisted there came back at the next boot with whatever grants it named).
+    An agent's record changes through `update_agent`, where conferral runs."""
     from kernel import sender_context
 
     async def _mk(agent_id):
@@ -251,6 +254,11 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
                             "parent_id": seeded_kernel.id,
                             "id": agent_id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
+                            # `persist_record` is privileged: the baseline never
+                            # reaches it, so the grant is named — and the LOADER's
+                            # owner guard is what this test is about.
+                            "can_call": {seeded_kernel.id: ["persist_record"]},
                         },
                     }
                 ]
@@ -276,7 +284,7 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
             )
         )[0]["result"]
         assert r.get("reason") == "unauthorized", r
-        # …and it may name ITSELF.
+        # …and not ITSELF either.
         own = (
             await seeded_kernel.send(
                 [
@@ -290,7 +298,8 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
                 ]
             )
         )[0]["result"]
-    assert own.get("reason") != "unauthorized", own
+    assert own.get("reason") == "unauthorized", own
+    assert "only by the operator" in own["error"], own
 
 
 async def test_forget_record_refuses_a_siblings_namespace(seeded_kernel):
@@ -307,6 +316,9 @@ async def test_forget_record_refuses_a_siblings_namespace(seeded_kernel):
                         "parent_id": seeded_kernel.id,
                         "id": aid,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
+                        # named, so the LOADER's owner guard answers, not the gate
+                        "can_call": {seeded_kernel.id: ["forget_record"]},
                     },
                 }
             ]

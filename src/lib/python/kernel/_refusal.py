@@ -146,4 +146,21 @@ def guard_agent_id(verb: str, agent_id: object) -> dict | None:
         return bad(
             verb, "id", f"a name, not a number (message ids are ints); got {agent_id!r}"
         )
+    if "|" in agent_id:
+        # `|` qualifies a FOREIGN agent (`<guid>|<agent>`): a local id never
+        # carries one, so a gate can tell local from foreign by the id alone.
+        return bad(
+            verb,
+            "id",
+            f"a local name without `|` (it marks a foreign `guid|agent`); got {agent_id!r}",
+        )
+    if agent_id == RESERVED_ID:
+        # `kernel` names the operator: sends to it reach the root, and a memory
+        # store serves the operator under it. An agent holding that id would BE
+        # the operator to every store (measured 2026-09-28).
+        return bad(verb, "id", f"a name other than the reserved {RESERVED_ID!r}")
     return None
+
+
+# The one reserved agent id — the operator's name (send target, store identity).
+RESERVED_ID = "kernel"

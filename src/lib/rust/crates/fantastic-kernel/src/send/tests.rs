@@ -136,6 +136,58 @@ async fn unwatch_stops_fanout() {
     );
 }
 
+/// a16 (audit 2026-09-28): an emit onto ANOTHER agent's inbox passes the
+/// two-sided gate under verb `emit`; a denied emit is dropped. Emitting on your
+/// own inbox is how every bundle publishes, so it stays ungated.
+#[tokio::test]
+async fn emit_on_another_agent_needs_both_halves() {
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("root");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    kernel.register(granted(
+        "em_open",
+        Some("root"),
+        "can_call",
+        json!({"em_target": ["emit"]}),
+    ));
+    kernel.register(granted("em_closed", Some("root"), "can_call", json!({})));
+    kernel.register(granted(
+        "em_target",
+        Some("root"),
+        "callable_by",
+        json!({"em_open": ["emit"], "em_closed": ["emit"]}),
+    ));
+    let mut rx = kernel.ensure_inbox(&AgentId::from("em_target"));
+    let target = AgentId::from("em_target");
+    with_sender(AgentId::from("em_closed"), {
+        let kernel = Arc::clone(&kernel);
+        let target = target.clone();
+        async move { kernel.emit(&target, json!({"type": "poke", "n": 1})).await }
+    })
+    .await;
+    assert!(
+        rx.try_recv().is_none(),
+        "an emit with no egress grant must be dropped"
+    );
+    with_sender(AgentId::from("em_open"), {
+        let kernel = Arc::clone(&kernel);
+        let target = target.clone();
+        async move { kernel.emit(&target, json!({"type": "poke", "n": 2})).await }
+    })
+    .await;
+    let got = rx.try_recv().expect("the granted emit landed");
+    assert_eq!(got.payload, json!({"type": "poke", "n": 2}));
+    // emitting on your OWN inbox — ungated
+    with_sender(AgentId::from("em_target"), {
+        let kernel = Arc::clone(&kernel);
+        let target = target.clone();
+        async move { kernel.emit(&target, json!({"type": "self", "n": 3})).await }
+    })
+    .await;
+    assert_eq!(rx.try_recv().expect("own emit").payload["n"], 3);
+}
+
 #[tokio::test]
 async fn send_with_binary_missing_target_returns_error() {
     let kernel = Arc::new(Kernel::new());
@@ -585,7 +637,6 @@ async fn the_state_stream_is_not_covered_by_a_wildcard() {
         .is_none());
 }
 
-
 // ─── C20: the gate's denial shapes are python's ────────────────
 
 fn make_agent_under(id: &str, parent: &str) -> Arc<Agent> {
@@ -773,117 +824,134 @@ async fn conferring_an_empty_verb_list_probes_star() {
     assert_eq!(d["side"], "delegation");
 }
 
-// ── C35: alias resolves through well_known ──────────────────────────────
+// ── `$subtree:<X>` ingress + heritable egress ──────────────────────────
 
-/// Answers `{"id": <own id>}` on every verb — just enough to prove a `send`
-/// landed on the right agent.
-struct IdEcho;
-#[async_trait::async_trait]
-impl crate::bundle::Bundle for IdEcho {
-    fn name(&self) -> &str {
-        "id_echo"
-    }
-    async fn handle(
-        &self,
-        agent_id: &AgentId,
-        _payload: &Value,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        Ok(Some(json!({"id": agent_id.0})))
-    }
-}
-
-fn alias_kernel() -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
-    let mut reg = crate::bundle::BundleRegistry::new();
-    reg.register("id_echo.tools", IdEcho);
-    kernel.bundles = reg;
-    let kernel = Arc::new(kernel);
+/// `served` accepts `$subtree:hub`; `hub` holds a heritable entry on `served`;
+/// `kid`/`grandkid` live under `hub`; `outsider` holds a plain egress grant.
+fn subtree_kernel() -> (Arc<Kernel>, Arc<Agent>, Arc<Agent>) {
+    let kernel = Arc::new(Kernel::new());
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    kernel
-}
-
-#[tokio::test]
-async fn alias_resolves_to_agent() {
-    // python `test_alias_resolves_to_agent`: `alias` wires into `well_known`
-    // on register, and `send` resolves a target through it.
-    let kernel = alias_kernel();
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type":"create_agent","parent_id":"kernel","id":"store_x",
-                   "handler_module":"id_echo.tools","alias":"store"}),
-        )])
-        .await;
-    assert_eq!(
-        kernel.well_known.get("store").map(|e| e.value().clone()),
-        Some(AgentId::from("store_x"))
+    let served = granted(
+        "served",
+        Some("kernel_state"),
+        "callable_by",
+        json!({"$subtree:hub": ["list", "allow"]}),
     );
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("store"),
-            json!({"type": "reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["id"], "store_x");
+    kernel.register(Arc::clone(&served));
+    for a in [
+        granted(
+            "hub",
+            Some("kernel_state"),
+            "can_call",
+            json!({"served": {"verbs": ["list", "allow"], "for": "descendants"}}),
+        ),
+        make_agent_under("kid", "hub"),
+        make_agent_under("grandkid", "kid"),
+        granted(
+            "outsider",
+            Some("kernel_state"),
+            "can_call",
+            json!({"served": ["list"]}),
+        ),
+    ] {
+        kernel.register(a);
+    }
+    (kernel, root, served)
 }
 
 #[tokio::test]
-async fn literal_id_unaffected_by_aliases() {
-    // python `test_literal_id_unaffected_by_aliases`: a literal id that is
-    // NOT an alias resolves to itself, alias meta on the record or not.
-    let kernel = alias_kernel();
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type":"create_agent","parent_id":"kernel","id":"real",
-                   "handler_module":"id_echo.tools","alias":"real_alias"}),
-        )])
-        .await;
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("real"),
-            json!({"type": "reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["id"], "real");
+async fn a_descendant_reaches_through_subtree_and_heritable_grants() {
+    let (kernel, _root, served) = subtree_kernel();
+    let gate = |sender: &str, verb: &str| {
+        kernel.gate(
+            &AgentId::from(sender),
+            verb,
+            &served,
+            &json!({"type": verb}),
+        )
+    };
+    assert_eq!(gate("kid", "list"), None);
+    assert_eq!(gate("grandkid", "list"), None);
+    // a NAMED privileged verb is covered by both forms
+    assert_eq!(gate("kid", "allow"), None);
+    // the holder is not covered by its own heritable entry
+    assert_eq!(gate("hub", "list").unwrap()["side"], "egress");
+    // a verb the entry does not name
+    assert_eq!(gate("kid", "mkdir").unwrap()["side"], "egress");
+    // outside the subtree: its own egress holds, the target refuses
+    assert_eq!(gate("outsider", "list").unwrap()["side"], "ingress");
+    // an agent spawned AFTER the grants is covered at call time
+    kernel.register(make_agent_under("late", "grandkid"));
+    assert_eq!(gate("late", "list"), None);
 }
 
 #[tokio::test]
-async fn alias_cleared_on_delete() {
-    // python `test_alias_cleared_on_delete`: `unregister` drops any alias
-    // pointing at the removed agent; a dangling alias then names no agent.
-    let kernel = alias_kernel();
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type":"create_agent","parent_id":"kernel","id":"a1",
-                   "handler_module":"id_echo.tools","alias":"myalias"}),
-        )])
-        .await;
-    assert!(kernel.well_known.contains_key("myalias"));
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type":"delete_agent","id":"a1"}),
-        )])
-        .await;
-    assert!(!kernel.well_known.contains_key("myalias"));
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("myalias"),
-            json!({"type": "reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(r.get("error").is_some());
+async fn a_heritable_wildcard_never_covers_a_privileged_verb() {
+    let (kernel, _root, _served) = subtree_kernel();
+    kernel.register(granted(
+        "wild",
+        Some("kernel_state"),
+        "can_call",
+        json!({"served2": {"verbs": ["*"], "for": "descendants"}}),
+    ));
+    kernel.register(make_agent_under("wild_kid", "wild"));
+    kernel.register(granted(
+        "served2",
+        Some("kernel_state"),
+        "callable_by",
+        json!({"$subtree:wild": "*"}),
+    ));
+    let served2 = kernel
+        .agents
+        .get(&AgentId::from("served2"))
+        .map(|e| Arc::clone(&e))
+        .unwrap();
+    let gate = |verb: &str| {
+        kernel.gate(
+            &AgentId::from("wild_kid"),
+            verb,
+            &served2,
+            &json!({"type": verb}),
+        )
+    };
+    assert_eq!(gate("list"), None);
+    assert_eq!(gate("allow").unwrap()["side"], "egress");
+}
+
+#[tokio::test]
+async fn a_heritable_entry_is_conferred_only_by_its_holder_as_a_subset() {
+    let (kernel, root, _served) = subtree_kernel();
+    let confer = |sender: &str, verbs: Value| {
+        kernel.gate(
+            &AgentId::from(sender),
+            "create_agent",
+            &root,
+            &json!({"type": "create_agent", "parent_id": sender,
+                    "can_call": {"served": {"verbs": verbs, "for": "descendants"}}}),
+        )
+    };
+    assert_eq!(confer("hub", json!(["list"])), None);
+    assert_eq!(confer("hub", json!(["list", "allow"])), None);
+    let d = confer("hub", json!(["list", "disallow"])).expect("a superset was conferred");
+    assert_eq!(
+        d,
+        json!({
+            "error": "hub cannot confer a heritable 'disallow' on served: you do not hold \
+                      that heritable entry — only the operator, or a holder of the same \
+                      entry, confers one (a subset of it)",
+            "reason": "unauthorized", "side": "delegation", "hint": crate::authz::FROM_ABOVE,
+        })
+    );
+    assert_eq!(keys(&d), ["error", "reason", "side", "hint"]);
+    // a beneficiary holds nothing to pass on
+    let d = confer("kid", json!(["list"])).expect("a beneficiary conferred the entry");
+    assert_eq!(d["side"], "delegation");
+    assert!(d["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("kid cannot confer a heritable 'list'"));
 }
 
 // ── C36: the call row and its settle ───────────────────────────────────
@@ -1123,10 +1191,7 @@ async fn the_settle_row_keeps_what_stored_outcome_keeps() {
     assert_eq!(settles.len(), 1);
     let s = &settles[0];
     assert_eq!(s["settled"], json!("w"), "the agent the call was on");
-    assert_eq!(
-        s["outcome"],
-        json!({"status": "completed", "bytes": 12})
-    );
+    assert_eq!(s["outcome"], json!({"status": "completed", "bytes": 12}));
     assert_eq!(s["attempts"], json!(1));
     assert_eq!(
         s.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -1159,9 +1224,11 @@ async fn a_refusal_that_opened_no_call_row_appends_no_settle() {
             json!({"type": "work"}),
         )])
         .await;
-    assert!(crate::test_support::rows_about(&kernel, &AgentId::from("kernel_state"))
-        .iter()
-        .all(|r| r.get("kind") != Some(&json!("settle"))));
+    assert!(
+        crate::test_support::rows_about(&kernel, &AgentId::from("kernel_state"))
+            .iter()
+            .all(|r| r.get("kind") != Some(&json!("settle")))
+    );
 }
 
 #[tokio::test]
@@ -1603,10 +1670,7 @@ fn kernel_verb_docs_match_python_verbatim() {
         distilled["shutdown_agents"],
         json!(PY_KERNEL_VERB_DOCS[9].1)
     );
-    assert_eq!(
-        distilled["ack_deadletter"],
-        json!("args: id:int|str (req")
-    );
+    assert_eq!(distilled["ack_deadletter"], json!("args: id:int|str (req"));
 }
 
 #[test]

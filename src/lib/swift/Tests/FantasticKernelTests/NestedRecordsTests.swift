@@ -56,7 +56,16 @@ private func setup() async -> Fixture {
         .appendingPathComponent("nested-\(UUID().uuidString)")
         .appendingPathComponent(".fantastic/web")
     let recs: [OrderedDictionary<String, JSON>] = [
-        ["id": .string("wws"), "handler_module": .string("leg.tools"), "parent_id": .string(ROOT_ID)],
+        // the loader's record verbs are privileged: the owning leg names them
+        [
+            "id": .string("wws"), "handler_module": .string("leg.tools"),
+            "parent_id": .string(ROOT_ID),
+            "can_call": .object([
+                "web_loader": .array([
+                    .string("persist_record"), .string("forget_record"), .string("load_tree"),
+                ])
+            ]),
+        ],
         [
             "id": .string("rest_leg"), "handler_module": .string("leg.tools"),
             "parent_id": .string(ROOT_ID),

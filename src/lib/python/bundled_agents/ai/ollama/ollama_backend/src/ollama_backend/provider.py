@@ -10,12 +10,6 @@ from typing import AsyncIterator
 
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 
-DEFAULT_ENDPOINT = "http://localhost:11434"
-# NO guessy default (by default, no defaults): never name a network-reaching model.
-# The sentinel exists ONLY so `reflect` can say what is true; `chat()` fails loud
-# naming `model` if it is left unset.
-DEFAULT_MODEL = "(no default — set the `model` meta)"
-
 
 class OllamaProvider:
     #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
@@ -25,8 +19,8 @@ class OllamaProvider:
 
     def __init__(
         self,
-        endpoint: str = DEFAULT_ENDPOINT,
-        model: str = DEFAULT_MODEL,
+        endpoint: str,
+        model: str,
         num_ctx: int | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
@@ -69,7 +63,7 @@ class OllamaProvider:
     ) -> AsyncIterator[str]:
         """Stream raw text tokens from ollama — NO tools array. ai_core parses
         any `<call>` element out of the text stream."""
-        if not self._model or self._model == DEFAULT_MODEL:
+        if not self._model:
             raise RuntimeError(
                 "ollama_backend: no `model` set — this connector does not guess one. "
                 "Name a model on the agent record (model=...)."

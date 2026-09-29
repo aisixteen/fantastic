@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from cli import Cli
+from file_bridge import fs
 from kernel_state.tools import read_tree, write_record
 
 from kernel import Kernel, _load_dotenv, dispatch_argv
@@ -30,7 +31,9 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     """Build the live tree from `root_dir` (or seed a fresh root) and
     compose per-process ephemerals. No agent boots here — `dispatch_argv`
     runs the boot pass (which is when the root loader subscribes)."""
-    records = read_tree(root_dir)
+    # The running dir is the dir holding the root's `.fantastic` — before any kernel
+    # exists that is `root_dir`'s parent; after `load` it is `kernel.workdir`.
+    records = read_tree(fs.Root(root_dir.resolve().parent, root_dir))
     # No ROOT record on disk (fresh project, or a missing/corrupt `agent.yaml`
     # with children still under `agents/`): the root IS the loader
     # (id="kernel_state"). Seed its agent.yaml + readme now so the next boot
@@ -50,17 +53,24 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     # The COLD primitives are direct by design: this one-time seed write below, and
     # `read_tree` at boot — the chicken-egg bring-up before any provider can exist.
     if seeded:
-        write_record(kernel.root._root_path, kernel.root.record)
+        write_record(
+            fs.Root(kernel.workdir, kernel.root._root_path), kernel.root.record
+        )
     if sys.stdin.isatty():
         Cli(kernel, parent=kernel.root)  # ephemeral stdout renderer
 
 
 def _build_kernel(root_dir: Path = Path(".fantastic")) -> Kernel:
-    """Construct + hydrate ONE kernel from a `.fantastic` root. The seam for a
-    future kernel LIST (several `Kernel()` bridged IN-PROCESS via io_bridge's
-    memory transport — each seats a `MemoryTransport.pair()` half on an io_bridge
-    agent). Today `main` builds exactly one; a multi-kernel launcher would call
-    this per root and pick a primary for `dispatch_argv`. NOT built now."""
+    """Construct + hydrate ONE kernel from a `.fantastic` root.
+
+    ONE KERNEL PER PROCESS. Bundles keep process state in MODULE-level dicts
+    keyed by agent id (`exec_bridge._jobs`, `ai_core._locks`/`_queue`,
+    `scheduler._tick_tasks`, `io_bridge._bridges`, `web._servers`,
+    `file_bridge._UNDO`), so two kernels in one process holding the same id
+    would share that state. It is resolvable — key the state per kernel as well
+    as per id — and not needed now; `main` builds exactly one. A future kernel
+    LIST (several `Kernel()` bridged in-process via io_bridge's memory
+    transport) starts with that keying, then calls this per root."""
     kernel = Kernel()
     _bootstrap(kernel, root_dir)
     return kernel
@@ -100,8 +110,8 @@ def main_dispatch() -> None:
 
     # atexit safety net for graceful shutdown. The primary path is
     # signal handlers + the `finally` block inside `_default` — those
-    # walk the tree depth-first and call each bundle's `on_shutdown`/
-    # `on_delete` hook (kills `code serve-web`, PTYs, etc.) AND flush
+    # walk the tree depth-first and call each bundle's `on_shutdown`
+    # hook (kills `code serve-web`, PTYs, etc.) AND flush
     # the root loader before the daemon exits. This atexit covers the
     # OTHER ways Python can leave the loop: an uncaught exception that
     # escapes asyncio.run, a `sys.exit` from somewhere unexpected.

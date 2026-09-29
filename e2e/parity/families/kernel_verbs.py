@@ -1,4 +1,4 @@
-"""kernel_verbs — the root's own verbs and their refusals (C13, C17–C35, C39).
+"""kernel_verbs — the root's own verbs and their refusals (C13, C17–C34, C39).
 
 §9.1 marks this whole row `source` in both rounds: four refusal captures in
 round 1 and nothing after. Every id shape, every two-fault precedence pair,
@@ -8,16 +8,14 @@ of it was written into the ports from reading python, and none of it was driven.
 The leg's grants are EXACT here (a seed override, as
 `SCR/parity_capture_wire.py:161-195` did), because half these cases are about
 authority and a leg granted `"*"` on everything cannot show a refusal:
-  * `limited` is granted `['reflect']` and nothing else — C21;
-  * `web_loader` is in the reach so C35's alias has somewhere to go.
+  * `limited` is granted `['reflect']` and nothing else — C21.
 """
 
 from __future__ import annotations
 
-import json
 import time
 
-from families import BASE, OPEN, call, save_kernel_log
+from families import BASE, MEMORY, OPEN, call, save_kernel_log
 
 NAME = "kernel_verbs"
 
@@ -27,28 +25,30 @@ def run(ctx) -> None:  # noqa: C901
 
     def seed_extra(k, w, port):
         """Narrow the legs: `limited` gets ONE verb, by name."""
-        for p in ("agents/web/agent.json", "agents/web/agents/ws/agent.json",
-                  "agents/web/agents/rest/agent.json"):
-            r = json.loads((w / p).read_text())
-            r["can_call"]["limited"] = ["reflect"]
-            (w / p).write_text(json.dumps(r, indent=2))
+        from spec import read_rec, write_rec
 
-    reach = ["files", "readings", "totals", "limited", "joiner", "web_loader", "child_of_loader",
+        for p in ("agents/web/agent.yaml", "agents/web/agents/ws/agent.yaml",
+                  "agents/web/agents/rest/agent.yaml"):
+            r = read_rec(w / p)
+            r["can_call"]["limited"] = ["reflect"]
+            write_rec(w / p, r)
+
+    reach = ["files", "readings", "totals", "limited", "joiner",
              "blobber", "ghost", "web", "rest", "ws", "kernel_store"]
     k = ctx.boot(reach=reach, port=ports.take("main"), seed_extra=seed_extra)
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         (ctx.work / "a.txt").write_text("a\n")
         rec.json("setup/files", k.create(parent_id=k.root_id, id="files",
-                                         handler_module="file_bridge.tools", root=".", **OPEN,
+                                         handler_module="file_bridge.tools", allow=["."], root=".", **OPEN,
                                          callable_by=cb))
         rec.json("setup/readings", k.create(parent_id=k.root_id, id="readings",
-                                            handler_module="file_bridge.tools", root=".", **OPEN,
+                                            handler_module="file_bridge.tools", allow=["."], root=".", **OPEN,
                                             callable_by=cb))
         rec.json("setup/limited", k.create(parent_id=k.root_id, id="limited",
                                            handler_module="cli.tools", **OPEN, callable_by=cb))
         rec.json("setup/kernel_store", k.create(parent_id=k.root_id, id="kernel_store",
-                                                handler_module="file_bridge.tools",
+                                                handler_module="file_bridge.tools", allow=["."],
                                                 root=".fantastic", **OPEN, callable_by=cb))
         time.sleep(0.8)
 
@@ -79,7 +79,7 @@ def run(ctx) -> None:  # noqa: C901
 
         # ── C18 — message ids and a cancel id that is not one ──
         rec.json("C18/messages_ids_shapes",
-                 call(k, "kernel", {"type": "messages", "ids": [0, -1, "007", "+5"]}))
+                 call(k, MEMORY, {"type": "read", "owner": "readings", "ids": [0, -1, "007", "+5"]}))
         rec.json("C18/cancel_plus_pid", call(k, "kernel", {"type": "cancel", "task_id": "+1"}))
         rec.json("C18/cancel_missing", call(k, "kernel", {"type": "cancel"}))
 
@@ -164,31 +164,15 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("C32/readings_shutdown_agents", call(k, "readings", {"type": "shutdown_agents"}))
         rec.json("C32/readings_list_agents", call(k, "readings", {"type": "list_agents"}))
         # ── C34 is driven in `wire` (it needs the raw octet leg) ──
-        # ── C35 — an alias, a child of the alias, a delete, then a send ──
-        rec.json("C35/create_alias",
-                 call(k, k.root_id, {"type": "create_agent", "id": "web_loader",
-                                     "handler_module": "static_loader.tools",
-                                     "parent_id": k.root_id, "root": ".", **OPEN,
-                                     "callable_by": cb}))
-        rec.json("C35/send_to_alias", call(k, "web_loader", {"type": "reflect"}))
-        rec.json("C35/child_of_alias",
-                 call(k, k.root_id, {"type": "create_agent", "id": "child_of_loader",
-                                     "handler_module": "cli.tools", "parent_id": "web_loader",
-                                     **OPEN, "callable_by": cb}))
-        rec.json("C35/delete_alias", call(k, k.root_id, {"type": "delete_agent",
-                                                         "id": "web_loader"}))
-        rec.json("C35/send_after_delete", call(k, "web_loader", {"type": "reflect"}))
-        rec.json("C35/child_after_parent_delete", call(k, "child_of_loader", {"type": "reflect"}))
-        # ── C39 — a control character as an agent name ──
+        # ── C39 — a control character as a memory-store owner ──
         for raw, tag in (("\n", "newline"), ("\x1c", "fs"), ("", "empty")):
-            rec.json(f"C39/rows_read_{tag}", call(k, "kernel", {"type": "rows_read", "agent": raw}))
+            rec.json(f"C39/rows_read_{tag}", call(k, MEMORY, {"type": "read", "owner": raw}))
             rec.json(f"C39/rows_write_{tag}",
-                     call(k, "kernel", {"type": "rows_write", "agent": raw,
+                     call(k, MEMORY, {"type": "append", "owner": raw,
                                         "rows": [{"role": "user", "content": "x"}]}))
         # ── the shape of every kernel verb's refusal when it is asked nothing ──
         for verb in ("create_agent", "update_agent", "delete_agent", "list_agents", "ps", "ledger",
-                     "messages", "rows_read", "rows_write", "cancel", "persist_blob", "load_blob",
-                     "shutdown_agents", "nope"):
+                     "cancel", "shutdown_agents", "nope"):
             rec.json(f"bare/{verb}", call(k, "kernel", {"type": verb}))
         rec.json("final/kernel_list_agents", call(k, "kernel", {"type": "list_agents"}))
         rec.json("final/kernel_ledger", call(k, "kernel", {"type": "ledger"}))

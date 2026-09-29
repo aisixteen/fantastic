@@ -99,6 +99,7 @@ def test_state_event_lifecycle_added(client, seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                     "id": "create1",
                 }
@@ -126,6 +127,7 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                     "id": "c",
                 }
@@ -230,6 +232,7 @@ def test_state_event_carries_display_name_when_present(client, seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "display_name": "my-store",
                     },
                     "id": "c",

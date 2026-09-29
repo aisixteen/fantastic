@@ -12,7 +12,7 @@ current.
 THE ROOT ID IS MEASURED, NEVER LOOKED UP. `HostKernel` reads it out of the
 driver's `RUNTIMES` row; a row is a claim about a binary, and it was wrong for
 two runtimes for as long as rust and swift called their root `core`. Here the
-kernel seeds `.fantastic/agent.json` first and the id is READ OFF IT, with the
+kernel seeds `.fantastic/agent.yaml` first and the id is READ OFF IT, with the
 branch that produced the seed recorded in `meta.json`. A capture can then never
 grant against an id the binary does not use.
 """
@@ -42,8 +42,22 @@ from helpers.host.driver import (  # noqa: E402
     _OCTET,
     _PAYLOAD_HEADER,
     _bytes_field,
+    _dump,
     free_port,
 )
+from helpers import memory  # noqa: E402
+
+import yaml  # noqa: E402
+
+
+def read_rec(path: Path) -> dict:
+    """A persisted record (`agent.yaml`), as the kernel wrote it."""
+    return yaml.safe_load(path.read_text())
+
+
+def write_rec(path: Path, rec: dict) -> None:
+    """A record as the kernel writes it — block style, key order kept."""
+    path.write_text(_dump(rec))
 
 #: Run output. `e2e/.gitignore` already covers `runs/`.
 RUNS = REPO / "e2e/runs/parity"
@@ -146,19 +160,17 @@ def kernel_env(rt: str, extra: dict | None = None, drop: tuple[str, ...] = ()) -
     `e2e/backends/connection.local.env` — a real key on the kernel's env for a
     run that is supposed to spend nothing).
 
-    Every name here is one a bundle READS: `SHELL` is terminal_backend's
-    `_detect_shell`, `TMPDIR` is every mkdtemp, `HOME`/`LANG`/`TERM` are what a
-    shell child inherits. `drop` removes a name for the one case whose subject
+    Every name here is one the runtime READS: `TMPDIR` is every mkdtemp,
+    `HOME`/`LANG` are the runtime's own home and locale. A child gets none of
+    them unless its record names them in `inherit_env`. `drop` removes a name for the one case whose subject
     is its absence (providers, no key).
     """
     env = {
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
         "HOME": str(HOME),
-        "SHELL": "/bin/zsh",
         "LANG": "en_US.UTF-8",
-        "TERM": "xterm",
         "TMPDIR": str(TMP),
-        "ANTHROPIC_KEY": STUB_KEY,
+        "ANTHROPIC_API_KEY": STUB_KEY,
         "NVIDIA_API_KEY": STUB_KEY,
     }
     if rt == "python":
@@ -287,7 +299,7 @@ class CaptureKernel(HostKernel):
             check=False,
         )
         self.seed_branch = "one_shot_reflect"
-        if not (w / "agent.json").exists():
+        if not (w / "agent.yaml").exists():
             self.seed_branch = "brief_daemon"
             seed = subprocess.Popen(
                 self.cmd,
@@ -298,7 +310,7 @@ class CaptureKernel(HostKernel):
                 start_new_session=True,
             )
             for _ in range(100):
-                if (w / "agent.json").exists():
+                if (w / "agent.yaml").exists():
                     break
                 time.sleep(0.1)
             seed.terminate()
@@ -306,20 +318,33 @@ class CaptureKernel(HostKernel):
                 seed.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 seed.kill()
-        if not (w / "agent.json").exists():
-            raise SystemExit(f"{self.rt}: kernel never seeded {w}/agent.json")
+        if not (w / "agent.yaml").exists():
+            raise SystemExit(f"{self.rt}: kernel never seeded {w}/agent.yaml")
 
-        root = json.loads((w / "agent.json").read_text())
+        root = read_rec(w / "agent.yaml")
         measured = root.get("id")
         if not isinstance(measured, str) or not measured:
-            raise SystemExit(f"{self.rt}: seeded agent.json carries no id: {root!r}")
+            raise SystemExit(f"{self.rt}: seeded agent.yaml carries no id: {root!r}")
         self.root_id = measured
 
         root["callable_by"] = {**BASE, "rest": "*", "ws": "*"}
         root["can_call"] = {**BASE, "rest": "*"}
-        (w / "agent.json").write_text(json.dumps(root, indent=2))
+        # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one.
+        # One ram_store for the kernel's own rows AND every AI agent's
+        # conversation (each AI record names it in `memory_store_id`); the legs
+        # are its admins, and every declared id may reach it.
+        root["memory_store_id"] = memory.MEMORY
+        write_rec(w / "agent.yaml", root)
+        (w / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
+        write_rec(w / "agents" / memory.MEMORY / "agent.yaml", memory.store_record(
+            self.root_id,
+            admins=["kernel", "rest", "ws"],
+            callable_by={**BASE, "rest": "*", "ws": "*", "web": "*",
+                         **{t: "*" for t in self.reach
+                            if t not in (self.root_id, memory.MEMORY)}}))
 
         reach = {t: "*" for t in self.reach if t != self.root_id}
+        reach[memory.MEMORY] = "*"
         legs = {
             "agents/web": {
                 "id": "web",
@@ -350,7 +375,7 @@ class CaptureKernel(HostKernel):
         for rel, rec in legs.items():
             d = w / rel
             d.mkdir(parents=True, exist_ok=True)
-            (d / "agent.json").write_text(json.dumps(rec, indent=2))
+            write_rec(d / "agent.yaml", rec)
         if self.seed_extra is not None:
             self.seed_extra(self, w, port)
         return port

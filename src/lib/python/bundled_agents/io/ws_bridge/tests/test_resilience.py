@@ -7,14 +7,13 @@
 2. ONE malformed frame killed the reader. `decode_frame` raised out of
    `WSTransport.recv`, the read loop died, and `reflect` still said
    `connected:true` while every forward timed out.
-3. TEARDOWN blocked the event loop. `st.cleanup` was a sync callable and
-   `_kill_tunnel` waits up to 2s on an ssh that ignores SIGTERM.
+3. TEARDOWN blocked the event loop. `st.cleanup` was a sync callable, so a
+   slow transport teardown froze every other agent on the loop.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import struct
 import sys
@@ -105,10 +104,22 @@ async def _open_bridge(kernel, peer_id: str) -> str:
     return rec["id"]
 
 
+def _accept(kernel, agent_id: str, foreign: str) -> None:
+    """Open `agent_id` to a FOREIGN caller — an inbound bridge call is judged by
+    its qualified `<guid>|<agent>`, never by the leg that relays it."""
+    cb = dict(kernel.ctx.agents[agent_id]._meta.get("callable_by") or {})
+    kernel.update(agent_id, callable_by={**cb, foreign: "*"})
+
+
 async def _wire_pair(ka, kbk) -> tuple[str, str]:
+    ka.update(ka.id, guid="guid-a")
+    kbk.update(kbk.id, guid="guid-b")
+    _accept(ka, ka.id, "guid-b|*")
+    _accept(kbk, kbk.id, "guid-a|*")
     a_id = await _open_bridge(ka, "PLACEHOLDER")
     b_id = await _open_bridge(kbk, a_id)
-    ka.update(a_id, peer_id=b_id)
+    ka.update(a_id, peer_id=b_id, peer_guid="guid-b")
+    kbk.update(b_id, peer_guid="guid-a")
     mt_a, mt_b = MemoryTransport.pair()
     wb._test_transport_inject[a_id] = mt_a
     wb._test_transport_inject[b_id] = mt_b
@@ -127,8 +138,9 @@ async def test_reentrant_forward_completes_instead_of_deadlocking(two_kernels):
     `kernel.send` and never reads A's reply. Served as a task it just works."""
     ka, kbk = two_kernels
     a_id, b_id = await _wire_pair(ka, kbk)
-    # The probe is a CHILD of the bridge, so the structural baseline
-    # ($parent/$children, both directions) is the only grant either end needs.
+    # The probe is a CHILD of the bridge, so the structural baseline covers its
+    # own call back through the bridge; the call INTO it comes from kernel A, so
+    # it accepts A's agents by their qualified id.
     probe = (
         await kbk.send(
             [
@@ -144,6 +156,7 @@ async def test_reentrant_forward_completes_instead_of_deadlocking(two_kernels):
             ]
         )
     )[0]["result"]["id"]
+    _accept(kbk, probe, "guid-a|*")
 
     out = await asyncio.wait_for(
         ka.send(
@@ -226,36 +239,3 @@ async def test_teardown_awaits_the_cleanup_hook():
     assert ran.is_set()
     assert engine._state("cleanup_probe").cleanup is None
     engine._bridges.pop("cleanup_probe", None)
-
-
-async def test_ssh_tunnel_cleanup_is_awaitable_and_runs_off_the_loop(monkeypatch):
-    """The ssh+ws leg registers `to_thread(_kill_tunnel, …)` — an AWAITABLE, so
-    the 2s `proc.wait` cannot freeze every other agent on the loop."""
-    killed: list = []
-
-    class _Proc:
-        pid = 4242
-
-    async def _fake_open_tunnel(host, local_port, remote_port):
-        return _Proc()
-
-    async def _fake_connect(url):
-        return object()
-
-    monkeypatch.setattr(_ws, "_open_tunnel", _fake_open_tunnel)
-    monkeypatch.setattr(_ws.WSTransport, "connect", staticmethod(_fake_connect))
-    monkeypatch.setattr(_ws, "_kill_tunnel", lambda p: killed.append(p))
-
-    st = engine._BridgeState()
-    await _ws.build_transport(
-        "ssh+ws",
-        {"peer_id": "p", "host": "h", "local_port": 9, "remote_port": 8},
-        None,
-        st,
-    )
-    assert st.extra["tunnel_pid"] == 4242
-    assert st.cleanup is not None
-    pending = st.cleanup()
-    assert inspect.isawaitable(pending), "cleanup must be awaitable (off the loop)"
-    await pending
-    assert len(killed) == 1

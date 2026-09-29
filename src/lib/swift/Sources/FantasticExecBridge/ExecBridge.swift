@@ -7,11 +7,12 @@
 // regex command ALLOWLIST — `allowed` on the record is a list of regexes, and
 // `start {command, args}` refuses unless the shell-joined line fullmatches one.
 // No per-call override, no default, no PATH fallback; an empty `allowed` runs
-// nothing. The withdrawn `code`/`shim`/`interpreter`/`interpreters`/
-// `argv_template` fields are refused at WRITE time (`validateMeta`) and at
-// `start`.
+// nothing. The one other permitted line is the record's `shell` (true = the
+// child's own `$SHELL` bare, "login" = `$SHELL -l`, PTY only): a PTY `start` with
+// no `command` runs that `$SHELL`, read from the child's environment —
+// autodiscovery, never a default.
 //
-// It is a GENERAL-PURPOSE COMMAND runner, NOT a code runner. A program is a FILE
+// It is a GENERAL-PURPOSE COMMAND runner. A program is a FILE
 // some process (or a `write_stream`) put on disk; running it is `command` +
 // `args`, exactly like anything else — so the job table / output pump / connector
 // relay / fd passing / task-table rows / mail contract are all language-blind.
@@ -36,6 +37,7 @@
 //
 #if os(macOS)
 
+    import FantasticFile
     import FantasticIoBridge
     import FantasticJSON
     import FantasticKernel
@@ -138,6 +140,51 @@
             + pyStr(.array(pats.map(JSON.string)))
     }
 
+    // ── the child's own shell (py `SHELL_VAR` / `_shell_tail` / `_shell_permits`) ──
+    //
+    // A PTY `start` that names no `command` runs the CHILD's `$SHELL`: a client
+    // with no environment of its own (a browser page) cannot name the shell, but
+    // the record can — `inherit_env`/`env` decide what the child's environment
+    // holds, and `SHELL` is read from THAT, never from the kernel's own env unless
+    // it was passed down. One read, no chain: a child env without `SHELL` is
+    // refused loud.
+    //
+    // The ALLOWLIST still decides what may run. A record writer who does not know
+    // the shell's path cannot write an exact `allowed` line for it, so the
+    // record's `shell` field permits the resolved shell line itself — and nothing
+    // wider:
+    //
+    //   shell: true     → exactly [$SHELL]        (the bare shell)
+    //   shell: "login"  → exactly [$SHELL, "-l"]  (a login shell)
+    //
+    // It is a LINE, not a pattern: any other argv, and every pipe job, still has
+    // to fullmatch `allowed`. Who may set `shell` is who may write the record —
+    // the same authority that writes `allowed`.
+
+    /// The env var a PTY start without `command` reads its shell from.
+    let SHELL_VAR = "SHELL"
+
+    /// The argv the record's `shell` permits AFTER `$SHELL`, or nil when the
+    /// record permits no shell line. Only the JSON bool `true` counts — a stray
+    /// `1` is not a permission (python compares `v is True`).
+    func shellTail(_ record: Agent?) -> [String]? {
+        switch record?.metaValue(forKey: "shell") {
+        case .some(.bool(true)): return []
+        case .some(.string("login")): return ["-l"]
+        default: return nil
+        }
+    }
+
+    /// True when `argv` is exactly the shell line the record's `shell` permits: a
+    /// PTY job whose argv is the child's own `$SHELL` plus the tail its `shell`
+    /// value names. Judged on the RESOLVED argv, so it holds whether the caller
+    /// named the shell or left `command` out.
+    func shellPermits(_ record: Agent?, env: [String: String], argv: [String], pty: Bool) -> Bool {
+        guard pty, let tail = shellTail(record), let shell = env[SHELL_VAR], !shell.isEmpty
+        else { return false }
+        return argv == [shell] + tail
+    }
+
     /// Shell-join argv the way python's `shlex.join` does — POSIX quoting, so the
     /// joined line the allowlist matches is the same one a shell would see.
     func shlexJoin(_ argv: [String]) -> String {
@@ -164,11 +211,18 @@
         /// python's module-level `VERBS` — ONE table: reflect renders it and
         /// `advertises` reads it.
         static let verbDocs: OrderedDictionary<String, JSON> = [
-            "start": .string("args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes."),
+            "start": .string("args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
             "status": .string("args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}."),
-            "stop": .string("args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs."),
+            "stop": .string(
+                "args: job_id:str? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs."
+            ),
             "interrupt": .string("args: job_id:str? — SIGINT one job or ALL of this agent's running jobs."),
             "clear": .string("args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM"),
+            "write": .string("args: job_id:str (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."),
+            "resize": .string("args: job_id:str (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
+            "ack": .string("args: job_id:str (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
+            "output": .string("args: job_id:str (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."),
+            "paste_image": .string("args: job_id:str (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."),
             "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
             "reflect": .string("Identity + running job count + auth posture. No args."),
             "boot": .string("No-op. Nothing auto-restarts: a command is started by a caller, not by the record."),
@@ -201,6 +255,8 @@
             var exitCode: Int32? = nil
             var stdout: String = ""
             var stderr: String = ""
+            /// The terminal of a PTY job (`start pty={cols,rows}`); nil for a pipe job.
+            var pty: PtyJob? = nil
         }
 
         /// Guards `jobs`. Never held across an `await`.
@@ -225,7 +281,10 @@
             // sealed); mail is ungated too (py parity — the fanout already delivered).
             // `shutdown` is NOT a verb here: python's VERBS table has no such key, so
             // it is mail like any other unowned type.
-            let owned = ["start", "boot", "status", "clear", "interrupt", "stop"]
+            let owned = [
+                "start", "boot", "status", "clear", "interrupt", "stop", "write", "resize", "ack",
+                "output", "paste_image",
+            ]
             if owned.contains(verb), let agent = kernel.agent(agentId) {
                 let rule = try resolveIngress(
                     ingressRule: agent.metaValue(forKey: "ingress_rule"),
@@ -277,6 +336,21 @@
                             + "and grants (its `can_call`; a target must list this runner in "
                             + "`callable_by`). Do not rewrite the wire by hand."),
                 ])
+            case "write":
+                return await writeReply(agentId, payload)
+            case "resize":
+                return resizeReply(agentId, payload)
+            case "ack":
+                return ackReply(agentId, payload)
+            case "output":
+                return outputReply(agentId, payload)
+            case "paste_image":
+                // `data` is bytes: on the text channel there is none to paste —
+                // the job is checked first, as python's handler does.
+                switch ptyJob("paste_image", agentId, payload) {
+                case .failure(let r): return r.json
+                case .success: return Refusal.bad("paste_image", "data", "raw bytes")
+                }
             case "interrupt":
                 if let gone = noSuchJob(agentId, payload) { return gone }
                 return .object(["interrupted": .integer(Int64(signalJobs(agentId, payload, SIGINT)))])
@@ -307,24 +381,23 @@
 
         /// `start` — spawn the COMMAND in the BACKGROUND and return at once.
         ///
-        /// args: command:str (req), args:list[str]? (argv, default []), env:dict?
-        /// (extra env vars), cwd:str?. The FULL line (command + args, shell-joined)
-        /// must fullmatch one of the record's `allowed` regexes or the start is
-        /// refused naming the patterns. A `code` field is refused explicitly.
+        /// args: command:str (req — on a PTY start, absent = the child's `$SHELL`),
+        /// args:list[str]? (argv, default []), pty:{cols,rows}?. The FULL line
+        /// (command + args, shell-joined) must fullmatch one of the record's
+        /// `allowed` regexes — or be the exact shell line the record's `shell`
+        /// permits — or the start is refused naming the patterns. `cwd`/`env` are
+        /// the RECORD's, never the call's.
         private func startReply(agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
             let record = kernel.agent(agentId)
-            // EVERY refusal on this verb carries a CODE. Sibling argument errors used
-            // to split — `args`/`env` answered a typed message while `code`/`command`/
-            // the policy wall answered a bare `{error}` with no `reason` at all — so
-            // nothing could tell a typo from a policy refusal without matching prose.
-            if !payload["code"].isNull {
-                return Refusal.bad("start", "code", "absent — run a command instead")
-            }
-            // python `command.strip()` — ALL whitespace, newlines included.
-            guard let command = payload["command"].asString,
-                !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else {
-                return Refusal.missing("start", "command")
+            // EVERY refusal on this verb carries a CODE, so a model can tell a typo
+            // from a policy refusal without reading the prose.
+            // WHERE and WITH WHAT a command runs are the OPERATOR's: a per-call `env`
+            // (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted line
+            // actually ran (audit 2026-09-28).
+            for gone in ["env", "cwd"] where !payload[gone].isNull {
+                return Refusal.bad(
+                    "start", gone,
+                    "absent — `\(gone)` is the record's (update_agent \(agentId.value) \(gone)=…)")
             }
             // `args` — python `payload.get("args", [])`: the KEY absent is `[]`, an
             // explicit null is not a list and refuses. Items are str/int/float — and a
@@ -342,45 +415,100 @@
                     }
                 }
             }
-            // The FULL argv, shell-joined, matched against the allowlist BEFORE spawn.
+            var dimsOut: (Int, Int)? = nil
+            if !payload["pty"].isNull {
+                switch dims("start", payload["pty"]) {
+                case .failure(let r): return r.json
+                case .success(let d): dimsOut = d
+                }
+            }
+            // The child's WHOLE environment, from the record — built before the
+            // command is resolved, because an absent `command` on a PTY start is
+            // read from it. (python's order: args, pty, env, THEN command.)
+            let env = childEnv(record)
+            var rawCommand = payload["command"]
+            if rawCommand.isNull, dimsOut != nil {
+                // AUTODISCOVERY, not a default: the shell is whatever the record
+                // passed down to the child as SHELL. No chain (zsh → bash → sh)
+                // behind it — a child env without one is refused, naming where it
+                // comes from.
+                guard let shell = env[SHELL_VAR], !shell.isEmpty else {
+                    return Refusal.make(
+                        Refusal.missingArg,
+                        "exec_bridge: start named no command and the child's environment "
+                            + "has no \(SHELL_VAR) to run — a PTY start without `command` runs "
+                            + "the shell the record passes down, never a guessed one",
+                        hint: "update_agent \(agentId.value) inherit_env=[\"\(SHELL_VAR)\"] "
+                            + "(or env={\"\(SHELL_VAR)\": …}), or name `command`",
+                        extra: [("arg", .string(SHELL_VAR))])
+                }
+                rawCommand = .string(shell)
+            }
+            // A pipe job always names its command; so does a PTY start that passed
+            // one explicitly (an empty string is a typo, not "use the shell").
+            // python `command.strip()` — ALL whitespace, newlines included.
+            guard let command = rawCommand.asString,
+                !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                return Refusal.missing("start", "command")
+            }
+            // The FULL argv, shell-joined, matched BEFORE spawn. Two ways a line is
+            // permitted, both written on the RECORD: the shell line its `shell`
+            // field names, or a fullmatch against `allowed`. Checked in that order
+            // only because the first is an exact comparison; neither widens the
+            // other.
             let argv = [command] + args
             let line = shlexJoin(argv)
-            if let why = commandPermitted(record, line) {
+            if !shellPermits(record, env: env, argv: argv, pty: dimsOut != nil),
+                var why = commandPermitted(record, line)
+            {
                 // An AUTHORIZATION denial, not a bad argument: the command line is
                 // well-formed and the LEG refused it. Same code the ingress gate
                 // answers, so one branch covers "the operator has not opened this".
+                if let tail = shellTail(record) {
+                    // Say what `shell` DOES permit, so a caller that passed extra args
+                    // (or a pipe job) learns why the shell permission did not cover
+                    // it. The value is JSON (`true`/`"login"`) — python's
+                    // `json.dumps`, the wire's own spelling — so every runtime prints
+                    // the same bytes.
+                    let shell = env[SHELL_VAR].flatMap { $0.isEmpty ? nil : $0 } ?? "$" + SHELL_VAR
+                    let shown = pyJsonDumps(record?.metaValue(forKey: "shell") ?? .null)
+                    why +=
+                        " (`shell=\(shown)` permits only the PTY line "
+                        + "\(pyRepr(shlexJoin([shell] + tail))))"
+                }
                 return Refusal.make(
                     Refusal.unauthorized, why,
                     hint: "the leg's `allowed` policy decides; an operator may widen it")
             }
-            // python `payload.get("cwd") or rec.get("cwd") or None`: truthiness, not
-            // presence, and the RAW value is what the job row records.
-            var cwd = payload["cwd"]
-            if !pyTruthy(cwd) { cwd = record?.metaValue(forKey: "cwd") ?? .null }
-            if !pyTruthy(cwd) { cwd = .null }
-            // The per-call `env` block — python `payload.get("env") or {}`, so a falsy
-            // value (null, `{}`, `[]`, `""`, `0`) is the empty block, and anything
-            // truthy that is not an object refuses. Values are str/int/float/bool.
-            var envExtra: [String: String] = [:]
-            let rawEnv = payload["env"]
-            if pyTruthy(rawEnv) {
-                guard let m = rawEnv.asObject else {
-                    return Refusal.bad("start", "env", "a dict of str -> str")
-                }
-                for (k, v) in m {
-                    switch v {
-                    case .string, .integer, .double, .bool: envExtra[k] = pyStr(v)
-                    default:
-                        return Refusal.bad("start", "env", "a dict of str -> str")
-                    }
-                }
+            guard let cwdStr = record?.metaValue(forKey: "cwd")?.asString, !cwdStr.isEmpty else {
+                return Refusal.make(
+                    Refusal.missingArg,
+                    "exec_bridge: this leg names no `cwd` — where a command runs is the "
+                        + "operator's decision, never guessed",
+                    hint: "update_agent \(agentId.value) cwd=<dir>", extra: [("arg", .string("cwd"))])
             }
+            let cwd: JSON = .string(cwdStr)
 
-            let spawned: Spawn.Spawned
+            var spawned: Spawn.Spawned? = nil
+            var ptyParts: (Child, Int32, Int32)? = nil
             do {
-                spawned = try Spawn.job(
-                    argv: argv, selfId: agentId.value, envExtra: envExtra,
-                    cwd: cwd.asString)
+                if let (cols, rows) = dimsOut {
+                    ptyParts = try Spawn.pty(
+                        argv: argv, selfId: agentId.value, env: env, cwd: cwdStr, cols: cols,
+                        rows: rows)
+                } else {
+                    spawned = try Spawn.job(argv: argv, selfId: agentId.value, env: env, cwd: cwdStr)
+                }
+            } catch is Spawn.NoPath {
+                return Refusal.make(
+                    Refusal.missingArg,
+                    "exec_bridge: \(pyRepr(.string(command))) is a bare command and this leg "
+                        + "gives the child no PATH to find it in — the kernel's own PATH is not "
+                        + "the child's",
+                    hint: "update_agent \(agentId.value) inherit_env=[\"PATH\"] "
+                        + "(or env={\"PATH\": …}), or start an absolute path",
+                    extra: [("arg", .string("PATH"))])
             } catch {
                 // python's `str(OSError)`: `[Errno 2] No such file or directory: 'nope'`.
                 return Refusal.make(
@@ -388,8 +516,15 @@
             }
             // python `secrets.token_hex(4)` — ALWAYS 8 hex digits, leading zeros kept.
             let jobId = String(format: "%08x", UInt32.random(in: .min ... .max))
+            let ctrlFd = spawned?.ctrlFd ?? ptyParts!.2
+            let child = spawned?.child ?? ptyParts!.0
+            let pty = ptyParts.map {
+                PtyJob(
+                    jobId: jobId, owner: agentId, child: $0.0, masterFd: $0.1,
+                    cols: dimsOut!.0, rows: dimsOut!.1)
+            }
             let relay = Relay(
-                fd: spawned.ctrlFd, owner: agentId, jobId: jobId, kernel: kernel)
+                fd: ctrlFd, owner: agentId, jobId: jobId, kernel: kernel)
             // THE RELAY IS THE JOB'S TASK TOO (py `spawn_task(id, "relay", …)`): a
             // program's `kernel.send` must be rowed under work that is still alive,
             // not under the `start` dispatch that settles the moment we return.
@@ -400,20 +535,35 @@
             let counter = LineCounter()
             // The job OUTLIVES this dispatch, so it needs its OWN task-table row —
             // otherwise a subprocess nobody can reach is the orphan bug.
+            let pipe = spawned
             let taskId = kernel.spawnTask(agent: agentId, verb: "start") { [weak self] in
-                await self?.pump(
-                    agentId: agentId, jobId: jobId, spawned: spawned, counter: counter,
-                    kernel: kernel)
+                if let spawned = pipe {
+                    await self?.pump(
+                        agentId: agentId, jobId: jobId, spawned: spawned, counter: counter,
+                        kernel: kernel)
+                } else if let pty {
+                    await self?.ptyPump(
+                        agentId: agentId, jobId: jobId, pty: pty, child: child, kernel: kernel)
+                }
             }
             lock.withLock {
                 jobs[jobId] = Job(
-                    agent: agentId, taskId: taskId, child: spawned.child,
+                    agent: agentId, taskId: taskId, child: child,
                     relay: relay, command: command, args: args, cwd: cwd,
-                    startedAt: Date().timeIntervalSince1970, counter: counter)
+                    startedAt: Date().timeIntervalSince1970, counter: counter, pty: pty)
             }
+            // The RESOLVED invocation rides the announcement: a client that let the
+            // kernel pick the shell learns which one ran, and can re-issue it
+            // verbatim.
             await kernel.emit(
-                agentId, .object(["type": .string("job_started"), "job_id": .string(jobId)]))
-            return .object(["job_id": .string(jobId), "status": .string("running")])
+                agentId,
+                .object([
+                    "type": .string("job_started"), "job_id": .string(jobId),
+                    "command": .string(command), "args": .array(args.map(JSON.string)),
+                ]))
+            return .object([
+                "job_id": .string(jobId), "status": .string("running"), "pty": .bool(pty != nil),
+            ])
         }
 
         /// The job's task-table body: drain both pipes LIVE (a `progress` per line as
@@ -474,6 +624,39 @@
                 ]))
         }
 
+        /// THE JOB'S TASK for a PTY job (python `_pty_pump`): the terminal's own
+        /// ordered stream carries every `output` chunk; at EOF the process is
+        /// awaited, the row written, `job_done` emitted last.
+        private func ptyPump(
+            agentId: AgentId, jobId: String, pty: PtyJob, child: Child, kernel: Kernel
+        ) async {
+            let code = await pty.run(kernel: kernel)
+            relayFor(jobId)?.stop()
+            if Task.isCancelled {
+                lock.withLock {
+                    if var j = jobs[jobId] {
+                        j.status = "stopped"
+                        j.exitCode = child.exitCode
+                        jobs[jobId] = j
+                    }
+                }
+                return
+            }
+            lock.withLock {
+                if var j = jobs[jobId] {
+                    j.exitCode = code
+                    j.status = j.status == "stopping" ? "stopped" : (code == 0 ? "done" : "failed")
+                    jobs[jobId] = j
+                }
+            }
+            await kernel.emit(
+                agentId,
+                .object([
+                    "type": .string("job_done"), "job_id": .string(jobId),
+                    "exit_code": .integer(Int64(code)), "ok": .bool(code == 0),
+                ]))
+        }
+
         /// Emit one `progress` per output line. The counter is SHARED across stdout
         /// and stderr and lives on the PUMP, not the table — python's `_read_stream`
         /// closes over the job dict, so `clear` dropping the row leaves `n` counting.
@@ -491,6 +674,222 @@
                 ]))
         }
 
+        // MARK: - PTY jobs (a terminal is a job)
+
+        /// A refusal carried through a `Result`.
+        struct RefusalJSON: Error { let json: JSON }
+
+        /// A live PTY job this agent owns, or the refusal (python `_pty_job`).
+        private func ptyJob(_ verb: String, _ agentId: AgentId, _ payload: JSON) -> Result<PtyJob, RefusalJSON> {
+            guard let jid = payload["job_id"].asString, !jid.isEmpty else {
+                return .failure(RefusalJSON(json: Refusal.missing(verb, "job_id")))
+            }
+            let found = lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
+            guard let job = found else {
+                return .failure(
+                    RefusalJSON(
+                        json: Refusal.make(
+                            Refusal.notFound, "exec_bridge: no job \(pyRepr(jid))",
+                            extra: [("job_id", .string(jid))])))
+            }
+            guard let pty = job.pty else {
+                return .failure(
+                    RefusalJSON(json: Refusal.bad(verb, "job_id", "a PTY job (started with `pty`)")))
+            }
+            guard job.child.isAlive, pty.isLive else {
+                return .failure(
+                    RefusalJSON(
+                        json: Refusal.make(
+                            Refusal.notFound, "exec_bridge: job \(pyRepr(jid)) has ended",
+                            extra: [("job_id", .string(jid))])))
+            }
+            return .success(pty)
+        }
+
+        /// A positive int (python `_dims`: an int >= 1, a bool is not one).
+        private func dim(_ verb: String, _ name: String, _ v: JSON) -> Result<Int, RefusalJSON> {
+            if case .integer(let n) = v, n >= 1, n <= 65535 { return .success(Int(n)) }
+            return .failure(RefusalJSON(json: Refusal.bad(verb, name, "a positive integer")))
+        }
+
+        /// `(cols, rows)` of a `pty` / `resize` object — both required, positive.
+        private func dims(_ verb: String, _ raw: JSON) -> Result<(Int, Int), RefusalJSON> {
+            guard case .object = raw else {
+                return .failure(RefusalJSON(json: Refusal.bad(verb, "pty", "an object {cols, rows}")))
+            }
+            switch (dim(verb, "cols", raw["cols"]), dim(verb, "rows", raw["rows"])) {
+            case (.failure(let r), _), (_, .failure(let r)): return .failure(r)
+            case (.success(let c), .success(let r)): return .success((c, r))
+            }
+        }
+
+        private func writeReply(_ agentId: AgentId, _ payload: JSON) async -> JSON {
+            let pty: PtyJob
+            switch ptyJob("write", agentId, payload) {
+            case .failure(let r): return r.json
+            case .success(let p): pty = p
+            }
+            guard let data = payload["data"].asString else {
+                return Refusal.bad("write", "data", "a string")
+            }
+            switch await pty.writeAll(Data(data.utf8)) {
+            case .success(let n): return .object(["written": .integer(Int64(n))])
+            case .failure(let e):
+                return Refusal.make(
+                    Refusal.transportError, "exec_bridge: write failed: \(osErrorStr(e.code))")
+            }
+        }
+
+        private func resizeReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
+            let pty: PtyJob
+            switch ptyJob("resize", agentId, payload) {
+            case .failure(let r): return r.json
+            case .success(let p): pty = p
+            }
+            switch dims("resize", payload) {
+            case .failure(let r): return r.json
+            case .success(let (cols, rows)):
+                let e = pty.resize(cols: cols, rows: rows)
+                if e != 0 {
+                    return Refusal.make(
+                        Refusal.transportError, "exec_bridge: resize failed: \(osErrorStr(e))")
+                }
+                return .object([
+                    "resized": .bool(true), "cols": .integer(Int64(cols)),
+                    "rows": .integer(Int64(rows)),
+                ])
+            }
+        }
+
+        private func ackReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
+            let pty: PtyJob
+            switch ptyJob("ack", agentId, payload) {
+            case .failure(let r): return r.json
+            case .success(let p): pty = p
+            }
+            guard case .integer(let chars) = payload["chars"], chars >= 0 else {
+                return Refusal.bad("ack", "chars", "a non-negative integer")
+            }
+            let (unacked, paused) = pty.ack(Int(chars))
+            return .object(["unacked": .integer(Int64(unacked)), "paused": .bool(paused)])
+        }
+
+        private func outputReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
+            let raw = payload["job_id"]
+            let found = raw.asString.flatMap { jid in
+                lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
+            }
+            guard let job = found else {
+                return Refusal.make(
+                    Refusal.notFound, "exec_bridge: no job \(pyRepr(raw))", extra: [("job_id", raw)])
+            }
+            guard let pty = job.pty else {
+                return Refusal.bad(
+                    "output", "job_id", "a PTY job (a pipe job's output is in `status`)")
+            }
+            var text = pty.ringText()
+            let mb = payload["max_bytes"]
+            if mb != .null {
+                guard case .integer(let n) = mb, n >= 0 else {
+                    return Refusal.bad("output", "max_bytes", "a non-negative integer")
+                }
+                let bytes = Array(text.utf8)
+                if Int(n) < bytes.count {
+                    // python slices the BYTES and decodes with errors="ignore": a char
+                    // cut at the front is dropped, never shown as litter.
+                    var start = bytes.count - Int(n)
+                    while start < bytes.count && bytes[start] & 0xC0 == 0x80 { start += 1 }
+                    text = String(decoding: bytes[start...], as: UTF8.self)
+                }
+            }
+            let jid = raw.asString ?? ""
+            return .object([
+                "job_id": .string(jid), "output": .string(text),
+                "origin": .string(
+                    "\(agentId.value) output {job_id: \(jid)} — the ring NOW; re-send, it moves"),
+            ])
+        }
+
+        /// `paste_image` — the BINARY channel: `data` IS the blob.
+        private func pasteImageReply(_ agentId: AgentId, _ header: JSON, _ data: Data) async -> JSON {
+            let pty: PtyJob
+            switch ptyJob("paste_image", agentId, header) {
+            case .failure(let r): return r.json
+            case .success(let p): pty = p
+            }
+            if data.count > MAX_PASTE_IMAGE {
+                return Refusal.bad("paste_image", "data", "at most \(MAX_PASTE_IMAGE) bytes")
+            }
+            // The mime is the caller's to state — never guessed.
+            guard let mimeRaw = header["mime"].asString, !mimeRaw.isEmpty else {
+                return Refusal.missing("paste_image", "mime")
+            }
+            let mime = mimeRaw.lowercased()
+            guard let ext = PTY_IMAGE_EXT.first(where: { $0.0 == mime })?.1 else {
+                let legal = PTY_IMAGE_EXT.map { $0.0 }.sorted().map { pyRepr($0) }.joined(separator: ", ")
+                return Refusal.bad("paste_image", "mime", "one of [\(legal)]")
+            }
+            guard let dir = pty.pasteDirectory() else {
+                return Refusal.make(
+                    Refusal.transportError, "exec_bridge: paste_image failed: \(osErrorStr(errno))")
+            }
+            let name = "paste_\(String(format: "%08x", UInt32.random(in: .min ... .max))).\(ext)"
+            do {
+                _ = try fsWriteChunk(dir, name, data, offset: 0, truncate: true, base: "/")
+            } catch {
+                return Refusal.make(
+                    Refusal.transportError, "exec_bridge: paste_image failed: \(error.message)")
+            }
+            let path = (dir as NSString).appendingPathComponent(name)
+            // the path at the cursor with a trailing space, no newline — pasting
+            // must not submit
+            if case .failure(let e) = await pty.writeAll(Data("\(path) ".utf8)) {
+                return Refusal.make(
+                    Refusal.transportError, "exec_bridge: paste_image failed: \(osErrorStr(e.code))")
+            }
+            return .object(["path": .string(path), "bytes": .integer(Int64(data.count))])
+        }
+
+        /// The BINARY channel: `paste_image`'s `data` IS the blob. Every other verb
+        /// takes the text path.
+        public func handleBinary(
+            agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        ) async throws -> (JSON?, Data?) {
+            guard header["type"].asString == "paste_image" else {
+                return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
+            }
+            if let agent = kernel.agent(agentId) {
+                let rule = try resolveIngress(
+                    ingressRule: agent.metaValue(forKey: "ingress_rule"),
+                    auth: agent.metaValue(forKey: "auth"))
+                if case .deny(let d) = rule.authorize(
+                    AuthAction(kind: "spawn", target: agentId.value, verb: "paste_image", token: nil))
+                {
+                    return (d.asRefusal, nil)
+                }
+            }
+            return (await pasteImageReply(agentId, header, blob), nil)
+        }
+
+        /// The child's WHOLE environment, from the record (python `_child_env`): the
+        /// kernel env vars named in `inherit_env` (nothing by default; `["*"]` = every
+        /// one — the operator's wildcard), then the operator's `env` extras. Nothing
+        /// else leaks in — the kernel's `.env` keys reach a child only by name.
+        private func childEnv(_ record: Agent?) -> [String: String] {
+            let names = (record?.metaValue(forKey: "inherit_env")?.asArray ?? []).compactMap {
+                $0.asString
+            }
+            let host = ProcessInfo.processInfo.environment
+            var env: [String: String] = [:]
+            if names.contains("*") {
+                env = host
+            } else {
+                for n in names { if let v = host[n] { env[n] = v } }
+            }
+            for (k, v) in record?.metaValue(forKey: "env")?.asObject ?? [:] { env[k] = pyStr(v) }
+            return env
+        }
+
         // MARK: - status / clear
 
         private func snap(_ jobId: String, _ j: Job, full: Bool) -> JSON {
@@ -504,10 +903,17 @@
                 "last_line": .string(j.counter.lastLine),
                 "command": .string(j.command),
                 "args": .array(j.args.map(JSON.string)),
+                "pty": .bool(j.pty != nil),
             ]
+            if let p = j.pty {
+                o["cols"] = .integer(Int64(p.cols))
+                o["rows"] = .integer(Int64(p.rows))
+            }
             if full {
-                o["stdout"] = .string(j.stdout)
-                o["stderr"] = .string(j.stderr)
+                if j.pty == nil {
+                    o["stdout"] = .string(j.stdout)
+                    o["stderr"] = .string(j.stderr)
+                }
                 o["cwd"] = j.cwd
             }
             return .object(o)
@@ -602,8 +1008,10 @@
                     if sig == SIGKILL {
                         j.status = "stopping"
                         jobs[id] = j
+                        if Self.kill(j) { n += 1 }
+                    } else if j.child.signal(sig) {
+                        n += 1
                     }
-                    if j.child.signal(sig) { n += 1 }
                 }
                 return n
             }
@@ -712,8 +1120,17 @@
                 return j
             }
             guard let job else { return }
-            if job.child.isAlive { _ = job.child.signal(SIGKILL) }
+            if job.child.isAlive { Self.kill(job) }
             job.relay?.stop()
+        }
+
+        /// SIGKILL one job: its whole SESSION — the command and everything it
+        /// launched (a pipe job's `server &`, a PTY shell's background jobs). Every
+        /// job leads its own session (`Spawn`), so this never reaches the kernel.
+        /// Returns whether the job's own process was signalled.
+        @discardableResult
+        private static func kill(_ j: Job) -> Bool {
+            Spawn.killSession(j.child.pid)
         }
 
         private func teardownAgent(_ agentId: AgentId) {
@@ -750,12 +1167,37 @@
                         + "legal values: allow_all_ingress, deny_ingress"
                 }
             }
-            // The withdrawn code-runner fields are refused at WRITE time.
-            for gone in ["code", "shim", "interpreter", "interpreters", "argv_template"] {
-                if let v = meta[gone], !v.isNull {
-                    return
-                        "exec_bridge: `\(gone)` is not a field — this is a general-purpose "
-                        + "COMMAND runner; gate it with `allowed=[<regex>, ...]`"
+            // WHERE and WITH WHAT a command runs is the record's — shaped at the write.
+            if let c = meta["cwd"], !c.isNull, (c.asString ?? "").isEmpty {
+                return "cwd must be a non-empty directory path"
+            }
+            if let e = meta["env"], !e.isNull {
+                let ok =
+                    e.asObject?.values.allSatisfy {
+                        switch $0 {
+                        case .string, .integer, .double, .bool: return true
+                        default: return false
+                        }
+                    } ?? false
+                if !ok { return "env must be a map of NAME -> value" }
+            }
+            if let n = meta["inherit_env"], !n.isNull {
+                let ok = n.asArray?.allSatisfy { !($0.asString ?? "").isEmpty } ?? false
+                if !ok { return #"inherit_env must be a list of env var names (["*"] = all)"# }
+            }
+            // `shell` names ONE exact line, so its legal set is closed: the JSON bool
+            // (true → `$SHELL`, false → none) or "login" (`$SHELL -l`). A number is
+            // not a bool here — python checks `isinstance(v, bool)`, so `1` refuses.
+            if let v = meta["shell"], !v.isNull {
+                let ok: Bool
+                switch v {
+                case .bool: ok = true
+                case .string(let s): ok = s == "login"
+                default: ok = false
+                }
+                if !ok {
+                    return "shell=\(pyRepr(v)) is not a shell permission — legal values: true "
+                        + #"(the child's $SHELL, bare), "login" ($SHELL -l), false (none)"#
                 }
             }
             // `allowed` must be a non-empty list of compilable regexes.
@@ -784,7 +1226,7 @@
             return nil
         }
 
-        /// python's `readme.md`, verbatim — 139 lines and the trailing newline.
+        /// python's `readme.md`, verbatim, with the trailing newline.
         static let readmeText = """
             # exec_bridge — process edge
 
@@ -792,25 +1234,48 @@
             an IO edge, so this leg is gated exactly like `file_bridge`/`web_ws`: **sealed by default**,
             and the commands it may run come from an operator **allowlist** of regexes.
 
-            It is a GENERAL-PURPOSE command runner, not a code runner: there is no `code` field, no
-            `interpreters`, no shim. A program is a FILE some process (or a `write_stream`) put on disk;
+            It is a GENERAL-PURPOSE command runner. A program is a FILE some process (or a `write_stream`) put on disk;
             running it is `command` + `args`, exactly like anything else.
 
-            Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `reflect` · `boot`.
+            Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `reflect` · `boot`, and for a
+            PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
             Any verb NOT in that list is **MAIL** for the running program (see below).
 
-            - `start(command, args?, env?, cwd?)` → `{job_id, status:'running'}` at once — non-blocking,
+            WHERE and WITH WHAT a command runs is the RECORD's, never the call's: `cwd` (REQUIRED — a
+            leg without one runs nothing), `env` (the operator's extra vars), `inherit_env` (which of
+            the kernel's env vars pass through — none by default, `["*"]` = all; the kernel's `.env`
+            keys reach a child only when named). A per-call `env`/`cwd` is refused. A bare `command`
+            is found on the CHILD's `PATH` only — pass `PATH` through `inherit_env`/`env`, or start an
+            absolute path; with no `PATH` the start is refused naming it.
+
+            - `start(command, args?, pty?)` → `{job_id, status:'running', pty}` at once — non-blocking,
               many jobs in parallel. `command` is the program/binary; `args` is its argv (a list of
               strings). The FULL line (`command` + `args`, shell-joined) must fullmatch one of the
-              record's `allowed` regexes or the start is refused, naming the patterns. `env` adds
-              environment vars; `cwd` overrides the record's. There is no blocking run-and-wait verb:
-              output streams as `progress` events on this agent's inbox (one per line, `{n, line,
-              stream}`) with a final `job_done` (`{exit_code, ok, stdout, stderr}`), after a
-              `job_started`.
-            - `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr, or every job of
-              this agent as summaries.
-            - `stop(job_id?)` SIGKILL · `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished
-              rows. Omit `job_id` and it applies to all of this agent's jobs.
+              record's `allowed` regexes or the start is refused, naming the patterns. There is no
+              blocking run-and-wait verb: a pipe job's output streams as `progress` events on this
+              agent's inbox (one per line, `{n, line, stream}`) with a final `job_done`
+              (`{exit_code, ok, stdout, stderr}`), after a `job_started`.
+            - **A terminal is a PTY job**: `start(command, args, pty={cols, rows})` runs the command on
+              a pseudo-terminal (`TERM=xterm-256color`), same gate. **Leave `command` out** and it runs
+              the CHILD's own `$SHELL` — read from the environment the record passes down
+              (`inherit_env`/`env`), never guessed; a child env with no `SHELL` is refused naming it.
+              `job_started` and `status` report the resolved `command`. It streams `output {job_id, data}`
+              chunks and ends with `job_done {job_id, exit_code, ok}`. Drive it with
+              `write(job_id, data)` (keystrokes, written in full, serialized), `resize(job_id, cols,
+              rows)`, `ack(job_id, chars)` (flow control — the reader pauses past 100K unacked chars,
+              resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
+              re-attach) and `paste_image(job_id, data, mime)` (saves the image, types its path).
+              Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
+              Nothing respawns a terminal — `boot` starts nothing; a client that attaches and finds no
+              live PTY job `start`s one.
+            - `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr (a PTY job: its
+              `cols`/`rows`), or every job of this agent as summaries.
+            - `stop(job_id?)` SIGKILL the job's whole session — the command and everything it
+              launched (`server &`, a `nohup`, a shell's background jobs); deleting the agent or
+              stopping the kernel does the same. A process that leaves the session on purpose
+              (`setsid`) escapes — containment beyond that is the OS's ·
+              `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished rows. Omit `job_id` and
+              it applies to all of this agent's jobs.
             - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
             Every running job is a row in the kernel TASK TABLE (`task_id` in each `status` snapshot,
@@ -843,6 +1308,26 @@
             PER RECORD (nothing is inherited from a parent). Which interpreter/binary may run is the
             operator's decision, never the caller's — that is exactly why the gate is a record field a
             caller cannot edit.
+
+            **The child's own shell — `shell`.** A client that cannot name the shell (a browser page
+            has no environment) cannot write an exact `allowed` line for it either. The record's `shell`
+            field permits the resolved shell line itself, and nothing wider:
+
+            ```
+            update_agent <id> inherit_env='["SHELL", "PATH"]' shell=true     # PTY start → exactly $SHELL
+            update_agent <id> inherit_env='["SHELL", "PATH"]' shell=login    # PTY start → exactly $SHELL -l
+            ```
+
+            It is ONE exact line on a PTY job, not a pattern: other args, and every pipe job, still need
+            an `allowed` match. A shell on a terminal runs whatever is typed into it — `shell` states which
+            program `start` spawns, not a limit on what that program can do.
+
+            **Know what a `.*` tail grants.** `*` is allowed here like on every gate — whoever writes
+            it owns it. But a pattern names a COMMAND, and a command can run others:
+            - an interpreter with `-c`/`-e` (`python3 -c .*`, `node -e .*`), or any shell
+              (`bash .*`, `zsh`), runs ANY code;
+            - `find … -exec`, `git -c …` / git hooks / aliases, `xargs`, `env` run ANY command.
+            Grant a fixed argv, or a program file, when the caller should get less than that.
 
             ## Build a durable program: a FILE plus a command
 
@@ -935,24 +1420,34 @@
             let running = lock.withLock {
                 jobs.values.filter { $0.agent == agentId && $0.child.isAlive }.count
             }
-            // python `rec.get("cwd") or "<process default>"` — TRUTHINESS, so an
-            // empty string or a 0 reads as "not set", not as a directory.
+            // python `rec.get("cwd")` — the record's, as written; null when unset.
             let cwd = record?.metaValue(forKey: "cwd") ?? .null
             var out: OrderedDictionary<String, JSON> = [
                 "id": .string(agentId.value),
                 "sentence": .string(
                     "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd."
                 ),
-                "cwd": pyTruthy(cwd) ? cwd : .string("<process default>"),
+                "cwd": cwd,
                 "allowed": .array(allowedPatterns(record).map(JSON.string)),
+                "inherit_env": record?.metaValue(forKey: "inherit_env") ?? .array([]),
+                // The shell line the record permits without an `allowed` entry:
+                // false (none), true ($SHELL bare) or "login" ($SHELL -l) — python
+                // `rec.get("shell") or False`.
+                "shell": record?.metaValue(forKey: "shell").flatMap { pyTruthy($0) ? $0 : nil }
+                    ?? .bool(false),
                 "running": .integer(Int64(running)),
                 "verbs": .object(Self.verbDocs),
                 "emits": .object([
-                    "job_started": .string("{type:'job_started', job_id}"),
+                    "job_started": .string(
+                        "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)"
+                    ),
                     "progress": .string(
                         "{type:'progress', job_id, n, line, stream} — one per output line"),
                     "job_done": .string(
-                        "{type:'job_done', job_id, exit_code, ok, stdout, stderr}"),
+                        "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split"
+                    ),
+                    "output": .string(
+                        "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
                 ]),
                 "wire": .string(
                     "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."

@@ -304,13 +304,22 @@ fn the_root_records_next_id_resumes_the_counter_and_the_load_writes_nothing() {
     )
     .expect("boot");
     assert_eq!(booted.kernel.rows.next_id(), 5000);
-    assert_eq!(booted.kernel.rows.id_reserved(), 5000 + crate::rows::ID_BLOCK);
-    assert!(booted.kernel.mint_id() >= 5000, "ids never repeat across a restart");
+    assert_eq!(
+        booted.kernel.rows.id_reserved(),
+        5000 + crate::rows::ID_BLOCK
+    );
+    assert!(
+        booted.kernel.mint_id() >= 5000,
+        "ids never repeat across a restart"
+    );
     assert_eq!(
         std::fs::read_to_string(fdir.join("agent.yaml")).unwrap(),
         body,
         "load never edits a record"
     );
-    assert!(!fdir.join("messages.yaml").exists(), "no tape is ever written");
+    assert!(
+        !fdir.join("messages.yaml").exists(),
+        "no tape is ever written"
+    );
     shutdown(tmp.path()).unwrap();
 }

@@ -18,12 +18,6 @@ import httpx
 
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 
-DEFAULT_ENDPOINT = "https://integrate.api.nvidia.com/v1"
-# NO guessy default (by default, no defaults): never name a network-reaching model.
-# The sentinel exists ONLY so `reflect` can say what is true; `chat()` fails loud
-# naming `model` if it is left unset.
-DEFAULT_MODEL = "(no default — set the `model` meta)"
-
 
 class NvidiaNimProvider:
     #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
@@ -34,8 +28,8 @@ class NvidiaNimProvider:
     def __init__(
         self,
         api_key: str,
-        endpoint: str = DEFAULT_ENDPOINT,
-        model: str = DEFAULT_MODEL,
+        endpoint: str,
+        model: str,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self._api_key = api_key
@@ -59,7 +53,7 @@ class NvidiaNimProvider:
     ) -> AsyncIterator[str]:
         """Stream raw text tokens — NO tools array. ai_core parses any
         `<call>` element out of the text stream."""
-        if not self._model or self._model == DEFAULT_MODEL:
+        if not self._model:
             raise RuntimeError(
                 "nvidia_nim_backend: no `model` set — this connector does not guess "
                 "one. Name a model on the agent record (model=...)."

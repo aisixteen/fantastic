@@ -19,11 +19,43 @@
     /// /dev/null** where python leaves it INHERITED, and an `sh` process image existed
     /// between the spawn and the command.
     ///
-    /// `posix_spawnp` takes the file actions directly: the control socket is dup'd to
+    /// `posix_spawn` takes the file actions directly: the control socket is dup'd to
     /// fd 3, the two pipes to 1/2, stdin is inherited by name, and every other
     /// descriptor is closed — python's `create_subprocess_exec(..., pass_fds=(fd,))`
-    /// behaviour (`close_fds=True`), argv untouched.
+    /// behaviour (`close_fds=True`), argv untouched. Not `posix_spawnp`: it searches
+    /// the KERNEL's `PATH`; the file comes from `resolve` over the CHILD's.
     enum Spawn {
+
+        /// A bare command, and the child's environment has no `PATH` to find it in
+        /// (python `proc.NoPath`).
+        struct NoPath: Error {}
+
+        /// python `proc.resolve`: argv[0] → the file to exec. A command with a `/` is
+        /// exec'd as written (relative to `cwd`). A bare name is looked up in the
+        /// CHILD's `PATH` only — never the kernel's, never a built-in default path; a
+        /// child env without `PATH` throws `NoPath`.
+        static func resolve(
+            _ command: String, cwd: String, env: [String: String]
+        ) throws -> String {
+            if command.contains("/") { return command }
+            guard let path = env["PATH"] else { throw NoPath() }
+            for dir in path.components(separatedBy: ":") {
+                // POSIX: an empty entry is the working directory — the CHILD's; a
+                // relative entry is relative to it, an absolute one stands alone.
+                let base =
+                    dir.hasPrefix("/")
+                    ? URL(fileURLWithPath: dir)
+                    : URL(fileURLWithPath: cwd).appendingPathComponent(dir.isEmpty ? "." : dir)
+                let full = base.appendingPathComponent(command).standardized.path
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: full, isDirectory: &isDir),
+                    !isDir.boolValue, access(full, X_OK) == 0
+                {
+                    return full
+                }
+            }
+            throw Failure(code: ENOENT, path: command)
+        }
 
         /// A spawn that never reached `exec`. `description` is python's `str(OSError)`
         /// for the same failure, so the refusal text matches byte for byte.
@@ -46,20 +78,24 @@
         /// Launch `argv` (argv[0] = command, rest = args) with a control socket on an
         /// inherited fd. `selfId` is the OWNER agent id (the tool's public id, not an
         /// ephemeral job id), so a tool can address itself by the id others use.
-        /// `envExtra` is the per-call `env` block, applied BEFORE the two control vars
-        /// so a caller cannot override them. There is NO `FANTASTIC_ARGS`: a
-        /// general-purpose command runner passes arguments as argv, not a smuggled env.
+        /// `env` is the child's WHOLE environment, composed from the record (the
+        /// inherited names, the operator's extras) — nothing leaks in from the
+        /// kernel's own; the two control vars are written OVER it so a record cannot
+        /// override them. There is NO `FANTASTIC_ARGS`: a general-purpose command
+        /// runner passes arguments as argv, not a smuggled env.
         static func job(
-            argv: [String], selfId: String, envExtra: [String: String], cwd: String?
+            argv: [String], selfId: String, env: [String: String], cwd: String
         ) throws -> Spawned {
             guard let command = argv.first else {
                 throw Failure(code: EINVAL, path: "")
             }
+            let program = try resolve(command, cwd: cwd, env: env)
             var sock: [Int32] = [0, 0]
             guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sock) == 0 else {
                 throw Failure(code: errno, path: command)
             }
-            let parentFd = sock[0], childFd = sock[1]
+            let parentFd = sock[0]
+            let childFd = sock[1]
             var outFds: [Int32] = [0, 0]
             var errFds: [Int32] = [0, 0]
             guard pipe(&outFds) == 0 else {
@@ -90,10 +126,8 @@
             // `POSIX_SPAWN_CLOEXEC_DEFAULT` (below) closes everything a file action
             // does not name. stdin is named so it stays INHERITED, as python leaves it.
             posix_spawn_file_actions_addinherit_np(&actions, 0)
-            if let cwd, !cwd.isEmpty {
-                // `_np`, not the 26.0-only spelling: this package deploys to macOS 14.
-                posix_spawn_file_actions_addchdir_np(&actions, cwd)
-            }
+            // `_np`, not the 26.0-only spelling: this package deploys to macOS 14.
+            posix_spawn_file_actions_addchdir_np(&actions, cwd)
 
             // `restore_signals=True`, python's default: every signal back to SIG_DFL
             // with an empty mask, so a child does not inherit a handler or a block the
@@ -113,20 +147,25 @@
             // in the window between its `socketpair()` and its `fcntl`, which kept that
             // job's lifeline open after the kernel closed it: the child never saw EOF
             // and never self-reaped (an orphan, measured 2026-09-22).
+            //
+            // `POSIX_SPAWN_SETSID`: the job LEADS ITS OWN SESSION, so `killSession`
+            // takes the command and everything it launched (`server &`, a `nohup`),
+            // and a Ctrl-C at the kernel's terminal is the kernel's to handle.
             posix_spawnattr_setflags(
                 &attrs,
-                Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
+                Int16(
+                    POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT
+                        | POSIX_SPAWN_SETSID))
 
-            var env = ProcessInfo.processInfo.environment
-            for (k, v) in envExtra { env[k] = v }
-            // AFTER `envExtra`: a caller's `env` cannot rewrite the control wire.
+            var env = env
+            // OVER the record's `env`: it cannot rewrite the control wire.
             env["FANTASTIC_CTRL_FD"] = "3"
             env["FANTASTIC_SELF_ID"] = selfId
 
             var pid: pid_t = 0
             let rc = withCStrings(argv) { cArgv in
                 withCStrings(env.map { "\($0.key)=\($0.value)" }) { cEnv in
-                    posix_spawnp(&pid, command, &actions, &attrs, cArgv, cEnv)
+                    posix_spawn(&pid, program, &actions, &attrs, cArgv, cEnv)
                 }
             }
             // The child's ends are ours to drop on every path — keep the write ends and
@@ -145,6 +184,37 @@
                 child: Child(pid: pid), ctrlFd: parentFd,
                 stdout: FileHandle(fileDescriptor: outFds[0], closeOnDealloc: true),
                 stderr: FileHandle(fileDescriptor: errFds[0], closeOnDealloc: true))
+        }
+
+        /// Every pid the OS lists right now — `proc_listallpids` (python
+        /// `proc._all_pids`).
+        static func allPids() -> [pid_t] {
+            let n = proc_listallpids(nil, 0)
+            guard n > 0 else { return [] }
+            // Slack for processes born between the count and the fill.
+            var buf = [pid_t](repeating: 0, count: Int(n) + 64)
+            let got = buf.withUnsafeMutableBytes {
+                proc_listallpids($0.baseAddress, Int32($0.count))
+            }
+            return buf.prefix(Int(max(got, 0))).filter { $0 > 0 }
+        }
+
+        /// SIGKILL a job's WHOLE session: every member first, then the leader
+        /// (python `proc.kill_session`). Every job leads its own session, and what
+        /// it launched stays there — a script's `server &`, a `nohup`, and each job
+        /// an interactive shell puts in its OWN process group, which neither a kill
+        /// of the leader nor a tty hangup (foreground group only) reaches. Once the
+        /// leader is gone they reparent to launchd — so the members are found by
+        /// session id BEFORE the leader dies.
+        /// A process that `setsid()`s out of the session leaves it by design:
+        /// containment beyond that is the OS's. Returns whether the leader was
+        /// signalled.
+        @discardableResult
+        static func killSession(_ leader: pid_t) -> Bool {
+            for pid in allPids() where pid != leader && getsid(pid) == leader {
+                kill(pid, SIGKILL)
+            }
+            return kill(leader, SIGKILL) == 0
         }
 
         /// Hand a `[String]` to C as a NULL-terminated `char *const *`.

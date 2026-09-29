@@ -157,8 +157,7 @@ extension Kernel {
             }
         }
 
-        // 9. resolve — `"kernel"` aliases to the root, else through a
-        // declared `alias` (`well_known`, C35), else a literal id.
+        // 9. resolve — `"kernel"` names the root, else a literal id.
         guard let target = resolveAgent(item.target.value) else {
             return .settled(
                 Outcome.refused(
@@ -189,7 +188,7 @@ extension Kernel {
         // allocator that mints every row, so a pid, a reply tag and a
         // ledger row agree.
         // ── KERNEL-REFLECT FAST PATH ──────────────────────────────────────
-        // `reflect` on the `kernel` ALIAS (the literal target, not the root's
+        // `reflect` on the `kernel` ADDRESS (the literal target, not the root's
         // own id — python keys on `target_id == "kernel"`) is a PURE IDENTITY
         // READ. Python answers it without a task-table row, and for an UNNAMED
         // item without a ledger row and WITHOUT MINTING AN ID at all
@@ -548,7 +547,7 @@ enum Launched {
     case dispatch(Dispatch)
 }
 
-/// A `reflect` on the `kernel` alias: answered from the substrate identity,
+/// A `reflect` on the `kernel` address: answered from the substrate identity,
 /// with no dispatch and no task row. `execId` is nil for an UNNAMED item —
 /// python does not even mint an id for one — and set when the caller NAMED the
 /// execution, whose ledger row is already open.

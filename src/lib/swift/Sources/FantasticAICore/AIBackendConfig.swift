@@ -27,13 +27,6 @@ public struct AIBackendConfig: Sendable {
     public var kind: String
     /// One-line `reflect.sentence`.
     public var sentence: String
-    /// What `reflect.model` says when the record names none — python
-    /// `cfg.default_model`, usually a SENTINEL that says whose choice it is
-    /// rather than a guess that reaches the network.
-    public var defaultModel: String
-    /// What `reflect.endpoint` says when the record names none — python
-    /// `cfg.default_endpoint`.
-    public var defaultEndpoint: String
 
     /// The per-generation wall-clock ceiling, in seconds — python
     /// `cfg.send_timeout`. A FIELD, not a constant, because python's is one: its
@@ -68,18 +61,16 @@ public struct AIBackendConfig: Sendable {
     /// agent so it can read meta. Pure function — no side effects.
     public var reflectExtra: @Sendable (Agent) -> OrderedDictionary<String, JSON>
 
-    /// Build the provider for one send. Async because FM may probe
-    /// on-device availability + assemble instructions. Returns
-    /// `.refused(json)` to short-circuit `send` with that exact body
-    /// (api_key missing, model unavailable), or `.provider(p)` to run.
+    /// Build the provider for one send. Returns `.refused(json)` to
+    /// short-circuit `send` with that exact body (api_key missing), or
+    /// `.provider(p)` to run. THROWS when the record lacks a connector field it
+    /// must name (`requiredMeta`) — the turn fails loud, as python's raise does.
     public var makeProvider:
-        @Sendable (_ agent: Agent, _ clientId: String, _ kernel: Kernel) async -> ProviderResult
+        @Sendable (_ agent: Agent, _ clientId: String, _ kernel: Kernel) async throws -> ProviderResult
 
     public init(
         kind: String,
         sentence: String,
-        defaultModel: String,
-        defaultEndpoint: String,
         sendTimeout: Double = AIBackend.envSendTimeout,
         errorMapper: (@Sendable (Error) -> String?)? = nil,
         streamWrapper: (
@@ -90,18 +81,30 @@ public struct AIBackendConfig: Sendable {
             _ in [:]
         },
         makeProvider:
-            @escaping @Sendable (Agent, String, Kernel) async -> ProviderResult
+            @escaping @Sendable (Agent, String, Kernel) async throws -> ProviderResult
     ) {
         self.kind = kind
         self.sentence = sentence
-        self.defaultModel = defaultModel
-        self.defaultEndpoint = defaultEndpoint
         self.sendTimeout = sendTimeout
         self.errorMapper = errorMapper
         self.streamWrapper = streamWrapper
         self.reflectExtra = reflectExtra
         self.makeProvider = makeProvider
     }
+}
+
+/// A connector field the record MUST name — an endpoint or a model is never
+/// guessed. Throws, naming the field, so the turn fails loud. Python
+/// `ai_core.required_meta`.
+public func requiredMeta(_ agent: Agent, _ key: String, _ backend: String) throws(PyError) -> String
+{
+    guard case .string(let v)? = agent.metaValue(forKey: key), !pyStrip(v).isEmpty else {
+        throw PyError(
+            "ValueError",
+            "\(backend): `\(key)` is required on the agent record — nothing is "
+                + "guessed (update_agent <id> \(key)=…)")
+    }
+    return v
 }
 
 /// The backend's own `status` emitter, handed to a `streamWrapper` so a wait it

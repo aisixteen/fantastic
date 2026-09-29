@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from io_bridge import dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
+from io_bridge import validate_meta  # noqa: F401  (the `peer_guid` write check)
 
 # Re-exported so the bundle's tests can inject a transport / inspect engine state
 # via `relay_connector.tools.<name>` (the engine lives in io_bridge now).
@@ -142,3 +143,7 @@ async def on_delete(agent):
     """Cascade hook — cancels the read loop + heartbeat, closes the relay
     connection, rejects pending Futures. Delegated to the shared engine."""
     return await _engine_on_delete(agent)
+
+
+# Shutdown frees the same process resources — declared, never inferred.
+on_shutdown = on_delete

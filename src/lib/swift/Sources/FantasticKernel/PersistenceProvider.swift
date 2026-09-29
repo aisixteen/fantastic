@@ -3,7 +3,7 @@
 // Mirrors py `kernel_state` + rust `persistence.rs`: the substrate no longer
 // owns an `fs` surface for records. It persists THROUGH a DISCOVERED
 // `file_bridge` provider's `read_stream`/`write_stream` verbs over the raw-bytes
-// binary channel (the string `read`/`write` verbs are GONE). NO FALLBACKS: no provider ⇒
+// binary channel. NO FALLBACKS: no provider ⇒
 // the live tree stays in RAM (lost on restart until a store is wired). Cold
 // primitives (boot read, root seed) stay direct — the chicken-egg bring-up.
 
@@ -30,11 +30,10 @@ extension Kernel {
     /// `.fantastic`). Bound by MATCH, operator-wired, not composed. Returns its
     /// id, or `nil` when none is wired (⇒ RAM). No fallback.
     public func findStore() -> AgentId? {
-        guard let rootAgent = root else { return nil }
+        guard let rootAgent = root, let workdir = self.workdir else { return nil }
         let want = Self.canonPath(rootAgent.rootPath.path)
-        // The kernel's running dir = the dir holding `.fantastic` (= cwd in
-        // production). Resolve a relative provider root against it.
-        let workdir = rootAgent.rootPath.deletingLastPathComponent()
+        // A relative provider root resolves under the kernel's running dir (the
+        // ONE source — `Kernel.workdir`).
         // SUBTREE, not direct children, BREADTH-FIRST.
         //
         // One level was scanned for a long time and the consequence was
@@ -73,6 +72,79 @@ extension Kernel {
         if a == s { return "" }
         if a.hasPrefix(s + "/") { return String(a.dropFirst(s.count + 1)) }
         return a
+    }
+
+    // ── loud persistence (audit 2026-09-28, d2) ────────────────────────
+    // A refused/failed persist write is LOUD: stderr, and `persistence.error` on
+    // the root reflect (which then reports no provider) until a write lands.
+
+    /// The last persist failure, or nil while writes land.
+    public var persistError: OrderedDictionary<String, JSON>? {
+        persistErrorLock.lock()
+        defer { persistErrorLock.unlock() }
+        return _persistError
+    }
+
+    /// python `_persist_failed`.
+    public func persistFailed(_ storeId: AgentId, _ path: String, _ why: JSON) {
+        let msg: JSON
+        if case .object(let o) = why, let e = o["error"] { msg = e } else { msg = why }
+        let who = root?.id.value ?? ""
+        RuntimeLog.warn(
+            "  [\(who)] persist through \(pyRepr(.string(storeId.value))) failed: \(path): \(pyStr(msg))")
+        persistErrorLock.lock()
+        _persistError = [
+            "store": .string(storeId.value), "path": .string(path), "error": msg,
+        ]
+        persistErrorLock.unlock()
+    }
+
+    /// python `_persist_landed`.
+    public func persistLanded() {
+        persistErrorLock.lock()
+        _persistError = nil
+        persistErrorLock.unlock()
+    }
+
+    /// python `_covers` — does a store's `allow` list expose `path` (a listed
+    /// path, or under a listed directory)? The file_bridge's own rule, read off
+    /// its record.
+    static func allowCovers(_ allow: JSON?, _ path: String) -> Bool {
+        for entry in allow?.asArray ?? [] {
+            guard let s = entry.asString, !s.hasPrefix("/") else { continue }
+            let e = normRelative(s)
+            if e == "." || path == e || path.hasPrefix(e + "/") { return true }
+        }
+        return false
+    }
+
+    /// `posixpath.normpath(p or ".")` of a relative path.
+    private static func normRelative(_ p: String) -> String {
+        var parts: [Substring] = []
+        for seg in p.split(separator: "/", omittingEmptySubsequences: true) {
+            if seg == "." { continue }
+            if seg == "..", let last = parts.last, last != ".." {
+                parts.removeLast()
+                continue
+            }
+            parts.append(seg)
+        }
+        return parts.isEmpty ? "." : parts.joined(separator: "/")
+    }
+
+    /// python `_check_store_allow` — at boot: a discovered store whose `allow`
+    /// does not expose the records (`agent.yaml` and the children dir) would
+    /// refuse every write; say so now.
+    public func checkStoreAllow() {
+        guard let storeId = findStore() else { return }
+        let allow = agent(storeId)?.metaValue(forKey: "allow")
+        let missing = [RECORD_FILE, childrenDir].filter { !Self.allowCovers(allow, $0) }
+        if missing.isEmpty { return }
+        persistFailed(
+            storeId, missing.joined(separator: ", "),
+            .string(
+                "the store's `allow` does not expose the records "
+                    + "(add them, or `.`): allow=\(pyRepr(allow ?? .null))"))
     }
 
     /// A `secrets.token_hex(4)`-shaped tmp-file suffix: 4 random bytes as 8 lowercase
@@ -204,7 +276,6 @@ extension Kernel {
         // carry (no handler_module, the root's absent parent_id) left alone.
         // Assigning `nil` here DELETED such a key instead.
         for (k, v) in agent.record().ordered { existing[k] = v }
-        // The record persists AS-IS — a single stream, no `code`/`main.py` split.
         let serialized = YamlIO.dump(.object(existing))
         // ATOMIC COMMIT (C43): stream into a tmp beside the target, then
         // RENAME — never `write_stream` the live path directly. A
@@ -213,8 +284,7 @@ extension Kernel {
         // hydrating a tree with a hole in it. `rename` is the leg's own
         // single atomic op (and creates parents), so the only two outcomes
         // are "the old record survives" or "the new one is complete" — never
-        // a torn file. Same protocol `text_file`'s `_write_atomic` uses for a
-        // document.
+        // a torn file.
         let tmp = "\(af).tmp.\(Self.randomHex8())"
         let written = await storeSendBinary(
             storeId,
@@ -223,15 +293,22 @@ extension Kernel {
                 "truncate": .bool(true),
             ]),
             Data(serialized.utf8))
-        if pyTruthy(written.0["error"]) {
+        if case .object = written.0, !pyTruthy(written.0["error"]) {
+        } else {
             // Leave the previous record untouched; a debris tmp is visible in `list`.
+            persistFailed(storeId, af, written.0)
             return
         }
-        _ = await storeSend(
+        let moved = await storeSend(
             storeId,
             .object([
                 "type": .string("rename"), "old_path": .string(tmp), "new_path": .string(af),
             ]))
+        if case .object = moved, !pyTruthy(moved["error"]) {
+            persistLanded()
+        } else {
+            persistFailed(storeId, af, moved)
+        }
     }
 
     /// Seed a `readme.md` (copy-if-missing) into the agent's dir THROUGH the
@@ -269,10 +346,11 @@ extension Kernel {
         // `recursive` is REQUIRED: an agent's dir holds `agent.yaml` (and any
         // sidecars), and a bare `delete` on a populated dir refuses — py parity
         // (`kernel_state._forget_via_store` has always passed it).
-        _ = await storeSend(
+        let out = await storeSend(
             storeId,
             .object([
                 "type": .string("delete"), "path": .string(reldir), "recursive": .bool(true),
             ]))
+        if pyTruthy(out["error"]) { persistFailed(storeId, reldir, out) }
     }
 }

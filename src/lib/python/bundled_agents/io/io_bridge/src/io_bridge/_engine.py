@@ -33,7 +33,7 @@ from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import DenyInbound, resolve_ingress
 from io_bridge.egress_rules import Silent, resolve_egress
 from kernel import current_origin, remote_caller_context
-from kernel._refusal import NOT_CONNECTED, refusal
+from kernel._refusal import NOT_CONNECTED, UNAUTHORIZED, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
 
@@ -77,7 +77,7 @@ def stamp_egress(rule: EgressRule, frame: dict) -> dict:
 
 # `async build_transport(kind, rec, kernel, st) -> _BaseTransport`. Raises on bad
 # config (the engine wraps it into a `{"error": ...}` boot reply). May set
-# `st.cleanup` for transport-specific teardown (e.g. an ssh tunnel).
+# `st.cleanup` for transport-specific teardown.
 BuildTransport = Callable[[str, dict, Any, "_BridgeState"], Awaitable[_BaseTransport]]
 
 
@@ -124,12 +124,12 @@ class _BridgeState:
     # loop can keep reading while a handler runs, and so teardown can cancel them.
     pending_calls: set[asyncio.Task] = field(default_factory=set)
     corr_counter: int = 0
-    # Optional transport-specific teardown the bundle registers in build_transport
-    # (e.g. `lambda: asyncio.to_thread(_kill_tunnel, proc)` for ssh+ws). AWAITED by
-    # the engine on teardown — a blocking kill belongs on a thread, not on the loop.
+    # Optional transport-specific teardown the bundle registers in build_transport.
+    # AWAITED by the engine on teardown — anything blocking belongs on a thread,
+    # not on the loop.
     cleanup: Callable[[], Awaitable[None]] | None = None
-    # Bundle-specific reflect/diagnostic state (e.g. ssh `tunnel_pid`). The engine
-    # only clears it on teardown; the bundle's `reflect_fields` reads it.
+    # Bundle-specific reflect/diagnostic state. The engine only clears it on
+    # teardown; the bundle's `reflect_fields` reads it.
     extra: dict = field(default_factory=dict)
     # Per-leg auth rules (symmetric, independent). The read loop consults `ingress`
     # before dispatching an inbound `call`; `forward` stamps `egress.credential()`
@@ -137,6 +137,10 @@ class _BridgeState:
     # outbound — but boot ALWAYS overwrites these from the record (resolve_ingress/egress).
     ingress: IngressRule = field(default_factory=DenyInbound)
     egress: EgressRule = field(default_factory=Silent)
+    # The remote agents this leg SUBSCRIBED to (`watch_remote`). An inbound
+    # `event` frame is re-emitted only when its `src` is here — nothing flows
+    # until subscribed, and nothing after an unwatch.
+    watching: set[str] = field(default_factory=set)
 
 
 # Per-agent bridge state — process-memory only, keyed by agent id (shared across
@@ -174,27 +178,49 @@ def _local_guid(kernel: Any) -> str | None:
     return (root.record.get("guid") if root is not None else None) or None
 
 
-def _check_caller(kernel: Any, caller: Any) -> dict | None:
-    """INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it: it
-    must read `<guid>|<agent id>`, and the guid must NOT be this kernel's own — a
-    remote cannot pose as a local agent. (A remote naming some THIRD kernel's guid is
-    not detectable here; accepted.)"""
-    if caller is None:
-        return None
+def _check_caller(rec: dict, caller: Any) -> dict | None:
+    """INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it.
+    Every inbound call names its sender as `<guid>|<agent id>`, and the guid must
+    be the ONE peer this leg is pinned to (`peer_guid` on the record): a peer
+    cannot pose as a third kernel's agent. No pin, no inbound call."""
     if (
         not isinstance(caller, str)
         or caller.count("|") != 1
         or not all(caller.split("|"))
     ):
-        return {
-            "error": f"bridge: frame caller {caller!r} is not `<guid>|<agent id>`",
-            "reason": "unauthorized",
-        }
-    if caller.split("|")[0] == _local_guid(kernel):
-        return {
-            "error": "bridge: a remote frame claims THIS kernel's guid as its caller — refused",
-            "reason": "unauthorized",
-        }
+        return refusal(
+            UNAUTHORIZED,
+            f"bridge: an inbound call must name its caller as `<guid>|<agent id>`; "
+            f"got {caller!r}",
+        )
+    pin = rec.get("peer_guid")
+    if not pin:
+        return refusal(
+            UNAUTHORIZED,
+            "bridge: this leg pins no peer, so it serves no inbound call",
+            hint="update_agent <this leg> peer_guid=<the peer kernel's guid> "
+            "(its root reflect shows `guid`)",
+        )
+    if caller.split("|")[0] != pin:
+        return refusal(
+            UNAUTHORIZED,
+            f"bridge: caller {caller!r} is not from the pinned peer {pin!r}",
+        )
+    return None
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
+    `|`). Re-exported by every bridge bundle. (This kernel's OWN guid is refused
+    where the kernel is in hand — at serve.)"""
+    if "peer_guid" not in meta or meta["peer_guid"] is None:
+        return None
+    pin = meta["peer_guid"]
+    if not isinstance(pin, str) or not pin or "|" in pin:
+        return (
+            f"bridge: peer_guid must be one kernel guid (a non-empty string "
+            f"without `|`); got {pin!r}"
+        )
     return None
 
 
@@ -242,16 +268,22 @@ async def _serve_inbound_call(
         if isinstance(fid, str) and fid:
             item["id"] = fid
         caller = frame.get("caller")
-        bad_caller = _check_caller(kernel, caller)
+        rec = kernel.get(kernel.id) or {}
+        bad_caller = _check_caller(rec, caller)
+        if bad_caller is None and caller.split("|")[0] == _local_guid(kernel):
+            bad_caller = refusal(
+                UNAUTHORIZED,
+                "bridge: this leg's peer_guid is THIS kernel's own guid — refused",
+                hint="pin the PEER kernel's guid",
+            )
         if bad_caller is not None:
             reply = bad_caller
-        elif caller:
-            # THE QUALIFIED CALLER rides into the dispatch: a memory store keys what
-            # this call writes by `<remote guid>|<remote agent>`, not by this leg.
+        else:
+            # THE QUALIFIED CALLER rides into the dispatch: the gate checks the
+            # target's `callable_by` against `<peer guid>|<remote agent>` (never
+            # the leg), and a memory store keys what it writes by it.
             with remote_caller_context(kernel.id, caller):
                 reply = (await kernel.send([item]))[0]["result"]
-        else:
-            reply = (await kernel.send([item]))[0]["result"]
     try:
         await transport.send({"type": "reply", "id": frame.get("id"), "data": reply})
     except ConnectionClosed:
@@ -268,8 +300,9 @@ async def _read_loop(id: str, kernel: Any) -> None:
       - inbound `reply` — resolve the pending Future for `id`.
       - inbound `error` — `{type:'error', id, error}` from a remote dispatch that
         RAISED; fail the pending forward promptly instead of hanging to timeout.
-      - inbound `event` — `{type:'event', payload}` from a remote `watch`; re-emit
-        on this bridge's inbox so local `kernel.watch(<bridge_id>, …)` sees it.
+      - inbound `event` — `{type:'event', src, payload}` from a remote `watch`;
+        re-emitted (payload + `src`) on this bridge's inbox ONLY when `src` is a
+        subscribed remote agent (`watch_remote`), else dropped.
 
     On ConnectionClosed: emit `{type:'bridge_down'}`, fail every pending Future.
     """
@@ -299,14 +332,20 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 if fut is not None and not fut.done():
                     fut.set_result({"error": f"remote error: {frame.get('error')}"})
             elif ftype == "event":
-                # The `watch_remote` RETURN half: WE dialed OUT to a chosen, key-pinned
-                # peer and asked it to stream; this re-emit lands on the bridge's OWN
-                # inbox for explicit local watchers — trusted-by-association (we opened
-                # the channel), NOT a sealed-ingress inbound leak.
-                try:
-                    await kernel.emit(id, frame.get("payload") or {})
-                except Exception:
-                    pass
+                # The `watch_remote` RETURN half: re-emitted on the bridge's OWN inbox
+                # for local watchers ONLY when its `src` is a remote agent this leg
+                # subscribed to. An event nobody asked for is dropped.
+                src = frame.get("src")
+                payload = frame.get("payload")
+                if (
+                    isinstance(src, str)
+                    and src in st.watching
+                    and isinstance(payload, dict)
+                ):
+                    try:
+                        await kernel.emit(id, {**payload, "src": src})
+                    except Exception:
+                        pass
             # Other frame types are ignored so the loop stays robust.
     finally:
         # The transport is gone — every in-flight inbound dispatch has nowhere to
@@ -315,6 +354,7 @@ async def _read_loop(id: str, kernel: Any) -> None:
         for t in list(st.pending_calls):
             t.cancel()
         st.pending_calls.clear()
+        st.watching.clear()
         try:
             await kernel.emit(id, {"type": "bridge_down"})
         except Exception:
@@ -358,6 +398,7 @@ async def _teardown(id: str) -> None:
     st.read_task = None
     st.cleanup = None
     st.extra.clear()
+    st.watching.clear()
     st.ingress = DenyInbound()
     st.egress = Silent()
 
@@ -465,7 +506,7 @@ async def _forward(id, payload, kernel):
 
 
 async def _watch_remote(id, payload, kernel):
-    """args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set)."""
+    """args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set)."""
     target = payload.get("target")
     if not target or not isinstance(target, str):
         return {"error": "bridge.watch_remote: target (str) required"}
@@ -478,11 +519,12 @@ async def _watch_remote(id, payload, kernel):
         await st.transport.send({"type": "watch", "src": target})
     except ConnectionClosed as e:
         return {"error": f"bridge.watch_remote: send failed: {e}"}
+    st.watching.add(target)
     return {"ok": True, "watching": target}
 
 
 async def _unwatch_remote(id, payload, kernel):
-    """args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted."""
+    """args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them."""
     target = payload.get("target")
     if not target or not isinstance(target, str):
         return {"error": "bridge.unwatch_remote: target (str) required"}
@@ -493,6 +535,7 @@ async def _unwatch_remote(id, payload, kernel):
             "bridge.unwatch_remote: not connected",
             hint="call boot first",
         )
+    st.watching.discard(target)
     try:
         await st.transport.send({"type": "unwatch", "src": target})
     except ConnectionClosed as e:
@@ -512,7 +555,7 @@ def make_verbs(
 ) -> dict:
     """Build the 6-verb table for a bridge bundle. `reflect_fields(rec, st)`
     supplies the transport-specific reflect fields; `sentence` is the one-liner;
-    `default_kind` is the reflect `transport` fallback. The leg's ingress/egress
+    `default_kind` is the `transport` a record without one reflects. The leg's ingress/egress
     rules are resolved from the record by the shared registries (see boot)."""
 
     async def _boot(id, payload, kernel):
@@ -542,6 +585,9 @@ def make_verbs(
             "ingress_rule": _ingress_name(rec),
             "egress_rule": _egress_name(rec),
             "sealed": _ingress_name(rec) != "allow_all_ingress",
+            # The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
+            # null = no pin, no inbound call.
+            "peer_guid": rec.get("peer_guid"),
         }
         out.update(reflect_fields(rec, st))
         out["verbs"] = {
@@ -550,7 +596,7 @@ def make_verbs(
         out["emits"] = {
             "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
             "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
-            "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox with their original `{type, ...}` shape",
+            "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
         }
         return out
 

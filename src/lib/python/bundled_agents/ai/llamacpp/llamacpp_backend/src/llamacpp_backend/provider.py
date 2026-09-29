@@ -19,7 +19,6 @@ from ai_core.core import THINK_CLOSE, THINK_OPEN
 # llama-server's own documented bind + the OpenAI-compatible path it mounts.
 # Nothing is downloaded or started from here: the operator runs `llama-server`
 # consciously and this only names where to reach it.
-DEFAULT_ENDPOINT = "http://127.0.0.1:8080/v1"
 # A SENTINEL, never sent on the wire. `llama-server` serves exactly ONE model —
 # whichever `-hf`/`-m` loaded it — and ignores the request's `model` field. So
 # there is no model to guess and none to get wrong; this string exists only so
@@ -36,7 +35,7 @@ class LlamaCppProvider:
 
     def __init__(
         self,
-        endpoint: str = DEFAULT_ENDPOINT,
+        endpoint: str,
         model: str | None = None,
         api_key: str | None = None,
         temperature: float | None = None,

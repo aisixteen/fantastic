@@ -146,19 +146,6 @@ struct ContextSeamTests {
         #expect(spy.called == 0, "truncate must NOT call the summarizer")
     }
 
-    @Test func toolPairingNeverOrphansRoleTool() async throws {
-        let b: [JSON] = [
-            turn("user", "u0"),
-            .object(["role": .string("assistant"), "content": .string("a"), "tool_calls": .array([.object(["id": .string("1")])])]),
-            .object(["role": .string("tool"), "tool_call_id": .string("1"), "content": .string("r")]),
-            turn("assistant", "done"),
-            turn("user", "u-live"),
-        ]
-        // recent_n=3 would start the recent window on the role:tool (idx 2); must snap back.
-        let proj = try await AIStrategies.getStrategy("compact")!(b, [], .object([:]), ctx(1_000_000, recentN: 3))
-        #expect(proj.body.first?["role"].asString != "tool")
-    }
-
     @Test func summarizerFailureDegradesToStub() async throws {
         let proj = try await AIStrategies.getStrategy("compact")!(
             body(10), [], .object([:]), ctx(1_000_000, summarize: { _ in throw MockError.boom }))

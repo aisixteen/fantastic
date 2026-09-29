@@ -2,7 +2,7 @@
 
 Runs the whole coder loop over Aider's polyglot-benchmark (Exercism) exercises
 — each a born-failing mini-repo with its OWN test suite as the objective
-oracle. Zero kernel code: the E43 trio (file_bridge + text_file editor +
+oracle. Zero kernel code: the E43 trio (file_bridge + a file_bridge `editor` +
 exec_bridge runner) driven by the live model; scored by rerunning the
 exercise's suite (+ never-touched-test check).
 

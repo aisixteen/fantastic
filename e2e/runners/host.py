@@ -5,7 +5,7 @@ assertions, different substrate. Which kernel is a PLUG — `KERNEL=rust` or
 `KERNEL=swift` — exactly as the model is a plug in `backends/`.
 
 ROLES, NOT BUNDLE NAMES. A compiled kernel runs only what is compiled into it,
-so `memory` is `text_file` here while js registers a handler in
+so `memory` is a `file_bridge` data store here while js registers a handler in
 process. The scenario declares the role; each runner supplies the implementation
 it has. That is what lets one scenario be shared across four kernels rather than
 copied four times — and a role with no shipped equivalent is refused BY NAME,
@@ -36,7 +36,7 @@ REPO = E2E.parent
 #: bespoke verbs — python and js register them in process; a compiled kernel
 #: would need a probe bundle compiled in. That is a REAL boundary.
 ROLE_BUNDLE = {
-    "memory": "text_file.tools",
+    "memory": "file_bridge.tools",
     "render_sink": "cli.tools",
     "compute": "exec_bridge.tools",
     # STATEFUL FIXTURES. TEST-ONLY on every runtime, and gated so a default
@@ -124,14 +124,15 @@ def main(scenario_id: str) -> int:
         print(f"  {rt.upper()} kernel  ·  {model}  ·  {sc['title']}  ·  :{k.port}")
         print("=" * 74)
 
-        kv_ids = [e["id"] for e in roster if e["role"] == "memory"]
+        # THE RECORDS STORE: the loader's, and no one else's — an agent that can
+        # write through it can rewrite any record, grants included.
         store = k.create(
             parent_id=k.root_id,
             id="store",
-            handler_module="file_bridge.tools",
+            handler_module="file_bridge.tools", allow=["."],
             root=".fantastic",
             ingress_rule="allow_all_ingress",
-            callable_by={**BASE, "rest": "*", "ai": "*", **{i: "*" for i in kv_ids}},
+            callable_by={**BASE, "rest": "*"},
         )
         assert store.get("id"), store
 
@@ -143,9 +144,10 @@ def main(scenario_id: str) -> int:
                 "callable_by": {**BASE, "rest": "*", "ai": "*"},
             }
             if entry["role"] == "memory":
-                # The text editor writes THROUGH the store — both gate halves.
-                meta["target_id"] = store["id"]
-                meta["can_call"] = {store["id"]: "*"}
+                # A DATA store of its own, apart from the records.
+                meta["root"] = f".fantastic/data/{entry['id']}"
+                meta["allow"] = ["."]
+                meta["ingress_rule"] = "allow_all_ingress"
             if entry["role"] == "user":
                 # THE HUMAN'S WORDS ARE POLICY ON ITS RECORD. The scenario says
                 # what the person answers; without carrying it the human has no
@@ -157,12 +159,22 @@ def main(scenario_id: str) -> int:
                 # full command line; the runner permits its own python.
                 meta["allowed"] = [f"{sys.executable} -c .*"]
                 meta["ingress_rule"] = "allow_all_ingress"
+                # where and with what it runs: the operator's, on the record
+                meta["cwd"] = "."
+                meta["inherit_env"] = ["PATH", "HOME"]
             rec = k.create(**meta)
             assert rec.get("id"), rec
 
-        can_call = {**BASE, store["id"]: "*"}
+        can_call = {**BASE}
         for peer in (sc.get("grants") or {}).get("ai_can_call", []):
-            can_call[peer] = "*"
+            # `$root:<verb>` names ONE verb on the root by its real id — how a
+            # scenario grants a PRIVILEGED kernel verb (`ledger`, `ps`), which a
+            # wildcard never carries.
+            if peer.startswith("$root:"):
+                verbs = can_call.setdefault(k.root_id, [])
+                verbs.append(peer.split(":", 1)[1])
+            else:
+                can_call[peer] = "*"
         # ITS MEMORY: the conversation lives in the kernel's `memory` store — the
         # agent names it and may call it; the store's ingress for `ai` was seeded
         # (every declared id may reach it).
@@ -171,9 +183,7 @@ def main(scenario_id: str) -> int:
             parent_id=k.root_id,
             id="ai",
             handler_module="anthropic_backend.tools",
-            # VERBATIM on every runtime now — `endpoint` is the URL.
-            # This used to strip `/messages` because rust and swift
-            # appended it while python did not.
+            # VERBATIM on every runtime — `endpoint` is the URL.
             endpoint=endpoint,
             model=model,
             memory_store_id=memory.MEMORY,
@@ -185,8 +195,7 @@ def main(scenario_id: str) -> int:
         assert ai.get("id"), ai
         # NOTHING TO DELIVER. Every backend reads its key from the ENVIRONMENT,
         # and the kernel was spawned with this process's env — so the key is
-        # already where it will be looked for. This used to reflect the agent
-        # and push the key through `set_api_key` on whichever runtimes had it.
+        # already where it will be looked for.
         assert key, "ANTHROPIC_API_KEY is unset — the backend will refuse"
 
         first = k.send("ai", {"type": "send", "text": sc["task"], "client_id": "probe"})
@@ -270,9 +279,9 @@ def main(scenario_id: str) -> int:
                         ok = False
                     continue
                 q = check["read"]
-                # memory is FILES now: the scenario's `key` is the document
-                # path, and the value lives in the text_file `read` reply's
-                # lines — match against the whole reply, not a `value` field.
+                # memory is FILES: the scenario's `path` names the document, and
+                # the value lives in the file agent's `read` reply lines —
+                # match against the whole reply, not a `value` field.
                 got = k.send(q["agent"], {"type": "read", "path": q["path"]})
                 seen[q["agent"]] = got
                 if check["contains"] not in str(got):

@@ -24,6 +24,10 @@ async def _mk(kernel, agent_id="runner", **extra):
         "id": agent_id,
         "handler_module": "exec_bridge.tools",
         "ingress_rule": "allow_all_ingress",
+        # WHERE a command runs is the record's, required — never guessed
+        "cwd": ".",
+        # a bare command is found on the CHILD's PATH only
+        "inherit_env": ["PATH"],
         **extra,
     }
     r = (await kernel.send([{"target": kernel.id, "payload": meta}]))[0]["result"]
@@ -165,8 +169,6 @@ async def test_every_start_refusal_carries_a_code(seeded_kernel):
 
     r = await start()
     assert (r["reason"], r["arg"]) == ("missing_arg", "command"), r
-    r = await start(command="echo", code="x = 1")
-    assert (r["reason"], r["arg"]) == ("bad_arg", "code"), r
     r = await start(command="echo", args=[{"nope": 1}])
     assert (r["reason"], r["arg"]) == ("bad_arg", "args"), r
     r = await start(command="echo", env={"K": ["nope"]})
@@ -190,12 +192,6 @@ async def test_an_unknown_job_id_is_not_found_on_every_verb(seeded_kernel):
 async def test_write_time_refusal_for_broken_regex(seeded_kernel):
     r = await _mk(seeded_kernel, agent_id="r2", allowed=["("])
     assert "broken regex" in r["error"]
-
-
-async def test_write_time_refusal_for_dead_fields(seeded_kernel):
-    for field in ("code", "shim", "interpreter", "interpreters", "argv_template"):
-        r = await _mk(seeded_kernel, agent_id=f"r_{field}", **{field: "x"})
-        assert "is not a field" in r["error"], (field, r)
 
 
 # ─── the job lifecycle ──────────────────────────────────────────
@@ -230,13 +226,72 @@ async def test_stop_kills_a_running_job(seeded_kernel):
     assert row["status"] != "running"
 
 
-async def test_env_reaches_the_child(seeded_kernel):
-    await _mk(seeded_kernel, allowed=[r"/bin/sh -c .*"])
-    r = await _start(
-        seeded_kernel, "runner", "/bin/sh", ["-c", "echo $MARK"], env={"MARK": "x42"}
-    )
+async def test_the_records_env_reaches_the_child(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"/bin/sh -c .*"], env={"MARK": "x42"})
+    r = await _start(seeded_kernel, "runner", "/bin/sh", ["-c", "echo $MARK"])
     row = await _wait_done(seeded_kernel, "runner", r["job_id"])
     assert row["last_line"] == "x42"
+
+
+# ─── the child's WHOLE environment is the record's (audit 2026-09-28) ───────
+# A per-call `env` (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted
+# line actually ran, and every child inherited the kernel's `.env` keys.
+
+
+async def test_a_per_call_env_or_cwd_is_refused(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"/bin/sh -c .*"])
+    for arg, val in (("env", {"LD_PRELOAD": "/tmp/x.so"}), ("cwd", "/")):
+        r = await _start(
+            seeded_kernel, "runner", "/bin/sh", ["-c", "true"], **{arg: val}
+        )
+        assert (r["reason"], r["arg"]) == ("bad_arg", arg), r
+
+
+async def test_a_leg_with_no_cwd_runs_nothing(seeded_kernel):
+    await _mk(seeded_kernel, agent_id="nocwd", allowed=[r"/bin/sh -c .*"], cwd=None)
+    r = await _start(seeded_kernel, "nocwd", "/bin/sh", ["-c", "true"])
+    assert (r["reason"], r["arg"]) == ("missing_arg", "cwd"), r
+
+
+async def test_the_kernel_env_reaches_a_child_only_by_name(seeded_kernel, monkeypatch):
+    monkeypatch.setenv("FT_SECRET", "s3cret")
+    monkeypatch.setenv("FT_OPEN", "open")
+    line = ["-c", "echo ${FT_SECRET:-none}/${FT_OPEN:-none}"]
+    for aid, inherit, want in (
+        ("bare", None, "none/none"),
+        ("named", ["FT_OPEN"], "none/open"),
+        ("all", ["*"], "s3cret/open"),
+    ):
+        await _mk(
+            seeded_kernel, agent_id=aid, allowed=[r"/bin/sh -c .*"], inherit_env=inherit
+        )
+        r = await _start(seeded_kernel, aid, "/bin/sh", line)
+        row = await _wait_done(seeded_kernel, aid, r["job_id"])
+        assert row["last_line"] == want, (aid, row)
+
+
+async def test_a_bare_command_is_found_on_the_childs_path_only(seeded_kernel, tmp_path):
+    tool = tmp_path / "ft_only_here"
+    tool.write_text("#!/bin/sh\necho found-by-child-path\n")
+    tool.chmod(0o755)
+    # No PATH in the child env: refused naming it — no kernel PATH, no default path.
+    await _mk(seeded_kernel, agent_id="nopath", allowed=[r"echo .*"], inherit_env=None)
+    r = await _start(seeded_kernel, "nopath", "echo", ["x"])
+    assert (r["reason"], r["arg"]) == ("missing_arg", "PATH"), r
+    # The child's PATH decides: a tool the kernel's PATH does not hold runs…
+    await _mk(
+        seeded_kernel,
+        agent_id="ownpath",
+        allowed=[r"(ft_only_here|echo)( .*)?"],
+        inherit_env=None,
+        env={"PATH": str(tmp_path)},
+    )
+    r = await _start(seeded_kernel, "ownpath", "ft_only_here")
+    row = await _wait_done(seeded_kernel, "ownpath", r["job_id"])
+    assert row["last_line"] == "found-by-child-path", row
+    # …and one only the kernel's PATH holds is not found.
+    r = await _start(seeded_kernel, "ownpath", "echo", ["x"])
+    assert r["reason"] == "transport_error" and "No such file" in r["error"], r
 
 
 async def test_many_jobs_run_in_parallel(seeded_kernel):
@@ -390,6 +445,7 @@ async def test_a_stream_chunk_crosses_the_wire_raw(
                         "parent_id": seeded_kernel.id,
                         "id": "fb",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "ingress_rule": "allow_all_ingress",
                         "root": "sd",
                         "callable_by": {"runner": "*"},
@@ -398,14 +454,10 @@ async def test_a_stream_chunk_crosses_the_wire_raw(
             ]
         )
     )[0]["result"]["id"]
-    await _mk(seeded_kernel, allowed=[rf"{py} -c .*"], can_call={fb: "*"})
-    r = await _start(
-        seeded_kernel,
-        "runner",
-        py,
-        ["-c", CONNECTOR_SRC + _STREAM_CHILD],
-        env={"FB": fb},
+    await _mk(
+        seeded_kernel, allowed=[rf"{py} -c .*"], can_call={fb: "*"}, env={"FB": fb}
     )
+    r = await _start(seeded_kernel, "runner", py, ["-c", CONNECTOR_SRC + _STREAM_CHILD])
     row = await _wait_done(seeded_kernel, "runner", r["job_id"], secs=15.0)
     assert row["exit_code"] == 0, row
     assert row["last_line"] == "WROTE 768 READ 768 True bytes", row
@@ -617,3 +669,59 @@ async def test_password_ingress_is_refused_on_fs_and_process_legs(seeded_kernel)
         r = await _mk(seeded_kernel, agent_id=f"pw{i}", **meta)
         assert r.get("reason") == "invalid_meta", (meta, r)
         assert "wire envelope" in r["error"], r
+
+
+async def test_stop_and_delete_kill_everything_a_job_launched(seeded_kernel):
+    """A plain job leads its own session, so `stop` and `delete_agent` take what it
+    launched too — a script's `sleep &` and a `nohup` used to outlive it. Twin of
+    the PTY case (`test_pty_jobs.py::test_every_teardown_kills_the_whole_session`)."""
+    import os
+
+    import exec_bridge.tools as ebt
+    from exec_bridge import proc
+
+    line = "sleep 303 & nohup sleep 304 >/dev/null 2>&1 & sleep 305"
+    for aid, end in (("pipe_stop", "stop"), ("pipe_delete", "delete_agent")):
+        await _mk(seeded_kernel, agent_id=aid, allowed=[r"/bin/sh -c .*"])
+        r = await _start(seeded_kernel, aid, "/bin/sh", ["-c", line])
+        leader = ebt._jobs[r["job_id"]]["proc"].pid
+        members: list[int] = []
+        for _ in range(100):
+            members = []
+            for p in proc._all_pids():
+                try:
+                    if p != leader and os.getsid(p) == leader:
+                        members.append(p)
+                except OSError:
+                    continue
+            if len(members) >= 3:
+                break
+            await asyncio.sleep(0.05)
+        assert len(members) >= 3, (end, members)
+        if end == "stop":
+            await seeded_kernel.send(
+                [{"target": aid, "payload": {"type": "stop", "job_id": r["job_id"]}}]
+            )
+        else:
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": seeded_kernel.id,
+                        "payload": {"type": "delete_agent", "id": aid},
+                    }
+                ]
+            )
+        alive = [leader, *members]
+        for _ in range(100):
+            left = []
+            for p in alive:
+                try:
+                    os.kill(p, 0)
+                    left.append(p)
+                except ProcessLookupError:
+                    pass
+            alive = left
+            if not alive:
+                break
+            await asyncio.sleep(0.05)
+        assert not alive, (end, alive)

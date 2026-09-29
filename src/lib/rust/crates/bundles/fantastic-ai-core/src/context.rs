@@ -33,9 +33,8 @@ pub const BUDGET_FLOOR: i64 = 256;
 /// notice text changes. Python `ai_core/strategies/base.py`.
 pub const NOTICE_ENVELOPE_RESERVE: i64 = 160;
 
-/// Rough token estimate for ONE message — counts the SERIALIZED form,
-/// because role + content + tool_calls + role:tool replies + the JSON
-/// envelope all consume real context.
+/// Rough token estimate for ONE message — counts the SERIALIZED form, because
+/// role + content + the JSON envelope all consume real context.
 pub fn estimate_one(message: &Value) -> i64 {
     // PYTHON'S `json.dumps`, PYTHON'S LENGTH: `, `/`: ` separators, `\uXXXX`
     // escapes (ensure_ascii), and CODE POINTS. `serde_json`'s compact separators

@@ -7,13 +7,8 @@ This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lo
 ## The wire
 Stateless: every pass sends `store:false` and the whole conversation as `input` items (the system block as `instructions`) — the conversation is this agent's, never the endpoint's. The stream is read on BOTH channels: `response.reasoning_text` / `reasoning_summary_text` deltas are wrapped in `<think>…</think>` (parsed for calls, stripped before the turn is stored), `response.output_text` deltas are the output. A turn ends `completed`; one cut at `max_output_tokens` (`response.incomplete`) is a loud error on a main turn and an answer (`last_stop_reason:"max_tokens"`) on a bounded side call such as a fold summary. Sampling knobs on the record (`sampling`) merge verbatim into the request body.
 
-## Bare completion — the tool loop is the CALLER's
-This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-provider pass. It NEVER sends Responses `tools` nor reads `function_call` items (one
-arriving is a loud error); the stream's text is returned verbatim. Any tool convention
-is the caller's — an authored agent teaches it in the prompt (via `system_prompt`),
-reads the completion, dispatches, and feeds the result back as the next `{send, text}`
-turn.
+## Bare completion + the `<call>` grammar — no native tool API
+`send` performs exactly ONE provider pass: the stream's text is read; it never sends Responses `tools` nor reads `function_call` items (one arriving is a loud error). Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
 ## Context management — owned HERE
 The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record

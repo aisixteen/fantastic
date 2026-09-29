@@ -4,7 +4,7 @@ name = "fantastic-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Cross-kernel bridge — WS-only, asymmetric; ships raw call frames over memory/WS/SSH+WS transports."
+description = "Cross-kernel bridge — WS-only, asymmetric; ships raw call frames over memory/WS transports."
 
 [dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel" }
@@ -17,14 +17,6 @@ tokio = { workspace = true }
 libc = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
-which = { version = "6", optional = true }
-nix = { version = "0.29", features = ["signal"], optional = true }
-
-[features]
-# `full` enables the SSH+WS transport (spawns the `ssh` binary as a
-# subprocess for the local port-forward). Disabled by default so the
-# embedded slice stays subprocess-free.
-full = ["dep:which", "dep:nix"]
 
 [dev-dependencies]
 fantastic-file = { path = "../fantastic-file" }

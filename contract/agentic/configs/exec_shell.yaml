@@ -1,0 +1,38 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/exec_shell.yaml`.
+#
+# Four terminal legs that differ ONLY in how the child's own shell may start,
+# so every refusal below is attributable to one declared fact.
+
+loaders:
+  - id: static_loader
+    file: fantastic.yaml
+    manifest:
+      agents:
+        # The child's env carries SHELL and the record permits it, bare.
+        - id: shell_term
+          handler_module: exec_bridge.tools
+          ingress_rule: allow_all_ingress
+          cwd: "."
+          env: {SHELL: /bin/sh}
+          shell: true
+        # The same shell, permitted only as a LOGIN shell (`$SHELL -l`).
+        - id: login_term
+          handler_module: exec_bridge.tools
+          ingress_rule: allow_all_ingress
+          cwd: "."
+          env: {SHELL: /bin/sh}
+          shell: login
+        # The permission is there, but nothing passes a SHELL down to the child.
+        - id: bare_env_term
+          handler_module: exec_bridge.tools
+          ingress_rule: allow_all_ingress
+          cwd: "."
+          shell: true
+        # A SHELL but no `shell` permission: the resolved line meets `allowed`.
+        - id: allow_term
+          handler_module: exec_bridge.tools
+          ingress_rule: allow_all_ingress
+          cwd: "."
+          env: {SHELL: /bin/sh}
+          allowed: ['/bin/echo .*']

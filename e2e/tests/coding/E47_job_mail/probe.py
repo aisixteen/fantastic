@@ -79,14 +79,14 @@ async def main():
         # amnesiac (measured on E46/E53).
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": root.id, "id": FB,
-            "handler_module": "file_bridge.tools", "root": ".",
+            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
             "ingress_rule": "allow_all_ingress",
             "callable_by": {"ai": "*", "rest": "*", "web": "*"},
         })
         assert not r.get("error"), f"create {FB}: {r}"
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": root.id, "id": RUNNER,
-            "handler_module": "exec_bridge.tools", "cwd": os.getcwd(),
+            "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
             "ingress_rule": "allow_all_ingress",
             "allowed": [re.escape(INTERP) + r" worker\.py"],
             "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -109,7 +109,7 @@ async def main():
         conn = await connect(
             root, core, BK, can_call={RUNNER: "*", "cli": "*", "user": "*"},
             callable_by={"user": "*"},
-            limits=Limits.from_env(os.environ), record={"file_bridge_id": FB},
+            limits=Limits.from_env(os.environ),
         )
         await drive(conn, task, client_id="mail", via="user")
         transcript = "".join(conn.proxy.transcript)

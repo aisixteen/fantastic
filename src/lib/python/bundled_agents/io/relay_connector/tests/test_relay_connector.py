@@ -343,13 +343,17 @@ def two_kernels(tmp_path, monkeypatch):
     monkeypatch.chdir(b_dir)
     kb = boot_root()
     kb.ensure("cli", "cli.tools", display_name="cli")
+    # each kernel's INSTANCE guid (distinct from a relay leg's own path `guid`) —
+    # what a leg stamps on outbound frames and what the peer's leg is pinned to
+    ka.update(ka.id, guid="kern-a")
+    kb.update(kb.id, guid="kern-b")
     monkeypatch.chdir(tmp_path)
     yield ka, kb
     rc._bridges.clear()
     rc._test_transport_inject.clear()
 
 
-async def _make_leg(kernel, *, partner, ingress=None):
+async def _make_leg(kernel, *, partner, ingress=None, peer_guid=None):
     rec_payload = {
         "type": "create_agent",
         "parent_id": kernel.id,
@@ -361,6 +365,8 @@ async def _make_leg(kernel, *, partner, ingress=None):
     }
     if ingress is not None:
         rec_payload["ingress_rule"] = ingress
+    if peer_guid is not None:
+        rec_payload["peer_guid"] = peer_guid
     rec = (await kernel.send([{"target": "kernel_state", "payload": rec_payload}]))[0][
         "result"
     ]
@@ -373,7 +379,18 @@ async def test_forward_round_trips_through_relay_tunnel(two_kernels):
     io_bridge engine with the relay transport, symmetric callee role and all."""
     ka, kb = two_kernels
     a_id = await _make_leg(ka, partner="B")
-    b_id = await _make_leg(kb, partner="A", ingress="allow_all_ingress")
+    # B's leg serves A's agents: pinned to A's INSTANCE guid, and B's root accepts
+    # them by their qualified id (never by the leg).
+    b_id = await _make_leg(
+        kb, partner="A", ingress="allow_all_ingress", peer_guid="kern-a"
+    )
+    kb.update(
+        kb.id,
+        callable_by={
+            **kb.ctx.agents[kb.id]._meta.get("callable_by", {}),
+            "kern-a|*": "*",
+        },
+    )
 
     mt_a, mt_b = _pair("A", "B")
     rc._test_transport_inject[a_id] = mt_a

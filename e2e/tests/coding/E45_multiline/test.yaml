@@ -2,7 +2,7 @@
 # or a backend name — those live in e2e/backends/.
 id: multiline_edit
 group: coding
-title: a MULTILINE, multi-hunk patch — whole blocks move, the rest byte-identical
+title: a MULTILINE, multi-hunk edit — whole blocks move, the rest byte-identical
 runner: probe.py
 runtimes: [python, rust, swift]
 costs: turns

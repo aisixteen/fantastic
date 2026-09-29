@@ -41,6 +41,7 @@ from io_bridge._engine import (
     make_verbs,
     on_delete,
     stamp_egress,
+    validate_meta,
 )
 from io_bridge._transport import ConnectionClosed, MemoryTransport, _BaseTransport
 from io_bridge._codec import decode_frame, encode_frame, find_bytes_path, set_path
@@ -71,6 +72,7 @@ __all__ = [
     "Silent",
     # engine
     "make_verbs",
+    "validate_meta",
     "dispatch",
     "boot",
     "on_delete",

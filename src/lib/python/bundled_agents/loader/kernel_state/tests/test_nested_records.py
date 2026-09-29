@@ -20,10 +20,20 @@ async def _call(k, target, payload):
 
 async def _setup(k):
     for rec in (
-        {"id": "wws", "handler_module": "file_bridge.tools", "parent_id": k.id},
+        {
+            "id": "wws",
+            "handler_module": "file_bridge.tools",
+            "allow": ["."],
+            "parent_id": k.id,
+            # the loader's record verbs are privileged: the owning leg names them
+            "can_call": {
+                "web_loader": ["persist_record", "forget_record", "load_tree"]
+            },
+        },
         {
             "id": "rest_leg",
             "handler_module": "file_bridge.tools",
+            "allow": ["."],
             "parent_id": k.id,
             "can_call": {"web_loader": "*"},
         },

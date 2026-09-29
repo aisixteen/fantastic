@@ -65,13 +65,13 @@ def run(ctx) -> None:  # noqa: C901
     try:
         (ctx.work / "a.txt").write_text("a\n")
         rec.json("setup/readings", k.create(parent_id=k.root_id, id="readings",
-                                            handler_module="file_bridge.tools", root=".",
+                                            handler_module="file_bridge.tools", allow=["."], root=".",
                                             **OPEN, callable_by=cb))
-        # The live peer, both field spellings, exactly as `wire` writes them.
+        # The live peer, exactly as `wire` writes it.
         rec.json("setup/wsb", k.create(
             parent_id=k.root_id, id="wsb", handler_module="ws_bridge.tools", **OPEN,
             callable_by=cb, can_call={**BASE, "readings": "*"},
-            transport="ws", url=peer.url(), host="127.0.0.1", remote_port=peer.port,
+            transport="ws", host="127.0.0.1", port=peer.port,
             peer_id="peer"))
         # A7.x — `memory` transport has no dialer outside a test injection.
         rec.json("setup/wsb_mem", k.create(
@@ -81,7 +81,7 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("setup/wsb_pass", k.create(
             parent_id=k.root_id, id="wsb_pass", handler_module="ws_bridge.tools", **OPEN,
             callable_by=cb, can_call={**BASE, "readings": "*"},
-            transport="ws", url=peer.url(), host="127.0.0.1", remote_port=peer.port,
+            transport="ws", host="127.0.0.1", port=peer.port,
             peer_id="peer", egress_rule="password", auth_token="parity-peer-token"))
         rec.json("setup/relay", k.create(
             parent_id=k.root_id, id="relay", handler_module="relay_connector.tools", **OPEN,

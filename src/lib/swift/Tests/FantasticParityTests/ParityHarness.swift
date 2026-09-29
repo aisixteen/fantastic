@@ -222,9 +222,8 @@
             }
         }
 
-        /// The new uniform reflect contract: both runtimes return
-        /// `{id, sentence, tree, ...}` with NONE of the old primer keys,
-        /// and `bundles` omitted by default.
+        /// The uniform reflect contract: both runtimes return
+        /// `{id, sentence, tree, ...}`, and `bundles` omitted by default.
         @Test func reflectContractParity() async throws {
             guard let binary = pythonBinaryURL() else { return }
             let tmp = makeTempDir()
@@ -234,11 +233,6 @@
             let kernel = try await startKernelInMemory(portHint: 0)
             let swReply = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result
 
-            let gone = [
-                "transports", "primitive", "envelope", "universal_verb",
-                "binary_protocol", "browser_bus", "well_known",
-                "agent_count", "available_bundles",
-            ]
             for (label, r, root, runtime) in [
                 ("python", pyReply, "kernel_state", "python"),
                 ("swift", swReply, "kernel_state", "swift"),
@@ -249,9 +243,6 @@
                 #expect(r["runtime"].asString == runtime, "\(label) reflect runtime != \(runtime)")
                 #expect(r["tree"]["id"].asString == root, "\(label) reflect tree.id != \(root)")
                 #expect(r["bundles"].asArray == nil, "\(label) reflect has bundles by default")
-                for k in gone {
-                    #expect(r[k] == nil || r[k] == .null, "\(label) reflect still has primer key \(k)")
-                }
             }
         }
 
@@ -285,7 +276,7 @@
             _ = try pythonOneShot(
                 binary: binary, workdir: pyDir, agentId: "kernel_state", verb: "create_agent",
                 args: [
-                    "handler_module": "file_bridge.tools", "root": ".fantastic",
+                    "handler_module": "file_bridge.tools", "allow": #"["."]"#, "root": ".fantastic",
                     "ingress_rule": "allow_all_ingress",
                 ])
             // Two reflect calls in the SAME workdir must read the guid back

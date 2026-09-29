@@ -50,7 +50,7 @@ import OrderedCollections
 /// `AIBackend` the bundle's `handle` delegates straight to. Mirrors
 /// Rust's `buildAIBackend` / the Python `ai_core` factory.
 public func buildAIBackend(_ config: AIBackendConfig) -> AIBackend {
-    // The AI core keeps two process-wide tables keyed by kernel identity; this
+    // The AI core keeps process-wide tables keyed by `Kernel.serial`; this
     // is where their cleanup registers, once, so a kernel that shuts down takes
     // its rows with it.
     AISideTables.installTeardownHook()
@@ -296,8 +296,8 @@ public final class AIBackend: @unchecked Sendable {
         fields["sentence"] = .string(config.sentence)
         // KEY PRESENCE, not truthiness: `rec.get("model", default)` returns a
         // `model: null` on the record as null.
-        fields["model"] = agent.metaValue(forKey: "model") ?? .string(config.defaultModel)
-        fields["endpoint"] = agent.metaValue(forKey: "endpoint") ?? .string(config.defaultEndpoint)
+        fields["model"] = agent.metaValue(forKey: "model") ?? .null
+        fields["endpoint"] = agent.metaValue(forKey: "endpoint") ?? .null
         // Context Protocol: context_window + the RAW context_strategy.
         for (k, v) in contextReflectFields(agent: agent) {
             fields[k] = v
@@ -575,7 +575,7 @@ public final class AIBackend: @unchecked Sendable {
         // Build the provider FIRST — backends that must refuse before
         // touching history (NIM no-api_key, FM unavailable) return their
         // exact refusal body here, preserving wire byte-identity.
-        let result = await config.makeProvider(agent, clientId, kernel)
+        let result = try await config.makeProvider(agent, clientId, kernel)
         let provider: any AIProvider
         switch result {
         case .refused(let body):
@@ -1084,7 +1084,7 @@ public final class AIBackend: @unchecked Sendable {
             blocks = [override]
         } else {
             let selfId = agent.id
-            // THE `kernel` ALIAS, not the root's own id: python targets
+            // THE `kernel` ADDRESS, not the root's own id: python targets
             // `kernel`, and the root id differs per runtime (`core` here,
             // `kernel_state` in python), so hard-coding it made the primer
             // resolve differently on each.
@@ -1192,17 +1192,10 @@ public final class AIBackend: @unchecked Sendable {
         return (messages, storeLen)
     }
 
-    /// Project the internal message list to what the model reads — pure text,
-    /// every role a chat template renders. Tool replies (a caller may persist
-    /// `role:tool` turns of its own) are mapped to `role:user` here, because
-    /// many templates (incl. tiny local models) don't render a `tool` role.
-    /// Keeps only role + content.
+    /// Project the message list to what the model actually reads — its role and
+    /// its text; every other key is stripped. Python `_render_for_model`.
     private func renderForModel(_ messages: [JSON]) -> [JSON] {
-        messages.map { m in
-            let role = m["role"].asString ?? ""
-            let outRole = role == "tool" ? "user" : role
-            return .object(["role": .string(outRole), "content": m["content"]])
-        }
+        messages.map { m in .object(["role": m["role"], "content": m["content"]]) }
     }
 
     // NO `done` EVENT. `status(phase='done')` IS the completion — two events for
@@ -1357,7 +1350,11 @@ func withGenerationCeiling<T: Sendable>(
     try await withThrowingTaskGroup(of: T?.self) { group in
         group.addTask { try await body() }
         group.addTask {
-            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            // A CANCELLED sleep is a cancel, not an expiry: rethrow it. Swallowing
+            // it here returned nil at once, so a `cancel` of the send read as the
+            // ceiling expiring and a second `done` (reason `timeout`) followed the
+            // `cancelled` one (parity `ai_paths/cases/cancel_midstream`).
+            try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
             return nil
         }
         let first = try await group.next() ?? nil

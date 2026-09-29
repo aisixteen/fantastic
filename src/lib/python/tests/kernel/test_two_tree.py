@@ -1,7 +1,7 @@
 """Two-tree integration — host kernel ⇄ frontend kernel, full round-trip.
 
 Wires a HOST kernel (root `kernel_state`) + a real `web_loader` (an `kernel_state`
-child with `root=.fantastic/web watch=false alias=web_loader`) + a FRONTEND
+child `id=web_loader root=.fantastic/web watch=false`) + a FRONTEND
 stand-in `Kernel`. Faithful because the JS kernel is the SAME kernel — a second
 `Kernel` is a true stand-in for the browser. The frontend persists its tree
 through `web_loader` (the real verb contract), re-rooting exactly like the JS
@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from _testkit import boot_root
+from file_bridge import fs
 from kernel_state.tools import read_tree
 from kernel import Kernel
 
@@ -43,8 +44,8 @@ def _load_reroot(records: list[dict], loader_id: str) -> list[dict]:
 
 
 async def _host_with_web_loader():
-    """Host root + a real `web_loader` (created → booted → anchor seeded +
-    alias registered). Returns (host_root_agent, web_loader_id)."""
+    """Host root + a real `web_loader` (created → booted → anchor seeded).
+    Returns (host_root_agent, web_loader_id)."""
     host = boot_root()
     wl = (
         await host.send(
@@ -55,9 +56,9 @@ async def _host_with_web_loader():
                         "type": "create_agent",
                         "parent_id": host.id,
                         "handler_module": "kernel_state.tools",
+                        "id": "web_loader",
                         "root": ".fantastic/web",
                         "watch": False,
-                        "alias": "web_loader",
                     },
                 }
             ]
@@ -80,7 +81,7 @@ async def test_two_tree_roundtrip(tmp_path, monkeypatch):
         ]
     )
 
-    # ── PERSIST each record through web_loader via the ALIAS (re-rooted) ──
+    # ── PERSIST each record through web_loader by its id (re-rooted) ──
     for rec in fe.save()["records"]:
         reply = (
             await host.send(
@@ -149,7 +150,7 @@ async def test_two_tree_roundtrip(tmp_path, monkeypatch):
     assert wl_id in host_ids  # the loader itself IS a host agent
     assert not ({"canvas", "panel", "term", "vfx"} & host_ids)
     # host MAIN read_tree walks agents/, never the web/ namespace
-    main_ids = {r["id"] for r in read_tree(Path(".fantastic"))}
+    main_ids = {r["id"] for r in read_tree(fs.Root(Path.cwd(), ".fantastic"))}
     assert not ({"canvas", "panel", "term", "vfx"} & main_ids)
 
 

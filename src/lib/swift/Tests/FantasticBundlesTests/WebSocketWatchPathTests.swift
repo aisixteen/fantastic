@@ -1,10 +1,9 @@
 // The ONE watch path (connect-time auto-watch + explicit `watch` frame): the
-// name resolves the way `send` resolves a target (an id, a declared alias,
-// `kernel`), the watch runs under the leg's own identity, and a refusal is an
-// `error` frame — never silence, and never recorded as watched. Measured before
-// (python, same shape here): a socket opened by ALIAS (`/exec/ws` for
-// `exec_real`) mirrored nothing and said nothing, and the explicit watch that
-// followed was skipped as a duplicate.
+// name resolves the way `send` resolves a target (an id or `kernel`), the watch
+// runs under the leg's own identity, and a refusal is an `error` frame — never
+// silence, and never recorded as watched. Measured before (python, same shape
+// here): a socket whose connect-time watch did not resolve mirrored nothing and
+// said nothing, and the explicit watch that followed was skipped as a duplicate.
 //
 // Twin of python `bundled_agents/io/web_ws/tests/test_watch_path.py`.
 
@@ -38,7 +37,7 @@ private func webKernel() async throws -> Kernel {
 
 private func mountLeg(_ k: Kernel, grant: Bool) async {
     var canCall = BASE
-    if grant { canCall["exec_real"] = .string("*") }
+    if grant { canCall["exec"] = .string("*") }
     await create(
         k,
         [
@@ -51,7 +50,7 @@ private func mountLeg(_ k: Kernel, grant: Bool) async {
     ])[0].result
 }
 
-/// python `_exec`: the leg, and an exec_bridge `exec_real` declaring `alias: exec`.
+/// python `_exec`: the leg, and an exec_bridge `exec`.
 private func mountExec(_ k: Kernel, grant: Bool) async {
     await mountLeg(k, grant: grant)
     var callableBy = BASE
@@ -60,9 +59,10 @@ private func mountExec(_ k: Kernel, grant: Bool) async {
         k,
         [
             "parent_id": .string("kernel_state"), "handler_module": .string("exec_bridge.tools"),
-            "id": .string("exec_real"), "alias": .string("exec"),
+            "id": .string("exec"),
             "ingress_rule": .string("allow_all_ingress"),
             "allowed": .array([.string("/bin/echo .*")]),
+            "cwd": .string("."),
             "callable_by": .object(callableBy),
         ])
 }
@@ -123,7 +123,7 @@ private func call(_ id: String, _ payload: JSON) -> JSON {
 @Suite("web_ws — the one watch path", .serialized)
 struct WebSocketWatchPathTests {
     @Test(.timeLimit(.minutes(1)))
-    func aSocketOpenedByAliasReceivesTheAgentsEvents() async throws {
+    func aSocketOpenedOnAnAgentReceivesItsEvents() async throws {
         let k = try await webKernel()
         await mountExec(k, grant: true)
         let ws = socket(k, "exec")
@@ -162,7 +162,7 @@ struct WebSocketWatchPathTests {
             first["type"].asString == "error" && first["reason"].asString == "unauthorized",
             "\(first.serialize())")
         #expect(
-            k.agent(AgentId("exec_real"))?.watcherIds().isEmpty == true, "not recorded")
+            k.agent(AgentId("exec"))?.watcherIds().isEmpty == true, "not recorded")
         // …and an explicit watch is re-tried, not skipped as a duplicate
         try await send(
             ws, .object(["type": .string("watch"), "src": .string("exec"), "id": .string("w")]))

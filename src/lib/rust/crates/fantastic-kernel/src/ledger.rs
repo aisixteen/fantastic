@@ -354,11 +354,8 @@ impl Ledger {
                         e.insert("status".to_string(), json!(out.status.as_str()));
                         // THE SAME SHAPE flushed or not: what the settle row keeps,
                         // made wire-safe (a raw body reads `<bytes:N>`).
-                        let kept = stored_outcome(
-                            out,
-                            r.name.is_some(),
-                            crate::jsonsafe::BodyAs::Marker,
-                        );
+                        let kept =
+                            stored_outcome(out, r.name.is_some(), crate::jsonsafe::BodyAs::Marker);
                         let mut oc = Map::new();
                         oc.insert("pid".to_string(), json!(id));
                         if let Value::Object(k) = kept {
@@ -504,7 +501,10 @@ mod tests;
 /// retired by `ack_deadletter`. Python `DEAD_STATUSES`.
 #[must_use]
 pub fn is_dead(status: Status) -> bool {
-    matches!(status, Status::Failed | Status::TimedOut | Status::Cancelled)
+    matches!(
+        status,
+        Status::Failed | Status::TimedOut | Status::Cancelled
+    )
 }
 
 /// WHAT A SETTLE ROW KEEPS of an outcome — the one definition (python

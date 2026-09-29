@@ -13,7 +13,6 @@ verb-channel tests live in web_ws's selftest.
 ## Pre-flight
 
 ```bash
-cd new_codebase
 rm -rf .fantastic
 pkill -9 -f "fantastic" 2>/dev/null
 PORT=18901
@@ -53,29 +52,20 @@ rm -rf .fantastic /tmp/serve.log
 
 ## Tests
 
-### Test 1: GET / serves the index HTML
+### Test 1: GET / is not a page (404)
 
 ```bash
-curl -s http://localhost:$PORT/ | python -c "
-import sys
-body = sys.stdin.read().lower()
-assert '<!doctype' in body, 'no doctype'
-assert 'fantastic' in body, 'no fantastic title'
-assert 'agent tree' in body, 'no agent tree header'
-print('PASS')
-"
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:$PORT/
 ```
-Expected: `PASS`. The page is rendered from
-`bundled_agents/web/src/web/templates/index.html` with the dynamic
-`<ul>` tree substituted.
+Expected: `404`. The host renders nothing of its own — no tree index; a landing
+page is a declared route or a file served through `/<file_bridge>/file/<path>`.
 
 ### Test 2: WS reflect round-trip (uniform identity + tree)
 
 `reflect` is the one uniform discovery verb, reached over WS by calling
 `kernel.reflect`. The reply is the root agent's identity plus its
-`tree`; the old primer keys (`transports`, `available_bundles`,
-`agent_count`, …) are gone — that prose moved into the root readme
-(`reflect readme=true`). Add `bundles=all` to get the catalog.
+`tree`; transport prose lives in the root readme (`reflect readme=true`).
+Add `bundles=all` to get the catalog.
 
 ```bash
 call kernel '{"type":"reflect"}' | python -c "
@@ -83,11 +73,6 @@ import json, sys
 d = json.loads(sys.stdin.read())
 assert d.get('id') == 'kernel_state', f'id={d.get(\"id\")}'
 assert 'sentence' in d and 'tree' in d, f'keys={list(d)}'
-# Old primer keys must be gone.
-gone = [k for k in ('transports','primitive','envelope','browser_bus',
-                    'binary_protocol','agent_count','available_bundles',
-                    'well_known') if k in d]
-assert not gone, f'stale primer keys leaked: {gone}'
 def walk_ids(n, out):
     out.append(n['id'])
     for c in n.get('children', []):
@@ -121,10 +106,10 @@ Expected: `HTTP/1.1 404 Not Found`.
 ### Test 5: GET /<backend_id>/ (no UI) → 404
 
 ```bash
-TB=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+TB=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"exec_bridge.tools","cwd":"."}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 curl -s -i "http://localhost:$PORT/$TB/" | head -1
 ```
-Expected: `HTTP/1.1 404 Not Found` (terminal_backend has no webapp/index.html).
+Expected: `HTTP/1.1 404 Not Found` (the host renders nothing for an agent).
 
 ### Test 6: WS call → reply round-trip
 
@@ -207,9 +192,9 @@ signal: stale lock blocked the relaunch → `_pid_alive` check broken.
 
 ### Test 10: there is NO server-side render route (`/<id>/` is not served)
 
-The web host renders no agent UI server-side: the `GET /<id>/` →
-`render_html` page route was REMOVED. The host does exactly two things —
-serve STATIC files via the `file` alias (`/<id>/file/<path>`, Test 11)
+The web host renders no agent UI server-side: there is no `GET /<id>/`
+page route. The host does exactly two things —
+serve STATIC files via the file route (`/<id>/file/<path>`, Test 11)
 and carry `send()` over the WS bus. Frontend panels live in the TS
 kernel (`html_agent.ts` → canvas), not as host pages. So `/<id>/` matches
 no route at all → 404.
@@ -245,9 +230,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/$FA/file/.
 [ "$code" = "404" ] && echo "  traversal → 404: OK" || echo "  FAIL: code=$code"
 rm -rf wfp
 ```
-Expected: every grep + 404 check PASS. Replaces the old
-`content_alias_file` registry — any view (e.g. an `html_agent.ts` in the
-frontend kernel) can now do `<img src="/<fa>/file/imgs/x.png">` without
+Expected: every grep + 404 check PASS. Any view (e.g. an `html_agent.ts` in
+the frontend kernel) can do `<img src="/<fa>/file/imgs/x.png">` without
 registering anything.
 
 ### Test 12: WS binary frame round-trip (bytes)

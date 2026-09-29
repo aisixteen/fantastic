@@ -25,6 +25,7 @@
 use async_trait::async_trait;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+    Unconfigured,
 };
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_repr_value, py_str, py_truthy};
@@ -43,12 +44,8 @@ pub const HANDLER_MODULE: &str = "responses_backend.tools";
 /// readme.md — the PYTHON bundle's, byte for byte.
 pub const README: &str = include_str!("readme.md");
 
-/// NO guessed host: the sentinel `reflect` shows until the record names one.
-pub const DEFAULT_ENDPOINT: &str =
-    "(no default — set the `endpoint` meta: the full …/v1/responses URL)";
-
-/// NO guessed model: the sentinel `reflect` shows until the record names one.
-pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
+/// The name a required-field refusal carries.
+const BACKEND: &str = "responses_backend";
 
 /// What `reflect` says this agent IS — python `responses_backend/tools.py`'s
 /// `sentence`, verbatim.
@@ -164,10 +161,8 @@ fn drop_cached_client(self_id: &AgentId) {
 
 /// Read the key from the environment. Never written to disk, never on a record.
 fn read_api_key() -> Option<String> {
-    std::env::var(KEY_VAR)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    // VERBATIM, as python reads it (`os.environ.get(KEY_VAR)`) — never trimmed.
+    std::env::var(KEY_VAR).ok().filter(|s| !s.is_empty())
 }
 
 // ── plain messages → Responses translation ──────────────────────────
@@ -219,9 +214,10 @@ struct ResponsesProvider {
     self_id: AgentId,
     endpoint: String,
     model: String,
-    max_tokens: u64,
+    max_tokens: i64,
     /// The record's `sampling` object, merged VERBATIM into the body after the
-    /// fixed fields (python `body.update(self._sampling)`).
+    /// fixed fields (python `body.update(self._sampling)`); it may not name a
+    /// key the provider sets itself ([`OWNED_KEYS`]).
     sampling: Map<String, Value>,
     /// The endpoint's reported prompt size and the last stop reason — ai_core
     /// calibrates on the first and refuses a cut fold summary on the second.
@@ -257,14 +253,14 @@ impl Provider for ResponsesProvider {
                 "{KEY_VAR} not set in environment (.env)"
             )));
         };
-        if self.endpoint.is_empty() || self.endpoint == DEFAULT_ENDPOINT {
+        if self.endpoint.is_empty() {
             return Err(ProviderError::raised(
                 "responses_backend: no `endpoint` set — this connector does not \
                  guess a host. Name the full …/v1/responses URL on the agent \
                  record (endpoint=...).",
             ));
         }
-        if self.model.is_empty() || self.model == DEFAULT_MODEL {
+        if self.model.is_empty() {
             return Err(ProviderError::raised(
                 "responses_backend: no `model` set — this connector does not guess \
                  one. Name a model on the agent record (model=...).",
@@ -684,14 +680,38 @@ impl Bundle for ResponsesBundle {
 /// (python `make_provider`); the key is the provider's own business at call time.
 fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
     let meta = helpers::agent_meta(agent_id, kernel);
-    let max_tokens = meta
-        .get("max_tokens")
-        .and_then(Value::as_u64)
-        .filter(|n| *n != 0)
-        .unwrap_or(DEFAULT_MAX_TOKENS);
-    let sampling: Map<String, Value> = meta
-        .get("sampling")
-        .and_then(Value::as_object)
+    // python's argument order: `endpoint`, `model`, `max_tokens`, then the
+    // provider's own check of `sampling`.
+    // `endpoint` and `model` are REQUIRED on the record — nothing is guessed.
+    let (endpoint, model) = match (
+        helpers::required_meta(&meta, "endpoint", BACKEND),
+        helpers::required_meta(&meta, "model", BACKEND),
+    ) {
+        (Ok(e), Ok(m)) => (e, m),
+        (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
+    };
+    let max_tokens = match py_int_or(meta.get("max_tokens"), DEFAULT_MAX_TOKENS) {
+        Ok(n) => n,
+        Err(e) => return Arc::new(Unconfigured(ProviderError::value_error(e))),
+    };
+    let raw_sampling = meta.get("sampling").and_then(Value::as_object);
+    let mut owned: Vec<&str> = raw_sampling
+        .map(|m| {
+            m.keys()
+                .map(String::as_str)
+                .filter(|k| OWNED_KEYS.contains(k))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !owned.is_empty() {
+        owned.sort_unstable();
+        return Arc::new(Unconfigured(ProviderError::value_error(format!(
+            "responses_backend: `sampling` may not set {} — those are the record's \
+             (`model`, `max_tokens`) or the provider's own",
+            owned.join(", ")
+        ))));
+    }
+    let sampling: Map<String, Value> = raw_sampling
         .map(|m| {
             m.iter()
                 .filter(|(_, v)| !v.is_null())
@@ -701,23 +721,67 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         .unwrap_or_default();
     Arc::new(ResponsesProvider {
         self_id: agent_id.clone(),
-        endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
-        model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
+        endpoint,
+        model,
         max_tokens,
         sampling,
         report: ReportCell::default(),
     })
 }
 
+/// Request-body keys this provider sets itself; `sampling` may not touch them
+/// (python `provider._OWNED_KEYS`).
+const OWNED_KEYS: [&str; 6] = [
+    "model",
+    "input",
+    "instructions",
+    "max_output_tokens",
+    "stream",
+    "store",
+];
+
+/// python `int(v or default)`: a falsy value takes the default; an int is itself;
+/// a float truncates; a bool is 0/1; a numeric string parses. Anything else is
+/// python's `int()` error.
+fn py_int_or(v: Option<&Value>, default: u64) -> Result<i64, String> {
+    let default = i64::try_from(default).unwrap_or(i64::MAX);
+    let Some(v) = v.filter(|v| py_truthy(v)) else {
+        return Ok(default);
+    };
+    match v {
+        Value::Bool(_) => Ok(1),
+        Value::Number(n) => Ok(n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f.trunc() as i64))
+            .unwrap_or(default)),
+        Value::String(s) => {
+            let t = s.trim();
+            let digits_ok = !t.is_empty() && !t.starts_with('_') && !t.ends_with('_');
+            t.replace('_', "")
+                .parse::<i64>()
+                .ok()
+                .filter(|_| digits_ok)
+                .ok_or_else(|| {
+                    format!(
+                        "invalid literal for int() with base 10: {}",
+                        fantastic_bundle::py_repr(s)
+                    )
+                })
+        }
+        Value::Array(_) => Err(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .to_string(),
+        ),
+        _ => Err(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .to_string(),
+        ),
+    }
+}
+
 /// `reflect` — python `_make_reflect` with no `reflect_extra`.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    Value::Object(verbs::reflect_base(
-        agent_id,
-        kernel,
-        SENTENCE,
-        DEFAULT_MODEL,
-        DEFAULT_ENDPOINT,
-    ))
+    Value::Object(verbs::reflect_base(agent_id, kernel, SENTENCE))
 }
 
 #[cfg(test)]

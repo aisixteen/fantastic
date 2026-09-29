@@ -16,9 +16,9 @@ Two arms, SAME task, different answers — that difference is the measurement:
   judgement  — the human answers "do your best judgement"; the model must pick a
                value ITSELF and still finish the task.
 
-Memory is FILES now: the answer lands in `prefs.md` through the `text_file`
-editor. Scored on the FILE, never on prose; both arms also require that a
-an inquiry was actually sent — read off the KERNEL LEDGER (`ai -> user`), which
+Memory is FILES: the answer lands in `prefs.md` through the `prefs` file agent.
+Scored on the FILE, never on prose; both arms also require that an inquiry was
+actually sent — read off the KERNEL LEDGER (`ai -> user`), which
 is the only evidence that cannot be faked by talking about it.
 """
 
@@ -70,11 +70,11 @@ async def _arm(name: str, answer: str):
         {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
+            "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "kernel_store",
             "root": ".",
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {"prefs": "*", aid: "*", "rest": "*", "web": "*"},
+            "callable_by": {aid: "*", "rest": "*", "web": "*"},
         },
         {
             # THE HUMAN. `answer` is the whole policy — one bundle serves both
@@ -94,11 +94,11 @@ async def _arm(name: str, answer: str):
         {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "text_file.tools",
+            "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "prefs",
-            "target_id": "kernel_store",
-            "can_call": {"kernel_store": "*"},
-            "description": "Text editor for the user's preference files.",
+            "root": ".",
+            "ingress_rule": "allow_all_ingress",
+            "description": "The user's preference files.",
             "callable_by": {aid: "*", "rest": "*", "web": "*"},
         },
     ):
@@ -117,7 +117,6 @@ async def _arm(name: str, answer: str):
         # (measured 2026-09-04: zero turns, a clean cap, nothing to read).
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
-        record={"file_bridge_id": "kernel_store"},
     )
     # THE TASK COMES FROM THE HUMAN, not from the harness.
     capped = await drive(conn, TASK, client_id=name, via="user")

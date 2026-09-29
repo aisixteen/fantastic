@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Fantastic exec_bridge agent — the process-transport member of the io family: a sealed-by-default, allowlisted-interpreter process edge that publishes a kernel wire over an inherited control fd."
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
-dependencies = ["fantastic-io-bridge"]
+dependencies = ["fantastic-io-bridge", "fantastic-file-bridge"]
 
 [project.entry-points."fantastic.bundles"]
 exec_bridge = "exec_bridge.tools"

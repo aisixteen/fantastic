@@ -26,8 +26,6 @@ use std::fmt;
 
 pub mod memory;
 pub mod relay;
-#[cfg(feature = "full")]
-pub mod ssh;
 pub mod ws;
 
 /// Errors a transport can raise. Kept narrow on purpose — every
@@ -96,7 +94,7 @@ pub trait BridgeTransport: Send + Sync {
     async fn send_frame(&self, frame: Value) -> Result<(), TransportError>;
 
     /// Push a BINARY frame (`[4B len|header|body]` over a WS binary message).
-    /// Default: refuse — only stream-capable transports (memory/ws/ssh/relay)
+    /// Default: refuse — only stream-capable transports (memory/ws/relay)
     /// override it.
     async fn send_binary(&self, _header: Value, _body: Vec<u8>) -> Result<(), TransportError> {
         Err(TransportError::Other(

@@ -53,7 +53,7 @@ public func gateWebLeg(
 }
 
 /// The fs-edge GATE — gate a verb on a leg given its rule meta (`ingress_rule` /
-/// the legacy `auth` shorthand + the envelope `auth_token`). `reflect` — and ONLY
+/// the `auth` both-directions shorthand + the envelope `auth_token`). `reflect` — and ONLY
 /// `reflect` — bypasses the gate, so a SEALED bridge is still discoverable:
 /// python's `UNGATED` set holds that one verb, so a sealed `boot` is denied like
 /// any other call. Returns `nil` to ADMIT, or a deny JSON

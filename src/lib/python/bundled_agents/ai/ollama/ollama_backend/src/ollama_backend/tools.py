@@ -24,7 +24,7 @@ a kernel TASK, killed with the universal `ps` → `cancel` system verbs.
 
 from __future__ import annotations
 
-from ai_core import build
+from ai_core import build, required_meta
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -42,8 +42,6 @@ def make_provider(id, kernel):
     """Build an OllamaProvider from the agent record
     (endpoint/model/num_ctx/temperature/num_predict)."""
     from ollama_backend.provider import (
-        DEFAULT_ENDPOINT,
-        DEFAULT_MODEL,
         OllamaProvider,
     )
 
@@ -53,8 +51,8 @@ def make_provider(id, kernel):
     num_predict = rec.get("num_predict")
     think = rec.get("think")
     return OllamaProvider(
-        endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
-        model=rec.get("model", DEFAULT_MODEL),
+        endpoint=required_meta(rec, "endpoint", "ollama_backend"),
+        model=required_meta(rec, "model", "ollama_backend"),
         num_ctx=int(num_ctx) if num_ctx else None,
         temperature=float(temperature) if temperature is not None else None,
         num_predict=int(num_predict) if num_predict else None,
@@ -78,12 +76,9 @@ async def _reflect_extra(id, kernel):
 
 
 def _build():
-    from ollama_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
 
     return build(
         sentence="Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
-        default_model=DEFAULT_MODEL,
-        default_endpoint=DEFAULT_ENDPOINT,
         make_provider=make_provider,
         name="ollama_backend",
         module_name=__name__,

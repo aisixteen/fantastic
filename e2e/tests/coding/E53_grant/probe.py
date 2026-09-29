@@ -66,10 +66,10 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"vault": "*", "rest": "*", "web": "*"},
+                "callable_by": {"rest": "*", "web": "*"},
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
@@ -83,9 +83,8 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": "vault",
-                "handler_module": "text_file.tools",
-                "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"rest": "*", "web": "*", "ai": ["reflect"]},
             },
         )
@@ -115,7 +114,7 @@ async def main():
                 # TWO TRAPS IN ONE LINE, both measured 2026-09-04.
                 # `update_agent` is PRIVILEGED: never covered by a wildcard, so
                 # it must be NAMED. And the grant must name the ROOT'S REAL ID,
-                # not the `kernel` alias — the alias routes a dispatch but the
+                # not the `kernel` address — `kernel` routes a dispatch but the
                 # gate resolves the target first, so `{"kernel": [...]}` refused
                 # with "user may not call 'update_agent' on kernel_state".
                 "can_call": {root.id: ["update_agent"], "ai": "*"},

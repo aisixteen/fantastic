@@ -17,7 +17,7 @@ import FantasticKernel
 import Foundation
 import OrderedCollections
 
-/// `handler_module` of the WS derivation (ws / ssh+ws / memory transports).
+/// `handler_module` of the WS derivation (ws / memory transports).
 public let WS_HANDLER_MODULE = "ws_bridge.tools"
 /// `handler_module` of the RELAY derivation (the relay-kernel router transport).
 public let RELAY_HANDLER_MODULE = "relay_connector.tools"
@@ -73,9 +73,9 @@ enum BridgeDocs {
         "forward":
             "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
         "watch_remote":
-            "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set).",
+            "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
         "unwatch_remote":
-            "args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted.",
+            "args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them.",
         "list_peers": "No args (optional timeout). One-shot snapshot of the relay directory:",
         "watch_directory":
             "No args. Subscribe to the relay directory; live `peer_joined`/`peer_left`/",
@@ -99,7 +99,7 @@ enum BridgeDocs {
         "bridge_down":
             "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
         "<remote event>":
-            "events from `watch_remote` subscriptions are re-emitted on this agent's inbox with their original `{type, ...}` shape",
+            "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
     ]
 }
 
@@ -145,14 +145,25 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         await teardown(agentId)
     }
 
-    /// Python `on_delete` — cancels the read loop, closes the transport, kills
-    /// the ssh tunnel (if any), rejects pending.
+    /// Python `on_delete` — cancels the read loop, closes the transport,
+    /// rejects pending.
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
         await teardown(agentId)
     }
 
     public var readme: String? {
         family == .ws ? Self.wsReadme : Self.relayReadme
+    }
+
+    /// Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
+    /// `|`). This kernel's OWN guid is refused where the kernel is in hand — at
+    /// serve. Python `io_bridge._engine.validate_meta`.
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        guard let pin = meta["peer_guid"], pin != .null else { return nil }
+        if let s = pin.asString, !s.isEmpty, !s.contains("|") { return nil }
+        return "bridge: peer_guid must be one kernel guid (a non-empty string without `|`); got \(pyRepr(pin))"
     }
 
     // MARK: - dispatch
@@ -245,13 +256,14 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         // The active per-leg rule TYPE names — keyed by the field you SET, so
         // read-key == write-key and `reflect` → edit is a direct mirror.
         for (k, v) in describe(meta) { out[k] = v }
+        // The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
+        // null = no pin, no inbound call.
+        out["peer_guid"] = meta["peer_guid"] ?? .null
         switch family {
         case .ws:
             out["host"] = meta["host"] ?? .null
             out["peer_id"] = meta["peer_id"] ?? .null
-            out["local_port"] = meta["local_port"] ?? .null
-            out["remote_port"] = meta["remote_port"] ?? .null
-            out["tunnel_pid"] = st.extra["tunnel_pid"] ?? .null
+            out["port"] = meta["port"] ?? .null
         case .relay:
             if let relay = st.transport as? RelayTransport {
                 out["connected"] = .bool(await relay.isLive)
@@ -347,12 +359,14 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     static let wsReadme = """
         # ws_bridge — outbound WebSocket bridge
 
-        Dials a remote `web_ws` surface. **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
+        Dials a remote `web_ws` surface at `ws://<host>:<port>/<peer_id>/ws` (`host` explicit). **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
         Token on frame envelope (`auth_token`). Same `ingress_rule`/`egress_rule`/`auth` as every io_bridge leg.
 
         Verbs: `boot` · `reconnect` · `forward(target,payload[,timeout])` · `watch_remote(target)` · `unwatch_remote(target)` · `reflect`
-        Transports: `ws` (default) · `ssh+ws` · `memory` (test)
-        Emits: `bridge_up` · `bridge_down` · remote events via `watch_remote`
+        Transports: `ws` (default) · `memory` (test). No tunnel is spawned here — an ssh tunnel is an `exec_bridge` job or devops; dial its local end.
+        Emits: `bridge_up` · `bridge_down` · remote events for a `watch_remote` subscription only (payload + `src`); anything unsubscribed is dropped.
+
+        Inbound calls (a paired transport) are served only from the ONE pinned peer: set `peer_guid` (the peer kernel's guid). Every frame names its caller `<guid>|<agent>`, and the target's `callable_by` must name it (or `<guid>|*`) — accepting this leg is not accepting its peer.
 
         """
 
@@ -372,7 +386,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
 
         **Self-healing** — the leg auto-connects (eager initial dial + background
         auto-connect) and auto-reconnects with the `reconnect` backoff (seconds, default
-        10; `0` = one-shot/legacy, raise on first failure). `reflect.connected` tracks the
+        10; `0` = one-shot, raise on first failure). `reflect.connected` tracks the
         LIVE socket. A no-reply `keepalive` verb is sent every `heartbeat` seconds to keep
         the relay's liveness view of us green.
 
@@ -414,7 +428,15 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
 
         Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` (peer to
         reach) · `relay_token` (X-Fantastic-Auth) · `heartbeat` (s, default 30) ·
-        `reconnect` (s, default 10) · `role` · `owner_guid` · `exposes`. Transport: `relay`.
+        `reconnect` (s, default 10) · `role` · `owner_guid` · `exposes` · `peer_guid`.
+        Transport: `relay`.
+
+        **Inbound calls are served only from the ONE pinned peer**: `peer_guid` is the partner
+        KERNEL's instance guid (its root reflect's `guid` — not the leg's path `guid`). Every
+        tunneled call names its caller `<guid>|<agent>`; a caller from any other guid, or a leg
+        with no pin, is refused. The call is then gated AS that foreign id: the target's
+        `callable_by` must name `<guid>|<agent>` or `<guid>|*` — accepting this leg is not
+        accepting its peer. Remote events re-emit only for a `watch_remote` subscription.
 
         """
 }

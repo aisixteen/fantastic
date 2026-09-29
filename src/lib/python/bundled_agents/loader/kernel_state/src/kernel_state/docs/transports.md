@@ -21,7 +21,7 @@ reflect `verbs`.
                 `[4-byte BE uint32 H | H-byte JSON header | M-byte body]`;
                 `_binary_path` names the body field. Skips base64.
 
-`kernel` is an alias for the tree root: send any verb to `kernel` and it
-resolves to the root agent — handy for reflecting the whole tree without
-knowing the root's id. To operate a running daemon's live surface (find its
+`kernel` is a reserved address for the tree root: send any verb to `kernel`
+and it resolves to the root agent, whatever its id — reflect the whole tree
+without knowing the root's id. To operate a running daemon's live surface (find its
 port, POST/WS to it, stop it), `reflect kernel readme=daemon`.

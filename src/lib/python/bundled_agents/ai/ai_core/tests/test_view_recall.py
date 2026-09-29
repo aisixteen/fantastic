@@ -28,8 +28,6 @@ def _cfg():
 
     return Backend(
         sentence="s",
-        default_model="m",
-        default_endpoint="e",
         make_provider=lambda *a: None,
         name="fake",
         module_name="fake",

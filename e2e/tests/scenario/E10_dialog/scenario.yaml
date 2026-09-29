@@ -1,8 +1,8 @@
 # THE SCENARIO — shared data, one copy, every runtime.
 #
 # This is the same idea as `contract/agentic/`: a scenario is a DECLARED fixture
-# plus a task plus what must become true. The runner is per-runtime (python and
-# js build in process, rust and swift over REST), the scenario is not. Three
+# plus a task plus what must become true. One runner drives every runtime over
+# REST (python, rust, swift), and the scenario is shared. Three
 # copies differing only in how the store gets registered is duplication that
 # drifts the first time the task changes — and then the results stop being
 # comparable, which is the only reason to run it on four kernels at all.
@@ -22,8 +22,7 @@ limits:
 
 # The fixture, by ROLE rather than by bundle name: a compiled kernel can only
 # run bundles compiled into it — the role is the contract; the runner picks
-# the implementation it has (python: `text_file`; rust/swift: pending the
-# text_file port — red until then, python leads).
+# the implementation it has (a `file_bridge` data store).
 roster:
   - role: memory
     id: yaml_store

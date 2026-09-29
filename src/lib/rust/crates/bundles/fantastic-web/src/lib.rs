@@ -5,13 +5,11 @@
 //! duck-typed `get_routes` verb, and only then starts listening, so the port
 //! never serves a request before its full route table is in place.
 //!
-//! The baked routes are RENDERING ONLY, and they are exactly python's four:
+//! The baked routes are RENDERING ONLY, and they are exactly python's two:
 //!
 //! | route                           | what                                   |
 //! |---------------------------------|----------------------------------------|
-//! | `GET /`                         | the agent-tree index (HTML)            |
 //! | `GET /_assets/favicon.png`      | the bundled favicon                    |
-//! | `GET /favicon.png`              | the same favicon                       |
 //! | `GET /{agent_id}/file/{path}`   | pipe the agent's `read_stream` SOURCE  |
 //!
 //! Verb-invocation surfaces (WS, REST) are NOT baked in: they live in
@@ -61,9 +59,6 @@ pub use origin::DEFAULT_HOST;
 /// readme.md auto-seeded into the agent's dir on creation. Python's file, byte
 /// for byte (`PB/web/host/src/web/readme.md`).
 pub const README: &str = include_str!("readme.md");
-
-/// The `/` index scaffold — python's `web/templates/index.html`, byte for byte.
-pub const ROOT_INDEX_HTML: &str = include_str!("index.html");
 
 /// Bundled favicon — python's `web/favicon.png`, byte for byte.
 pub const FAVICON_PNG: &[u8] = include_bytes!("favicon.png");
@@ -116,21 +111,12 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    /// Run `work` under the boot dispatch's task AND sender scope — what
-    /// python's uvicorn serve task inherits.
-    ///
-    /// The serve task is created INSIDE the `boot` dispatch, so a request
-    /// handler inherits BOTH contextvars that dispatch set: `_current_task`
-    /// (the boot pid) and `_current_sender` (the agent's OWN id — `_dispatch`
-    /// sets it before calling the handler). A route that does not re-scope the
-    /// sender (`GET /`) therefore calls as the WEB AGENT, never as the
-    /// operator, and the distilled roster's per-node gate denies a lateral
-    /// sibling. Measured 2026-09-21 on python: `GET /` sender = `web`, and a
-    /// sibling's watcher saw nothing. Running it as operator made the roster
-    /// ungated and dispatched `reflect` on every agent in the tree.
-    ///
-    /// The REST/WS/file-proxy routes re-scope to their own leg id inside, so
-    /// this only decides the routes python leaves inherited.
+    /// Run `work` AS THIS HOST under the boot dispatch's task — python
+    /// `_safe_serve` sets `_current_sender` to the host's own id explicitly
+    /// rather than inheriting it from whoever dispatched `boot` (audit d9), and
+    /// clears `_current_task` to the boot pid's scope. A request never calls as
+    /// the operator. The REST/WS/file-proxy routes re-scope to their own leg id
+    /// inside.
     pub(crate) async fn scoped<F: Future>(&self, work: F) -> F::Output {
         let work = fantastic_kernel::send::with_sender(self.web_agent_id.clone(), work);
         match self.boot_task {
@@ -181,6 +167,14 @@ impl Bundle for WebBundle {
     ) -> Result<(), BundleError> {
         stop_reply(agent_id).await;
         Ok(())
+    }
+    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        self.on_delete(agent_id, kernel).await
     }
 }
 
@@ -271,8 +265,14 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
     let web_children: std::collections::HashSet<String> =
         web.child_ids().into_iter().map(|c| c.0).collect();
     let mut out: Vec<String> = Vec::new();
-    for entry in kernel.agents.iter() {
-        let agent = entry.value();
+    // Snapshot first: the gates below read `kernel.agents` again (the subtree and
+    // heritable walks), which must not happen under a live map iteration.
+    let agents: Vec<Arc<fantastic_kernel::Agent>> = kernel
+        .agents
+        .iter()
+        .map(|e| Arc::clone(e.value()))
+        .collect();
+    for agent in &agents {
         if agent.id == *web_id {
             continue;
         }
@@ -300,8 +300,12 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
             &web_children,
             None,
             true,
+            None,
         );
-        if !egress.allowed {
+        // the heritable half — an ancestor's `{aid: {verbs, for: descendants}}`
+        if !egress.allowed
+            && !kernel.heritable_egress(web_id.as_str(), "read_stream", agent.id.as_str())
+        {
             continue;
         }
         let children: std::collections::HashSet<String> =
@@ -315,6 +319,7 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
             &children,
             None,
             true,
+            Some(&|o: &str, x: &str| kernel.in_subtree(o, x)),
         );
         if !ingress.allowed {
             continue;
@@ -394,23 +399,17 @@ Set port on create_agent or via update_agent."
     start_serving(agent_id, &state, &table, port).await;
     // Announce OURSELVES to the cli renderer (the boot-event convention): the
     // web host owns its port, so it tells the terminal where to attach — the
-    // renderer never reaches in for it. Best-effort: cli's `say` returns None;
-    // when there is no cli the send answers a refusal, and the stderr line is
-    // the fallback so container logs still record the bind.
+    // renderer never reaches in for it. No cli (non-tty) ⇒ nobody is told; the
+    // bound port is on this agent's reflect.
     let line = format!(
         "listening on http://127.0.0.1:{port}/ · rest/ws are children (reflect kernel for ids)"
     );
-    let reply = kernel
+    kernel
         .send(vec![Item::new(
             AgentId::from("cli"),
             json!({"type": "say", "source": "web", "text": line}),
         )])
-        .await
-        .remove(0)
-        .result;
-    if !reply.is_null() {
-        eprintln!("  [web] {agent_id} listening on http://localhost:{port}/");
-    }
+        .await;
     let surfaces = table.read().await.child_ids();
     Ok(json!({"running": true, "surfaces": surfaces}))
 }

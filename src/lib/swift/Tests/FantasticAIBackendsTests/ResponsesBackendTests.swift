@@ -54,7 +54,7 @@ private func provider(
     endpoint: String = "http://proxy.test/v1/responses", model: String = "qwen-test",
     apiKey: String? = "sk", maxTokens: Int64 = 900
 ) -> ResponsesProvider {
-    ResponsesProvider(
+    try! ResponsesProvider(
         endpoint: endpoint, model: model, apiKey: apiKey, maxTokens: maxTokens, sampling: [:])
 }
 
@@ -95,7 +95,7 @@ struct ResponsesBackendTests {
     }
 
     @Test func bodyIsStatelessNoToolsInPythonsKeyOrder() {
-        let p = ResponsesProvider(
+        let p = try! ResponsesProvider(
             endpoint: "http://proxy.test/v1/responses", model: "qwen-test", apiKey: "sk",
             maxTokens: 900, sampling: ["temperature": .double(0.2)])
         let body = p.requestBody(messages: msgs)
@@ -163,8 +163,27 @@ struct ResponsesBackendTests {
 
     @Test func missingKeyEndpointOrModelFailLoudNamingIt() async {
         #expect(await firstError(provider(apiKey: nil)).contains("OPENAI_API_KEY"))
-        #expect(await firstError(provider(endpoint: DEFAULT_ENDPOINT)).contains("no `endpoint` set"))
-        #expect(await firstError(provider(model: DEFAULT_MODEL)).contains("no `model` set"))
+        #expect(await firstError(provider(endpoint: "")).contains("no `endpoint` set"))
+        #expect(await firstError(provider(model: "")).contains("no `model` set"))
+    }
+
+    /// `store:false` keeps the conversation ours and `model` is the record's — a
+    /// `sampling` key naming either is refused, not merged over it (audit d8).
+    @Test func samplingMayNotOverrideWhatTheProviderOwns() {
+        for key in ["store", "model", "max_output_tokens"] {
+            #expect(throws: PyError.self) {
+                try ResponsesProvider(
+                    endpoint: "http://x/v1/responses", model: "m", apiKey: nil, maxTokens: 64,
+                    sampling: [key: .integer(1)])
+            }
+            do throws(PyError) {
+                _ = try ResponsesProvider(
+                    endpoint: "http://x/v1/responses", model: "m", apiKey: nil, maxTokens: 64,
+                    sampling: [key: .integer(1)])
+            } catch {
+                #expect(error.message.contains(key), "\(error)")
+            }
+        }
     }
 
     @Test func recordFieldsMapLikePython() {

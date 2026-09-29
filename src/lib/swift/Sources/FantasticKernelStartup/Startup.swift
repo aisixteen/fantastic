@@ -1,7 +1,6 @@
 // Public startup entry points — `startKernel` + `startKernelInMemory`.
 //
-// Mirrors the Rust UniFFI free functions of the same names. Lives
-// in its own target (FantasticKernelStartup) because it composes
+// Lives in its own target (FantasticKernelStartup) because it composes
 // the entire default bundle set — every bundle target gets imported
 // here. Core `FantasticKernel` stays bundle-agnostic.
 //
@@ -31,12 +30,10 @@ import FantasticStaticLoader
 import FantasticWeb
 import FantasticWebRest
 import FantasticWebWS
-import FantasticTextFile
 import Foundation
 
 #if os(macOS)
     import FantasticExecBridge
-    import FantasticTerminalBackend
 #endif
 
 /// Build the default bundle registry — every bundle that ships in
@@ -66,8 +63,10 @@ public func defaultBundleRegistry() -> BundleRegistry {
         // A fixed body of knowledge per solver: `ask` is keyword search over
         // the `lines` on its record; `asked` is the tally the scorer reads.
         r.registerUnlisted(ORACLE_MODULE, OracleProbe())
+        // In-flight, failing and timed work: what a timeout, a stop or a
+        // reboot lands on.
+        r.registerUnlisted(SLOW_MODULE, SlowProbe())
     #endif
-    r.register("text_file.tools", TextFileBundle())
     // THE MEMORY STORE in RAM — what the root's `memory_store_id` and every AI
     // agent's name (python `memory/ram_store`).
     r.register(RamStoreBundle.handlerModule, RamStoreBundle())
@@ -89,7 +88,6 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("llamacpp_backend.tools", LlamaCppBundle())
     #if os(macOS)
         r.register("exec_bridge.tools", ExecBridgeBundle())
-        r.register("terminal_backend.tools", TerminalBackendBundle())
     #endif
     return r
 }
@@ -100,9 +98,8 @@ public func defaultBundleRegistry() -> BundleRegistry {
 /// alongside the app process, not in a workdir).
 ///
 /// `portHint` is the preferred HTTP port the listener should bind
-/// to (8B+). 0 means "any free port"; the actual port is available
-/// via `kernel.httpPort()` after boot. Phase 8A returns a kernel
-/// whose `httpPort()` is 0 — the live listener wires in with 8B.
+/// to; 0 means "any free port". The bound port is `kernel.httpPort()`
+/// after boot.
 public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
     let kernel = Kernel(
         storage: .inMemory,
@@ -111,18 +108,21 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
     // NO GUID HERE. The instance guid is minted ONCE by the root loader's `boot`
     // (python `kernel_state._boot`), so an in-memory kernel gets one the same way
     // a disk one does — and never two different ones.
+    // THE RUNNING DIR, NAMED: an in-memory kernel runs in the process cwd, and its
+    // root's address says so — `Kernel.workdir` (the one clamp base) is the dir
+    // holding it. Nothing is written there.
     let root = Agent(
         id: AgentId(ROOT_ID),
         handlerModule: ROOT_HANDLER_MODULE,
-        parentId: nil
+        parentId: nil,
+        rootPath: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".fantastic")
     )
     kernel.register(root)
     kernel.setRoot(root)
 
-    // Create the web agent so phase 8B's listener has a home + the
-    // app can immediately call `kernel.send("web", {boot})` to
-    // start listening. Port hint stashes into the agent's meta so
-    // 8B picks it up.
+    // Create the web agent: `create_agent` fires its `boot`, which binds the
+    // listener on the port hint stashed in its meta.
     _ = await kernel.send([Item(AgentId("kernel"), .object([
             "type": .string("create_agent"),
             "parent_id": .string(ROOT_ID),

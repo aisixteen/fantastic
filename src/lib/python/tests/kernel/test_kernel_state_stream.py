@@ -83,8 +83,10 @@ async def test_state_event_sender_set_inside_handler_dispatch(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "alice_xxx",
-                        "can_call": {"cli": ["token"]},
+                        # `emit` on another agent passes the gate like a send
+                        "can_call": {"cli": ["token", "emit"]},
                     },
                 }
             ]
@@ -93,7 +95,7 @@ async def test_state_event_sender_set_inside_handler_dispatch(seeded_kernel):
     # Two-sided deny-all: open cli's reciprocal ingress for alice's `token`.
     cli = seeded_kernel.ctx.agents.get("cli")
     cb = dict(cli._meta.get("callable_by") or {})
-    cb["alice_xxx"] = ["token"]
+    cb["alice_xxx"] = ["token", "emit"]
     (
         await seeded_kernel.send(
             [
@@ -360,7 +362,7 @@ async def test_state_snapshot_reports_in_flight_not_qsize(seeded_kernel):
 async def test_lifecycle_added_fires_on_create(seeded_kernel):
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
-    seeded_kernel.create("file_bridge.tools", id="file_test1")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="file_test1")
     added = [
         e for e in events if e["kind"] == "added" and e["agent_id"] == "file_test1"
     ]
@@ -382,7 +384,7 @@ async def test_lifecycle_added_fires_on_ensure(kernel):
 
 
 async def test_lifecycle_updated_fires_on_update(seeded_kernel):
-    seeded_kernel.create("file_bridge.tools", id="file_test2")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="file_test2")
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
     seeded_kernel.update("file_test2", display_name="renamed")
@@ -396,7 +398,7 @@ async def test_lifecycle_updated_fires_on_update(seeded_kernel):
 async def test_lifecycle_removed_fires_on_delete(seeded_kernel):
     """`removed` event fires AFTER the cascade has cleaned up — get(id)
     inside the callback already returns None."""
-    seeded_kernel.create("file_bridge.tools", id="file_test3")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="file_test3")
     observations: list[tuple[str, object]] = []
 
     def cb(e):
@@ -433,10 +435,10 @@ async def test_no_recursion_when_callback_creates_agent(seeded_kernel):
         if e["kind"] == "added" and counter["creates"] < 3:
             counter["creates"] += 1
             seeded_kernel.create(
-                "file_bridge.tools", id=f"file_chain_{counter['creates']}"
+                "file_bridge.tools", allow=["."], id=f"file_chain_{counter['creates']}"
             )
 
     seeded_kernel.add_state_subscriber(cb)
-    seeded_kernel.create("file_bridge.tools", id="file_seed")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="file_seed")
     # Bounded chain (we cap at 3) — not an unbounded loop.
     assert counter["creates"] == 3

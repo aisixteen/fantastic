@@ -372,7 +372,7 @@ struct MemoryStoreTests {
             [
                 "can_call": .object([
                     "probe": .string("*"),
-                    "kernel": .array([.string("ledger"), .string("ack_deadletter")]),
+                    "kernel_state": .array([.string("ledger"), .string("ack_deadletter")]),
                 ])
             ])
         await withStore(k)
@@ -443,7 +443,7 @@ struct MemoryStoreTests {
             [
                 "can_call": .object([
                     "probe": .string("*"),
-                    "kernel": .array([.string("ledger"), .string("ack_deadletter")]),
+                    "kernel_state": .array([.string("ledger"), .string("ack_deadletter")]),
                 ])
             ])
         await withStore(k)
@@ -554,15 +554,6 @@ struct MemoryStoreTests {
         #expect(k.nextId == 5000)
         #expect(k.idReserved == 5000 + Kernel.ID_BLOCK)
         #expect(k.root?.metaValue(forKey: "next_id") == .integer(5000))
-    }
-
-    // ── the row verbs are gone ──
-
-    @Test(arguments: ["messages", "rows_read", "rows_write", "shutdown_kernel"])
-    func theKernelRowVerbsAreDeleted(_ v: String) async {
-        let k = makeKernel(MemProbe())
-        let out = await call(k, "kernel", verb(v)).result
-        #expect(out["reason"].asString == "unhandled", "\(out.serialize())")
     }
 
     @Test func kernelStopAcks() async {

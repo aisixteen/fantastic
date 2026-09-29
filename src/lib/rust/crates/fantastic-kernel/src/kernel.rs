@@ -16,7 +16,7 @@ use crate::tasks::TaskTable;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Notify;
@@ -113,13 +113,6 @@ pub struct Kernel {
     /// `DashMap` has none, so the port sorted by id at each reader and answered
     /// a registry python never answers.
     agent_order: RwLock<Vec<AgentId>>,
-    /// Stable name → agent id, wired from an agent's `alias` meta at
-    /// `register` (and dropped at `unregister`) — python `Kernel.well_known`.
-    /// `send` targets, `create_agent`'s `parent_id` and the gate's operand
-    /// resolution all resolve a non-"kernel" id through this AFTER the
-    /// `kernel`→root special case (C35), so a caller can address a well-known
-    /// agent (e.g. `web_loader`) by that stable name instead of its minted id.
-    pub well_known: DashMap<String, AgentId>,
     /// Per-id inbox (agents + synthetic browser client ids).
     pub inboxes: DashMap<AgentId, crate::inbox::InboxSender>,
     /// Active state-event taps (telemetry, debugging). Keyed by token
@@ -226,7 +219,6 @@ impl Kernel {
         Self {
             agents: DashMap::new(),
             agent_order: RwLock::new(Vec::new()),
-            well_known: DashMap::new(),
             inboxes: DashMap::new(),
             state_subscribers,
             next_subscriber: AtomicU64::new(1),
@@ -265,7 +257,11 @@ impl Kernel {
     /// is merged, and the `updated` state event (the CHANGED KEYS) is what drives
     /// a loader to re-persist the record. No disk write here. `None` when no such
     /// agent.
-    pub fn update(&self, id: &AgentId, patch: serde_json::Map<String, Value>) -> Option<crate::agent::AgentRecord> {
+    pub fn update(
+        &self,
+        id: &AgentId,
+        patch: serde_json::Map<String, Value>,
+    ) -> Option<crate::agent::AgentRecord> {
         let agent = self.agents.get(id).map(|e| Arc::clone(&e))?;
         let changed: Vec<Value> = patch.keys().map(|k| Value::String(k.clone())).collect();
         let rec = agent.update_meta(patch);
@@ -427,10 +423,8 @@ impl Kernel {
                 .and_then(|hm| self.bundles.get(hm))
             {
                 // C87: python's exact text is "hook raised", not "on_shutdown
-                // raised" (`_agent.py:2900-2906`, `print(f"  [shutdown]
-                // {self.id} hook raised: {e}", file=sys.stderr)`) — the same
-                // wording whether the hook resolved to `on_shutdown` or the
-                // `on_delete` fallback.
+                // raised" (`print(f"  [shutdown] {self.id} hook raised: {e}",
+                // file=sys.stderr)`).
                 if let Err(e) = bundle.on_shutdown(&agent.id, self).await {
                     eprintln!("  [shutdown] {} hook raised: {e}", agent.id.0);
                 }
@@ -552,40 +546,11 @@ impl Kernel {
                 order.push(agent.id.clone());
             }
         }
-        // C35: a declared `alias` meta becomes a stable, resolvable NAME —
-        // `send` targets, `create_agent`'s `parent_id` and the gate's operand
-        // resolution all go through `well_known` after the `kernel` special
-        // case. Declared config the substrate makes FUNCTIONAL, not
-        // autonomous behaviour. Python `Kernel.register`.
-        if let Some(alias) = agent
-            .meta
-            .read()
-            .expect("meta lock poisoned")
-            .get("alias")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            self.well_known.insert(alias.to_string(), agent.id.clone());
-        }
         self.agents.insert(agent.id.clone(), agent);
     }
 
-    /// Resolve a `send`-style operand THROUGH `well_known`: a declared
-    /// `alias` meta resolves to its agent id, a literal id resolves to
-    /// itself — python `self.ctx.agents.get(self.ctx.well_known.get(x, x))`.
-    /// Callers special-case the `"kernel"` alias to the root BEFORE calling
-    /// this (C35 lands it after that check, never instead of it).
-    #[must_use]
-    pub fn resolve_well_known(&self, id: &str) -> AgentId {
-        self.well_known
-            .get(id)
-            .map(|e| e.value().clone())
-            .unwrap_or_else(|| AgentId::from(id))
-    }
-
-    /// Resolve a `send`-style operand end to end (C35): `"kernel"` aliases the
-    /// root; otherwise a declared `alias` meta resolves through `well_known`,
-    /// then a literal id. `None` when it names no live agent. The ONE place
+    /// Resolve a `send`-style operand end to end: `"kernel"` names the root;
+    /// otherwise a literal id. `None` when it names no live agent. The ONE place
     /// `send`'s target, `send_with_binary`'s target, `create_agent`'s
     /// `parent_id` and the gate's operand resolution all go through, so the
     /// four cannot drift on what "the same id" resolves to.
@@ -594,8 +559,9 @@ impl Kernel {
         if raw_id == "kernel" {
             return self.root();
         }
-        let resolved = self.resolve_well_known(raw_id);
-        self.agents.get(&resolved).map(|e| Arc::clone(&e))
+        self.agents
+            .get(&AgentId::from(raw_id))
+            .map(|e| Arc::clone(&e))
     }
 
     /// Register `id` as a READER and hand back its queue — python's
@@ -645,8 +611,6 @@ impl Kernel {
             .write()
             .expect("agent order poisoned")
             .retain(|a| a != id);
-        // Drop any alias pointing at the agent being removed (C35).
-        self.well_known.retain(|_, target| target != id);
     }
 
     /// Cheap clone of the current root pointer (`None` until
@@ -658,6 +622,33 @@ impl Kernel {
     /// Swap the root pointer atomically. Bootstrap calls this once.
     pub fn set_root(&self, root: Arc<Agent>) {
         self.root.store(Some(root));
+    }
+
+    /// The kernel's RUNNING DIR — the dir holding its root's `.fantastic`
+    /// (python `Kernel.workdir`). The ONE source of the disk clamp base; a
+    /// relative root address is resolved the way any relative path is.
+    ///
+    /// # Errors
+    /// No root ⇒ no running dir to clamp disk to.
+    pub fn workdir(&self) -> Result<PathBuf, String> {
+        let root = self
+            .root()
+            .ok_or_else(|| "kernel has no root — no running dir to clamp disk to".to_string())?;
+        if root.root_path.as_os_str().is_empty() {
+            return Err(
+                "the kernel root has no disk address — no running dir to clamp disk to".to_string(),
+            );
+        }
+        let at = if root.root_path.is_absolute() {
+            root.root_path.clone()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(&root.root_path)
+        };
+        at.parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| format!("root address {} has no parent dir", at.display()))
     }
 
     /// Push a state event to every subscriber. Keep callbacks short —
@@ -810,6 +801,16 @@ impl Kernel {
                         rec.id
                     )));
                 }
+            }
+            // THE SAME ID RULE AS A CREATE: a record edited on disk to carry the
+            // reserved `kernel`, a foreign `guid|agent`, or a path-walking id is
+            // refused here, before the live tree is torn down.
+            if let Some(bad) = crate::refusal::guard_agent_id("load", rec.id.as_str()) {
+                return Err(KernelError::InvalidSnapshot(format!(
+                    "record {:?}: {}",
+                    rec.id,
+                    bad.get("error").and_then(Value::as_str).unwrap_or_default()
+                )));
             }
             if !ids_seen.insert(rec.id.as_str()) {
                 return Err(KernelError::InvalidSnapshot(format!(

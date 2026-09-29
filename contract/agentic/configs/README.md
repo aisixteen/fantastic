@@ -53,14 +53,16 @@ loaders:                           # one or more static_loader agents
     manifest:                      # ← exactly ONE of these three:
       agents:
         - id: memory
-          handler_module: text_file.tools
-          callable_by: {worker: [set, read]}
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          callable_by: {worker: [write, read]}
     # manifest_text: "agents: [ this is : not : valid"   # verbatim bytes (malformed-yaml cases)
     # missing_manifest: true                             # nothing written — the path is not there
 
 expect:
   hydration: ok                    # ok | refused_at_write | boot_error
-  error_contains: "not readable"   # REQUIRED unless hydration is ok — pin the message
+  error_contains: "cannot read manifest"   # REQUIRED unless hydration is ok — pin the message
   reboot: true                     # default true; PC-4 skips when false
   closed_roster_sender: worker     # who probes PC-3; defaults to the first roster id
   edges:                           # reachability probes — see below
@@ -116,8 +118,8 @@ is loud by default. A config must name which it expects.
 | `expect.hydration` | what happened | where it surfaces |
 |---|---|---|
 | `ok` | the roster built | the create reply carries a record; the explicit `boot` says `booted: true` |
-| `refused_at_write` | the manifest could not be READ (missing, or escaping the cwd clamp) | `validate_meta` → `{"error": …, "created": false}`, and the loader never enters the roster |
-| `boot_error` | the manifest read fine and an ENTRY failed | **nowhere, by default** — the create reply looks clean |
+| `refused_at_write` | the `manifest` field has the wrong SHAPE (not a non-empty path string) — the only write-time check | `validate_meta` → `{"error": …, "reason": "invalid_meta"}`, and the loader never enters the roster |
+| `boot_error` | the manifest could not be READ (missing, or escaping the running-dir clamp), or it read fine and an ENTRY failed | **nowhere, by default** — the create reply looks clean |
 
 That last row is why the engine always re-sends `boot`. `_verb_create_agent`
 boots the child it just made, DISCARDS the reply and swallows the exception
@@ -167,7 +169,7 @@ to change is noted per gap.
    direction is what catches it.
 
 5. **No ordering, no dependency, no top-level metadata.** Entries create
-   top-to-bottom; a `can_call` or `file_bridge_id` naming a later id is not
+   top-to-bottom; a `can_call` naming a later id is not
    validated at all; and nothing in a `fantastic.yaml` describes what the built
    system SHOULD look like. That last one is why this wrapper format exists.
 
@@ -175,21 +177,23 @@ to change is noted per gap.
 
 `engine_smoke*.yaml` are ENGINE fixtures, not scenarios: they exist so
 `hydrate` / `dehydrate` / `reach` and all five runner invariants are exercised
-independently of any scenario, and they cover the three hydration verdicts
-between them (`ok`, `boot_error`, `refused_at_write`).
+independently of any scenario, and they cover two of the three hydration
+verdicts between them (`ok`, `boot_error` — an unreadable manifest and a bad
+entry); no shipped fixture declares `refused_at_write`.
 
-Every other config is a SCENARIO, and each pairs with one validator module
-beside the runner. The pairing is by stem, and a validator's basename must be
-unique **repo-wide** — with no `__init__.py` under `tests/`, two modules sharing
-a basename abort collection for the whole repository.
+Every other config is a SCENARIO, run by the one general runner
+(`src/lib/python/tests/agentic/test_agentic.py`, and each port's corpus runner)
+against its spec in `../specs/`.
 
-| config | validator | pins |
-|---|---|---|
-| `two_sided_gate.yaml` | `test_two_sided_gate.py` | TSG-1…TSG-6 — an edge is the intersection of both halves, and a denial names the half that refused |
-| `sealed_by_default.yaml` | `test_sealed_by_default.py` | C23, C20 — an undeclared capability errors; the io seal is not the call gate |
-| `owned_subtree_delete.yaml` | `test_owned_subtree_delete.py` | C17, C18 — a delete consumes one loader's roster and spares its neighbour; a refused one mutates nothing |
-| `lifecycle.yaml` | `test_lifecycle.py` | C14…C16 — cancel stops the work, terminal states absorb, four failure classes stay four shapes |
-| `namespacing.yaml` | `test_namespacing.py` | C20 — a child's state belongs to its POSITION in the tree |
+| config | pins |
+|---|---|
+| `two_sided_gate.yaml` | TSG-1…TSG-6 — an edge is the intersection of both halves, and a denial names the half that refused |
+| `sealed_by_default.yaml` | C23, C20 — an undeclared capability errors; the io seal is not the call gate |
+| `owned_subtree_delete.yaml` | C17, C18 — a delete consumes one loader's roster and spares its neighbour; a refused one mutates nothing |
+| `lifecycle.yaml` | C14…C16 — cancel stops the work, terminal states absorb, four failure classes stay four shapes |
+| `namespacing.yaml` | C20 — a child's state belongs to its POSITION in the tree |
+| `subtree_grants.yaml` | SUB-1…SUB-6 — `$subtree:<X>` accepts X's live subtree at call time; a heritable `can_call` entry reaches for X's descendants, never X; only a holder confers one |
+| `exec_shell.yaml` | EXS-1…EXS-5 — a PTY `start` with no `command` runs the child's own `$SHELL` (autodiscovered from `inherit_env`/`env`, no fallback); the record's `shell` permits exactly `$SHELL` / `$SHELL -l` |
 
 `lifecycle.yaml` names one non-shipped bundle, `lifecycle_probe.tools`, which
 lives at `tests/agentic/lifecycle_probe/` — a real package on the suite's own

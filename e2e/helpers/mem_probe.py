@@ -17,16 +17,16 @@ DONE = 'end your run by calling done — emit <call name="done"></call>'
 
 
 async def files(root, ids: list[str]) -> None:
-    """`work_fb` (the run dir, open) and `notes` (a text document agent over it),
-    both reachable by `ids`."""
+    """`work_fb` (the run dir, open) and `notes` (a second file agent over the same
+    dir — the one the model edits through), both reachable by `ids`."""
     for payload in (
         {"type": "create_agent", "parent_id": root.id, "id": "work_fb",
-         "handler_module": "file_bridge.tools", "root": ".",
+         "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
          "ingress_rule": "allow_all_ingress",
-         "callable_by": {"notes": "*", "rest": "*", "web": "*", **{i: "*" for i in ids}}},
+         "callable_by": {"rest": "*", "web": "*", **{i: "*" for i in ids}}},
         {"type": "create_agent", "parent_id": root.id, "id": "notes",
-         "handler_module": "text_file.tools", "target_id": "work_fb",
-         "can_call": {"work_fb": "*"},
+         "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+         "ingress_rule": "allow_all_ingress",
          "callable_by": {"rest": "*", "web": "*", **{i: "*" for i in ids}}},
     ):
         r = await call(root, root.id, payload)

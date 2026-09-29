@@ -1,6 +1,6 @@
 """Test helpers for the decoupled-persistence kernel.
 
-`Agent` no longer touches disk — a loader agent does, driven by the
+`Agent` never touches disk — a loader agent does, driven by the
 state stream + a debounced flush. For deterministic tests we expose:
 
   - `boot_root()` — production-style bootstrap in the cwd: read the
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from file_bridge import fs
 from kernel_state.tools import read_tree, write_record
 
 from kernel import Kernel
@@ -35,13 +36,13 @@ def boot_root(*, compose_cli: bool = False):
     call `persist()` for on-disk state."""
     k = Kernel()
     root_dir = Path(".fantastic")
-    records = read_tree(root_dir)
+    records = read_tree(fs.Root(root_dir.resolve().parent, root_dir))
     if not any(r.get("parent_id") is None for r in records):  # no root record on disk
         records = [
             {"id": "kernel_state", "handler_module": "kernel_state.tools"}
         ] + records
     k.load(records, root_path=root_dir)
-    write_record(k.root._root_path, k.root.record)  # root agent.yaml + readme
+    write_record(fs.Root(k.workdir, k.root._root_path), k.root.record)  # + readme
     if compose_cli:
         from cli import Cli
 
@@ -55,14 +56,13 @@ def persist(root) -> None:
     record + seed its readme."""
     for a in list(root.ctx.agents.values()):
         if not type(a).ephemeral:
-            write_record(a._root_path, a.record)
+            write_record(fs.Root(root.ctx.workdir, a._root_path), a.record)
 
 
 # ─── running a PYTHON helper on the command runner ──────────────────────────
 #
-# exec_bridge is a general-purpose COMMAND runner: no `code`, no `shim`, no
-# interpreter allowlist. A test that wants a python child speaking the kernel
-# wire composes it itself — the wire client is DATA (`CONNECTOR_SRC`), so the
+# exec_bridge is a general-purpose COMMAND runner. A test that wants a python
+# child speaking the kernel wire composes it itself — the wire client is DATA (`CONNECTOR_SRC`), so the
 # test prepends it and runs `python -c <program>` like any other command.
 import sys as _sys  # noqa: E402 — after the module prose above
 
@@ -73,6 +73,7 @@ def py_runner_meta(**extra) -> dict:
         "handler_module": "exec_bridge.tools",
         "allowed": [f"{_sys.executable} -c .*"],
         "ingress_rule": "allow_all_ingress",
+        "cwd": ".",
         **extra,
     }
 

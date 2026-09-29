@@ -48,19 +48,19 @@ let RECALL_PROMPT = """
 /// acted on. The chain simply stopped, with nothing anywhere saying why.
 enum AIIncarnation {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var table: [ObjectIdentifier: [String: Int]] = [:]
+    nonisolated(unsafe) private static var table: [UInt64: [String: Int]] = [:]
 
     static func of(_ kernel: Kernel, _ id: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        return table[ObjectIdentifier(kernel)]?[id] ?? 0
+        return table[kernel.serial]?[id] ?? 0
     }
 
     @discardableResult
     static func bump(_ kernel: Kernel, _ id: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        let key = ObjectIdentifier(kernel)
+        let key = kernel.serial
         let n = (table[key]?[id] ?? 0) + 1
         table[key, default: [:]][id] = n
         return n
@@ -69,7 +69,7 @@ enum AIIncarnation {
     /// TEST SEAM — python's `_incarnation["ai"] = 1`.
     static func set(_ kernel: Kernel, _ id: String, _ n: Int) {
         lock.lock()
-        table[ObjectIdentifier(kernel), default: [:]][id] = n
+        table[kernel.serial, default: [:]][id] = n
         lock.unlock()
     }
 
@@ -77,12 +77,12 @@ enum AIIncarnation {
     /// per kernel the process ever built and nothing ever removed them.
     static func forget(_ kernel: Kernel) {
         lock.lock()
-        table.removeValue(forKey: ObjectIdentifier(kernel))
+        table.removeValue(forKey: kernel.serial)
         lock.unlock()
     }
 }
 
-/// The process-wide AI side tables are keyed by kernel identity, so a kernel
+/// The process-wide AI side tables are keyed by `Kernel.serial`, so a kernel
 /// that shuts down must take its rows with it. Registered ONCE, the first time
 /// any AI backend is built — the kernel cannot reach into this module itself.
 enum AISideTables {
@@ -253,9 +253,9 @@ extension AIBackend {
     /// a refusal (no api_key, model unavailable) is `nil`: the recall then stays
     /// at the mechanical fit, exactly as python's `_get_provider` failure does.
     func sideProvider(agent: Agent, kernel: Kernel) async -> (any AIProvider)? {
-        switch await config.makeProvider(agent, "cli", kernel) {
+        switch try? await config.makeProvider(agent, "cli", kernel) {
         case .provider(let p): return p
-        case .refused: return nil
+        case .refused, nil: return nil
         }
     }
 

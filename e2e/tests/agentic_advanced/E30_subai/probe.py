@@ -221,7 +221,6 @@ def _ai_meta(
         "type": "create_agent",
         "parent_id": root.id,
         "id": agent_id,
-        "file_bridge_id": store["id"],
         # Two-sided deny-all: the operator grants the BUILDER its toolset. Written
         # before the call gate existed, this probe gave the builder only the
         # structural baseline — it could not reach one peer it is asked to wire, so
@@ -342,13 +341,11 @@ async def find_value(root, mem_id: str, want: int):
     import os as _os
     import re as _re
 
-    # NOT `.fantastic` wholesale: this fixture roots `kernel_store` — the store
-    # `totals` persists THROUGH — at `.fantastic`, so a total written the way the
-    # task intends lands at `.fantastic/total.txt`. Skipping the dir made check 3
-    # structurally unpassable via the fixture's own persist path (measured
-    # 2026-09-02: swift lane stored exactly the true total, scored `stored=None`).
-    # Skip the RECORDS instead: `agents/` subtrees and `agent.yaml` files.
-    skip_dirs = {"readings", "agents", ".ckpt", "__pycache__"}
+    # NOT `.fantastic` wholesale: `totals` is a data store rooted at
+    # `.fantastic/data`, so a total written the way the task intends lands at
+    # `.fantastic/data/total.txt`. Skip the RECORDS instead: `agents/` subtrees and
+    # `agent.yaml` files.
+    skip_dirs = {"readings", "agents", "__pycache__"}
     pat = _re.compile(rf"\b{want}\b")
     first = None
     for dirpath, dirnames, filenames in _os.walk("."):
@@ -394,7 +391,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         "callable_by": {
                             "ai": "*",
@@ -407,14 +404,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                             # built nothing — a false NO on checks 2 & 3.
                             "rest": "*",
                             "web": "*",
-                            # THE OTHER HALF of totals' persist path. `totals`
-                            # is created below with `can_call:{kernel_store}` +
-                            # `target_id: kernel_store`; without this ingress
-                            # half every `write` it makes is refused ("does not
-                            # accept 'read_stream' from totals") and each lane
-                            # spent turns repairing a grant the task never
-                            # mentioned (measured 2026-09-02, all 6 lanes).
-                            "totals": "*",
                         },
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
@@ -435,7 +424,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "readings",
                         "callable_by": {
                             "ai": "*",
@@ -465,10 +454,11 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "text_file.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "totals",
-                        "target_id": store["id"],
-                        "can_call": {store["id"]: "*"},
+                        # a DATA store — the records under `.fantastic` stay the loader's
+                        "root": ".fantastic/data",
+                        "ingress_rule": "allow_all_ingress",
                         "callable_by": {
                             "ai": "*",
                             "brain": "*",
@@ -481,7 +471,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                             "rest": "*",
                             "web": "*",
                         },
-                        "file_bridge_id": store["id"],
                         "description": "Durable store for computed results.",
                     },
                 }
@@ -536,7 +525,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                             "rest": "*",
                             "web": "*",
                         },
-                        "file_bridge_id": store["id"],
                         "description": "Fires a payload at a target on a recurrence.",
                     },
                 }
@@ -592,7 +580,7 @@ def _stored_value(want: set[int]):
     non-program file that is the number alone or `<name>[:=] <number>`. `hour × 4`
     is small (0–92) and word-bounded search matched a readme (measured 2026-09-10)."""
     pat = re.compile(r"^\s*(?:[\w .-]{0,40}[:=]\s*)?(\d{1,3})\s*$")
-    skip_dirs = {"readings", "agents", ".ckpt", "__pycache__"}
+    skip_dirs = {"readings", "agents", "__pycache__"}
     for dirpath, dirnames, filenames in os.walk("."):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for name in sorted(filenames):
@@ -714,7 +702,7 @@ async def score(root, store_id, total, new_total, transcript):
     # ── 5. THE MULTIPLIER LIVES IN THE PROGRAM, not in a prompt ──
     in_code = False
     for dirpath, dirnames, filenames in os.walk("."):
-        dirnames[:] = [d for d in dirnames if d not in {"readings", "agents", ".ckpt", "__pycache__"}]
+        dirnames[:] = [d for d in dirnames if d not in {"readings", "agents", "__pycache__"}]
         for name in filenames:
             if not name.endswith((".py", ".sh", ".js", ".rb", ".pl")):
                 continue

@@ -50,7 +50,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy};
+use fantastic_bundle::{
+    py_json_dumps, py_repr, py_repr_value, py_split_whitespace, py_splitlines, py_str, py_strip,
+    py_truthy,
+};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{
     missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNAUTHORIZED, UNHANDLED,
@@ -60,6 +63,25 @@ use serde_json::{json, Map, Value};
 
 /// The `handler_module` this bundle answers to — python's package path.
 pub const HANDLER_MODULE: &str = "ram_store.tools";
+
+/// A reply object from `(key, value)` pairs, the values MOVED in verbatim.
+///
+/// A stored row is a caller's value, and the kernel keeps one number whose
+/// text is not JSON: the `NaN` / `Infinity` token python's `json.dumps` writes
+/// (a model's `<limit>inf</limit>`, or a hex id like `3e500123` that `float()`
+/// reads as infinity). `json!` turns each operand into a `Value` through
+/// `to_value`, which re-parses that text and PANICS — and a panic here fires
+/// under the store's lock, so every later call answers "ram_store poisoned"
+/// (measured: E30 subai on rust, 2026-09-29). So a reply that carries a row is
+/// assembled with this, never with `json!` — the kernel's own
+/// `jsonsafe::obj` rule, which a bundle cannot import.
+fn obj<const N: usize>(pairs: [(&str, Value); N]) -> Value {
+    let mut out = Map::with_capacity(N);
+    for (k, v) in pairs {
+        out.insert(k.to_string(), v);
+    }
+    Value::Object(out)
+}
 
 pub mod test_support;
 
@@ -380,7 +402,11 @@ fn load_tables(tables: &Value) -> Result<Tables, Value> {
         .and_then(Value::as_array)
         .unwrap_or(&empty)
     {
-        let owner = fr.get("owner").and_then(Value::as_str).unwrap_or("").to_string();
+        let owner = fr
+            .get("owner")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let fold = fr.get("fold").and_then(as_id);
         let members: Vec<Value> = fr
             .get("members")
@@ -397,7 +423,9 @@ fn load_tables(tables: &Value) -> Result<Tables, Value> {
             .iter()
             .all(|m| t.has(&owner, as_id(m).unwrap_or(-1)))
         {
-            return Err(bad_tables(&format!("inject: fold {fold} refs a missing row")));
+            return Err(bad_tables(&format!(
+                "inject: fold {fold} refs a missing row"
+            )));
         }
         let ms: Vec<i64> = members.iter().filter_map(as_id).collect();
         for m in &ms {
@@ -655,7 +683,10 @@ fn parse_scope(t: &Tables, owner: &str, scope: &Value) -> Result<(Value, i64), V
     let ids = t.ids(owner);
     if kind == "range" {
         let Some(r) = val.as_object() else {
-            return Err(bad_scope(BAD_ARG, "share: range must be {from, to}".to_string()));
+            return Err(bad_scope(
+                BAD_ARG,
+                "share: range must be {from, to}".to_string(),
+            ));
         };
         let lo = r.get("from").and_then(as_id);
         let hi = r.get("to").and_then(as_id);
@@ -680,7 +711,10 @@ fn parse_scope(t: &Tables, owner: &str, scope: &Value) -> Result<(Value, i64), V
         return Ok((json!({"range": {"from": lo, "to": hi}}), first));
     }
     let Some(rid) = as_id(val) else {
-        return Err(bad_scope(BAD_ARG, format!("share: {kind} must be a row id")));
+        return Err(bad_scope(
+            BAD_ARG,
+            format!("share: {kind} must be a row id"),
+        ));
     };
     if kind == "head_until" {
         match ids.first() {
@@ -709,7 +743,10 @@ fn parse_scope(t: &Tables, owner: &str, scope: &Value) -> Result<(Value, i64), V
             .and_then(|r| r.get("kind"))
             .and_then(Value::as_str);
         if !k.is_some_and(|k| REF_KINDS.contains(&k)) {
-            return Err(bad_scope(BAD_ARG, format!("share: row {rid} is not a fold")));
+            return Err(bad_scope(
+                BAD_ARG,
+                format!("share: row {rid} is not a fold"),
+            ));
         }
     }
     let mut out = Map::new();
@@ -723,11 +760,17 @@ fn grant_view(kernel: &Arc<Kernel>, g: &Map<String, Value>) -> Value {
     out.insert("grant".to_string(), get("grant"));
     out.insert(
         "owner".to_string(),
-        Value::from(display(kernel, &g.get("owner").map(py_str).unwrap_or_default())),
+        Value::from(display(
+            kernel,
+            &g.get("owner").map(py_str).unwrap_or_default(),
+        )),
     );
     out.insert(
         "reader".to_string(),
-        Value::from(display(kernel, &g.get("reader").map(py_str).unwrap_or_default())),
+        Value::from(display(
+            kernel,
+            &g.get("reader").map(py_str).unwrap_or_default(),
+        )),
     );
     for k in ["scope", "mode", "as_of", "until", "why", "created_by", "ts"] {
         out.insert(k.to_string(), get(k));
@@ -776,7 +819,10 @@ fn readable(
         with(&mut r, "side", json!("store"));
         return Err(r);
     }
-    Ok((g.get("owner").map(py_str).unwrap_or_default(), Some(scope_ids(t, g))))
+    Ok((
+        g.get("owner").map(py_str).unwrap_or_default(),
+        Some(scope_ids(t, g)),
+    ))
 }
 
 fn now_secs() -> f64 {
@@ -875,7 +921,10 @@ impl RamStoreBundle {
                         _ => {
                             let mut e = refusal(
                                 BAD_ARG,
-                                format!("append: a row id is a kernel int, got {}", py_repr_value(v)),
+                                format!(
+                                    "append: a row id is a kernel int, got {}",
+                                    py_repr_value(v)
+                                ),
                             );
                             with(&mut e, "arg", json!("rows"));
                             return e;
@@ -900,7 +949,9 @@ impl RamStoreBundle {
                     continue;
                 };
                 let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
-                let list = refs.as_array().filter(|a| a.iter().all(|m| as_id(m).is_some()));
+                let list = refs
+                    .as_array()
+                    .filter(|a| a.iter().all(|m| as_id(m).is_some()));
                 let Some(list) = list else {
                     let mut e = refusal(BAD_ARG, format!("append: row {rid} refs must be row ids"));
                     with(&mut e, "arg", json!("rows"));
@@ -958,17 +1009,24 @@ impl RamStoreBundle {
                     ids.retain(|i| *i >= last);
                 }
             }
-            if let Some(kinds) = payload.get("kinds").and_then(Value::as_array).filter(|k| !k.is_empty()) {
+            if let Some(kinds) = payload
+                .get("kinds")
+                .and_then(Value::as_array)
+                .filter(|k| !k.is_empty())
+            {
                 ids.retain(|i| {
                     let k = row_of(i).get("kind").cloned().unwrap_or(Value::Null);
                     kinds.contains(&k)
                 });
             }
-            if let Some(m) = payload.get("match").and_then(Value::as_object).filter(|m| !m.is_empty()) {
+            if let Some(m) = payload
+                .get("match")
+                .and_then(Value::as_object)
+                .filter(|m| !m.is_empty())
+            {
                 ids.retain(|i| {
                     let r = row_of(i);
-                    m.iter()
-                        .all(|(k, v)| r.get(k).unwrap_or(&Value::Null) == v)
+                    m.iter().all(|(k, v)| r.get(k).unwrap_or(&Value::Null) == v)
                 });
             }
             if let Some(want) = payload.get("ids").and_then(Value::as_array) {
@@ -992,7 +1050,11 @@ impl RamStoreBundle {
             let total = ids.len();
             let limit = payload.get("limit").and_then(as_id);
             let page: Vec<i64> = match limit {
-                Some(l) => ids.iter().take(usize::try_from(l).unwrap_or(usize::MAX)).copied().collect(),
+                Some(l) => ids
+                    .iter()
+                    .take(usize::try_from(l).unwrap_or(usize::MAX))
+                    .copied()
+                    .collect(),
                 None => ids.clone(),
             };
             let next = match (limit, page.last()) {
@@ -1003,12 +1065,23 @@ impl RamStoreBundle {
                 .iter()
                 .filter_map(|i| t.get(&owner, *i).map(Value::Object))
                 .collect();
-            json!({"rows": rows, "next": next, "total": total})
+            obj([
+                ("rows", Value::Array(rows)),
+                ("next", next),
+                ("total", Value::from(total)),
+            ])
         })
     }
 
     fn search(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let q = py_strip(&payload.get("query").filter(|v| py_truthy(v)).map(py_str).unwrap_or_default()).to_lowercase();
+        let q = py_strip(
+            &payload
+                .get("query")
+                .filter(|v| py_truthy(v))
+                .map(py_str)
+                .unwrap_or_default(),
+        )
+        .to_lowercase();
         if q.is_empty() {
             return missing("search", "query");
         }
@@ -1021,7 +1094,11 @@ impl RamStoreBundle {
             if let Some(allowed) = &allowed {
                 ids.retain(|i| allowed.contains(i));
             }
-            if let Some(want) = payload.get("ids").and_then(Value::as_array).filter(|w| !w.is_empty()) {
+            if let Some(want) = payload
+                .get("ids")
+                .and_then(Value::as_array)
+                .filter(|w| !w.is_empty())
+            {
                 let mut scope: HashSet<i64> = HashSet::new();
                 for x in want {
                     if let Some(rid) = as_id(x) {
@@ -1044,7 +1121,9 @@ impl RamStoreBundle {
                 if !hit {
                     continue;
                 }
-                let Some(row) = t.row(&owner, *i) else { continue };
+                let Some(row) = t.row(&owner, *i) else {
+                    continue;
+                };
                 let text = text_of(row);
                 for (n, line) in py_splitlines(&text).into_iter().enumerate() {
                     if line.to_lowercase().contains(&q) {
@@ -1079,13 +1158,25 @@ impl RamStoreBundle {
             .filter(|m| py_truthy(m))
             .cloned()
             .unwrap_or_else(|| json!("frozen"));
-        let Some(mode) = mode.as_str().filter(|m| MODES.contains(m)).map(str::to_string) else {
+        let Some(mode) = mode
+            .as_str()
+            .filter(|m| MODES.contains(m))
+            .map(str::to_string)
+        else {
             let mut r = refusal(BAD_ARG, "share: mode must be one of ('frozen', 'live')");
             with(&mut r, "arg", json!("mode"));
             return r;
         };
-        let why_raw = payload.get("why").filter(|w| py_truthy(w)).map(py_str).unwrap_or_default();
-        let why: String = py_split_whitespace(&why_raw).join(" ").chars().take(300).collect();
+        let why_raw = payload
+            .get("why")
+            .filter(|w| py_truthy(w))
+            .map(py_str)
+            .unwrap_or_default();
+        let why: String = py_split_whitespace(&why_raw)
+            .join(" ")
+            .chars()
+            .take(300)
+            .collect();
         self.with_tables(id, |t| {
             let (scope, anchor) =
                 match parse_scope(t, &me, payload.get("scope").unwrap_or(&Value::Null)) {
@@ -1108,7 +1199,11 @@ impl RamStoreBundle {
             g.insert("until".to_string(), Value::Null);
             g.insert(
                 "why".to_string(),
-                if why.is_empty() { Value::Null } else { Value::from(why.clone()) },
+                if why.is_empty() {
+                    Value::Null
+                } else {
+                    Value::from(why.clone())
+                },
             );
             g.insert(
                 "created_by".to_string(),
@@ -1121,7 +1216,12 @@ impl RamStoreBundle {
                 .get(&gid)
                 .and_then(|g| g.get("as_of").cloned())
                 .unwrap_or(Value::Null);
-            json!({"grant": gid, "anchor": anchor, "as_of": as_of, "created": created})
+            obj([
+                ("grant", Value::from(gid)),
+                ("anchor", Value::from(anchor)),
+                ("as_of", as_of),
+                ("created", Value::from(created)),
+            ])
         })
     }
 
@@ -1174,7 +1274,7 @@ impl RamStoreBundle {
                 .filter(|g| g.get(field).map(py_str).as_deref() == Some(me.as_str()))
                 .map(|g| grant_view(kernel, g))
                 .collect();
-            json!({"grants": out})
+            obj([("grants", Value::Array(out))])
         })
     }
 
@@ -1288,7 +1388,9 @@ impl Bundle for RamStoreBundle {
             {
                 None
             }
-            Some(_) => Some("admins must be a list of agent ids ('kernel' = the operator)".to_string()),
+            Some(_) => {
+                Some("admins must be a list of agent ids ('kernel' = the operator)".to_string())
+            }
         }
     }
 
@@ -1327,18 +1429,15 @@ impl Bundle for RamStoreBundle {
 
     /// A deleted store is GONE: a re-created agent under the same id starts empty
     /// (python's tables live on the agent instance, which a delete drops).
-    async fn on_delete(&self, agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+    async fn on_delete(
+        &self,
+        agent_id: &AgentId,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
         self.tables
             .lock()
             .expect("ram_store poisoned")
             .remove(&agent_id.0);
-        Ok(())
-    }
-
-    /// NOT a delete: a teardown walk must not empty the store before the final
-    /// flush (python has no `on_delete` hook for the same reason). The tables die
-    /// with the process.
-    async fn on_shutdown(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         Ok(())
     }
 }

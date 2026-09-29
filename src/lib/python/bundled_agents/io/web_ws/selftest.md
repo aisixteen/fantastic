@@ -9,7 +9,6 @@ the parent web's FastAPI app via the duck-typed `get_routes` verb.
 ## Pre-flight
 
 ```bash
-cd new_codebase
 rm -rf .fantastic
 pkill -9 -f "fantastic" 2>/dev/null
 PORT=18901
@@ -44,8 +43,8 @@ async def main():
             m = json.loads(await ws.recv())
             if m.get('id')=='1' and m.get('type')=='reply':
                 d = m['data']
-                # Uniform reflect: identity + tree, no legacy primer keys.
-                ok = d.get('id') == 'kernel_state' and 'tree' in d and 'transports' not in d
+                # Uniform reflect: identity + tree.
+                ok = d.get('id') == 'kernel_state' and 'tree' in d
                 print('PASS' if ok else f'FAIL keys={list(d)}'); return
 asyncio.run(main())
 "

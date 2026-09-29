@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 
 from ollama_backend.provider import OllamaProvider
 
@@ -30,7 +32,7 @@ def _patched_client(stream_items):
 async def test_chat_yields_content_tokens():
     """The provider is PURE RAW TEXT — it yields only str content tokens (a
     `<tool_call>` envelope rides the text and is parsed by ai_core, not here)."""
-    p = OllamaProvider(model="ollama-test")
+    p = OllamaProvider(endpoint="http://ollama.test", model="ollama-test")
     chunks = [
         _mk_chunk(content="hello "),
         _mk_chunk(content='<tool_call>{"name":"send"}</tool_call>'),
@@ -46,7 +48,7 @@ async def test_chat_yields_content_tokens():
 
 async def test_chat_no_tools_arg_in_request():
     """No native `tools` array is ever sent to ollama (raw prompt-and-parse)."""
-    p = OllamaProvider(model="ollama-test")
+    p = OllamaProvider(endpoint="http://ollama.test", model="ollama-test")
     client = _patched_client([_mk_chunk(content="ok")])
     with patch("ollama.AsyncClient", return_value=client):
         async for _ in p.chat([{"role": "user", "content": "hi"}]):
@@ -58,7 +60,7 @@ async def test_chat_no_tools_arg_in_request():
 
 async def test_chat_handles_null_content():
     """ollama returns `null` (not absent) for content sometimes — normalize to '' (skip)."""
-    p = OllamaProvider(model="ollama-test")
+    p = OllamaProvider(endpoint="http://ollama.test", model="ollama-test")
     chunks = [{"message": {"content": None}}, {"message": {"content": "ok"}}]
     with patch("ollama.AsyncClient", return_value=_patched_client(chunks)):
         out = []
@@ -67,17 +69,14 @@ async def test_chat_handles_null_content():
     assert out == ["ok"]
 
 
-def test_default_model_and_endpoint():
-    from ollama_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
-
-    # No model given → the sentinel default (never a guessed network-reaching id).
-    p = OllamaProvider()
-    assert p.model == DEFAULT_MODEL
-    assert p._endpoint == DEFAULT_ENDPOINT
+def test_endpoint_and_model_are_required():
+    # Nothing is guessed: a provider without them cannot be built.
+    with pytest.raises(TypeError):
+        OllamaProvider()
 
 
 def test_stop_resets_client():
-    p = OllamaProvider(model="ollama-test")
+    p = OllamaProvider(endpoint="http://ollama.test", model="ollama-test")
     p._client = "fake"
     p.stop()
     assert p._client is None

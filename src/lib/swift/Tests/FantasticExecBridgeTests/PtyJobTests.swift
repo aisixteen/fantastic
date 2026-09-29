@@ -1,0 +1,351 @@
+// A terminal is a PTY JOB of exec_bridge (terminal_backend merged in) — twins of
+// python `exec_bridge/tests/test_pty_jobs.py`, plus the record-owned environment.
+#if os(macOS)
+
+    import FantasticJSON
+    import FantasticKernel
+    import Foundation
+    import OrderedCollections
+    import Testing
+
+    @testable import FantasticExecBridge
+
+    private let CHILD = """
+        import fcntl,os,struct,sys,termios,signal
+        def size():
+            r,c=struct.unpack('HHHH',fcntl.ioctl(0,termios.TIOCGWINSZ,b'\\0'*8))[:2]
+            return c,r
+        signal.signal(signal.SIGWINCH, lambda *a: print('WINCH %d %d' % size(), flush=True))
+        print('TTY', os.isatty(0), os.environ.get('TERM'), flush=True)
+        print('SIZE %d %d' % size(), flush=True)
+        line = sys.stdin.readline()
+        print('GOT', line.strip(), flush=True)
+        """
+
+    private func py3() -> String? {
+        for p in ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
+        where FileManager.default.isExecutableFile(atPath: p) { return p }
+        return nil
+    }
+
+    private func kernelWith(_ id: String, _ meta: OrderedDictionary<String, JSON> = [:]) async
+        -> Kernel
+    {
+        let registry = BundleRegistry()
+        registry.register("exec_bridge.tools", ExecBridgeBundle())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        var payload: OrderedDictionary<String, JSON> = [
+            "type": "create_agent", "parent_id": "kernel_state",
+            "handler_module": "exec_bridge.tools", "id": .string(id),
+            "ingress_rule": "allow_all_ingress", "allowed": [".*"], "cwd": ".",
+        ]
+        for (k, v) in meta { payload[k] = v }
+        _ = await kernel.send([Item(AgentId("kernel_state"), .object(payload))])
+        return kernel
+    }
+
+    private func call(_ k: Kernel, _ id: String, _ p: OrderedDictionary<String, JSON>) async -> JSON
+    {
+        await k.send([Item(AgentId(id), .object(p))])[0].result
+    }
+
+    /// Collect `output` text from `inbox` until `pred`.
+    private func outputUntil(_ inbox: Inbox, _ pred: (String) -> Bool) async -> String {
+        var text = ""
+        let deadline = Date().addingTimeInterval(15)
+        while !pred(text) && Date() < deadline {
+            if let item = inbox.tryTake() {
+                if item.payload["type"].asString == "output" {
+                    text += item.payload["data"].asString ?? ""
+                }
+            } else {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        return text
+    }
+
+    private func nextOf(_ inbox: Inbox, _ type: String) async -> JSON? {
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            if let item = inbox.tryTake() {
+                if item.payload["type"].asString == type { return item.payload }
+            } else {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        return nil
+    }
+
+    private func start(_ k: Kernel, _ id: String, _ py: String) async -> String {
+        let r = await call(
+            k, id,
+            [
+                "type": "start", "command": .string(py), "args": ["-c", .string(CHILD)],
+                "pty": ["cols": 91, "rows": 37],
+            ])
+        #expect(r["pty"] == true, "\(r.serialize())")
+        return r["job_id"].asString ?? ""
+    }
+
+    @Suite("exec_bridge PTY jobs", .serialized)
+    struct PtyJobTests {
+        @Test func aPtyJobRunsOnATerminalAndTakesKeystrokes() async {
+            guard let py = py3() else { return }
+            let k = await kernelWith("term_a")
+            let inbox = k.ensureInbox(AgentId("term_a"))
+            let jid = await start(k, "term_a", py)
+            let text = await outputUntil(inbox) { $0.contains("SIZE") }
+            #expect(text.contains("TTY True xterm-256color"), "\(text)")
+            #expect(text.contains("SIZE 91 37"), "\(text)")
+            let w = await call(
+                k, "term_a", ["type": "write", "job_id": .string(jid), "data": "hello\n"])
+            #expect(w == .object(["written": 6]), "\(w.serialize())")
+            let got = await outputUntil(inbox) { $0.contains("GOT hello") }
+            #expect(got.contains("GOT hello"), "\(got)")
+            let done = await nextOf(inbox, "job_done")
+            #expect(
+                done
+                    == .object([
+                        "type": "job_done", "job_id": .string(jid), "exit_code": 0, "ok": true,
+                    ]), "\(done?.serialize() ?? "nil")")
+        }
+
+        @Test func pasteImageWantsAMimeAndTypesASavedPath() async {
+            guard let py = py3() else { return }
+            let k = await kernelWith("term_p")
+            let inbox = k.ensureInbox(AgentId("term_p"))
+            let jid = await start(k, "term_p", py)
+            _ = await outputUntil(inbox) { $0.contains("SIZE") }
+            // The mime is the caller's to state — never guessed.
+            let (missing, _) = await k.sendWithBinary(
+                AgentId("term_p"), .object(["type": "paste_image", "job_id": .string(jid)]),
+                Data([0x89, 0x50]))
+            #expect(
+                missing["reason"] == "missing_arg" && missing["arg"] == "mime",
+                "\(missing.serialize())")
+            let (r, _) = await k.sendWithBinary(
+                AgentId("term_p"),
+                .object(["type": "paste_image", "job_id": .string(jid), "mime": "image/png"]),
+                Data([0x89, 0x50, 0x4E, 0x47, 0x2E, 0x2E, 0x2E, 0x2E]))
+            #expect(r["bytes"] == 8, "\(r.serialize())")
+            let path = r["path"].asString ?? ""
+            #expect(path.hasSuffix(".png"), "\(r.serialize())")
+            _ = await call(k, "term_p", ["type": "write", "job_id": .string(jid), "data": "\n"])
+            let text = await outputUntil(inbox) { $0.contains("GOT") && $0.contains(".png") }
+            #expect(text.contains(path), "\(text)")
+        }
+
+        /// Measured (the CLI, 2026-09-28): a shell puts each job it starts in its
+        /// OWN process group inside the PTY session, so killing the leader alone
+        /// (and the tty's hangup, which reaches the foreground group only) left
+        /// `sleep &` and a `nohup` running, reparented to launchd. `stop` and
+        /// `delete_agent` (the kernel's shutdown runs the same teardown) now kill
+        /// the whole session. Twin of python
+        /// `test_every_teardown_kills_the_whole_session`.
+        @Test func everyTeardownKillsTheWholeSession() async {
+            for (aid, end) in [("sh_stop", "stop"), ("sh_delete", "delete_agent")] {
+                let k = await kernelWith(
+                    aid, ["allowed": ["/bin/sh -i"], "env": ["PATH": "/usr/bin:/bin"]])
+                let inbox = k.ensureInbox(AgentId(aid))
+                let r = await call(
+                    k, aid,
+                    [
+                        "type": "start", "command": "/bin/sh", "args": ["-i"],
+                        "pty": ["cols": 80, "rows": 24],
+                    ])
+                let jid = r["job_id"].asString ?? ""
+                _ = await call(
+                    k, aid,
+                    [
+                        "type": "write", "job_id": .string(jid),
+                        "data":
+                            "echo PID=$$\nsleep 300 &\nnohup sleep 301 >/dev/null 2>&1 &\nsleep 302\n",
+                    ])
+                let text = await outputUntil(inbox) {
+                    $0.range(of: #"PID=\d+"#, options: .regularExpression) != nil
+                }
+                guard let m = text.range(of: #"PID=\d+"#, options: .regularExpression),
+                    let leader = pid_t(text[m].dropFirst(4))
+                else {
+                    Issue.record("no shell pid in \(text)")
+                    return
+                }
+                var members: [pid_t] = []
+                for _ in 0..<100 {
+                    members = Spawn.allPids().filter { $0 != leader && getsid($0) == leader }
+                    if members.count >= 3 { break }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                #expect(members.count >= 3, "\(end): \(members)")
+                if end == "stop" {
+                    _ = await call(k, aid, ["type": "stop", "job_id": .string(jid)])
+                } else {
+                    _ = await call(k, "kernel_state", ["type": "delete_agent", "id": .string(aid)])
+                }
+                var alive = [leader] + members
+                for _ in 0..<100 {
+                    alive = alive.filter { kill($0, 0) == 0 }
+                    if alive.isEmpty { break }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                #expect(alive.isEmpty, "\(end): survivors \(alive)")
+            }
+        }
+
+        /// A plain (pipe) job leads its own session too, so `stop` and
+        /// `delete_agent` take what it launched — a script's `sleep &` and a
+        /// `nohup` used to outlive it. Twin of python
+        /// `test_stop_and_delete_kill_everything_a_job_launched`.
+        @Test func stopAndDeleteKillEverythingAJobLaunched() async {
+            let line = "echo PID=$$; sleep 303 & nohup sleep 304 >/dev/null 2>&1 & sleep 305"
+            for (aid, end) in [("pipe_stop", "stop"), ("pipe_delete", "delete_agent")] {
+                let k = await kernelWith(
+                    aid, ["allowed": ["/bin/sh -c .*"], "env": ["PATH": "/usr/bin:/bin"]])
+                let inbox = k.ensureInbox(AgentId(aid))
+                let r = await call(
+                    k, aid, ["type": "start", "command": "/bin/sh", "args": ["-c", .string(line)]])
+                let jid = r["job_id"].asString ?? ""
+                var leader: pid_t?
+                let deadline = Date().addingTimeInterval(15)
+                while leader == nil && Date() < deadline {
+                    if let item = inbox.tryTake(), item.payload["type"].asString == "progress",
+                        let l = item.payload["line"].asString, l.hasPrefix("PID=")
+                    {
+                        leader = pid_t(l.dropFirst(4))
+                    } else {
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                    }
+                }
+                guard let leader else {
+                    Issue.record("\(end): no PID line")
+                    return
+                }
+                var members: [pid_t] = []
+                for _ in 0..<100 {
+                    members = Spawn.allPids().filter { $0 != leader && getsid($0) == leader }
+                    if members.count >= 3 { break }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                #expect(members.count >= 3, "\(end): \(members)")
+                if end == "stop" {
+                    _ = await call(k, aid, ["type": "stop", "job_id": .string(jid)])
+                } else {
+                    _ = await call(k, "kernel_state", ["type": "delete_agent", "id": .string(aid)])
+                }
+                var alive = [leader] + members
+                for _ in 0..<100 {
+                    alive = alive.filter { kill($0, 0) == 0 }
+                    if alive.isEmpty { break }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                #expect(alive.isEmpty, "\(end): survivors \(alive)")
+            }
+        }
+
+        @Test func resizeReachesTheProgramAndStatusReportsIt() async {
+            guard let py = py3() else { return }
+            let k = await kernelWith("term_r")
+            let inbox = k.ensureInbox(AgentId("term_r"))
+            let jid = await start(k, "term_r", py)
+            _ = await outputUntil(inbox) { $0.contains("SIZE") }
+            let r = await call(
+                k, "term_r", ["type": "resize", "job_id": .string(jid), "cols": 120, "rows": 40])
+            #expect(r == .object(["resized": true, "cols": 120, "rows": 40]), "\(r.serialize())")
+            let w = await outputUntil(inbox) { $0.contains("WINCH 120 40") }
+            #expect(w.contains("WINCH 120 40"), "\(w)")
+            let snap = await call(k, "term_r", ["type": "status", "job_id": .string(jid)])
+            let s = snap["jobs"][0]
+            #expect(s["pty"] == true && s["cols"] == 120 && s["rows"] == 40, "\(snap.serialize())")
+            #expect(s["stdout"].isNull, "a PTY job has no stdout/stderr split")
+            _ = await call(k, "term_r", ["type": "write", "job_id": .string(jid), "data": "x\n"])
+        }
+
+        @Test func outputReplaysTheRing() async {
+            guard let py = py3() else { return }
+            let k = await kernelWith("term_o")
+            let inbox = k.ensureInbox(AgentId("term_o"))
+            let jid = await start(k, "term_o", py)
+            _ = await outputUntil(inbox) { $0.contains("SIZE") }
+            let ring =
+                await call(k, "term_o", ["type": "output", "job_id": .string(jid)])["output"]
+                .asString ?? ""
+            #expect(ring.contains("TTY True") && ring.contains("SIZE 91 37"), "\(ring)")
+            let tail =
+                await call(
+                    k, "term_o", ["type": "output", "job_id": .string(jid), "max_bytes": 8])[
+                    "output"
+                ]
+                .asString ?? ""
+            #expect(tail.utf8.count <= 8 && ring.hasSuffix(tail), "\(tail)")
+            _ = await call(k, "term_o", ["type": "write", "job_id": .string(jid), "data": "x\n"])
+        }
+
+        @Test func aPtyJobIsGatedAndItsVerbsWantAPtyJob() async {
+            guard let py = py3() else { return }
+            let k = await kernelWith("term_g", ["allowed": .array([.string("\(py) -c .*")])])
+            let r = await call(
+                k, "term_g",
+                [
+                    "type": "start", "command": "/bin/sh", "args": ["-i"],
+                    "pty": ["cols": 80, "rows": 24],
+                ])
+            #expect(r["reason"] == "unauthorized", "\(r.serialize())")
+            let bad = await call(
+                k, "term_g",
+                ["type": "start", "command": .string(py), "args": ["-c", "0"], "pty": ["cols": 0]])
+            #expect(bad["reason"] == "bad_arg", "\(bad.serialize())")
+            let nf = await call(k, "term_g", ["type": "write", "job_id": "nope", "data": "x"])
+            #expect(nf["reason"] == "not_found", "\(nf.serialize())")
+            let pipe = await call(
+                k, "term_g", ["type": "start", "command": .string(py), "args": ["-c", "input()"]])
+            let w = await call(
+                k, "term_g", ["type": "write", "job_id": pipe["job_id"], "data": "x"])
+            #expect(w["reason"] == "bad_arg" && w["arg"] == "job_id", "\(w.serialize())")
+            _ = await call(k, "term_g", ["type": "stop", "job_id": pipe["job_id"]])
+        }
+
+        /// The kernel's environment reaches a child only by NAME (`inherit_env`).
+        @Test func theKernelEnvReachesAChildOnlyByName() async {
+            setenv("FT_SECRET_SW", "s3cret", 1)
+            setenv("FT_OPEN_SW", "open", 1)
+            for (id, inherit, want) in [
+                ("env_bare", JSON.null, "none/none"),
+                ("env_named", JSON.array([.string("FT_OPEN_SW")]), "none/open"),
+                ("env_all", JSON.array([.string("*")]), "s3cret/open"),
+            ] {
+                let k = await kernelWith(id, ["inherit_env": inherit])
+                let inbox = k.ensureInbox(AgentId(id))
+                _ = await call(
+                    k, id,
+                    [
+                        "type": "start", "command": "/bin/sh",
+                        "args": ["-c", "echo ${FT_SECRET_SW:-none}/${FT_OPEN_SW:-none}"],
+                    ])
+                let done = await nextOf(inbox, "job_done")
+                #expect(
+                    done?["stdout"].asString == "\(want)\n", "\(id): \(done?.serialize() ?? "nil")")
+            }
+        }
+
+        /// A per-call `env`/`cwd` is refused, and a leg with no `cwd` runs nothing.
+        @Test func whereAndWithWhatARunIsTheRecords() async {
+            let k = await kernelWith("rec_only")
+            for (arg, val) in [
+                ("env", JSON.object(["LD_PRELOAD": "/tmp/x"])), ("cwd", JSON.string("/")),
+            ] {
+                let r = await call(
+                    k, "rec_only",
+                    ["type": "start", "command": "/bin/sh", "args": ["-c", "true"], arg: val])
+                #expect(r["reason"] == "bad_arg" && r["arg"] == .string(arg), "\(r.serialize())")
+            }
+            let k2 = await kernelWith("no_cwd", ["cwd": .null])
+            let r = await call(
+                k2, "no_cwd", ["type": "start", "command": "/bin/sh", "args": ["-c", "true"]])
+            #expect(r["reason"] == "missing_arg" && r["arg"] == "cwd", "\(r.serialize())")
+        }
+    }
+#endif

@@ -2,7 +2,8 @@
 
 A tree of agents. One primitive — `send(target_id, payload) -> reply`.
 One discovery verb — `reflect` — which every agent answers with its
-identity, verbs, and state. `kernel` is an alias for the tree root.
+identity, verbs, and state. `kernel` is a reserved address: it always names the tree
+root, whatever the root's id.
 
 ## Reflect — the discovery verb
 

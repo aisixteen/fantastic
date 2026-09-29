@@ -74,7 +74,7 @@ single point of variance is `(transport | listener) + (transport literal) +
 
 | Derivation | Path | Direction | Transport | Extractor |
 |---|---|---|---|---|
-| `ws_bridge` (was `kernel_bridge`) | `io/ws_bridge/` | outbound dial | ws / ssh+ws / memory | `EnvelopeExtractor` |
+| `ws_bridge` (was `kernel_bridge`) | `io/ws_bridge/` | outbound dial | ws / memory | `EnvelopeExtractor` |
 | `relay_connector` | `io/relay_connector/` | outbound dial (relay router) | `relay` | `EnvelopeExtractor` |
 | `web_ws` | `io/web_ws/` | inbound, 1:N | ws (listener) | `EnvelopeExtractor` |
 | `web_rest` | `io/web_rest/` | inbound, 1:N | http (listener) | header (`X-Fantastic-Auth`) |
@@ -215,8 +215,9 @@ two-tree federation, the plain WS bridge matrix, and the Swift `ParityHarness`):
   adds `persistence: {provider:<id>|null}` (which file_bridge the loader persists through),
   via a duck-typed `reflect_root_extra(agent)` hook. So a client reads the whole gate/wiring
   state in ONE reflect — no per-agent round-trips, no kernel skip-sealed heuristic.
-- **Record fields** (`.fantastic`): `transport` (memory|ws|ssh+ws|relay),
-  per-leg `ingress_rule`/`egress_rule`/`auth`. `handler_module` strings:
+- **Record fields** (`.fantastic`): `transport` (memory|ws|relay),
+  per-leg `ingress_rule`/`egress_rule`/`auth`, and `peer_guid` (the ONE peer kernel whose
+  agents an inbound-serving leg accepts, as `<peer_guid>|<agent>`). `handler_module` strings:
   `relay_connector.tools`, `web.tools`, `web_ws.tools`, `web_rest.tools` stable;
   `kernel_bridge.tools` → `ws_bridge.tools` migrated in lockstep.
 - **Relay** (external interface `../fantastic_relay`, a relay-KERNEL router):
@@ -250,8 +251,7 @@ The following is decided-later and is **not** built; do not treat it as present:
   `modality = stream` slot for it.
 
 These two are jointly "http_file," to be revisited as one later decision. Other
-out-of-scope-for-now items: verb-level elevation/privileged-verb policy, the
-`terminal_backend` child-env scrub, browser PoP for the message channel, and the
+out-of-scope-for-now items: verb-level elevation/privileged-verb policy, browser PoP for the message channel, and the
 existing-project migration script — all tracked in the historical blueprint, none on
 this doc's current-state critical path.
 

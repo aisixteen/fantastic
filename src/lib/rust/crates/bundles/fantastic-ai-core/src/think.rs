@@ -161,6 +161,36 @@ pub fn decode_openai_delta(delta: &serde_json::Value, wrap: &mut ThinkWrap) -> V
     out
 }
 
+/// PROVIDER-REPORTED USAGE off one OpenAI-style streaming chunk — the NIM and
+/// `llama-server` wire alike: `usage.prompt_tokens` (on the last chunk, with
+/// `stream_options.include_usage`) is what the window really held, and a
+/// `finish_reason` of `length` means the output stopped AT its bound
+/// (`max_tokens`). Python `NvidiaNimProvider.chat` / `LlamaCppProvider.chat`.
+pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::ReportCell) {
+    let mut r = report.lock().expect("report poisoned");
+    if let Some(n) = chunk
+        .get("usage")
+        .and_then(|u| u.get("prompt_tokens"))
+        .filter(|v| fantastic_bundle::py_truthy(v))
+        .and_then(serde_json::Value::as_i64)
+    {
+        r.prompt_tokens = Some(n);
+    }
+    let fr = chunk
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("finish_reason"))
+        .filter(|v| fantastic_bundle::py_truthy(v));
+    if let Some(fr) = fr {
+        r.stop_reason = Some(if fr.as_str() == Some("length") {
+            "max_tokens".to_string()
+        } else {
+            fantastic_bundle::py_str(fr)
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +205,10 @@ mod tests {
             &serde_json::json!({"choices": [{"delta": {"content": "x"}, "finish_reason": null}]}),
             &report,
         );
-        assert_eq!(*report.lock().unwrap(), crate::provider::ProviderReport::default());
+        assert_eq!(
+            *report.lock().unwrap(),
+            crate::provider::ProviderReport::default()
+        );
         note_openai_usage(
             &serde_json::json!({"choices": [{"finish_reason": "length"}], "usage": {"prompt_tokens": 1234}}),
             &report,
@@ -183,7 +216,10 @@ mod tests {
         let r = report.lock().unwrap().clone();
         assert_eq!(r.prompt_tokens, Some(1234));
         assert_eq!(r.stop_reason.as_deref(), Some("max_tokens"));
-        note_openai_usage(&serde_json::json!({"choices": [{"finish_reason": "stop"}]}), &report);
+        note_openai_usage(
+            &serde_json::json!({"choices": [{"finish_reason": "stop"}]}),
+            &report,
+        );
         assert_eq!(report.lock().unwrap().stop_reason.as_deref(), Some("stop"));
     }
 
@@ -255,35 +291,5 @@ mod tests {
         // A content-only turn never opens a span.
         let mut w2 = ThinkWrap::new();
         assert_eq!(w2.close_marker(), None);
-    }
-}
-
-/// PROVIDER-REPORTED USAGE off one OpenAI-style streaming chunk — the NIM and
-/// `llama-server` wire alike: `usage.prompt_tokens` (on the last chunk, with
-/// `stream_options.include_usage`) is what the window really held, and a
-/// `finish_reason` of `length` means the output stopped AT its bound
-/// (`max_tokens`). Python `NvidiaNimProvider.chat` / `LlamaCppProvider.chat`.
-pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::ReportCell) {
-    let mut r = report.lock().expect("report poisoned");
-    if let Some(n) = chunk
-        .get("usage")
-        .and_then(|u| u.get("prompt_tokens"))
-        .filter(|v| fantastic_bundle::py_truthy(v))
-        .and_then(serde_json::Value::as_i64)
-    {
-        r.prompt_tokens = Some(n);
-    }
-    let fr = chunk
-        .get("choices")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("finish_reason"))
-        .filter(|v| fantastic_bundle::py_truthy(v));
-    if let Some(fr) = fr {
-        r.stop_reason = Some(if fr.as_str() == Some("length") {
-            "max_tokens".to_string()
-        } else {
-            fantastic_bundle::py_str(fr)
-        });
     }
 }

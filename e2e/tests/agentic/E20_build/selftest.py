@@ -27,7 +27,7 @@ TWO SCENARIOS, because there are two shapes a passing run has:
   * `leg`  — the model reflects the operator's pre-wired `runner` and runs there.
 
 Both must score the same, and each must be scored on the RIGHT agent. Scoring goes
-through the probe's own `pick_program_runner` / `_last_successful_job` / `job_cwd`,
+through the probe's own `pick_program_runner` / `_last_successful_job`,
 never a local copy — a second copy of the scoring is the drift the emergence README
 records twice already.
 
@@ -90,7 +90,7 @@ async def find_value(root, mem_id, want):
     import re as _re
     pat = _re.compile(rf"\b{want}\b")
     for dirpath, dirnames, filenames in os.walk("."):
-        dirnames[:] = [d for d in dirnames if d not in ("readings", ".fantastic", ".ckpt", "__pycache__")]
+        dirnames[:] = [d for d in dirnames if d not in ("readings", ".fantastic", "__pycache__")]
         for name in sorted(filenames):
             if name.endswith((".py", ".jsonl")) or ".tmp." in name:
                 continue
@@ -149,10 +149,10 @@ async def scenario(name: str, own: bool) -> bool:
     from exec_bridge._connector import CONNECTOR_SRC
 
     root = boot_root()
-    store = (await root.send([{"target": root.id, "payload": {
+    (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
+            "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "kernel_store",
             "root": ".",  # the run dir — main.py lands beside readings/ and in runner cwd
             "ingress_rule": "allow_all_ingress",
@@ -164,7 +164,7 @@ async def scenario(name: str, own: bool) -> bool:
     (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
+            "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "readings",
             "root": "readings",
             "ingress_rule": "allow_all_ingress",
@@ -172,11 +172,11 @@ async def scenario(name: str, own: bool) -> bool:
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "text_file.tools",
+            "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "totals",
-            "target_id": store["id"],
-            "can_call": {store["id"]: "*"},
-            # accept the running program's `set`, from EITHER leg it might arrive on
+            "root": ".",
+            "ingress_rule": "allow_all_ingress",
+            # accept the running program's writes, from EITHER leg they might arrive on
             "callable_by": {EXECUTOR_LEG: "*", OWN_LEG: "*"},
         }}]))[0]["result"]
     # The operator's half: the command runner. Wired in BOTH scenarios — in `own` it
@@ -193,6 +193,7 @@ async def scenario(name: str, own: bool) -> bool:
                 "handler_module": "exec_bridge.tools",
                 "id": OWN_LEG,
                 "cwd": os.getcwd(),
+                "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
                 "allowed": [rf"{re.escape(sys.executable)} \S+"],
@@ -236,17 +237,16 @@ async def scenario(name: str, own: bool) -> bool:
     print(f"  2. total correct     {'OK' if c2 else 'NO'}  expected={total}")
 
     # 3. THE CANARY — a file the program has never seen; re-issue the recorded job
-    #    VERBATIM on the agent the scorer picked, cwd included, exactly as the probe does.
+    #    VERBATIM on the agent the scorer picked (its record owns `cwd`), exactly as
+    #    the probe does.
     with open(os.path.join("readings", CANARY_FILE), "w") as fh:
         fh.write(f"{canary_value}\n")
     c3 = False
     if job is not None:
-        cwd = await P.job_cwd(root, ran_on, job["job_id"])
         (await root.send([{"target": ran_on, "payload": {
                 "type": "start",
                 "command": job["command"],
                 "args": job.get("args") or [],
-                **({"cwd": cwd} if cwd else {}),
             }}]))[0]["result"]
         c3 = await wait_for(root, mem["id"], new_total, 90)
     print(f"  3. it RUNS (canary)  {'OK' if c3 else 'NO'}  expected={new_total}")

@@ -32,10 +32,10 @@ struct AnthropicLiveTests {
     @Test("a real turn streams text back and ends with a terminal stop_reason")
     func liveTurn() async throws {
         let provider = AnthropicProvider(
-            endpoint: env("ANTHROPIC_ENDPOINT") ?? DEFAULT_ENDPOINT,
-            // Explicit model — DEFAULT_MODEL is now the fail-loud sentinel, so a
-            // live turn must name a real model (the connector never guesses one).
-            model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-4-6",
+            // Nothing is guessed: an unset variable is an empty field, and the
+            // provider fails loud naming it.
+            endpoint: env("ANTHROPIC_ENDPOINT") ?? "",
+            model: env("ANTHROPIC_MODEL") ?? "",
             apiKey: env("ANTHROPIC_API_KEY") ?? "",
             maxTokens: 64,
             sampling: [:])

@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
 
-from kernel._kernel import _current_task
+from kernel._kernel import _current_sender, _current_task
 
 from .app import DEFAULT_HOST, extra_origins, make_app, own_origins
 
@@ -185,6 +184,10 @@ def _start_serving(agent_id: str, handle: _ServerHandle) -> None:
         # was, each REST-ingress task named a parent pid that had ended
         # (measured 2026-09-16: `parent: 7`, no such row).
         _current_task.set(None)
+        # The request tasks run AS THIS HOST, stated here rather than inherited
+        # from whoever dispatched `boot` (audit 2026-09-28, d9). Every route that
+        # sends also wraps its send in `sender_context`.
+        _current_sender.set(agent_id)
         # uvicorn calls sys.exit(1) on bind failure (e.g. port already
         # in use). SystemExit out of an asyncio task aborts the whole
         # event loop — taking the kernel down with one bad webapp.
@@ -264,7 +267,8 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             holder_parent=web.record.get("parent_id"),
             holder_children=frozenset(getattr(web, "_children", {}) or {}),
         )
-        if not egress.allowed:
+        # the heritable half — an ancestor's `{aid: {verbs, for: descendants}}`
+        if not egress.allowed and not web._heritable_egress(web_id, "read_stream", aid):
             continue
         ingress = authorize_call(
             rec.get("callable_by"),
@@ -273,6 +277,7 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             holder_id=aid,
             holder_parent=rec.get("parent_id"),
             holder_children=frozenset(getattr(agent, "_children", {}) or {}),
+            in_subtree=web._in_subtree,
         )
         if not ingress.allowed:
             continue
@@ -351,28 +356,20 @@ async def _boot(id, payload, kernel):
     _start_serving(id, handle)
     # Announce OURSELVES to the cli renderer (the boot-event convention): the web
     # host owns its port, so it tells the terminal where to attach — the renderer
-    # never reaches in for it. Best-effort: cli's `say` returns None; if there is
-    # no cli (non-tty), fall back to a stderr log so container logs still record
-    # the bind.
+    # never reaches in for it. No cli (non-tty) ⇒ nobody is told; the bound port
+    # is on this agent's reflect.
     line = (
         f"listening on http://127.0.0.1:{handle.port}/"
         " · rest/ws are children (reflect kernel for ids)"
     )
-    reply = (
-        await kernel.send(
-            [
-                {
-                    "target": "cli",
-                    "payload": {"type": "say", "source": "web", "text": line},
-                }
-            ]
-        )
-    )[0]["result"]
-    if reply is not None:
-        print(
-            f"  [web] {id} listening on http://localhost:{handle.port}/",
-            file=sys.stderr,
-        )
+    await kernel.send(
+        [
+            {
+                "target": "cli",
+                "payload": {"type": "say", "source": "web", "text": line},
+            }
+        ]
+    )
     return {"running": True, "surfaces": list(handle.routes_by_child.keys())}
 
 
@@ -429,3 +426,7 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     if fn is None:
         return {"error": f"web: unknown type {t!r}"}
     return await fn(id, payload, kernel)
+
+
+# Shutdown frees the same process resources — declared, never inferred.
+on_shutdown = on_delete

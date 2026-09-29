@@ -1,6 +1,6 @@
 //! Verb entrypoints the backends dispatch through. A backend's `Bundle`
-//! does only its own pre-checks (file_bridge_id, api_key) + provider
-//! build, then calls these. The provider is the per-backend seam,
+//! does only its own pre-checks (api_key, the required record fields) +
+//! provider build, then calls these. The provider is the per-backend seam,
 //! constructed by the backend and passed in per `send`.
 
 use crate::agent_loop::{run_generation, BackendConfig, GenFailure};
@@ -78,32 +78,23 @@ pub const CONCURRENCY_DOC: &str = "Per-backend FIFO lock around `send`: one gene
 /// generating, cancel, emits, concurrency`. A backend adds only its own `reflect_extra` keys, which
 /// land after `concurrency` exactly as python's `out.update(extra)` does.
 ///
-/// `model`/`endpoint`/`context_strategy` are the RECORD's values, raw: python
-/// reads them with `rec.get(key, default)`, so only an ABSENT key takes the
-/// default and a `null` on the record reflects back as `null`.
+/// `model`/`endpoint` are the RECORD's values, raw (absent ⇒ `null`: nothing is
+/// guessed); `context_strategy` takes its default only when ABSENT — a `null`
+/// on the record reflects back as `null`.
 #[must_use]
-pub fn reflect_base(
-    agent_id: &AgentId,
-    kernel: &Kernel,
-    sentence: &str,
-    default_model: &str,
-    default_endpoint: &str,
-) -> Map<String, Value> {
+pub fn reflect_base(agent_id: &AgentId, kernel: &Kernel, sentence: &str) -> Map<String, Value> {
     let meta = agent_meta(agent_id, kernel);
     let mut out = Map::new();
     out.insert("id".to_string(), json!(agent_id.as_str()));
     out.insert("sentence".to_string(), json!(sentence));
+    // What the RECORD names — nothing guessed, so an unset field reads null.
     out.insert(
         "model".to_string(),
-        meta.get("model")
-            .cloned()
-            .unwrap_or_else(|| json!(default_model)),
+        meta.get("model").cloned().unwrap_or(Value::Null),
     );
     out.insert(
         "endpoint".to_string(),
-        meta.get("endpoint")
-            .cloned()
-            .unwrap_or_else(|| json!(default_endpoint)),
+        meta.get("endpoint").cloned().unwrap_or(Value::Null),
     );
     out.insert(
         "context_window".to_string(),
@@ -197,7 +188,11 @@ fn digest(r: &Value) -> Value {
 ///
 /// ONE SHAPE: `{rows, next, total, fold?}`. Bodies are behind `recall` / `grep`,
 /// never here.
-pub async fn history(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> MemResult<Value> {
+pub async fn history(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> MemResult<Value> {
     let fold_raw = payload.get("fold").filter(|v| !v.is_null());
     let mut head: Option<Value> = None;
     let rows: Vec<Value> = match fold_raw {
@@ -509,8 +504,8 @@ impl Drop for QueuedGuard {
 /// The shared `send` flow: guard the call chain → the memory store named (fail
 /// loud) → a `late` reply recorded, never a turn → enqueue → FIFO lock → run the
 /// generation under a timeout → clean up → ROUTE the pass's output. The backend
-/// supplies a built `provider` (it has already failfast-checked file_bridge_id /
-/// api_key) and its `cfg`.
+/// supplies a built `provider` (it has already failfast-checked its api_key and
+/// required record fields) and its `cfg`.
 ///
 /// The generation runs INLINE in this dispatch — the backend spawns no task of
 /// its own. It doesn't need to: a `send` IS a kernel task (`"<agent>:<n>"`, one
@@ -752,7 +747,7 @@ pub async fn send(
     // A provider failure python does NOT map propagates out of the handler. The
     // raise is deferred to after the cleanup below (python does it from an
     // `except` whose `finally` clears the current entry and releases the lock).
-    let mut raise: Option<String> = None;
+    let mut raise: Option<(&'static str, String)> = None;
     let reply = match outcome {
         Ok(Ok((final_text, tid))) => {
             message_id = Some(tid);
@@ -799,7 +794,7 @@ pub async fn send(
             if pe.mapped {
                 json!({"error": pe.message, "client_id": client_id})
             } else {
-                raise = Some(pe.message);
+                raise = Some((pe.kind, pe.message));
                 Value::Null
             }
         }
@@ -832,8 +827,8 @@ pub async fn send(
     // The raise happens HERE, after the cleanup python does in its `finally`:
     // the entry is cleared and the lock is free before the failure leaves this
     // dispatch, or the next caller inherits a phantom in-flight turn.
-    if let Some(msg) = raise {
-        return Err(Box::new(PythonRaise(msg)));
+    if let Some((kind, msg)) = raise {
+        return Err(Box::new(PythonRaise(kind, msg)));
     }
 
     // ROUTE this pass's output where it was addressed. DETACHED as its own kernel
@@ -882,14 +877,14 @@ pub async fn send(
 
 /// A handler RAISE with python's exception text. The kernel settles a bundle
 /// `Err` as `{error: <Display>, raised: true}`, and python's settle spells that
-/// `f"{type(e).__name__}: {e}"` — every provider failure python raises is a
-/// `RuntimeError`, so that is the name a caller reads.
+/// `f"{type(e).__name__}: {e}"` — a provider failure is a `RuntimeError`, a
+/// record field the backend cannot run without a `ValueError`.
 #[derive(Debug)]
-struct PythonRaise(String);
+struct PythonRaise(&'static str, String);
 
 impl std::fmt::Display for PythonRaise {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RuntimeError: {}", self.0)
+        write!(f, "{}: {}", self.0, self.1)
     }
 }
 
@@ -1051,7 +1046,10 @@ pub async fn watch(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) ->
             c.0.clone()
         }
     };
-    if !kernel.inboxes.contains_key(&AgentId::from(watcher.as_str())) {
+    if !kernel
+        .inboxes
+        .contains_key(&AgentId::from(watcher.as_str()))
+    {
         return Ok(json!({
             "error": format!(
                 "watch: {} has no registered inbox, so nothing would read the row events",
@@ -1115,7 +1113,8 @@ pub async fn fork_from(
     let Some(grant) = payload.get("grant").and_then(crate::retrieval::as_id) else {
         return Ok(missing_arg("fork_from", "grant", "(an int) is required"));
     };
-    let not_found = |e: MemoryStoreError| json!({"error": e.0, "reason": "not_found", "arg": "grant"});
+    let not_found =
+        |e: MemoryStoreError| json!({"error": e.0, "reason": "not_found", "arg": "grant"});
     let given = match crate::memory::store_call(
         agent_id,
         kernel,
@@ -1129,7 +1128,10 @@ pub async fn fork_from(
     let g = given
         .get("grants")
         .and_then(Value::as_array)
-        .and_then(|a| a.iter().find(|x| x.get("grant").and_then(Value::as_i64) == Some(grant)))
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x.get("grant").and_then(Value::as_i64) == Some(grant))
+        })
         .cloned();
     let Some(g) = g else {
         return Ok(json!({
@@ -1148,16 +1150,13 @@ pub async fn fork_from(
             "arg": "owner",
         }));
     }
-    let res = match crate::memory::store_call(
-        agent_id,
-        kernel,
-        json!({"type": "read", "grant": grant}),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => return Ok(not_found(e)),
-    };
+    let res =
+        match crate::memory::store_call(agent_id, kernel, json!({"type": "read", "grant": grant}))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return Ok(not_found(e)),
+        };
     let shared: Vec<Value> = res
         .get("rows")
         .and_then(Value::as_array)
@@ -1210,7 +1209,11 @@ pub fn request_share(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         return missing_arg("request_share", "row", "(an int) is required");
     };
     let caller = fantastic_kernel::current_origin().map_or_else(|| "kernel".to_string(), |c| c.0);
-    let raw = payload.get("why").filter(|w| py_truthy(w)).map(py_str).unwrap_or_default();
+    let raw = payload
+        .get("why")
+        .filter(|w| py_truthy(w))
+        .map(py_str)
+        .unwrap_or_default();
     let why: String = fantastic_bundle::py_split_whitespace(&raw)
         .join(" ")
         .chars()

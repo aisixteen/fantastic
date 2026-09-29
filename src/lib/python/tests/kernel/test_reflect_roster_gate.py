@@ -19,6 +19,7 @@ async def _mk(kernel, agent_id, parent=None, **meta):
         "parent_id": parent or kernel.id,
         "id": agent_id,
         "handler_module": "file_bridge.tools",
+        "allow": ["."],
         "ingress_rule": "allow_all_ingress",
         **meta,
     }

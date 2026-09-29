@@ -165,10 +165,8 @@ final class MockBundle: AgentBundle, @unchecked Sendable {
 }
 
 /// In-memory file_bridge stand-in: dict-backed STREAM verbs (`write_stream` /
-/// `read_stream` on the binary channel — the string read/write verbs are gone),
-/// so the real chat persistence path (the JSONL sidecar
-/// `agents/<self>/chat_<client>.jsonl` → the AI's own `file_bridge_id` →
-/// write_stream/read_stream) is exercised without touching disk.
+/// `read_stream` on the binary channel), so the kernel's record persistence
+/// through a discovered store runs without touching disk.
 final class MockFileBridge: AgentBundle, @unchecked Sendable {
     let name = "mock_file_bridge"
     private let lock = NSLock()
@@ -386,8 +384,6 @@ func baseConfig(
     AIBackendConfig(
         kind: "mock_backend",
         sentence: "Mock LLM agent.",
-        defaultModel: "(no default — set the `model` meta)",
-        defaultEndpoint: "http://mock.invalid",
         reflectExtra: { _ in ["extra": .string("yes")] },
         makeProvider: { _, _, _ in provider() }
     )
@@ -463,13 +459,12 @@ func bootMockKernel(
     for id in backendIds { accept[id] = .string("*") }
     let acceptJSON = JSON.object(accept)
     // The loader's own discoverable store (`findStore` matches a file_bridge
-    // whose `root` resolves to the root agent's dir). Chat no longer rides this
-    // leg — each backend gets its own below — but the kernel's record
-    // persistence still wants a provider to exist.
+    // whose `root` resolves to the root agent's dir) — the kernel's record
+    // persistence provider. The conversation lives in the memory store.
     _ = await kernel.send([Item(AgentId("kernel_state"), .object([
             "type": .string("create_agent"),
             "parent_id": .string("kernel_state"),
-            "handler_module": .string("file_bridge.tools"),
+            "handler_module": .string("file_bridge.tools"), "allow": ["."],
             // `findStore` matches a file_bridge whose `root` resolves to the
             // root agent's own dir — that is how the loader owns sidecar
             // placement, and the stand-in must satisfy the same rule.
@@ -510,9 +505,8 @@ func bootMockKernel(
             "callable_by": acceptJSON,
         ]))])[0].result
     // Deny-all: a backend streams to `cli`, routes replies to its peers
-    // (probe/raiser/slowpoke + the other backends), and its `file_bridge_id` leg
-    // is granted per backend below. Grant exactly those lateral edges — wiring
-    // pairs with granting.
+    // (probe/raiser/slowpoke + the other backends) and keeps its turns in
+    // `memory`. Grant exactly those lateral edges — wiring pairs with granting.
     var grant: OrderedCollections.OrderedDictionary<String, JSON> = [
         "cli": .string("*"),
         "probe": .string("*"), "raiser": .string("*"), "slowpoke": .string("*"),
@@ -521,29 +515,14 @@ func bootMockKernel(
     for other in backendIds { grant[other] = .string("*") }
     var out: [String: AgentId] = [:]
     for id in backendIds {
-        // ONE FILE LEG PER BACKEND. The chat sidecar lands at the leg's root
-        // (`agents/<self>/chat_<client>.jsonl`) — a private leg keeps each
-        // backend's transcripts under its own `agents/` tree.
-        let legId = "store_\(id)"
-        _ = await kernel.send([Item(AgentId("kernel_state"), .object([
-                "type": .string("create_agent"),
-                "parent_id": .string("kernel_state"),
-                "handler_module": .string("file_bridge.tools"),
-                "root": .string(storeRoot.appendingPathComponent(id).path),
-                "id": .string(legId),
-                "callable_by": acceptJSON,
-            ]))])[0].result
-        var backendGrant = grant
-        backendGrant[legId] = .string("*")
         var create: OrderedCollections.OrderedDictionary<String, JSON> = [
             "type": .string("create_agent"),
             "parent_id": .string("kernel_state"),
             "handler_module": .string("mock_backend.tools"),
             "id": .string(id),
-            "file_bridge_id": .string(legId),
             "memory_store_id": .string("memory"),
             "context_window": .integer(contextWindow),
-            "can_call": .object(backendGrant),
+            "can_call": .object(grant),
             // Peer backends call each other — accept them (ingress).
             "callable_by": acceptJSON,
         ]

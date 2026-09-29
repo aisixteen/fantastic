@@ -20,15 +20,6 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "nvidia_nim_backend.tools"
 
-/// NO guessy default (by default, no defaults): never name a network-reaching
-/// model. The sentinel exists ONLY so `reflect` can say what is true; `chat()`
-/// fails loud when the model is unset or still this value.
-/// (py-canonical `nvidia_nim_backend.provider.DEFAULT_MODEL`.)
-public let DEFAULT_MODEL = "(no default — set the `model` meta)"
-
-/// The NIM API's own host (py `nvidia_nim_backend.provider.DEFAULT_ENDPOINT`).
-public let DEFAULT_ENDPOINT = "https://integrate.api.nvidia.com/v1"
-
 /// The variable carrying the key. Named in the failure text so an unwired
 /// connector says exactly what to set. Python `KEY_VAR`.
 public let KEY_VAR = "NVIDIA_API_KEY"
@@ -69,8 +60,6 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                 sentence:
                     "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
                 // NIM's `done` error path keeps `accumulated`.
-                defaultModel: DEFAULT_MODEL,
-                defaultEndpoint: DEFAULT_ENDPOINT,
                 // A PROVIDER HTTP FAILURE IS A CLEAN REFUSAL HERE, not a raise:
                 // the free tier rate-limits by design and the caller can act on
                 // being told so. Python `_map_error`.
@@ -101,8 +90,8 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                     }
                     return .provider(
                         NvidiaNimProvider(
-                            endpoint: Self.endpoint(agent: agent),
-                            model: Self.model(agent: agent),
+                            endpoint: try requiredMeta(agent, "endpoint", "nvidia_nim_backend"),
+                            model: try requiredMeta(agent, "model", "nvidia_nim_backend"),
                             apiKey: apiKey))
                 }
             ))
@@ -121,13 +110,8 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     ## Implementation
     This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `NvidiaNimProvider` builder and the NIM-specific extras below, and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
-    ## Bare completion — the tool loop is the CALLER's
-    This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-    provider pass. It NEVER sends the OpenAI `tools`/`tool_choice` fields nor reads
-    `delta.tool_calls`; the `NvidiaNimProvider` streams plain `content` text, returned
-    verbatim. Any tool convention is the caller's — an authored agent teaches it in the
-    prompt (via `system_prompt`), reads the completion, dispatches, and feeds the result
-    back as the next `{send, text}` turn.
+    ## Bare completion + the `<call>` grammar — no native tool API
+    `send` performs exactly ONE provider pass: the `NvidiaNimProvider` streams plain `content` text and never sends the OpenAI `tools`/`tool_choice` fields nor reads `delta.tool_calls`. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
     ## Context management — owned HERE
     The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
@@ -195,25 +179,12 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
         await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
-    // MARK: - meta helpers
-
-    /// The record's `endpoint` — the OpenAI-compatible BASE, with `/chat/completions`
-    /// appended by the provider (python `httpx.AsyncClient(base_url=…)`). It used
-    /// to read a `host` meta and append `/v1/chat/completions`, so one runtime's
-    /// working record was a 404 on the other.
-    fileprivate static func endpoint(agent: Agent) -> String {
-        agent.metaValue(forKey: "endpoint")?.asString ?? DEFAULT_ENDPOINT
-    }
-
-    fileprivate static func model(agent: Agent) -> String {
-        agent.metaValue(forKey: "model")?.asString ?? DEFAULT_MODEL
-    }
 }
 
 /// NIM `/v1/chat/completions` SSE provider — Bearer auth, 429 retry with
 /// exponential backoff (1s, 2s, 4s). PURE RAW TEXT: yields `.token`s only,
 /// decoded from BOTH of the model's channels (`reasoning_content` wrapped in
-/// `<think>…</think>`, `content` bare — see `decodeNimSSELine`); no native
+/// `<think>…</think>`, `content` bare — see `decodeOpenAISSELine`); no native
 /// tool-calls (ai-core parses the `<call name=…>` envelope from the text).
 struct NvidiaNimProvider: AIProvider {
     let endpoint: String
@@ -234,7 +205,7 @@ struct NvidiaNimProvider: AIProvider {
         let usage = usage
         return AsyncThrowingStream { continuation in
             let task = Task {
-                if model.isEmpty || model == DEFAULT_MODEL {
+                if model.isEmpty {
                     // RAISES, unmapped: python's `RuntimeError` here is a
                     // misconfiguration, not a provider refusal, and the caller's
                     // settle says `raised: true` so it reads as one.
@@ -285,7 +256,7 @@ struct NvidiaNimProvider: AIProvider {
                     var wrap = ThinkingWrap()
                     for try await line in bytesToLines(response.body) {
                         if let usage { recordOpenAIReport(line, into: usage) }
-                        let decoded = decodeNimSSELine(line, wrap: &wrap)
+                        let decoded = decodeOpenAISSELine(line, wrap: &wrap)
                         for token in decoded.tokens { continuation.yield(.token(token)) }
                         if decoded.done { break }
                     }

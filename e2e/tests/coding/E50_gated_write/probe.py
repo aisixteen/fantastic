@@ -39,14 +39,14 @@ async def main():
     try:
         for payload in (
             {"type": "create_agent", "parent_id": root.id, "id": FB,
-             "handler_module": "file_bridge.tools", "root": ".",
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
-             "callable_by": {"vault": "*", "rest": "*", "web": "*"}},
+             "callable_by": {"rest": "*", "web": "*"}},
             # The vault ACCEPTS the writer's discovery (reflect) but not its
             # writes; the reviewer may reach it AND may update it.
             {"type": "create_agent", "parent_id": root.id, "id": "vault",
-             "handler_module": "text_file.tools", "target_id": FB,
-             "can_call": {FB: "*"},
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+             "ingress_rule": "allow_all_ingress",
              "callable_by": {"rest": "*", "web": "*", "ai": ["reflect"], "ai_rev": "*"}},
         ):
             r = await _call(root, root.id, payload)
@@ -58,7 +58,7 @@ async def main():
         w = await connect(root, core, BK, agent_id="ai",
                           can_call={"vault": "*", "cli": "*", "user": "*"},
                           callable_by={"user": "*"},
-                          limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
+                          limits=Limits.from_env(os.environ))
         await drive(w,
             "Write a file `note.md` containing exactly `access: granted` through "
             "the editor `vault`'s `write` verb (reflect it for the shape). Your "
@@ -81,7 +81,7 @@ async def main():
                                      # can delegate it (it holds ROOT_VERBS there).
                                      root.id: ["update_agent", "reflect", "get", "list_agents"],
                                      "cli": "*"},
-                           limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
+                           limits=Limits.from_env(os.environ))
         await drive(rv,
             "The agent `ai` needs write access to the editor `vault` but is "
             "denied on ingress. You may grant it. Reflect `vault` to read its "

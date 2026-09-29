@@ -11,8 +11,8 @@ Production runtime — full parity with the Python reference kernel.
 
 |                                              | value                                   |
 |----------------------------------------------|-----------------------------------------|
-| Bundles                                      | **17** (13 iOS-safe + 4 full-tier subprocess) |
-| Cargo tests passing                          | **203** (workspace, default features)   |
+| Bundles                                      | **16** (15 iOS-safe + 1 full-tier subprocess) |
+| Cargo tests passing                          | **1091** (workspace, default features)  |
 | `./scripts/quality.sh`                       | 8 / 8 PASS (compile, fmt, clippy, test, deny, audit, machete, tree) |
 | Feature gates                                | `full` (default) / `embedded` (no-subprocess) |
 | Embedded slice (`cli --no-default-features --features embedded`) | clean compile, subprocess-using bundles excluded |
@@ -111,13 +111,12 @@ full     # CLI + server + macOS Pro + Linux unsandboxed
 embedded # iOS Lite, iPadOS, visionOS, sandboxed macOS
 ```
 
-**`full`** includes every ported bundle. Subprocess-spawning bundles
-(`terminal_backend`, `exec_bridge`) and the SSH transport in
-`ws_bridge` are gated to this feature.
+**`full`** includes every ported bundle. The subprocess-spawning bundle
+(`exec_bridge` — commands and PTY jobs, the one spawner) is gated to this feature.
 
 **`embedded`** compiles without any subprocess code. iOS app sandboxes
 forbid `fork()` / `Process` / dynamic library loading; the embedded
-slice excludes anything that touches them at compile time. 13 of 17
+slice excludes anything that touches them at compile time. 15 of 16
 bundles ship under embedded — the iOS-safe ceiling.
 
 Switch with `--no-default-features --features embedded`:
@@ -141,25 +140,24 @@ Bundles that compile under either tier:
 | `fantastic-core`               | the `kernel_state.tools` root loader (id="kernel_state") — records, blobs, the record-owner guard |
 | `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, grants, search, inject/dump |
 | `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents as operator at boot |
-| `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default) |
-| `fantastic-text-file`          | stateless text-document agent — read/write/patch/append, version/if_match, checkpoints; every byte a gated send |
+| `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + the text verbs — read/write/edit/append/undo, version/if_match |
 | `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces |
 | `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default |
 | `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default |
 | `fantastic-scheduler`          | recurring tasks on a tokio tick |
-| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS; SSH+WS in full tier) |
+| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS) |
 | `fantastic-ollama-backend`     | local LLM via ollama |
 | `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible) |
 | `fantastic-llamacpp-backend`   | local LLM via llama-server (OpenAI-compatible) |
 | `fantastic-anthropic-backend`  | Claude via the Anthropic Messages API |
+| `fantastic-responses-backend`  | the OpenAI Responses API |
 | `fantastic-cli-bundle`         | the `cli` render sink (token/done/say/error/status/context to stdout) |
 
 Full-tier-only bundles (subprocess; excluded from the embedded slice):
 
 | crate                          | role |
 |--------------------------------|------|
-| `fantastic-terminal-backend`   | PTY shell + flow control + UTF-8 incremental decode + image-paste |
-| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist |
+| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist; a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste) |
 
 Internal / test crates:
 
@@ -181,8 +179,7 @@ rust/
 │       ├── fantastic-core/                kernel_state.tools root loader
 │       ├── fantastic-ram-store/           the memory store (in RAM)
 │       ├── fantastic-static-loader/       declarative YAML roster loader
-│       ├── fantastic-file/                fs-as-agent
-│       ├── fantastic-text-file/           text-document agent
+│       ├── fantastic-file/                fs-as-agent + text verbs
 │       ├── fantastic-web/                 axum host + WS/REST router
 │       ├── fantastic-web-ws/              WS verb channel
 │       ├── fantastic-web-rest/            REST verb channel
@@ -193,9 +190,9 @@ rust/
 │       ├── fantastic-nvidia-nim-backend/  NVIDIA NIM LLM (thin binding over ai-core)
 │       ├── fantastic-llamacpp-backend/    llama-server LLM (thin binding over ai-core)
 │       ├── fantastic-anthropic-backend/   Claude (thin binding over ai-core)
+│       ├── fantastic-responses-backend/   OpenAI Responses API (thin binding over ai-core)
 │       ├── fantastic-cli-bundle/          the cli render sink
-│       ├── fantastic-terminal-backend/    PTY  (full-tier only)
-│       ├── fantastic-exec-bridge/         command runner (full-tier only)
+│       ├── fantastic-exec-bridge/         command runner + PTY jobs (full-tier only)
 │       └── fantastic-scenario-probes/     e2e fixture agents (test-only feature)
 ├── scripts/
 │   ├── build-cli.sh                       cargo build --release --bin fantastic_kernel

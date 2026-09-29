@@ -292,7 +292,8 @@ test("the flush records itself and never loops", async () => {
 test("ledger is a projection of store + RAM, scoped to the caller", async () => {
   const { k, p } = kernel();
   mk(k);
-  mk(k, "caller", { can_call: { probe: "*" } });
+  // `ledger` and `ack_deadletter` are PRIVILEGED: the root must be named.
+  mk(k, "caller", { can_call: { probe: "*", [ROOT]: ["ledger", "ack_deadletter"] } });
   await withStore(k);
   const asCaller = k.scopedFor("caller", null);
   const mine = (await asCaller.send([{ target: "probe", payload: { type: "work" }, id: "mine-1" }]))[0]!;
@@ -354,7 +355,8 @@ test("named dedup survives a restart on the same store (dump → new kernel → 
 test("a dead letter is announced, listed and acked", async () => {
   const { k } = kernel();
   mk(k);
-  mk(k, "caller", { can_call: { probe: "*" } });
+  // `ledger` and `ack_deadletter` are PRIVILEGED: the root must be named.
+  mk(k, "caller", { can_call: { probe: "*", [ROOT]: ["ledger", "ack_deadletter"] } });
   await withStore(k);
   const inbox: Payload[] = [];
   k.onInbox("caller", (e) => inbox.push(e));
@@ -374,7 +376,8 @@ test("a dead letter is announced, listed and acked", async () => {
   const ok = (await asCaller.send([{ target: "probe", payload: { type: "work" } }]))[0]!;
   const refused = (await asCaller.send([{ target: "kernel", payload: { type: "ack_deadletter", id: ok.pid } }]))[0]!.result as Payload;
   assert.equal(refused["reason"], "bad_arg", "only a dead letter is acked");
-  // another agent cannot ack mine
+  // another agent cannot ack mine — even holding the named grant
+  k.updateMeta("probe", { can_call: { [ROOT]: ["ack_deadletter"] } });
   const nosy = (await k.scopedFor("probe", null).send([{ target: "kernel", payload: { type: "ack_deadletter", id: out.pid } }]))[0]!.result as Payload;
   assert.equal(nosy["reason"], "not_found");
   await k.store.flush();
@@ -463,12 +466,3 @@ test("an unstarted kernel keeps its rows bounded by the ledger's ring", async ()
   assert.ok(k.store.rows.size <= 2 * 5, `rows grew past the ring: ${k.store.rows.size}`);
 });
 
-// ── the row verbs are gone ─────────────────────────────────────────────
-
-for (const verb of ["messages", "rows_read", "rows_write", "shutdown_kernel"]) {
-  test(`the kernel row verb '${verb}' is not answered`, async () => {
-    const { k } = kernel();
-    const out = await res(k, "kernel", { type: verb });
-    assert.equal(out["reason"], "unhandled");
-  });
-}

@@ -120,7 +120,7 @@
             var steps: [[String]] = [
                 [
                     "kernel", "create_agent", "parent_id=kernel_state",
-                    "handler_module=file_bridge.tools", "id=store", "root=.fantastic",
+                    "handler_module=file_bridge.tools", "id=store", "root=.fantastic", #"allow=["."]"#,
                     "ingress_rule=allow_all_ingress",
                     // BOTH SIDES, granted from above: the leg's `can_call`
                     // alone is half the gate.
@@ -306,7 +306,7 @@
             for argv in [
                 [
                     "kernel", "create_agent", "parent_id=kernel_state",
-                    "handler_module=file_bridge.tools", "id=store", "root=.fantastic",
+                    "handler_module=file_bridge.tools", "id=store", "root=.fantastic", #"allow=["."]"#,
                     "ingress_rule=allow_all_ingress",
                 ],
                 [

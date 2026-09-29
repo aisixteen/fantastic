@@ -1,10 +1,10 @@
 # ws_bridge selftest
 
-> scopes: kernel, ws, ssh
+> scopes: kernel, ws
 > requires: `uv sync`. The MemoryTransport spec is fully in-process
-> (no network); the WS spec needs a running `fantastic`; the
-> SSH+WS spec needs a real remote host with `fantastic` installed +
-> SSH key access.
+> (no network); the WS spec needs a running `fantastic`. (A remote over
+> ssh: tunnel it with an `exec_bridge` job or by hand, then run the WS
+> spec against the tunnel's local end — the bridge spawns nothing.)
 
 The bridge is **WS-only** (since the HTTP/REST removal). A bridge
 agent on kernel A opens a WS to kernel B's `web_ws` endpoint and
@@ -16,9 +16,10 @@ bridge agent needed** — asymmetric client/server.
 
 Streams use the same WS protocol's watch frames:
 A → B `{type:'watch', src:<target>}`, B → A
-`{type:'event', payload}`. The bridge re-emits each event on its own
-inbox so local watchers see remote streams through
-`kernel.watch(<bridge_id>, ...)`.
+`{type:'event', src, payload}`. The bridge re-emits an event (payload +
+`src`) on its own inbox ONLY when `src` is a subscribed target — nothing
+flows before `watch_remote`, nothing after `unwatch_remote` — so local
+watchers see remote streams through `kernel.watch(<bridge_id>, ...)`.
 
 ## Test 1 — MemoryTransport pair round-trip + streaming (in-process)
 
@@ -111,7 +112,7 @@ PY
 B_WS_ID=$(call_at $PORT_B kernel_state '{"type":"list_agents"}' \
   | python3 -c "import json,sys; ags=json.load(sys.stdin)['agents']; print(next(a['id'] for a in ags if a['handler_module']=='web_ws.tools'))")
 
-A_BRIDGE_ID=$(call_at $PORT_A kernel_state "{\"type\":\"create_agent\",\"handler_module\":\"ws_bridge.tools\",\"transport\":\"ws\",\"peer_id\":\"$B_WS_ID\",\"host\":\"127.0.0.1\",\"local_port\":$PORT_B}" \
+A_BRIDGE_ID=$(call_at $PORT_A kernel_state "{\"type\":\"create_agent\",\"handler_module\":\"ws_bridge.tools\",\"transport\":\"ws\",\"peer_id\":\"$B_WS_ID\",\"host\":\"127.0.0.1\",\"port\":$PORT_B}" \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 
 # Boot A's bridge — opens WS to B's web_ws.
@@ -134,59 +135,7 @@ failed (check kernel B's log + that `peer_id` matches B's web_ws
 agent's id); hang on forward → corr_id mismatch in the read_loop
 dispatch.
 
-## Test 3 — SSH+WS transport against a real remote (manual)
-
-Requires a remote host with fantastic installed and SSH key access:
-`ssh <host>` works without password.
-
-```bash
-HOST=gpu-box                    # your real host alias
-REMOTE_PORT=8888
-LOCAL_PORT=49001
-PORT_LOCAL=8888
-
-# 1. On REMOTE: start fantastic with web + web_ws persisted.
-ssh $HOST 'cd ~/fantastic_target_proj && uv run --project ~/fantastic_canvas/python fantastic >/tmp/remote-serve.log 2>&1 &'
-sleep 3
-
-# 2. On REMOTE: find the web_ws id.
-B_WS_ID=$(ssh $HOST "REMOTE_PORT=$REMOTE_PORT python3 - <<'PY'
-import asyncio, json, os, websockets
-port = os.environ['REMOTE_PORT']
-async def main():
-    async with websockets.connect(f'ws://localhost:{port}/kernel_state/ws') as ws:
-        await ws.send(json.dumps({'type':'call','target':'kernel_state','payload':{'type':'list_agents'},'id':'1'}))
-        while True:
-            m = json.loads(await ws.recv())
-            if m.get('id')=='1' and m.get('type') in ('reply','error'):
-                ws_id = next(a['id'] for a in m['data']['agents'] if a['handler_module']=='web_ws.tools')
-                print(ws_id); return
-asyncio.run(main())
-PY")
-echo "remote web_ws: $B_WS_ID"
-
-# 3. LOCAL: create a bridge with transport=ssh+ws, host, local_port,
-#    remote_port, peer_id=$B_WS_ID
-A_ID=$(call_at $PORT_LOCAL kernel_state "{\"type\":\"create_agent\",\"handler_module\":\"ws_bridge.tools\",\"transport\":\"ssh+ws\",\"host\":\"$HOST\",\"local_port\":$LOCAL_PORT,\"remote_port\":$REMOTE_PORT,\"peer_id\":\"$B_WS_ID\"}" \
-  | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-
-# 4. Boot — opens SSH tunnel + WS over it
-call_at $PORT_LOCAL $A_ID '{"type":"boot"}' | python3 -m json.tool
-# Expect: {"booted":true, "transport":"ssh+ws", "tunnel_pid":<int>}
-
-# 5. Forward a reflect
-call_at $PORT_LOCAL $A_ID '{"type":"forward","target":"kernel_state","payload":{"type":"reflect"}}' | python3 -m json.tool
-# Expect: remote kernel_state.reflect body
-```
-Expected: `tunnel_pid` non-null in boot reply; forward returns the
-remote kernel_state's reflect.
-Regression signal: `tunnel failed: …` → SSH key or host lookup
-problem (try `ssh $HOST 'echo ok'` first); `tunnel_pid: null` after
-boot → ServerAliveCountMax tripped early (network flaky); reply
-contains the remote web_ws's reflect instead of kernel_state's → peer_id
-was used as a target id, not just a WS path (that's a bug — file).
-
-## Test 4 — WS streaming (watch_remote) against a live `fantastic` (manual)
+## Test 3 — WS streaming (watch_remote) against a live `fantastic` (manual)
 
 Same setup as Test 2. After A's bridge is booted, subscribe to B's
 kernel_state inbox via `watch_remote`. Then trigger an event on B and verify
@@ -219,8 +168,8 @@ sleep 1
 call_at $PORT_B kernel_state '{"type":"reflect"}' >/dev/null
 # Or any verb that fans out a state event on B's kernel_state.
 
-# Expect: A's bridge tail shows {"type":"event","payload":{...}} frames
-# whose payload mirrors B.kernel_state's emits.
+# Expect: A's bridge tail shows {"type":"event","src":"<bridge>","payload":{...}}
+# frames whose payload mirrors B.kernel_state's emits plus `"src":"kernel_state"`.
 
 kill $TAIL_PID
 ```
@@ -235,5 +184,4 @@ the `{type:'watch'}` (look in B's log); A's read loop never re-emits
 |---|------|------|
 | 1 | MemoryTransport + streaming + auth-policy (deny_inbound + password) unit suite (20 tests, in-process) | |
 | 2 (manual) | WS transport — A.bridge → B.web_ws round-trip | |
-| 3 (manual) | SSH+WS transport against a real remote | |
-| 4 (manual) | WS streaming — watch_remote re-emit | |
+| 3 (manual) | WS streaming — watch_remote re-emit | |

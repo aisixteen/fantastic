@@ -19,7 +19,10 @@ import Foundation
 import FantasticKernelState
 import Testing
 
-func makeKernelWithAll(rootPath: URL = URL(fileURLWithPath: "")) -> Kernel {
+func makeKernelWithAll(
+    rootPath: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent(".fantastic")
+) -> Kernel {
     let registry = BundleRegistry()
     // THE ROOT IS THE LOADER, as in every real kernel: `persist_blob` /
     // `load_blob` are its verbs (C13), and the root reflect frame is its
@@ -100,7 +103,7 @@ struct BundleSmokeTests {
 
         // Wire the store (file_bridge @ .fantastic, open) — it self-persists.
         _ = await kernel.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "id": "store",
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "allow": ["."], "id": "store",
                 "root": ".fantastic", "ingress_rule": "allow_all_ingress",
             ])])[0].result
         #expect(
@@ -131,7 +134,7 @@ struct BundleSmokeTests {
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
         _ = await kernel.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "id": "fs",
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "allow": ["."], "id": "fs",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
             ])])[0].result
         // Non-UTF-8 bytes — proves the channel is raw, not text/base64.
@@ -162,7 +165,7 @@ struct BundleSmokeTests {
         _ = await kernel.send([Item("kernel_state", [
                 "type": "create_agent",
                 "parent_id": "kernel_state",
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "fs1",
                 "root": .string(tmp.path),
             ])])[0].result
@@ -182,7 +185,7 @@ struct BundleSmokeTests {
         defer { try? fm.removeItem(at: dir) }
         // Open file_bridge store — the scheduler persists through it.
         _ = await kernel.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "id": "store",
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "allow": ["."], "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the scheduler that persists through it.
                 "callable_by": ["sched": "*"],
@@ -223,7 +226,7 @@ struct BundleSmokeTests {
         let kernel = makeKernelWithAll(rootPath: dir)
         defer { try? fm.removeItem(at: dir) }
         _ = await kernel.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "id": "store",
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "allow": ["."], "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the scheduler that persists through it.
                 "callable_by": ["sched": "*"],
@@ -270,7 +273,7 @@ struct BundleSmokeTests {
         let probe = SchedProbe(capture: capture)
         kernel.bundles.register("sched_probe.tools", probe)
         _ = await kernel.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "id": "store",
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "allow": ["."], "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
             ])])[0].result
         var canCall: JSON = .object([:])
@@ -564,7 +567,7 @@ struct BundleSmokeTests {
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
         _ = await kernel2.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "id": "fs",
+                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "allow": ["."], "id": "fs",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
             ])])[0].result
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
@@ -629,7 +632,7 @@ struct BundleSmokeTests {
         _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("create_agent"),
                 "parent_id": .string("kernel_state"),
-                "handler_module": .string("file_bridge.tools"),
+                "handler_module": .string("file_bridge.tools"), "allow": ["."],
                 "id": .string("fs"), "root": .string(rel),
                 "ingress_rule": .string("allow_all_ingress"),
                 // …and the INGRESS half, on the target.
@@ -647,7 +650,7 @@ struct BundleSmokeTests {
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("ws_bridge.tools"), "id": .string("wbr"),
                 "transport": .string("ws"), "host": .string("127.0.0.1"),
-                "local_port": .integer(Int64(port)), "peer_id": .string("kernel_state"),
+                "port": .integer(Int64(port)), "peer_id": .string("kernel_state"),
             ]))])[0].result
         // `create_agent` already booted it through the kernel's fanout, so this
         // second boot is python's idempotent `{already:true, transport}`.
@@ -863,7 +866,7 @@ private func schedulerOnAStore(_ tag: String) async throws -> (Kernel, URL) {
     let kernel = makeKernelWithAll(rootPath: dir)
     var store: JSON = [
         "type": "create_agent", "parent_id": "kernel_state",
-        "handler_module": "file_bridge.tools", "id": "store",
+        "handler_module": "file_bridge.tools", "allow": ["."], "id": "store",
         "root": .string(rel), "ingress_rule": "allow_all_ingress",
     ]
     store["callable_by"] = ["sched": "*"]
@@ -1222,7 +1225,7 @@ struct SchedulerStderrTests {
             kernel, "kernel_state",
             [
                 "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": "file_bridge.tools", "id": "store",
+                "handler_module": "file_bridge.tools", "allow": ["."], "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 "callable_by": ["sched": "*"] as JSON,
             ])

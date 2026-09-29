@@ -6,12 +6,14 @@
 //! `{reason:"unauthorized"}`), and bound by a **regex command ALLOWLIST**:
 //! `allowed` on the record is a list of regexes, and `start {command, args}`
 //! refuses unless the shell-joined line fullmatches one. No per-call override,
-//! no default, no PATH fallback — an empty `allowed` runs nothing. The withdrawn
-//! `code`/`shim`/`interpreter`/`interpreters`/`argv_template` fields are refused
-//! at WRITE time (`validate_meta`) and at `start`.
+//! no default, no PATH fallback — an empty `allowed` runs nothing.
 //!
-//! It is a GENERAL-PURPOSE COMMAND runner, **not** a code runner. A program is a
-//! FILE some process (or a `write_stream`) put on disk; running it is `command` +
+//! A PTY `start` with no `command` runs the CHILD's own `$SHELL`, read from the
+//! environment the record passes down (`inherit_env` / `env`) — autodiscovery,
+//! never a default. The record's `shell` (`true` → `$SHELL`, `"login"` →
+//! `$SHELL -l`) permits exactly that line without an `allowed` entry.
+//!
+//! It is a GENERAL-PURPOSE COMMAND runner. A program is a FILE some process (or a `write_stream`) put on disk; running it is `command` +
 //! `args`, exactly like anything else — so the job table / output pump / connector
 //! relay / fd passing / task-table rows / mail contract are all language-blind.
 //!
@@ -37,7 +39,7 @@
 //! | verb       | args                                                            | reply                                          |
 //! |------------|-----------------------------------------------------------------|------------------------------------------------|
 //! | `reflect`  | _none_ (UNGATED — discovery works on a sealed leg)              | identity + allowlist + posture                 |
-//! | `start`    | `command:str` (req), `args:list[str]?`, `env:dict?`, `cwd?`     | `{job_id, status:"running"}` at once           |
+//! | `start`    | `command:str` (req; PTY: absent = child `$SHELL`), `args?`, `pty?` | `{job_id, status:"running", pty}` at once   |
 //! | `status`   | `job_id:str?`                                                   | one job with its output, or all of this agent's |
 //! | `clear`    | `job_id:str?`                                                   | drops finished rows of this agent              |
 //! | `interrupt`| `job_id:str?`                                                   | `{interrupted: int}` (SIGINT to in-flight)     |
@@ -53,7 +55,8 @@ use async_trait::async_trait;
 use fantastic_bundle::{io_error_str, py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{
-    bad, missing, refusal, refusal_hint, with, NOT_FOUND, TRANSPORT_ERROR, UNAUTHORIZED,
+    bad, missing, refusal, refusal_hint, with, MISSING_ARG, NOT_FOUND, TRANSPORT_ERROR,
+    UNAUTHORIZED,
 };
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
@@ -175,6 +178,71 @@ fn shlex_quote(s: &str) -> String {
     }
 }
 
+// ── the child's own shell (py `SHELL_VAR` / `_shell_tail` / `_shell_permits`) ──
+//
+// A PTY `start` that names no `command` runs the CHILD's `$SHELL`: a client with
+// no environment of its own (a browser page) cannot name the shell, but the
+// record can — `inherit_env`/`env` decide what the child's environment holds,
+// and `SHELL` is read from THAT, never from the kernel's own env unless it was
+// passed down. One read, no chain: a child env without `SHELL` is refused loud.
+//
+// The ALLOWLIST still decides what may run. A record writer who does not know
+// the shell's path cannot write an exact `allowed` line for it, so the record's
+// `shell` field permits the resolved shell line itself — and nothing wider:
+//
+//   shell: true     → exactly [$SHELL]        (the bare shell)
+//   shell: "login"  → exactly [$SHELL, "-l"]  (a login shell)
+//
+// It is a LINE, not a pattern: any other argv, and every pipe job, still has to
+// fullmatch `allowed`. Who may set `shell` is who may write the record — the
+// same authority that writes `allowed`.
+
+/// The child env var a PTY `start` without `command` runs.
+pub const SHELL_VAR: &str = "SHELL";
+
+/// The argv the record's `shell` permits AFTER `$SHELL`, or `None` when the record
+/// permits no shell line. Only JSON `true` and the string `"login"` count — a `1`
+/// is not `true` (python compares `True` by identity for the same reason).
+pub fn shell_tail(meta: &Map<String, Value>) -> Option<Vec<String>> {
+    match meta.get("shell") {
+        Some(Value::Bool(true)) => Some(vec![]),
+        Some(Value::String(s)) if s == "login" => Some(vec!["-l".to_string()]),
+        _ => None,
+    }
+}
+
+/// One var of the child's environment as the CHILD will see it. python's
+/// `_child_env` stringifies every `env` extra (`str(v)`), so a non-string value is
+/// read the way python prints it.
+fn child_var(env: &Map<String, Value>, name: &str) -> Option<String> {
+    env.get(name).map(|v| match v {
+        Value::String(s) => s.clone(),
+        other => py_str(other),
+    })
+}
+
+/// True when `argv` is exactly the shell line the record's `shell` permits: a PTY
+/// job whose argv is the child's own `$SHELL` plus the tail its `shell` value
+/// names. Judged on the RESOLVED argv, so it holds whether the caller named the
+/// shell or left `command` out.
+fn shell_permits(
+    meta: &Map<String, Value>,
+    env: &Map<String, Value>,
+    argv: &[String],
+    pty: bool,
+) -> bool {
+    let (Some(tail), Some(shell)) = (shell_tail(meta), child_var(env, SHELL_VAR)) else {
+        return false;
+    };
+    if !pty || shell.is_empty() {
+        return false;
+    }
+    let mut want = Vec::with_capacity(tail.len() + 1);
+    want.push(shell);
+    want.extend(tail);
+    argv == want.as_slice()
+}
+
 // ── bundle impl ─────────────────────────────────────────────────────
 
 /// The exec_bridge bundle.
@@ -191,8 +259,9 @@ impl Bundle for ExecBridgeBundle {
     }
 
     /// Refuse a write this bundle cannot honour, at the WRITE, next to the typo
-    /// (py-canonical `validate_meta`). Rejects the withdrawn code-runner fields and
-    /// validates that `allowed` is a non-empty list of compilable regexes.
+    /// (py-canonical `validate_meta`): the ingress posture, the record's `cwd` /
+    /// `env` / `inherit_env` shapes, `shell` (true / false / "login"), and
+    /// `allowed` as a non-empty list of compilable regexes.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
@@ -229,19 +298,41 @@ impl Bundle for ExecBridgeBundle {
                 ));
             }
         }
-        // The withdrawn code-runner fields are refused at WRITE time. This is a
-        // GENERAL-PURPOSE command runner; gate it with `allowed`.
-        for gone in [
-            "code",
-            "shim",
-            "interpreter",
-            "interpreters",
-            "argv_template",
-        ] {
-            if meta.get(gone).is_some_and(|v| !v.is_null()) {
+        // WHERE and WITH WHAT a command runs is the record's — shaped at the write.
+        if let Some(c) = meta.get("cwd").filter(|v| !v.is_null()) {
+            if !c.as_str().is_some_and(|s| !s.is_empty()) {
+                return Some("cwd must be a non-empty directory path".to_string());
+            }
+        }
+        if let Some(e) = meta.get("env").filter(|v| !v.is_null()) {
+            let ok = e.as_object().is_some_and(|m| {
+                m.values()
+                    .all(|v| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_)))
+            });
+            if !ok {
+                return Some("env must be a map of NAME -> value".to_string());
+            }
+        }
+        if let Some(n) = meta.get("inherit_env").filter(|v| !v.is_null()) {
+            let ok = n
+                .as_array()
+                .is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())));
+            if !ok {
+                return Some(
+                    r#"inherit_env must be a list of env var names (["*"] = all)"#.to_string(),
+                );
+            }
+        }
+        // `shell` is a CLOSED set — each legal value names ONE exact line. A JSON
+        // `1` is refused: python checks `isinstance(v, bool)` first so a bare `1`
+        // (equal to True there) can never read as permission.
+        if let Some(v) = meta.get("shell").filter(|v| !v.is_null()) {
+            let ok = matches!(v, Value::Bool(_)) || v.as_str() == Some("login");
+            if !ok {
                 return Some(format!(
-                    "exec_bridge: `{gone}` is not a field — this is a general-purpose \
-                     COMMAND runner; gate it with `allowed=[<regex>, ...]`"
+                    "shell={} is not a shell permission — legal values: true \
+                     (the child's $SHELL, bare), \"login\" ($SHELL -l), false (none)",
+                    py_repr_value(v)
                 ));
             }
         }
@@ -295,7 +386,17 @@ impl Bundle for ExecBridgeBundle {
         // such key, so it is MAIL like any other unowned type.
         let owned = matches!(
             verb,
-            "start" | "boot" | "status" | "clear" | "interrupt" | "stop"
+            "start"
+                | "boot"
+                | "status"
+                | "clear"
+                | "interrupt"
+                | "stop"
+                | "write"
+                | "resize"
+                | "ack"
+                | "output"
+                | "paste_image"
         );
         if owned {
             let meta = snapshot_meta(agent_id, kernel);
@@ -311,6 +412,12 @@ impl Bundle for ExecBridgeBundle {
             "clear" => clear_reply(agent_id, payload),
             "interrupt" => interrupt_reply(agent_id, payload),
             "stop" => stop_reply(agent_id, payload),
+            "write" => pty::write_reply(agent_id, payload).await,
+            "resize" => pty::resize_reply(agent_id, payload),
+            "ack" => pty::ack_reply(agent_id, payload),
+            "output" => pty::output_reply(agent_id, payload),
+            // `data` is bytes: on the text channel there is none to paste.
+            "paste_image" => pty::paste_image_text(agent_id, payload),
             // The reference wire client SOURCE — a model pastes it at the top of
             // its program instead of re-deriving the socket framing (measured
             // 2026-09-01, E30 subai:rust: ten messages lost to int(fd)/buffering/
@@ -349,6 +456,28 @@ impl Bundle for ExecBridgeBundle {
         Ok(Some(reply))
     }
 
+    /// The BINARY channel: `paste_image`'s `data` IS the blob. Every other verb
+    /// takes the text path.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        blob: Vec<u8>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+        if header.get("type").and_then(Value::as_str) == Some("paste_image") {
+            let meta = snapshot_meta(agent_id, kernel);
+            if let Some(denied) = gate(&meta, agent_id, "paste_image") {
+                return Ok((Some(denied), None));
+            }
+            return Ok((
+                Some(pty::paste_image_reply(agent_id, &header, &blob).await),
+                None,
+            ));
+        }
+        Ok((self.handle(agent_id, &header, kernel).await?, None))
+    }
+
     async fn on_delete(
         &self,
         agent_id: &AgentId,
@@ -362,6 +491,14 @@ impl Bundle for ExecBridgeBundle {
             }
         }
         Ok(())
+    }
+    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        self.on_delete(agent_id, kernel).await
     }
 
     /// A task of this agent is being cancelled — SIGKILL its subprocess FIRST.
@@ -454,12 +591,8 @@ fn snapshot_meta(agent_id: &AgentId, kernel: &Kernel) -> Map<String, Value> {
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
-    // py `rec.get("cwd") or "<process default>"`: TRUTHINESS over the raw value, so
-    // a non-string cwd is reported as written rather than silently dropped.
-    let cwd_val = match meta.get("cwd").filter(|v| py_truthy(v)) {
-        Some(v) => v.clone(),
-        None => json!("<process default>"),
-    };
+    // py `rec.get("cwd")` — the record's, reported as written; null when unset.
+    let cwd_val = meta.get("cwd").cloned().unwrap_or(Value::Null);
     // Liveness = the OS process has not exited — ONE definition (`jobs::alive`).
     let running = jobs::jobs()
         .values()
@@ -471,26 +604,38 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // model can see what it may run without guessing.
         "sentence": "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd.",
         "cwd": cwd_val,
-        // THE GATE, advertised: a caller must see what it may run.
+        // THE GATE, advertised: a caller must see what it may run, where, and with
+        // which of the kernel's env vars.
         "allowed": allowed_patterns(&meta),
+        "inherit_env": meta.get("inherit_env").cloned().unwrap_or_else(|| json!([])),
+        // The shell line the record permits without an `allowed` entry: false
+        // (none), true ($SHELL bare) or "login" ($SHELL -l). py `rec.get("shell")
+        // or False` — any falsy value reads as false.
+        "shell": meta.get("shell").filter(|v| py_truthy(v)).cloned().unwrap_or(json!(false)),
         "running": running,
         // py `{n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()}`
         // — the FIRST LINE of each verb's docstring, in `VERBS` order. Several are
         // truncated mid-sentence; that is the python text, not an abbreviation.
         "verbs": {
-            "start": "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes.",
+            "start": "args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
             "status": "args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}.",
-            "stop": "args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs.",
+            "stop": "args: job_id:str? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.",
             "interrupt": "args: job_id:str? — SIGINT one job or ALL of this agent's running jobs.",
             "clear": "args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM",
+            "write": "args: job_id:str (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}.",
+            "resize": "args: job_id:str (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
+            "ack": "args: job_id:str (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}.",
+            "output": "args: job_id:str (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}.",
+            "paste_image": "args: job_id:str (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}.",
             "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
             "reflect": "Identity + running job count + auth posture. No args.",
             "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the record.",
         },
         "emits": {
-            "job_started": "{type:'job_started', job_id}",
+            "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
             "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
-            "job_done": "{type:'job_done', job_id, exit_code, ok, stdout, stderr}",
+            "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
+            "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
         },
         "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
         "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
@@ -511,9 +656,14 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 }
 
 pub mod jobs;
+pub mod pty;
 pub mod relay;
 pub mod spawn;
 
+#[cfg(test)]
+mod pty_tests;
+#[cfg(test)]
+mod shell_tests;
 #[cfg(test)]
 mod tests;
 
@@ -532,10 +682,13 @@ fn signal_jobs(agent_id: &AgentId, payload: &Value, sig: nix::sys::signal::Signa
         if !jobs::alive(j) {
             continue; // already gone — never pretend
         }
-        if sig == nix::sys::signal::Signal::SIGKILL {
+        let signalled = if sig == nix::sys::signal::Signal::SIGKILL {
             j.status = "stopping".to_string();
-        }
-        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(j.pid as i32), sig).is_ok() {
+            jobs::kill(j)
+        } else {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(j.pid as i32), sig).is_ok()
+        };
+        if signalled {
             n += 1;
         }
     }
@@ -590,26 +743,29 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
 
 /// `start` — spawn the COMMAND in the BACKGROUND and return at once.
 ///
-/// args: `command:str` (req), `args:list[str]?` (argv, default `[]`), `env:dict?`
-/// (extra env vars), `cwd:str?`. The FULL line (command + args, shell-joined) must
-/// fullmatch one of the record's `allowed` regexes or the start is refused naming
-/// the patterns. A `code` field is refused explicitly — this runs COMMANDS, not code.
+/// args: `command:str` (req — on a PTY start, absent = the child's `$SHELL`),
+/// `args:list[str]?` (argv, default `[]`), `pty:{cols,rows}?` (run it on a
+/// terminal). The FULL line (command + args, shell-joined) must fullmatch one of
+/// the record's `allowed` regexes — or be the exact shell line the record's
+/// `shell` permits — or the start is refused naming the patterns. A pipe job
+/// always names its command. Everything else is the RECORD's, never the call's:
+/// `cwd` (required), `env` + `inherit_env` (the child's environment).
 async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
-    // EVERY refusal on this verb carries a CODE. Sibling argument errors used to
-    // split — `args`/`env` answered `bad_arg` while `command`/`code`/the policy
-    // wall answered a bare `{error}` — so nothing could tell a typo from a policy
-    // refusal without matching prose.
-    if payload.get("code").is_some_and(|v| !v.is_null()) {
-        return bad("start", "code", "absent — run a command instead");
+    // EVERY refusal on this verb carries a CODE, so nothing has to tell a typo
+    // from a policy refusal by matching prose.
+    // WHERE and WITH WHAT a command runs are the OPERATOR's: a per-call `env`
+    // (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted line actually
+    // ran (audit 2026-09-28).
+    for gone in ["env", "cwd"] {
+        if payload.get(gone).is_some_and(|v| !v.is_null()) {
+            return bad(
+                "start",
+                gone,
+                &format!("absent — `{gone}` is the record's (update_agent {agent_id} {gone}=…)"),
+            );
+        }
     }
-    // py `not isinstance(command, str) or not command.strip()`: a string of nothing
-    // but WHITESPACE is missing, and `str.strip()` strips every python space
-    // character, not just ASCII.
-    let command = match payload.get("command").and_then(Value::as_str) {
-        Some(c) if c.chars().any(|ch| !fantastic_bundle::is_space(ch)) => c.to_string(),
-        _ => return missing("start", "command"),
-    };
     // `args` — a list of scalars, each stringified into argv. python's
     // `isinstance(a, (str, int, float))` ACCEPTS a bool (a bool IS an int there), and
     // `str(True)` is `True`; an explicit `null` is not a list and refuses.
@@ -627,49 +783,142 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         }
         _ => return bad("start", "args", "a list of strings"),
     };
+    let dims = match payload.get("pty").filter(|v| !v.is_null()) {
+        None => None,
+        Some(raw) => match pty::dims("start", raw) {
+            Ok(d) => Some(d),
+            Err(e) => return e,
+        },
+    };
+    // The child's WHOLE environment, from the record — built before the command
+    // is resolved, because an absent `command` on a PTY start is read from it.
+    let mut env = child_env(&meta);
+    // py `payload.get("command")`: an absent key and an explicit `null` are the
+    // same "no command".
+    let named = payload.get("command").filter(|v| !v.is_null());
+    let command = match named {
+        // AUTODISCOVERY, not a default: the shell is whatever the record passed
+        // down to the child as SHELL. No chain (zsh → bash → sh) behind it — a
+        // child env without one is refused, naming where it comes from.
+        None if dims.is_some() => match child_var(&env, SHELL_VAR).filter(|s| !s.is_empty()) {
+            Some(shell) => Value::String(shell),
+            None => {
+                let mut v = refusal_hint(
+                    MISSING_ARG,
+                    format!(
+                        "exec_bridge: start named no command and the child's environment \
+                         has no {SHELL_VAR} to run — a PTY start without `command` runs \
+                         the shell the record passes down, never a guessed one"
+                    ),
+                    format!(
+                        "update_agent {agent_id} inherit_env=[\"{SHELL_VAR}\"] \
+                         (or env={{\"{SHELL_VAR}\": …}}), or name `command`"
+                    ),
+                );
+                with(&mut v, "arg", json!(SHELL_VAR));
+                return v;
+            }
+        },
+        None => Value::Null,
+        Some(v) => v.clone(),
+    };
+    // py `not isinstance(command, str) or not command.strip()`: a string of nothing
+    // but WHITESPACE is missing, and `str.strip()` strips every python space
+    // character, not just ASCII. A pipe job always names its command; so does a
+    // PTY start that passed one explicitly (an empty string is a typo, not "use
+    // the shell").
+    let command = match command.as_str() {
+        Some(c) if c.chars().any(|ch| !fantastic_bundle::is_space(ch)) => c.to_string(),
+        _ => return missing("start", "command"),
+    };
     // The FULL argv, shell-joined, matched against the allowlist BEFORE spawning.
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(command.clone());
     argv.extend(args.iter().cloned());
     let line = shlex_join(&argv);
-    if let Some(why) = command_permitted(&meta, &line) {
+    // Two ways a line is permitted, both written on the RECORD: the shell line
+    // its `shell` field names, or a fullmatch against `allowed`. Checked in that
+    // order only because the first is an exact comparison; neither widens the
+    // other.
+    let why = if shell_permits(&meta, &env, &argv, dims.is_some()) {
+        None
+    } else {
+        command_permitted(&meta, &line)
+    };
+    if let Some(mut why) = why {
         // An AUTHORIZATION denial, not a bad argument: the command line is
         // well-formed and the LEG refused it. Same code the ingress gate answers,
         // so one branch covers "the operator has not opened this".
+        if let Some(tail) = shell_tail(&meta) {
+            // Say what `shell` DOES permit, so a caller that passed extra args (or
+            // a pipe job) learns why the shell permission did not cover it. The
+            // value is JSON (`true`/`"login"`), the wire's own spelling, so every
+            // runtime prints the same bytes; the line is python's repr of the
+            // shell-joined argv, `'$SHELL'` when the child has none.
+            let shell = child_var(&env, SHELL_VAR)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("${SHELL_VAR}"));
+            let mut permitted = vec![shell];
+            permitted.extend(tail);
+            why.push_str(&format!(
+                " (`shell={}` permits only the PTY line {})",
+                serde_json::to_string(meta.get("shell").unwrap_or(&Value::Null))
+                    .unwrap_or_default(),
+                py_repr(&shlex_join(&permitted))
+            ));
+        }
         return refusal_hint(
             UNAUTHORIZED,
             why,
             "the leg's `allowed` policy decides; an operator may widen it",
         );
     }
-    // The per-call `env` block — py `payload.get("env") or {}`, so ANY falsy value
-    // (absent, null, `{}`, `0`, `""`, `[]`) is an empty block and only a truthy
-    // non-dict refuses. Values are str/int/float/bool, stringified by `str()`.
-    let env_extra: Map<String, Value> = match payload.get("env").filter(|v| py_truthy(v)) {
-        None => Map::new(),
-        Some(Value::Object(m)) => {
-            for v in m.values() {
-                if !matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_)) {
-                    return bad("start", "env", "a dict of str -> str");
-                }
-            }
-            m.clone()
-        }
-        Some(_) => return bad("start", "env", "a dict of str -> str"),
-    };
-    // py `payload.get("cwd") or rec.get("cwd") or None` — truthiness, and the raw
-    // value is what the job row reports; `proc.spawn_argv` then uses it only when it
-    // is a non-empty STRING.
-    let cwd = payload
+    let Some(cwd) = meta
         .get("cwd")
-        .filter(|v| py_truthy(v))
-        .or_else(|| meta.get("cwd").filter(|v| py_truthy(v)))
-        .cloned()
-        .unwrap_or(Value::Null);
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+    else {
+        let mut v = refusal_hint(
+            MISSING_ARG,
+            "exec_bridge: this leg names no `cwd` — where a command runs is the operator's \
+             decision, never guessed",
+            format!("update_agent {agent_id} cwd=<dir>"),
+        );
+        with(&mut v, "arg", json!("cwd"));
+        return v;
+    };
 
-    let spawned = match crate::spawn::spawn_job(&argv, agent_id.as_str(), &env_extra, cwd.as_str())
-    {
+    let spawned = match dims {
+        None => crate::spawn::spawn_job(&argv, agent_id.as_str(), &env, &cwd).map(|s| (s, None)),
+        Some((cols, rows)) => {
+            env.insert("TERM".to_string(), json!("xterm-256color"));
+            crate::spawn::spawn_pty(&argv, agent_id.as_str(), &env, &cwd, cols, rows).and_then(
+                |(s, master)| {
+                    set_nonblocking(&master)?;
+                    Ok((s, Some(pty::Pty::new(master, cols, rows)?)))
+                },
+            )
+        }
+    };
+    let (spawned, pty_state) = match spawned {
         Ok(s) => s,
+        Err(e) if e.get_ref().is_some_and(|r| r.is::<crate::spawn::NoPath>()) => {
+            let mut v = refusal_hint(
+                MISSING_ARG,
+                format!(
+                    "exec_bridge: {} is a bare command and this leg gives the child no PATH \
+                     to find it in — the kernel's own PATH is not the child's",
+                    py_repr(&command)
+                ),
+                format!(
+                    "update_agent {agent_id} inherit_env=[\"PATH\"] (or env={{\"PATH\": …}}), \
+                     or start an absolute path"
+                ),
+            );
+            with(&mut v, "arg", json!("PATH"));
+            return v;
+        }
         Err(e) => {
             // py `f"exec_bridge: spawn failed: {e}"` over the OSError
             // `create_subprocess_exec` raises — `[Errno 2] No such file or
@@ -725,9 +974,17 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     let owner = agent_id.clone();
     let jid = job_id.clone();
     let k = Arc::clone(kernel);
-    let task = kernel.spawn_task(agent_id, "start", async move {
-        jobs::pump(owner, jid, child, k).await;
-    });
+    let task = match &pty_state {
+        None => kernel.spawn_task(agent_id, "start", async move {
+            jobs::pump(owner, jid, child, k).await;
+        }),
+        Some(p) => {
+            let p = Arc::clone(p);
+            kernel.spawn_task(agent_id, "start", async move {
+                pty::pump(owner, jid, child, p, k).await;
+            })
+        }
+    };
     jobs::jobs().insert(
         job_id.clone(),
         jobs::Job {
@@ -737,9 +994,9 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             ctrl: ctrl_task,
             stop,
             // WHAT ran — so a caller can re-issue this job verbatim.
-            command,
-            args,
-            cwd,
+            command: command.clone(),
+            args: args.clone(),
+            cwd: json!(cwd),
             status: "running".to_string(),
             started_at: now_secs(),
             exit_code: None,
@@ -747,12 +1004,64 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             last_line: String::new(),
             stdout: String::new(),
             stderr: String::new(),
+            pty: pty_state.clone(),
         },
     );
+    // The RESOLVED invocation rides the announcement: a client that let the
+    // kernel pick the shell learns which one ran, and can re-issue it verbatim.
     kernel
-        .emit(agent_id, json!({"type": "job_started", "job_id": job_id}))
+        .emit(
+            agent_id,
+            json!({"type": "job_started", "job_id": job_id, "command": command, "args": args}),
+        )
         .await;
-    json!({"job_id": job_id, "status": "running"})
+    json!({"job_id": job_id, "status": "running", "pty": pty_state.is_some()})
+}
+
+/// The child's WHOLE environment, from the record (python `_child_env`): the
+/// kernel env vars named in `inherit_env` (nothing by default; `["*"]` = every one —
+/// the operator's wildcard), then the operator's `env` extras. Nothing else leaks
+/// in — the kernel's `.env` keys reach a child only when the operator names them.
+fn child_env(meta: &Map<String, Value>) -> Map<String, Value> {
+    let names: Vec<String> = meta
+        .get("inherit_env")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut env = Map::new();
+    if names.iter().any(|n| n == "*") {
+        for (k, v) in std::env::vars() {
+            env.insert(k, json!(v));
+        }
+    } else {
+        for n in &names {
+            if let Ok(v) = std::env::var(n) {
+                env.insert(n.clone(), json!(v));
+            }
+        }
+    }
+    if let Some(extra) = meta.get("env").and_then(Value::as_object) {
+        for (k, v) in extra {
+            env.insert(k.clone(), v.clone());
+        }
+    }
+    env
+}
+
+fn set_nonblocking(fd: &std::os::fd::OwnedFd) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: fcntl on an fd we own.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags == -1
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// `boot` — a NO-OP returning null. Nothing auto-restarts: a command is started by a

@@ -17,23 +17,20 @@ zip and revive guide).
 | `src/transport/` | the WS bridge to the host (`WsBridge`) and its frame codec |
 | `src/bundles/loader/proxy_loader.ts` | persists this kernel's tree THROUGH the host's loader, and hydrates it back |
 | `src/bundles/memory/ram_store.ts` | the memory store (`kernel_start` needs the root to name one) |
-| `src/bundles/ai/` | the AI backend — an LLM agent that runs in this kernel (raw `<call>` tag grammar, memory-store conversation, compaction) |
 | `src/bundles/host.ts` | `Host` — a view's call/watch surface over the kernel |
 | `tools/esbuild/` | the vendored, sha256-pinned esbuild that `scripts/pack.sh` packs an app's page with |
 
 ## The public API (`src/index.ts`)
 
-`Kernel`, `Agent`, `WsBridge`, `ProxyLoader`, `Host`, `registerRamStore`,
-`registerAIBackend` / `makeAIBackend` / `OpenAIProvider`, `str`, the types an app
-needs (`Json`, `Payload`, `Handler`, `AgentRecord`, `Bridge`, `Item`, `Outcome`,
-`AIRecord`, …) and:
+`Kernel`, `Agent`, `WsBridge`, `ProxyLoader`, `Host`, `registerRamStore`, `str`,
+the types an app needs (`Json`, `Payload`, `Handler`, `AgentRecord`, `Bridge`,
+`Item`, `Outcome`, …) and:
 
 ```ts
 boot({ origin, loader, register, seed?, makeSocket? }) → Promise<{ kernel, loader }>
 ```
 
-1. creates the `Kernel` and registers the library's own bundles (the memory store;
-   the AI backend only if the app registers it — `registerAIBackend`),
+1. creates the `Kernel` and registers the library's own bundle (the memory store),
 2. calls `register(kernel)` — the app registers ITS bundles and readmes
    (`kernel.registerBundle`, `kernel.setBundleReadme`) before anything loads,
 3. dials the host with a `WsBridge` whose control endpoint is `loader`, and names
@@ -87,7 +84,7 @@ by `tests/contract_corpus.test.ts` and `tests/c21_conformance.test.ts`.
 ## Host contract (weak binding)
 
 - Every agent answers `{type:"reflect"}` — the universal discovery verb.
-- This kernel federates to a host **loader** alias over the WS bridge and persists
+- This kernel federates to a host **loader** (by id) over the WS bridge and persists
   every local change back through it. No per-page session id.
 - Direction is **this kernel → host**: the host never references it. Same rule as
   `ws_bridge` — addressed by URL + id only, no shared types.

@@ -123,32 +123,21 @@ class _FakeProvider:
 
 
 @pytest.fixture
-async def wired(seeded_kernel, store_agent):
+async def wired(seeded_kernel):
     _ASKED.clear()
     seeded_kernel.create(
         "c1_user.tools",
         id="c1_user",
         callable_by={"c1_ai": "*"},
     )
+    # the AI's file surface: it edits with its OWN grants on the bridge
     seeded_kernel.create(
-        "text_file.tools",
+        "file_bridge.tools",
         id="c1_store",
-        target_id=store_agent,
-        can_call={store_agent: "*"},
+        root="c1",
+        allow=["."],
+        ingress_rule="allow_all_ingress",
         callable_by={"c1_ai": "*"},
-    )
-    # the surface must ACCEPT the editor (two-sided gate)
-    await seeded_kernel.send(
-        [
-            {
-                "target": seeded_kernel.id,
-                "payload": {
-                    "type": "update_agent",
-                    "id": store_agent,
-                    "callable_by": {"c1_store": "*"},
-                },
-            }
-        ]
     )
     seeded_kernel.create(
         "ollama_backend.tools",

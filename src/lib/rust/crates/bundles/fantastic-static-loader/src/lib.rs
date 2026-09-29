@@ -47,10 +47,11 @@ fn manifest_meta(agent: &Agent) -> Value {
 }
 
 /// Read + parse the manifest into the declared agent specs. Cold read, clamped
-/// to cwd by the running-dir law — the same one-time bring-up path as the root
-/// loader's tree read (before any file_bridge agent can exist), and through the
-/// SAME disk surface: `fantastic_file::fs`, as python imports `file_bridge.fs`.
-fn load_manifest(agent: &Agent) -> Result<Vec<Value>, String> {
+/// to the kernel's running dir `base` ([`Kernel::workdir`]) — the same one-time
+/// bring-up path as the root loader's tree read (before any file_bridge agent
+/// can exist), and through the SAME disk surface: `fantastic_file::fs`, as
+/// python imports `file_bridge.fs`.
+fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, String> {
     let raw = manifest_meta(agent);
     let path = match raw.as_str() {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -61,8 +62,7 @@ fn load_manifest(agent: &Agent) -> Result<Vec<Value>, String> {
             ))
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let text = fs::read_text(&cwd, &path).map_err(|e| {
+    let text = fs::read_text(base, &path).map_err(|e| {
         format!(
             "static_loader: cannot read manifest {}: {e}",
             py_repr(&path)
@@ -94,7 +94,10 @@ fn load_manifest(agent: &Agent) -> Result<Vec<Value>, String> {
 }
 
 async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
-    let agents = match load_manifest(agent) {
+    let agents = match kernel
+        .workdir()
+        .and_then(|base| load_manifest(agent, &base))
+    {
         Ok(a) => a,
         Err(e) => return json!({ "error": e, "booted": false }),
     };
@@ -278,35 +281,24 @@ impl Bundle for StaticLoaderBundle {
         "static_loader"
     }
 
-    /// Refuse a manifest that is absent or unreadable at WRITE time, so a broken
-    /// roster never becomes a booting record. Merged view (record + patch): a
-    /// record may exist without a manifest yet — `boot` reports that — but a
-    /// manifest that is NAMED must be readable now.
+    /// The manifest's SHAPE at write time — a NAMED manifest must be a non-empty
+    /// path string. Merged view (record + patch): a record may exist without a
+    /// manifest yet. Whether the file is readable is `boot`'s question: it reads
+    /// through `Kernel::workdir`, which a write-time check is never handed.
     fn validate_meta(
         &self,
         meta: &serde_json::Map<String, Value>,
         record: &serde_json::Map<String, Value>,
     ) -> Option<String> {
-        let mut merged = record.clone();
-        for (k, v) in meta {
-            merged.insert(k.clone(), v.clone());
+        let raw = meta
+            .get(MANIFEST_FIELD)
+            .or_else(|| record.get(MANIFEST_FIELD))?;
+        match raw.as_str() {
+            Some(p) if !p.is_empty() => None,
+            _ => Some(format!(
+                "static_loader: {MANIFEST_FIELD} must be a non-empty path string"
+            )),
         }
-        let raw = merged.get(MANIFEST_FIELD)?;
-        let path = match raw.as_str() {
-            Some(p) if !p.is_empty() => p,
-            _ => {
-                return Some(format!(
-                    "static_loader: {MANIFEST_FIELD} must be a non-empty path string"
-                ))
-            }
-        };
-        let cwd = std::env::current_dir().unwrap_or_default();
-        fs::read_text(&cwd, path).err().map(|e| {
-            format!(
-                "static_loader: manifest {} is not readable: {e}",
-                py_repr(path)
-            )
-        })
     }
 
     fn readme(&self) -> Option<&'static str> {

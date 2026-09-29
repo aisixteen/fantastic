@@ -24,7 +24,7 @@ directory, and no capture reaches a real provider. Run it at every landing point
 | `diff.py` | `self` \| `port` \| `status` \| `check-proofs` \| `rulecheck` |
 | `stubs/` | `anthropic_sse.py`, `openai_chat.py` (nim + llamacpp), `ollama_chat.py`, `ws_peer.py`, `relay.py` |
 | `families/` | `tree`, `store`, `wire`, `cli`, `ctx`, `bundle_verbs`, `kernel_verbs`, `bridges`, `ai_paths`, `providers` |
-| `rules.yaml` | the normalisation rules N1–N19, each with a `why` and the items it must not hide. `diff.py rulecheck` is their own test — 33 cases, and it must stay all-green |
+| `rules.yaml` | the normalisation rules N1–N19, each with a `why` and the items it must not hide. `diff.py rulecheck` is their own test — 35 cases, and it must stay all-green |
 | `residuals.yaml` | known differences, each with an owner decision and a state |
 | `proofs.yaml` | plan item id → the selector or unit twin that proves it |
 | `landed.yaml` | which items have landed per runtime — an entry makes a diff line a REGRESSION |

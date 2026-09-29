@@ -6,7 +6,7 @@ config: namespacing.yaml
 name: namespacing
 description: >
   TWO wings, symmetric and unwired to each other. Each is a static_loader owning
-  one memory (a text_file editor) and one file space (file_bridge), and the two wings
+  one memory (a notes store) and one file space (file_bridge), and the two wings
   declare the SAME shapes under DIFFERENT parents — which is the point: a child's
   state has to be told apart by WHERE it sits, not by what it is called. The
   memories share a store (the one `.fantastic` provider, declared in wing_a's roster)

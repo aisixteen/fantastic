@@ -135,7 +135,7 @@ struct KernelStateTests {
                 AgentId("kernel"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("store"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("store"),
                     "root": .string(storeRoot.path),
                 ]))
         ])
@@ -240,7 +240,7 @@ struct KernelStateTests {
                 AgentId("kernel"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("store"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("store"),
                     "root": .string(storeRoot.path),
                 ]))
         ])

@@ -14,8 +14,7 @@
 //!   catalog / its names, paged with `bundles_next`.
 //! - `readme=true` — attach the agent's readme.md (string or null).
 //!
-//! There is NO `primer`: transport/wire docs moved into the root readme
-//! (`reflect readme=true`); `available_bundles` is now the `bundles` flag.
+//! Transport/wire docs live in the root readme (`reflect readme=true`).
 
 use crate::agent::Agent;
 #[cfg(test)]
@@ -601,14 +600,15 @@ pub fn tree_node(target: &Agent) -> Value {
     }
     // Wiring/posture meta surfaced inline (mirrors py _POSTURE_KEYS in kernel/_agent.py):
     // a client reads the IO landscape — which legs are open vs sealed-by-default, what a
-    // consumer persists through — from ONE root reflect. Same keys + order across runtimes.
+    // bridge exposes — from ONE root reflect. Same keys + order across runtimes.
     if let Ok(meta) = target.meta.read() {
         for k in [
             "ingress_rule",
             "egress_rule",
             "auth",
             "root",
-            "file_bridge_id",
+            // what a file_bridge exposes under its root (audit d7)
+            "allow",
             // THE CALL GATE, made readable. Without these an agent cannot read
             // its own authority — only discover it by trying, which cost whole
             // passes of empirical probing every run. They also make the

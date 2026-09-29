@@ -4,7 +4,7 @@
 // Mirrors the `match obj.get("type")` arm of Rust
 // `fantastic-anthropic-backend::consume_sse`. It lives out here, apart from the
 // HTTP/retry plumbing, because that is the only way it is testable under "unit
-// tests only" — the same reason `decodeNimSSELine` does.
+// tests only" — the same reason `decodeOpenAISSELine` does.
 //
 // Anthropic frames each event as an `event:` line plus a `data:` JSON line, and
 // the JSON carries its own `type`, so dispatch is on that and `event:` lines are
@@ -46,7 +46,7 @@ struct AnthropicStreamState {
 ///
 /// BOTH CHANNELS ARE READ. A reasoning model streams its thought as
 /// `thinking_delta` and its answer as `text_delta`; reading only the latter
-/// silently drops whole turns — the same failure `decodeNimSSELine` documents
+/// silently drops whole turns — the same failure `decodeOpenAISSELine` documents
 /// for `reasoning_content`. The thought is WRAPPED once per turn in
 /// `<think>…</think>`: parsed for tool calls, stripped before the turn persists.
 func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)

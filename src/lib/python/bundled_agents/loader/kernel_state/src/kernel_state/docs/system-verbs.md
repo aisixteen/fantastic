@@ -26,8 +26,8 @@ and finished sixteen messages having created nothing.
   authority. Name `kernel_state` for a top-level agent. There is no default
   parent: placement is always stated, never inferred from who sent the call.
   `id` is minted as `{bundle}_{hex6}` when omitted. Everything else becomes the
-  record's meta — that is how a bundle is configured (`file_bridge_id`, `mode`,
-  `root`, `ingress_rule`, …). Returns the new record.
+  record's meta — that is how a bundle is configured (`mode`, `root`, `allow`,
+  `ingress_rule`, …). Returns the new record.
 
 `update_agent` — args: `id:str`, `**meta`
 : Patch a record's meta. **Every field you name is REPLACED, not merged** (a field

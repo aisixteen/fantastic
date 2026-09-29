@@ -72,7 +72,7 @@ test("the structural baseline covers your own creator and your own subtree", asy
   assert.equal(up!.status, "completed", JSON.stringify(up!.result));
 });
 
-test("a wildcard NEVER covers a privileged verb — only an explicit name does", () => {
+test("a STRUCTURAL wildcard never covers a privileged verb — a name or a named id's `*` does", () => {
   const ctx = {
     holderId: "alice",
     holderParent: "kernel_state",
@@ -80,11 +80,12 @@ test("a wildcard NEVER covers a privileged verb — only an explicit name does",
   };
   for (const verb of PRIVILEGED_VERBS) {
     assert.equal(
-      authorizeCall({ bob: "*" }, verb, "bob", ctx),
+      authorizeCall({ $parent: "*" }, verb, "kernel_state", ctx),
       false,
       `wildcard covered privileged verb '${verb}' — a broad $parent:"*" would silently become "mutate the graph"`,
     );
-    assert.equal(authorizeCall({ bob: [verb] }, verb, "bob", ctx), true);
+    assert.equal(authorizeCall({ $parent: [verb] }, verb, "kernel_state", ctx), true);
+    assert.equal(authorizeCall({ bob: "*" }, verb, "bob", ctx), true, "a named id's `*` is the operator's own statement");
   }
   // Acting on your OWN subtree is baseline, not escalation.
   assert.equal(
@@ -218,9 +219,9 @@ test("a malformed grant is DENY, never a character walk", () => {
   assert.equal(authorizeCall(["*"] as unknown as Payload, "poke", "0", ctx), false);
 });
 
-test("hydration's pair is privileged: a wildcard never carries rows_read / rows_write", () => {
+test("a file_bridge's exposure is privileged: a wildcard never carries allow / disallow", () => {
   const ctx = { holderId: "a", holderParent: "p", holderChildren: new Set<string>() };
-  for (const verb of ["rows_read", "rows_write"]) {
+  for (const verb of ["allow", "disallow"]) {
     assert.ok(PRIVILEGED_VERBS.has(verb));
     assert.equal(authorizeCall({ $parent: "*" }, verb, "p", ctx), false);
     assert.equal(authorizeCall({ $parent: [verb] }, verb, "p", ctx), true);
@@ -257,4 +258,135 @@ test("a watch by a watcher that is not an agent here is refused the same way", (
   const d = k.scopedFor("ghost", null).watch("bob", "ghost");
   assert.equal(d?.["reason"], "unauthorized");
   assert.equal(d?.["side"], "egress");
+});
+
+test("an emit onto ANOTHER agent needs both halves; your own inbox stays ungated (a16)", () => {
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state" }));
+  k.register(new Agent({ id: "em_open", parentId: "kernel_state", meta: { can_call: { em_target: ["emit"] } } }));
+  k.register(new Agent({ id: "em_closed", parentId: "kernel_state", meta: { can_call: {} } }));
+  k.register(
+    new Agent({
+      id: "em_target",
+      parentId: "kernel_state",
+      meta: { callable_by: { em_open: ["emit"], em_closed: ["emit"] } },
+    }),
+  );
+  const seen: Payload[] = [];
+  k.onInbox("em_target", (p) => seen.push(p));
+  k.scopedFor("em_closed", null).emit("em_target", { type: "poke", n: 1 });
+  assert.deepEqual(seen, [], "an emit with no egress grant must be dropped");
+  k.scopedFor("em_open", null).emit("em_target", { type: "poke", n: 2 });
+  assert.deepEqual(seen, [{ type: "poke", n: 2 }]);
+  k.scopedFor("em_target", null).emit("em_target", { type: "self", n: 3 });
+  assert.equal(seen.length, 2, "an agent's emit on its own inbox is ungated");
+});
+
+// ── `$subtree:<id>` ingress + HERITABLE egress (owner, 2026-09-29) ─────────
+//
+// Agents spawned dynamically under one owner (a web leg's terminals and AIs)
+// reach a target with NO per-agent name on either side: the target accepts
+// `"$subtree:hub"`, the owner carries a heritable `can_call` entry that covers
+// its descendants — never itself.
+
+function subtreeTree(): Kernel {
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state" }));
+  k.registerBundle("probe.tools", () => ({ ok: true }));
+  k.register(
+    new Agent({
+      id: "served",
+      parentId: "kernel_state",
+      handlerModule: "probe.tools",
+      meta: { callable_by: { "$subtree:hub": ["list", "allow", "allowed"], "$subtree:ghost": "*" } },
+    }),
+  );
+  k.register(
+    new Agent({
+      id: "hub",
+      parentId: "kernel_state",
+      handlerModule: "probe.tools",
+      meta: { can_call: { served: { verbs: ["list", "allow", "allowed"], for: "descendants" } } },
+    }),
+  );
+  k.register(new Agent({ id: "kid", parentId: "hub", handlerModule: "probe.tools" }));
+  k.register(
+    new Agent({
+      id: "outsider",
+      parentId: "kernel_state",
+      handlerModule: "probe.tools",
+      meta: { can_call: { served: ["list"] } },
+    }),
+  );
+  return k;
+}
+
+async function sendAs(k: Kernel, from: string, type: string): Promise<Payload> {
+  const [out] = await k.scopedFor(from, null).send([{ target: "served", payload: { type } }]);
+  return out!.status === "completed" ? { ok: true } : (out!.result as Payload);
+}
+
+test("$subtree + heritable: a descendant of the owner reaches the target", async () => {
+  const k = subtreeTree();
+  assert.deepEqual(await sendAs(k, "kid", "list"), { ok: true });
+});
+
+test("heritable: the HOLDER of the entry is not covered by it", async () => {
+  const k = subtreeTree();
+  const r = await sendAs(k, "hub", "list");
+  assert.equal(r["side"], "egress", JSON.stringify(r));
+});
+
+test("$subtree: an agent outside the subtree is refused by the target", async () => {
+  const k = subtreeTree();
+  const r = await sendAs(k, "outsider", "list");
+  assert.equal(r["side"], "ingress", JSON.stringify(r));
+});
+
+test("a NAMED privileged verb is covered by both forms", async () => {
+  const k = subtreeTree();
+  assert.deepEqual(await sendAs(k, "kid", "allow"), { ok: true });
+  // a verb the heritable entry does not name dies at egress
+  assert.equal((await sendAs(k, "kid", "mkdir"))["side"], "egress");
+});
+
+test("`*` in a heritable entry never covers a privileged verb", async () => {
+  const k = subtreeTree();
+  k.updateMeta("hub", { can_call: { served: { verbs: ["*"], for: "descendants" } } });
+  assert.deepEqual(await sendAs(k, "kid", "list"), { ok: true });
+  assert.equal((await sendAs(k, "kid", "allow"))["side"], "egress");
+});
+
+test("$subtree is resolved at CALL time: a grandchild registered later is covered", async () => {
+  const k = subtreeTree();
+  k.register(new Agent({ id: "grandkid", parentId: "kid", handlerModule: "probe.tools" }));
+  assert.deepEqual(await sendAs(k, "grandkid", "list"), { ok: true });
+});
+
+test("$subtree never matches a foreign id, an absent root, or an empty id", () => {
+  const k = subtreeTree();
+  const ctx = {
+    holderId: "served",
+    holderParent: "kernel_state",
+    holderChildren: new Set<string>(),
+    enforcePrivileged: false,
+    inSubtree: (o: string, x: string) => o === x || (o === "kid" && x === "hub"),
+  };
+  // a foreign caller that happens to carry the owner's id after the `|`
+  assert.equal(authorizeCall({ "$subtree:hub": "*" }, "list", "g1|hub", ctx), false);
+  assert.equal(authorizeCall({ "$subtree:": "*" }, "list", "kid", ctx), false);
+  // an id that is not in the tree: `$subtree:ghost` on `served` matches nothing
+  assert.equal(k.gate("outsider", "list", "served")?.["side"], "ingress");
+  // and on EGRESS the key matches nothing (callable_by-only: no resolver there)
+  assert.equal(
+    authorizeCall({ "$subtree:hub": "*" }, "list", "kid", { holderId: "x", holderParent: null, holderChildren: new Set() }),
+    false,
+  );
+});
+
+test("a NAMED id's `*` covers a privileged verb; a structural token's `*` does not (a12)", () => {
+  const ctx = { holderId: "a", holderParent: "p", holderChildren: new Set<string>() };
+  assert.equal(authorizeCall({ files: "*" }, "allow", "files", ctx), true);
+  assert.equal(authorizeCall({ files: ["*"] }, "disallow", "files", ctx), true);
+  assert.equal(authorizeCall({ $parent: "*" }, "allow", "p", ctx), false);
 });

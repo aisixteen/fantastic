@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from file_bridge import fs
 from kernel_state.tools import (
     _find_store,
     on_shutdown,
@@ -20,7 +21,7 @@ from kernel import Kernel
 
 def _stage(tmp_path, monkeypatch):
     """chdir into tmp_path and stage a nested .fantastic tree under cwd (the disk
-    surface clamps to cwd, so the staged root must be cwd-relative). Returns the
+    surface clamps to the running dir, so the staged root must be under it). Returns the
     cwd-relative root dir. (Staging writes directly — that's test setup; the code
     under test, read_tree, goes through `fs`.)"""
     monkeypatch.chdir(tmp_path)
@@ -49,7 +50,7 @@ def _stage(tmp_path, monkeypatch):
 
 def test_read_tree_flat_with_parent_ids(tmp_path, monkeypatch):
     root = _stage(tmp_path, monkeypatch)
-    records = read_tree(root)
+    records = read_tree(fs.Root(tmp_path, root))
     by_id = {r["id"]: r for r in records}
     assert set(by_id) == {"kernel_state", "web", "web_ws"}
     assert by_id["kernel_state"].get("parent_id") in (None,)  # root
@@ -61,7 +62,7 @@ def test_read_tree_flat_with_parent_ids(tmp_path, monkeypatch):
 def test_read_tree_feeds_kernel_load(tmp_path, monkeypatch):
     root = _stage(tmp_path, monkeypatch)
     k = Kernel()
-    k.load(read_tree(root), root_path=root)
+    k.load(read_tree(fs.Root(tmp_path, root)), root_path=root)
     assert set(k.agents) == {"kernel_state", "web", "web_ws"}
     assert k.root.id == "kernel_state"
     # derived addresses mirror the nested disk layout
@@ -75,9 +76,12 @@ def test_write_record_merge_not_overwrite(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     d = Path("a")
     # a sidecar field a bundle wrote, plus a kernel field
-    write_record(d, {"id": "a", "handler_module": "x.tools", "custom_sidecar": 1})
+    write_record(
+        fs.Root(tmp_path, d),
+        {"id": "a", "handler_module": "x.tools", "custom_sidecar": 1},
+    )
     # the kernel re-persists only its keys; the sidecar field must survive
-    write_record(d, {"id": "a", "handler_module": "x.tools", "x": 2})
+    write_record(fs.Root(tmp_path, d), {"id": "a", "handler_module": "x.tools", "x": 2})
     on_disk = yaml.safe_load((d / "agent.yaml").read_text())
     assert on_disk["custom_sidecar"] == 1  # preserved
     assert on_disk["x"] == 2  # added
@@ -89,7 +93,7 @@ def test_rmtree_removes_dir(tmp_path, monkeypatch):
     d = Path("gone")
     (d / "agents" / "child").mkdir(parents=True)
     (d / "agent.yaml").write_text("{}")
-    rmtree(d)
+    rmtree(fs.Root(tmp_path, d))
     assert not d.exists()
 
 
@@ -111,7 +115,7 @@ async def test_no_provider_state_stays_in_ram(tmp_path, monkeypatch):
                         "payload": {
                             "type": "create_agent",
                             "parent_id": root.id,
-                            "handler_module": "text_file.tools",
+                            "handler_module": "file_bridge.tools",
                             "mode": "mem",
                         },
                     }
@@ -137,6 +141,7 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
     # operator/LLM wires the provider: a real, persisted, gated file_bridge child.
     root.create(
         "file_bridge.tools",
+        allow=["."],
         id="store",
         root=".fantastic",
         ingress_rule="allow_all_ingress",
@@ -157,6 +162,7 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
                             "type": "create_agent",
                             "parent_id": root.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             "x": 7,
                         },
                     }
@@ -302,6 +308,7 @@ async def test_a_record_commits_atomically_and_leaves_no_debris(
                         "parent_id": seeded_kernel.id,
                         "id": "atomic_probe",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "display_name": "Atomic",
                     },
                 }

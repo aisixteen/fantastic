@@ -9,7 +9,6 @@ Tick-loop + schedule persistence THROUGH the loader (`persist_blob`/`load_blob`)
 ## Pre-flight
 
 ```bash
-cd new_codebase
 rm -rf .fantastic
 ```
 
@@ -26,7 +25,7 @@ Expected: `{"error":"scheduler.schedule: persist_blob: no store wired — persis
 ### Test 2: open a store at `.fantastic`, then schedule persists through the loader
 
 ```bash
-FA=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools root=.fantastic allow='["."]' ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 SCH=$(fantastic $SC schedule target=cli payload='{"type":"say","text":"hello"}' interval_seconds=60 | python -c "import json,sys;print(json.load(sys.stdin)['schedule_id'])")
 test -f .fantastic/agents/$SC/schedules.yaml && echo "OK persisted through the loader"
 ```

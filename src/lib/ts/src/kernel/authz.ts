@@ -20,17 +20,27 @@ import { UNAUTHORIZED, refusal } from "./refusal.ts";
 /** Verbs a WILDCARD never covers (python `_authz.PRIVILEGED_VERBS`) — only an
  *  explicit list entry names one, so a broad `$parent:"*"` can never silently
  *  become "mutate the graph through my parent". The mutators change the tree;
- *  `state_subscribe` reads the WHOLE tree's stream; `rows_read`/`rows_write` are
- *  hydration's pair (a conversation read whole / written into an agent). This
- *  kernel answers none of the last two — the set is gate POLICY, the same in
- *  every runtime, so a grant means one thing wherever it is read. */
+ *  `state_subscribe` reads the WHOLE tree's stream; `allow`/`disallow` change a
+ *  file_bridge's exposure; the lifecycle, task and loader verbs are the root's.
+ *  This kernel answers few of them — the set is gate POLICY, the same in every
+ *  runtime, so a grant means one thing wherever it is read. */
 export const PRIVILEGED_VERBS: ReadonlySet<string> = new Set([
   "create_agent",
   "delete_agent",
   "update_agent",
   "state_subscribe",
-  "rows_read",
-  "rows_write",
+  "allow",
+  "disallow",
+  "kernel_start",
+  "kernel_stop",
+  "shutdown_agents",
+  "ps",
+  "cancel",
+  "ledger",
+  "ack_deadletter",
+  "persist_record",
+  "forget_record",
+  "load_tree",
 ]);
 
 /** Structural baseline, merged UNDER any explicit grant on every agent: reach
@@ -49,8 +59,14 @@ export const FROM_ABOVE =
   "grant it to yourself. Agents are deny-all by default (both to call and to be " +
   "called).";
 
+/** `"$subtree:<id>"` — a `callable_by` key accepting `<id>` and every LIVE
+ *  descendant of it, resolved at call time (python `SUBTREE_PREFIX`). */
+export const SUBTREE_PREFIX = "$subtree:";
+
 /** A grant value is `"*"` (any verb) or a list of verb names (which may itself
- *  contain `"*"`). A PRIVILEGED verb loses its wildcard cover. */
+ *  contain `"*"`). A PRIVILEGED verb loses its wildcard cover. A HERITABLE map
+ *  value (`{verbs, for}`) never grants its holder — it is read only by
+ *  `authorizeHeritable`, for the holder's descendants. */
 function verbAllowed(grant: Json | undefined, verb: string, privileged: boolean): boolean {
   if (privileged) return Array.isArray(grant) && grant.includes(verb);
   if (grant === "*") return true;
@@ -68,6 +84,10 @@ export interface GrantContext {
    *  callee's `$children:"*"` ("I trust my own subtree") legitimately accepts a
    *  privileged verb. */
   enforcePrivileged?: boolean;
+  /** `$subtree:<x>` — is `otherId` `x` or a live descendant of it? Handed in by
+   *  the INGRESS check only: the key is `callable_by`-only, so on egress (no
+   *  resolver) it matches nothing. */
+  inSubtree?: (otherId: string, x: string) => boolean;
 }
 
 /**
@@ -99,9 +119,56 @@ export function authorizeCall(
     else if (key === "$self") matched = otherId === ctx.holderId;
     else if (key === "$parent") matched = otherId === ctx.holderParent;
     else if (key === "$loader") matched = ctx.loaderId !== undefined && ctx.loaderId !== null && otherId === ctx.loaderId;
-    else if (key.startsWith("$")) matched = false; // unknown token matches nothing
+    else if (key.startsWith(SUBTREE_PREFIX)) {
+      // A LOCAL descendant only: a foreign `<guid>|<agent>` is never in this
+      // tree, and an empty or absent `<x>` matches nothing.
+      const x = key.slice(SUBTREE_PREFIX.length);
+      matched = x !== "" && !otherId.includes("|") && ctx.inSubtree !== undefined && ctx.inSubtree(otherId, x);
+    } else if (key.startsWith("$")) matched = false; // unknown token matches nothing
     else matched = key === otherId;
-    if (matched && verbAllowed(value, verb, privileged)) return true;
+    // A privileged verb loses only a STRUCTURAL key's wildcard (python
+    // `privileged and key in STRUCTURAL_TOKENS`); a NAMED id's `*` is the
+    // operator's own statement and covers it (audit a12).
+    const structural = key.startsWith("$");
+    if (matched && verbAllowed(value, verb, privileged && structural)) return true;
+  }
+  return false;
+}
+
+/** A HERITABLE `can_call` entry — `{verbs: [<verb>, …], for: "descendants"}`,
+ *  exactly those keys, a non-empty list of verb strings. */
+export function isHeritable(value: Json | undefined): value is { verbs: string[]; for: "descendants" } {
+  if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  const verbs = (value as Payload)["verbs"];
+  return (
+    keys.length === 2 &&
+    (value as Payload)["for"] === "descendants" &&
+    Array.isArray(verbs) &&
+    verbs.length > 0 &&
+    verbs.every((v) => typeof v === "string")
+  );
+}
+
+/**
+ * EGRESS through an ANCESTOR's heritable entry (python `authorize_heritable`).
+ * `ancestorGrants` are the `can_call` maps of the sender's ancestors, parent
+ * first. An entry keyed by the target's literal id lets the holder's
+ * DESCENDANTS call it: a NAMED verb covers even a privileged one, `*` covers
+ * only a non-privileged verb. The holder itself is never covered — its own map
+ * reaches `verbAllowed`, which refuses a map value.
+ */
+export function authorizeHeritable(
+  ancestorGrants: Iterable<Payload | null | undefined>,
+  verb: string,
+  targetId: string,
+): boolean {
+  for (const g of ancestorGrants) {
+    if (g === null || g === undefined || typeof g !== "object" || Array.isArray(g)) continue;
+    const entry = (g as Payload)[targetId];
+    if (!isHeritable(entry)) continue;
+    if (entry.verbs.includes(verb)) return true;
+    if (entry.verbs.includes("*") && !PRIVILEGED_VERBS.has(verb)) return true;
   }
   return false;
 }

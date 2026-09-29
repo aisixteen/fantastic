@@ -81,7 +81,7 @@ fn text(chunks: &[&str], status: &str, reason: Option<&str>) -> String {
     sse(&evts)
 }
 
-fn provider(endpoint: String, max_tokens: u64, sampling: Map<String, Value>) -> ResponsesProvider {
+fn provider(endpoint: String, max_tokens: i64, sampling: Map<String, Value>) -> ResponsesProvider {
     ResponsesProvider {
         self_id: AgentId::from(format!("resp_{}", endpoint.len()).as_str()),
         endpoint,
@@ -323,13 +323,13 @@ async fn missing_key_endpoint_or_model_fail_loud_naming_it() {
     let p = provider("http://127.0.0.1:1/v1/responses".into(), 16, Map::new());
     assert!(drain(&p, None).await.unwrap_err().contains(KEY_VAR));
     std::env::set_var(KEY_VAR, "sk");
-    let p = provider(DEFAULT_ENDPOINT.into(), 16, Map::new());
+    let p = provider(String::new(), 16, Map::new());
     assert!(drain(&p, None)
         .await
         .unwrap_err()
         .contains("no `endpoint` set"));
     let mut p = provider("http://127.0.0.1:1/v1/responses".into(), 16, Map::new());
-    p.model = DEFAULT_MODEL.into();
+    p.model = String::new();
     assert!(drain(&p, None)
         .await
         .unwrap_err()
@@ -495,4 +495,59 @@ async fn send_streams_tokens_raw_on_both_channels() {
     // python `_send` returns the RAW text (`response: last_text`); only the stored
     // assistant row is stripped — ai-core's business, not this provider's.
     assert_eq!(r["response"], "<think>pondering</think>hello", "{r}");
+}
+
+/// `endpoint` is REQUIRED on the record — a send without one raises python's
+/// `ValueError`, naming the field (audit 2026-09-28, c9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_without_an_endpoint_raises_naming_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, id) = mk_kernel(&tmp, "").await;
+    let r = kernel
+        .send(vec![Item::new(
+            id,
+            json!({"type": "send", "text": "hi", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["raised"], json!(true), "{r}");
+    assert_eq!(
+        r["error"],
+        json!(
+            "ValueError: responses_backend: `endpoint` is required on the agent record — \
+             nothing is guessed (update_agent <id> endpoint=…)"
+        )
+    );
+}
+
+/// `store:false` keeps the conversation ours and `model` is the record's — a
+/// `sampling` key naming either is refused, never merged over it (audit d8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampling_may_not_override_what_the_provider_owns() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": id.as_str(),
+                   "sampling": {"store": true, "temperature": 0.1, "model": "x"}}),
+        )])
+        .await;
+    let r = kernel
+        .send(vec![Item::new(
+            id,
+            json!({"type": "send", "text": "hi", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"],
+        json!(
+            "ValueError: responses_backend: `sampling` may not set model, store — those \
+             are the record's (`model`, `max_tokens`) or the provider's own"
+        ),
+        "{r}"
+    );
 }

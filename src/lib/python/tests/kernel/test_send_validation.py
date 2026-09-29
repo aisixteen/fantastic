@@ -16,6 +16,7 @@ async def _mk(kernel, agent_id, **meta):
         "parent_id": kernel.id,
         "id": agent_id,
         "handler_module": "file_bridge.tools",
+        "allow": ["."],
         "ingress_rule": "allow_all_ingress",
         **meta,
     }
@@ -64,7 +65,12 @@ async def test_non_string_ids_on_system_verbs_are_missing_arg(seeded_kernel):
         {"type": "delete_agent", "id": 5},
         {"type": "update_agent", "id": ["x"]},
         {"type": "create_agent", "handler_module": 7, "parent_id": k},
-        {"type": "create_agent", "handler_module": "file_bridge.tools", "parent_id": 3},
+        {
+            "type": "create_agent",
+            "handler_module": "file_bridge.tools",
+            "allow": ["."],
+            "parent_id": 3,
+        },
         {"type": "cancel", "task_id": []},
     ):
         r = (await seeded_kernel.send([{"target": k, "payload": payload}]))[0]["result"]
@@ -81,6 +87,7 @@ async def test_a_supplied_empty_id_on_create_is_refused_not_minted(seeded_kernel
                     "payload": {
                         "type": "create_agent",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "parent_id": seeded_kernel.id,
                         "id": "",
                     },

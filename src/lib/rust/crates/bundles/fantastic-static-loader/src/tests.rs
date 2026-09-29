@@ -51,7 +51,8 @@ fn mk_kernel() -> Arc<Kernel> {
         None,
         None,
         Map::new(),
-        std::path::PathBuf::new(),
+        // the running dir is the cwd — manifests are written under it
+        std::env::current_dir().unwrap().join(".fantastic"),
         false,
     );
     kernel.register(Arc::clone(&root));
@@ -181,30 +182,71 @@ async fn boot_is_idempotent_by_id() {
     assert_eq!(kernel.agents.len(), before);
 }
 
-#[tokio::test]
-async fn an_unreadable_manifest_is_refused_at_write_time() {
-    // A broken roster must never become a BOOTING record: `validate_meta`
-    // refuses it at create, not one boot later.
-    let kernel = mk_kernel();
-    let rec = kernel
+/// Create a static_loader under the root with `manifest`; returns the create reply.
+async fn create_loader(kernel: &Arc<Kernel>, id: &str, manifest: Value) -> Value {
+    kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                "id": "sl2", "manifest": "nope.yaml",
+                "id": id, "manifest": manifest,
             }),
         )])
         .await
         .remove(0)
-        .result;
-    assert_eq!(rec["reason"], "invalid_meta", "{rec}");
-    assert!(
-        rec["error"].as_str().unwrap().contains("not readable"),
-        "{rec}"
-    );
-    assert!(
-        !kernel.agents.contains_key(&AgentId::from("sl2")),
-        "a refused create must leave no agent behind"
+        .result
+}
+
+async fn boot_loader(kernel: &Arc<Kernel>, id: &str) -> Value {
+    kernel
+        .send(vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result
+}
+
+#[tokio::test]
+async fn the_manifest_shape_is_judged_at_write_time() {
+    // `validate_meta` is SHAPE-ONLY: a named manifest must be a non-empty path
+    // string. Readability is boot's question (it reads through the workdir).
+    let kernel = mk_kernel();
+    for (i, bad) in [json!(""), json!(7), json!(["a.yaml"]), json!(null)]
+        .into_iter()
+        .enumerate()
+    {
+        let id = format!("sl_shape{i}");
+        let rec = create_loader(&kernel, &id, bad.clone()).await;
+        assert_eq!(rec["reason"], "invalid_meta", "{bad}: {rec}");
+        assert_eq!(
+            rec["error"], "static_loader: manifest must be a non-empty path string",
+            "{bad}"
+        );
+        assert!(
+            !kernel.agents.contains_key(&AgentId::from(id.as_str())),
+            "a refused create must leave no agent behind"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_manifest_is_reported_at_boot() {
+    // The write is shape-only, so the record lands; `boot` names the resolved
+    // path in python's OSError text and boots nothing.
+    let kernel = mk_kernel();
+    let rec = create_loader(&kernel, "sl2", json!("nope.yaml")).await;
+    assert!(rec.get("error").is_none(), "{rec}");
+    let r = boot_loader(&kernel, "sl2").await;
+    let abs = fs::realpath(&std::env::current_dir().unwrap()).join("nope.yaml");
+    assert_eq!(
+        r,
+        json!({
+            "error": format!(
+                "static_loader: cannot read manifest 'nope.yaml': \
+                 [Errno 2] No such file or directory: '{}'",
+                abs.display()
+            ),
+            "booted": false,
+        })
     );
 }
 
@@ -339,58 +381,21 @@ fn an_empty_manifest_string_is_no_manifest() {
     // A8.20 — python tests `isinstance(path, str) and path`.
     let agent = loader_with_meta(meta_of(&[("manifest", json!(""))]));
     assert_eq!(
-        load_manifest(&agent).unwrap_err(),
+        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
         "static_loader: no 'manifest' path on the record"
     );
 }
 
 #[tokio::test]
-async fn a_manifest_outside_the_running_dir_is_refused() {
+async fn a_manifest_outside_the_running_dir_is_refused_at_boot() {
     // A8.8 — the cold bring-up read is not exempt from the running-dir law, and
     // the tail is python's own `fs` ValueError.
     let kernel = mk_kernel();
-    let rec = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                "id": "sl3", "manifest": "/etc/hosts",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(rec["reason"], "invalid_meta", "{rec}");
+    let rec = create_loader(&kernel, "sl3", json!("/etc/hosts")).await;
+    assert!(rec.get("error").is_none(), "{rec}");
     assert_eq!(
-        rec["error"],
-        "static_loader: manifest '/etc/hosts' is not readable: fs: path '/etc/hosts' escapes root"
-    );
-}
-
-#[tokio::test]
-async fn a_missing_manifest_names_the_resolved_path() {
-    // A8.8 — python's OSError text, with the path `fs` resolved.
-    let kernel = mk_kernel();
-    let rec = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                "id": "sl5", "manifest": "nope.yaml",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let abs = fs::realpath(&std::env::current_dir().unwrap()).join("nope.yaml");
-    assert_eq!(
-        rec["error"],
-        json!(format!(
-            "static_loader: manifest 'nope.yaml' is not readable: \
-             [Errno 2] No such file or directory: '{}'",
-            abs.display()
-        )),
-        "{rec}"
+        boot_loader(&kernel, "sl3").await["error"],
+        "static_loader: cannot read manifest '/etc/hosts': fs: path '/etc/hosts' escapes root"
     );
 }
 
@@ -401,7 +406,7 @@ fn an_absolute_manifest_inside_cwd_is_refused() {
     let abs = std::env::current_dir().unwrap().join(&rel);
     let agent = loader_with_meta(meta_of(&[("manifest", json!(abs.display().to_string()))]));
     assert_eq!(
-        load_manifest(&agent).unwrap_err(),
+        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
         format!(
             "static_loader: cannot read manifest '{}': fs: path '{}' escapes root",
             abs.display(),
@@ -421,7 +426,7 @@ fn a_symlinked_manifest_escaping_cwd_is_refused() {
     let rel_link = link.display().to_string();
     let agent = loader_with_meta(meta_of(&[("manifest", json!(rel_link.clone()))]));
     assert_eq!(
-        load_manifest(&agent).unwrap_err(),
+        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
         format!(
             "static_loader: cannot read manifest '{rel_link}': fs: path '{rel_link}' escapes root"
         )
@@ -436,7 +441,7 @@ fn a_falsy_yaml_document_boots_empty() {
         let (fixture, rel) = write_manifest(doc);
         let agent = loader_with_meta(meta_of(&[("manifest", json!(rel))]));
         assert_eq!(
-            load_manifest(&agent).unwrap(),
+            load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap(),
             Vec::<Value>::new(),
             "{doc:?}"
         );
@@ -445,7 +450,7 @@ fn a_falsy_yaml_document_boots_empty() {
     let (fixture, rel) = write_manifest("[1]");
     let agent = loader_with_meta(meta_of(&[("manifest", json!(rel.clone()))]));
     assert_eq!(
-        load_manifest(&agent).unwrap_err(),
+        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
         format!("static_loader: manifest '{rel}' must be a mapping with `agents:`")
     );
     drop(fixture);

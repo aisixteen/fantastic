@@ -118,7 +118,7 @@ async fn mk_probed(
     );
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     kernel.bundles.register(
         "sched_probe.tools",
         ProbeBundle {
@@ -145,7 +145,7 @@ async fn mk_probed(
                 json!({
                     "type":"create_agent",
                     "parent_id": "kernel",
-                    "handler_module":"file_bridge.tools",
+                    "handler_module":"file_bridge.tools", "allow": ["."],
                     "id": format!("ff_{sch_id}"),
                     "root": tmp.path().join(".fantastic").to_string_lossy(),
                     "ingress_rule": "allow_all_ingress",
@@ -273,8 +273,6 @@ async fn reflect_reports_state() {
         .remove(0)
         .result;
     assert_eq!(r["id"], sch.as_str());
-    // Persists through the loader — no per-agent wiring is surfaced.
-    assert!(r.get("file_bridge_id").is_none(), "{r}");
     assert_eq!(r["paused"], false);
     // `create_agent` auto-fires boot (Python parity — see
     // lifecycle::create_from_payload), so the tick loop is running by

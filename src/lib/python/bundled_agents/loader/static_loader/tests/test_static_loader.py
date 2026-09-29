@@ -14,7 +14,9 @@ from kernel import sender_context
 MANIFEST = """\
 agents:
   - id: memory
-    handler_module: text_file.tools
+    handler_module: file_bridge.tools
+    allow: ['.']
+    ingress_rule: allow_all_ingress
     callable_by:
       worker: [write, read]
   - id: worker
@@ -91,6 +93,7 @@ async def test_roster_is_closed_a_child_cannot_create_more(seeded_kernel):
                             "type": "create_agent",
                             "parent_id": "kernel_state",
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                         },
                     }
                 ]
@@ -112,10 +115,10 @@ async def test_worker_may_use_its_declared_edge_but_not_others(seeded_kernel):
                 ]
             )
         )[0]["result"]
-        # `patch` on memory was never granted → denied.
+        # `edit` on memory was never granted → denied.
         no = (
             await seeded_kernel.send(
-                [{"target": "memory", "payload": {"type": "patch", "path": "k.txt"}}]
+                [{"target": "memory", "payload": {"type": "edit", "path": "k.txt"}}]
             )
         )[0]["result"]
     assert ok.get("reason") != "unauthorized"
@@ -146,8 +149,8 @@ async def test_a_manifest_that_reassigns_a_handler_module_fails_loud(seeded_kern
     loader = await _init_loader(seeded_kernel)
     Path("fantastic.yaml").write_text(
         MANIFEST.replace(
-            "  - id: memory\n    handler_module: text_file.tools",
             "  - id: memory\n    handler_module: file_bridge.tools",
+            "  - id: memory\n    handler_module: scheduler.tools",
         )
     )
     r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
@@ -186,10 +189,39 @@ async def test_missing_manifest_reports_not_crashes(seeded_kernel):
             ]
         )
     )[0]["result"]
-    # create_agent's validate_meta refuses an unreadable manifest at write time.
-    assert rec.get("reason") == "invalid_meta" and "not readable" in rec.get(
-        "error", ""
-    )
+    # validate_meta checks the SHAPE only, so the record is written; the READ is
+    # the boot's, against the kernel's running dir, and it reports — not raises.
+    assert rec.get("id") == "sl2", rec
+    r = (await seeded_kernel.send([{"target": "sl2", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
+    assert r["booted"] is False, r
+    assert r["error"].startswith("static_loader: cannot read manifest 'nope.yaml': "), r
+
+
+async def test_a_malformed_manifest_field_is_refused_at_write_time(seeded_kernel):
+    for bad in ("", 5):
+        rec = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kernel_state",
+                            "handler_module": "static_loader.tools",
+                            "id": "sl3",
+                            "manifest": bad,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert rec.get("reason") == "invalid_meta", rec
+        assert rec["error"] == (
+            "static_loader: manifest must be a non-empty path string"
+        ), rec
+        assert "sl3" not in seeded_kernel.ctx.agents
 
 
 async def test_a_roster_entry_without_an_id_is_refused_loud(seeded_kernel):
@@ -199,13 +231,13 @@ async def test_a_roster_entry_without_an_id_is_refused_loud(seeded_kernel):
     before = set(seeded_kernel.ctx.agents)
     loader = await _init_loader(
         seeded_kernel,
-        "agents:\n  - handler_module: text_file.tools\n",
+        "agents:\n  - handler_module: file_bridge.tools\n",
     )
     r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
         0
     ]["result"]
     assert r["booted"] is False, r
-    assert "explicit id" in r["error"] and "text_file.tools" in r["error"], r
+    assert "explicit id" in r["error"] and "file_bridge.tools" in r["error"], r
     # NOTHING was created — not on this boot, and not by the create-time boot.
     assert set(seeded_kernel.ctx.agents) == before | {loader}
 
@@ -217,9 +249,9 @@ async def test_an_id_less_entry_is_refused_before_the_valid_ones_hydrate(
     loader = await _init_loader(
         seeded_kernel,
         "agents:\n"
-        "  - handler_module: text_file.tools\n"
+        "  - handler_module: file_bridge.tools\n"
         "  - id: memory\n"
-        "    handler_module: text_file.tools\n",
+        "    handler_module: file_bridge.tools\n",
     )
     r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
         0

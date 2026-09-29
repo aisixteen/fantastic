@@ -17,7 +17,6 @@ SIGTERM (A14.19) and swift needs the SIGKILL (C85), and both are measurements.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import pty
 import shutil
@@ -28,15 +27,16 @@ import time
 from pathlib import Path
 
 from families import save_kernel_log  # noqa: F401 - kept for symmetry of imports
-from spec import free_port, kernel_cmd, kernel_env
+from spec import _dump, free_port, kernel_cmd, kernel_env, read_rec, write_rec
 
 NAME = "cli"
 
 MANIFEST = """agents:
   - id: memory
-    handler_module: text_file.tools
+    handler_module: file_bridge.tools
   - id: notes
     handler_module: file_bridge.tools
+    allow: ['.']
     root: notes
     can_call:
       memory: [read]
@@ -54,36 +54,36 @@ def rpm_tree(root_id: str, shape: str, F: Path) -> None:
         d = {"id": i, "handler_module": "file_bridge.tools"}
         if not nop:
             d["parent_id"] = parent
-        return json.dumps(d)
+        return _dump(d)
 
     def root() -> str:
-        return json.dumps({"id": root_id, "handler_module": "kernel_state.tools", "guid": "g"})
+        return _dump({"id": root_id, "handler_module": "kernel_state.tools", "guid": "g"})
 
     A = F / "agents"
     if shape in ("S1", "S2", "S3", "S6", "S7"):
-        w(F / "agent.json", root())
+        w(F / "agent.yaml", root())
     if shape == "S1":       # a child under an unparseable parent record
-        w(A / "p1/agent.json", "{NOT_JSON")
-        w(A / "p1/agents/c1/agent.json", rec("c1", "p1"))
-        w(A / "good/agent.json", rec("good", root_id))
+        w(A / "p1/agent.yaml", "{NOT_YAML")
+        w(A / "p1/agents/c1/agent.yaml", rec("c1", "p1"))
+        w(A / "good/agent.yaml", rec("good", root_id))
     if shape == "S2":       # a nested record claiming the ROOT as its parent
-        w(A / "a/agent.json", rec("a", root_id))
-        w(A / "a/agents/b/agent.json", rec("b", root_id))
+        w(A / "a/agent.yaml", rec("a", root_id))
+        w(A / "a/agents/b/agent.yaml", rec("b", root_id))
     if shape == "S3":       # a record with NO parent_id at all
-        w(A / "x/agent.json", rec("x", nop=True))
-        w(A / "y/agent.json", rec("y", root_id))
+        w(A / "x/agent.yaml", rec("x", nop=True))
+        w(A / "y/agent.yaml", rec("y", root_id))
     if shape == "S4":       # no root record, one child
-        w(A / "good/agent.json", rec("good", root_id))
+        w(A / "good/agent.yaml", rec("good", root_id))
     if shape == "S5":       # an unparseable ROOT record
-        w(F / "agent.json", "{NOT_JSON")
-        w(A / "good/agent.json", rec("good", root_id))
+        w(F / "agent.yaml", "{NOT_YAML")
+        w(A / "good/agent.yaml", rec("good", root_id))
     if shape == "S6":       # seven siblings — the ORDER the walk returns them in
         for n in ["zz", "mm", "aa", "kk", "bb", "Ab", "b0"]:
-            w(A / f"{n}/agent.json", rec(n, root_id))
+            w(A / f"{n}/agent.yaml", rec(n, root_id))
     if shape == "S7":       # a record-LESS directory that has children
         (A / "p2").mkdir(parents=True, exist_ok=True)
-        w(A / "p2/agents/c2/agent.json", rec("c2", "p2"))
-        w(A / "good/agent.json", rec("good", root_id))
+        w(A / "p2/agents/c2/agent.yaml", rec("c2", "p2"))
+        w(A / "good/agent.yaml", rec("good", root_id))
 
 
 def snapshot(wd: Path) -> dict:
@@ -273,7 +273,7 @@ def port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-COERCE = ["handler_module=text_file.tools", "id=coerced", "n=3", "neg=-2", "flag=true",
+COERCE = ["handler_module=file_bridge.tools", "id=coerced", "n=3", "neg=-2", "flag=true",
           "off=FALSE", "f=1.5", "exp=1e3", 'obj={"a":1,"b":[2,3]}', 'lst=[1,"x"]',
           "badobj={notjson", "s=hello", "empty=", "eq=a=b", "noeq",
           "big=12345678901234567890",
@@ -320,14 +320,14 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         log["reflect"].pop("_err", None)
         log["reflect"]["stdout"] = log["reflect"]["stdout"][:400]
         w = wd / ".fantastic"
-        if not (w / "agent.json").exists():
+        if not (w / "agent.yaml").exists():
             d = Daemon(cli, wd)
             for _ in range(100):
-                if (w / "agent.json").exists():
+                if (w / "agent.yaml").exists():
                     break
                 time.sleep(0.1)
             log["daemon_seed"] = d.stop()
-        log["root_id"] = json.loads((w / "agent.json").read_text()).get("id")
+        log["root_id"] = read_rec(w / "agent.yaml").get("id")
         return log
 
     def seed_web(wd: Path):
@@ -335,9 +335,9 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         port = free_port()
         w = wd / ".fantastic"
         (w / "agents/web").mkdir(parents=True, exist_ok=True)
-        (w / "agents/web/agent.json").write_text(json.dumps(
-            {"id": "web", "handler_module": "web.tools", "parent_id": log["root_id"],
-             "port": port}, indent=2))
+        write_rec(w / "agents/web/agent.yaml",
+                  {"id": "web", "handler_module": "web.tools", "parent_id": log["root_id"],
+                   "port": port})
         log["port"] = port
         return port, log
 
@@ -442,13 +442,13 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
 
         def stale_lock(wd: Path) -> dict:
             (wd / ".fantastic").mkdir()
-            (wd / ".fantastic/lock.json").write_text(json.dumps({"pid": 999999}))
-            return {"wrote": ".fantastic/lock.json", "content": {"pid": 999999}}
+            write_rec(wd / ".fantastic/lock.yaml", {"pid": 999999})
+            return {"wrote": ".fantastic/lock.yaml", "content": {"pid": 999999}}
 
         def zero_lock(wd: Path) -> dict:
             (wd / ".fantastic").mkdir()
-            (wd / ".fantastic/lock.json").write_text(json.dumps({"pid": 0}))
-            return {"wrote": ".fantastic/lock.json", "content": {"pid": 0}}
+            write_rec(wd / ".fantastic/lock.yaml", {"pid": 0})
+            return {"wrote": ".fantastic/lock.yaml", "content": {"pid": 0}}
 
         def dotenv(wd: Path) -> dict:
             # A14.5 / D17(b): autoload exists only in python, and it loads an
@@ -458,30 +458,30 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
 
         def corrupt_root(wd: Path) -> dict:
             (wd / ".fantastic").mkdir()
-            (wd / ".fantastic/agent.json").write_text("{NOT_JSON")
-            return {"wrote": ".fantastic/agent.json", "content": "{NOT_JSON"}
+            (wd / ".fantastic/agent.yaml").write_text("{NOT_YAML")
+            return {"wrote": ".fantastic/agent.yaml", "content": "{NOT_YAML"}
 
         def corrupt_child(wd: Path) -> dict:
             log = seed_root(wd)
             (wd / ".fantastic/agents/bad").mkdir(parents=True, exist_ok=True)
-            (wd / ".fantastic/agents/bad/agent.json").write_text("{NOT_JSON")
-            return {"seed_root_id": log["root_id"], "wrote": ".fantastic/agents/bad/agent.json"}
+            (wd / ".fantastic/agents/bad/agent.yaml").write_text("{NOT_YAML")
+            return {"seed_root_id": log["root_id"], "wrote": ".fantastic/agents/bad/agent.yaml"}
 
         def nope_bundle(wd: Path) -> dict:
             log = seed_root(wd)
             (wd / ".fantastic/agents/nope").mkdir(parents=True, exist_ok=True)
-            (wd / ".fantastic/agents/nope/agent.json").write_text(json.dumps(
-                {"id": "nope", "handler_module": "nope.tools", "parent_id": log["root_id"]}))
+            write_rec(wd / ".fantastic/agents/nope/agent.yaml",
+                      {"id": "nope", "handler_module": "nope.tools", "parent_id": log["root_id"]})
             return {"seed_root_id": log["root_id"], "handler_module": "nope.tools"}
 
         def memo_tree(wd: Path) -> dict:
-            """`SCR/cli_verify2.py`: a hydrated `text_file` agent, then reflect it —
+            """`SCR/cli_verify2.py`: a hydrated `file_bridge` agent, then reflect it —
             a record written by hand must come back as the same agent."""
             log = seed_root(wd)
             (wd / ".fantastic/agents/memo").mkdir(parents=True, exist_ok=True)
-            (wd / ".fantastic/agents/memo/agent.json").write_text(json.dumps(
-                {"id": "memo", "handler_module": "text_file.tools",
-                 "parent_id": log["root_id"], "description": "hydrated by hand"}))
+            write_rec(wd / ".fantastic/agents/memo/agent.yaml",
+                      {"id": "memo", "handler_module": "file_bridge.tools",
+                       "parent_id": log["root_id"], "description": "hydrated by hand"})
             return {"seed_root_id": log["root_id"]}
 
         simple("stale_lock_call", ["kernel", "list_agents"], pre=stale_lock)
@@ -511,13 +511,14 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         F = wd / ".fantastic"
         (F / "agents/store").mkdir(parents=True, exist_ok=True)
         (F / "agents/sload").mkdir(parents=True, exist_ok=True)
-        F.joinpath("agent.json").write_text(json.dumps(
-            {"id": "kernel_state", "handler_module": "kernel_state.tools", "guid": "g"}))
-        (F / "agents/store/agent.json").write_text(json.dumps(
-            {"id": "store", "handler_module": "file_bridge.tools", "root": ".fantastic",
-             "parent_id": "kernel_state"}))
-        (F / "agents/sload/agent.json").write_text(json.dumps(
-            {"id": "sload", "handler_module": "static_loader.tools", "parent_id": "kernel_state"}))
+        write_rec(F / "agent.yaml",
+                  {"id": "kernel_state", "handler_module": "kernel_state.tools", "guid": "g"})
+        write_rec(F / "agents/store/agent.yaml",
+                  {"id": "store", "handler_module": "file_bridge.tools", "allow": ["."],
+                   "root": ".fantastic", "parent_id": "kernel_state"})
+        write_rec(F / "agents/sload/agent.yaml",
+                  {"id": "sload", "handler_module": "static_loader.tools",
+                   "parent_id": "kernel_state"})
         before = snapshot(wd)
         d = Daemon(cli, wd)
         time.sleep(5)
@@ -546,7 +547,7 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         running = snapshot(wd)
         steps = []
         for a in (["kernel", "list_agents"],
-                  ["kernel", "create_agent", "handler_module=text_file.tools", "id=late"],
+                  ["kernel", "create_agent", "handler_module=file_bridge.tools", "id=late"],
                   ["init", "static_loader", "x.yaml"], ["reflect", "kernel", "tree=ids"],
                   ["reflect"], []):
             b2 = snapshot(wd)

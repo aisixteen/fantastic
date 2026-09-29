@@ -176,6 +176,35 @@ struct KernelEmitTests {
         #expect(first?.payload["x"].asInt == 1)
     }
 
+    /// a16 (audit 2026-09-28): an emit onto ANOTHER agent's inbox passes the
+    /// two-sided gate under verb `emit`; a denied emit is dropped. Emitting on
+    /// your own inbox is how every bundle publishes, so it stays ungated.
+    @Test func emitOnAnotherAgentNeedsBothHalves() async {
+        let kernel = makeKernel()
+        kernel.register(
+            Agent(
+                id: "em_open", handlerModule: nil, parentId: "kernel_state",
+                meta: ["can_call": ["em_target": ["emit"]]]))
+        kernel.register(Agent(id: "em_closed", handlerModule: nil, parentId: "kernel_state"))
+        kernel.register(
+            Agent(
+                id: "em_target", handlerModule: nil, parentId: "kernel_state",
+                meta: ["callable_by": ["em_open": ["emit"], "em_closed": ["emit"]]]))
+        let inbox = kernel.ensureInbox("em_target")
+        await KernelTaskLocals.$currentSender.withValue(AgentId("em_closed")) {
+            await kernel.emit("em_target", ["type": "poke", "n": 1])
+        }
+        #expect(inbox.tryTake() == nil, "an emit with no egress grant must be dropped")
+        await KernelTaskLocals.$currentSender.withValue(AgentId("em_open")) {
+            await kernel.emit("em_target", ["type": "poke", "n": 2])
+        }
+        #expect(inbox.tryTake()?.payload == ["type": "poke", "n": 2])
+        await KernelTaskLocals.$currentSender.withValue(AgentId("em_target")) {
+            await kernel.emit("em_target", ["type": "self", "n": 3])
+        }
+        #expect(inbox.tryTake()?.payload["n"] == 3)
+    }
+
     /// C29 — an agent gets no queue merely by existing.
     @Test func registerMintsNoInbox() async {
         let kernel = makeKernel()

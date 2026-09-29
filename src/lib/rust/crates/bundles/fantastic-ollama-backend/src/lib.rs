@@ -25,6 +25,7 @@
 use async_trait::async_trait;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+    Unconfigured,
 };
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
@@ -48,13 +49,8 @@ pub const SEND_TIMEOUT_SECS: f64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
 /// Default `client_id` for callers that don't supply one.
 pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
 
-/// Default ollama HTTP endpoint.
-pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
-
-/// NO guessy default (by default, no defaults): never name a network-reaching
-/// model. The sentinel exists only so reflect can say what's true; the request
-/// path fails loud when the model is unset/sentinel.
-pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
+/// The name a required-field refusal carries.
+const BACKEND: &str = "ollama_backend";
 
 /// What `reflect` says this agent IS — python `ollama_backend/tools.py`'s
 /// `sentence`, verbatim.
@@ -133,7 +129,7 @@ impl Provider for OllamaProvider {
         max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
         // NO guessy default: fail loud before the wire if no model is named.
-        if self.model.is_empty() || self.model == DEFAULT_MODEL {
+        if self.model.is_empty() {
             return Err(ProviderError::raised(
                 "ollama_backend: no `model` set — this connector does not \
                  guess one. Name a model on the agent record (model=...).",
@@ -404,11 +400,22 @@ impl Bundle for OllamaBackendBundle {
 /// record can change between turns), and shared by `send` and the verbs that need
 /// a completion of their own — `context_recall` asks the model which rows to keep
 /// in full.
+///
+/// `endpoint` and `model` are REQUIRED on the record — nothing is guessed; a
+/// record without them builds a provider whose every pass raises, naming the
+/// field (python `required_meta`).
 fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
     let meta = helpers::agent_meta(agent_id, kernel);
+    let (endpoint, model) = match (
+        helpers::required_meta(&meta, "endpoint", BACKEND),
+        helpers::required_meta(&meta, "model", BACKEND),
+    ) {
+        (Ok(e), Ok(m)) => (e, m),
+        (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
+    };
     Arc::new(OllamaProvider {
-        endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
-        model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
+        endpoint,
+        model,
         temperature: meta
             .get("temperature")
             .and_then(Value::as_f64)
@@ -420,13 +427,10 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
     })
 }
 
-
 /// `reflect` — python `_make_reflect` + `ollama_backend/tools.py`'s
-/// `_reflect_extra`: the shared base body, then the sampling knobs. The rust-only
-/// `file_bridge_id` key is gone; a model that read it learned a binding python's
-/// ollama agent does not report.
+/// `_reflect_extra`: the shared base body, then the sampling knobs.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, DEFAULT_MODEL, DEFAULT_ENDPOINT);
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE);
     let meta = helpers::agent_meta(agent_id, kernel);
     out.insert(
         "temperature".to_string(),

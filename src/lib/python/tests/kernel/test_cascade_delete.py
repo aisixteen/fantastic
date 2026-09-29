@@ -11,17 +11,19 @@ by the `removed` state event — covered in the kernel_state tests.
 
 from __future__ import annotations
 
+import asyncio
+
 
 async def test_cascade_walks_deepest_first(seeded_kernel):
     """Three-level pyramid: delete root of subtree → all descendants
     removed; ctx.agents and disk both reflect the cascade."""
-    seeded_kernel.create("file_bridge.tools", id="P")
-    seeded_kernel.create("file_bridge.tools", id="C", display_name="child")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="P")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="C", display_name="child")
     # Children-of-children: simulate a nested tree by spawning under
     # the parent agent (P) rather than under root.
     p_agent = seeded_kernel.ctx.agents["P"]
-    p_agent.create("file_bridge.tools", id="GC1")
-    p_agent.create("file_bridge.tools", id="GC2")
+    p_agent.create("file_bridge.tools", allow=["."], id="GC1")
+    p_agent.create("file_bridge.tools", allow=["."], id="GC2")
     assert {"P", "GC1", "GC2"}.issubset(seeded_kernel.ctx.agents.keys())
 
     r = await seeded_kernel.delete("P")
@@ -36,10 +38,10 @@ async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
     """delete_lock on a deep descendant blocks the cascade. Response
     carries `locked:true, blocked_by:<id>, error:...`. NO mutations
     happen — the entire subtree is intact."""
-    seeded_kernel.create("file_bridge.tools", id="P")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="P")
     p_agent = seeded_kernel.ctx.agents["P"]
-    p_agent.create("file_bridge.tools", id="LOCKED", delete_lock=True)
-    p_agent.create("file_bridge.tools", id="OK")
+    p_agent.create("file_bridge.tools", allow=["."], id="LOCKED", delete_lock=True)
+    p_agent.create("file_bridge.tools", allow=["."], id="OK")
     r = await seeded_kernel.delete("P")
     assert r["reason"] == "locked"  # &#27: the one refusal shape, not a flag
     assert r["blocked_by"] == "LOCKED"
@@ -51,9 +53,9 @@ async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
 
 async def test_cascade_lock_unblocks_after_clear(seeded_kernel):
     """Clear the lock via update_agent; cascade proceeds."""
-    seeded_kernel.create("file_bridge.tools", id="P")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="P")
     p_agent = seeded_kernel.ctx.agents["P"]
-    p_agent.create("file_bridge.tools", id="L", delete_lock=True)
+    p_agent.create("file_bridge.tools", allow=["."], id="L", delete_lock=True)
     blocked = await seeded_kernel.delete("P")
     assert blocked["reason"] == "locked"
     seeded_kernel.update("L", delete_lock=False)
@@ -66,7 +68,7 @@ async def test_cascade_lock_unblocks_after_clear(seeded_kernel):
 async def test_cascade_emits_agent_deleted(seeded_kernel):
     """The `delete_agent` verb on root emits `agent_deleted` after the
     cascade returns successfully — NOT for the silent system call."""
-    seeded_kernel.create("file_bridge.tools", id="X")
+    seeded_kernel.create("file_bridge.tools", allow=["."], id="X")
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(events.append)
     (
@@ -94,9 +96,13 @@ async def test_cascade_emits_agent_deleted(seeded_kernel):
 
 
 async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
-    """Real domain case: a terminal_backend nested under a parent agent.
-    Delete the parent → cascade reaches terminal_backend's on_delete FIRST
-    (kills PTY in real life), then both records vanish."""
+    """Real domain case: an exec_bridge running a PTY job (a terminal), nested
+    under a parent agent. Delete the parent → cascade reaches exec_bridge's
+    on_delete FIRST (SIGKILLs the job's process), then both records vanish."""
+    import sys
+
+    from exec_bridge import tools as ebt
+
     parent = (
         await seeded_kernel.send(
             [
@@ -106,6 +112,7 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": seeded_kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -120,7 +127,10 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": parent_id,
-                        "handler_module": "terminal_backend.tools",
+                        "handler_module": "exec_bridge.tools",
+                        "ingress_rule": "allow_all_ingress",
+                        "cwd": ".",
+                        "allowed": [rf"{sys.executable} -c .*"],
                     },
                 }
             ]
@@ -128,6 +138,22 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
     )[0]["result"]
     backend_id = backend["id"]
     assert backend_id in seeded_kernel.ctx.agents
+    job = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": backend_id,
+                    "payload": {
+                        "type": "start",
+                        "command": sys.executable,
+                        "args": ["-c", "import time; time.sleep(60)"],
+                        "pty": {"cols": 80, "rows": 24},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    proc = ebt._jobs[job["job_id"]]["proc"]
 
     r = (
         await seeded_kernel.send(
@@ -142,3 +168,4 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
     assert r["deleted"] is True
     assert parent_id not in seeded_kernel.ctx.agents
     assert backend_id not in seeded_kernel.ctx.agents
+    assert await asyncio.wait_for(proc.wait(), timeout=5) != 0, "the PTY job was killed"

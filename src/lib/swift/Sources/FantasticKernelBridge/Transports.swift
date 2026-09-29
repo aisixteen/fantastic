@@ -1,10 +1,11 @@
-// ws_bridge transport seam — WS (+ ssh-tunnelled WS) to a remote `web_ws`, and
-// the `memory` test transport.
+// ws_bridge transport seam — WS to a remote `web_ws`, and the `memory` test
+// transport. It spawns nothing: an ssh tunnel is an `exec_bridge` job or devops,
+// and the bridge dials its local end.
 //
 // Python `ws_bridge/_ws.py`: the bridge is an ASYMMETRIC PURE CLIENT — it dials
 // `ws://{host}:{port}/{peer_id}/ws` and ships raw bridge frames
 // (`call`/`reply`/`watch`/`event`). The engine + verbs live in `Engine.swift`;
-// this file supplies only the transport builders and the WS/tunnel mechanics.
+// this file supplies only the transport builders and the WS mechanics.
 //
 // Every failure here raises `ConnectionClosed` or `BridgeConfigError` carrying
 // ONLY python's message — the engine wraps it (`bridge: ws boot failed: …`).
@@ -251,7 +252,8 @@ public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
                 // A header with a hole where the body was is not the event python
                 // mirrors to a watcher.
                 var frame: JSON = .object([
-                    "type": .string("event"), "payload": item.payload,
+                    "type": .string("event"), "src": .string(target.value),
+                    "payload": item.payload,
                 ])
                 guard let body = item.body else {
                     self?.push((frame, Data(), false))
@@ -280,70 +282,6 @@ private final class MemoryWaiter: @unchecked Sendable {
     func finish(_ pair: (JSON, Data, Bool)?) { continuation.resume(returning: pair) }
 }
 
-// MARK: - the ssh tunnel (ssh+ws)
-
-/// Python `_open_tunnel`: `ssh -L local:localhost:remote -N <host>`, no `-f`, so
-/// the handle survives for teardown. Returns the running process once the local
-/// port accepts a connection.
-func openTunnel(host: String, localPort: Int, remotePort: Int) async throws -> Process {
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-    proc.arguments = [
-        "-N", "-L", "\(localPort):localhost:\(remotePort)",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3",
-        host,
-    ]
-    proc.standardInput = FileHandle.nullDevice
-    proc.standardOutput = FileHandle.nullDevice
-    proc.standardError = FileHandle.nullDevice
-    do {
-        try proc.run()
-    } catch {
-        throw BridgeConfigError("\(error)")
-    }
-    let deadline = Date().addingTimeInterval(TUNNEL_READY_TIMEOUT)
-    while Date() < deadline {
-        if !proc.isRunning {
-            throw BridgeConfigError("ssh tunnel exited early (code \(proc.terminationStatus))")
-        }
-        if tunnelPortAccepts(localPort) { return proc }
-        try? await Task.sleep(nanoseconds: 100_000_000)
-    }
-    proc.terminate()
-    throw BridgeConfigError(
-        "ssh tunnel to \(host):\(remotePort) not ready in \(pyFloatRepr(TUNNEL_READY_TIMEOUT))s")
-}
-
-/// One 200 ms TCP probe of `127.0.0.1:<port>` (python's `socket.connect`).
-private func tunnelPortAccepts(_ port: Int) -> Bool {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
-    if fd < 0 { return false }
-    defer { close(fd) }
-    var timeout = timeval(tv_sec: 0, tv_usec: 200_000)
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-    var addr = sockaddr_in()
-    addr.sin_family = sa_family_t(AF_INET)
-    addr.sin_port = UInt16(port).bigEndian
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-    let ok = withUnsafePointer(to: &addr) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
-        }
-    }
-    return ok
-}
-
-/// Python `_kill_tunnel`: SIGTERM the process group, wait 2 s, then SIGKILL.
-func killTunnel(_ proc: Process) {
-    guard proc.isRunning else { return }
-    proc.terminate()
-    let deadline = Date().addingTimeInterval(2.0)
-    while proc.isRunning && Date() < deadline { usleep(20_000) }
-    if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
-}
-
 // MARK: - the build_transport seam
 
 extension KernelBridgeBundle {
@@ -368,57 +306,32 @@ extension KernelBridgeBundle {
     ) async throws -> any BridgeTransport {
         let peerIdValue = meta["peer_id"] ?? .null
         guard pyTruthy(peerIdValue) else {
-            throw BridgeConfigError("peer_id required for ws/ssh+ws transports")
+            throw BridgeConfigError("peer_id required for the ws transport")
         }
         let peerId = pyStr(peerIdValue)
         if kind == "ws" {
-            let localPort = meta["local_port"] ?? .null
-            let portValue = pyTruthy(localPort) ? localPort : (meta["remote_port"] ?? .null)
+            let portValue = meta["port"] ?? .null
             guard pyTruthy(portValue) else {
-                throw BridgeConfigError("ws transport requires local_port or remote_port")
+                throw BridgeConfigError("ws transport requires port")
             }
             let hostValue = meta["host"] ?? .null
-            let host = pyTruthy(hostValue) ? pyStr(hostValue) : "localhost"
+            guard pyTruthy(hostValue) else {
+                throw BridgeConfigError("ws transport requires host (nothing is guessed)")
+            }
+            let host = pyStr(hostValue)
             let port = try intArg(portValue)
             guard let url = URL(string: "ws://\(host):\(port)/\(peerId)/ws") else {
                 throw BridgeConfigError("ws transport: malformed url")
             }
             return try await WSTransport.connect(url: url)
         }
-        if kind == "ssh+ws" {
-            let hostValue = meta["host"] ?? .null
-            let localPort = try intArg(meta["local_port"] ?? .integer(0), orZero: true)
-            let remoteValue = meta["remote_port"] ?? .null
-            guard pyTruthy(hostValue), localPort != 0, pyTruthy(remoteValue) else {
-                throw BridgeConfigError("ssh+ws requires host, local_port, remote_port")
-            }
-            let tunnel = try await openTunnel(
-                host: pyStr(hostValue), localPort: localPort,
-                remotePort: try intArg(remoteValue))
-            st.extra["tunnel_pid"] = .integer(Int64(tunnel.processIdentifier))
-            // OFF the cooperative pool: `killTunnel` blocks up to 2 s waiting on
-            // an ssh that ignores SIGTERM, and a bridge teardown must not freeze
-            // every other agent for that interval.
-            st.cleanup = { await Task.detached { killTunnel(tunnel) }.value }
-            do {
-                guard let url = URL(string: "ws://localhost:\(localPort)/\(peerId)/ws") else {
-                    throw BridgeConfigError("ssh+ws transport: malformed url")
-                }
-                return try await WSTransport.connect(url: url)
-            } catch {
-                killTunnel(tunnel)
-                st.cleanup = nil
-                st.extra["tunnel_pid"] = nil
-                throw error
-            }
-        }
         throw BridgeConfigError("unknown transport \(pyRepr(kind))")
     }
 
     /// `int(x)` inside `build_transport`: python raises the bare ValueError text.
-    private func intArg(_ v: JSON, orZero: Bool = false) throws -> Int {
+    private func intArg(_ v: JSON) throws -> Int {
         do {
-            return orZero ? try pyIntOr(v, 0) : try pyInt(v)
+            return try pyInt(v)
         } catch let e as PyError {
             throw BridgeConfigError(e.message)
         }

@@ -27,8 +27,6 @@ regex = "1"
 # The shared agentic corpus is TEST data (`contract/`), read by the agentic
 # runner — not a manifest, so it needs no PyYAML semantics.
 serde_yaml = "0.9"
-# The shared agentic corpus declares text_file memory agents.
-fantastic-text-file = { path = "../fantastic-text-file" }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 # The agentic runner (tests/agentic.rs) boots the same rosters the shared corpus

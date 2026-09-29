@@ -132,7 +132,9 @@ test("the ledger verb is ORIGIN-SCOPED — an agent sees only what it originated
   assert.ok(allRows.some((r) => r.name === "operator-job"));
 
   // As an AGENT: only its own rows. Unscoped, this verb would hand any agent
-  // the result BODIES of everything every other agent ran.
+  // the result BODIES of everything every other agent ran. (`ledger` is
+  // privileged, so the grant names the root.)
+  k.updateMeta("nosy", { can_call: { kernel_state: ["ledger"] } });
   const scoped = k.scopedFor("nosy", null);
   const mine = ((await scoped.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
   const mineRows = mine["executions"] as { name?: string }[];

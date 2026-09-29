@@ -14,13 +14,14 @@ import os
 from pathlib import Path
 
 from kernel_state import yaml_io
+from file_bridge import fs
 from kernel_state.tools import read_tree, write_record
 
 FIX = Path(__file__).parent / "fixtures"
 
 RECORD = {
     "id": "tricky_0a1b2c",
-    "handler_module": "text_file.tools",
+    "handler_module": "file_bridge.tools",
     "parent_id": "kernel_state",
     "one": "1",
     "truthy": "true",
@@ -78,12 +79,12 @@ def test_record_round_trips_type_stable_and_byte_stable(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     d = Path(".fantastic")
     d.mkdir()
-    write_record(d, RECORD)
+    write_record(fs.Root(tmp_path, d), RECORD)
     first = (d / "agent.yaml").read_text(encoding="utf-8")
-    back = read_tree(d)[0]
+    back = read_tree(fs.Root(tmp_path, d))[0]
     assert back == RECORD
     assert [type(v) for v in back.values()] == [type(v) for v in RECORD.values()]
     assert list(back) == list(RECORD)  # key order kept, no sort
-    write_record(d, back)
+    write_record(fs.Root(tmp_path, d), back)
     assert (d / "agent.yaml").read_text(encoding="utf-8") == first
     assert "..." not in first.splitlines()  # never a document-end marker

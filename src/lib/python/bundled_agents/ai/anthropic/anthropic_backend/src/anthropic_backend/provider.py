@@ -11,8 +11,8 @@ endpoint parsing the model's own tool syntax server-side) is a loud error, not a
 silent drop — the model wrote a call in a grammar this kernel does not speak.
 
 Internally translates to the Anthropic wire shape: a top-level `system` string +
-alternating user/assistant text turns. The key is read from `ANTHROPIC_KEY` (or
-`ANTHROPIC_API_KEY`) at call time (`.env` is loaded into os.environ at boot).
+alternating user/assistant text turns. The key is read from `ANTHROPIC_API_KEY`
+at call time (`.env` is loaded into os.environ at boot).
 """
 
 from __future__ import annotations
@@ -22,13 +22,6 @@ from typing import AsyncIterator
 
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 
-DEFAULT_ENDPOINT = "https://api.anthropic.com/v1/messages"
-# NO guessy default (by default, no defaults): this connector never names a model
-# that reaches the network. The sentinel exists ONLY so `reflect` can say what is
-# true; `chat()` fails loud naming `model` if it is ever left unset. (Same shape as
-# the llamacpp sentinel, but anthropic REQUIRES a model on the wire, so it raises
-# rather than omitting the field.)
-DEFAULT_MODEL = "(no default — set the `model` meta)"
 API_VERSION = "2023-06-01"
 
 # EDGE TRANSPORT FAILURES — not answers, and not statements about the request.
@@ -80,8 +73,8 @@ class AnthropicProvider:
 
     def __init__(
         self,
-        endpoint: str = DEFAULT_ENDPOINT,
-        model: str = DEFAULT_MODEL,
+        endpoint: str,
+        model: str,
         *,
         max_tokens: int = MAX_TOKENS,
         sampling: dict | None = None,
@@ -116,10 +109,10 @@ class AnthropicProvider:
 
         import httpx
 
-        key = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        key = os.environ.get("ANTHROPIC_API_KEY")
         if not key:
-            raise RuntimeError("ANTHROPIC_KEY not set in environment (.env)")
-        if not self._model or self._model == DEFAULT_MODEL:
+            raise RuntimeError("ANTHROPIC_API_KEY not set in environment (.env)")
+        if not self._model:
             raise RuntimeError(
                 "anthropic_backend: no `model` set — this connector does not guess "
                 "one. Name a model on the agent record (model=...)."

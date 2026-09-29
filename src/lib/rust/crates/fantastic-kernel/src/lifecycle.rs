@@ -64,8 +64,10 @@ pub fn mint_guid() -> String {
 /// Any extra fields become the new agent's meta.
 /// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
 ///
-/// `{id|token: "*" | [verbs]}` — anything else is refused here, so a record can
-/// never carry a grant the gate would have to guess on. Ported from python
+/// `{id|token: "*" | [verbs]}`, plus the `callable_by`-only `$subtree:<local id>`
+/// key and the `can_call`-only heritable value `{"verbs": [...], "for":
+/// "descendants"}` under a literal id — anything else is refused here, so a
+/// record can never carry a grant the gate would have to guess on. Ported from python
 /// (measured 2026-09-01, E21_plan: `update_agent` accepted `can_call:"*"`, and
 /// the py gate crashed out of a web serve; the rust gate denies instead of
 /// crashing, but a silently-dead grant is still the wrong answer — refuse loud).
@@ -83,13 +85,49 @@ pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
             ));
         };
         for (k, v) in map {
+            let kr = fantastic_bundle::py_repr(k);
+            if let Some(x) = k.strip_prefix(crate::authz::SUBTREE_PREFIX) {
+                if field != "callable_by" {
+                    return Some(format!(
+                        "{field}[{kr}]: `$subtree:` is callable_by-only — it names who \
+                         may call you, never whom you may call"
+                    ));
+                }
+                if x.is_empty() || x.contains('|') {
+                    return Some(format!(
+                        "{field}[{kr}]: `$subtree:` names one LOCAL agent id \
+                         (`$subtree:<id>`, no `|`)"
+                    ));
+                }
+            }
+            if v.is_object() {
+                if field != "can_call" {
+                    return Some(format!(
+                        "{field}[{kr}]: a heritable entry {{\"verbs\": [...], \"for\": \
+                         \"descendants\"}} is can_call-only"
+                    ));
+                }
+                if k.starts_with('$') {
+                    return Some(format!(
+                        "{field}[{kr}]: a heritable entry names a literal target id, \
+                         never a token"
+                    ));
+                }
+                if !crate::authz::is_heritable(v) {
+                    return Some(format!(
+                        "{field}[{kr}] must be exactly {{\"verbs\": [\"<verb>\", …], \
+                         \"for\": \"descendants\"}}"
+                    ));
+                }
+                continue;
+            }
             let ok = v.as_str() == Some("*")
                 || v.as_array()
                     .is_some_and(|a| a.iter().all(|x| x.is_string()));
             if !ok {
                 return Some(format!(
-                    "{field}[{}] must be \"*\" or a list of verb strings",
-                    fantastic_bundle::py_repr(k)
+                    "{field}[{kr}] must be \"*\", a list of verb strings, or (can_call) \
+                     {{\"verbs\": [...], \"for\": \"descendants\"}}"
                 ));
             }
         }
@@ -114,7 +152,7 @@ pub(crate) async fn create_from_payload(
     };
 
     // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument — resolved
-    // like a send target (the `kernel` alias included), never defaulted.
+    // like a send target (the reserved `kernel` address included), never defaulted.
     //
     // It used to be accepted and silently STRIPPED while the ADDRESSED agent
     // became the parent: `parent_id:"specialist"` produced `parent_id="kernel_state"`
@@ -135,10 +173,8 @@ pub(crate) async fn create_from_payload(
              tool you keep, or the root ('kernel_state') for a top-level agent",
         );
     };
-    // Resolved the same way `send` does (C35): `kernel` special-cased to the
-    // root here (matching `parent_id:"kernel"` being accepted before any
-    // agent could ever declare that literal alias), then a declared `alias`
-    // meta through `well_known`, then a literal id.
+    // Resolved the same way `send` does: `kernel` special-cased to the root,
+    // then a literal id.
     let parent: Arc<Agent> = if pid == "kernel" {
         Arc::clone(root)
     } else {

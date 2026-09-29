@@ -11,7 +11,6 @@
 use fantastic_file::FileBundle;
 use fantastic_kernel::{with_operator, with_sender, Agent, AgentId, Item, Kernel};
 use fantastic_static_loader::{StaticLoaderBundle, HANDLER_MODULE};
-use fantastic_text_file::TextFileBundle;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -137,10 +136,9 @@ fn mk_kernel() -> Arc<Kernel> {
     kernel
         .bundles
         .register("lifecycle_probe.tools", LifecycleProbe);
-    kernel.bundles.register("file_bridge.tools", FileBundle);
     kernel
         .bundles
-        .register(fantastic_text_file::HANDLER_MODULE, TextFileBundle);
+        .register("file_bridge.tools", FileBundle::default());
     kernel
         .bundles
         .register("exec_bridge.tools", fantastic_exec_bridge::ExecBridgeBundle);
@@ -263,7 +261,7 @@ async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 /// sender/operator context the caller set, so `send_with_binary`'s gate applies.
 async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
     // Binary channel when the payload carries content (`bytes_utf8` — the
-    // text_file byte verbs: write/patch/append) or is a stream verb; the
+    // file_bridge text verbs: write/edit/append) or is a stream verb; the
     // mirror of python, where real bytes ride the payload in-process.
     let is_stream = matches!(
         payload.get("type").and_then(Value::as_str),
@@ -805,6 +803,162 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
     }
 }
 
+// ─── PC-5 · the hydration verdict ───────────────────────────────
+
+/// One assertion tagged with the requirement it pins (swift `check`).
+fn check(pinned: &mut BTreeMap<String, usize>, rid: &str, cond: bool, detail: String) {
+    *pinned.entry(rid.to_string()).or_insert(0) += 1;
+    assert!(cond, "[{rid}] {detail}");
+}
+
+fn loader_ids(sc: &Scenario) -> Vec<String> {
+    sc.config["loaders"]
+        .as_array()
+        .map(|ls| {
+            ls.iter()
+                .map(|l| l["id"].as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn created(h: &Hydration, lid: &str) -> bool {
+    h.creates
+        .get(lid)
+        .and_then(|r| r.get("id"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
+
+fn booted(h: &Hydration, lid: &str) -> bool {
+    h.boots.get(lid).and_then(|r| r.get("booted")) == Some(&json!(true))
+}
+
+/// What this hydration ACTUALLY did, in the config's own vocabulary (python
+/// `Hydration.outcome`).
+fn outcome(h: &Hydration, sc: &Scenario) -> &'static str {
+    let lids = loader_ids(sc);
+    if lids.iter().any(|l| !created(h, l)) {
+        return "refused_at_write";
+    }
+    if lids.iter().any(|l| !booted(h, l)) {
+        return "boot_error";
+    }
+    "ok"
+}
+
+/// The message the refusal carried, whichever channel refused (python
+/// `Hydration.outcome_error`).
+fn outcome_error(h: &Hydration, sc: &Scenario) -> String {
+    let text = |v: Option<&Value>| match v {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+    };
+    let lids = loader_ids(sc);
+    if let Some(l) = lids.iter().find(|l| !created(h, l)) {
+        return text(h.creates.get(l).and_then(|r| r.get("error")));
+    }
+    if let Some(l) = lids.iter().find(|l| !booted(h, l)) {
+        return text(h.boots.get(l).and_then(|r| r.get("error")));
+    }
+    String::new()
+}
+
+/// PC-5 reads BOTH loud channels: `create_agent`'s reply (a write-time refusal
+/// — the loader never became an agent) and the explicit boot's (a manifest
+/// that cannot build: `create_agent` boots its child and swallows the failure,
+/// so the create reply looks clean). They are different verdicts and a config
+/// declares which one it expects (python `core_the_hydration_verdict_matches_the_declaration`).
+fn the_hydration_verdict_matches_the_declaration(
+    h: &Hydration,
+    sc: &Scenario,
+    want: &str,
+    pinned: &mut BTreeMap<String, usize>,
+) {
+    let got = outcome(h, sc);
+    check(
+        pinned,
+        "PC-5",
+        got == want,
+        format!(
+            "{}: declared {want:?}, got {got:?} (creates={:?} boots={:?})",
+            sc.name, h.creates, h.boots
+        ),
+    );
+    let lids = loader_ids(sc);
+    if want == "ok" {
+        for lid in &lids {
+            check(
+                pinned,
+                "PC-5",
+                created(h, lid),
+                format!("{lid}: {:?}", h.creates.get(lid)),
+            );
+            check(
+                pinned,
+                "PC-5",
+                booted(h, lid),
+                format!(
+                    "{lid}: an explicit boot is the ONLY loud channel — {:?}",
+                    h.boots.get(lid)
+                ),
+            );
+        }
+        return;
+    }
+    let err = outcome_error(h, sc);
+    let contains = sc.spec["expect"]["error_contains"].as_str().unwrap_or("");
+    check(
+        pinned,
+        "PC-5",
+        err.contains(contains),
+        format!("refusal must name why: {contains:?} not in {err:?}"),
+    );
+    if want == "refused_at_write" {
+        for lid in &lids {
+            let rec = h.creates.get(lid).cloned().unwrap_or(Value::Null);
+            check(
+                pinned,
+                "PC-5",
+                rec.get("reason") == Some(&json!("invalid_meta")),
+                format!("{lid}: {rec}"),
+            );
+            check(
+                pinned,
+                "PC-5",
+                rec.get("id").is_none(),
+                format!("{lid}: refused create must mint no id: {rec}"),
+            );
+            check(
+                pinned,
+                "PC-5",
+                !h.kernel.agents.contains_key(&AgentId::from(lid.as_str())),
+                format!("{lid} was refused yet exists in the roster"),
+            );
+        }
+    } else {
+        let broken: Vec<&String> = lids.iter().filter(|l| !booted(h, l)).collect();
+        check(
+            pinned,
+            "PC-5",
+            !broken.is_empty(),
+            "declared boot_error but every loader booted green".to_string(),
+        );
+        for lid in broken {
+            check(
+                pinned,
+                "PC-5",
+                created(h, lid) && h.creates[lid]["id"] == json!(lid),
+                format!(
+                    "{lid}: a boot failure is SWALLOWED at create — the create reply is expected to look clean, got {:?}",
+                    h.creates.get(lid)
+                ),
+            );
+        }
+    }
+}
+
 // ─── the suite ──────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -834,41 +988,8 @@ async fn the_shared_agentic_corpus_holds_on_this_runtime() {
             .to_string();
         let h = hydrate(sc).await;
 
-        // PC-5 — the hydration verdict, on the LOUD channel. `create_agent`
-        // boots its child and swallows the exception, so the create reply is the
-        // only place a write-time refusal is visible.
-        // PC-5 reads BOTH loud channels: `create_agent`'s reply (a write-time
-        // refusal — the loader never became an agent) and the explicit boot's
-        // (a manifest that parses but cannot build). They are different
-        // verdicts and a config declares which one it expects.
-        let loaders = sc.config["loaders"].as_array().cloned().unwrap_or_default();
-        let all_created = loaders.iter().all(|l| {
-            let lid = l["id"].as_str().unwrap_or("");
-            h.creates
-                .get(lid)
-                .map(|r| r.get("error").is_none())
-                .unwrap_or(false)
-        });
-        let all_booted = loaders.iter().all(|l| {
-            let lid = l["id"].as_str().unwrap_or("");
-            h.boots
-                .get(lid)
-                .map(|r| r.get("error").is_none() && r.get("booted") != Some(&json!(false)))
-                .unwrap_or(false)
-        });
-        let built = all_created && all_booted;
-        if declared == "ok" {
-            assert!(
-                built,
-                "{}: declared hydration ok, creates said {:?}",
-                sc.name, h.creates
-            );
-        } else {
-            assert!(
-                !built,
-                "{}: declared hydration {declared:?} but every loader built",
-                sc.name
-            );
+        the_hydration_verdict_matches_the_declaration(&h, sc, &declared, &mut pinned);
+        if declared != "ok" {
             continue; // nothing to reach in a system that was refused
         }
         run_steps(&h, sc, &mut pinned).await;

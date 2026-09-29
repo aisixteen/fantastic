@@ -133,19 +133,6 @@ async def test_truncate_returns_projection_no_summarizer():
     assert not called, "truncate must NOT call the summarizer"
 
 
-async def test_tool_pairing_never_orphans_role_tool():
-    body = [
-        _turn("user", "u0"),
-        {"role": "assistant", "content": "a", "tool_calls": [{"id": "1"}]},
-        {"role": "tool", "tool_call_id": "1", "content": "r"},
-        _turn("assistant", "done"),
-        _turn("user", "u-live"),
-    ]
-    # recent_n=3 would start the recent window on the role:tool (idx 2); must snap back.
-    proj = await get_strategy("compact")(body, [], {}, _ctx(bud=1_000_000, recent_n=3))
-    assert not (proj.body and proj.body[0].get("role") == "tool")
-
-
 async def test_summarizer_failure_degrades_to_stub():
     async def boom(_msgs, max_tokens=None):
         raise RuntimeError("nope")
@@ -167,7 +154,7 @@ async def test_tight_budget_keeps_live_user_turn():
 
 def test_context_notice_compact_shape():
     n = core._context_notice("compact", "MY SUMMARY", False, 7)
-    assert n["role"] == "user" and "tool_calls" not in n
+    assert n["role"] == "user"
     c = n["content"]
     assert "[context-notice]" in c and "MY SUMMARY" in c
     assert "recall" in c and "memory agent" in c  # affordances taught
@@ -375,7 +362,7 @@ async def test_derive_reaction_detects_recall_and_persist(monkeypatch):
         _send_turn(
             "ai", {"type": "recall", "query": "codename"}
         ),  # the recall reaction
-        # the persist reaction — `text_file`'s write, not the deleted KV `set`
+        # the persist reaction — a file_bridge `write`
         _send_turn("notes", {"type": "write", "path": "facts.md", "text": "HALCYON"}),
         _turn("assistant", "It's HALCYON."),
     ]
@@ -390,12 +377,9 @@ async def test_derive_reaction_detects_recall_and_persist(monkeypatch):
     assert r == {"recalled": True, "persisted": True, "recall_count": 1}
 
 
-async def test_reaction_counts_text_file_write_and_patch_not_dead_kv_verbs(monkeypatch):
-    """The persist verbs are `text_file`'s — memory is plain FILES now.
-
-    The set the reader scanned for (`set`/`append`/`replace`) was durable_memory's KV
-    surface, deleted with it. A model that reacted to a compaction by writing
-    `{type:'write', path:'facts.md'}` was scored as not having reacted at all."""
+async def test_reaction_counts_the_file_bridge_text_verbs(monkeypatch):
+    """The persist verbs are a file_bridge's `write`/`edit`/`append` — a model
+    keeps what it must as plain files; any other verb is not a persist."""
     thread: list[dict] = []
 
     async def fake_load(self_id, kernel, behind=False):
@@ -405,14 +389,14 @@ async def test_reaction_counts_text_file_write_and_patch_not_dead_kv_verbs(monke
     _projection["ai"] = {"fired": True}
     _compaction_mark["ai"] = {"fired_at_index": 0, "client_id": "cli"}
     try:
-        for verb in ("write", "patch", "append"):
+        for verb in ("write", "edit", "append"):
             thread[:] = [_send_turn("notes", {"type": verb, "path": "facts.md"})]
             r = await core._derive_reaction("ai", None)
             assert r["persisted"] is True, verb
-        for dead in ("set", "replace"):
-            thread[:] = [_send_turn("mem", {"type": dead, "key": "k", "value": "v"})]
+        for other in ("read", "list"):
+            thread[:] = [_send_turn("notes", {"type": other, "path": "facts.md"})]
             r = await core._derive_reaction("ai", None)
-            assert r["persisted"] is False, dead
+            assert r["persisted"] is False, other
     finally:
         _projection.pop("ai", None)
         _compaction_mark.pop("ai", None)

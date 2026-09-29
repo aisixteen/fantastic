@@ -20,8 +20,6 @@ members = [
     "fantastic-responses-backend",
     "fantastic-scheduler",
     "fantastic-static-loader",
-    "fantastic-terminal-backend",
-    "fantastic-text-file",
     "fantastic-web",
     "fantastic-web-rest",
     "fantastic-web-ws",
@@ -232,11 +230,15 @@ name = "fantastic-exec-bridge"
 version = "0.1.0"
 source = { editable = "bundled_agents/io/exec_bridge" }
 dependencies = [
+    { name = "fantastic-file-bridge" },
     { name = "fantastic-io-bridge" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" }]
+requires-dist = [
+    { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
+    { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
+]
 
 [[package]]
 name = "fantastic-file-bridge"
@@ -274,8 +276,6 @@ dependencies = [
     { name = "fantastic-responses-backend" },
     { name = "fantastic-scheduler" },
     { name = "fantastic-static-loader" },
-    { name = "fantastic-terminal-backend" },
-    { name = "fantastic-text-file" },
     { name = "fantastic-web" },
     { name = "fantastic-web-rest" },
     { name = "fantastic-web-ws" },
@@ -309,8 +309,6 @@ requires-dist = [
     { name = "fantastic-responses-backend", editable = "bundled_agents/ai/responses/responses_backend" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
-    { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal" },
-    { name = "fantastic-text-file", editable = "bundled_agents/text_file" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
     { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
     { name = "fantastic-web-ws", editable = "bundled_agents/io/web_ws" },
@@ -451,22 +449,6 @@ requires-dist = [
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "pyyaml", specifier = ">=6" },
 ]
-
-[[package]]
-name = "fantastic-terminal-backend"
-version = "0.1.0"
-source = { editable = "bundled_agents/terminal" }
-dependencies = [
-    { name = "fantastic-file-bridge" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" }]
-
-[[package]]
-name = "fantastic-text-file"
-version = "0.1.0"
-source = { editable = "bundled_agents/text_file" }
 
 [[package]]
 name = "fantastic-web"

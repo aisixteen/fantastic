@@ -3,8 +3,8 @@
 // Same public re-export set as `FantasticKernelEmbedded`. The
 // difference is intentionally not in this module's source — both
 // products import the same kernel package, and the Pro-tier
-// subprocess bundles (`terminal_backend`, `local_runner`,
-// `exec_bridge`) are linked in automatically via
+// subprocess bundle (`exec_bridge` — commands and PTY jobs) is linked in
+// automatically via
 // the kernel's `#if os(macOS)` paths when the consuming app target
 // is macOS-only.
 //

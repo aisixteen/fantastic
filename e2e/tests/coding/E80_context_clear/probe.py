@@ -29,7 +29,7 @@ sys.path.insert(
 
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
-from helpers.facts_arm import FOLD_ARMS, WINDOW, call, leg, plant_fillers
+from helpers.facts_arm import FOLD_ARMS, WINDOW, call, plant_fillers
 from helpers import memory
 from helpers.kernel import open_kernel, restart
 
@@ -51,18 +51,18 @@ PAD = 4000
 
 async def _fixture(root):
     r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": FB,
-                                    "handler_module": "file_bridge.tools", "root": ".fantastic",
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
                                     "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {AI: "*", "notes": "*", "rest": "*", "web": "*"}})
+                                    "callable_by": {AI: "*", "rest": "*", "web": "*"}})
     assert not r.get("error"), f"create {FB}: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "work_fb",
-                                    "handler_module": "file_bridge.tools", "root": ".",
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                                     "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {"notes": "*", "rest": "*", "web": "*"}})
+                                    "callable_by": {"rest": "*", "web": "*"}})
     assert not r.get("error"), f"create work_fb: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "notes",
-                                    "handler_module": "text_file.tools", "target_id": "work_fb",
-                                    "can_call": {"work_fb": "*"},
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+                                    "ingress_rule": "allow_all_ingress",
                                     "callable_by": {AI: "*", "rest": "*", "web": "*"}})
     assert not r.get("error"), f"create notes: {r}"
     await call(root, root.id, {"type": "boot"})
@@ -73,7 +73,7 @@ async def _connect(root, core):
     return await connect(root, core, BK, agent_id=AI,
                          can_call={FB: "*", "notes": "*", "cli": "*", "user": "*", AI: "*"},
                          callable_by={"user": "*"}, limits=Limits.from_env(os.environ),
-                         record={**leg(FB), "context_window": WINDOW, "num_ctx": WINDOW,
+                         record={"context_window": WINDOW, "num_ctx": WINDOW,
                                  "context_strategy": STRATEGY, **EXTRA})
 
 

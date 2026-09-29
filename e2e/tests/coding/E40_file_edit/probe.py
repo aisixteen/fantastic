@@ -1,11 +1,10 @@
-"""coding/file_edit — the model EDITS with the patch organ. LLM-driven.
+"""coding/file_edit — the model EDITS with the file agent's `edit` verb. LLM-driven.
 
-One organ, precisely: the `text_file` editor's `patch` verb (patch moved OFF
-the bridge — text_file owns SEARCH/REPLACE and reaches disk only through gated
-sends to the file agent). The task is a surgical config change; the score is
-the FILE — the target line changed, every other line byte-identical (a
-whole-file rewrite that happens to match would pass the diff, so the
-transcript must also show a `patch` call — the organ, not a bypass).
+One organ, precisely: the file_bridge's `edit` verb (SEARCH/REPLACE hunks, a
+transaction over the listed files). The task is a surgical config change; the
+score is the FILE — the target line changed, every other line byte-identical (a
+whole-file rewrite that happens to match would pass the diff, so the transcript
+must also show an `edit` call — the organ, not a bypass).
 """
 
 from __future__ import annotations
@@ -34,10 +33,10 @@ CONFIG = (
 )
 
 TASK = (
-    "The editor agent `editor` edits this run's files. In `config.txt`, change "
-    "`port = 8080` to `port = 9090` — and change NOTHING else. Use the "
-    "editor's `patch` verb (reflect `editor` to learn its exact shape); do "
-    "NOT rewrite the whole file. When the patch is applied, end your run by calling done — emit <call name=\"done\"></call>."
+    f"The file agent `{FB}` holds this run's files. In `config.txt`, change "
+    "`port = 8080` to `port = 9090` — and change NOTHING else. Use its `edit` "
+    f"verb (reflect `{FB}` to learn its exact shape); do NOT rewrite the whole "
+    "file. When the edit is applied, end your run by calling done — emit <call name=\"done\"></call>."
 )
 
 
@@ -47,7 +46,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_edit_", reach=[FB, "editor", "ai", "cli", "user"]
+        prefix="coding_edit_", reach=[FB, "ai", "cli", "user"]
     )
     try:
         r = await _call(
@@ -57,27 +56,13 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "editor": "*"},
-            },
-        )
-        assert not r.get("error"), f"create {FB}: {r}"
-        r = await _call(
-            root,
-            root.id,
-            {
-                "type": "create_agent",
-                "parent_id": root.id,
-                "id": "editor",
-                "handler_module": "text_file.tools",
-                "target_id": FB,
-                "can_call": {FB: "*"},
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
-        assert not r.get("error"), f"create editor: {r}"
+        assert not r.get("error"), f"create {FB}: {r}"
         Path("config.txt").write_text(CONFIG)
 
         # THE HUMAN who wants the work done — the task comes FROM here.
@@ -88,7 +73,7 @@ async def main():
             root,
             core,
             BK,
-            can_call={FB: "*", "editor": "*", "cli": "*", "user": "*"},
+            can_call={FB: "*", "cli": "*", "user": "*"},
             callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
@@ -105,8 +90,8 @@ async def main():
                 after == CONFIG.replace("port = 8080", "port = 9090"),
             ),
             (
-                "the PATCH organ was used, not a rewrite",
-                '<type>patch</type>' in transcript,
+                "the EDIT organ was used, not a rewrite",
+                '<type>edit</type>' in transcript,
             ),
         ]
         for name, ok in checks:
@@ -114,7 +99,7 @@ async def main():
         allok = all(ok for _, ok in checks)
         verdict(
             allok,
-            "a surgical patch, by the model, through the organ"
+            "a surgical edit, by the model, through the organ"
             if allok
             else "a file_edit check failed",
         )

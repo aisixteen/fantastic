@@ -81,7 +81,10 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
     }
     // THE BOOT MOUNT WALK.
     let r = kernel
-        .send(vec![Item::new(AgentId::from(web_id), json!({"type": "boot"}))])
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
         .await
         .remove(0)
         .result;
@@ -99,7 +102,10 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
         assert!(at("/z_literal/ws") < at("/{host_id}/ws"), "{paths:?}");
         let (path, handler) = first_ws_match(&t, "/z_literal/ws").expect("a full match");
         assert_eq!(path, "/z_literal/ws");
-        assert!(matches!(handler, Handler::Ws(ref leg) if leg.0 == "z_literal"), "{handler:?}");
+        assert!(
+            matches!(handler, Handler::Ws(ref leg) if leg.0 == "z_literal"),
+            "{handler:?}"
+        );
         // the catch-all still serves every other host
         let (path, _) = first_ws_match(&t, "/elsewhere/ws").expect("a full match");
         assert_eq!(path, "/{host_id}/ws");

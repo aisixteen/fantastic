@@ -34,7 +34,7 @@ private func fixture(_ name: String) throws -> String {
 struct YamlIOTests {
     static let record: OrderedDictionary<String, JSON> = obj([
         "id": .string("tricky_0a1b2c"),
-        "handler_module": .string("text_file.tools"),
+        "handler_module": .string("file_bridge.tools"),
         "parent_id": .string("kernel_state"),
         "one": .string("1"),
         "truthy": .string("true"),

@@ -12,19 +12,20 @@ loaders:
         # (kernel_state/tools.py `_find_store`, which walks the subtree).
         - id: store
           handler_module: file_bridge.tools
+          allow: ['.']
           root: .fantastic
           ingress_rule: allow_all_ingress
-          callable_by:
-            memory: ['*']
+        # Memory is plain FILES on a data store the worker edits directly.
         - id: memory
-          handler_module: text_file.tools
-          target_id: store
-          can_call:
-            store: ['*']
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: memory
+          ingress_rule: allow_all_ingress
           callable_by:
             worker: [write, read]
         - id: worker
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           can_call:
             memory: [write, read]
@@ -33,7 +34,9 @@ loaders:
         # it, quiet's callable_by does not name worker back.
         - id: quiet
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
         - id: island
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress

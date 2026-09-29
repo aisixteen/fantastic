@@ -22,7 +22,7 @@ struct AnthropicSamplingTests {
 
     private func provider(sampling: OrderedDictionary<String, JSON>) -> AnthropicProvider {
         AnthropicProvider(
-            endpoint: DEFAULT_ENDPOINT,
+            endpoint: "http://h.invalid/v1/messages",
             model: "claude-x",
             apiKey: "unused",
             maxTokens: 64,

@@ -358,7 +358,7 @@ pub(crate) fn fan_out(
 }
 
 /// How to get a reply's body again, in ONE line: the replying agent's own
-/// `origin` when it wrote one (a text_file read names path, range and version);
+/// `origin` when it wrote one (a file_bridge read names path, range and version);
 /// otherwise the call that produced it — re-sending it may not give the same
 /// bytes, and the line says so. Python `_origin_line`.
 #[must_use]
@@ -760,7 +760,10 @@ async fn route_reply_gated(
     let own_store = meta.get("memory_store_id").and_then(Value::as_str);
     if payloads.iter().any(|(t, p)| {
         Some(t.as_str()) == own_store
-            && matches!(p.get("type").and_then(Value::as_str), Some("share" | "unshare"))
+            && matches!(
+                p.get("type").and_then(Value::as_str),
+                Some("share" | "unshare")
+            )
     }) {
         crate::memory::forget_grants(&self_id, &kernel);
         // the next body event simply carries none if the store refuses — no grant
@@ -791,9 +794,9 @@ async fn route_reply_gated(
                     // ORIGIN line. SYNC OR ASYNC ALIKE (decided 2026-09-26): a
                     // body is never persisted; under the cap it is inline.
                     if let Some(p) = out.pid {
-                        let over = crate::context::estimate_one(
-                            &json!({"role": "user", "content": body}),
-                        ) > cap;
+                        let over =
+                            crate::context::estimate_one(&json!({"role": "user", "content": body}))
+                                > cap;
                         if over && crate::memory::store_reply(&self_id, &kernel, p.0, &body) {
                             // CODE POINTS: python prints `len(body)`.
                             let size = body.chars().count();

@@ -35,7 +35,7 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
     kernel.bundles.register(HANDLER_MODULE, NvidiaNimBundle);
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
         fantastic_ram_store::RamStoreBundle::default(),
@@ -59,7 +59,7 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
             json!({
                 "type":"create_agent",
                 "parent_id": "kernel",
-                "handler_module":"file_bridge.tools",
+                "handler_module":"file_bridge.tools", "allow": ["."],
                 "id": fid,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
@@ -82,15 +82,13 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
         "parent_id": "kernel",
         "handler_module":HANDLER_MODULE,
         "id": nim,
-        "file_bridge_id": fid.clone(),
         "model": "test-model",
     });
     for (k, v) in memory {
         create[k] = v;
     }
-    if let Some(e) = endpoint {
-        create["endpoint"] = json!(e);
-    }
+    // REQUIRED — nothing is guessed; an unreachable one unless a test serves it.
+    create["endpoint"] = json!(endpoint.unwrap_or_else(|| "http://127.0.0.1:1/v1".to_string()));
     let _ = kernel
         .send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
@@ -659,8 +657,8 @@ async fn a_mapped_rate_limit_is_an_answer_not_a_raise() {
     );
 }
 
-/// UNMAPPED, same backend: a no-model refusal is not an HTTP status, so python's
-/// mapper returns None and the raise goes through.
+/// UNMAPPED, same backend: a missing-model refusal is not an HTTP status, so
+/// python's mapper returns None and the raise goes through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unmapped_nim_failure_still_raises() {
     let tmp = TempDir::new().unwrap();
@@ -669,7 +667,7 @@ async fn an_unmapped_nim_failure_still_raises() {
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": nim.as_str(), "model": DEFAULT_MODEL}),
+            json!({"type": "update_agent", "id": nim.as_str(), "model": ""}),
         )])
         .await;
     let r = kernel
@@ -685,7 +683,7 @@ async fn an_unmapped_nim_failure_still_raises() {
         r["error"]
             .as_str()
             .unwrap_or_default()
-            .starts_with("RuntimeError: nvidia_nim_backend: no `model` set"),
+            .starts_with("ValueError: nvidia_nim_backend: `model` is required"),
         "{r:#?}"
     );
 }
@@ -857,14 +855,12 @@ async fn kernel_cancel_kills_an_in_flight_send() {
     assert_eq!(st["generating"], false);
 }
 
-/// NO guessy default (mirror of the Python provider test): the sentinel
-/// `DEFAULT_MODEL` is not a real id, and the request path fails loud — naming
-/// `model` — rather than putting the sentinel (or an empty string) on the wire.
+/// NO guessy default (mirror of the Python provider test): an empty model never
+/// reaches the wire — the request path fails loud, naming `model`.
 #[tokio::test]
-async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
-    assert_eq!(DEFAULT_MODEL, "(no default — set the `model` meta)");
+async fn an_empty_model_fails_loud_in_chat() {
     let kernel = Arc::new(Kernel::new());
-    for m in [DEFAULT_MODEL.to_string(), String::new()] {
+    for m in [String::new()] {
         let p = NimProvider {
             self_id: AgentId::from("nim_x"),
             endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
@@ -873,7 +869,10 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             client_id: "cli".to_string(),
             report: Default::default(),
         };
-        let err = match p.chat(&[json!({"role": "user", "content": "hi"})], None).await {
+        let err = match p
+            .chat(&[json!({"role": "user", "content": "hi"})], None)
+            .await
+        {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
             Err(e) => e.message,
         };
@@ -887,7 +886,7 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
 #[tokio::test]
 async fn reflect_keys_are_python_keys_in_python_order() {
     // python `_make_reflect` + `_reflect_extra`: the shared base, then
-    // `has_api_key` alone. `file_bridge_id` was a rust-only key.
+    // `has_api_key` alone.
     let tmp = TempDir::new().unwrap();
     let _key = KeyEnv::set(Some("nvapi-x")).await;
     let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
@@ -924,5 +923,4 @@ async fn reflect_keys_are_python_keys_in_python_order() {
         "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling)."
     );
     assert_eq!(r["has_api_key"], true);
-    assert!(r.get("file_bridge_id").is_none(), "{r:#?}");
 }

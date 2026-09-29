@@ -2,7 +2,7 @@
 
 The emergent-coder bet, measured: no repo-map ORGAN exists — the map is an
 ARTIFACT the model builds from the organs it has (glob/grep through the
-searcher, paged reads, the text_file editor) and keeps as a FILE, because
+searcher, paged reads, the file agent's text verbs) and keeps as a FILE, because
 memory is files. The subject is a REAL repo (aider's `coders` package, copied
 from the local research clone into the run's workdir, removed after). Weights
 are locked out two ways: the map must be COMPLETE for a directory whose truth
@@ -85,18 +85,17 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "notes": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": "notes",
-                "handler_module": "text_file.tools",
-                "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
@@ -105,6 +104,7 @@ async def main():
                 "id": XID,
                 "handler_module": "exec_bridge.tools",
                 "cwd": os.getcwd(),
+                "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["grep .*", "find .*"],
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},

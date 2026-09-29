@@ -309,17 +309,6 @@ async fn distilled_self_extension_states_the_file_and_command_model() {
     assert!(se.contains("write_stream"));
     assert!(se.contains("`bytes` is VERBATIM") && se.contains("</bytes>"));
     assert!(se.contains("exec_bridge.tools"));
-    for dead in [
-        "code:'",
-        "code=",
-        "interpreters:",
-        "shim:",
-        "handler_module:'",
-    ] {
-        assert!(!se.contains(dead), "withdrawn recipe {dead:?}: {se}");
-    }
-    assert!(!se.contains("send_binary") && !se.contains("Begin Bytes"));
-    assert!(!se.contains("Executors here") && !se.contains("NO script executor"));
 }
 
 /// C12: an unknown verb on the loader is python's CODED refusal, verbatim.
@@ -344,7 +333,7 @@ async fn load_tree_persist_record_round_trip() {
         .send(vec![Item::new(
             root.clone(),
             json!({"type": "persist_record", "record": {
-                "id": "noted", "handler_module": "text_file.tools", "parent_id": "kernel_state"
+                "id": "noted", "handler_module": "file_bridge.tools", "parent_id": "kernel_state"
             }}),
         )])
         .await
@@ -377,6 +366,53 @@ async fn load_tree_persist_record_round_trip() {
         .remove(0)
         .result;
     assert_eq!(gone["ok"], json!(true));
+    assert!(!tmp.path().join(".fantastic/agents/noted").exists());
+}
+
+/// a15 (audit 2026-09-28): the ROOT loader's tree is hydrated at boot, so no
+/// AGENT writes it — not a sibling's record, not its own. The operator still does.
+#[tokio::test]
+async fn the_root_loader_refuses_record_verbs_from_an_agent() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    // NAMED grants, so the LOADER's own guard is what answers, not the gate.
+    let made = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "someone",
+                   "handler_module": "file_bridge.tools",
+                   "can_call": {root.0.clone(): ["persist_record", "forget_record"]}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!("someone"), "{made}");
+    for payload in [
+        json!({"type": "persist_record", "record": {"id": "noted", "parent_id": "kernel_state"}}),
+        json!({"type": "forget_record", "id": "noted"}),
+    ] {
+        let out = fantastic_kernel::send::with_sender(AgentId::from("someone"), {
+            let kernel = Arc::clone(&kernel);
+            let root = root.clone();
+            async move {
+                kernel
+                    .send(vec![Item::new(root, payload)])
+                    .await
+                    .remove(0)
+                    .result
+            }
+        })
+        .await;
+        assert_eq!(out["reason"], json!("unauthorized"), "{out}");
+        assert!(
+            out["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("only by the operator"),
+            "{out}"
+        );
+    }
     assert!(!tmp.path().join(".fantastic/agents/noted").exists());
 }
 
@@ -531,3 +567,92 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
 /// Records nested under a federated record (python `test_nested_records.py`).
 #[path = "tests_nested_records.rs"]
 mod nested_records;
+
+// ─── loud persistence (audit 2026-09-28, d2) ───────────────────────────
+
+/// A kernel with the root loader AND the real file_bridge, NOT yet booted.
+fn with_file(tmp: &TempDir) -> Arc<Kernel> {
+    let mut reg = BundleRegistry::new();
+    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
+    bootstrap(reg, BootstrapOptions::daemon(tmp.path()))
+        .expect("boot")
+        .kernel
+}
+
+async fn make_store(kernel: &Arc<Kernel>, extra: serde_json::Value) {
+    let mut create = json!({
+        "type": "create_agent", "parent_id": "kernel", "id": "store",
+        "handler_module": "file_bridge.tools", "root": ".fantastic",
+        "allow": ["."], "ingress_rule": "allow_all_ingress",
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        create[k] = v.clone();
+    }
+    let r = root_reflect(kernel, create).await;
+    assert_eq!(r["id"], json!("store"), "{r}");
+}
+
+async fn boot_root(kernel: &Arc<Kernel>) {
+    let root = kernel.root().expect("root").id.clone();
+    kernel
+        .send(vec![Item::new(root, json!({"type": "boot"}))])
+        .await;
+}
+
+async fn persistence_of(kernel: &Arc<Kernel>) -> serde_json::Value {
+    root_reflect(kernel, json!({"type": "reflect", "tree": "none"})).await["persistence"].clone()
+}
+
+/// A discovered store whose `allow` does not expose the records is reported at
+/// boot: no provider, and `persistence.error` names the store and the paths.
+#[tokio::test]
+async fn a_store_that_does_not_expose_the_records_is_loud_at_boot() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = with_file(&tmp);
+    make_store(&kernel, json!({"allow": ["data"]})).await;
+    boot_root(&kernel).await;
+    let p = persistence_of(&kernel).await;
+    assert_eq!(p["provider"], serde_json::Value::Null, "{p}");
+    assert_eq!(p["error"]["store"], json!("store"), "{p}");
+    assert!(
+        p["error"]["path"].as_str().unwrap().contains("agent.yaml"),
+        "{p}"
+    );
+}
+
+/// A refused write is loud, and clears once a write lands again.
+#[tokio::test]
+async fn a_refused_write_is_loud_and_clears_when_writes_land() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = with_file(&tmp);
+    make_store(&kernel, json!({"readonly": true})).await;
+    boot_root(&kernel).await;
+    assert_eq!(persistence_of(&kernel).await, json!({"provider": "store"}));
+    let made = root_reflect(
+        &kernel,
+        json!({"type": "create_agent", "parent_id": "kernel", "id": "probe",
+               "handler_module": "file_bridge.tools", "allow": ["."]}),
+    )
+    .await;
+    assert_eq!(made["id"], json!("probe"), "{made}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let p = persistence_of(&kernel).await;
+    assert_eq!(p["provider"], serde_json::Value::Null, "{p}");
+    assert_eq!(p["error"]["store"], json!("store"), "{p}");
+    assert!(
+        p["error"]["error"].as_str().unwrap().contains("readonly"),
+        "{p}"
+    );
+    // the operator fixes the store; the next write (its own updated record)
+    // lands and the error clears
+    let mut patch = Map::new();
+    patch.insert("readonly".to_string(), json!(false));
+    kernel.update(&AgentId::from("store"), patch);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(persistence_of(&kernel).await, json!({"provider": "store"}));
+    assert!(tmp
+        .path()
+        .join(".fantastic/agents/store/agent.yaml")
+        .exists());
+}

@@ -32,7 +32,7 @@ test("callHost forwards the LITERAL target to the host, not the local root", asy
 
   const reply = await kernel.callHost("kernel", {
     type: "create_agent",
-    handler_module: "terminal_backend.tools",
+    handler_module: "exec_bridge.tools",
   });
   assert.equal(seen.length, 1);
   assert.equal(

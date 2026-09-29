@@ -58,17 +58,15 @@ impl From<MemoryStoreError> for GenFailure {
     }
 }
 
-/// Project the message list to what the model actually reads — pure text, every
-/// role a chat template renders. Maps any `role:tool` (legacy turns in an old
-/// chat.json) to `role:user`, because many templates don't render a `tool` role.
+/// Project the message list to what the model actually reads — its role and its
+/// text; every other key is stripped.
 fn render_for_model(messages: &[Value]) -> Vec<Value> {
     messages
         .iter()
         .map(|m| {
-            let role = m.get("role").and_then(Value::as_str).unwrap_or("");
-            let out_role = if role == "tool" { "user" } else { role };
+            let role = m.get("role").cloned().unwrap_or(Value::Null);
             let content = m.get("content").cloned().unwrap_or_else(|| json!(""));
-            json!({"role": out_role, "content": content})
+            json!({"role": role, "content": content})
         })
         .collect()
 }

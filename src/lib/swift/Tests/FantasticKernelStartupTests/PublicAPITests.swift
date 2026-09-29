@@ -19,7 +19,7 @@ struct StartKernelInMemoryTests {
     @Test func registersDefaultBundleSet() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         // Spot-check key bundles are registered + dispatchable.
-        for hm in ["file_bridge.tools", "cli.tools", "text_file.tools", "ollama_backend.tools"]
+        for hm in ["file_bridge.tools", "cli.tools", "ollama_backend.tools"]
         {
             let id = "probe_\(hm.replacingOccurrences(of: ".", with: "_"))"
             let r = await kernel.send([Item(AgentId("kernel_state"), .object([
@@ -73,12 +73,10 @@ struct StartKernelInMemoryTests {
                 "id": .string("ollama_nomodel"),
             ]))])[0].result
         let r = await kernel.send([Item(AgentId("ollama_nomodel"), .object(["type": .string("reflect")]))])[0].result
-        // B1.24: python answers `rec.get("model", cfg.default_model)`, and that
-        // default is a fail-loud SENTINEL — it says whose choice the model is
-        // rather than naming one that reaches the network.
-        #expect(
-            r["model"].asString == "(no default — set the `model` meta)",
-            "ollama must not guess a model default: \(r)")
+        // B1.24: python answers `rec.get("model")` — no model on the record is
+        // null, never a guessed one.
+        #expect(r["model"].isNull, "ollama must not guess a model default: \(r)")
+        #expect(r["endpoint"].isNull, "ollama must not guess an endpoint: \(r)")
     }
 
     @Test func httpPortIsZeroPreListener() async throws {
@@ -92,17 +90,11 @@ struct StartKernelInMemoryTests {
     }
 }
 
-// The `Kernel.sendJson` / `sendJsonAs` / `proxyEmit` / `registerTool` suites are
-// GONE with the UniFFI-compat surface they covered. Nothing is untested as a
-// result: sender attribution is pinned by `sendAsAttributesSender` and emit's
-// state event by `emitPublishesStateEvent`, both in KernelDispatchTests, against
-// the native API instead of the string shim.
-
 @Suite("save / load")
 struct SaveLoadTests {
     @Test func saveReturnsValidJson() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        let json = kernel.save()
+        let json = try kernel.saveJSON()
         let parsed = try JSON.parse(json)
         #expect(parsed["version"].asInt == 1)
         #expect(!parsed["agents"].asArray.isNilOrEmpty)
@@ -113,13 +105,13 @@ struct SaveLoadTests {
         _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("create_agent"),
                 "parent_id": .string("kernel_state"),
-                "handler_module": .string("file_bridge.tools"),
+                "handler_module": .string("file_bridge.tools"), "allow": ["."],
                 "id": .string("snap_target"),
             ]))])[0].result
-        let snap = kernel.save()
+        let snap = try kernel.saveJSON()
         // Make a fresh kernel + load.
         let kernel2 = try await startKernelInMemory(portHint: 0)
-        try kernel2.load(json: snap)
+        try kernel2.loadJSON(snap)
         let listed = await kernel2.send([Item(AgentId("kernel_state"), .object(["type": .string("list_agents")]))])[0].result
         let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
         #expect(ids.contains("snap_target"))

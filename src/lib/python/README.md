@@ -96,8 +96,7 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   (`ingress_rule=allow_all_ingress` to open), it spawns ONLY a command line
   matching one of the record's `allowed` regexes — one spawn surface
   (`proc`), no per-call override, no default, no PATH fallback, so a line
-  that matches nothing is refused, naming the patterns. It is NOT a code
-  runner: no `code` field, no `interpreters`, no shim. A durable program is
+  that matches nothing is refused, naming the patterns. A durable program is
   a FILE (written over a stream) plus a command that runs it: `start
   {command, args}` / `status` / `stop` / `interrupt` / `clear` / `boot`,
   the job table, the connector relay and the mail contract are all
@@ -108,30 +107,19 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   NAMED command, not a sandbox — the operator chose which commands may run,
   nothing
   more.
-- **text_file** — stateless text-document agent; durable memory as plain FILES
-  in any format (the substrate imposes none). Line-numbered `read`, atomic
-  `write`, SEARCH/REPLACE `patch`, `append`; on-demand `version`/`if_match` +
-  `checkpoint`/`restore`. Owns no disk of its own — every byte is a gated send
-  to the `file_bridge` named by `on:`/`target_id`; fails loud until wired.
   Reached like any other unit by id
   (`send(<id>, {...})`), so compute, inference, and memory share one
   calling convention.
-- **terminal_backend** — PTY shell session. The browser xterm view
-  (`terminal_view`) lives in the canvas app (the CLI's), not here. The backend
-  ports VSCode's terminal robustness: streaming **flow control** (the
-  PTY reader pauses past 100K unacknowledged chars and resumes on the
-  consumer's `ack` verb — backpressure so a flood can't lock up a
-  tab), **incremental UTF-8 decode** (a multi-byte char split across
-  an `os.read` chunk is reassembled, not shattered into `<?>` litter),
-  and **serialized full-buffer writes** (large/bracketed pastes land
-  whole). `paste_image` bridges a browser-clipboard image into a
-  CLI running in the PTY (e.g. `claude`): the view ships the bytes,
-  the backend saves a file and types its path in — mimicking a
-  drag-drop, since the server can't reach the browser clipboard.
+- **terminals are exec_bridge PTY jobs** — `start {command, args, pty:{cols,rows}}`
+  runs an allowlisted command on a pseudo-terminal (the same gate, the same one
+  spawner). The job streams `output` and is driven with `write` / `resize` / `ack`
+  (VSCode's flow control: the reader pauses past 100K unacked chars) / `output` (the
+  ring, for re-attach) / `paste_image`. The browser xterm view lives in the canvas app
+  (the CLI's), not here. Nothing respawns a terminal: a client that attaches `start`s.
 - **ws_bridge / relay_connector** — cross-host. Sub-kernel reach is
   the ssh connector + `exec_bridge`; a bridge leg carries the verbs
   so a canvas can reach a remote kernel.
-  `ws_bridge` opens WS (or SSH+WS) to a peer kernel's `web_ws`
+  `ws_bridge` opens WS to a peer kernel's `web_ws`
   and ships raw call frames (asymmetric — no peer bridge needed);
   local agents reach remote agents through it without merging the two
   address spaces, and `watch_remote` streams a remote agent's emits
@@ -188,8 +176,7 @@ REPL example:
 ```
 fantastic> add web port=8888                        # uvicorn boots
 fantastic> add file_bridge
-fantastic> add terminal_backend                      # PTY shell (its xterm view lives in the canvas app)
-# browse http://localhost:8888/  → tree view with ↗ visit links
+# the host renders nothing at `/` — attach a client over web_ws / web_rest
 # a browser app (the CLI's canvas) boots the ts kernel and renders its members (see src/lib/ts/SERVE.md)
 ```
 
@@ -215,10 +202,8 @@ fantastic kernel create_agent parent_id=kernel_state handler_module=web_rest.too
 
 After `fantastic`:
 ```bash
-# Rendering: `/` is the agent-tree index; `/<id>/file/<path>` proxies to a gated
-# file_bridge's read_stream (a SEALED file_bridge 404s — the allowance is its own gate).
-curl http://localhost:8888/                            # root index — agent tree (HTML)
-curl http://localhost:8888/<id>/                       # agent UI (HTML) if it ships render_html
+# The host renders nothing of its own (`/` is a 404). `/<id>/file/<path>` proxies to
+# a gated file_bridge's read_stream (sealed, or a path outside its `allow` list → 404).
 curl http://localhost:8888/<id>/file/<path>            # octet proxy → the agent's read_stream
 
 # WS (when web_ws is mounted)
@@ -303,21 +288,23 @@ uv run pytest -n auto
 ├── conftest.py                               # pytest fixtures
 ├── tests/                                    # substrate-level tests
 └── bundled_agents/
-    ├── loader/kernel_state/                     # the ROOT agent + persistence/hydration root (owns .fantastic/)
+    ├── loader/kernel_state/                  # the ROOT agent + persistence/hydration root (owns .fantastic/)
+    ├── loader/static_loader/                 # declarative roster loader (a fantastic.yaml manifest)
     ├── cli/                                  # stdout renderer (ephemeral — composed when isatty)
     ├── web/                                  # HTTP+WS transport (uvicorn) + favicon
-    ├── file/, scheduler/                     # filesystem + recurring tasks
+    ├── io/file_bridge/                       # the DISK edge — sealed by default, deny-all `allow` list, text verbs (read/write/edit/append/undo) + streams; `fs.py` is the one opener
+    ├── scheduler/                            # recurring tasks
     ├── io/exec_bridge/                       # the PROCESS edge — sealed-by-default command runner, regex command ALLOWLIST (`allowed`), one spawn surface (proc.py), control wire; a program is a FILE + a command
-    ├── text_file/                            # stateless text-document agent — file memory, patch, checkpoints (text_file.tools)
     ├── memory/ram_store/                     # the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), grants, inject/dump (ram_store.tools)
-    ├── terminal/                             # PTY shell (handler_module terminal_backend.tools; xterm view lives in ts/)
-    ├── ai/ai_core/                           # shared AI agent loop/state (queue/FIFO lock/menu cache, prompt assembly, agentic _run loop, verb bodies); all three AI backends bind to it
+    ├── ai/ai_core/                           # shared AI agent state (queue/FIFO lock/menu cache, prompt assembly, the ONE-pass _run, `<call>` parsing, verb bodies); every AI backend binds to it
     ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core
-    ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible) — thin binding over ai_core + NIM-specific key/retry verbs
+    ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible) — thin binding over ai_core; key from NVIDIA_API_KEY, rate-limit retry
     ├── ai/anthropic/anthropic_backend        # Anthropic LLM (anthropic_backend.tools) — thin binding over ai_core
+    ├── ai/llamacpp/llamacpp_backend          # local llama-server (OpenAI surface) — thin binding over ai_core
     ├── ai/responses/responses_backend        # OpenAI Responses-API LLM (responses_backend.tools) — thin binding over ai_core
-    ├── io/io_bridge/                         # the IO base — a reflectable keystone agent (channel model, rule registries, read loop/verbs/lifecycle, MemoryTransport); bridges + web faces derive from it; IO legs sealed by default
-    ├── io/ws_bridge/                     # cross-kernel WS bridge (asymmetric) — ws / ssh+ws transports
+    ├── io/io_bridge/                         # the IO base — a shared LIBRARY, not an agent (channel model, rule registries, read loop/verbs/lifecycle, binary-frame codec, MemoryTransport); bridges + web legs derive from it; IO legs sealed by default
+    ├── io/web_ws/, io/web_rest/              # the web call legs (WS / REST) — io_bridge inbound derivations, sealed by default
+    ├── io/ws_bridge/                     # cross-kernel WS bridge (asymmetric) — ws transport
     ├── io/relay_connector/               # cross-kernel bridge through a relay-KERNEL router — dial ws://host/<guid>, X-Fantastic-Auth, reach a partner_guid; tunnels io_bridge frames; auto-reconnect + keepalive + directory (list_peers/watch) + kernelgroup typing (role/owner_guid/exposes via set_identity)
 ```
 
@@ -337,7 +324,7 @@ special. Compose the reply with flags:
   catalog (what you can `create_agent` from); `ids` = names only.
 - `readme=true` — attach the agent's
   readme.md. On the kernel/root this is the root readme: every
-  transport, the wire/binary-protocol details, the `kernel` alias, the
+  transport, the wire/binary-protocol details, the reserved `kernel` address, the
   two-kernel model. Transport docs live there now, NOT in the reflect
   JSON — reach them with `reflect readme=true`.
 

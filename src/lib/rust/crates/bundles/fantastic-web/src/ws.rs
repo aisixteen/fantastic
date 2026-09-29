@@ -7,7 +7,9 @@
 //! C→S {type:"watch"|"unwatch", src}           → (un)register a watcher
 //! C→S {type:"state_subscribe"|"state_unsubscribe"}
 //! S→C {type:"reply", id, data} | {type:"error", id, …}
-//! S→C {type:"event", payload}                 → drained from the watcher inbox
+//! S→C {type:"event", src, payload}            → an event from a watched agent
+//!                                               (`src` = the name the client watched)
+//! S→C {type:"event", payload}                 → an event emitted to THIS connection
 //! ```
 //!
 //! Every server→client TEXT frame leaves through
@@ -258,8 +260,12 @@ async fn send_envelope(
 async fn forward_event(
     out_tx: &tokio::sync::mpsc::Sender<Out>,
     item: fantastic_kernel::inbox::InboxItem,
+    src: Option<&str>,
 ) -> bool {
-    let frame = json!({"type": "event", "payload": item.payload});
+    let frame = match src {
+        None => json!({"type": "event", "payload": item.payload}),
+        Some(s) => json!({"type": "event", "src": s, "payload": item.payload}),
+    };
     match item.body {
         None => out_tx.send(Out::Text(encode_frame(&frame))).await.is_ok(),
         Some((path, body)) => {
@@ -321,6 +327,11 @@ pub(crate) async fn ws_loop(
     // A second read half on the SAME queue, used ONLY to WAIT: a drainer that
     // held the lock across its wait would block every flush forever.
     let inbox_ready = state.kernel.ensure_inbox(&client_id);
+    // EVERY READER THIS SOCKET DRAINS — its own inbox (events emitted to the
+    // connection, no `src`) and ONE PER WATCH (so each mirrored event goes out
+    // stamped with the `src` it came from; a bridge on the other end re-emits
+    // only what it subscribed to). A reply flushes them ALL first.
+    let readers: Readers = Arc::new(std::sync::Mutex::new(vec![(None, Arc::clone(&inbox_rx))]));
 
     // THE CONNECT-TIME AUTO-WATCH IS GATED. Only mirror the host's inbox when
     // THIS leg's rule admits an inbound `watch` with NO credential (an open
@@ -336,9 +347,9 @@ pub(crate) async fn ws_loop(
         ),
         Decision::Allow
     );
-    // The name the client used → the RESOLVED agent id actually watched. Only a
-    // watch that REALLY registered is recorded (see [`watch_path`]).
-    let mut watching: HashMap<String, AgentId> = HashMap::new();
+    // The name the client used → the watch it REALLY registered (see
+    // [`watch_path`]): the resolved agent, that watch's own reader, its drain.
+    let mut watching: HashMap<String, WatchEntry> = HashMap::new();
 
     // Pending `call` tasks — cancelled on disconnect so long-lived sends
     // release their locks immediately.
@@ -364,7 +375,7 @@ pub(crate) async fn ws_loop(
                     {
                         let mut rx = inbox_rx.lock().await;
                         while let Some(item) = rx.try_recv() {
-                            if !forward_event(&out_tx, item).await {
+                            if !forward_event(&out_tx, item, None).await {
                                 gone = true;
                                 break;
                             }
@@ -407,8 +418,10 @@ pub(crate) async fn ws_loop(
         watch_path(
             &state.kernel,
             &leg_agent_id,
+            &host_agent_id,
             &client_id,
             &mut watching,
+            &readers,
             &out_tx,
             &host_agent_id.0,
             &json!(""),
@@ -503,7 +516,7 @@ pub(crate) async fn ws_loop(
                 // is real work — a `ps` row, reachable by `cancel`, and its send
                 // parented to it instead of becoming a root.
                 let spawner = Arc::clone(&state.kernel);
-                let flush_rx = Arc::clone(&inbox_rx);
+                let flush_readers = Arc::clone(&readers);
                 let handle = spawner.spawn_task(&host_agent_id, "ws_call", async move {
                     // THE FRAME ID IS THE EXECUTION ID. One id space: the same
                     // id arriving twice — a double-click, a second tab, a
@@ -551,13 +564,19 @@ pub(crate) async fn ws_loop(
                     // BEFORE the handler), so flush them here — under the drain's
                     // own lock, so the drain cannot be mid-forward — and only then
                     // enqueue the reply. One sink, one order.
-                    let mut rx = flush_rx.lock().await;
-                    while let Some(item) = rx.try_recv() {
-                        forward_event(&out, item).await;
+                    let snapshot: Vec<Reader> =
+                        flush_readers.lock().expect("readers poisoned").clone();
+                    let mut held = Vec::with_capacity(snapshot.len());
+                    for (src, rx) in &snapshot {
+                        let mut g = rx.lock().await;
+                        while let Some(item) = g.try_recv() {
+                            forward_event(&out, item, src.as_deref()).await;
+                        }
+                        held.push(g);
                     }
                     let f = json!({"type": "reply", "id": fid, "data": out_item.result});
                     send_envelope(&out, f, out_item.body, REPLY_BINARY_PATH).await;
-                    drop(rx);
+                    drop(held);
                 });
                 track_call(&state.kernel, &pending_calls, handle);
             }
@@ -585,14 +604,25 @@ pub(crate) async fn ws_loop(
                     continue;
                 }
                 let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
-                watch_path(&kernel, &leg, &client_id, &mut watching, &out, src, &fid).await;
+                watch_path(
+                    &kernel,
+                    &leg,
+                    &host_agent_id,
+                    &client_id,
+                    &mut watching,
+                    &readers,
+                    &out,
+                    src,
+                    &fid,
+                )
+                .await;
             }
             "unwatch" => {
                 // NO GATE — python gates the four inbound actions and leaves
                 // `unwatch` (a client giving something up) ungated.
                 let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
-                if let Some(id) = watching.remove(src) {
-                    kernel.unwatch(&id, &client_id).await;
+                if let Some(entry) = watching.remove(src) {
+                    drop_watch(&kernel, src, entry, &readers).await;
                 }
             }
             "state_subscribe" => {
@@ -627,8 +657,8 @@ pub(crate) async fn ws_loop(
                 // Conversation rows are not on this stream — an AI agent
                 // announces its own rows to its watchers (`watch` on that agent,
                 // gated there).
-                let token = kernel.add_state_subscriber(
-                    Arc::new(move |event: &Value, body: Option<&(String, Vec<u8>)>| {
+                let token = kernel.add_state_subscriber(Arc::new(
+                    move |event: &Value, body: Option<&(String, Vec<u8>)>| {
                         let Value::Object(ev) = event else {
                             return;
                         };
@@ -667,8 +697,8 @@ pub(crate) async fn ws_loop(
                             }
                         };
                         let _ = out_for_cb.try_send(out);
-                    }),
-                );
+                    },
+                ));
                 state_unsubs
                     .lock()
                     .expect("state_unsubs poisoned")
@@ -703,8 +733,9 @@ pub(crate) async fn ws_loop(
     }
     // 2. Unwatch every src this WS subscribed to.
     {
-        for (_, id) in watching.drain() {
-            state.kernel.unwatch(&id, &client_id).await;
+        let all: Vec<(String, WatchEntry)> = watching.drain().collect();
+        for (src, entry) in all {
+            drop_watch(&state.kernel, &src, entry, &readers).await;
         }
     }
     // 3. Unregister any state-stream callbacks tied to this WS.
@@ -731,19 +762,21 @@ pub(crate) async fn ws_loop(
 /// FAIL LOUD: a name that resolves to no agent, or a gate refusal, is answered
 /// with an `error` frame and NOT recorded as watched. (The connect-time watch
 /// used to discard the result and mark the name watched anyway; a name the
-/// kernel's `watch` did not resolve — an alias like `exec` for `exec_real` —
-/// mirrored nothing, said nothing, and the explicit watch that followed was then
-/// skipped as a duplicate.)
+/// kernel's `watch` did not resolve mirrored nothing, said nothing, and the
+/// explicit watch that followed was then skipped as a duplicate.)
 ///
-/// The name resolves the way `send` resolves a target (`kernel`, a declared
-/// `alias`, a literal id), and the watch runs UNDER THE LEG'S OWN IDENTITY, so
+/// The name resolves the way `send` resolves a target (`kernel` or a literal
+/// id), and the watch runs UNDER THE LEG'S OWN IDENTITY, so
 /// the kernel's gate sees a real caller — without it the kernel reads the watch
 /// as an OPERATOR's and the two-sided gate never runs.
+#[allow(clippy::too_many_arguments)]
 async fn watch_path(
     kernel: &Arc<fantastic_kernel::Kernel>,
     leg: &AgentId,
+    host: &AgentId,
     client_id: &AgentId,
-    watching: &mut std::collections::HashMap<String, AgentId>,
+    watching: &mut std::collections::HashMap<String, WatchEntry>,
+    readers: &Readers,
     out: &tokio::sync::mpsc::Sender<Out>,
     src: &str,
     fid: &Value,
@@ -755,26 +788,93 @@ async fn watch_path(
         let mut r = fantastic_kernel::refusal(
             fantastic_kernel::refusal::UNKNOWN_AGENT,
             format!(
-                "watch: no agent {} (an id, a declared alias, or `kernel`)",
+                "watch: no agent {} (an id, or `kernel`)",
                 fantastic_bundle::py_repr(src)
             ),
         );
         fantastic_kernel::refusal::with(&mut r, "src", json!(src));
-        let _ = out.send(Out::Text(encode_frame(&error_frame(fid, &r)))).await;
+        let _ = out
+            .send(Out::Text(encode_frame(&error_frame(fid, &r))))
+            .await;
         return;
     };
-    let denial = fantastic_kernel::send::with_sender(
-        leg.clone(),
-        kernel.watch(&target.id, client_id.clone()),
-    )
-    .await;
+    // THIS WATCH'S OWN READER — registered before the watch asks for one.
+    let reader = AgentId::from(format!("{client_id}>{}", target.id).as_str());
+    let rx = Arc::new(tokio::sync::Mutex::new(kernel.ensure_inbox(&reader)));
+    let ready = kernel.ensure_inbox(&reader);
+    let denial =
+        fantastic_kernel::send::with_sender(leg.clone(), kernel.watch(&target.id, reader.clone()))
+            .await;
     if let Some(d) = denial {
+        kernel.remove_inbox(&reader);
         // python `{"type":"error", "id":…, **denial}` — the denial's keys are
         // FLATTENED onto the frame, not wrapped in `data`.
-        let _ = out.send(Out::Text(encode_frame(&error_frame(fid, &d)))).await;
+        let _ = out
+            .send(Out::Text(encode_frame(&error_frame(fid, &d))))
+            .await;
         return;
     }
-    watching.insert(src.to_string(), target.id.clone());
+    let tag = src.to_string();
+    let task = Arc::clone(kernel).spawn_task(host, "ws_drain", {
+        let out = out.clone();
+        let rx = Arc::clone(&rx);
+        async move {
+            loop {
+                {
+                    let mut g = rx.lock().await;
+                    while let Some(item) = g.try_recv() {
+                        if !forward_event(&out, item, Some(&tag)).await {
+                            return;
+                        }
+                    }
+                }
+                ready.ready().await;
+            }
+        }
+    });
+    readers
+        .lock()
+        .expect("readers poisoned")
+        .push((Some(src.to_string()), rx));
+    watching.insert(
+        src.to_string(),
+        WatchEntry {
+            target: target.id.clone(),
+            reader,
+            task,
+        },
+    );
+}
+
+/// One registered watch — python's `watching[src] = (aid, reader, drain)`.
+pub(crate) struct WatchEntry {
+    target: AgentId,
+    reader: AgentId,
+    task: fantastic_kernel::TaskId,
+}
+
+/// A reader this socket drains: the `src` its events are stamped with (`None` for
+/// the connection's own inbox) and the locked receive half.
+type Reader = (
+    Option<String>,
+    Arc<tokio::sync::Mutex<fantastic_kernel::inbox::InboxReceiver>>,
+);
+type Readers = Arc<std::sync::Mutex<Vec<Reader>>>;
+
+/// Give a watch back: unwatch, stop its drain, DROP ITS INBOX, forget the reader.
+async fn drop_watch(
+    kernel: &Arc<fantastic_kernel::Kernel>,
+    src: &str,
+    entry: WatchEntry,
+    readers: &Readers,
+) {
+    kernel.unwatch(&entry.target, &entry.reader).await;
+    kernel.cancel_task(&entry.task).await;
+    kernel.remove_inbox(&entry.reader);
+    readers
+        .lock()
+        .expect("readers poisoned")
+        .retain(|(s, _)| s.as_deref() != Some(src));
 }
 
 /// python `{"type": "error", "id": <id or "">, **denial}` — the denial's own

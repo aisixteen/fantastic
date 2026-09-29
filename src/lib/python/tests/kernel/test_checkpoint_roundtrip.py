@@ -34,6 +34,7 @@ async def _seed(kernel) -> None:
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "store",
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
@@ -50,7 +51,7 @@ async def _seed(kernel) -> None:
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "text_file.tools",
+                        "handler_module": "file_bridge.tools",
                         "id": "memory",
                         "target_id": "store",
                         "callable_by": {"store": ["read"]},
@@ -71,6 +72,7 @@ async def _seed(kernel) -> None:
                         "type": "create_agent",
                         "parent_id": "memory",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "leaf",
                     },
                 }
@@ -135,6 +137,7 @@ async def test_awkward_values_survive_the_document(kernel):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "awkward",
                         "nothing": None,
                         "empty_map": {},

@@ -70,7 +70,7 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -86,6 +86,7 @@ async def main():
                 "id": RUNNER,
                 "handler_module": "exec_bridge.tools",
                 "cwd": os.getcwd(),
+                "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": [re.escape(INTERP) + " -c .*"],
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -106,10 +107,9 @@ async def main():
             root,
             core,
             BK,
-            can_call={RUNNER: "*", "cli": "*", "kernel": ["ps", "cancel", "reflect"], "user": "*"},
+            can_call={RUNNER: "*", "cli": "*", root.id: ["ps", "cancel", "reflect"], "user": "*"},
             callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
-            record={"file_bridge_id": FB},
         )
         await drive(conn, TASK, client_id="cancel", via="user")
         transcript = "".join(conn.proxy.transcript)

@@ -1,6 +1,6 @@
-// Wire-frame codec — byte-identical to python web_ws/_proxy.py
-// (encode_outbound/decode_inbound) and the legacy transport.js
-// (encodeFrame/decodeFrame). Two formats, auto-selected by content:
+// Wire-frame codec — byte-identical to the shared io_bridge binary-frame codec
+// (python `io_bridge/_codec.py` encode_frame/decode_frame). Two formats,
+// auto-selected by content:
 //
 //   text:   JSON (no bytes anywhere in the envelope)
 //   binary: [4-byte BE uint32 headLen | JSON head | raw body]

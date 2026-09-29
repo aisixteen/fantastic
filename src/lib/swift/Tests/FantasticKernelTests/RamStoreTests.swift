@@ -64,6 +64,8 @@ private func store() async -> Kernel {
                 "callable_by": .object([
                     "alice": .string("*"), "bob": .string("*"), "carol": .string("*"),
                     "leg": .string("*"),
+                    // a relayed call is gated AS the foreign caller: named
+                    "g2|scout": .string("*"),
                 ]),
             ]))
     ])[0].result

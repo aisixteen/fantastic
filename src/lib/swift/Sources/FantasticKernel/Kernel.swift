@@ -144,14 +144,6 @@ public final class Kernel: @unchecked Sendable {
     private let agentsLock = NSLock()
     private var _agents: OrderedDictionary<AgentId, Agent> = [:]
 
-    /// Declared aliases (an agent's `alias` meta → its id) — python's `well_
-    /// known`. Wired at `register`, dropped at `unregister`. `send` targets,
-    /// `create_agent parent_id` and the gate's placement operand all resolve
-    /// through it, AFTER the built-in `kernel` alias (C35) — see
-    /// [`resolveAgent`].
-    private let wellKnownLock = NSLock()
-    private var _wellKnown: [String: AgentId] = [:]
-
     /// The name of the container directory a parent keeps its children in.
     /// DECLARED CONFIG, read off the root record at hydration (`children_dir`),
     /// default `agents` — a self-describing tree may name it `host_agents`.
@@ -171,16 +163,27 @@ public final class Kernel: @unchecked Sendable {
     /// Atomic root agent reference. Set by `setRoot`; read by `root`.
     private let rootLock = NSLock()
     private var _root: Agent?
+    /// The last refused/failed persist write — `persistence.error` on the root
+    /// reflect until a write lands again (python `agent._persist_error`, d2).
+    let persistErrorLock = NSLock()
+    var _persistError: OrderedDictionary<String, JSON>?
 
-    /// HTTP port the listener is bound to (0 if no listener). Set
-    /// by phase 8B when the Hummingbird listener binds. Exposed via
-    /// `httpPort()` shim in `PublicAPI.swift`.
+    /// HTTP port the listener is bound to (0 if no listener). Set when the
+    /// listener binds; read via `httpPort()` in `PublicAPI.swift`.
     let httpPortLock = NSLock()
     var _httpPort: UInt16 = 0
 
     public let bundles: BundleRegistry
     public let storage: StorageMode
     public let inboxBound: Int
+
+    /// This kernel's process-unique serial — what a side table keyed PER KERNEL
+    /// uses. Never an address: a kernel dropped without `shutdown()` keeps its
+    /// rows, and the next kernel allocated at the same address must not read them
+    /// as its own. Monotonic from 1, minted under a lock at `init`.
+    public let serial: UInt64
+    private static let serialLock = NSLock()
+    nonisolated(unsafe) private static var lastSerial: UInt64 = 0
 
     /// The TASK TABLE — every in-flight dispatch, keyed by a task id
     /// (`"<agent_id>:<n>"`, a pid). Tasks form a TREE through the send chain;
@@ -262,6 +265,10 @@ public final class Kernel: @unchecked Sendable {
         self.storage = storage
         self.bundles = bundles
         self.inboxBound = inboxBound
+        self.serial = Kernel.serialLock.withLock {
+            Kernel.lastSerial += 1
+            return Kernel.lastSerial
+        }
     }
 
     // ── Agent map ───────────────────────────────────────────────
@@ -277,15 +284,6 @@ public final class Kernel: @unchecked Sendable {
         agentsLock.lock()
         _agents[agent.id] = agent
         agentsLock.unlock()
-        // C35: a declared `alias` meta becomes addressable by that stable
-        // name — like the built-in `kernel`→root alias, but for anything an
-        // operator names. Declared config the substrate makes functional,
-        // not autonomous behavior. Python `Kernel.register`.
-        if case .string(let alias)? = agent.metaValue(forKey: "alias"), !alias.isEmpty {
-            wellKnownLock.lock()
-            _wellKnown[alias] = agent.id
-            wellKnownLock.unlock()
-        }
     }
 
     /// Compose an EPHEMERAL child directly under `parent` — python's `Cli
@@ -324,17 +322,13 @@ public final class Kernel: @unchecked Sendable {
         return _agents[id]
     }
 
-    /// Resolve an id the way `send` does (C35): `"kernel"` → the root, else
-    /// through a declared `alias` (`well_known`), else a literal id. `nil`
-    /// when it names no live agent. Python `Agent._resolve_agent` / the
-    /// inline resolve in `_launch`.
+    /// Resolve an id the way `send` does: `"kernel"` → the root, else a
+    /// literal id. `nil` when it names no live agent. Python
+    /// `Agent._resolve_agent` / the inline resolve in `_launch`.
     public func resolveAgent(_ id: String) -> Agent? {
         if id.isEmpty { return nil }
         if id == "kernel" { return root }
-        wellKnownLock.lock()
-        let real = _wellKnown[id]
-        wellKnownLock.unlock()
-        return agent(real ?? AgentId(id))
+        return agent(AgentId(id))
     }
 
     /// All registered agents in insertion order.
@@ -350,10 +344,6 @@ public final class Kernel: @unchecked Sendable {
         agentsLock.lock()
         _agents.removeValue(forKey: id)
         agentsLock.unlock()
-        // Drop any alias pointing at it (C35). Python `Kernel.unregister`.
-        wellKnownLock.lock()
-        for (name, target) in _wellKnown where target == id { _wellKnown.removeValue(forKey: name) }
-        wellKnownLock.unlock()
         inboxLock.lock()
         _inboxes[id]?.finish()
         _inboxes[id] = nil
@@ -370,6 +360,19 @@ public final class Kernel: @unchecked Sendable {
         rootLock.lock()
         defer { rootLock.unlock() }
         return _root
+    }
+
+    /// The kernel's RUNNING DIR — the dir holding its root's address (its
+    /// `.fantastic`). The ONE source of the disk clamp base (every file_bridge
+    /// root resolves under it) and of store discovery; nothing reads the process
+    /// cwd in its place (audit 2026-09-28, c6; python `Kernel.workdir`). No root,
+    /// or a root that never named its address (`Agent`'s default
+    /// `URL(fileURLWithPath: "")`) ⇒ nil, and the disk verbs refuse.
+    public var workdir: URL? {
+        guard let rp = root?.rootPath, !(rp.baseURL != nil && rp.relativePath == ".") else {
+            return nil
+        }
+        return rp.deletingLastPathComponent()
     }
 
     // ── Inbox + watchers ────────────────────────────────────────

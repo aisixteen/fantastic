@@ -26,7 +26,7 @@ Fantastic is **two cooperating kernels**, and recipes always split across them:
 HOST kernel (this container: python or rust)         FRONTEND kernel (browser, ts/)
   data · compute · transport · memory                  the VIEW lives here
   kernel_state(root) web web_ws web_rest file_bridge             canvas · *_view · *content
-  exec_bridge terminal_backend ai_* yaml_state         (federates to the host over
+  exec_bridge ai_* ram_store                           (federates to the host over
   scheduler ws_bridge                                  the SAME web_ws WS wire)
 ```
 
@@ -81,7 +81,7 @@ tree. Any agent I create that answers `get_webapp` becomes a tile."*
 clipboard-image paste).
 
 ```text
-HOST:      terminal_backend  (PTY; cwd = your project)
+HOST:      exec_bridge       (a PTY job; cwd = your project)
 FRONTEND:  terminal_view     (xterm)  ── bound by id ──▶ the backend
 ```
 
@@ -90,8 +90,8 @@ flow-control (`ack` past ~100K unacked), incremental UTF-8 (no split-char litter
 serialized paste-safe writes, and an image-paste bridge (browser clipboard image
 → saved file → path typed into the shell, e.g. for a CLI like `claude`).
 
-**Hand to an LLM:** *"Create a `terminal_backend` cwd'd at my project; attach a
-`terminal_view`; give me a shell."*
+**Hand to an LLM:** *"Create an `exec_bridge` cwd'd at my project that allows my shell;
+start it as a PTY job; attach a `terminal_view`."*
 
 **⚠ Today:** fully ported. The PTY runs **inside** this image (sh/bash); mount
 your project at `/work` so the shell sees your files.
@@ -104,24 +104,27 @@ your project at `/work` so the shell sees your files.
 agents as tools** and routes its own output.
 
 ```text
-HOST:      ai backend (anthropic_backend | ollama_backend | nvidia_nim_backend)
-             + file_bridge (chat history sidecar; file_bridge_id=…)
+HOST:      ai backend (anthropic_backend | ollama_backend | nvidia_nim_backend |
+             llamacpp_backend | responses_backend; endpoint + model on the record)
+             + ram_store (its conversation; memory_store_id=…)
 FRONTEND:  ai_view (chat panel)  ── by id ──▶ the backend
 ```
 
 **Wiring:** send a prompt to the backend; it streams `token`/`done` **on its own
 id**; the prompt *names who listens* and the system prompt carries the `send()`
 signature, so the model **routes its own result** (no `reply_to` primitive; 1:N
-falls out). Tell it the ids of an `exec_bridge`, a `file_bridge`, a `yaml_state` and it
-calls them as tools. A recursion guard keeps AI→AI chains safe.
+falls out). Tell it the ids of an `exec_bridge` and a `file_bridge` and it calls them as
+tools. A recursion guard keeps AI→AI chains safe.
 
 **Hand to an LLM:** *"Create an `anthropic_backend` (key from env); attach an
-`ai_view`. Here are the ids of an exec_bridge and a yaml_state memory — use them
+`ai_view`. Here are the ids of an exec_bridge and a notes file_bridge — use them
 as tools."*
 
-**⚠ Today:** fully ported. Pass the key at launch (`-e ANTHROPIC_KEY=…`). Durable
-memory = a `yaml_state` agent (recipe 4's sibling); the model decides what to save
-and recalls it on a fresh turn — judgment emerges, it isn't coded.
+**⚠ Today:** fully ported. Pass the key at launch (`-e ANTHROPIC_API_KEY=…`). Durable
+memory = files on a DATA `file_bridge` (`root=.fantastic/data allow='["."]'` — keep it
+apart from the `.fantastic` records store, which holds every agent's grants); the
+model decides what to save and recalls it on a fresh turn — judgment emerges, it
+isn't coded.
 
 ---
 
@@ -223,11 +226,12 @@ FRONTEND:     canvas — one tile per project, iframing that project's own webap
 
 **Wiring:** `local_runner` start/stop/status a project's own `fantastic` (truth from
 its `.fantastic/lock.json` pid+port); `ws_bridge` dials a peer **by URL** (weak
-binding — memory / ws / ssh+ws transports); from **either** kernel a routine reads
+binding — memory / ws transports); from **either** kernel a routine reads
 memory anywhere + spawns ai/py **by id**. Each project can also be a **container** —
 **a unit at `host:port`** (no shared network): the bridge dials
 `host.containers.internal:<port>` for another container on this host, or
-`ws://<ip>:<port>/…` (or the `ssh+ws` transport) for one on another machine.
+`ws://<ip>:<port>/…` for one on another machine (over ssh: tunnel with an
+`exec_bridge` job and dial the tunnel's local end).
 
 **Hand to an LLM:** *"For each project dir, create a `local_runner` (or run its
 container); bridge to it; iframe its webapp as a canvas tile. To reach a project on

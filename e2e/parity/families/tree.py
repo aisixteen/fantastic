@@ -13,9 +13,8 @@ Three changes from round 1, each for a measured reason:
   * `yaml_state.tools` → `absent_bundle.tools` — the yaml entry point is a STALE
     record in the source venv (D12) and `yaml` measured the venv, not the kernel.
     An id whose handler module does not exist anywhere is the real question;
-  * `totals2`/`sload2`/`term2` — the same three bundles with EMPTY-STRING and
-    zero arguments, because a falsy argument takes a different branch than a
-    missing one in all three.
+  * `totals2`/`sload2` — the same two bundles with EMPTY-STRING arguments,
+    because a falsy argument takes a different branch than a missing one.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ import re
 import sys
 import time
 
-from families import OPEN, call, save_kernel_log
+from families import MEMORY, OPEN, ai, call, save_kernel_log
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
 
@@ -50,22 +49,20 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
     return [
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{re.escape(interp)} \S+"])),
         ("readings", "file_bridge.tools",
-         dict(root="readings", description="Sensor readings — one integer per file.")),
-        ("kernel_store", "file_bridge.tools", dict(root=".", callable_by={**cb, "totals": "*"})),
-        ("totals", "text_file.tools", dict(target_id="kernel_store")),
+         dict(allow=["."], root="readings", description="Sensor readings — one integer per file.")),
+        ("kernel_store", "file_bridge.tools", dict(allow=["."], root=".", callable_by=cb)),
+        ("totals", "file_bridge.tools", dict(allow=["."], root=".")),
         # The same bundle with a FALSY argument — a different branch everywhere.
-        ("totals2", "text_file.tools", dict(target_id="kernel_store", description="")),
+        ("totals2", "file_bridge.tools", dict(allow=["."], root=".", description="")),
         ("sched", "scheduler.tools", {}),
-        ("term", "terminal_backend.tools", {}),
-        ("term2", "terminal_backend.tools", dict(command="", cols=0)),
         ("wsb", "ws_bridge.tools", dict(url="ws://127.0.0.1:9/nowhere")),
         ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere")),
         ("sload", "static_loader.tools", dict(root=".")),
         ("sload2", "static_loader.tools", dict(root=".", display_name="")),
         ("cli", "cli.tools", {}),
-        ("olla", "ollama_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
-        ("llama", "llamacpp_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
-        ("nim", "nvidia_nim_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
+        ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("llama", "llamacpp_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("nim", "nvidia_nim_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
         # NOT `yaml_state.tools`: see the module docstring.
         ("absent", "absent_bundle.tools", {}),
         ("dispenser", "dispenser_probe.tools", {}),
@@ -74,7 +71,7 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("user", "user_probe.tools", {}),
         ("oracle", "oracle_probe.tools", dict(lines=["the answer is 42"])),
         ("ai", "anthropic_backend.tools",
-         dict(model="stub-model", endpoint=stub_url, sampling={"x": 1, "y": None},
+         ai(model="stub-model", endpoint=stub_url, sampling={"x": 1, "y": None},
               context_window=CTX_WINDOW, output_reserve=CTX_RESERVE,
               can_call={"readings": "*", "totals": "*", "runner": "*",
                         "kernel_store": "*", "kernel": "*"})),
@@ -155,7 +152,7 @@ def run(ctx) -> None:
             last = len(stub.requests)
         time.sleep(3)
 
-        rec.json("ai_rows_read", call(k, "kernel", {"type": "rows_read", "agent": "ai"}))
+        rec.json("ai_rows_read", call(k, MEMORY, {"type": "read", "owner": "ai"}))
         for verb, extra in (("history", {}), ("status", {"client_id": "probe"}),
                             ("context_status", {}), ("recall", {"query": "total"}),
                             # `query`, not `pattern` — round 1 aimed this at a name

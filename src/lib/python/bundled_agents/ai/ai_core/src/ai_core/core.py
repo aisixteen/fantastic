@@ -29,23 +29,10 @@ Two layers:
 re-exports it) so a test's `monkeypatch.setattr("<bundle>.tools.SEND_TIMEOUT",
 0.05)` is honoured on this shared path.
 
-AI rehaul backlog (TODO — not in scope for the current decoupling).
-These items will need a coordinated redesign across all LLM
-backends + the TS ai_view before the next major bump:
-  1. Cross-backend conversation portability — history now lives in a
-     chat JSONL sidecar (one line per turn, persisted through its
-     loader; the AI writes no disk itself), but it is a child of THIS
-     agent, so switching upstream_id still starts a fresh conversation.
-     Future: history travels with the chat tile, backends become
-     stateless-modulo-streaming.
-  2. (resolved) Tool-call protocol is now RAW + uniform: every provider
-     streams plain text; the shared `tool_parse` parses the one `<call>`
-     grammar for all backends. No native provider tool API, no JSON.
-  3. Multi-modal binary frames — image/audio payloads currently
-     have no defined wire shape. Needs the WS binary frame channel
-     (also blocks terminal_backend's image-paste).
-  4. Cost / token tracking — no per-turn cost report today.
-  5. Auth — api_key sidecar is plaintext; no per-tenant scoping.
+AI backlog (TODO):
+  1. Multi-modal binary frames — image/audio payloads have no defined
+     wire shape yet.
+  2. Cost / token tracking — no per-turn cost report today.
 """
 
 from __future__ import annotations
@@ -74,7 +61,7 @@ from ai_core.context import (
 )
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
-from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
+from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
 
 # TWO live consumers. The agentic LOOP is still emergent — the backend does ONE
 # provider pass per send and never iterates — but `_route_reply` DOES parse this
@@ -170,8 +157,6 @@ class Backend:
     """
 
     sentence: str
-    default_model: str
-    default_endpoint: str
     make_provider: Callable[
         [str, Any], Any
     ]  # (id, kernel) -> Provider | None; sync OR async
@@ -333,16 +318,9 @@ def _lock_for(self_id: str) -> asyncio.Lock:
 
 
 def _render_for_model(messages: list[dict]) -> list[dict]:
-    """Project the message list to what the model actually reads — pure text, every
-    role a chat template renders. Maps any `role:tool` (e.g. legacy turns in an old
-    chat.json, or a caller-supplied convo) to `role:user` because many templates
-    (incl. tiny local models) don't render a `tool` role. Strips non-text keys."""
-    out: list[dict] = []
-    for m in messages:
-        role = m.get("role")
-        content = m.get("content", "")
-        out.append({"role": "user" if role == "tool" else role, "content": content})
-    return out
+    """Project the message list to what the model actually reads — its role and
+    its text; every other key is stripped."""
+    return [{"role": m.get("role"), "content": m.get("content", "")} for m in messages]
 
 
 # ─── persistence (the KERNEL ROW STORE — this bundle owns no files) ─────────
@@ -838,6 +816,18 @@ def _apply_res(row: dict, res: str) -> dict:
     return row
 
 
+def required_meta(rec: dict, key: str, backend: str) -> str:
+    """A connector field the record MUST name — an endpoint or a model is never
+    guessed. Raises, naming the field, so the turn fails loud."""
+    v = rec.get(key)
+    if not isinstance(v, str) or not v.strip():
+        raise ValueError(
+            f"{backend}: `{key}` is required on the agent record — nothing is "
+            f"guessed (update_agent <id> {key}=…)"
+        )
+    return v
+
+
 async def _get_provider(self_id: str, kernel, cfg: Backend):
     """Return the cached provider for `self_id`, building it via the
     backend's `make_provider` (sync OR async) on cache miss. May return
@@ -917,7 +907,7 @@ _ASYNC_HOWTO = """## Replies are rows, not turns
 A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
 tag, your title, size, and its ORIGIN (how to get it again):
 [reply to <pid> · notes read · "survey filler_2"]
-(settled, 6812 bytes — NOT inlined, held in memory only until this agent restarts. origin: text_file notes.md lines 1-200 v3f2a — read {path, range}. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`)
+(settled, 6812 bytes — NOT inlined, held in memory only until this agent restarts. origin: notes notes.md lines 1-200 v3f2a — read {path, range}. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`)
 GREP FIRST: `<type>grep</type> <query>substring</query>` on yourself finds the line —
 in a body held this run, a folded stretch, an old turn, a row shared with you — with
 its id and line. BODIES ARE NOT KEPT: after a restart only the origin line remains, so
@@ -1516,7 +1506,7 @@ _NO_CALL_NUDGE = (
 
 def _origin_line(result, target: str, verb: str, payload) -> str:
     """How to get a reply's body again, in ONE line: the replying agent's own
-    `origin` when it wrote one (a text_file read names path, range and version);
+    `origin` when it wrote one (a file_bridge read names path, range and version);
     otherwise the call that produced it — re-sending it may not give the same
     bytes, and the line says so."""
     if isinstance(result, dict):
@@ -2297,12 +2287,12 @@ async def _project_context(
     out_body = proj.body
     stable = system_block + fact_block
     while len(out_body) > 2 and estimate_tokens(stable + [notice] + out_body) > b:
-        out_body = drop_orphan_tools([out_body[0]] + out_body[2:])
+        out_body = [out_body[0]] + out_body[2:]
     # Last resort, and only when nothing else is left to give: [goal, live] still
     # over budget. The live turn is what the model must answer, so the goal is
     # what goes — loudly, in the notice's own count, not silently.
     while len(out_body) > 1 and estimate_tokens(stable + [notice] + out_body) > b:
-        out_body = drop_orphan_tools(out_body[1:])
+        out_body = out_body[1:]
     dropped_n = max(0, len(body) - len(out_body))
     _projection[self_id] = {
         "fired": True,
@@ -2399,8 +2389,7 @@ async def _run(
     )
     # Context-overflow projection: shape what the MODEL sees this turn to fit the
     # window via the agent's `context_strategy` (default compact). Done ONCE at turn
-    # entry, never mid-tool-loop (would orphan role:tool from its assistant). The
-    # window is read off the record EVERY turn, so a model switched to a smaller one
+    # entry. The window is read off the record EVERY turn, so a model switched to a smaller one
     # (`update_agent`) is fitted — folded — on its very next turn.
     projected = await _project_context(
         kernel.get(self_id) or {},
@@ -2511,8 +2500,8 @@ def _make_reflect(cfg: Backend):
         out = {
             "id": id,
             "sentence": cfg.sentence,
-            "model": rec.get("model", cfg.default_model),
-            "endpoint": rec.get("endpoint", cfg.default_endpoint),
+            "model": rec.get("model"),
+            "endpoint": rec.get("endpoint"),
             "context_window": resolve_context_window(rec),
             "context_strategy": rec.get("context_strategy", DEFAULT_STRATEGY),
             "memory_store_id": rec.get("memory_store_id"),
@@ -3076,11 +3065,9 @@ async def _derive_reaction(id, kernel) -> dict | None:
             if args.get("target_id") == id and ptype == "recall":
                 recalled = True
                 recall_count += 1
-            # `text_file`'s MUTATING verbs. The old tuple ("set"/"append"/"replace")
-            # was durable_memory's KV surface, which is deleted — memory is plain
-            # files now, so a model that persisted with `write` or `patch` scored as
-            # not having reacted at all.
-            elif ptype in ("write", "patch", "append"):
+            # A file_bridge's MUTATING text verbs — a model persists what it must
+            # keep as plain files.
+            elif ptype in ("write", "edit", "append"):
                 persisted = True
     return {"recalled": recalled, "persisted": persisted, "recall_count": recall_count}
 
@@ -3647,8 +3634,6 @@ async def _request_share(id, payload, kernel):
 def build(
     *,
     sentence: str,
-    default_model: str,
-    default_endpoint: str,
     make_provider: Callable[[str, Any], Any],
     name: str,
     module_name: str,
@@ -3675,8 +3660,6 @@ def build(
 
     Args:
       sentence: the agent's one-line self-description (reflect `sentence`).
-      default_model / default_endpoint: reflect fallbacks when the record
-        omits them.
       make_provider: fn(id, kernel) -> Provider | None. May be sync OR
         async (awaited if a coroutine). Called only on a `_providers`
         cache miss — tests pre-seed `_providers[id]` to bypass it.
@@ -3698,8 +3681,6 @@ def build(
     """
     cfg = Backend(
         sentence=sentence,
-        default_model=default_model,
-        default_endpoint=default_endpoint,
         make_provider=make_provider,
         name=name,
         module_name=module_name,

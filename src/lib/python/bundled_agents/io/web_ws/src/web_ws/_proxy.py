@@ -9,7 +9,9 @@ Two on-the-wire formats, picked automatically by payload content:
     C->S {type:"unwatch", src}
     S->C {type:"reply",  id, data}                -> reply for a prior call
     S->C {type:"error",  id, error}               -> reply error
-    S->C {type:"event",  payload}                 -> any event mirrored from kernel inbox
+    S->C {type:"event",  src, payload}            -> an event from a watched agent
+                                                     (`src` = the name the client watched)
+    S->C {type:"event",  payload}                 -> an event emitted to THIS connection
 
   BINARY FRAMES (when payload contains a `bytes` value anywhere):
     [4-byte BE uint32 H | H-byte JSON envelope | M-byte raw blob]
@@ -38,10 +40,8 @@ from kernel._refusal import UNKNOWN_AGENT, bad, refusal
 from io_bridge import (
     decode_frame,
     encode_frame,
-    find_bytes_path,
     gate_inbound,
     resolve_ingress,
-    set_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,13 +53,8 @@ def _make_client_id() -> str:
 
 # ─── binary frame codec ─────────────────────────────────────────
 # The codec is shared with every other transport — it lives in `io_bridge._codec`.
-# These module-level aliases keep the historical proxy-local names (used by tests +
-# the read loop below). A WS text frame ⇒ `encode_frame` returns (utf-8 json, False)
-# and we send it as text; bytes anywhere ⇒ (binary frame, True) sent as a binary frame.
-_find_bytes_path = find_bytes_path
-_set_path = set_path
-encode_outbound = encode_frame
-decode_inbound = decode_frame
+# A WS text frame ⇒ `encode_frame` returns (utf-8 json, False) and is sent as text;
+# bytes anywhere ⇒ (binary frame, True), sent as a binary frame.
 
 
 # ─── proxy loop ─────────────────────────────────────────────────
@@ -91,17 +86,25 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     auto_watch = gate_inbound(
         resolve_ingress(kernel.get(web_agent_id) or {}), "watch", {"src": host_agent_id}
     ).allowed
-    # name the client used → the RESOLVED agent id actually watched. Only a watch
-    # that REALLY registered is recorded here (see `_watch`).
-    watching: dict[str, str] = {}
+    # name the client used → (the RESOLVED agent id watched, that watch's own
+    # reader, its drain). Only a watch that REALLY registered is recorded here
+    # (see `_watch`). ONE READER PER WATCH, so every mirrored event goes out
+    # stamped with the `src` it came from — a bridge on the other end re-emits
+    # only what it subscribed to.
+    watching: dict[str, tuple[str, str, asyncio.Task]] = {}
 
-    async def drain_outbound() -> None:
-        q = kernel.ctx.ensure_inbox(client_id)
+    async def drain_outbound(reader: str, src: str | None) -> None:
+        q = kernel.ctx.ensure_inbox(reader)
         while True:
             payload = await q.get()
             if ws.application_state != WebSocketState.CONNECTED:
                 return
-            frame, is_bin = encode_outbound({"type": "event", "payload": payload})
+            envelope = (
+                {"type": "event", "payload": payload}
+                if src is None
+                else {"type": "event", "src": src, "payload": payload}
+            )
+            frame, is_bin = encode_frame(envelope)
             try:
                 if is_bin:
                     await ws.send_bytes(frame)
@@ -116,7 +119,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
 
     # REGISTERED: this loop lives as long as the socket does.
     drain_task = kernel.ctx.tasks[
-        kernel.ctx.spawn_task(host_agent_id, "ws_drain", drain_outbound())
+        kernel.ctx.spawn_task(
+            host_agent_id, "ws_drain", drain_outbound(client_id, None)
+        )
     ]["_task"]
 
     async def _send_envelope(envelope: dict) -> None:
@@ -132,7 +137,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         #      and propagates.
         if ws.application_state != WebSocketState.CONNECTED:
             return
-        frame, is_bin = encode_outbound(envelope)
+        frame, is_bin = encode_frame(envelope)
         try:
             if is_bin:
                 await ws.send_bytes(frame)
@@ -157,11 +162,10 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         return gate_inbound(resolve_ingress(rec), kind, frame)
 
     # ─── inbound frame handlers ─────────────────────────────────
-    # Browser-originated traffic has no agent context — the WS handler
-    # runs outside any handler dispatch, so without help `_current_sender`
-    # would be None and telemetry rays would have nowhere to start. Tag
-    # the dispatch with `host_agent_id` (this webapp's own id) so every
-    # external call/emit visually originates from the webapp sprite.
+    # Browser-originated traffic has no agent identity of its own: every
+    # dispatch is tagged, explicitly, with `web_agent_id` (this surface's
+    # own id) — it is gated as that agent and every external call/emit
+    # originates from it.
     async def _on_call(frame):
         target = frame.get("target", "")
         payload = frame.get("payload", {})
@@ -203,13 +207,12 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         `watch` frame both come here. FAIL LOUD: a name that resolves to no agent,
         or a gate refusal, is answered with an `error` frame and NOT recorded as
         watched. (The connect-time watch used to discard the result and mark the
-        name watched anyway; a name the kernel's `watch` did not resolve — an
-        alias like `exec` for `exec_real` — mirrored nothing, said nothing, and
-        the explicit watch that followed was then skipped as a duplicate:
-        measured, a page watching a python host agent by alias got zero events.)
+        name watched anyway; a name the kernel's `watch` did not resolve mirrored
+        nothing, said nothing, and the explicit watch that followed was then
+        skipped as a duplicate: measured, a page got zero events.)
 
-        The name resolves the way `send` resolves a target (`kernel`, a declared
-        `alias`, a literal id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
+        The name resolves the way `send` resolves a target (`kernel` or a literal
+        id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
         sees a real caller: without it `_current_sender` is None, the kernel reads
         the watch as an OPERATOR's, and the two-sided gate never runs — which is
         exactly how a leg granted only `assistant:[send]` could mirror any
@@ -224,18 +227,32 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                     "id": frame_id,
                     **refusal(
                         UNKNOWN_AGENT,
-                        f"watch: no agent {src!r} (an id, a declared alias, or `kernel`)",
+                        f"watch: no agent {src!r} (an id, or `kernel`)",
                         src=src,
                     ),
                 }
             )
             return
+        reader = f"{client_id}>{target.id}"
+        kernel.ctx.ensure_inbox(reader)
         with sender_context(web_agent_id):
-            denial = kernel.watch(target.id, client_id)
+            denial = kernel.watch(target.id, reader)
         if denial is not None:
+            kernel.ctx.inboxes.pop(reader, None)
             await _send_envelope({"type": "error", "id": frame_id, **denial})
             return
-        watching[src] = target.id
+        drain = kernel.ctx.tasks[
+            kernel.ctx.spawn_task(
+                host_agent_id, "ws_drain", drain_outbound(reader, src)
+            )
+        ]["_task"]
+        watching[src] = (target.id, reader, drain)
+
+    def _drop_watch(src: str) -> None:
+        aid, reader, drain = watching.pop(src)
+        kernel.unwatch(aid, reader)
+        drain.cancel()
+        kernel.ctx.inboxes.pop(reader, None)
 
     async def _on_watch(frame):
         if not _gate("watch", frame).allowed:
@@ -245,7 +262,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     async def _on_unwatch(frame):
         src = frame.get("src", "")
         if src in watching:
-            kernel.unwatch(watching.pop(src), client_id)
+            _drop_watch(src)
 
     # ─── state stream bridge ───────────────────────────────────
     # Mirror of the watch/unwatch lifecycle but for the kernel's
@@ -344,7 +361,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             # every in-flight `call` on it (an LLM generation with it). Answer the
             # bad frame and KEEP THE SOCKET.
             try:
-                frame = decode_inbound(raw)
+                frame = decode_frame(raw)
             except Exception:
                 frame = None
             if not isinstance(frame, dict):
@@ -383,8 +400,8 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             t.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        for aid in watching.values():
-            kernel.unwatch(aid, client_id)
+        for src in list(watching):
+            _drop_watch(src)
         # Unregister any state-stream callbacks tied to this WS.
         for fn in state_unsubs:
             fn()

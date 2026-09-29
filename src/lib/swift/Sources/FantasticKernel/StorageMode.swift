@@ -31,8 +31,7 @@ public enum StorageMode: Sendable, Equatable {
     }
 
     /// Path of the canonical state file (`.fantastic/state.json`)
-    /// in Disk mode. Used by `kernel.save()` / `kernel.load()` for
-    /// snapshot round-trips.
+    /// in Disk mode. Used by `saveToDisk()` and the daemon's snapshot hydration.
     public var stateFile: URL? {
         workdir?.appendingPathComponent(".fantastic/state.json")
     }

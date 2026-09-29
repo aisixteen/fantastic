@@ -30,7 +30,6 @@ from helpers.facts_arm import (
     FOLD_ARMS,
     WINDOW,
     call,
-    leg,
     plant_fillers,
     read_view,
     store_rows,
@@ -48,19 +47,19 @@ async def _fixture(root, ids):
     # THE STORE: a file_bridge rooted at `.fantastic` — what the loader discovers as its
     # provider (records, ledger and now the message log). Created BEFORE the root boots.
     r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": FB,
-                                    "handler_module": "file_bridge.tools", "root": ".fantastic",
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
                                     "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {**{i: "*" for i in ids}, "notes": "*", "rest": "*", "web": "*"}})
+                                    "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"}})
     assert not r.get("error"), f"create {FB}: {r}"
     # the editor the agents read through (its own bridge over the run dir)
     r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "work_fb",
-                                    "handler_module": "file_bridge.tools", "root": ".",
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                                     "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {"notes": "*", "rest": "*", "web": "*"}})
+                                    "callable_by": {"rest": "*", "web": "*"}})
     assert not r.get("error"), f"create work_fb: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "notes",
-                                    "handler_module": "text_file.tools", "target_id": "work_fb",
-                                    "can_call": {"work_fb": "*"},
+                                    "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+                                    "ingress_rule": "allow_all_ingress",
                                     "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"}})
     assert not r.get("error"), f"create notes: {r}"
     # THE ORDER: hydrated (boot_root did it, cold) → the root boots and the pump
@@ -73,7 +72,7 @@ async def _connect(root, core, aid):
     return await connect(root, core, BK, agent_id=aid,
                          can_call={FB: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
                          callable_by={"user": "*"}, limits=Limits.from_env(os.environ),
-                         record={**leg(FB), "context_window": WINDOW, "num_ctx": WINDOW,
+                         record={"context_window": WINDOW, "num_ctx": WINDOW,
                                  "context_strategy": STRATEGY, **EXTRA})
 
 

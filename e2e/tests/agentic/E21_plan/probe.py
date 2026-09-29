@@ -194,7 +194,7 @@ async def main():
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
@@ -228,10 +228,11 @@ async def main():
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "text_file.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "yaml_store",
-                        "target_id": store["id"],
-                        "can_call": {store["id"]: "*"},
+                        # a DATA store — the records under `.fantastic` stay the loader's
+                        "root": ".fantastic/data",
+                        "ingress_rule": "allow_all_ingress",
                         "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
                     },
                 }
@@ -258,7 +259,7 @@ async def main():
                         "payload": {
                             "type": "create_agent",
                             "parent_id": root.id,
-                            "handler_module": "file_bridge.tools",
+                            "handler_module": "file_bridge.tools", "allow": ["."],
                             "id": gid,
                             "root": gid,
                             "description": desc,
@@ -295,6 +296,9 @@ async def main():
                         "id": "shell",
                         # the COMMAND runner's gate: regexes over the full line
                         "allowed": [f"{sys.executable} -c .*"],
+                        # where and with what it runs: the operator's, on the record
+                        "cwd": os.getcwd(),
+                        "inherit_env": ["PATH", "HOME"],
                         "callable_by": {"ai": "*"},
                     },
                 }
@@ -359,17 +363,8 @@ async def main():
     ]  # the client surface is discoverable, not callable
     for _gid, *_rest in GUARDS:
         CAN_CALL[_gid] = "*"
-    # The sidecar is asked for as a CAPABILITY, never by backend name — a probe
-    # that branches on `BACKEND ==` is a probe that has stopped being agnostic.
-    # ...and the RUNTIME: python's anthropic backend persists through the loader,
-    # rust's and swift's refuse `send` without a `file_bridge_id`. One bundle,
-    # two contracts — recorded, not branched on by name.
-    # ALWAYS. The AI's chat store persists through ITS OWNER'S leg and nothing
-    # else — the loader path was removed — so an AI without a
-    # `file_bridge_id` runs AMNESIAC: every turn starts with empty history.
-    # Measured 2026-08-30 on plan:python — turn 6 said "I don't see any prior
-    # conversation context" and walked away from a task it had been doing.
-    EXTRA = {"file_bridge_id": store["id"]}
+    # The AI keeps its conversation in its memory store; it needs no file leg.
+    EXTRA: dict = {}
 
     # ONE connector (helpers/ai.py). It creates the agent, opens `cli`'s reciprocal
     # ingress, hands the plug its key where one is needed, subscribes to the AI's own

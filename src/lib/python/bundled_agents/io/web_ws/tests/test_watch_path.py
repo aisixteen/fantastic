@@ -1,9 +1,9 @@
 """The ONE watch path (connect-time auto-watch + explicit `watch` frame): the name
-resolves the way `send` resolves a target (an id, a declared alias, `kernel`), the
-watch runs under the leg's own identity, and a refusal is an `error` frame — never
-silence, and never recorded as watched. Measured before: a socket opened by ALIAS
-(`/exec/ws` for `exec_real`) mirrored nothing and said nothing, and the explicit
-watch that followed was skipped as a duplicate."""
+resolves the way `send` resolves a target (an id or `kernel`), the watch runs under
+the leg's own identity, and a refusal is an `error` frame — never silence, and never
+recorded as watched. Measured before: a socket whose connect-time watch did not
+resolve mirrored nothing and said nothing, and the explicit watch that followed was
+skipped as a duplicate."""
 
 from __future__ import annotations
 
@@ -41,19 +41,19 @@ def _exec(k, *, grant: bool):
         "web_ws.tools",
         id="leg",
         ingress_rule="allow_all_ingress",
-        can_call={**BASE, "exec_real": "*"} if grant else dict(BASE),
+        can_call={**BASE, "exec": "*"} if grant else dict(BASE),
     )
     k.create(
         "exec_bridge.tools",
-        id="exec_real",
-        alias="exec",
+        id="exec",
         ingress_rule="allow_all_ingress",
         allowed=[re.escape(PY) + r" -c .*"],
+        cwd=".",
         callable_by={**BASE, "leg": "*"} if grant else dict(BASE),
     )
 
 
-def test_a_socket_opened_by_alias_receives_the_agents_events(seeded_kernel):
+def test_a_socket_opened_on_an_agent_receives_its_events(seeded_kernel):
     _exec(seeded_kernel, grant=True)
     with _client(seeded_kernel, "leg") as c, c.websocket_connect("/exec/ws") as ws:
         ws.send_text(
@@ -86,6 +86,11 @@ def test_a_socket_opened_by_alias_receives_the_agents_events(seeded_kernel):
     kinds = [f["payload"].get("type") for f in frames if f.get("type") == "event"]
     assert "job_started" in kinds and "job_done" in kinds, frames
     assert not [f for f in frames if f.get("type") == "error"], frames
+    # every mirrored event names the agent it came from — the name the socket
+    # watched — so a bridge on the other end re-emits only what it subscribed to
+    events = [f for f in frames if f.get("type") == "event"]
+    assert events and all(f.get("src") == "exec" for f in events), events
+    assert list(events[0]) == ["type", "src", "payload"], events[0]
 
 
 def test_a_refused_auto_watch_is_an_error_frame_not_silence(seeded_kernel):
@@ -93,7 +98,7 @@ def test_a_refused_auto_watch_is_an_error_frame_not_silence(seeded_kernel):
     with _client(seeded_kernel, "leg") as c, c.websocket_connect("/exec/ws") as ws:
         first = json.loads(ws.receive_text())
         assert first["type"] == "error" and first["reason"] == "unauthorized", first
-        assert not seeded_kernel.ctx.agents["exec_real"]._watcher_ids, "not recorded"
+        assert not seeded_kernel.ctx.agents["exec"]._watcher_ids, "not recorded"
         # …and an explicit watch is re-tried, not skipped as a duplicate
         ws.send_text(json.dumps({"type": "watch", "src": "exec", "id": "w"}))
         again = json.loads(ws.receive_text())

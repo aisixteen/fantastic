@@ -2,7 +2,7 @@
 """The Exercism gym — the emergent coder's PASS-RATE over real broken repos.
 
 Not an e2e test (those prove each organ once); a BENCHMARK. Runs the whole
-coder loop — the E43 trio (file_bridge + text_file editor + exec_bridge runner)
+coder loop — the E43 trio (file_bridge + a file_bridge `editor` + exec_bridge runner)
 driven by the live model — over Aider's polyglot-benchmark, 225 Exercism
 exercises across SIX languages, each a born-failing mini-repo with its OWN test
 suite as the objective oracle. Scored by rerunning that suite + a never-touched
@@ -244,15 +244,15 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
 
         for payload in (
             {"type": "create_agent", "parent_id": root.id, "id": FB,
-             "handler_module": "file_bridge.tools", "root": ".",
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
-             "callable_by": {"ai": "*", "rest": "*", "web": "*", "editor": "*"}},
+             "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
             {"type": "create_agent", "parent_id": root.id, "id": "editor",
-             "handler_module": "text_file.tools", "target_id": FB,
-             "can_call": {FB: "*"},
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+             "ingress_rule": "allow_all_ingress",
              "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
             {"type": "create_agent", "parent_id": root.id, "id": RUNNER,
-             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(),
+             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
              "ingress_rule": "allow_all_ingress", "allowed": L.allow,
              "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
         ):
@@ -273,7 +273,7 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
             f"This is a {lang} exercise. Implement the solution in "
             f"{', '.join('`'+s+'`' for s in stub_rel)} using the editor "
             f"`editor` (reflect it for its verbs — `write` the whole file or "
-            f"`patch` it). NEVER edit the test file(s): "
+            f"`edit` it). NEVER edit the test file(s): "
             f"{', '.join('`'+t+'`' for t in test_rel)}. Run the suite with the "
             f"runner `{RUNNER}`: send it exactly this payload — {start_call} — "
             f"it returns {{job_id}} at once; the suite runs in the background. "
@@ -286,7 +286,7 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
         conn = await connect(
             root, core, BK,
             can_call={FB: "*", RUNNER: "*", "editor": "*", "cli": "*"},
-            limits=Limits.from_env(os.environ, **GYM_LIMITS), record={"file_bridge_id": FB})
+            limits=Limits.from_env(os.environ, **GYM_LIMITS))
         await drive(conn, task, client_id="gym")
         await conn.close()
 

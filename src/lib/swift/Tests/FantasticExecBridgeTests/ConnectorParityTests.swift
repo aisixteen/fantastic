@@ -80,7 +80,7 @@ struct SpawnTests {
             """
         let s = try Spawn.job(
             argv: [py, "-u", "-c", code], selfId: "owner_agent",
-            envExtra: ["MYVAR": "hello"], cwd: nil)
+            env: ["MYVAR": "hello"], cwd: ".")
         let data = s.stdout.readDataToEndOfFile()
         _ = await s.child.wait()
         close(s.ctrlFd)
@@ -110,7 +110,7 @@ struct SpawnTests {
                 except OSError: return False
             print("stray", held(\(stray[0])), held(\(stray[1])), "stdin", held(0), "ctrl", held(3))
             """
-        let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "owner_agent", envExtra: [:], cwd: nil)
+        let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "owner_agent", env: [:], cwd: ".")
         let data = s.stdout.readDataToEndOfFile()
         _ = await s.child.wait()
         close(s.ctrlFd)
@@ -131,7 +131,7 @@ struct SpawnTests {
                 py, "-u", "-c",
                 CONNECTOR_SRC + "\nimport threading\nthreading.Event().wait()\n",
             ],
-            selfId: "owner_agent", envExtra: [:], cwd: nil)
+            selfId: "owner_agent", env: [:], cwd: ".")
         Thread.sleep(forTimeInterval: 0.5)
         #expect(s.child.isAlive, "child exited early")
 

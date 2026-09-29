@@ -13,7 +13,7 @@ import { runBatch } from "./batch.ts";
 import type { Item, Outcome } from "./outcome.ts";
 import { UNHANDLED, refusal } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
-import { authorizeCall, denial } from "./authz.ts";
+import { authorizeCall, authorizeHeritable, denial } from "./authz.ts";
 
 /**
  * The bridge transport (P2). The pure core depends only on this interface, so
@@ -50,7 +50,7 @@ export class Kernel {
   bridge: Bridge | null = null;
   /** WHICH provider this kernel persists records THROUGH — surfaced on the root
    *  reflect as `persistence:{provider}` (mirrors py). For the browser frontend the
-   *  loader sets this to the host loader id/alias it proxies to; null = unwired. */
+   *  loader sets this to the host loader id it proxies to; null = unwired. */
   persistenceProvider: string | null = null;
 
   /** Executions still in RAM — in flight, or settled and not yet flushed:
@@ -267,7 +267,7 @@ export class Kernel {
     }
   }
 
-  /** Resolve the `"kernel"` alias to the root id. */
+  /** Resolve the reserved `"kernel"` address to the root id. */
   private resolve(targetId: string): string {
     return targetId === "kernel" && this.rootId !== null
       ? this.rootId
@@ -363,6 +363,7 @@ export class Kernel {
           // a callee's `$children:"*"` ("I trust my own subtree") legitimately
           // accepts a privileged verb.
           enforcePrivileged: false,
+          inSubtree: (otherId, x) => this.inSubtree(otherId, x),
         },
       );
       if (!ok) return denial("ingress", senderId, targetId, verb);
@@ -399,10 +400,41 @@ export class Kernel {
         loaderId: this.rootId,
       },
     );
-    return ok ? null : denial("egress", senderId, targetId, verb);
+    if (ok) return null;
+    // A HERITABLE entry on an ANCESTOR covers its descendants (never its holder):
+    // walk parent → root, live tree, at call time.
+    if (sender !== undefined && authorizeHeritable(this.ancestorGrants(sender.parentId), verb, targetId)) {
+      return null;
+    }
+    return denial("egress", senderId, targetId, verb);
   }
 
-  /** Resolve the `"kernel"` alias for callers outside this module. */
+  /** The `can_call` maps of `parentId` and every agent above it, parent first. */
+  private *ancestorGrants(parentId: string | null): Generator<Payload | undefined> {
+    const seen = new Set<string>();
+    let id = parentId;
+    while (id !== null && !seen.has(id)) {
+      seen.add(id);
+      const a = this.agents.get(id);
+      if (a === undefined) return;
+      yield a.meta["can_call"] as Payload | undefined;
+      id = a.parentId;
+    }
+  }
+
+  /** `$subtree:<x>`: is `otherId` `x` itself or a LIVE descendant of it? */
+  private inSubtree(otherId: string, x: string): boolean {
+    const seen = new Set<string>();
+    let a = this.agents.get(otherId);
+    while (a !== undefined && !seen.has(a.id)) {
+      if (a.id === x) return true;
+      seen.add(a.id);
+      a = a.parentId === null ? undefined : this.agents.get(a.parentId);
+    }
+    return false;
+  }
+
+  /** Resolve the reserved `"kernel"` address for callers outside this module. */
   resolveId(targetId: string): string {
     return this.resolve(targetId);
   }
@@ -563,9 +595,16 @@ export class Kernel {
     }
   }
 
-  /** Deliver an event to an agent's inbox and to everyone watching it. */
+  /** Deliver an event to an agent's inbox and to everyone watching it.
+   *  GATED LIKE A SEND when an agent emits onto ANOTHER agent (audit
+   *  2026-09-28, a16): the emitter's `can_call` and the target's `callable_by`
+   *  must both allow verb `emit`. Not privileged — the baseline keeps emits to
+   *  self, parent and children. A denied emit is dropped; an emit has no reply. */
   emit(targetId: string, payload: Payload): void {
     const id = this.resolve(targetId);
+    if (this.currentOrigin !== null && this.currentOrigin !== id) {
+      if (this.gate(this.currentOrigin, "emit", id) !== null) return;
+    }
     this.deliver(id, payload);
     const ws = this.watchers.get(id);
     if (ws !== undefined) for (const w of ws) this.deliver(w, payload);

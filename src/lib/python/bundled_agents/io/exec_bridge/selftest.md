@@ -22,7 +22,7 @@ rm -rf /tmp/xb_test && mkdir -p /tmp/xb_test && cd /tmp/xb_test
 PY=$(python3 -c 'import sys; print(sys.executable)')
 K=fantastic_kernel
 # The store first, or one-shot seeds stay in RAM and the next call sees nothing.
-$K kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools id=store root=. ingress_rule=allow_all_ingress >/dev/null
+$K kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools id=store root=. 'allow=["."]' ingress_rule=allow_all_ingress >/dev/null
 ```
 
 ## Tests
@@ -42,7 +42,7 @@ sealed leg. Expect `"ingress_rule": "deny_ingress"`.
 ### Test 1: the allowlist is law, and the refusal names the legal set
 
 ```bash
-$K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=noalw ingress_rule=allow_all_ingress >/dev/null
+$K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=noalw cwd=. ingress_rule=allow_all_ingress >/dev/null
 $K noalw start command=$PY args='["-c","print(1)"]'   # empty allowlist → nothing runs
 $K kernel update_agent id=noalw allowed='["/nope/python3 .*"]' >/dev/null
 $K noalw start command=$PY args='["-c","print(1)"]'   # line does not match the pattern
@@ -58,7 +58,7 @@ allowlist fixes WHICH commands may run; it grants nothing else.
 ### Test 2: `start` → `status` → `stop`, and the job is a task-table row
 
 ```bash
-XB=$($K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=xb ingress_rule=allow_all_ingress allowed="[\"$PY .*\"]" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+XB=$($K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=xb cwd=. ingress_rule=allow_all_ingress allowed="[\"$PY .*\"]" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 JOB=$($K xb start command=$PY args='["-c","import time; print(\"up\", flush=True); time.sleep(30)"]' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("job_id",""))')
 $K xb status job_id=$JOB | python3 -m json.tool | grep -E '"(status|task_id|last_line)"'
 $K kernel ps | grep -F '"verb": "start"'
@@ -83,15 +83,15 @@ Expect the row to finalize, NOT to stay `running`. The OS subprocess is SIGKILLe
 ### Test 4: a program reaches another agent over the control wire
 
 ```bash
-$K kernel create_agent parent_id=kernel_state handler_module=text_file.tools id=mem file_bridge_id=store callable_by='{"xb":"*"}' >/dev/null
+$K kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools id=mem root=. allow='["."]' ingress_rule=allow_all_ingress callable_by='{"xb":"*"}' >/dev/null
 $K kernel update_agent id=xb can_call='{"mem":"*"}' >/dev/null
 # Write the program to a FILE (connector + body), then run it as a command.
 python3 - <<'PYGEN' >/dev/null
 from exec_bridge._connector import CONNECTOR_SRC
-open("prog.py","w").write(CONNECTOR_SRC + 'kernel.send("mem", {"type":"set","key":"k","value":"via-wire"})\n')
+open("prog.py","w").write(CONNECTOR_SRC + 'kernel.send("mem", {"type":"write","path":"k.txt","bytes":"via-wire"})\n')
 PYGEN
 $K xb start command=$PY args='["prog.py"]'
-sleep 1; $K mem read key=k | grep -F 'via-wire'
+sleep 1; $K mem read path=k.txt | grep -F 'via-wire'
 $K xb reflect | python3 -m json.tool | grep -E '"(allowed|wire)"'
 ```
 
@@ -123,13 +123,13 @@ the program's proxy inbox; the handler only ACKs.
 echo 100 > a.txt; echo 200 > b.txt
 python3 - <<'PYGEN' >/dev/null
 from exec_bridge._connector import CONNECTOR_SRC
-open("total.py","w").write(CONNECTOR_SRC + 'import os\nt=sum(int(open(f).read()) for f in os.listdir(".") if f.endswith(".txt"))\nkernel.send("mem", {"type":"set","key":"total","value":t})\n')
+open("total.py","w").write(CONNECTOR_SRC + 'import os\nt=sum(int(open(f).read()) for f in os.listdir(".") if f.endswith(".txt"))\nkernel.send("mem", {"type":"write","path":"total.out","bytes":str(t)})\n')
 PYGEN
 $K xb start command=$PY args='["total.py"]'
-sleep 1; $K mem read key=total | grep -F '300'
+sleep 1; $K mem read path=total.out | grep -F '300'
 echo 50 > c.txt                         # fresh input
 $K xb start command=$PY args='["total.py"]'   # SAME command, re-run
-sleep 1; $K mem read key=total | grep -F '350'
+sleep 1; $K mem read path=total.out | grep -F '350'
 ```
 
 Expect the total to be recomputed from disk each run — 300, then 350. The program is a
@@ -140,8 +140,6 @@ depends on exactly this.
 
 - `start` on a sealed leg SUCCEEDING — the gate is bypassed.
 - A refusal that does not name the legal `allowed` patterns.
-- `start` accepting a `code`/`shim`/`interpreter`/`interpreters`/`argv_template` field
-  instead of refusing it — the withdrawn recipe must stay refused.
 - Two `say` events after restarting a durable tool — the `_owner_inbox` supersede
   failed and every inbound send is doubled.
 - An `exec` key in `reflect.verbs` — that verb never existed here.

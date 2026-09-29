@@ -1,9 +1,9 @@
-"""coding/multiline_edit — a MULTILINE, multi-hunk patch. LLM-driven.
+"""coding/multiline_edit — a MULTILINE, multi-hunk edit. LLM-driven.
 
 E40 proves a one-line swap; this proves the SEARCH/REPLACE grammar at its real
 size: one hunk replacing a 3-line block, a second hunk elsewhere in the same
-patch — both landing in one all-or-nothing apply. The score is the FILE (exact
-expected bytes) plus the transcript showing `patch` and NOT a whole-file
+edit — both landing in one all-or-nothing apply. The score is the FILE (exact
+expected bytes) plus the transcript showing `edit` and NOT a whole-file
 `write` (a rewrite that happens to match would pass the diff alone).
 """
 
@@ -57,14 +57,14 @@ def farewell(name):
 
 TASK = (
     "The editor agent `editor` edits this run's files. In `hello.py`, make two "
-    "changes with ONE `patch` call (two SEARCH/REPLACE blocks):\n"
+    "changes with ONE `edit` call (two SEARCH/REPLACE blocks):\n"
     "1) replace the entire 3-line body of `greet` so the function reads "
     "exactly:\n"
     "def greet(name):\n"
     '    return f"Hello, {name}!"\n'
     '2) in `farewell`, change `"Bye, "` to `"Goodbye, "`.\n'
-    "Change NOTHING else. Use the editor's `patch` verb (reflect `editor` for "
-    "the shape); do NOT rewrite the whole file with `write`. When the patch "
+    "Change NOTHING else. Use the editor's `edit` verb (reflect `editor` for "
+    "the shape); do NOT rewrite the whole file with `write`. When the edit "
     'is applied, end your run by calling done — emit <call name="done"></call>.'
 )
 
@@ -85,10 +85,10 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "editor": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
@@ -99,9 +99,9 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": "editor",
-                "handler_module": "text_file.tools",
-                "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."],
+                "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
@@ -128,7 +128,7 @@ async def main():
         after = Path("hello.py").read_text()
         checks = [
             ("the file is exactly the expected result", after == EXPECTED),
-            ("the PATCH organ was used", "<type>patch</type>" in transcript),
+            ("the EDIT organ was used", "<type>edit</type>" in transcript),
             (
                 # dispatched calls only — the model quoting the readme's `write`
                 # example in its thinking is not a rewrite (false XX, 2026-09-09)

@@ -314,6 +314,9 @@ async def test_dump_inject_roundtrip(kernel, store):
 
 
 async def test_remote_caller_is_keyed_by_its_qualified_address(kernel, store):
+    # a relayed call is gated AS the foreign caller: the store names it
+    cb = dict(kernel.ctx.agents["mem"]._meta["callable_by"])
+    kernel.ctx.update("mem", callable_by={**cb, "g2|scout": "*"})
     with remote_caller_context("leg", "g2|scout"):
         out = await _call(
             kernel, "mem", {"type": "append", "rows": [{"id": 1}]}, as_="leg"

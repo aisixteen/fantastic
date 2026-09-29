@@ -135,9 +135,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// A present-but-wrong number is a TYPO, and `asInt ?? 60` hid it:
     /// `interval_seconds: "60"` silently became an hourly schedule the caller
     /// believed was per-minute, and nothing said so.
-    /// `refusal == nil` ⇒ `value` is usable. (A tuple, not `Result<_, JSON>`:
-    /// the retroactive `JSON: Error` conformance belongs to exactly one module,
-    /// and it is `FantasticTextFile`.)
+    /// `refusal == nil` ⇒ `value` is usable.
     private func intArg(
         _ payload: JSON, _ key: String, _ def: Int64, _ verb: String, _ minimum: Int64
     ) -> (value: Int64, refusal: JSON?) {

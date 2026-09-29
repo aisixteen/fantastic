@@ -46,8 +46,8 @@ def _stub_bundle(
 
 async def test_shutdown_walks_depth_first(seeded_kernel):
     """Parent's hook fires AFTER all descendants' hooks — same order
-    contract as `_cascade_delete`. Lets PTYs die before the canvas member
-    (e.g. terminal_backend) drops, serve-web before vscode_fantastic, etc."""
+    contract as `_cascade_delete`. Lets a PTY job die before the member that
+    owns it (an exec_bridge) drops, serve-web before vscode_fantastic, etc."""
     order: list[str] = []
 
     async def make_hook(tag: str):
@@ -112,12 +112,11 @@ async def test_shutdown_does_not_touch_records_or_tree(seeded_kernel, tmp_path):
     assert child_dir.is_dir()
 
 
-async def test_shutdown_falls_back_to_on_delete(seeded_kernel):
-    """Bundles that only define `on_delete` (terminal_backend,
-    vscode_fantastic, etc.) get their teardown invoked unchanged —
-    `on_shutdown` is the explicit name when a bundle wants to
-    distinguish shutdown from delete, but for "kill subprocesses
-    either way" bundles, `on_delete` is reused."""
+async def test_shutdown_never_falls_back_to_on_delete(seeded_kernel):
+    """Shutdown calls `on_shutdown` and only that (audit 2026-09-28, c9). A
+    bundle whose shutdown is its delete teardown declares it
+    (`on_shutdown = on_delete`); one with only `on_delete` has nothing to free
+    at shutdown, and delete's teardown is not run in its place."""
     fired: list[str] = []
 
     async def od_hook(agent):
@@ -128,7 +127,7 @@ async def test_shutdown_falls_back_to_on_delete(seeded_kernel):
 
     await seeded_kernel.ctx.shutdown()
 
-    assert fired == ["on_delete:OD"]
+    assert fired == []
 
 
 async def test_shutdown_prefers_on_shutdown_over_on_delete(seeded_kernel):

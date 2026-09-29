@@ -10,8 +10,8 @@
 //     // ... and `await kernel.shutdown()` when the app stops
 //
 // The Lite tier targets iOS, iPadOS, visionOS, tvOS, watchOS, and
-// sandboxed macOS. Sandbox-incompatible bundles (terminal_backend,
-// exec_bridge) are compile-time
+// sandboxed macOS. The sandbox-incompatible bundle (exec_bridge — commands
+// and PTY jobs) is compile-time
 // excluded by `#if os(macOS)` gates inside the kernel — importing
 // this module on iOS is safe and never reaches subprocess code.
 

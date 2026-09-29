@@ -59,7 +59,7 @@ public enum Status: String, Sendable {
 /// seconds and the kernel NEVER defaults it (absent = wait forever); `retries`
 /// is a caller-declared budget the kernel never defaults either.
 public struct Item: Sendable {
-    /// Who to call. `"kernel"` aliases the root.
+    /// Who to call. `"kernel"` is the reserved address of the root.
     public var target: AgentId
     /// The verb payload — `type` names the verb.
     public var payload: JSON

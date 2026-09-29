@@ -7,7 +7,6 @@ import yaml
 import asyncio
 import builtins
 import json
-import os
 import threading
 from pathlib import Path
 
@@ -93,6 +92,7 @@ async def test_readme_key_is_lexical_and_exact(seeded_kernel):
 
 
 def test_corrupt_root_record_keeps_the_children(tmp_path, monkeypatch):
+    from file_bridge import fs
     from kernel_state.tools import read_tree
 
     from _testkit import boot_root
@@ -102,9 +102,9 @@ def test_corrupt_root_record_keeps_the_children(tmp_path, monkeypatch):
     (d / "agents" / "memo").mkdir(parents=True)
     (d / "agent.yaml").write_text("{ not json")
     (d / "agents" / "memo" / "agent.yaml").write_text(
-        json.dumps({"id": "memo", "handler_module": "text_file.tools"})
+        json.dumps({"id": "memo", "handler_module": "file_bridge.tools"})
     )
-    recs = read_tree(d)
+    recs = read_tree(fs.Root(tmp_path, d))
     assert [r["id"] for r in recs] == ["memo"] and recs[0][
         "parent_id"
     ] == "kernel_state"
@@ -130,7 +130,6 @@ def test_describe_scopes_like_the_gate():
 
 def test_small_coercions():
     from ai_core.core import _as_list, _safe_client
-    from text_file.tools import _ckpt_path
 
     assert (
         _safe_client(5) == "5"
@@ -138,7 +137,6 @@ def test_small_coercions():
         and _safe_client(" a b ") == "a_b"
     )
     assert _as_list(None) == [] and _as_list(5) == [5] and _as_list([1, 2]) == [1, 2]
-    assert _ckpt_path(5, 1).endswith("/5/1")
 
 
 async def test_repl_prints_a_reflect_as_json_not_created(capsys):
@@ -209,30 +207,6 @@ async def test_scheduler_forgets_its_cache_on_delete(seeded_kernel, store_agent)
         assert "sch" not in sched._tick_tasks or sched._tick_tasks["sch"].done()
 
 
-async def test_detaching_a_reader_cancels_its_holder_row(seeded_kernel):
-    from terminal_backend import tools as term
-
-    k = seeded_kernel
-    r_fd, w_fd = os.pipe()
-    tid = k.ctx.spawn_task(k.id, "pty_reader", asyncio.Event().wait())
-    term._procs["t-fix"] = {
-        "fd": r_fd,
-        "reader_attached": True,
-        "ctx": k.ctx,
-        "reader_task": tid,
-    }
-    try:
-        term._detach_reader("t-fix")
-        await asyncio.sleep(0)
-        entry = k.ctx.tasks.get(tid)
-        assert entry is None or entry["_task"].done() or entry["_task"].cancelled()
-        assert "reader_task" not in term._procs["t-fix"]
-    finally:
-        term._procs.pop("t-fix", None)
-        os.close(r_fd)
-        os.close(w_fd)
-
-
 def test_exec_drain_rows_are_filed_under_the_owner():
     import exec_bridge.tools as x
 
@@ -267,6 +241,7 @@ async def test_a_long_line_does_not_end_the_pipe(seeded_kernel):
                         "id": "runner",
                         "ingress_rule": "allow_all_ingress",
                         "allowed": [f"{py} .*"],
+                        "cwd": ".",
                     },
                 }
             ]
@@ -311,6 +286,7 @@ async def test_records_over_a_chunk_keep_every_key(tmp_path, monkeypatch):
     root = boot_root()
     root.create(
         "file_bridge.tools",
+        allow=["."],
         id="store",
         root=".fantastic",
         ingress_rule="allow_all_ingress",
@@ -325,7 +301,7 @@ async def test_records_over_a_chunk_keep_every_key(tmp_path, monkeypatch):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "text_file.tools",
+                        "handler_module": "file_bridge.tools",
                         "id": "fat",
                         "note": big,
                     },

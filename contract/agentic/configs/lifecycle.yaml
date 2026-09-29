@@ -40,6 +40,7 @@ loaders:
         # per-victim edge; that granularity is gone, knowingly.
         - id: warden
           handler_module: file_bridge.tools
+          allow: ['.']
           can_call:
             $root: [ps, cancel]
             slowbot: [slow]
@@ -52,6 +53,7 @@ loaders:
 
         - id: open_fs
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           callable_by:
             warden: "*"
@@ -60,6 +62,7 @@ loaders:
         # what makes the reply about non-existence and not about authority.
         - id: doomed
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           callable_by:
             warden: [list]
@@ -68,4 +71,5 @@ loaders:
         # never names it. The denial class of the taxonomy.
         - id: stranger
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress

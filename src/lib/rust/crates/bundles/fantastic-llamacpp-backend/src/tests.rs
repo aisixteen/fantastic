@@ -83,7 +83,7 @@ fn the_unset_model_is_pythons_sentinel() {
     // field, so there is nothing to guess; python names the same sentinel.
     assert_eq!(DEFAULT_MODEL, "(server-loaded)");
     let p = LlamaCppProvider {
-        endpoint: DEFAULT_ENDPOINT.to_string(),
+        endpoint: "http://127.0.0.1:1/v1".to_string(),
         requested_model: None,
         api_key: None,
         max_tokens: None,
@@ -153,8 +153,7 @@ async fn reflect_extras_match_python() {
     // python `_make_reflect` + `llamacpp_backend/tools.py::_reflect_extra`: the
     // shared base body in python's order, then `temperature` (0.3 by default),
     // `num_predict`, `think`, `has_api_key`. `num_ctx` is deliberately ABSENT —
-    // llama-server fixes the window at start — and so are the rust-only `note`
-    // and `file_bridge_id` keys.
+    // llama-server fixes the window at start.
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp).await;
     let r = kernel
@@ -192,14 +191,14 @@ async fn reflect_extras_match_python() {
         r["sentence"],
         "llama.cpp-backed local LLM agent (raw prompt-and-parse tool-calling)."
     );
-    assert_eq!(r["model"], "(server-loaded)");
+    // what the RECORD names — nothing guessed (the provider reports the
+    // server's sentinel; reflect reports the record)
+    assert_eq!(r["model"], Value::Null);
     assert_eq!(r["temperature"], 0.3);
     assert_eq!(r["num_predict"], Value::Null);
     assert_eq!(r["think"], Value::Null);
     assert_eq!(r["has_api_key"], false);
     assert!(r.get("num_ctx").is_none(), "{r:#?}");
-    assert!(r.get("note").is_none(), "{r:#?}");
-    assert!(r.get("file_bridge_id").is_none(), "{r:#?}");
     // The shared verb menu and the shared emits, not a bundle-private copy.
     assert_eq!(r["verbs"], fantastic_ai_core::verbs::reflect_verbs());
     assert_eq!(r["emits"], fantastic_ai_core::verbs::reflect_emits());

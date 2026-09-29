@@ -12,7 +12,6 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
 import yaml
 
 from _testkit import boot_root, persist
@@ -325,7 +324,7 @@ async def test_ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller(
     await _mk(
         seeded_kernel,
         "caller",
-        can_call={"probe": "*", "kernel": ["ledger", "ack_deadletter"]},
+        can_call={"probe": "*", seeded_kernel.id: ["ledger", "ack_deadletter"]},
     )
     await _with_store(seeded_kernel)
     with sender_context("caller"):
@@ -392,7 +391,7 @@ async def test_a_dead_letter_is_announced_listed_and_acked(seeded_kernel):
     await _mk(
         seeded_kernel,
         "caller",
-        can_call={"probe": "*", "kernel": ["ledger", "ack_deadletter"]},
+        can_call={"probe": "*", seeded_kernel.id: ["ledger", "ack_deadletter"]},
     )
     await _with_store(seeded_kernel)
     inbox = seeded_kernel.ctx.ensure_inbox("caller")
@@ -512,17 +511,6 @@ async def test_the_id_counter_reserves_blocks_in_the_root_record(tmp_path, monke
     assert on_disk["next_id"] == bound
     root2 = boot_root()
     assert root2.ctx.mint_id() >= bound, "a reboot resumes past the reserved block"
-
-
-# ── the row verbs are gone ─────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "verb", ["messages", "rows_read", "rows_write", "shutdown_kernel"]
-)
-async def test_the_kernel_row_verbs_are_deleted(seeded_kernel, verb):
-    out = (await _call(seeded_kernel, "kernel", {"type": verb}))["result"]
-    assert out.get("reason") == "unhandled", out
 
 
 async def test_kernel_stop_acks(seeded_kernel):

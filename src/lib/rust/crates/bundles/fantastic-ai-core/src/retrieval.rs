@@ -118,17 +118,18 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     // times in one run and pushed the one body hit past the inline cap (measured
     // 2026-09-06, python recall_after_fold). The first occurrence keeps its
     // address.
-    let mut take = |rid: Value, n: Value, line: &str, matches: &mut Vec<Value>, total: &mut usize| {
-        let key = py_split_whitespace(line).join(" ");
-        if !seen_lines.insert(key) {
-            return;
-        }
-        *total += 1;
-        if matches.len() < limit {
-            let cut: String = py_strip(line).chars().take(width).collect();
-            matches.push(json!({"id": rid, "line": n, "text": cut}));
-        }
-    };
+    let mut take =
+        |rid: Value, n: Value, line: &str, matches: &mut Vec<Value>, total: &mut usize| {
+            let key = py_split_whitespace(line).join(" ");
+            if !seen_lines.insert(key) {
+                return;
+            }
+            *total += 1;
+            if matches.len() < limit {
+                let cut: String = py_strip(line).chars().take(width).collect();
+                matches.push(json!({"id": rid, "line": n, "text": cut}));
+            }
+        };
 
     // BODIES FIRST: what a grep is for is the line inside a body never read
     // whole — rows that merely mention the query come after, so the content hit is
@@ -180,8 +181,17 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         req.insert("ids".to_string(), json!(ids));
     }
     let res = store_call(agent_id, kernel, Value::Object(req)).await?;
-    for m in res.get("matches").and_then(Value::as_array).cloned().unwrap_or_default() {
-        let text = m.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+    for m in res
+        .get("matches")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let text = m
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         take(
             m.get("id").cloned().unwrap_or(Value::Null),
             m.get("line").cloned().unwrap_or(json!(0)),
@@ -206,8 +216,17 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
             )
             .await?;
             let owner = r.get("owner").map_or_else(|| "None".to_string(), py_str);
-            for m in res.get("matches").and_then(Value::as_array).cloned().unwrap_or_default() {
-                let text = m.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+            for m in res
+                .get("matches")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                let text = m
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let rid = format!(
                     "{owner}:{}",
                     m.get("id").map_or_else(|| "None".to_string(), py_str)
@@ -371,7 +390,9 @@ pub async fn context_recall(
     let meta = agent_meta(agent_id, kernel);
     let rows = load_history(agent_id, kernel, false).await?;
     if rows.is_empty() {
-        return Ok(json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "empty store", "degraded": false}));
+        return Ok(
+            json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "empty store", "degraded": false}),
+        );
     }
     let sys_tokens = estimate_one(&json!({
         "role": "system",
@@ -385,7 +406,9 @@ pub async fn context_recall(
         .filter(|r| row_id(r).is_some())
         .collect();
     if view.is_empty() {
-        return Ok(json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "no addressable rows", "degraded": false}));
+        return Ok(
+            json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "no addressable rows", "degraded": false}),
+        );
     }
     let digest = |r: &Value| -> Value {
         if res_of(r) == "full" && row_content(r).starts_with("[reply to ") {

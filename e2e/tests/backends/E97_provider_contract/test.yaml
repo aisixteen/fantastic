@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/. Runs on ANY backend plug:
+# `BACKEND=anthropic` and `BACKEND=responses` are the two this was written for.
+id: provider_contract
+group: backends
+title: "what ai_core needs from a provider, through a live AI agent: stream, stripped thinking, a <call> that runs, a visible cut, a real cancel"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 90
+  max_turns: 12
+  no_progress_turns: 8
+  turn_chars: 60000
+  turn_seconds: 300

@@ -19,6 +19,20 @@ from pathlib import Path
 BASE = {"$self": "*", "$parent": "*", "$children": "*"}
 #: The ingress rule an agent needs before any leg may call it.
 OPEN = {"ingress_rule": "allow_all_ingress"}
+#: THE MEMORY STORE `spec.CaptureKernel.seed` writes: one ram_store for the
+#: kernel's rows and every AI agent's conversation.
+MEMORY = "memory"
+
+
+def ai(**meta) -> dict:
+    """An AI agent's record: its conversation store NAMED and GRANTED.
+
+    `memory_store_id` has no default — an AI agent without one fails its first
+    store call — and the store is reached like any agent, so its `can_call`
+    names it. The rest of the grant is the family's own (the kernel default,
+    `BASE`, when the family states none)."""
+    can = {**(meta.pop("can_call", None) or BASE), MEMORY: "*"}
+    return {**meta, "memory_store_id": MEMORY, "can_call": can}
 
 
 @dataclass

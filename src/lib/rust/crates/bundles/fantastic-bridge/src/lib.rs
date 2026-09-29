@@ -1,5 +1,5 @@
 //! fantastic-bridge — cross-kernel comms. TWO io_bridge derivations:
-//! `ws_bridge` (ws/ssh/memory) + `relay_connector` (relay-kernel router),
+//! `ws_bridge` (ws/memory) + `relay_connector` (relay-kernel router),
 //! sharing one engine.
 //!
 //! Pairs of bridge agents forward `send` envelopes between kernels
@@ -9,10 +9,8 @@
 //! WS-only, asymmetric (matches the canonical Python kernel). Transports:
 //! - `memory`  — in-process paired channels (tests only)
 //! - `ws`      — `tokio-tungstenite` client against a remote `web_ws` surface
-//! - `ssh+ws`  — spawns `ssh -L local:localhost:remote -N <host>` as a
-//!   subprocess, then layers `ws` over the local tunnel port. Gated by
-//!   `feature = "full"` — the embedded slice (iOS) does not spawn
-//!   subprocesses.
+//!   (`host` explicit). The bridge spawns nothing: an ssh tunnel is an
+//!   `exec_bridge` job or devops, and the bridge dials its local end.
 //!
 //! (The HTTP/`web_rest` transport was removed — WS subsumes its
 //! request/reply semantic and adds streaming via watch/event.)
@@ -40,7 +38,8 @@
 //! outbound  {type:"watch", src:target}  / {type:"unwatch", src:target}
 //! inbound   {type:"reply", id, data}     — read loop routes to pending oneshot
 //! inbound   {type:"error", id, error}    — read loop fails the pending oneshot
-//! inbound   {type:"event", payload}      — read loop re-emits on this bridge's inbox
+//! inbound   {type:"event", src, payload} — re-emitted (payload + `src`) on this bridge's
+//!                                        inbox ONLY for a subscribed `src`, else dropped
 //! ```
 
 #![deny(missing_docs)]
@@ -52,8 +51,8 @@ use fantastic_bundle::{
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{refusal_hint, NOT_CONNECTED};
 use fantastic_kernel::{AgentId, Item, Kernel};
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
@@ -66,12 +65,10 @@ pub mod transport;
 use authorizer::{Action, Decision, EgressRule, IngressRule};
 use transport::memory::MemoryTransport;
 use transport::relay::{RelaySpawn, RelayTransport};
-#[cfg(feature = "full")]
-use transport::ssh::SshTransport;
 use transport::ws::WsTransport;
 use transport::{BridgeTransport, TransportError};
 
-/// `handler_module` of the WS derivation (ws / ssh+ws / memory transports).
+/// `handler_module` of the WS derivation (ws / memory transports).
 pub const WS_HANDLER_MODULE: &str = "ws_bridge.tools";
 /// `handler_module` of the RELAY derivation (the relay-kernel router transport).
 pub const RELAY_HANDLER_MODULE: &str = "relay_connector.tools";
@@ -81,7 +78,7 @@ pub const RELAY_HANDLER_MODULE: &str = "relay_connector.tools";
 /// io_bridge engine + thin ws_bridge / relay_connector derivations).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Family {
-    /// ws / ssh+ws / memory (the `ws_bridge` derivation).
+    /// ws / memory (the `ws_bridge` derivation).
     Ws,
     /// the relay-kernel router (`relay_connector` derivation).
     Relay,
@@ -113,8 +110,8 @@ impl Family {
             "boot": "No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op.",
             "reconnect": "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
             "forward": "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
-            "watch_remote": "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set).",
-            "unwatch_remote": "args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted.",
+            "watch_remote": "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
+            "unwatch_remote": "args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them.",
         });
         if self == Family::Relay {
             if let Some(o) = v.as_object_mut() {
@@ -187,8 +184,6 @@ type PendingReply = oneshot::Sender<Result<(Value, Option<Vec<u8>>), String>>;
 pub(crate) struct BridgeState {
     pub(crate) transport: Arc<dyn BridgeTransport>,
     pub(crate) transport_kind: String,
-    /// pid of the `ssh+ws` tunnel child, for reflect (python `st.extra`).
-    pub(crate) tunnel_pid: Option<u32>,
     pub(crate) read_task: AsyncMutex<Option<fantastic_kernel::TaskId>>,
     pub(crate) pending: Mutex<HashMap<String, PendingReply>>,
     pub(crate) corr_counter: AtomicU64,
@@ -201,6 +196,10 @@ pub(crate) struct BridgeState {
     /// The per-leg EGRESS rule (default `Silent`); `forward` stamps its credential
     /// on the outbound frame envelope.
     pub(crate) egress: Arc<dyn EgressRule>,
+    /// The remote agents this leg SUBSCRIBED to (`watch_remote`). An inbound
+    /// `event` frame is re-emitted only when its `src` is here — nothing flows
+    /// until subscribed, and nothing after an unwatch.
+    pub(crate) watching: Mutex<HashSet<String>>,
 }
 
 impl BridgeState {
@@ -211,7 +210,7 @@ impl BridgeState {
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
-/// The WS derivation of io_bridge — ws / ssh+ws / memory transports. Registered
+/// The WS derivation of io_bridge — ws / memory transports. Registered
 /// under `ws_bridge.tools`. (Was the combined `kernel_bridge`; cloud split out.)
 pub struct WsBridgeBundle;
 /// The RELAY derivation of io_bridge — the relay-kernel router transport.
@@ -383,8 +382,7 @@ async fn dispatch_binary(
         .get("timeout")
         .and_then(Value::as_f64)
         .unwrap_or(DEFAULT_FORWARD_TIMEOUT_SECS);
-    let (v, body) =
-        forward_core(kernel, agent_id, &target, inner, blob, true, timeout_secs).await;
+    let (v, body) = forward_core(kernel, agent_id, &target, inner, blob, true, timeout_secs).await;
     Ok((Some(v), body))
 }
 
@@ -417,6 +415,21 @@ impl Bundle for WsBridgeBundle {
         let _ = shutdown_reply(agent_id, kernel).await;
         Ok(())
     }
+    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        self.on_delete(agent_id, kernel).await
+    }
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        _record: &Map<String, Value>,
+    ) -> Option<String> {
+        validate_peer_guid(meta)
+    }
 }
 
 #[async_trait]
@@ -447,6 +460,21 @@ impl Bundle for RelayConnectorBundle {
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         let _ = shutdown_reply(agent_id, kernel).await;
         Ok(())
+    }
+    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        self.on_delete(agent_id, kernel).await
+    }
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        _record: &Map<String, Value>,
+    ) -> Option<String> {
+        validate_peer_guid(meta)
     }
 }
 
@@ -551,8 +579,8 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
     out.insert("connected".into(), json!(connected));
     out.insert("pending_count".into(), json!(pending));
     // Read-key == write-key (py parity): `ingress_rule`/`egress_rule`, so a
-    // `reflect` → `update_agent` edit is a direct mirror. No `auth` alias in the
-    // reflect (it's a legacy WRITE shorthand only). `sealed` = the leg still
+    // `reflect` → `update_agent` edit is a direct mirror. No `auth` in the
+    // reflect (it's a WRITE shorthand only). `sealed` = the leg still
     // denies inbound (the conscious-open signal).
     out.insert("ingress_rule".into(), json!(ingress_name));
     out.insert(
@@ -563,23 +591,22 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
         )),
     );
     out.insert("sealed".into(), json!(ingress_name != "allow_all_ingress"));
+    // The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
+    // null = no pin, no inbound call.
+    out.insert(
+        "peer_guid".into(),
+        meta_value(agent_id, kernel, "peer_guid").unwrap_or(Value::Null),
+    );
     // The family's own `reflect_fields` — python's `out.update(...)`, so these
     // land after the shared block, in their own order.
     match family {
         Family::Ws => {
-            for key in ["host", "peer_id", "local_port", "remote_port"] {
+            for key in ["host", "peer_id", "port"] {
                 out.insert(
                     key.into(),
                     meta_value(agent_id, kernel, key).unwrap_or(Value::Null),
                 );
             }
-            out.insert(
-                "tunnel_pid".into(),
-                bridge
-                    .as_ref()
-                    .and_then(|b| b.tunnel_pid)
-                    .map_or(Value::Null, |p| json!(p)),
-            );
         }
         Family::Relay => {
             for key in ["relay_url", "guid", "partner_guid"] {
@@ -625,7 +652,7 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
         json!({
             "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
             "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
-            "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox with their original `{type, ...}` shape",
+            "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
         }),
     );
     Value::Object(out)
@@ -646,21 +673,20 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
         Some(v) if py_truthy(&v) => py_str(&v),
         _ => "ws".to_string(),
     };
-    let mut tunnel_pid: Option<u32> = None;
     let transport: Arc<dyn BridgeTransport> = if kind == "memory" {
         match take_injected(agent_id) {
             Some(t) => t,
             None => return json!({"error": "bridge: memory transport requires test injection"}),
         }
     } else {
-        match build_transport(family, &kind, agent_id, kernel, &mut tunnel_pid).await {
+        match build_transport(family, &kind, agent_id, kernel).await {
             Ok(t) => t,
             Err(e) => return json!({"error": format!("bridge: {kind} boot failed: {e}")}),
         }
     };
 
     // Resolve the per-leg ingress + egress rules from the record (`ingress_rule` /
-    // `egress_rule`, else the legacy `auth` shorthand). A bad rule must not leave
+    // `egress_rule`, else the `auth` shorthand). A bad rule must not leave
     // the just-built transport leaked/open.
     let rules = authorizer::ingress::resolve(rule_spec(agent_id, kernel, "ingress_rule").as_ref())
         .and_then(|i| {
@@ -678,13 +704,13 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     let state = Arc::new(BridgeState {
         transport: Arc::clone(&transport),
         transport_kind: kind.clone(),
-        tunnel_pid,
         read_task: AsyncMutex::new(None),
         pending: Mutex::new(HashMap::new()),
         corr_counter: AtomicU64::new(0),
         down_emitted: std::sync::atomic::AtomicBool::new(false),
         ingress,
         egress,
+        watching: Mutex::new(HashSet::new()),
     });
 
     // Spawn the read loop BEFORE we publish the state so the
@@ -717,72 +743,37 @@ async fn build_transport(
     kind: &str,
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
-    tunnel_pid: &mut Option<u32>,
 ) -> Result<Arc<dyn BridgeTransport>, String> {
     match family {
-        Family::Ws => build_ws_transport(kind, agent_id, kernel, tunnel_pid).await,
+        Family::Ws => build_ws_transport(kind, agent_id, kernel).await,
         Family::Relay => build_relay_transport(agent_id, kernel).await,
     }
 }
 
-/// python `ws_bridge._ws.build_transport`.
+/// python `ws_bridge._ws.build_transport` — `host` explicit, nothing guessed.
 async fn build_ws_transport(
     kind: &str,
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
-    tunnel_pid: &mut Option<u32>,
 ) -> Result<Arc<dyn BridgeTransport>, String> {
     let peer_id = match meta_value(agent_id, kernel, "peer_id") {
         Some(v) if py_truthy(&v) => py_str(&v),
-        _ => return Err("peer_id required for ws/ssh+ws transports".to_string()),
+        _ => return Err("peer_id required for the ws transport".to_string()),
     };
     if kind == "ws" {
-        let port = meta_value(agent_id, kernel, "local_port")
+        let port = meta_value(agent_id, kernel, "port")
             .filter(py_truthy)
-            .or_else(|| meta_value(agent_id, kernel, "remote_port").filter(py_truthy))
-            .ok_or_else(|| "ws transport requires local_port or remote_port".to_string())?;
+            .ok_or_else(|| "ws transport requires port".to_string())?;
         let port = py_int(&port).map_err(|e| e.message().to_string())?;
         let host = match meta_value(agent_id, kernel, "host") {
             Some(v) if py_truthy(&v) => py_str(&v),
-            _ => "localhost".to_string(),
+            _ => return Err("ws transport requires host (nothing is guessed)".to_string()),
         };
         let url = format!("ws://{host}:{port}/{peer_id}/ws");
         return WsTransport::connect(&url)
             .await
             .map(|t| t as Arc<dyn BridgeTransport>)
             .map_err(|e| transport_error_text(&e));
-    }
-    if kind == "ssh+ws" {
-        let host = match meta_value(agent_id, kernel, "host") {
-            Some(v) if py_truthy(&v) => py_str(&v),
-            _ => return Err("ssh+ws requires host, local_port, remote_port".to_string()),
-        };
-        let local_port = meta_value(agent_id, kernel, "local_port")
-            .filter(py_truthy)
-            .ok_or_else(|| "ssh+ws requires host, local_port, remote_port".to_string())?;
-        let remote_port = meta_value(agent_id, kernel, "remote_port")
-            .filter(py_truthy)
-            .ok_or_else(|| "ssh+ws requires host, local_port, remote_port".to_string())?;
-        let local_port = py_int(&local_port).map_err(|e| e.message().to_string())?;
-        let remote_port = py_int(&remote_port).map_err(|e| e.message().to_string())?;
-        #[cfg(feature = "full")]
-        {
-            let t = SshTransport::open(
-                &host,
-                &peer_id,
-                u16::try_from(remote_port).unwrap_or(0),
-                u16::try_from(local_port).unwrap_or(0),
-            )
-            .await
-            .map_err(|e| transport_error_text(&e))?;
-            *tunnel_pid = t.tunnel_pid();
-            return Ok(t as Arc<dyn BridgeTransport>);
-        }
-        #[cfg(not(feature = "full"))]
-        {
-            let _ = (local_port, remote_port, tunnel_pid);
-            return Err("ssh+ws transport requires the `full` feature".to_string());
-        }
     }
     Err(format!("unknown transport {}", py_repr(kind)))
 }
@@ -919,9 +910,17 @@ async fn forward_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
     // TEXT forward — no request body; the reply body (if any) is dropped here
     // because the text channel can't carry it (a binary forward uses
     // `handle_binary`, which preserves the reply body).
-    forward_core(kernel, agent_id, target, inner, Vec::new(), false, timeout_secs)
-        .await
-        .0
+    forward_core(
+        kernel,
+        agent_id,
+        target,
+        inner,
+        Vec::new(),
+        false,
+        timeout_secs,
+    )
+    .await
+    .0
 }
 
 /// The shared forward engine — ships a raw `call` frame (text or binary) to the
@@ -1055,11 +1054,25 @@ async fn watch_remote_reply(agent_id: &AgentId, payload: &Value, kind: &str) -> 
             )
         }
     };
+    if kind == "unwatch" {
+        state
+            .watching
+            .lock()
+            .expect("watching poisoned")
+            .remove(target);
+    }
     let frame = json!({ "type": kind, "src": target });
     if let Err(e) = state.transport.send_frame(frame).await {
         return json!({
             "error": format!("bridge.{kind}_remote: send failed: {}", transport_error_text(&e))
         });
+    }
+    if kind == "watch" {
+        state
+            .watching
+            .lock()
+            .expect("watching poisoned")
+            .insert(target.to_string());
     }
     let key = if kind == "watch" {
         "watching"
@@ -1126,10 +1139,20 @@ async fn serve_inbound_call(
         // the `auth_token` rides the frame envelope, not the payload
         token: frame.get("auth_token").and_then(Value::as_str),
     });
-    // THE QUALIFIED CALLER, checked on INGRESS before the kernel sees it.
+    // THE QUALIFIED CALLER, checked on INGRESS before the kernel sees it: from
+    // the ONE pinned peer, and never this kernel's own guid.
     let caller = frame.get("caller").cloned().filter(|c| !c.is_null());
-    let bad_caller = check_caller(&kernel, caller.as_ref());
     let leg = fantastic_kernel::current_sender().unwrap_or_else(|| AgentId::from(""));
+    let pin = meta_string(&leg, &kernel, "peer_guid");
+    let bad_caller = check_caller(pin.as_deref(), caller.as_ref()).or_else(|| {
+        (pin.is_some() && pin == local_guid(&kernel)).then(|| {
+            refusal_hint(
+                fantastic_kernel::refusal::UNAUTHORIZED,
+                "bridge: this leg's peer_guid is THIS kernel's own guid — refused",
+                "pin the PEER kernel's guid",
+            )
+        })
+    });
     if let Decision::Deny(denial) = decision {
         let _ = state
             .transport
@@ -1146,9 +1169,9 @@ async fn serve_inbound_call(
         let target_id = AgentId::from(target.as_str());
         let send = kernel.send_with_binary(&target_id, inner, body);
         let (data, reply_body) = match caller.as_ref().and_then(Value::as_str) {
-            // THE QUALIFIED CALLER rides into the dispatch: a memory store keys
-            // what this call writes by `<remote guid>|<remote agent>`, not by
-            // this leg.
+            // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
+            // target's `callable_by` against `<peer guid>|<remote agent>` (never
+            // the leg), and a memory store keys what it writes by it.
             Some(c) if !c.is_empty() => {
                 fantastic_kernel::with_remote_caller(leg.clone(), c.to_string(), send).await
             }
@@ -1179,9 +1202,9 @@ async fn serve_inbound_call(
             corr_id.as_str(),
         )]);
         let reply = match caller.as_ref().and_then(Value::as_str) {
-            // THE QUALIFIED CALLER rides into the dispatch: a memory store keys
-            // what this call writes by `<remote guid>|<remote agent>`, not by
-            // this leg.
+            // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
+            // target's `callable_by` against `<peer guid>|<remote agent>` (never
+            // the leg), and a memory store keys what it writes by it.
             Some(c) if !c.is_empty() => {
                 fantastic_kernel::with_remote_caller(leg.clone(), c.to_string(), send).await
             }
@@ -1208,34 +1231,56 @@ fn local_guid(kernel: &Arc<Kernel>) -> Option<String> {
     })
 }
 
-/// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it: it
-/// must read `<guid>|<agent id>`, and the guid must NOT be this kernel's own — a
-/// remote cannot pose as a local agent. (A remote naming some THIRD kernel's guid
-/// is not detectable here; accepted.) `None` = no claim, or a good one. Python
+/// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it.
+/// Every inbound call names its sender as `<guid>|<agent id>`, and the guid must
+/// be the ONE peer this leg is pinned to (`peer_guid` on the record): a peer
+/// cannot pose as a third kernel's agent. No pin, no inbound call. Python
 /// `io_bridge._engine._check_caller`.
-pub fn check_caller(kernel: &Arc<Kernel>, caller: Option<&Value>) -> Option<Value> {
-    let caller = caller?;
-    let well_formed = caller.as_str().is_some_and(|c| {
+pub fn check_caller(pin: Option<&str>, caller: Option<&Value>) -> Option<Value> {
+    let text = caller.and_then(Value::as_str).filter(|c| {
         let parts: Vec<&str> = c.split('|').collect();
         parts.len() == 2 && parts.iter().all(|p| !p.is_empty())
     });
-    if !well_formed {
-        return Some(json!({
-            "error": format!(
-                "bridge: frame caller {} is not `<guid>|<agent id>`",
-                fantastic_bundle::py_repr_value(caller)
+    let Some(text) = text else {
+        return Some(fantastic_kernel::refusal::refusal(
+            fantastic_kernel::refusal::UNAUTHORIZED,
+            format!(
+                "bridge: an inbound call must name its caller as `<guid>|<agent id>`; got {}",
+                caller.map_or_else(|| "None".to_string(), py_repr_value)
             ),
-            "reason": "unauthorized",
-        }));
-    }
-    let guid = caller.as_str().and_then(|c| c.split('|').next());
-    if guid.is_some() && guid.map(str::to_string) == local_guid(kernel) {
-        return Some(json!({
-            "error": "bridge: a remote frame claims THIS kernel's guid as its caller — refused",
-            "reason": "unauthorized",
-        }));
+        ));
+    };
+    let Some(pin) = pin.filter(|p| !p.is_empty()) else {
+        return Some(refusal_hint(
+            fantastic_kernel::refusal::UNAUTHORIZED,
+            "bridge: this leg pins no peer, so it serves no inbound call",
+            "update_agent <this leg> peer_guid=<the peer kernel's guid> (its root reflect shows `guid`)",
+        ));
+    };
+    if text.split('|').next() != Some(pin) {
+        return Some(fantastic_kernel::refusal::refusal(
+            fantastic_kernel::refusal::UNAUTHORIZED,
+            format!(
+                "bridge: caller {} is not from the pinned peer {}",
+                py_repr(text),
+                py_repr(pin)
+            ),
+        ));
     }
     None
+}
+
+/// Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
+/// `|`). This kernel's OWN guid is refused where the kernel is in hand — at serve.
+fn validate_peer_guid(meta: &Map<String, Value>) -> Option<String> {
+    match meta.get("peer_guid") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(p)) if !p.is_empty() && !p.contains('|') => None,
+        Some(other) => Some(format!(
+            "bridge: peer_guid must be one kernel guid (a non-empty string without `|`); got {}",
+            py_repr_value(other)
+        )),
+    }
 }
 
 async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kernel>) {
@@ -1272,13 +1317,25 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                 ));
             }
             "event" => {
-                // Remote `watch` delivery — re-emit on this bridge's
-                // own inbox so local watchers see the remote stream
-                // via the standard kernel.watch(<bridge_id>, ...).
-                let payload = match frame.get("payload") {
-                    Some(v) if py_truthy(v) => v.clone(),
-                    _ => json!({}),
+                // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
+                // inbox for local watchers ONLY when its `src` is a remote agent
+                // this leg subscribed to. An event nobody asked for is dropped.
+                let Some(src) = frame.get("src").and_then(Value::as_str) else {
+                    continue;
                 };
+                if !state
+                    .watching
+                    .lock()
+                    .expect("watching poisoned")
+                    .contains(src)
+                {
+                    continue;
+                }
+                let mut payload = match frame.get("payload") {
+                    Some(v) if v.is_object() => v.clone(),
+                    _ => continue,
+                };
+                payload["src"] = json!(src);
                 // A BINARY event re-emits WHOLE. The envelope's `_binary_path` is
                 // `payload.<p>`; the inbox carrier wants `<p>`, the path inside
                 // the payload, so the body reaches a local watcher as the frame

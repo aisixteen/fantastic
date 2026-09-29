@@ -1,0 +1,27 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/subtree_grants.yaml`.
+#
+# `served` accepts a whole SUBTREE by one key (`$subtree:hub`), resolved at call
+# time — `hub` does not even exist at hydration; the spec creates it, and its
+# descendants, afterwards. `outsider` holds a plain egress grant on `served` but
+# lives outside that subtree.
+
+
+loaders:
+  - id: svc_l
+    file: svc.yaml
+    manifest:
+      agents:
+        - id: served
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          callable_by:
+            "$subtree:hub": [list, allow, allowed]
+            "$subtree:hub_wild": [list, allow]
+        - id: outsider
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          can_call:
+            served: [list]

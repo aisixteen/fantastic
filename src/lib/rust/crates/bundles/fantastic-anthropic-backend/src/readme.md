@@ -1,16 +1,11 @@
 # anthropic_backend — Claude, a context-managed completion agent
-Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
+Talks to the Anthropic Messages API. `endpoint` and `model` are REQUIRED on the record — nothing is guessed. Key read from `ANTHROPIC_API_KEY` in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
 
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
-## Bare completion — the tool loop is the CALLER's
-This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-provider pass. It NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use`
-blocks; the `AnthropicProvider` streams plain `text_delta` content, returned verbatim.
-Any tool convention is the caller's — an authored agent teaches it in the prompt (via
-`system_prompt`), reads the completion, dispatches, and feeds the result back as the
-next `{send, text}` turn.
+## Bare completion + the `<call>` grammar — no native tool API
+`send` performs exactly ONE provider pass: the `AnthropicProvider` streams plain `text_delta` content and never sends Anthropic `tools`/`input_schema` nor reads `tool_use` blocks. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
 ## Context management — owned HERE
 The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record

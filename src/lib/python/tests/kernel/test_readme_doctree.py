@@ -304,7 +304,7 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
     usable, and the weak models are exactly the ones that never follow the pointer to
     read it. The prose may leave; the SHAPE of a durable program may not — the
     distilled string must name the live paths (write a FILE over `write_stream`, run
-    it with a `command`) and must not resurrect the withdrawn `code` field."""
+    it with a `command`)."""
     r = (await kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
         "result"
     ]
@@ -316,27 +316,8 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
     assert len(se) < 900, (
         f"pointer must stay a pointer, not the prose ({len(se)} chars)"
     )
-    # It must not resurrect the dead recipe, and it must name the live paths.
-    assert "code:'" not in se, "pointer must not teach the withdrawn `code` field"
+    # It must name the live paths.
     assert "write_stream" in se, "pointer must name the stream write path"
-
-
-async def test_full_reflect_names_no_dead_authoring_recipe(kernel):
-    """Self-authoring is withdrawn, so the full reflect must not advertise the old
-    `code`/interpreter/shim recipe — a model following a dead recipe burns messages
-    on a `create_agent` now refused. Replaces the old advertised-executors test,
-    whose invariant is moot while nothing is advertised."""
-    r = (
-        await kernel.send(
-            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
-        )
-    )[0]["result"]
-    se = r["self_extension"]
-    for dead in ("code:'", "code=", "interpreters:", "shim:"):
-        assert dead not in se, (
-            f"full reflect still teaches the withdrawn recipe: {dead!r}"
-        )
-    assert "write_stream" in se and "command" in se.lower()
 
 
 async def test_non_root_bundle_no_frame_but_keyed(seeded_kernel):
@@ -352,6 +333,7 @@ async def test_non_root_bundle_no_frame_but_keyed(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]

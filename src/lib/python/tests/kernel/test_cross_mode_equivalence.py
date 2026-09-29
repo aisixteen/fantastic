@@ -92,6 +92,7 @@ async def _seed(kernel) -> None:
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "sealed",
                         "callable_by": {"rest_leg": "*", "ws_leg": "*"},
                     },

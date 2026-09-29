@@ -9,11 +9,11 @@ means **the same recipe serves any view package** (this TS kernel, a different
 framework's `dist/`, a plain HTML app): point a `file_bridge` agent at its build output
 and let it serve a caller-supplied mount page from there too.
 
-One duck-typed alias in `python/bundled_agents/web/host/src/web/app.py` does all the work:
+One duck-typed route in `python/bundled_agents/web/host/src/web/app.py` does all the work:
 
-| alias | route | what answers it |
-|---|---|---|
-| `read{path}` | `GET /{id}/file/{path}` | a `file_bridge` agent → static file server rooted at a dir |
+| route | what answers it |
+|---|---|
+| `GET /{id}/file/{path}` | any agent answering `read_stream` — a `file_bridge` agent is a static file server over what its `allow` list exposes |
 
 ## The page lives in the APP, not here
 
@@ -33,7 +33,7 @@ app's `readme.md` is the full revive recipe (inspect the zip without unpacking,
 pull `bundle.min.js`, open a `file_bridge` leg on it, provide the one-tag page).
 
 An app's page boots this library with `boot` (`src/index.ts`): it dials the
-host's loader alias (e.g. `web_loader` — a `kernel_state` the operator created at
+host's loader by id (e.g. `web_loader` — a `kernel_state` the operator created at
 `.fantastic/web`), hydrates the app's OWN tree from there, seeds an empty
 namespace the way the app decides, and persists every change back through that
 loader. The host never learns what the page is; it just serves bytes.
@@ -49,7 +49,7 @@ its root CLAMPED to the running dir):
 ```bash
 cp -R /PATH/TO/src/lib/ts/dist ./ts_dist_src
 fantastic kernel_state create_agent handler_module=file_bridge.tools id=ts_dist \
-  root=ts_dist_src ingress_rule=allow_all_ingress
+  root=ts_dist_src allow='["."]' ingress_rule=allow_all_ingress
 # → /ts_dist/file/index.js is the public entry; relative imports resolve under it
 ```
 

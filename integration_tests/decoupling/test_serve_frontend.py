@@ -59,7 +59,7 @@ async def _serves_frontend_bundle_via_file_bridge(
     seed_create(
         binary,
         workdir,
-        handler_module="file_bridge.tools",
+        handler_module="file_bridge.tools", allow=["."],
         agent_id="js_kernel",
         # RELATIVE root: file_bridge clamps roots inside the running dir (= workdir),
         # and the fs edge seals by default - open it for the /file/ proxy.

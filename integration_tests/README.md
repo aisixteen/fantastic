@@ -114,8 +114,9 @@ Container target notes:
     via the built-in host gateway `host.containers.internal:port` — the host
     forwards to it. (`127.0.0.1` is wrong here: inside a container it's that
     container's own loopback, not the host.)
-  - **another machine:** dial `ws://<machine-ip>:<port>/<peer>/ws` directly, or use
-    the `ssh+ws` bridge transport to tunnel with no exposed port.
+  - **another machine:** dial `ws://<machine-ip>:<port>/<peer>/ws` directly, or run
+    an ssh tunnel (an `exec_bridge` job, or devops) and dial its local end — the
+    bridge itself spawns nothing.
   - Proven by `bridge/test_bridge_container_to_container.py` (container-only;
     `publish_all=True` + `CONTAINER_PEER_HOST`). The existing python↔python bridge
     matrix runs against the `local` target.

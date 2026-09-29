@@ -62,28 +62,28 @@ public struct StaticLoaderBundle: AgentBundle {
     }
 
     /// Read the manifest THROUGH the running-dir clamp — python
-    /// `fs.read_text(Path.cwd(), path)`.
+    /// `fs.read_text(fs.Root(workdir), path)`, `base` being the kernel's running
+    /// dir (`Kernel.workdir`, the one source — audit c6).
     ///
     /// A cold bring-up read (before any `file_bridge` agent can exist) but NOT
     /// exempt from the running-dir law: `fs` is the one disk surface. The clamp
-    /// is `fs.resolve(cwd, path)`, not the lexical root clamp: a leading `/`
+    /// is `fs.resolve(base, path)`, not the lexical root clamp: a leading `/`
     /// escapes, symlinks are followed, and the error tail is python's own
     /// exception text (`fs: path '/etc/hosts' escapes root`, `[Errno 2] No such
     /// file or directory: '<abs>'`).
-    static func readManifest(_ path: String) -> (text: String?, error: String?) {
-        let cwd = FileManager.default.currentDirectoryPath
+    static func readManifest(_ path: String, base: String) -> (text: String?, error: String?) {
         do {
-            return (try fsReadText(cwd, path, base: cwd), nil)
+            return (try fsReadText(base, path, base: base), nil)
         } catch {
             return (nil, error.message)
         }
     }
 
-    /// Refuse a manifest that is absent or unreadable AT WRITE TIME, so a broken
-    /// roster never becomes a booting record.
-    ///
-    /// Merged view (record + patch), mirroring python's `validate_meta` and
-    /// rust's. A record with no manifest yet is allowed — `boot` reports that.
+    /// Refuse a malformed `manifest` at WRITE time — SHAPE only (a non-empty path
+    /// string). Whether the file is there and parses is the BOOT read's to report,
+    /// against `Kernel.workdir`: this hook is handed no kernel, so a write-time read
+    /// could only clamp to some other base. Merged view (record + patch), python's
+    /// `validate_meta`. A record with no manifest yet is allowed — `boot` reports that.
     public func validateMeta(
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
     ) -> String? {
@@ -91,20 +91,20 @@ public struct StaticLoaderBundle: AgentBundle {
         guard let path = raw.asString, !path.isEmpty else {
             return "static_loader: \(MANIFEST_FIELD) must be a non-empty path string"
         }
-        if let e = Self.readManifest(path).error {
-            return "static_loader: manifest \(pyRepr(path)) is not readable: \(e)"
-        }
         return nil
     }
 
     // MARK: - the manifest
 
     /// python `_load_manifest` — `(agents, error)`.
-    private func loadManifest(_ agent: Agent) -> (agents: [JSON], error: String?) {
+    private func loadManifest(_ agent: Agent, _ kernel: Kernel) -> (agents: [JSON], error: String?) {
         guard let path = agent.metaValue(forKey: MANIFEST_FIELD)?.asString, !path.isEmpty else {
             return ([], "static_loader: no \(pyRepr(MANIFEST_FIELD)) path on the record")
         }
-        let read = Self.readManifest(path)
+        guard let base = kernel.workdir?.path else {
+            return ([], "static_loader: cannot read manifest \(pyRepr(path)): kernel has no root — no running dir to clamp disk to")
+        }
+        let read = Self.readManifest(path, base: base)
         guard let text = read.text else {
             return ([], "static_loader: cannot read manifest \(pyRepr(path)): \(read.error ?? "")")
         }
@@ -135,7 +135,7 @@ public struct StaticLoaderBundle: AgentBundle {
     // MARK: - boot: hydrate the declared roster as operator
 
     private func boot(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
-        let (agents, err) = loadManifest(agent)
+        let (agents, err) = loadManifest(agent, kernel)
         if let err {
             return .object(["error": .string(err), "booted": .bool(false)])
         }
@@ -321,7 +321,7 @@ public struct StaticLoaderBundle: AgentBundle {
         ```yaml
         agents:
           - id: memory
-            handler_module: text_file.tools
+            handler_module: file_bridge.tools
           - id: worker
             handler_module: exec_bridge.tools
             allowed: ['python3 .*']   # the command(s) this leg may spawn

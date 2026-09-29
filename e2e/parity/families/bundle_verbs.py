@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from families import BASE, OPEN, call, save_kernel_log
+from families import BASE, OPEN, ai, call, save_kernel_log
 
 NAME = "bundle_verbs"
 
@@ -31,16 +31,16 @@ def fixtures(work: Path, interp: str) -> list:
     that is the case, not a mistake."""
     return [
         # ── file_bridge ──
-        ("files", "file_bridge.tools", dict(root=".")),
-        ("files_ro", "file_bridge.tools", dict(root="sub", readonly=True)),
-        ("files_escape", "file_bridge.tools", dict(root="../outside")),
-        ("files_symroot", "file_bridge.tools", dict(root="symroot")),
-        ("files_env_rule", "file_bridge.tools", dict(root=".", ingress_rule={"env": "X"})),
-        ("files_null_rule", "file_bridge.tools", dict(root=".", ingress_rule=None,
+        ("files", "file_bridge.tools", dict(allow=["."], root=".")),
+        ("files_ro", "file_bridge.tools", dict(allow=["."], root="sub", readonly=True)),
+        ("files_escape", "file_bridge.tools", dict(allow=["."], root="../outside")),
+        ("files_symroot", "file_bridge.tools", dict(allow=["."], root="symroot")),
+        ("files_env_rule", "file_bridge.tools", dict(allow=["."], root=".", ingress_rule={"env": "X"})),
+        ("files_null_rule", "file_bridge.tools", dict(allow=["."], root=".", ingress_rule=None,
                                                       auth_token="tok")),
-        ("files_auth_stem", "file_bridge.tools", dict(root=".", ingress_rule="password")),
-        # ── text_file ──
-        ("editor", "text_file.tools", dict(target_id="files", can_call={"files": "*"})),
+        ("files_auth_stem", "file_bridge.tools", dict(allow=["."], root=".", ingress_rule="password")),
+        # ── the text verbs, on a second bridge over the same root ──
+        ("editor", "file_bridge.tools", dict(allow=["."], root=".")),
         # ── exec_bridge ──
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{interp} .*"])),
         ("runner_badre", "exec_bridge.tools", dict(cwd=".", allowed=["(unclosed"])),
@@ -48,12 +48,12 @@ def fixtures(work: Path, interp: str) -> list:
         ("runner_alt", "exec_bridge.tools", dict(cwd=".", allowed=[r"/bin/echo a|/bin/echo ab"])),
         ("runner_rulename", "exec_bridge.tools", dict(cwd=".", allowed=["x"],
                                                       ingress_rule="no_such_rule")),
+        # the child's own shell: SHELL passed down + the `shell` permission; and
+        # the same permission with nothing passed down
+        ("term_shell", "exec_bridge.tools", dict(cwd=".", env={"SHELL": "/bin/sh"}, shell=True)),
+        ("term_noshell", "exec_bridge.tools", dict(cwd=".", shell=True)),
         # ── scheduler ──
         ("sched", "scheduler.tools", dict(can_call={**BASE, "files": "*"})),
-        # ── terminal ──
-        ("term3", "terminal_backend.tools", dict(command="/bin/sh", cwd=".")),
-        ("term4", "terminal_backend.tools", dict(command="/no/such/shell", cwd=".")),
-        ("term5", "terminal_backend.tools", dict(command="/bin/sh", cwd="/no/such/dir")),
         # ── static_loader ──
         ("sload", "static_loader.tools", dict(root=".")),
         # ── cli ──
@@ -69,10 +69,10 @@ def fixtures(work: Path, interp: str) -> list:
         # ── web ──
         ("web4", "web.tools", {}),
         # ── AI (no endpoint reached: every case is a NON-send verb) ──
-        ("ai", "anthropic_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
-        ("olla", "ollama_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
-        ("llama", "llamacpp_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
-        ("nim", "nvidia_nim_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
+        ("ai", "anthropic_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("llama", "llamacpp_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("nim", "nvidia_nim_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
     ]
 
 
@@ -107,8 +107,9 @@ def file_bridge_cases(interp: str) -> list:
     ]
 
 
-def text_file_cases() -> list:
-    """The A3.1–A3.10 argument tables, driven once each."""
+def text_cases() -> list:
+    """The file_bridge text verbs over their argument tables, driven once each."""
+    one = [{"path": "doc.txt", "hunks": 1}]
     return [
         ("write_new", "editor", {"type": "write", "path": "doc.txt", "bytes": "one\ntwo\nthree\n"}),
         ("write_no_bytes", "editor", {"type": "write", "path": "doc.txt"}),
@@ -117,21 +118,23 @@ def text_file_cases() -> list:
         ("read_offset_limit", "editor", {"type": "read", "path": "doc.txt", "offset": 1, "limit": 1}),
         ("read_offset_past_end", "editor", {"type": "read", "path": "doc.txt", "offset": 999}),
         ("read_missing", "editor", {"type": "read", "path": "nope.txt"}),
-        ("patch_ok", "editor", {"type": "patch", "path": "doc.txt",
-                                "patch": "<<<<<<< SEARCH\ntwo\n=======\nTWO\n>>>>>>> REPLACE\n"}),
-        ("patch_empty_search", "editor", {"type": "patch", "path": "doc.txt",
-                                          "patch": "<<<<<<< SEARCH\n=======\nHEAD\n>>>>>>> REPLACE\n"}),
-        ("patch_no_match", "editor", {"type": "patch", "path": "doc.txt",
-                                      "patch": "<<<<<<< SEARCH\nabsent\n=======\nx\n>>>>>>> REPLACE\n"}),
-        ("patch_malformed", "editor", {"type": "patch", "path": "doc.txt", "patch": "not a patch"}),
+        ("edit_ok", "editor", {"type": "edit", "edits": one,
+                               "bytes": "<<<<<<< SEARCH\ntwo\n=======\nTWO\n>>>>>>> REPLACE\n"}),
+        ("edit_empty_search", "editor", {"type": "edit", "edits": one,
+                                         "bytes": "<<<<<<< SEARCH\n=======\nHEAD\n>>>>>>> REPLACE\n"}),
+        ("edit_no_match", "editor", {"type": "edit", "edits": one,
+                                     "bytes": "<<<<<<< SEARCH\nabsent\n=======\nx\n>>>>>>> REPLACE\n"}),
+        ("edit_malformed", "editor", {"type": "edit", "edits": one, "bytes": "not a patch"}),
+        ("edit_hunk_count", "editor", {"type": "edit", "edits": [{"path": "doc.txt", "hunks": 3}],
+                                       "bytes": "<<<<<<< SEARCH\nTWO\n=======\ntwo\n>>>>>>> REPLACE\n"}),
+        ("write_if_match_stale", "editor", {"type": "write", "path": "doc.txt", "bytes": "x",
+                                            "if_match": "0000000000000000"}),
         ("append_ok", "editor", {"type": "append", "path": "doc.txt", "bytes": "four\n"}),
         ("append_missing_file", "editor", {"type": "append", "path": "nope.txt", "bytes": "x"}),
-        ("checkpoints_list", "editor", {"type": "checkpoints", "path": "doc.txt"}),
-        ("restore_latest", "editor", {"type": "restore", "path": "doc.txt"}),
-        ("restore_bad_id", "editor", {"type": "restore", "path": "doc.txt", "checkpoint": "nope"}),
-        ("drop_ok", "editor", {"type": "drop", "path": "doc.txt"}),
-        ("drop_again", "editor", {"type": "drop", "path": "doc.txt"}),
-        ("read_after_drop", "editor", {"type": "read", "path": "doc.txt"}),
+        ("undo_append", "editor", {"type": "undo", "path": "doc.txt"}),
+        ("read_after_undo", "editor", {"type": "read", "path": "doc.txt"}),
+        ("undo_again_is_redo", "editor", {"type": "undo", "path": "doc.txt"}),
+        ("undo_no_slot", "editor", {"type": "undo", "path": "never.txt"}),
     ]
 
 
@@ -169,6 +172,15 @@ def exec_cases(interp: str) -> list:
                                                     "import json,os,sys;"
                                                     "fd=int(os.environ.get('FANTASTIC_CTRL_FD') or 1);"
                                                     "os.write(fd, (json.dumps({'type':'watch','src':'files'})+chr(10)).encode())"]}),
+        # a PTY start with no command → the child's $SHELL, reported resolved
+        ("shell_autodiscover", "term_shell", {"type": "start", "pty": {"cols": 80, "rows": 24}}),
+        ("shell_status", "term_shell", {"type": "status"}),
+        ("shell_stop", "term_shell", {"type": "stop"}),
+        ("shell_missing", "term_noshell", {"type": "start", "pty": {"cols": 80, "rows": 24}}),
+        ("shell_extra_args", "term_shell", {"type": "start", "args": ["-c", "id"],
+                                            "pty": {"cols": 80, "rows": 24}}),
+        ("shell_pipe_needs_command", "term_shell", {"type": "start"}),
+        ("shell_reflect", "term_shell", {"type": "reflect"}),
         ("status_after_all", "runner", {"type": "status"}),
         ("clear_then_status", "runner", {"type": "clear"}),
     ]
@@ -188,32 +200,6 @@ def scheduler_cases() -> list:
         ("history", "sched", {"type": "history"}),
         ("pause_reply_order", "sched", {"type": "pause"}),
         ("resume", "sched", {"type": "resume"}),
-    ]
-
-
-def terminal_cases() -> list:
-    return [
-        ("boot_twice_1", "term3", {"type": "boot"}),
-        ("boot_twice_2", "term3", {"type": "boot"}),
-        ("shell_reflect", "term3", {"type": "reflect"}),
-        ("exec_failure", "term4", {"type": "boot"}),
-        ("bad_cwd", "term5", {"type": "boot"}),
-        ("start_then_input", "term3", {"type": "start"}),
-        ("input_data", "term3", {"type": "input", "data": "echo parity\n"}),
-        ("output_data_1", "term3", {"type": "output", "data": 1}),
-        ("output_max_bytes_0", "term3", {"type": "output", "max_bytes": 0}),
-        ("output_max_bytes_neg3", "term3", {"type": "output", "max_bytes": -3}),
-        ("resize_cols_70000", "term3", {"type": "resize", "cols": 70000, "rows": 24}),
-        ("resize_ok", "term3", {"type": "resize", "cols": 100, "rows": 40}),
-        ("signal_0", "term3", {"type": "signal", "signal": 0}),
-        ("paste_image_mime_empty", "term3", {"type": "paste_image", "mime": "", "bytes": "x"}),
-        ("paste_image_mime_jpg", "term3", {"type": "paste_image", "mime": "image/jpg",
-                                           "bytes": "x"}),
-        ("write_invalid_bytes", "term3", {"type": "write", "data": "\udcff"}),
-        ("stop_1", "term3", {"type": "stop"}),
-        ("stop_2", "term3", {"type": "stop"}),
-        ("write_after_exit", "term3", {"type": "write", "data": "echo after\n"}),
-        ("shutdown", "term3", {"type": "shutdown"}),
     ]
 
 
@@ -280,16 +266,16 @@ def web_ai_cases() -> list:
 
 
 MANIFESTS = {
-    "good.yaml": "agents:\n  - id: m_ok\n    handler_module: text_file.tools\n",
+    "good.yaml": "agents:\n  - id: m_ok\n    handler_module: file_bridge.tools\n",
     "empty.yaml": "",
     "falsy.yaml": "agents:\n",
     "notlist.yaml": "agents: 7\n",
-    "noid.yaml": "agents:\n  - handler_module: text_file.tools\n",
+    "noid.yaml": "agents:\n  - handler_module: file_bridge.tools\n",
     "bad.yaml": "agents:\n  - id: x\n   handler_module: [unclosed\n",
-    "yesno.yaml": "agents:\n  - id: m_yn\n    handler_module: text_file.tools\n"
+    "yesno.yaml": "agents:\n  - id: m_yn\n    handler_module: file_bridge.tools\n"
                   "    on: yes\n    off: no\n",
     "typed.yaml": "agents:\n  - id: m_typed\n    type: file_bridge\n"
-                  "    handler_module: text_file.tools\n",
+                  "    handler_module: file_bridge.tools\n",
     "unreadable.yaml": "agents: []\n",
 }
 
@@ -324,10 +310,9 @@ def run(ctx) -> None:
 
         groups = [
             ("file_bridge", file_bridge_cases(interp)),
-            ("text_file", text_file_cases()),
+            ("text", text_cases()),
             ("exec_bridge", exec_cases(interp)),
             ("scheduler", scheduler_cases()),
-            ("terminal", terminal_cases()),
             ("static_loader", loader_cases()),
             ("probes", probe_cases()),
             ("web_cli_ai", web_ai_cases()),
@@ -339,9 +324,9 @@ def run(ctx) -> None:
                 rec.json(f"{surface}/{case}", {
                     "target": target, "payload": payload, "reply": reply,
                     "http": k.http[before:]})
-                # Some exec/terminal cases need the child to finish before the
-                # next one asks about it.
-                if surface in ("exec_bridge", "terminal"):
+                # Some exec cases need the child to finish before the next one
+                # asks about it.
+                if surface == "exec_bridge":
                     time.sleep(0.4)
         # What the verbs LEFT: the same question the reply answers, asked of disk.
         from families import disk_walk

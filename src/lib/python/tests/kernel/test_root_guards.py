@@ -23,6 +23,7 @@ async def _mk(kernel, agent_id, **meta):
         "parent_id": kernel.id,
         "id": agent_id,
         "handler_module": "file_bridge.tools",
+        "allow": ["."],
         "ingress_rule": "allow_all_ingress",
         **meta,
     }
@@ -49,7 +50,7 @@ async def test_update_agent_refuses_handler_module_and_reserved_keys(seeded_kern
     a = await _mk(seeded_kernel, "rg_upd")
     before = dict(seeded_kernel.ctx.get(a) or {})
     for key, value in (
-        ("handler_module", "text_file.tools"),
+        ("handler_module", "file_bridge.tools"),
         ("root_path", "/tmp/elsewhere"),
         ("ctx", "x"),
         ("parent", "y"),
@@ -67,6 +68,7 @@ async def test_create_agent_refuses_reserved_keys(seeded_kernel):
         type="create_agent",
         parent_id=seeded_kernel.id,
         handler_module="file_bridge.tools",
+        allow=["."],
         id="rg_reserved",
         root_path="/tmp/elsewhere",
     )

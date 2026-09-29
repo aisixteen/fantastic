@@ -17,16 +17,15 @@ still looking like one table.
 
 The roster names a ROLE; each runner supplies whatever its kernel has:
 
-| role | python | js | rust | swift |
-|---|---|---|---|---|
-| `memory` | `text_file` bundle | in-process handler | pending text_file port | pending text_file port |
-| `render_sink` | `cli` | — | `cli` bundle | `cli` bundle |
+| role | python | rust | swift |
+|---|---|---|---|
+| `memory` | `file_bridge` data store | `file_bridge` data store | `file_bridge` data store |
+| `render_sink` | `cli` | `cli` bundle | `cli` bundle |
 
 ## Running it
 
 ```sh
 cd src/lib/python && KERNEL=python uv run python ../../../e2e/runners/host.py dialog
-cd e2e && node runners/inproc_js.mjs dialog
 cd src/lib/python && KERNEL=rust  uv run python ../../../e2e/runners/host.py dialog
 cd src/lib/python && KERNEL=swift uv run python ../../../e2e/runners/host.py dialog
 ```

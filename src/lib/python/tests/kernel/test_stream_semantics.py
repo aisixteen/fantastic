@@ -48,6 +48,7 @@ async def _agent(kernel, aid: str) -> None:
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": aid,
                     },
                 }

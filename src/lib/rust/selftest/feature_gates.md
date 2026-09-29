@@ -31,7 +31,7 @@ Expected: `Finished ... target(s)` with no errors and no warnings.
 cargo check -p fantastic-cli --no-default-features --features embedded
 ```
 Expected: clean compile. None of the subprocess-using bundles
-(terminal_backend, exec_bridge) pull in via path-dep resolution. If a
+(exec_bridge — commands and PTY jobs) pulls in via path-dep resolution. If a
 future bundle accidentally adds a non-`optional` dep to one of those,
 this check fails.
 
@@ -52,7 +52,7 @@ Expected: clean — no diff.
 ### Test 5: full-tier handler_modules are NOT in the embedded binary
 
 Build the CLI under embedded, boot a workdir that has a
-`terminal_backend.tools` record persisted, and confirm the kernel
+`exec_bridge.tools` record persisted, and confirm the kernel
 logs the weak-load skip line.
 
 ```bash
@@ -65,8 +65,8 @@ mkdir -p "$WORK/.fantastic/agents/tb"
 cat > "$WORK/.fantastic/agents/tb/agent.yaml" <<'JSON'
 {
   "id": "tb",
-  "handler_module": "terminal_backend.tools",
-  "meta": {"cmd": ["bash"]}
+  "handler_module": "exec_bridge.tools",
+  "meta": {"cwd": "."}
 }
 JSON
 
@@ -75,7 +75,7 @@ cd "$WORK"
 $BIN reflect 2>&1 | head -20
 ```
 Expected: a line matching
-`[kernel] skipping agent tb: bundle terminal_backend.tools not installed in this runtime`
+`[kernel] skipping agent tb: bundle exec_bridge.tools not installed in this runtime`
 in the boot output. The kernel must continue booting (no crash on
 missing bundle).
 

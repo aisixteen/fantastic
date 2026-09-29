@@ -180,7 +180,7 @@ async fn intro_booting_prints_the_control_plane_map() {
     );
     assert_eq!(
         lines[4],
-        "  REACH one call by id, any unit: compute(exec_bridge) · infer(ai) · memory(text_file) · shell(terminal_backend)"
+        "  REACH one call by id, any unit: compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)"
     );
     assert_eq!(
         dispatch(json!({"type": "intro_booting"})).await.unwrap(),

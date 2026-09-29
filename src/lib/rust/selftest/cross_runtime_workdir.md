@@ -30,18 +30,19 @@ cd python && uv sync && cd ..
 ```bash
 cd "$PYWORKDIR"
 
-# Stage some agents under Python.
-fantastic core create_agent handler_module=file.tools id=ff root="$PYWORKDIR" >/dev/null
-fantastic core create_agent handler_module=scheduler.tools id=sch file_agent_id=ff >/dev/null
-fantastic core create_agent handler_module=exec_bridge.tools id=py \
-    interpreters="[\"$(command -v python3)\"]" ingress_rule=allow_all_ingress >/dev/null
+# Stage some agents under Python. The store is the kernel's own `.fantastic`
+# (its `allow` must expose the records — deny-all otherwise).
+fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools \
+    id=ff root=.fantastic allow='["."]' ingress_rule=allow_all_ingress >/dev/null
+fantastic kernel create_agent parent_id=kernel_state handler_module=scheduler.tools id=sch >/dev/null
+fantastic kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=ex \
+    allowed='["echo( .*)?"]' inherit_env='["PATH"]' ingress_rule=allow_all_ingress >/dev/null
 
-# Confirm the interpreter allowlist landed on disk:
-grep '"interpreters"' "$PYWORKDIR/.fantastic/agents/py/agent.yaml"
+# Confirm the command gate landed on disk:
+grep -A1 'allowed' "$PYWORKDIR/.fantastic/agents/ex/agent.yaml"
 ```
-Expected: a line like `"interpreters": ["/path/to/python3"]` — the
-operator's explicit choice. There is no default and no PATH probing:
-the record IS the answer.
+Expected: the `allowed` list with `echo( .*)?` — the operator's explicit
+choice. There is no default: the record IS the answer.
 
 ### Test 2: Same workdir opened under Rust
 
@@ -49,27 +50,25 @@ the record IS the answer.
 # Same workdir, switch binary.
 "$RUSTBIN" reflect 2>&1 | grep -E '"id"|"sentence"'
 ```
-Expected: the reflect output lists agents `core`, `ff`, `sch`, `py`.
+Expected: the reflect output lists the root plus `ff`, `sch`, `ex`.
 NO `[kernel] skipping agent` lines (every Python-shipped bundle has
 a Rust equivalent).
 
-### Test 3: Rust uses Python's persisted interpreter allowlist
+### Test 3: Rust enforces Python's persisted command gate
 
 ```bash
-JOB=$("$RUSTBIN" py start code='import sys; print(sys.executable)' | jq -r .job_id)
-"$RUSTBIN" py status job_id="$JOB" | jq -r '.jobs[0].stdout'
+JOB=$("$RUSTBIN" ex start command=echo args='["same workdir"]' | jq -r .job_id)
+"$RUSTBIN" ex status job_id="$JOB" | jq -r '.jobs[0].stdout'
+"$RUSTBIN" ex start command=ls | jq -r .error
 ```
-Expected: the job's `stdout` matches the path written in Test 1
-BYTE-FOR-BYTE. The record's `interpreters` allowlist is the ONLY way
-Rust gets an interpreter here — it does not probe PATH, so the
-persisted record is what makes the same workdir deterministic across
-runtimes.
+Expected: the job prints `same workdir`; `ls` is refused naming the
+`allowed` patterns — the gate Python wrote is the gate Rust enforces.
 
 ### Test 4: Rust mutates the workdir; Python rehydrates cleanly
 
 ```bash
 # Schedule a fire via Rust.
-"$RUSTBIN" sch schedule target=core payload='{"type":"list_agents"}' interval_seconds=60 >/dev/null
+"$RUSTBIN" sch schedule target=kernel payload='{"type":"list_agents"}' interval_seconds=60 >/dev/null
 
 # Verify schedules.yaml exists + has the schedule.
 cat "$PYWORKDIR/.fantastic/agents/sch/schedules.yaml" | head -5
@@ -104,21 +103,17 @@ match). Same wire shape for the warn line.
 ### Test 6: Bundle present in Python but not Rust embedded slice
 
 ```bash
-# Stage a terminal_backend record (Rust requires --features full).
-mkdir -p "$PYWORKDIR/.fantastic/agents/tb"
-cat > "$PYWORKDIR/.fantastic/agents/tb/agent.yaml" <<'JSON'
-{"id":"tb","handler_module":"terminal_backend.tools","meta":{"cmd":["bash"]}}
-JSON
+# The exec_bridge record `ex` from Test 1 (Rust requires --features full).
 
 # Build an embedded-slice CLI (no full feature) and boot the workdir.
-cd /path/to/fantastic_canvas/rust
+cd /path/to/fantastic_canvas/src/lib/rust
 cargo build --release --bin fantastic_kernel --no-default-features --features embedded
 EMBEDDED_BIN=$(pwd)/target/release/fantastic_kernel
 cd "$PYWORKDIR"
-$EMBEDDED_BIN reflect 2>&1 | grep -E 'tb|skipping'
+$EMBEDDED_BIN reflect 2>&1 | grep -E 'ex|skipping'
 ```
-Expected: the embedded binary logs `skipping agent tb: bundle
-terminal_backend.tools not installed in this runtime` and continues
+Expected: the embedded binary logs `skipping agent ex: bundle
+exec_bridge.tools not installed in this runtime` and continues
 booting. iOS Lite would behave the same on this workdir.
 
 ## Cleanup
@@ -131,9 +126,8 @@ rm -rf "$PYWORKDIR"
 
 - Test 2 emits a skip line for a Python-shipped bundle: parity broken.
   A bundle is on one side but not the other. Check the bundle scoreboard.
-- Test 3 stdout doesn't match Test 1's path: `meta.python` auto-fill
-  isn't being read by the Rust resolution ladder. Drift across
-  reboots → users get unexpected Python versions.
+- Test 3 runs `ls`: the persisted `allowed` gate is not read by Rust —
+  the same workdir grants more under one runtime than the other.
 - Test 5 skip lines diverge in shape: log strings are wire contract.
   AI agents grep them; drift breaks tooling.
 - Test 6 crashes instead of skipping: embedded slice doesn't honor

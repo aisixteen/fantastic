@@ -119,6 +119,7 @@ fn create_store(dir: &std::path::Path) {
             "create_agent",
             "parent_id=kernel",
             "handler_module=file_bridge.tools",
+            r#"allow=["."]"#,
             "id=store",
             "root=.fantastic",
             "ingress_rule=allow_all_ingress",
@@ -151,6 +152,7 @@ fn one_shot_create_agent_persists_record() {
             "create_agent",
             "parent_id=kernel",
             "handler_module=file_bridge.tools",
+            r#"allow=["."]"#,
             "id=ff",
             "root=/tmp",
             "ingress_rule=allow_all_ingress",
@@ -188,6 +190,7 @@ fn one_shot_boots_the_root_before_the_call() {
             "create_agent",
             "parent_id=kernel",
             "handler_module=file_bridge.tools",
+            r#"allow=["."]"#,
             "id=second",
             "root=/tmp",
             "ingress_rule=allow_all_ingress",
@@ -220,6 +223,7 @@ fn one_shot_dispatch_returns_json_reply() {
             "create_agent",
             "parent_id=kernel",
             "handler_module=file_bridge.tools",
+            r#"allow=["."]"#,
             "id=ff",
             "root=/tmp",
             "ingress_rule=allow_all_ingress",
@@ -388,6 +392,7 @@ fn a_root_persist_reseeds_the_readme_and_docs_through_the_store() {
         "create_agent",
         "parent_id=kernel",
         "handler_module=file_bridge.tools",
+        r#"allow=["."]"#,
         "id=store",
         "root=.fantastic",
         "ingress_rule=allow_all_ingress",
@@ -963,7 +968,7 @@ fn a_non_finite_kv_argument_round_trips_instead_of_panicking() {
             "kernel",
             "create_agent",
             "parent_id=kernel",
-            "handler_module=text_file.tools",
+            "handler_module=file_bridge.tools",
             "id=coerced",
             "big2=123456789012345678901234567890",
             "inf=inf",
@@ -1059,7 +1064,11 @@ fn name_memory_store(dir: &std::path::Path) {
             "operator=true",
         ],
     );
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = run_cli(
         dir,
         &[
@@ -1069,7 +1078,11 @@ fn name_memory_store(dir: &std::path::Path) {
             "memory_store_id=memory",
         ],
     );
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// The product path: a one-shot in a tree with a store named. A one-shot is an
@@ -1083,8 +1096,15 @@ fn a_one_shot_with_a_store_named_is_fast_and_clean() {
     let t0 = std::time::Instant::now();
     let out = run_cli(tmp.path(), &["kernel", "ps"]);
     let wall = t0.elapsed();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(wall < std::time::Duration::from_secs(5), "one-shot took {wall:?}");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        wall < std::time::Duration::from_secs(5),
+        "one-shot took {wall:?}"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"tasks\""), "{stdout}");
     assert!(

@@ -8,8 +8,9 @@
 > separate one-shot `fantastic` calls. Drive via the WS surface.
 > out-of-scope: HTTP routes (covered by fantastic-web selftest), browser
 
-Reflect-driven LLM agent. Per-client chat threads, FIFO lock, native
-tool-calls, persistence via `file_agent_id`.
+Reflect-driven LLM agent. Per-client chat threads, FIFO lock, `<call>` tag
+tool-calls; the conversation lives in the memory store the record names
+(`memory_store_id`).
 
 **Why a live daemon is required:** the `OllamaProvider` HTTP client and
 the in-flight streaming task live in `BACKENDS` (process-global). A
@@ -28,7 +29,7 @@ curl -s http://localhost:11434/api/tags | jq -e '.models | length >= 1'
 
 ```bash
 rm -rf /tmp/ob_test
-mkdir -p /tmp/ob_test/root
+mkdir -p /tmp/ob_test
 cd /tmp/ob_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18911
@@ -36,9 +37,9 @@ MODEL=<your tool-calling model>
 
 $FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_ws.tools id=wws
-$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=fa root=/tmp/ob_test/root
+$FANTASTIC kernel_state create_agent handler_module=ram_store.tools id=mem
 $FANTASTIC kernel_state create_agent handler_module=ollama_backend.tools id=ob \
-  file_agent_id=fa model=$MODEL endpoint=http://localhost:11434
+  model=$MODEL endpoint=http://localhost:11434 memory_store_id=mem can_call='{"mem":"*"}'
 $FANTASTIC &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null' EXIT
@@ -67,32 +68,26 @@ PY
 
 ```bash
 call ob '{"type":"reflect"}' | jq -e '
-  .file_agent_id == "fa"
+  .memory_store_id == "mem"
   and (.verbs | has("send") and has("history") and has("status"))
   and (.verbs | has("interrupt") | not)
   and (.cancel | test("cancel"))'
 ```
-Expect: `file_agent_id` is set; `verbs` covers the LLM-backend surface. There is
+Expect: `memory_store_id` is set; `verbs` covers the LLM-backend surface. There is
 NO `interrupt` verb — an in-flight `send` is a KERNEL TASK, killed with the
 substrate's universal `ps` + `cancel` (the `cancel` key teaches how).
 
 ### Test 2: send streams + persists the thread
 
-Default caller is `client_id="cli"`, so the thread lands in the backend's
-per-client JSONL sidecar `agents/ob/chat_cli.jsonl` — one JSON line per turn —
-written THROUGH the leg named by the backend's `file_bridge_id` (the AI writes
-no disk itself; there is no chat agent and no loader blob path). Read it back
-with the `history` verb.
+Default caller is `client_id="cli"`. The thread is rows in the memory store
+(`mem`) — the AI writes no disk itself. Read it back with the `history` verb.
 
 ```bash
 call ob '{"type":"send","text":"reply with the single word: ok"}' | jq -e '.final'
 call ob '{"type":"history"}' \
   | jq -e '.messages | length >= 2 and (.[-1].content | ascii_downcase | contains("ok"))'
-# the sidecar is a plain file on `fa`'s root — one line per turn:
-test -s /tmp/ob_test/root/agents/ob/chat_cli.jsonl
 ```
-Expect: a `final`; `history` has ≥ 2 messages, last contains "ok"; the JSONL
-sidecar exists (non-empty) under `fa`'s root.
+Expect: a `final`; `history` has ≥ 2 messages, last contains "ok".
 
 ### Test 3: history persists across calls
 
@@ -101,7 +96,7 @@ call ob '{"type":"send","text":"my favorite color is teal, remember it"}' >/dev/
 call ob '{"type":"send","text":"what color did I just say?"}' \
   | jq -e '.final | ascii_downcase | contains("teal")'
 ```
-Expect: response mentions "teal" — proves the chat round-trip via `fa`.
+Expect: response mentions "teal" — proves the thread round-trip via `mem`.
 
 ### Test 4: history verb returns the thread
 

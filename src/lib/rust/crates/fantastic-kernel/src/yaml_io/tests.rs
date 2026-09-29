@@ -16,7 +16,7 @@ fn fixture(name: &str) -> String {
 fn record() -> Value {
     let pairs: Vec<(&str, Value)> = vec![
         ("id", json!("tricky_0a1b2c")),
-        ("handler_module", json!("text_file.tools")),
+        ("handler_module", json!("file_bridge.tools")),
         ("parent_id", json!("kernel_state")),
         ("one", json!("1")),
         ("truthy", json!("true")),

@@ -14,8 +14,7 @@
 // CRUD (`create_agent`/`delete_agent`/`list_agents`) is deliberately NOT here:
 // the frontend's tree is built by its bundles and persisted through the host
 // loader, so inventing local CRUD verbs would advertise a surface that does not
-// exist. The deleted row verbs (`messages`, `rows_read`, `rows_write`) and
-// `shutdown_kernel` (renamed `kernel_stop`) are answered by nobody.
+// exist.
 
 import type { Json, Payload } from "./json.ts";
 import type { Kernel } from "./kernel.ts";

@@ -18,9 +18,9 @@ from _engine import EXERCISED, Hydration, config_paths, hydrate
 @pytest.fixture
 def agentic_cwd(tmp_path, monkeypatch) -> Path:
     """Run this test inside an empty `tmp_path`. Mandatory before `hydrate`:
-    `static_loader` reads its manifest through `fs.read_text(Path.cwd(), path)`,
-    clamped to the cwd, so a manifest has to be materialized HERE and named
-    relatively — a config file in `configs/` can never be passed by path."""
+    `static_loader` reads its manifest clamped to the kernel's running dir (the
+    cwd), so a manifest has to be materialized HERE and named relatively — a
+    config file in `configs/` can never be passed by path."""
     monkeypatch.chdir(tmp_path)
     return tmp_path
 

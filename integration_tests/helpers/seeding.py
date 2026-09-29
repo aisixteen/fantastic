@@ -203,7 +203,7 @@ def seed_store(binary: Path, workdir: Path) -> None:
     reply = seed_create(
         binary,
         workdir,
-        handler_module="file_bridge.tools",
+        handler_module="file_bridge.tools", allow=["."],
         agent_id="store",
         root=".fantastic",
         ingress_rule="allow_all_ingress",
@@ -316,10 +316,6 @@ def seed_bridge_ws(
     `kernel.send(target, payload)` and replies over the same socket.
     No B-side bridge agent, no read_loop on the remote.
 
-    Note: `local_port` is the historical field name for "the port to
-    dial" (shared with the ssh+ws tunnel path); here it carries
-    `peer_port`.
-
     The `handler_module` is resolved per the dialing runtime
     (`_WS_BRIDGE_HANDLER_MODULE`): `ws_bridge.tools` on Python + Rust,
     `kernel_bridge.tools` on Swift (its port is deferred).
@@ -334,7 +330,7 @@ def seed_bridge_ws(
         agent_id=agent_id,
         transport="ws",
         peer_id=peer_id,
-        local_port=peer_port,
+        port=peer_port,
         host=host,
     )
     if "error" in reply:

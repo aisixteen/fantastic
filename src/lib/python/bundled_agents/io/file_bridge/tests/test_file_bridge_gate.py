@@ -20,6 +20,7 @@ async def _make(kernel, **meta):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         **meta,
                     },
                 }
@@ -207,6 +208,7 @@ async def test_an_unimplementable_rule_is_refused_at_CREATE_not_just_update(
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": "x",
                         "ingress_rule": "bogus_rule",
                     },

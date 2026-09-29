@@ -32,6 +32,8 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from record import HARNESS_FIELDS  # noqa: E402
 
@@ -72,9 +74,9 @@ class Norm:
     TIME_KEYS = {"ts", "started_at", "queued_at", "created_at", "next_run", "last_run",
                  "elapsed", "duration_ms"}
     ID_KEYS = {"id", "ids", "parent", "task_id", "message_id", "pid", "refs", "expand",
-               "after", "next", "bundles_next", "view_ids", "killed"}
+               "after", "next", "bundles_next", "view_ids", "killed", "covers"}
     COUNT_KEYS = {"bytes", "size", "body_len", "content-length", "__bytes_len__"}
-    OSPID_KEYS = {"pid", "tunnel_pid"}
+    OSPID_KEYS = {"pid"}
     GUID_KEYS = {"guid", "owner_guid", "partner_guid"}
 
     HARNESS_ID = re.compile(r"^(wirecap-|p-|p:|x-|s-|kv-|CASE=|reuse-|parity-|probe$)")
@@ -86,7 +88,7 @@ class Norm:
     PORT_AFTER_HOST = re.compile(
         r"(?<![\w.])((?:\d{1,3}(?:\.\d{1,3}){3}|localhost|\[::1\])):(\d{4,5})\b")
     PORT_AFTER_WORD = re.compile(
-        r"((?<![\w])(?:local_|remote_)?port[\"']?\s*(?:[:=]|\s)\s*[\"']?)(\d{4,5})\b")
+        r"((?<![\w])port[\"']?\s*(?:[:=]|\s)\s*[\"']?)(\d{4,5})\b")
 
     def __init__(self, ports: dict, root_alias: str | None, runtime: str) -> None:
         self.ports = {}
@@ -129,7 +131,7 @@ class Norm:
             out = new
         # N8 ports — by role, from the map the capture recorded. TWO forms, each
         # anchored: `<host>:<port>` and `port[:= ]<port>` (the second is how a
-        # persisted `agent.json` and the cli's own lines carry one).
+        # persisted `agent.yaml` and the cli's own lines carry one).
         def port_sub(m):
             p = int(m.group(2))
             if p in (9, 8080, 11434):
@@ -159,6 +161,10 @@ class Norm:
         # string. Measured: 664 of the 1855 python self-diff lines were this one
         # token in a stub request body.
         new = re.sub(r"(guid[\"']?\s*[:=]\s*[\"']?)[0-9a-f]{32}\b", r"\1<GUID:hex32>", out)
+        # …and as the kernel half of a QUALIFIED caller, `<guid>|<agent>` — every
+        # bridge call names its sender that way (audit 2026-09-28). The agent
+        # half stays compared.
+        new = re.sub(r"(?<![0-9a-f])[0-9a-f]{32}(?=\|)", "<GUID:hex32>", new)
         if new != out:
             self.fired.add("N3")
         out = new
@@ -207,6 +213,8 @@ class Norm:
             (r'(\\?"send_id\\?"\s*:\s*\\?")[A-Za-z0-9_-]{11}(\\?")',
              r"\1<SEND_ID:b64url11>\2", "N7"),
             (r'(\\?"job_id\\?"\s*:\s*\\?")[0-9a-f]{8}(\\?")', r"\1<JOB_ID:hex8>\2", "N7"),
+            # …and in an `origin` line, where the id is written `{job_id: <hex8>}`.
+            (r"(\bjob_id: )[0-9a-f]{8}\b", r"\1<JOB_ID:hex8>", "N7"),
             (r'(\\?"serial\\?"\s*:\s*\\?")[0-9a-f]{6}(\\?")', r"\1<SERIAL:hex6>\2", "N7"),
             (r'(\\?"(?:ts|started_at|queued_at|created_at|next_run|last_run|elapsed|'
              r'duration_ms)\\?"\s*:\s*)\d+\.\d+', r"\1<TS:float>", "N6"),
@@ -217,6 +225,14 @@ class Norm:
             if new != out:
                 self.fired.add(tag)
             out = new
+        # N4 — a kernel-minted row id inside EMBEDDED json (a state_event's
+        # `summary`, a frame's `text`): the same placeholder the key-based pass
+        # gives `{"id": 715}`, so N19 pairs the two sides by position.
+        new = re.sub(r'(\\?"(?:id|parent)\\?"\s*:\s*)(\d+)(?![\d.])',
+                     lambda m: m.group(1) + self._id_placeholder(int(m.group(2))), out)
+        if new != out:
+            self.fired.add("N4")
+        out = new
         # N10 — the recall header's live-task ESTIMATE. It is a token count over a
         # body whose ids have just been renamed, so it cannot be compared and its
         # PRESENCE and place in the sentence can.
@@ -314,7 +330,7 @@ class Norm:
 
     #: N12 — rewritten while they are read (C47), so neither their sha nor the
     #: size a listing reports is a comparable number.
-    REWRITTEN = ("ledger.json", "messages.xml", "lock.json", "schedules.json")
+    REWRITTEN = ("lock.yaml", "schedules.yaml")
     #: Every field of a capture record that is a NUMBER OVER, or a DIGEST OF, one
     #: of those files. `store.py` records each persisted file three ways (a disk
     #: walk, a `read_stream` walk, the reassembled body), so the same moving
@@ -325,12 +341,12 @@ class Norm:
                      "__raw_bytes_in_raw_file__"}
     REWRITTEN_TEXT = {"utf8", "__utf8__", "text", "head_hex"}
     #: N16 — a persisted file whose BYTES embed a value the rules have already
-    #: declared incomparable: the root `agent.json` carries the kernel's minted
+    #: declared incomparable: the root `agent.yaml` carries the kernel's minted
     #: guid (N3), a web leg's carries its OS-chosen port and an ai leg's the stub
     #: endpoint (N8). A digest over those bytes can only ever differ. The bytes
     #: themselves stay compared, normalised — in `raw/…`, in `disk_raw/…` and in
     #: the `utf8`/`text` field beside the digest.
-    DIGEST_OF_MINTED = ("agent.json",)
+    DIGEST_OF_MINTED = ("agent.yaml",)
     DIGEST_KEYS = {"sha256", "__sha256__"}
 
     @classmethod
@@ -385,7 +401,7 @@ class Norm:
                 return "<OSPID>"
             if key in self.ID_KEYS and self._is_minted_id(v):
                 return self._id_placeholder(v)
-            if key in ("port", "local_port", "remote_port") and isinstance(v, int):
+            if key == "port" and isinstance(v, int):
                 if v not in (9, 8080, 11434):
                     self.fired.add("N8")
                     return f"<PORT:{self.ports.get(v, '?')}>"
@@ -1219,6 +1235,14 @@ def load(p: Path):
             return "json", json.loads(raw.decode("utf-8", "surrogatepass"))
         except ValueError:
             return "text", raw.decode("utf-8", "replace")
+    if p.suffix == ".yaml":
+        # A PERSISTED RECORD (`agent.yaml`, `lock.yaml`, `schedules.yaml`) is a
+        # document: parsed, so the key-based rules (N3–N6) see its guid, its
+        # clock and its pid, exactly as they did when the store wrote json.
+        try:
+            return "json", yaml.safe_load(raw.decode("utf-8"))
+        except (ValueError, yaml.YAMLError):
+            return "text", raw.decode("utf-8", "replace")
     if p.suffix == ".jsonl":
         out = []
         for line in raw.decode("utf-8", "surrogatepass").splitlines():
@@ -1913,6 +1937,21 @@ def cmd_rulecheck() -> int:
         bad += 0 if ok else 1
         total += 1
         print(f"  {'ok  ' if ok else 'FAIL'} N10 — {name}: {len(lines)} line(s), "
+              f"expected {'>0' if want else '0'}")
+
+    # ── N3's qualified-caller form: the minted guid goes, the agent stays. ───
+    g1, g2 = "25e352990c374626905a70c52164dc46", "229a2a97b2bb4ee1a9726ff8cbfbbcff"
+    for name, la, lb, want in (
+            ("a caller's minted guid is not compared",
+             [{"caller": f"{g1}|rest"}], [{"caller": f"{g2}|rest"}], False),
+            ("a caller's AGENT half is still compared",
+             [{"caller": f"{g1}|rest"}], [{"caller": f"{g2}|ws"}], True),
+    ):
+        lines = cj(la, lb, "t/bridges/ws_peer_partner_events.json")
+        ok = bool(lines) == want
+        bad += 0 if ok else 1
+        total += 1
+        print(f"  {'ok  ' if ok else 'FAIL'} N3 — {name}: {len(lines)} line(s), "
               f"expected {'>0' if want else '0'}")
 
     # ── The diff is written INSIDE the run tree, never beside it. ───────────

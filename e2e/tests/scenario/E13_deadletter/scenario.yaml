@@ -36,7 +36,7 @@ roster:
     id: cli
 
 grants:
-  ai_can_call: [cli, yaml_store, plant]
+  ai_can_call: [cli, yaml_store, plant, "$root:ledger"]
 
 # `>= 3` pump runs proves the KERNEL re-ran it: one call, three handler
 # invocations. A model re-sending by hand would show the same total with a

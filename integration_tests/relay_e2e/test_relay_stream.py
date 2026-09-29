@@ -135,7 +135,7 @@ async def test_relay_streams_raw_bytes(
     seed_create(
         bin_b,
         wd_b,
-        handler_module="file_bridge.tools",
+        handler_module="file_bridge.tools", allow=["."],
         agent_id="fs",
         root="streams",
         ingress_rule="allow_all_ingress",

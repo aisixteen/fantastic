@@ -125,8 +125,18 @@ extension Kernel {
     /// `emit` for a payload carrying raw bytes — a `read_stream` chunk a bridge
     /// re-emits from a remote watch, which must reach a local watcher WHOLE.
     /// Same no-op rule for a non-agent id.
+    ///
+    /// GATED LIKE A SEND when the emitter is another agent (audit 2026-09-28,
+    /// a16): the emitter's `can_call` and the target's `callable_by` must both
+    /// allow verb `emit`. Not privileged — the baseline keeps emits to self,
+    /// parent and children. A denied emit is dropped; an emit has no reply.
     public func emitItem(_ targetId: AgentId, _ item: InboxItem) async {
         guard let target = agent(targetId) else { return }
+        if let orig = KernelTaskLocals.currentSender, orig != target.id,
+            gate(sender: orig, verb: "emit", target: target, payload: item.payload) != nil
+        {
+            return
+        }
         fanout(target, "emit", item)
     }
 
@@ -371,8 +381,9 @@ extension Kernel {
     // ─── keyed / tiered doc tree ───────────────────────────────
     // The manual is a SHORT `readme.md` orientation + a `docs/` topic tree.
     // `reflect readme=index` lists it token-annotated; `reflect readme=<key>`
-    // drills one topic. Read from the seeded on-disk tree with an embedded
-    // fallback for the in-memory root (mirrors `readReadme`).
+    // drills one topic. Read from the seeded on-disk tree in disk mode; the
+    // in-memory root has no disk and serves the embedded docs — picked by the
+    // storage mode, never tried in sequence (mirrors `readReadme`).
 
     /// ~tokens for a doc: ceil(chars/4), matching ai_core's estimate (Unicode
     /// scalars = code points, so the advertised cost is stable across runtimes).
@@ -808,7 +819,7 @@ extension Kernel {
         // it carries a handler_module (the `kernel_state` root loader): its
         // persistence verbs (load_tree / persist_record / boot) still route to
         // the bundle below, but `reflect <root>` is the kernel's own identity +
-        // tree, matching the `kernel` alias. Python `_agent.py`: `if verb ==
+        // tree, matching the `kernel` address. Python `_agent.py`: `if verb ==
         // "reflect" and self.parent is None`.
         if verb == "reflect", target.parentId == nil {
             return reflectIdentity(target)
@@ -980,11 +991,35 @@ extension Kernel {
             sender: joiner, verb: orig["type"].asString ?? "", target: target, payload: orig)
     }
 
-    /// Resolve an id the way `send` does — the `kernel` alias or a literal id.
+    /// Resolve an id the way `send` does — the reserved `kernel` address or a literal id.
     /// `nil` when it names no live agent.
     func resolveAgent(_ id: JSON) -> Agent? {
         guard let s = id.asString, !s.isEmpty else { return nil }
         return s == "kernel" ? root : agent(AgentId(s))
+    }
+
+    /// Is `otherId` X or a live descendant of X? The `$subtree:<X>` resolver, asked
+    /// at call time so an agent spawned after the grant is covered.
+    public func inSubtree(_ otherId: String, of x: String) -> Bool {
+        var node = agent(AgentId(otherId))
+        while let n = node {
+            if n.id.value == x { return true }
+            node = n.parentId.flatMap { agent($0) }
+        }
+        return false
+    }
+
+    /// May `sender` call `targetId` through a HERITABLE `can_call` entry one of its
+    /// ANCESTORS holds? Nearest ancestor first; the sender's own entries never count
+    /// (a heritable entry does not reach for its holder).
+    public func heritableEgress(sender: AgentId, verb: String, targetId: String) -> Bool {
+        var grants: [JSON] = []
+        var node = agent(sender)?.parentId.flatMap { agent($0) }
+        while let n = node {
+            grants.append(n.metaValue(forKey: "can_call") ?? .null)
+            node = n.parentId.flatMap { agent($0) }
+        }
+        return authorizeHeritable(ancestorGrants: grants, verb: verb, targetId: targetId).allowed
     }
 
     /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
@@ -1007,7 +1042,9 @@ extension Kernel {
             grant: sCan, verb: "create_agent", otherId: parent.id.value,
             holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
             enforcePrivileged: true)
-        if !d.allowed {
+        if !d.allowed
+            && !heritableEgress(sender: sender, verb: "create_agent", targetId: parent.id.value)
+        {
             return .object([
                 "error": .string("\(sender.value) may not create under \(parent.id.value)"),
                 "reason": .string("unauthorized"), "hint": .string(d.hint),
@@ -1019,7 +1056,7 @@ extension Kernel {
             grant: tCall, verb: "create_agent", otherId: sender.value,
             holderId: parent.id.value, parentId: parent.parentId?.value,
             childIds: Set(parent.childIds().map { $0.value }), loaderId: loaderId,
-            enforcePrivileged: false)
+            enforcePrivileged: false, inSubtree: { self.inSubtree($0, of: $1) })
         if !di.allowed {
             return .object([
                 "error": .string(
@@ -1067,7 +1104,7 @@ extension Kernel {
             grant: sCan, verb: verb, otherId: target.id.value,
             holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
             enforcePrivileged: true)
-        if !d.allowed {
+        if !d.allowed && !heritableEgress(sender: sender, verb: verb, targetId: target.id.value) {
             return .object([
                 "error": .string(
                     "\(sender.value) may not call \(pyRepr(verb)) on \(target.id.value)"),
@@ -1103,18 +1140,33 @@ extension Kernel {
 
         // Ingress — does the TARGET accept the sender? (tokens relative to target;
         // privileged-no-wildcard is egress-only, so enforcePrivileged: false.)
+        // A bridge leg relaying a FOREIGN caller is judged by that caller's
+        // qualified `<guid>|<agent>`, never by the leg: the target names who on the
+        // other kernel it accepts, and the baseline tokens never match a foreign id.
+        let rc = KernelTaskLocals.remoteCaller
+        let foreign = (rc != nil && rc!.leg == sender) ? rc!.address : nil
+        let inSender = foreign ?? sender.value
         let tCall = target.metaValue(forKey: "callable_by") ?? .null
         let tParent = target.parentId?.value
         let tKids = Set(target.childIds().map { $0.value })
         let di = authorizeCall(
-            grant: tCall, verb: verb, otherId: sender.value,
+            grant: tCall, verb: verb, otherId: inSender,
             holderId: target.id.value, parentId: tParent, childIds: tKids, loaderId: loaderId,
-            enforcePrivileged: false)
+            enforcePrivileged: false, inSubtree: { self.inSubtree($0, of: $1) })
         if !di.allowed {
+            let hint: String
+            if let f = foreign {
+                let guid = String(f.split(separator: "|").first ?? "")
+                hint =
+                    "a foreign caller is accepted only by name: callable_by {\(pyRepr(f)): [...]} "
+                    + "or {\(pyRepr(guid + "|*")): [...]} on \(target.id.value)"
+            } else {
+                hint = di.hint
+            }
             return .object([
                 "error": .string(
-                    "\(target.id.value) does not accept \(pyRepr(verb)) from \(sender.value)"),
-                "reason": .string("unauthorized"), "hint": .string(di.hint),
+                    "\(target.id.value) does not accept \(pyRepr(verb)) from \(inSender)"),
+                "reason": .string("unauthorized"), "hint": .string(hint),
                 "side": .string("ingress"),
             ])
         }
@@ -1124,6 +1176,31 @@ extension Kernel {
             return checkConferral(
                 sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
                 loaderId: loaderId, payload: payload)
+        }
+        return nil
+    }
+
+    /// A heritable entry is conferred only by an agent whose OWN `can_call` holds the
+    /// same entry, and only a subset of its verbs (`*` needs `*`; a named verb needs
+    /// the name, or `*` when the verb is not privileged).
+    private func heritableConferral(
+        sender: AgentId, sCan: JSON, key: String, want: [String]
+    ) -> JSON? {
+        let have = heritableVerbs(sCan[key]) ?? []
+        for v in want {
+            let covered =
+                have.contains(v)
+                || (v != "*" && have.contains("*") && !privilegedVerbs.contains(v))
+            if !covered {
+                return .object([
+                    "error": .string(
+                        "\(sender.value) cannot confer a heritable \(pyRepr(v)) on \(key): you "
+                            + "do not hold that heritable entry — only the operator, or a "
+                            + "holder of the same entry, confers one (a subset of it)"),
+                    "reason": .string("unauthorized"), "side": .string("delegation"),
+                    "hint": .string(fromAbove),
+                ])
+            }
         }
         return nil
     }
@@ -1151,10 +1228,24 @@ extension Kernel {
         // granter itself holds (structural tokens free; `callable_by` is unbounded).
         if case .object(let conferred) = payload["can_call"] {
             for (key, verbs) in conferred {
+                var isMap = false
+                if case .object = verbs { isMap = true }
                 let probeKey: String
                 switch key {
                 // Relative to the HOLDER — no lateral reach.
                 case "$self", "$parent", "$children":
+                    continue
+                // A heritable entry is conferred only by a holder of the SAME entry
+                // (subset). A malformed one, and a `$subtree:` key (which is
+                // callable_by-only), are refused by the write-time shape check with
+                // the shape's own words.
+                case let k where isMap || k.hasPrefix(subtreePrefix):
+                    if let want = heritableVerbs(verbs), !k.hasPrefix("$"),
+                        let denied = heritableConferral(
+                            sender: sender, sCan: sCan, key: k, want: want)
+                    {
+                        return denied
+                    }
                     continue
                 // NOT relative: `$loader` resolves to the ROOT for whoever holds
                 // it, so conferring it hands over real reach on the kernel's

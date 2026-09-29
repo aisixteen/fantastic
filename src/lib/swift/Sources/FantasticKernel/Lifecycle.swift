@@ -16,7 +16,7 @@ import FantasticJSON
 import Foundation
 
 /// Hooks run at the very end of `Kernel.shutdown()`, for process-wide state
-/// keyed by kernel identity that the kernel itself cannot see (it lives in
+/// keyed by `Kernel.serial` that the kernel itself cannot see (it lives in
 /// modules that depend on the kernel, never the other way round).
 private let teardownHookLock = NSLock()
 nonisolated(unsafe) private var _teardownHooks: [@Sendable (Kernel) -> Void] = []
@@ -213,7 +213,7 @@ extension Kernel {
     /// `flushPending` (the loader's record writer) and the kernel's FINAL
     /// EXECUTION FLUSH — both awaited BEFORE the teardown walk, while the
     /// provider and the memory store are still alive — then the depth-first
-    /// `onShutdown`/`onDelete` walk that frees OS resources (PTYs, subprocesses,
+    /// `onShutdown` walk that frees OS resources (PTYs, subprocesses,
     /// sockets) without touching records or disk. The tree survives so the
     /// next boot rehydrates cleanly. Idempotent: guarded by `shutdownComplete`,
     /// so the signal handler and any safety net don't double-run.
@@ -266,8 +266,8 @@ extension Kernel {
 
     /// Python `Agent.shutdown`: depth-first like cascade-delete, but DOES NOT
     /// touch records, disk, or tree membership — only invokes each bundle's
-    /// teardown hook. Children first, then this agent's `onShutdown` (whose
-    /// protocol default IS `onDelete`, python's fallback). A hook that throws
+    /// teardown hook. Children first, then this agent's `onShutdown` — ONLY
+    /// that hook, never `onDelete` in its place (audit c9). A hook that throws
     /// is printed and the walk continues: one bundle's teardown cannot take
     /// down the rest.
     ///
