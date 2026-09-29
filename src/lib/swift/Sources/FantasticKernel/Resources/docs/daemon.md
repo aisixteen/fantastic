@@ -29,7 +29,7 @@ yourself):
     fantastic kernel create_agent parent_id=<web_id> handler_module=web_ws.tools
     fantastic kernel create_agent parent_id=<web_id> handler_module=web_rest.tools
     fantastic kernel create_agent parent_id=<web_id> handler_module=kernel_state.tools \
-        root=.fantastic/web watch=false alias=web_loader   # frontend store (readme=frontend)
+        id=web_loader root=.fantastic/web watch=false   # frontend store (readme=frontend)
     fantastic web_loader persist_record \
         record='{"id":"<root_id>","handler_module":"<frontend-root>.ts"}'  # seed the frontend
 
@@ -47,7 +47,7 @@ HTTP/WS listeners stop, and it exits code 0. Reachable over both
 with one verb — no `kill`, no backend knowledge.
 
 This is **PRIVILEGED and root-only**: it is gated to the kernel's own
-control surface (the tree root, alias `kernel`); sending it to any child
+control surface (the tree root, address `kernel`); sending it to any child
 agent returns an error. It is **backend-agnostic**: the kernel is PID 1 in a
 container, so its exit stops the container (auto-removed if run with `--rm`);
 a bare host process simply dies. Either way the port goes down and the lock
@@ -56,8 +56,8 @@ bind-mounted `.fantastic/` workdir persists across the stop.
 
 # First contact — if you arrived via the terminal
 
-If a `fantastic` daemon was launched on a tty (or you are an LLM in a
-`terminal_backend` PTY here), it greeted you with a TWO-PHASE intro: first
+If a `fantastic` daemon was launched on a tty (or you are an LLM in an
+`exec_bridge` PTY job here), it greeted you with a TWO-PHASE intro: first
 `[fantastic] … — booting…` (identity + a compact PULL/PUSH control-plane
 map), then `[kernel] up` (the live REST/WS attach coordinates, or a compose
 hint if no web surface exists yet). That banner is the SHORT map; the doc

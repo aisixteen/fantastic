@@ -34,12 +34,54 @@ fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>, H
 }
 
 impl Kernel {
-    /// Resolve an id the way `send` does — the `kernel` alias, then a
-    /// declared `alias` meta through `well_known` (C35), then a literal id.
-    /// `None` when it names no live agent.
+    /// Resolve an id the way `send` does — the reserved `kernel` address, then a literal
+    /// id. `None` when it names no live agent.
     fn resolve_agent(self: &Arc<Self>, id: Option<&Value>) -> Option<Arc<Agent>> {
         let id = id.and_then(Value::as_str).filter(|s| !s.is_empty())?;
         self.resolve_target(id)
+    }
+
+    /// Is `other` X or a live descendant of X? The `$subtree:<X>` resolver, asked
+    /// at call time so an agent spawned after the grant is covered.
+    pub fn in_subtree(&self, other: &str, x: &str) -> bool {
+        let mut node = self
+            .agents
+            .get(&AgentId::from(other))
+            .map(|e| Arc::clone(&e));
+        while let Some(n) = node {
+            if n.id.as_str() == x {
+                return true;
+            }
+            node = n
+                .parent_id
+                .as_ref()
+                .and_then(|p| self.agents.get(p).map(|e| Arc::clone(&e)));
+        }
+        false
+    }
+
+    /// May `sender_id` call `target_id` through a HERITABLE `can_call` entry one
+    /// of its ANCESTORS holds? Nearest ancestor first; the sender's own entries
+    /// never count (a heritable entry does not reach for its holder).
+    pub fn heritable_egress(&self, sender_id: &str, verb: &str, target_id: &str) -> bool {
+        let parent_of = |id: &AgentId| self.agents.get(id).and_then(|a| a.parent_id.clone());
+        let mut grants = Vec::new();
+        let mut node = parent_of(&AgentId::from(sender_id));
+        while let Some(id) = node {
+            let Some(a) = self.agents.get(&id).map(|e| Arc::clone(&e)) else {
+                break;
+            };
+            grants.push(
+                a.meta
+                    .read()
+                    .expect("meta lock poisoned")
+                    .get("can_call")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            node = a.parent_id.clone();
+        }
+        crate::authz::authorize_heritable(grants.iter(), verb, target_id).allowed
     }
 
     /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
@@ -77,8 +119,11 @@ impl Kernel {
             s_kids,
             loader_id,
             true,
+            None,
         );
-        if !d.allowed {
+        if !d.allowed
+            && !self.heritable_egress(sender_id.as_str(), "create_agent", parent.id.as_str())
+        {
             return Some(json!({
                 "error": format!("{sender_id} may not create under {}", parent.id),
                 "reason": "unauthorized", "hint": d.hint, "side": "egress",
@@ -94,6 +139,7 @@ impl Kernel {
             &t_kids,
             loader_id,
             false,
+            Some(&|o: &str, x: &str| self.in_subtree(o, x)),
         );
         if !di.allowed {
             return Some(json!({
@@ -199,8 +245,9 @@ impl Kernel {
             &s_kids,
             loader_id.as_deref(),
             true,
+            None,
         );
-        if !d.allowed {
+        if !d.allowed && !self.heritable_egress(sender_id.as_str(), verb, target.id.as_str()) {
             return Some(json!({
                 "error": format!(
                     "{sender_id} may not call {} on {}",
@@ -243,25 +290,44 @@ impl Kernel {
 
         // Ingress — does the TARGET accept the sender? (tokens relative to target;
         // privileged-no-wildcard is egress-only, so `enforce_privileged=false`.)
+        // A bridge leg relaying a FOREIGN caller is judged by that caller's
+        // qualified `<guid>|<agent>`, never by the leg: the target names who on the
+        // other kernel it accepts, and the baseline tokens never match a foreign id.
+        let foreign = crate::send::relayed_caller(sender_id);
+        let in_sender = foreign.clone().unwrap_or_else(|| sender_id.0.clone());
         let (t_call, t_parent, t_kids) = grant_facts(Some(target.as_ref()), "callable_by");
         let di = crate::authz::authorize_call(
             &t_call,
             verb,
-            sender_id.as_str(),
+            &in_sender,
             target.id.as_str(),
             t_parent.as_deref(),
             &t_kids,
             loader_id.as_deref(),
             false,
+            Some(&|o: &str, x: &str| self.in_subtree(o, x)),
         );
         if !di.allowed {
+            let hint = match &foreign {
+                Some(f) => format!(
+                    "a foreign caller is accepted only by name: callable_by {{{}: [...]}} or \
+                     {{{}: [...]}} on {}",
+                    fantastic_bundle::py_repr(f),
+                    fantastic_bundle::py_repr(&format!(
+                        "{}|*",
+                        f.split('|').next().unwrap_or_default()
+                    )),
+                    target.id
+                ),
+                None => di.hint,
+            };
             return Some(json!({
                 "error": format!(
-                    "{} does not accept {} from {sender_id}",
+                    "{} does not accept {} from {in_sender}",
                     target.id,
                     fantastic_bundle::py_repr(verb)
                 ),
-                "reason": "unauthorized", "hint": di.hint, "side": "ingress",
+                "reason": "unauthorized", "hint": hint, "side": "ingress",
             }));
         }
 
@@ -309,9 +375,35 @@ impl Kernel {
         // reach, so it is unbounded).
         if let Some(Value::Object(conferred)) = obj.get("can_call") {
             for (key, verbs) in conferred {
+                if matches!(key.as_str(), "$self" | "$parent" | "$children") {
+                    continue; // relative to the HOLDER — no lateral reach
+                }
+                if verbs.is_object() || key.starts_with(crate::authz::SUBTREE_PREFIX) {
+                    // A heritable entry is conferred only by a holder of the SAME
+                    // entry (subset). A malformed one, and a `$subtree:` key (which
+                    // is callable_by-only), are refused by the write-time shape
+                    // check with the shape's own words.
+                    if crate::authz::is_heritable(verbs) && !key.starts_with('$') {
+                        if let Some(v) = crate::authz::heritable_uncovered(
+                            s_can.get(key),
+                            verbs["verbs"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+                        ) {
+                            return Some(json!({
+                                "error": format!(
+                                    "{sender_id} cannot confer a heritable {} on {key}: you \
+                                     do not hold that heritable entry — only the operator, \
+                                     or a holder of the same entry, confers one (a subset \
+                                     of it)",
+                                    fantastic_bundle::py_repr(&v)
+                                ),
+                                "reason": "unauthorized", "side": "delegation",
+                                "hint": crate::authz::FROM_ABOVE,
+                            }));
+                        }
+                    }
+                    continue;
+                }
                 let probe_key: &str = match key.as_str() {
-                    // Relative to the HOLDER — no lateral reach.
-                    "$self" | "$parent" | "$children" => continue,
                     // NOT relative: `$loader` resolves to the ROOT for whoever
                     // holds it, so conferring it hands over real reach on the
                     // kernel's control surface (ps, cancel, ledger,
@@ -361,6 +453,7 @@ impl Kernel {
                         s_kids,
                         loader_id,
                         true,
+                        None,
                     )
                     .allowed;
                     if !ok {

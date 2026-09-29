@@ -143,7 +143,7 @@ struct ReplyShapeTests {
             r["error"].asString == "ps is a kernel verb — kid does not answer it",
             "\(r.serialize())")
         #expect(
-            r["hint"].asString == "address the kernel root (alias 'kernel'); name the agent "
+            r["hint"].asString == "address the kernel root ('kernel'); name the agent "
                 + "you mean in `parent_id` / `id`", "\(r.serialize())")
     }
 

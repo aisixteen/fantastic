@@ -48,7 +48,7 @@ def _read_until_reply(ws, call_id, max_frames=10):
 
 def test_ws_call_returns_reply(client, seeded_kernel):
     """Send `reflect` to root via WS — the uniform identity + tree comes
-    back (no primer keys; transports moved to the readme)."""
+    back."""
     with client.websocket_connect("/kernel_state/ws") as ws:
         ws.send_text(
             json.dumps(
@@ -148,6 +148,7 @@ def test_ws_read_stream_cursor_round_trips(
     # Two-sided deny-all: reciprocally ACCEPT the ws leg that relays calls to it.
     seeded_kernel.create(
         "file_bridge.tools",
+        allow=["."],
         id="fb_ws",
         root="sd",
         ingress_rule="allow_all_ingress",
@@ -266,7 +267,7 @@ def _read_until_type(ws, ftype, max_frames=10):
     ],
 )
 def test_malformed_frame_answers_an_error_and_the_socket_survives(client, send, raw):
-    """Before this, `decode_inbound`/`.get` raised out of the receive loop and the
+    """Before this, `decode_frame`/`.get` raised out of the receive loop and the
     `finally` tore the whole connection down — cancelling every in-flight call on
     it (an LLM generation with them). Now the bad frame is answered and the next
     frame is served normally."""

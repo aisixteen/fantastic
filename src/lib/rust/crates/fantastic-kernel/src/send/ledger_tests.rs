@@ -285,7 +285,13 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
     // read the result BODIES of agents it holds no edge to.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    let a = mk_agent(&kernel, "l_scope").await;
+    // `ledger` is privileged: the baseline does not reach it, so it is named.
+    let a = crate::tasks::tests::mk_agent_grant(
+        &kernel,
+        "l_scope",
+        json!({"kernel_state": ["ledger"]}),
+    )
+    .await;
 
     // An OPERATOR execution (no origin).
     let _ = kernel
@@ -570,8 +576,9 @@ async fn a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger() {
 
     let rows = ledger_rows(&kernel).await;
     assert!(
-        rows.iter()
-            .any(|r| r["target"] == b.0 && r["status"] == "completed" && r["outcome"]["bytes"].is_number()),
+        rows.iter().any(|r| r["target"] == b.0
+            && r["status"] == "completed"
+            && r["outcome"]["bytes"].is_number()),
         "a forked agent's send left no ledger row: {rows:?}"
     );
 }
@@ -616,10 +623,16 @@ async fn the_ledger_view_is_caller_scoped() {
                 }
         })
     };
-    assert!(seen_by(None), "the operator must see every execution: {entries:?}");
+    assert!(
+        seen_by(None),
+        "the operator must see every execution: {entries:?}"
+    );
     // A THIRD PARTY does not.
     let other = AgentId::from("l_stranger");
-    assert!(!seen_by(Some(&other)), "an agent saw an execution it did not originate");
+    assert!(
+        !seen_by(Some(&other)),
+        "an agent saw an execution it did not originate"
+    );
     // The ORIGINATOR does.
     assert!(seen_by(Some(&a)), "the originator lost its own row");
 }

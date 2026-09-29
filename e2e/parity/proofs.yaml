@@ -20,8 +20,8 @@ version: 3
 by_selector:
   tree/create_*.json: [C15]
   tree/reflect_*.json:
-    [C1, C7, A1.1, A2.1, A2.16, A2.17, A2.20, A3.11, A3.14, A4.1, A4.2, A4.10,
-     A4.17, A4.26, A4.27, A5.1, A5.15, A6.6, A6.7, A6.8, A6.11, A6.28, A7.6,
+    [C1, C7, A1.1, A2.1, A2.16, A2.17, A2.20, A4.1, A4.2, A4.10,
+     A4.17, A4.26, A4.27, A5.1, A5.15, A7.6,
      A7.8, A7.9, A7.11, A7.12, A7.20, A7.21, A8.11, A8.15, A8.18, A9.1, A9.3,
      A10.1, A10.2, A11.11, A11.12, A11.15, A11.16, A11.22, A11.25, A11.26,
      B1.2, B1.12, B1.13, B1.14, B1.15, B1.16, B1.23, B1.24, B1.25, B2.15,
@@ -30,7 +30,7 @@ by_selector:
   tree/root_reflect_full.json: [C2, C3, C4, C9, C10, C12]
   tree/root_readme_*.json: [A12.1, A12.2, A12.3, A12.4]
   tree/kernel_list_agents.json: [C6, C12, C15, C23]
-  tree/kernel_ps*.json: [C14, A6.25]
+  tree/kernel_ps*.json: [C14]
   tree/kernel_ledger*.json: [C16, C24]
   tree/reflect_absent_agent.json: [C24]
   tree/refusal_*.json: [A2.3, C19]
@@ -39,7 +39,7 @@ by_selector:
   # §5.4's tree map names `reflect_<id>` and `root_readme_<key>` but not
   # `readme_<id>`, which is where every bundle's own readme BODY lands.
   tree/readme_*.json:
-    [A2.8, A3.12, A3.13, A4.18, A4.28, A5.2, A6.2, A7.1, A8.19, A8.23, A9.4,
+    [A2.8, A4.18, A4.28, A5.2, A7.1, A8.19, A8.23, A9.4,
      A11.2, A11.6, B4.5, B4.9, C45, A12.1]
   tree/ai_send_reply.json: [B3.4]
   tree/ai_history.json: [B3.5, B1.5]
@@ -51,7 +51,7 @@ by_selector:
 
   store/s1/create_*.json: [C15]
   store/s1/readme_true/*.json:
-    [A2.8, A3.12, A3.13, A4.18, A4.28, A5.2, A6.2, A7.1, A8.19, A8.23, A9.4,
+    [A2.8, A4.18, A4.28, A5.2, A7.1, A8.19, A8.23, A9.4,
      A11.2, A11.6, B4.5, B4.9, C45]
   store/s1/root_reflect_persistence.json: [C9, C12]
   store/s1/sched_*.json: [A5.6]
@@ -70,7 +70,7 @@ by_selector:
   store/final/kernel_*.json: [C6, C14, C16, C17, C36, C37, C47, A13.20]
 
   wire/frames.jsonl: [B2.6, B2.7, B2.13, B2.14, B2.17, A4.11, A4.12, A4.15,
-                      A4.30, A5.4, A5.8, A6.19, A6.30, A11.1, A13.14, C28, C29,
+                      A4.30, A5.4, A5.8, A11.1, A13.14, C28, C29,
                       C76, C77, C78, C86]
   wire/protocol.jsonl: [A11.7, A11.8, A11.9, A11.19, A11.29, A13.15, A13.19,
                         C30, C31, C40, C41, C77]
@@ -79,7 +79,7 @@ by_selector:
                     A11.28, A13.1, A13.2, A13.3, A13.4, A13.5, A13.6, A13.7,
                     A13.8, A13.9, A13.10, A13.11, A13.12, A13.13, C22, C31,
                     C34, C40, C41, C79]
-  wire/probes.json: [A4.34, A6.25, A11.7, A11.21, A11.31]
+  wire/probes.json: [A4.34, A11.7, A11.21, A11.31]
   wire/written_files.json: [A2.7, A13.19]
   wire/stub/req_*.bin: [B1.1, B2.7]
   wire/kernel_log.txt: [A9.5, A9.6, A9.7, A11.1, A14.13, C57]
@@ -108,15 +108,10 @@ by_selector:
   bundle_verbs/file_bridge/*.json:
     [A1.2, A1.3, A2.2, A2.3, A2.4, A2.5, A2.9, A2.10, A2.11, A2.12, A2.13,
      A2.14, A2.15, A2.18, A2.19, A2.21]
-  bundle_verbs/text_file/*.json:
-    [A3.1, A3.2, A3.3, A3.4, A3.5, A3.6, A3.7, A3.8, A3.9, A3.10, A3.15]
   bundle_verbs/exec_bridge/*.json:
     [A4.3, A4.4, A4.5, A4.6, A4.7, A4.8, A4.9, A4.13, A4.14, A4.16, A4.19,
      A4.20, A4.21, A4.22, A4.23, A4.24, A4.25, A4.29, A4.31, A4.32, A4.33]
   bundle_verbs/scheduler/*.json: [A5.3, A5.5, A5.7, A5.11, A5.13, A5.14, A5.16]
-  bundle_verbs/terminal/*.json:
-    [A6.1, A6.4, A6.5, A6.9, A6.10, A6.12, A6.14, A6.15, A6.16, A6.17, A6.18,
-     A6.20, A6.21, A6.22, A6.23, A6.24, A6.26, A6.27, A6.31]
   bundle_verbs/static_loader/*.json:
     [A8.1, A8.2, A8.4, A8.5, A8.6, A8.7, A8.8, A8.10, A8.12, A8.13, A8.14,
      A8.16, A8.17, A8.21, A8.22]
@@ -137,7 +132,6 @@ by_selector:
   kernel_verbs/C26/*.json: [C26]
   kernel_verbs/C27/*.json: [C27, C89]
   kernel_verbs/C32/*.json: [C32]
-  kernel_verbs/C35/*.json: [C35]
   kernel_verbs/C39/*.json: [C39, C90]
   kernel_verbs/bare/*.json: [C19, C23, C26, C27]
 
@@ -177,10 +171,8 @@ unit:
   A0.6: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_int", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyInt"}
   A5.9: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs", swift: "Tests/FantasticSchedulerTests"}
   A5.12: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs", swift: "Tests/FantasticSchedulerTests"}
-  A6.3: {rust: "crates/bundles/fantastic-terminal-backend/src/tests.rs", swift: "Tests/FantasticTerminalBackendTests"}
-  A6.13: {rust: "crates/bundles/fantastic-terminal-backend/src/tests.rs", swift: "Tests/FantasticTerminalBackendTests"}
   A7.10: {rust: "crates/bundles/fantastic-bridge/src/tests.rs", swift: "Tests/FantasticBridgeTests"}
-  A7.24: {rust: "crates/bundles/fantastic-bridge/src/tests.rs", swift: "Tests/FantasticBridgeTests", note: "D9 — not capturable without an ssh endpoint"}
+  A7.24: {rust: "crates/bundles/fantastic-bridge/src/tests.rs", swift: "Tests/FantasticBridgeTests"}
   A11.30: {rust: "crates/bundles/fantastic-web/src/tests.rs", swift: "Tests/FantasticWebTests"}
   B2.10: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs", swift: "Tests/FantasticAICoreTests"}
   B2.19: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs", swift: "Tests/FantasticAICoreTests"}
@@ -197,7 +189,6 @@ capture_and_unit:
 
 # ── proof: none — open until the owner records a decision ────────────────────
 no_proof:
-  A6.29: "needs `ulimit -u 1` around a forkpty; open until the owner records `proof: none-accepted` (D12)"
   # §9.2's "stderr lines of A15.1/A15.2/C87" row, unchanged: no capture drives a
   # malformed bridge frame, a failing scheduler persist, a raising subscriber or a
   # failing shutdown hook, and A15.3 is a LOG FORMAT the harness does not read as

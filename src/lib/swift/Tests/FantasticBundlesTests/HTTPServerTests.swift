@@ -72,72 +72,17 @@ struct HTTPServerTests {
 
     // MARK: - A11.3 route table
 
-    /// A11.3 — `/` is python's `_index_page`: the reflect tree rendered into
-    /// `templates/index.html`.
-    @Test func indexRendersTheReflectTree() async throws {
+    /// The host renders nothing of its own: `/` is undeclared, so it is a 404 —
+    /// no tree index, nothing about the kernel leaks to an anonymous client.
+    @Test func rootIsNotAPage() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
         defer { Task { await stopWeb(kernel) } }
         let (data, response) = try await URLSession(configuration: .ephemeral)
             .data(from: URL(string: "http://127.0.0.1:\(port)/")!)
         let http = try #require(response as? HTTPURLResponse)
-        #expect(http.statusCode == 200)
-        #expect(
-            (http.value(forHTTPHeaderField: "Content-Type") ?? "") == "text/html; charset=utf-8")
-        let html = String(data: data, encoding: .utf8) ?? ""
-        // The scaffold is python's template, verbatim.
-        let tpl = try String(
-            contentsOf: pythonSource("web/host/src/web/templates/index.html"), encoding: .utf8)
-        // The bundled scaffold is python's file, byte for byte.
-        #expect(WebServer.indexTemplate == tpl)
-        let head = String(tpl.prefix(while: { $0 != "{" }))
-        #expect(html.hasPrefix(head))
-        // ...with python's markup for every node. `_index_page` sends a DEFAULT
-        // reflect, so since C7 its `tree` is the ROSTER — purpose, not wiring —
-        // and no node carries `handler_module`. Python renders every node's
-        // `hm` as `(root)` here for exactly the same reason.
-        #expect(
-            html.contains("<li><span class=\"id\">kernel_state</span> <code>kernel_state</code>"))
-        #expect(html.contains("<span class=\"hm\">(root)</span>"))
-        #expect(html.contains("<code>web</code>"), "the web leg is a node of the roster")
-        #expect(!html.contains("<span class=\"hm\">web.tools</span>"))
-        // The swift-only index is gone.
-        #expect(!html.contains("fantastic kernel"))
-    }
-
-    /// A11.3 — `GET /` runs AS THE WEB AGENT, never as the operator.
-    ///
-    /// Python starts uvicorn inside the `boot` dispatch, so every request
-    /// handler inherits the web agent's id in `_current_sender` and the
-    /// roster walk `_index_page` triggers is gated per node. Swift's listener
-    /// is a NIO channel with no task-local to inherit: the index send carried
-    /// NO sender, i.e. OPERATOR authority (ungated), so the walk dispatched
-    /// into a lateral sibling python's browser can never reach — one extra
-    /// `wsx` frame in the 2026-09-21 acceptance capture (python 392 ws frames,
-    /// swift 397). The call rows the walk leaves name the sender, so that is
-    /// what this pins.
-    @Test func indexRosterWalkDispatchesAsTheWebAgent() async throws {
-        let kernel = try await startWebKernel()
-        let port = await bootWeb(kernel)
-        defer { Task { await stopWeb(kernel) } }
-        _ = try await URLSession(configuration: .ephemeral)
-            .data(from: URL(string: "http://127.0.0.1:\(port)/")!)
-        // THE EXECUTION ROWS still in RAM (no memory store is wired, so nothing
-        // flushed them).
-        let rows: JSON = .object([
-            "rows": .array(kernel.rows.all().map { .object($0) })
-        ])
-        // The walk's own reads: `internal: true` call rows the kernel minted
-        // while rendering the page.
-        let walk = (rows["rows"].asArray ?? []).filter {
-            $0["kind"].asString == "call" && $0["internal"].asBool == true
-                && $0["verb"].asString == "reflect"
-        }
-        #expect(!walk.isEmpty, "the index page left no roster-walk rows: \(rows.serialize())")
-        // EVERY one of them is the web agent's, never a null origin (operator).
-        #expect(
-            walk.allSatisfy { $0["caller"].asString == "web" },
-            "the index route dispatched as the operator: \(walk.map { $0["caller"].serialize() })")
+        #expect(http.statusCode == 404)
+        #expect(!(String(data: data, encoding: .utf8) ?? "").contains("kernel_state"))
     }
 
     /// A11.3 (D11) — the swift-only extras are gone; the favicon routes are
@@ -154,7 +99,7 @@ struct HTTPServerTests {
             #expect(http.statusCode == 404, "\(path)")
             #expect(String(data: data, encoding: .utf8) == "{\"detail\":\"Not Found\"}", "\(path)")
         }
-        for path in ["/favicon.png", "/_assets/favicon.png"] {
+        for path in ["/_assets/favicon.png"] {
             let (data, response) = try await session.data(
                 from: URL(string: "http://127.0.0.1:\(port)\(path)")!)
             let http = try #require(response as? HTTPURLResponse)
@@ -186,7 +131,7 @@ struct HTTPServerTests {
                 AgentId("kernel_state"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("files"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("files"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                     // THE SERVING ALLOWANCE IS BOTH GATES (C41): the proxy
                     // dispatches AS `web`, so the served agent's `callable_by`
@@ -527,7 +472,7 @@ struct HTTPServerTests {
                 AgentId("kernel_state"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("files"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("files"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                 ]))
         ])[0].result
@@ -768,7 +713,7 @@ struct HTTPServerTests {
                 AgentId("kernel_state"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("files"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("files"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                 ]))
         ])[0].result
@@ -822,7 +767,7 @@ struct HTTPServerTests {
                 AgentId("kernel_state"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("files"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("files"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                 ]))
         ])[0].result
@@ -880,7 +825,7 @@ struct HTTPServerTests {
                 AgentId("kernel_state"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("files"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("files"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                 ]))
         ])[0].result
@@ -912,7 +857,7 @@ struct HTTPServerTests {
     }
 
     /// THE ROOT `_reflect` SHORTCUT IS THE KERNEL'S IDENTITY, not the loader
-    /// bundle's. Python dispatches it at the `kernel` ALIAS, which takes the
+    /// bundle's. Python dispatches it at the reserved `kernel` address, which takes the
     /// identity-read fast path (`_agent.py`: `target_id == "kernel" and verb ==
     /// "reflect"` → `_reflect_identity`) — so the sentence is the substrate's,
     /// and `GET /<id>/_reflect/<root>` answers the same. The loader's own

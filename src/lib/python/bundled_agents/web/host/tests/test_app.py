@@ -71,6 +71,7 @@ async def served_bridge(seeded_kernel, web_agent):
                         "type": "create_agent",
                         "parent_id": seeded_kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "ingress_rule": "allow_all_ingress",
                         "callable_by": {web_agent: ["read_stream"]},
                     },
@@ -89,22 +90,23 @@ def client(seeded_kernel):
         yield c, seeded_kernel
 
 
-def test_root_returns_html(client):
+def test_root_is_not_a_page(client):
+    """The host renders nothing of its own: `/` is undeclared, so it is a 404 —
+    no tree index, nothing about the kernel leaks to an anonymous client."""
     c, _ = client
     r = c.get("/")
-    assert r.status_code == 200
-    assert "<html>" in r.text.lower() or "<!doctype" in r.text.lower()
+    assert r.status_code == 404
+    assert "kernel_state" not in r.text
 
 
 # ─── The web host renders no agent UI server-side — there is no `GET /<id>/`
 #     render route. Frontend panels (html_agent/gl views) are JS view-agents in
-#     the TS kernel; the host only serves STATIC files (the `file` alias below)
+#     the TS kernel; the host only serves STATIC files (the file route below)
 #     and carries the bus. So there's nothing render-side to exercise here.
 
 
-# ─── /<file_bridge>/file/<path> blob proxy: replaces content_alias_file
-#     with a URL convention. Any agent that answers `read{path}` becomes
-#     an HTTP file server.
+# ─── /<file_bridge>/file/<path> blob proxy: a URL convention. Any agent that
+#     answers `read_stream` becomes an HTTP file server.
 
 
 async def test_file_proxy_serves_text(
@@ -196,7 +198,7 @@ async def test_file_proxy_sealed_agent_404(
     refuses read_stream/read, so its files 404 (never served)."""
     monkeypatch.chdir(tmp_path)
     seeded_kernel.create(
-        "file_bridge.tools", id="sealed_fb", root="."
+        "file_bridge.tools", allow=["."], id="sealed_fb", root="."
     )  # no rule → sealed
     # Grant the serving edge so the SEAL is what denies, not a missing grant —
     # otherwise this passes for the wrong reason and stops testing the io gate.
@@ -248,6 +250,7 @@ async def test_private_but_internally_readable_is_expressible(
                         "parent_id": seeded_kernel.id,
                         "id": "in_kernel_reader",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": ".",
                         "can_call": {"transcripts": ["read_stream"]},
                     },
@@ -258,6 +261,7 @@ async def test_private_but_internally_readable_is_expressible(
     # Leg OPEN, but only the in-kernel reader is admitted — `web` is NOT.
     seeded_kernel.create(
         "file_bridge.tools",
+        allow=["."],
         id="transcripts",
         root=".",
         ingress_rule="allow_all_ingress",
@@ -305,6 +309,7 @@ async def test_gate_denial_404_carries_the_hint_but_a_missing_file_does_not(
     (tmp_path / "site.css").write_text("body{}")
     seeded_kernel.create(
         "file_bridge.tools",
+        allow=["."],
         id="ungranted",
         root=".",
         ingress_rule="allow_all_ingress",  # leg OPEN, call gate never admits `web`
@@ -356,7 +361,7 @@ async def test_browser_reachable_tracks_the_property_not_any_single_field(
                 ]
             )
         )[0]["result"]
-        seeded_kernel.create("file_bridge.tools", id="g", root=".", **meta)
+        seeded_kernel.create("file_bridge.tools", allow=["."], id="g", root=".", **meta)
         await _grant_serving(seeded_kernel, web_agent, "g")  # egress always granted
         listed = (
             "g"

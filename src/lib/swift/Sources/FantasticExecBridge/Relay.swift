@@ -18,7 +18,7 @@
     /// | child → parent | parent → child |
     /// |---|---|
     /// | `send{rid,target,payload}` | `reply{rid,data}` |
-    /// | `emit{target?,payload}` | — |
+    /// | `emit{payload}` | — |
     /// | `watch{src}` / `unwatch{src}` | `event{src,payload}` |
     /// | `onmessage` / `offmessage` | `inbox{payload}` |
     final class Relay: @unchecked Sendable {
@@ -270,16 +270,15 @@
                     }
                 }
             case "emit":
-                // python `m.get("target") or owner_id` / `m.get("payload") or {}` —
-                // a FALSY target (absent, null, `""`) is the OWNER agent, which is the
-                // one-arg `emit(payload)` form.
-                let raw = m["target"]
-                let tgt = pyTruthy(raw) ? AgentId(pyStr(raw)) : owner
+                // A program emits on its OWNER agent — the one it runs as (python
+                // `kernel.emit(owner_id, m.get("payload") or {})`).
                 let payload = pyTruthy(m["payload"]) ? m["payload"] : .object([:])
                 let relayTask = taskId
                 Task {
                     await KernelTaskLocals.$currentTask.withValue(relayTask) {
-                        await kernel.emit(tgt, payload)
+                        await KernelTaskLocals.$currentSender.withValue(owner) {
+                            await kernel.emit(owner, payload)
+                        }
                     }
                 }
             case "watch":
@@ -358,7 +357,7 @@
                             // fanout; drop it so a tool does not receive its own
                             // progress/job_started/job_done as inbox mail.
                             switch p.payload["type"].asString {
-                            case "progress", "job_started", "job_done": continue
+                            case "progress", "output", "job_started", "job_done": continue
                             default: break
                             }
                             self?.queue.async {

@@ -262,7 +262,7 @@ let ASYNC_HOWTO = #"""
     A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
     tag, your title, size, and its ORIGIN (how to get it again):
     [reply to <pid> · notes read · "survey filler_2"]
-    (settled, 6812 bytes — NOT inlined, held in memory only until this agent restarts. origin: text_file notes.md lines 1-200 v3f2a — read {path, range}. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`)
+    (settled, 6812 bytes — NOT inlined, held in memory only until this agent restarts. origin: notes notes.md lines 1-200 v3f2a — read {path, range}. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`)
     GREP FIRST: `<type>grep</type> <query>substring</query>` on yourself finds the line —
     in a body held this run, a folded stretch, an old turn, a row shared with you — with
     its id and line. BODIES ARE NOT KEPT: after a restart only the origin line remains, so

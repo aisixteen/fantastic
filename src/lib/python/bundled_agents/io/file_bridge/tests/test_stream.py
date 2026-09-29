@@ -13,6 +13,7 @@ async def _open(kernel, **meta):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "ingress_rule": "allow_all_ingress",
                         **meta,
                     },
@@ -91,6 +92,7 @@ async def test_stream_verbs_sealed_by_default(seeded_kernel, tmp_path, monkeypat
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": "s",
                     },
                 }
@@ -198,6 +200,7 @@ async def test_pump_refused_by_sealed_source(seeded_kernel, tmp_path, monkeypatc
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": "src",
                     },
                 }

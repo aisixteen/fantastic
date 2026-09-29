@@ -250,7 +250,7 @@ pub async fn wire_fake_store(kernel: &Arc<Kernel>, store_root: &Path) {
             "kernel",
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "store",
                 "root": store_root.to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",

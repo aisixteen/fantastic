@@ -33,6 +33,7 @@ async def _mk(kernel, **meta) -> str:
         "type": "create_agent",
         "parent_id": kernel.id,
         "handler_module": "file_bridge.tools",
+        "allow": ["."],
         "ingress_rule": "allow_all_ingress",
     }
     payload.update(meta)
@@ -186,6 +187,7 @@ async def test_agent_cannot_create_agent_even_on_its_parent(seeded_kernel):
                             "type": "create_agent",
                             "parent_id": seeded_kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                         },
                     }
                 ]
@@ -208,6 +210,7 @@ async def test_explicit_kernel_grant_lets_an_agent_create(seeded_kernel):
                             "type": "create_agent",
                             "parent_id": seeded_kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                         },
                     }
                 ]
@@ -260,6 +263,7 @@ async def test_parent_confers_only_a_subset_it_holds(seeded_kernel):
                             "type": "create_agent",
                             "parent_id": seeded_kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             "can_call": {peer: ["list"]},
                         },
                     }
@@ -276,6 +280,7 @@ async def test_parent_confers_only_a_subset_it_holds(seeded_kernel):
                             "type": "create_agent",
                             "parent_id": seeded_kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             "can_call": {peer: ["mkdir"]},
                         },
                     }
@@ -305,6 +310,7 @@ async def test_callable_by_is_freely_conferrable(seeded_kernel):
                             "type": "create_agent",
                             "parent_id": seeded_kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             "callable_by": {"anyone_at_all": ["list"]},
                         },
                     }
@@ -326,6 +332,7 @@ async def test_operator_conferral_is_unbounded(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": seeded_kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "can_call": {peer: ["list", "mkdir", "delete"]},
                     },
                 }
@@ -369,6 +376,7 @@ async def test_create_agent_refuses_a_non_dict_grant(kernel):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "callable_by": ["*"],
                     },
                 }
@@ -406,6 +414,7 @@ async def test_delegating_on_an_agent_that_does_not_exist_names_that(seeded_kern
                         "parent_id": "granter_dg",
                         "id": "kid_dg",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 },
                 {

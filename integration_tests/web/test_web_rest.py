@@ -8,7 +8,7 @@ and mounts:
 
 Two assertions per runtime:
 1. POST /<rest>/kernel {type:list_agents} returns agents that include
-   the seeded `web` agent. The `kernel` alias resolves to the root on
+   the seeded `web` agent. The reserved `kernel` address resolves to the root on
    all runtimes (python root = `kernel_state`; rust/swift root = `core`).
 2. GET  /<rest>/_reflect/web returns a dict. We reflect `web` (not
    `core`) because `web` is guaranteed present after seeding on every

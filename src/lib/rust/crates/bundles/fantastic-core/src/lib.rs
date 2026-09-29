@@ -98,15 +98,18 @@ pub fn seed_root_readme(workdir: &Path) -> io::Result<()> {
 
 /// The SHORT `self_extension` a DISTILLED root reflect carries — python
 /// `reflect_root_extra`'s non-full branch, verbatim.
-const SELF_EXTENSION_SHORT: &str = "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE \
-it to a file: <type>write_stream</type> <path>…</path> <truncate>true</truncate> <bytes>…</bytes> — `bytes` is \
-VERBATIM (the program between `<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped). \
-(2) RUN it on the COMMAND runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by its \
-`allowed` regexes (reflect it). (3) Re-run the same command to keep it \
-current. A COMPUTE worker is an `exec_bridge.tools` agent + a program \
-file — NOT a new handler_module. Create it as YOUR child; to wire it \
-to a SIBLING (`totals`) grant `can_call:{totals}` AND `update_agent \
-id='totals'` to add it to `totals.callable_by`. Read <type>reflect</type> \
+const SELF_EXTENSION_SHORT: &str =
+    "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE it \
+to a file: <type>write_stream</type> <path>…</path> \
+<truncate>true</truncate> <bytes>…</bytes> — `bytes` is VERBATIM (the \
+program between `<bytes>` and `</bytes>` exactly as written, real newlines, \
+nothing escaped). (2) RUN it on the COMMAND runner: <type>start</type> \
+<command>…</command> <args><item>…</item></args>, gated by its `allowed` \
+regexes (reflect it). (3) Re-run the same command to keep it current. A \
+COMPUTE worker is an `exec_bridge.tools` agent + a program file — NOT a new \
+handler_module. Create it as YOUR child; to wire it to a SIBLING (`totals`) \
+grant `can_call:{totals}` AND `update_agent id='totals'` to add it to \
+`totals.callable_by`. Read <type>reflect</type> \
 <readme>self-extension</readme> — send it to 'kernel' — for the fd wire.";
 
 /// The one-liner teaching keyed doc fetch — python `reflect_root_extra`'s `docs`.
@@ -119,42 +122,42 @@ a reflect with a string `readme` field: <type>reflect</type> \
 
 /// The LONG `self_extension` a `detail:"full"` root reflect carries — python's
 /// full branch, verbatim (it has no fd-wire tail sentence).
-const SELF_EXTENSION_FULL: &str = "A DURABLE PROGRAM is a FILE you write plus a command that runs it — \
-not a `code`-carrying agent. There is no `code` field: a program used \
-to be embedded as a JSON string, which is exactly how a call gets lost \
-to escaping. Assemble these THREE pieces and you have built something \
-that persists and re-runs, with no `code` field at all:\n\
-1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON \
-string. Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> \
-<truncate>true</truncate> <bytes>…</bytes> to write, <type>read_stream</type> <path>…</path> <offset>0</offset> to \
-read, one raw chunk at a time. `bytes` is VERBATIM: the program between \
-`<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped. That is \
-the only byte path; the string read/write verbs are gone.\n\
-2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect \
-it, read its `allowed` regexes, then send \
-<type>start</type> <command>path</command> <args><item>…</item></args>; poll <type>status</type>. \
-It runs commands, not inline programs.\n\
-3. RE-RUN: the file is durable on disk, so the SAME `start` command run \
-again later re-executes the SAME program against whatever the inputs \
-hold THEN — that is how a thing 'keeps itself up to date'.\n\
-A WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING \
-command runner) that owns a program file — you never author a new \
-handler_module (you cannot add modules to the catalog and do not need \
-to). 'A specialist with child workers' = a parent agent whose children \
-are exec_bridge runners, each with its own program file.\n\
-WIRING TO A SIBLING: you cannot raise your OWN authority, but if you \
-hold `update_agent` (e.g. on the root) you may open ANY agent's ingress \
-— including a sibling like `totals`/`readings` that is not your child. \
-To let your worker call `totals`: grant the worker `can_call:{totals}` \
-AND `update_agent id='totals'` to add the worker to `totals.callable_by` \
-(send the WHOLE map — update replaces, not merges).\n\
-A SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket \
-(FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply \
-comes back on the SAME fd as {op:'reply', rid, data}. It is not inline \
-— read frames until one carries your `rid`, skipping event/inbox frames.\n\
-COMPOSE the agents you were given for everything else (`list_agents`, \
-reflect each, send). CREATE/DELETE plain agents (create_agent with a \
-handler_module and grants, delete_agent) work as before.";
+const SELF_EXTENSION_FULL: &str =
+    "A DURABLE PROGRAM is a FILE you write plus a command that runs it — not a \
+`code`-carrying agent (there is no `code` field). A program carried as a \
+JSON string is exactly how a call gets lost to escaping. Assemble these \
+THREE pieces and you have built something that persists and re-runs:\n1. \
+WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. \
+Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> \
+<truncate>true</truncate> <bytes>…</bytes> to write, \
+<type>read_stream</type> <path>…</path> <offset>0</offset> to read, one raw \
+chunk at a time. `bytes` is VERBATIM: the program between `<bytes>` and \
+`</bytes>` exactly as written, real newlines, nothing escaped. The text \
+verbs (`write`, `edit`, `append`) take `bytes` the same way.\n2. RUN IT: \
+the executor is a general-purpose COMMAND runner. Reflect it, read its \
+`allowed` regexes, then send <type>start</type> <command>path</command> \
+<args><item>…</item></args>; poll <type>status</type>. It runs commands, \
+not inline programs.\n3. RE-RUN: the file is durable on disk, so the SAME \
+`start` command run again later re-executes the SAME program against \
+whatever the inputs hold THEN — that is how a thing 'keeps itself up to \
+date'.\nA WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the \
+EXISTING command runner) that owns a program file — you never author a new \
+handler_module (you cannot add modules to the catalog and do not need to). \
+'A specialist with child workers' = a parent agent whose children are \
+exec_bridge runners, each with its own program file.\nWIRING TO A SIBLING: \
+you cannot raise your OWN authority, but if you hold `update_agent` (e.g. \
+on the root) you may open ANY agent's ingress — including a sibling like \
+`totals`/`readings` that is not your child. To let your worker call \
+`totals`: grant the worker `can_call:{totals}` AND `update_agent \
+id='totals'` to add the worker to `totals.callable_by` (send the WHOLE map \
+— update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its \
+control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, \
+target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, \
+data}. It is not inline — read frames until one carries your `rid`, \
+skipping event/inbox frames.\nCOMPOSE the agents you were given for \
+everything else (`list_agents`, reflect each, send). CREATE/DELETE plain \
+agents (create_agent with a handler_module and grants, delete_agent) work \
+as before.";
 
 /// Per-loader process state — what `boot` installed, so a second `boot` is a
 /// no-op and `on_shutdown` can tear it down. Python keeps it on the agent
@@ -234,6 +237,9 @@ impl KernelStateBundle {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Value {
+        if let Some(denied) = guard_own_tree("persist_record", agent) {
+            return denied;
+        }
         let Some(record) = payload
             .get("record")
             .and_then(Value::as_object)
@@ -268,6 +274,9 @@ impl KernelStateBundle {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Value {
+        if let Some(denied) = guard_own_tree("forget_record", agent) {
+            return denied;
+        }
         let Some(target) = payload
             .get("id")
             .filter(|v| fantastic_bundle::py_truthy(v))
@@ -279,7 +288,8 @@ impl KernelStateBundle {
             return bad;
         }
         let parent_id = payload.get("parent_id").and_then(Value::as_str);
-        if let Some(denied) = guard_record_owner("forget_record", target, parent_id, agent, kernel) {
+        if let Some(denied) = guard_record_owner("forget_record", target, parent_id, agent, kernel)
+        {
             return denied;
         }
         if let Some(pid) = parent_id {
@@ -332,7 +342,12 @@ fn children_name(agent: &Arc<Agent>) -> String {
 /// Where records REALLY are for this loader: the live tree, then its own
 /// persisted records under its root (disk position). Python `_where`.
 fn places<'a>(agent: &Arc<Agent>, kernel: &'a Kernel) -> persistence::RecordPlaces<'a> {
-    persistence::RecordPlaces::new(kernel, loader_root(agent), children_name(agent), agent.id.0.clone())
+    persistence::RecordPlaces::new(
+        kernel,
+        loader_root(agent),
+        children_name(agent),
+        agent.id.0.clone(),
+    )
 }
 
 /// An absolute dir for a record under THIS loader's root — python
@@ -360,6 +375,28 @@ fn resolve_under(
 /// that already exists is placed by the live tree or its disk position, never by
 /// the payload — else naming a sibling's id with `parent_id` = yourself passed.
 /// The payload's `parent_id` places only a record that exists in neither.
+/// The ROOT loader's tree is the one this kernel HYDRATES at boot, so only the
+/// operator (its own flush, the CLI, boot) writes it. An agent's record changes
+/// through `update_agent`, where the conferral rule runs — a record written here
+/// by an agent would be hydrated with whatever grants it named (audit
+/// 2026-09-28, a15). A session loader (a remote's sub-namespace, never hydrated
+/// here) keeps serving its remote. Python `_guard_own_tree`.
+fn guard_own_tree(verb: &str, agent: &Arc<Agent>) -> Option<Value> {
+    if agent.parent_id.is_some() || fantastic_kernel::current_origin().is_none() {
+        return None;
+    }
+    let mut r = fantastic_kernel::refusal::refusal_hint(
+        fantastic_kernel::refusal::UNAUTHORIZED,
+        format!(
+            "{verb}: the kernel's own tree is written only by the operator — \
+             an agent's record changes through update_agent"
+        ),
+        "update_agent id=<id> …  (the conferral rule applies there)",
+    );
+    fantastic_kernel::refusal::with(&mut r, "side", json!("store"));
+    Some(r)
+}
+
 fn guard_record_owner(
     verb: &str,
     record_id: &str,
@@ -469,10 +506,12 @@ impl Bundle for KernelStateBundle {
         kernel: &Arc<Kernel>,
     ) -> Option<Map<String, Value>> {
         let mut out = Map::new();
-        out.insert(
-            "persistence".to_string(),
-            json!({ "provider": persistence::find_store(kernel).map(|id| id.0) }),
-        );
+        // `provider` only while writes land; a failing store shows as `error`.
+        let persistence = match persistence::persist_error(kernel) {
+            Some(err) => json!({ "provider": null, "error": err }),
+            None => json!({ "provider": persistence::find_store(kernel).map(|id| id.0) }),
+        };
+        out.insert("persistence".to_string(), persistence);
         out.insert(
             "guid".to_string(),
             agent

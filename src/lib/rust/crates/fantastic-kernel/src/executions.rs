@@ -216,7 +216,7 @@ impl Kernel {
         };
         let Some(store) = self
             .agents
-            .get(&self.resolve_well_known(&sid))
+            .get(&AgentId::from(sid.as_str()))
             .map(|e| Arc::clone(&e))
         else {
             let mut r = crate::refusal::unknown_agent(
@@ -232,9 +232,7 @@ impl Kernel {
         };
         let mut booted: Vec<String> = Vec::new();
         for a in [&root, &store] {
-            let out = self
-                .operator_send(&a.id, json!({"type": "boot"}))
-                .await;
+            let out = self.operator_send(&a.id, json!({"type": "boot"})).await;
             if out.status != Status::Completed {
                 return crate::refusal::refusal(
                     crate::refusal::UNHANDLED,
@@ -339,7 +337,9 @@ impl Kernel {
         if kind == Some("call") && row.get("agent").and_then(Value::as_str) == store {
             let payload = row.get("payload");
             if payload.and_then(|p| p.get("type")).and_then(Value::as_str) == Some("append") {
-                if let Some(rows) = payload.and_then(|p| p.get("rows")).and_then(Value::as_array)
+                if let Some(rows) = payload
+                    .and_then(|p| p.get("rows"))
+                    .and_then(Value::as_array)
                 {
                     for r in rows {
                         if r.get("kind").and_then(Value::as_str) != Some("flush") {
@@ -555,8 +555,7 @@ impl Kernel {
         let mut doomed: HashSet<i64> = gone.clone();
         for r in &rows {
             if matches!(kind_of(r), Some("settle" | "ack"))
-                && r
-                    .get("parent")
+                && r.get("parent")
                     .and_then(Value::as_i64)
                     .is_some_and(|p| gone.contains(&p))
             {
@@ -653,7 +652,9 @@ impl Kernel {
     /// The LEDGER PROJECTION: flushed `call`/`settle`/`ack` rows from the store,
     /// overlaid by what is still in RAM (live executions, unflushed rows). Each
     /// entry carries its originator as `_caller` for the verb to scope by.
-    pub(crate) async fn ledger_entries(self: &Arc<Self>) -> Result<Vec<Map<String, Value>>, String> {
+    pub(crate) async fn ledger_entries(
+        self: &Arc<Self>,
+    ) -> Result<Vec<Map<String, Value>>, String> {
         let mut entries: BTreeMap<i64, Map<String, Value>> = BTreeMap::new();
         let mut acked: HashSet<i64> = HashSet::new();
         let mut rows: Vec<Row> = Vec::new();
@@ -829,7 +830,12 @@ impl Kernel {
     /// Emitted on the ORIGINATING caller's own inbox (and so to whoever watches
     /// it, a UI included), or on the root for an operator send. Nothing retries
     /// it; the event is how a person learns there is something to decide.
-    pub(crate) async fn announce_deadletter(self: &Arc<Self>, pid: i64, out: &Outcome, attempts: u32) {
+    pub(crate) async fn announce_deadletter(
+        self: &Arc<Self>,
+        pid: i64,
+        out: &Outcome,
+        attempts: u32,
+    ) {
         let (target, caller, name) = match self.ledger.info(pid) {
             Some((t, c, n)) => (Some(t), c, n),
             None => (None, None, None),
@@ -843,7 +849,9 @@ impl Kernel {
         );
         entry.insert(
             "caller".to_string(),
-            caller.as_ref().map_or(Value::Null, |c| Value::from(c.0.clone())),
+            caller
+                .as_ref()
+                .map_or(Value::Null, |c| Value::from(c.0.clone())),
         );
         entry.insert("status".to_string(), Value::from(out.status.as_str()));
         entry.insert("attempts".to_string(), Value::from(attempts));

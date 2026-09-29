@@ -72,7 +72,7 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": STORE,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -83,6 +83,7 @@ async def main():
                 "id": XID,
                 "handler_module": "exec_bridge.tools",
                 "cwd": str(repo),
+                "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["git .*"],
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -102,7 +103,6 @@ async def main():
             can_call={XID: "*", "cli": "*", "user": "*"},
             callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
-            record={"file_bridge_id": STORE},
         )
         await drive(conn, TASK, client_id="git", via="user")
         transcript = "".join(conn.proxy.transcript)

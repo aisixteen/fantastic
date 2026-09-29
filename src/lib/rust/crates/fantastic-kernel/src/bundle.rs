@@ -19,9 +19,10 @@
 //!   agent unregisters from `kernel.agents`. Tear down process-memory
 //!   state (open files, in-flight tasks). Substrate then rmtrees the
 //!   agent's directory unless `ephemeral` is set.
-//! - `on_shutdown` fires during graceful kernel shutdown. The default
-//!   delegates to `on_delete`. Override if "tearing down, will
-//!   restart" should behave differently from "gone forever".
+//! - `on_shutdown` fires during graceful kernel shutdown, and only it: the
+//!   walk never runs `on_delete` in its place. A bundle that frees OS
+//!   resources at shutdown declares it (usually by calling its own
+//!   `on_delete`). Default: noop.
 //! - `on_cancel` fires when a `cancel` kills a task of this agent, BEFORE the
 //!   task is aborted — release the REAL resources that task holds (an OS
 //!   subprocess, a PTY, a socket). Dropping a future frees none of them.
@@ -118,7 +119,7 @@ pub trait Bundle: Send + Sync {
     /// (pure streams): raw bytes ride the binary carrier only, and a bundle
     /// that actually wants them overrides this method
     /// (`file_bridge.read_stream`/`write_stream`,
-    /// `terminal_backend.paste_image`). This mirrors the fallback the shipped
+    /// `exec_bridge.paste_image`). This mirrors the fallback the shipped
     /// overrides already use for their non-binary verbs (header→`handle`,
     /// blob unused). Returns NO reply body.
     async fn handle_binary(
@@ -174,13 +175,14 @@ pub trait Bundle: Send + Sync {
         Ok(())
     }
 
-    /// Pre-shutdown hook. Default: delegate to on_delete.
+    /// Pre-shutdown hook — the ONLY hook the shutdown walk calls (audit
+    /// 2026-09-28, c9: there is no `on_delete` fallback). Default: noop.
     async fn on_shutdown(
         &self,
-        agent_id: &AgentId,
-        kernel: &Arc<Kernel>,
+        _agent_id: &AgentId,
+        _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        self.on_delete(agent_id, kernel).await
+        Ok(())
     }
 
     /// Optional readme text seeded into the agent's dir on creation.

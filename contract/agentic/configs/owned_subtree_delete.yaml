@@ -10,17 +10,22 @@ loaders:
       agents:
         - id: a_head
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           can_call:
             a_notes: [write, read]
             a_leaf: [list]
-        # The roster's second member — a text editor the head drives.
+        # The roster's second member — a notes store the head edits.
         - id: a_notes
-          handler_module: text_file.tools
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: a_notes
+          ingress_rule: allow_all_ingress
           callable_by:
             a_head: [write, read]
         - id: a_leaf
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           callable_by:
             a_head: [list]
@@ -35,15 +40,18 @@ loaders:
         # (kernel_state/tools.py `_find_store`, which walks the subtree).
         - id: store
           handler_module: file_bridge.tools
+          allow: ['.']
           root: .fantastic
           ingress_rule: allow_all_ingress
         - id: b_head
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           can_call:
             b_leaf: [list]
         - id: b_leaf
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           callable_by:
             b_head: [list]
@@ -51,5 +59,6 @@ loaders:
         # `l_a` cascades cleanly, `l_b` refuses until this is cleared.
         - id: b_vault
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           delete_lock: true

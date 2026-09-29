@@ -5,10 +5,6 @@
 //! notice turn — the ONE canonical `[context-notice]` is composed at the
 //! seam ([`crate::projection`]). The durable store is NEVER touched.
 //!
-//! Tool-pairing is load-bearing: the OpenAI/NIM wire rejects a `role:tool`
-//! that isn't preceded by its `assistant.tool_calls` turn. Every cut drops
-//! orphaned leading `role:tool` messages so the body stays wire-valid.
-//!
 //! Selection is STATIC per agent (`context_strategy` meta, default
 //! `compact`); there is no runtime try-X-else-Y (NO-FALLBACKS). `memgpt`
 //! was removed — its persist nudge is now universal in the seam notice.
@@ -73,22 +69,8 @@ pub struct ProjectionCtx<'a> {
     pub client_id: &'a str,
 }
 
-fn is_tool(turn: &Value) -> bool {
-    turn.get("role").and_then(Value::as_str) == Some("tool")
-}
-
-/// Drop leading `role:tool` messages whose owning `assistant.tool_calls`
-/// turn is not present — the model wire would reject them.
-pub fn drop_orphan_tools(turns: Vec<Value>) -> Vec<Value> {
-    let mut i = 0;
-    while i < turns.len() && is_tool(&turns[i]) {
-        i += 1;
-    }
-    turns[i..].to_vec()
-}
-
 /// Keep the largest SUFFIX of `turns` that fits `budget`, always including
-/// the last turn (the live request), then drop orphaned leading tool replies.
+/// the last turn (the live request).
 pub fn fit_tail(turns: &[Value], budget: i64) -> Vec<Value> {
     if turns.is_empty() {
         return Vec::new();
@@ -104,16 +86,12 @@ pub fn fit_tail(turns: &[Value], budget: i64) -> Vec<Value> {
         kept.insert(0, t.clone());
         used += c;
     }
-    drop_orphan_tools(kept)
+    kept
 }
 
-/// Split `body` into (overflow, recent) at the last `recent_n` turns,
-/// snapping the boundary back so `recent` never STARTS on an orphan tool.
+/// Split `body` into (overflow, recent) at the last `recent_n` turns.
 pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>) {
-    let mut start = body.len().saturating_sub(recent_n);
-    while start > 0 && is_tool(&body[start]) {
-        start -= 1;
-    }
+    let start = body.len().saturating_sub(recent_n);
     (body[..start].to_vec(), body[start..].to_vec())
 }
 

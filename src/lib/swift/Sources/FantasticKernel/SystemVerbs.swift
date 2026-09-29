@@ -288,7 +288,9 @@ extension Kernel {
     // ── create_agent ────────────────────────────────────────────
 
     /// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
-    /// `{id|token: "*" | [verbs]}`; anything else is refused so a record can
+    /// `{id|token: "*" | [verbs]}`, plus the heritable `can_call` value
+    /// `{"verbs": [...], "for": "descendants"}` under a literal id and the
+    /// callable_by-only `$subtree:<local id>` key; anything else is refused so a record can
     /// never carry a grant the gate silently denies on (py-canonical, 2026-09-01).
     private func badGrantShape(_ meta: OrderedDictionary<String, JSON>) -> String? {
         for field in ["can_call", "callable_by"] {
@@ -299,13 +301,42 @@ extension Kernel {
                     + "(e.g. {\"$self\": \"*\", \"ai\": \"*\"}), never a bare value"
             }
             for (k, v) in map {
+                if k.hasPrefix(subtreePrefix) {
+                    let x = k.dropFirst(subtreePrefix.count)
+                    if field != "callable_by" {
+                        return "\(field)[\(pyRepr(k))]: `$subtree:` is callable_by-only — it "
+                            + "names who may call you, never whom you may call"
+                    }
+                    if x.isEmpty || x.contains("|") {
+                        return "\(field)[\(pyRepr(k))]: `$subtree:` names one LOCAL agent id "
+                            + "(`$subtree:<id>`, no `|`)"
+                    }
+                }
+                if case .object = v {
+                    if field != "can_call" {
+                        return "\(field)[\(pyRepr(k))]: a heritable entry "
+                            + "{\"verbs\": [...], \"for\": \"descendants\"} is can_call-only"
+                    }
+                    if k.hasPrefix("$") {
+                        return "\(field)[\(pyRepr(k))]: a heritable entry names a literal "
+                            + "target id, never a token"
+                    }
+                    if heritableVerbs(v) == nil {
+                        return "\(field)[\(pyRepr(k))] must be exactly "
+                            + "{\"verbs\": [\"<verb>\", …], \"for\": \"descendants\"}"
+                    }
+                    continue
+                }
                 let ok: Bool
                 switch v {
                 case .string(let s): ok = s == "*"
                 case .array(let items): ok = items.allSatisfy { $0.asString != nil }
                 default: ok = false
                 }
-                if !ok { return "\(field)[\(pyRepr(k))] must be \"*\" or a list of verb strings" }
+                if !ok {
+                    return "\(field)[\(pyRepr(k))] must be \"*\", a list of verb strings, or "
+                        + "(can_call) {\"verbs\": [...], \"for\": \"descendants\"}"
+                }
             }
         }
         return nil
@@ -317,7 +348,7 @@ extension Kernel {
         }
 
         // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument —
-        // resolved like a send target (the `kernel` alias included), never
+        // resolved like a send target (the reserved `kernel` address included), never
         // defaulted.
         //
         // It used to be accepted and silently STRIPPED while the ADDRESSED agent
@@ -331,9 +362,8 @@ extension Kernel {
                     + "tool you keep, or the root ('kernel_state') for a top-level agent",
                 extra: [("arg", .string("parent_id"))])
         }
-        // Resolved the SAME way `send` does (C35): the `kernel` alias, then a
-        // declared `alias` meta, then a literal id — so `parent_id` accepts
-        // anything a caller could have addressed.
+        // Resolved the SAME way `send` does: the reserved `kernel` address, then a literal
+        // id — so `parent_id` accepts anything a caller could have addressed.
         guard let parent = resolveAgent(pid) else {
             return Refusal.unknown(pid, live: allAgents().map { $0.id.value })
         }
@@ -672,7 +702,7 @@ func recordToJSON(_ rec: AgentRecord) -> JSON { rec.json }
 
 /// Mint an id like `<bundle>_<6 hex>` — python `f"{bundle}_{secrets.token_hex(3)}"`
 /// where `bundle` is the SECOND-TO-LAST dotted component of the handler module
-/// (`terminal_backend.tools` → `terminal_backend`), the WHOLE STRING when there
+/// (`exec_bridge.tools` → `exec_bridge`), the WHOLE STRING when there
 /// is no dot — python's own branch (`_agent.py::create`:
 /// `handler_module.split(".")[-2] if "." in handler_module else handler_module`),
 /// not an `IndexError`.
@@ -693,10 +723,10 @@ extension Kernel {
     /// The wiring/posture meta keys surfaced on every reflect tree node — a
     /// leg's lock (`ingress_rule`/`egress_rule`/`auth`: allow_all_ingress = open,
     /// password = gated, deny_inbound/absent on an io leg = sealed), a
-    /// file_bridge's served `root`, and what a consumer persists THROUGH
-    /// (`file_bridge_id`). Mirrors py/rust `_POSTURE_KEYS`.
+    /// file_bridge's served `root` and what it exposes under it (`allow`).
+    /// Mirrors py/rust `_POSTURE_KEYS`.
     static let POSTURE_KEYS = [
-        "ingress_rule", "egress_rule", "auth", "root", "file_bridge_id",
+        "ingress_rule", "egress_rule", "auth", "root", "allow",
         // THE CALL GATE, made readable. Without these an agent cannot read its
         // own authority — only discover it by trying, which cost whole passes of
         // empirical probing every run. They also make the replace-not-merge

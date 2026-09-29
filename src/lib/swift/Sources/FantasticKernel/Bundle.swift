@@ -112,10 +112,9 @@ public protocol AgentBundle: Sendable {
 
     /// Fired by `Kernel.shutdown`'s depth-first walk for every loaded agent
     /// that uses this bundle — the process is stopping, the record stays.
-    /// A bundle that wants to distinguish "shut down, will restart" from
-    /// "deleted forever" defines it; the DEFAULT IS `onDelete` (python's
-    /// resolution: `on_shutdown or on_delete`), because most bundles kill
-    /// the same subprocesses either way.
+    /// ONLY this hook runs at shutdown (audit 2026-09-28, c9): a bundle that
+    /// frees OS resources at shutdown declares it, usually by calling its own
+    /// `onDelete`. Default: nothing.
     func onShutdown(agentId: AgentId, kernel: Kernel) async throws
 
     /// The SIGTERM half of `cancel`: the kernel is killing `taskId` (one row of
@@ -169,8 +168,6 @@ extension AgentBundle {
     public func flushPending(agentId: AgentId, kernel: Kernel) async throws {}
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {}
-    public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
-        try await onDelete(agentId: agentId, kernel: kernel)
-    }
+    public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {}
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {}
 }

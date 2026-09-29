@@ -294,6 +294,58 @@ pub fn dedupe_stale_reads(history: &[Value]) -> Vec<Value> {
     keep_rev
 }
 
+/// A reply whose BODY is byte-identical to an EARLIER one (the same file read
+/// again, the same listing) is shown as a one-line stub citing the first — the
+/// first copy stays whole. Only bodies worth the saving are stubbed (400 chars
+/// and up), and a digested reply (its origin line, `(settled …`) is already one
+/// line. The view restarts at a clear, so a read after a clear is new again.
+/// Python `dedupe_repeat_bodies`.
+#[must_use]
+pub fn dedupe_repeat_bodies(history: &[Value]) -> Vec<Value> {
+    let mut seen: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut out: Vec<Value> = Vec::with_capacity(history.len());
+    for turn in history {
+        let content = turn.get("content").and_then(Value::as_str).unwrap_or("");
+        let is_user = turn.get("role").and_then(Value::as_str) == Some("user");
+        if !is_user || parse_reply_tag(content).is_none() {
+            out.push(turn.clone());
+            continue;
+        }
+        let mut changed = false;
+        let mut kept: Vec<String> = Vec::new();
+        for b in reply_blocks(content) {
+            let (head, body) = b.split_once('\n').unwrap_or((b, ""));
+            if body.chars().count() < 400 || body.starts_with("(settled") {
+                kept.push(b.to_string());
+                continue;
+            }
+            match seen.get(body) {
+                Some(first) => {
+                    kept.push(format!(
+                        "{head}\n[identical to the reply in row {} — the same {} bytes, not repeated]",
+                        fantastic_bundle::py_str(first),
+                        body.chars().count()
+                    ));
+                    changed = true;
+                }
+                None => {
+                    seen.insert(
+                        body.to_string(),
+                        turn.get("id").cloned().unwrap_or(Value::Null),
+                    );
+                    kept.push(b.to_string());
+                }
+            }
+        }
+        if changed {
+            out.push(with_content(turn, kept.join("\n\n")));
+        } else {
+            out.push(turn.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,56 +620,4 @@ mod tests {
         assert!(!distilled("SEENING"));
         assert!(!distilled("a bare tool call and no prose"));
     }
-}
-
-/// A reply whose BODY is byte-identical to an EARLIER one (the same file read
-/// again, the same listing) is shown as a one-line stub citing the first — the
-/// first copy stays whole. Only bodies worth the saving are stubbed (400 chars
-/// and up), and a digested reply (its origin line, `(settled …`) is already one
-/// line. The view restarts at a clear, so a read after a clear is new again.
-/// Python `dedupe_repeat_bodies`.
-#[must_use]
-pub fn dedupe_repeat_bodies(history: &[Value]) -> Vec<Value> {
-    let mut seen: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-    let mut out: Vec<Value> = Vec::with_capacity(history.len());
-    for turn in history {
-        let content = turn.get("content").and_then(Value::as_str).unwrap_or("");
-        let is_user = turn.get("role").and_then(Value::as_str) == Some("user");
-        if !is_user || parse_reply_tag(content).is_none() {
-            out.push(turn.clone());
-            continue;
-        }
-        let mut changed = false;
-        let mut kept: Vec<String> = Vec::new();
-        for b in reply_blocks(content) {
-            let (head, body) = b.split_once('\n').unwrap_or((b, ""));
-            if body.chars().count() < 400 || body.starts_with("(settled") {
-                kept.push(b.to_string());
-                continue;
-            }
-            match seen.get(body) {
-                Some(first) => {
-                    kept.push(format!(
-                        "{head}\n[identical to the reply in row {} — the same {} bytes, not repeated]",
-                        fantastic_bundle::py_str(first),
-                        body.chars().count()
-                    ));
-                    changed = true;
-                }
-                None => {
-                    seen.insert(
-                        body.to_string(),
-                        turn.get("id").cloned().unwrap_or(Value::Null),
-                    );
-                    kept.push(b.to_string());
-                }
-            }
-        }
-        if changed {
-            out.push(with_content(turn, kept.join("\n\n")));
-        } else {
-            out.push(turn.clone());
-        }
-    }
-    out
 }

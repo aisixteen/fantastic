@@ -571,5 +571,80 @@ impl Bundle for OracleProbe {
     }
 }
 
+// ── slow ────────────────────────────────────────────────────────────────────
+
+/// `slow` — work that is still IN FLIGHT when something else happens (a kernel
+/// stop, a caller's timeout, a reboot of the AI that called it), work that FAILS,
+/// work that just runs, and work that takes a stated time. `sleep` is the slow
+/// verb the parity AI paths time out on.
+///
+/// Mirrors `e2e/probes/slow_probe/tools.py` (its `_STATE` is module-wide, so the
+/// tallies here are the bundle's, not per agent).
+#[derive(Default)]
+pub struct SlowProbe {
+    started: Counter,
+    runs: Counter,
+}
+
+pub const SLOW_MODULE: &str = "slow_probe.tools";
+
+#[async_trait]
+impl Bundle for SlowProbe {
+    fn name(&self) -> &str {
+        "slow_probe"
+    }
+
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let reply = match verb {
+            "boot" | "shutdown" => Value::Null,
+            "reflect" => json!({
+                "id": agent_id.as_str(),
+                "sentence": "Probe work: `slow` (never finishes by itself), `work` (counts), \
+                             `fail` (raises), `sleep` (takes `seconds`).",
+                "verbs": {
+                    "slow": "sleeps for an hour — in flight until cancelled",
+                    "work": "counts one run, returns {runs}",
+                    "fail": "raises — a failed execution, a dead letter",
+                    "started": "how many `slow` calls have started",
+                    "sleep": "seconds:number (req) — sleeps that long, then returns {slept}",
+                },
+            }),
+            "slow" => {
+                self.started.bump();
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                json!({"finished": true})
+            }
+            "work" => json!({"runs": self.runs.bump()}),
+            "fail" => return Err(raised("RuntimeError", "slow_probe: failed on purpose")),
+            "started" => json!({"started": self.started.get()}),
+            "sleep" => {
+                let s = payload.get("seconds").cloned().unwrap_or(Value::Null);
+                match s.as_f64() {
+                    Some(secs) if secs >= 0.0 => {
+                        tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
+                        json!({"slept": s})
+                    }
+                    _ => json!({
+                        "error": "slow_probe: sleep needs seconds, a non-negative number",
+                        "reason": "bad_arg",
+                        "arg": "seconds",
+                    }),
+                }
+            }
+            other => json!({
+                "error": unknown_verb("slow_probe", other),
+                "reason": "unhandled",
+            }),
+        };
+        Ok(Some(reply))
+    }
+}
+
 #[cfg(test)]
 mod tests;

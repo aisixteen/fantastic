@@ -127,9 +127,6 @@ private func allRows(_ kernel: Kernel) -> [Row] {
     kernel.rows.all()
 }
 
-/// Python's `_stub_bundle`: a handler that answers nothing, carrying whatever
-/// hooks the test wants to observe. `onShutdown == nil` leaves the protocol
-/// default in place — which IS `onDelete`, python's fallback.
 /// A bundle whose `boot` does what the payload's `boot_mode` meta asks: RAISE,
 /// answer `{error}`, or succeed. The create_agent line branches on the OUTCOME
 /// STATUS, so all three must be reachable.
@@ -148,6 +145,9 @@ private struct BootProbe: AgentBundle {
     }
 }
 
+/// Python's `_stub_bundle`: a handler that answers nothing, carrying whatever
+/// hooks the test wants to observe. `shutdownHook == nil` is a bundle with no
+/// shutdown teardown of its own.
 private struct HookProbe: AgentBundle {
     let name: String
     let log: Log
@@ -167,11 +167,7 @@ private struct HookProbe: AgentBundle {
     }
 
     func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
-        guard let shutdownHook else {
-            try await onDelete(agentId: agentId, kernel: kernel)
-            return
-        }
-        try await shutdownHook(agentId, kernel)
+        try await shutdownHook?(agentId, kernel)
     }
 
     func onDelete(agentId: AgentId, kernel: Kernel) async throws {
@@ -385,8 +381,10 @@ struct DrainTests {
             ("quiet_probe.tools", QuietProbe(log: quiet)),
         ])
         for i in 0..<5 { _ = await create(kernel, "q\(i)", "quiet_probe.tools") }
+        // `ps` is privileged: the baseline `$parent` does not reach it — named.
         let a = await create(
-            kernel, "sp_a", "shut_probe.tools", canCall: .object(["$parent": .string("*")]))
+            kernel, "sp_a", "shut_probe.tools",
+            canCall: .object(["$parent": .string("*"), "kernel_state": .array([.string("ps")])]))
         kernel.quietTimeout = 0.3
         let before = allRows(kernel).count
         let out = await send(kernel, "kernel", "shutdown_agents").result
@@ -417,7 +415,7 @@ struct DrainTests {
         #expect(r["reason"].asString == "not_here")
         #expect(
             r["hint"].asString
-                == "address the kernel root (alias 'kernel'); name the agent you mean in "
+                == "address the kernel root ('kernel'); name the agent you mean in "
                 + "`parent_id` / `id`")
         #expect(r["verb"].asString == "shutdown_agents")
         let k = await send(kernel, a.value, "kernel_stop").result
@@ -594,9 +592,10 @@ struct GracefulShutdownTests {
         #expect(kernel.agent(AgentId("K"))?.childIds().contains(AgentId("K_child")) == true)
     }
 
-    /// Bundles that only define `onDelete` get their teardown invoked
-    /// unchanged — the protocol default of `onShutdown` IS `onDelete`.
-    @Test func shutdownFallsBackToOnDelete() async throws {
+    /// Shutdown calls `onShutdown` and only that (audit 2026-09-28, c9). A
+    /// bundle with only `onDelete` has nothing to free at shutdown, and delete's
+    /// teardown is not run in its place.
+    @Test func shutdownNeverFallsBackToOnDelete() async throws {
         let log = Log()
         let kernel = makeKernel([
             (
@@ -607,7 +606,7 @@ struct GracefulShutdownTests {
         ])
         _ = await create(kernel, "OD", "test_shutdown_only_od")
         await kernel.shutdown()
-        #expect(log.all() == ["on_delete:OD"])
+        #expect(log.all() == [])
     }
 
     /// If a bundle defines BOTH hooks, shutdown calls `onShutdown`; `onDelete`

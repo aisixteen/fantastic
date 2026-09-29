@@ -1,12 +1,15 @@
-"""FastAPI factory for one web agent (rendering host).
+"""FastAPI factory for one web agent (HTTP host).
 
 Routes baked into make_app:
-  GET  /                          -> agent index (HTML)
-  GET  /_assets/favicon.png       -> bundled favicon (+ /favicon.png fallback)
+  GET  /_assets/favicon.png       -> bundled favicon
   GET  /{agent_id}/file/{path}    -> proxy to agent's `read_stream` (SOURCE; streamed)
 
-The web host does exactly two things: serve STATIC files through the `file`
-alias above, and carry `send()` calls + events over the WS bus (the `web_ws`
+There is no `/` page: the host renders nothing of its own, so an undeclared `/`
+is a 404. A landing page is a declared route or a file served through the file
+route like any other.
+
+The web host does exactly two things: serve STATIC files through the file
+route above, and carry `send()` calls + events over the WS bus (the `web_ws`
 sub-agent). It renders no agent UI server-side — frontend panels live in the TS
 kernel and render there; this host just serves the static `dist` (via a `file`
 agent) and relays the bus. See `ts/SERVE.md`.
@@ -26,7 +29,7 @@ from importlib import resources
 
 from fastapi import FastAPI
 from kernel import sender_context
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 
 #: The web host binds LOOPBACK unless its record names a `host` — a closed default,
@@ -116,57 +119,13 @@ class _OriginGuard:
         await self.app(scope, receive, send)
 
 
-async def _index_page(kernel) -> str:
-    """Render the root index — the substrate tree. Reads the HTML scaffold per
-    request so editing `templates/index.html` hot-reloads (matches the
-    edit-and-refresh dev loop other webapps use)."""
-    primer = (
-        await kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
-    )[0]["result"]
-    tree = primer.get("tree", {})
-
-    def _esc(s: str) -> str:
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    def _render(node: dict, depth: int = 0) -> str:
-        aid = node["id"]
-        name = node.get("display_name") or aid
-        hm = node.get("handler_module") or "(root)"
-        children = node.get("children", [])
-        kids = (
-            "<ul>" + "".join(_render(c, depth + 1) for c in children) + "</ul>"
-            if children
-            else ""
-        )
-        return (
-            f'<li><span class="id">{_esc(name)}</span>'
-            f" <code>{_esc(aid)}</code>"
-            f' <span class="hm">{_esc(hm)}</span>{kids}</li>'
-        )
-
-    body = _render(tree) if tree else "<li><em>empty tree</em></li>"
-    tpl = (resources.files("web") / "templates" / "index.html").read_text("utf-8")
-    return tpl.replace("{{tree_body}}", body)
-
-
 def make_app(web_agent_id: str, kernel) -> FastAPI:
     app = FastAPI()
-
-    @app.get("/", response_class=HTMLResponse)
-    async def root():
-        # `/` is the agent-tree index. A custom landing page is NOT a web concern —
-        # serve it like any other file, through the gated `/file/` route via a
-        # file_bridge the operator wires (web does no direct disk IO of its own).
-        return HTMLResponse(await _index_page(kernel))
 
     _favicon_bytes = (resources.files("web") / "favicon.png").read_bytes()
 
     @app.get("/_assets/favicon.png")
     async def favicon_asset():
-        return Response(_favicon_bytes, media_type="image/png")
-
-    @app.get("/favicon.png")
-    async def favicon_root():
         return Response(_favicon_bytes, media_type="image/png")
 
     @app.get("/{agent_id}/file/{path:path}")
@@ -175,13 +134,12 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
         `read_stream{path,offset,length}` becomes an HTTP file server. file_bridge
         is the canonical implementer. URL convention:
         `<img src="/<file_bridge>/file/imgs/foo.png">` works without registration.
-        The serving ALLOWANCE is BOTH of the agent's gates. This request enters from
-        OUTSIDE any handler, so without help `_current_sender` would be None and the
-        read would carry OPERATOR authority — the browser inheriting the origin root
-        of trust, and `callable_by` never consulted. It is dispatched under
-        `sender_context(web_agent_id)` instead, so a browser fetch is an ordinary
-        agent send FROM the web host: the served agent's `ingress_rule` gates the io
-        leg AND its `callable_by` decides whether `web` may call it at all.
+        The serving ALLOWANCE is BOTH of the agent's gates. The read is dispatched
+        under `sender_context(web_agent_id)` — never as the OPERATOR, which would hand
+        the browser the origin root of trust with `callable_by` never consulted — so
+        a browser fetch is an ordinary agent send FROM the web host: the served
+        agent's `ingress_rule` gates the io leg AND its `callable_by` decides whether
+        `web` may call it at all.
 
         Measured 2026-08-21 (`live_plan`): with this route running as operator, a
         model set `transcripts` to `ingress_rule=allow_all_ingress` plus a `callable_by`

@@ -20,7 +20,7 @@ Manifest shape (`fantastic.yaml`):
 
     agents:
       - id: memory                     # explicit ids (idempotent across reboots)
-        handler_module: text_file.tools
+        handler_module: file_bridge.tools
         callable_by:                   # the INGRESS half — deny-all is TWO-SIDED,
           worker: [write, read]        # so an edge needs both ends declared here
       - id: worker
@@ -37,8 +37,6 @@ Manifest shape (`fantastic.yaml`):
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import yaml
 from file_bridge import fs
 
@@ -51,13 +49,13 @@ MANIFEST_FIELD = "manifest"
 
 def _load_manifest(agent) -> tuple[list[dict], str | None]:
     """Read + parse the manifest. Returns (agents, error). Cold read, clamped to
-    cwd by the running-dir law — the same one-time bring-up path as
-    `kernel_state.read_tree` (before any file_bridge agent can exist)."""
+    the kernel's running dir (`Kernel.workdir`) — the same one-time bring-up path
+    as `kernel_state.read_tree` (before any file_bridge agent can exist)."""
     path = agent.record.get(MANIFEST_FIELD)
     if not isinstance(path, str) or not path:
         return [], f"static_loader: no {MANIFEST_FIELD!r} path on the record"
     try:
-        text = fs.read_text(Path.cwd(), path)
+        text = fs.read_text(fs.Root(agent.ctx.workdir), path)
     except (OSError, ValueError) as e:
         return [], f"static_loader: cannot read manifest {path!r}: {e}"
     try:
@@ -73,18 +71,16 @@ def _load_manifest(agent) -> tuple[list[dict], str | None]:
 
 
 def validate_meta(meta: dict, record: dict) -> str | None:
-    """Refuse a manifest that is absent or unreadable at WRITE time, so a broken
-    roster never becomes a booting record. Merged view (record + patch)."""
+    """Refuse a malformed `manifest` at WRITE time — SHAPE only (a non-empty path
+    string). Whether the file is there and parses is the BOOT read's to report,
+    against `Kernel.workdir`: this hook is handed no kernel, so a write-time read
+    could only clamp to some other base. Merged view (record + patch)."""
     merged = {**record, **meta}
     if MANIFEST_FIELD not in merged:
         return None  # allowed to exist without one yet; boot will report it
     path = merged.get(MANIFEST_FIELD)
     if not isinstance(path, str) or not path:
         return f"static_loader: {MANIFEST_FIELD} must be a non-empty path string"
-    try:
-        fs.read_text(Path.cwd(), path)
-    except (OSError, ValueError) as e:
-        return f"static_loader: manifest {path!r} is not readable: {e}"
     return None
 
 
@@ -114,7 +110,7 @@ async def _boot(id, payload, agent):
             aid = spec.get("id")
             # An id-less entry cannot be idempotent: the roster is keyed by id,
             # so nothing matches the agent the LAST boot minted and this boot
-            # mints a SECOND one (`text_file_ab12cd`, then `text_file_ef34ab`),
+            # mints a SECOND one (`file_bridge_ab12cd`, then `file_bridge_ef34ab`),
             # which the flush persists — the roster grows by one agent per
             # restart and the operator is never told. The manifest is truth, so
             # it must name its agents.

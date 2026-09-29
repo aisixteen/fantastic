@@ -504,6 +504,68 @@ async fn hooked_tree(log: &Arc<HookLog>, raises: bool) -> Arc<Kernel> {
     kernel
 }
 
+/// A bundle with only a DELETE hook.
+struct OnlyDelete {
+    log: Arc<HookLog>,
+}
+
+#[async_trait::async_trait]
+impl crate::Bundle for OnlyDelete {
+    fn name(&self) -> &str {
+        "only_delete.tools"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _k: &Arc<Kernel>,
+    ) -> Result<crate::Reply, crate::bundle::BundleError> {
+        Ok(None)
+    }
+    async fn on_delete(
+        &self,
+        agent_id: &AgentId,
+        _k: &Arc<Kernel>,
+    ) -> Result<(), crate::bundle::BundleError> {
+        self.log.push(&format!("delete:{}", agent_id.0));
+        Ok(())
+    }
+}
+
+/// Shutdown calls `on_shutdown` and only that (audit 2026-09-28, c9): a bundle
+/// with only `on_delete` has nothing to free at shutdown, and delete's teardown
+/// is not run in its place.
+#[tokio::test]
+async fn shutdown_never_falls_back_to_on_delete() {
+    let log = Arc::new(HookLog::default());
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(
+        "only_delete.tools",
+        OnlyDelete {
+            log: Arc::clone(&log),
+        },
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        serde_json::Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let _ = kernel
+        .send(vec![crate::Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"only_delete.tools","id":"od"}),
+        )])
+        .await;
+    kernel.shutdown().await;
+    assert!(log.read().is_empty(), "{:?}", log.read());
+}
+
 #[tokio::test]
 async fn shutdown_walks_depth_first_after_the_flush_hook() {
     let log = Arc::new(HookLog::default());

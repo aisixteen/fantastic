@@ -102,11 +102,7 @@ LIMIT_ENV = (
 #: hid was a real gap in the product: no `web_rest`, in ANY runtime, could name
 #: an execution. Driving all three through one face surfaced it, and it was
 #: fixed in all three rather than worked around here.
-#:
-#: js keeps an in-process runner because its kernel IS in-process — it has no
-#: binary to spawn and no HTTP face of its own.
 #: The runtimes the host driver spawns — the ones with something to build.
-#: `js` runs in-process and has no binary.
 HOST_RUNTIMES = ("python", "rust", "swift")
 
 SCENARIO_RUNNERS = {
@@ -116,7 +112,6 @@ SCENARIO_RUNNERS = {
         "cwd": "pyroot",
         "env": {"KERNEL": "python"},
     },
-    "js": {"cmd": ["node", "runners/inproc_js.mjs"], "cwd": "e2e"},
     "rust": {
         "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
         "cwd": "pyroot",
@@ -145,7 +140,7 @@ def load_suite() -> list[dict]:
     # are not comparable, which is the only reason to run a scenario four times.
     runtimes = [
         r.strip()
-        for r in os.environ.get("RUNTIMES", "python,js,rust,swift").split(",")
+        for r in os.environ.get("RUNTIMES", "python,rust,swift").split(",")
         if r.strip()
     ]
     for sf in sorted(E2E.glob("tests/scenario/*/scenario.yaml")):
@@ -362,9 +357,9 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
             # types), a python one drives the host kernel under uv.
             args = [str(a) for a in (t.get("args") or [])]
             if t.get("cmd"):
-                # A SCENARIO. Every runtime runs its own — python and js here,
-                # rust and swift in their own test suites — so the command comes
-                # from the runner table rather than from a file extension.
+                # A SCENARIO. Every runtime runs it through the one host runner,
+                # so the command comes from the runner table rather than from a
+                # file extension.
                 cmd = [*t["cmd"], *args]
                 cwd = str(CWDS[t["cwd_key"]])
                 env.update({k: str(v) for k, v in (t.get("extra_env") or {}).items()})
@@ -492,7 +487,7 @@ async def main() -> int:
         "--runtime",
         action="append",
         default=[],
-        help="python | js | rust | swift — narrow the cross-product",
+        help="python | rust | swift — narrow the cross-product",
     )
     ap.add_argument(
         "--free", action="store_true", help="include the free harness self-tests"

@@ -41,7 +41,7 @@ struct RestartTests {
             _ = await send(k, "kernel_state", .object(["type": .string("boot")]))
             let made = await send(k, "kernel_state", .object([
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                "handler_module": .string("file_bridge.tools"), "id": .string("store"),
+                "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("store"),
                 "root": .string(wd.appendingPathComponent(".fantastic").path),
                 "ingress_rule": .string("allow_all_ingress"),
             ])).result
@@ -54,7 +54,7 @@ struct RestartTests {
             #expect(mem["error"].isNull, "\(mem.serialize())")
             let ex = await send(k, "kernel_state", .object([
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                "handler_module": .string("text_file.tools"), "id": .string("notes"),
+                "handler_module": .string("file_bridge.tools"), "id": .string("notes"),
             ])).result
             #expect(ex["error"].isNull, "\(ex.serialize())")
             k.update(AgentId("kernel_state"), ["memory_store_id": .string("memory")])
@@ -131,7 +131,7 @@ struct RestartTests {
         _ = await send(k, "kernel_state", .object(["type": .string("boot")]))
         _ = await send(k, "kernel_state", .object([
             "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-            "handler_module": .string("file_bridge.tools"), "id": .string("sp_late"),
+            "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("sp_late"),
             "root": .string(wd.appendingPathComponent("late").path),
             "ingress_rule": .string("allow_all_ingress"),
         ]))

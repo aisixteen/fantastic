@@ -57,7 +57,7 @@ async def test_send_system_verb_answered_natively(seeded_kernel):
 
 
 async def test_emit_puts_on_inbox(kernel):
-    kernel.create("file_bridge.tools", id="t")
+    kernel.create("file_bridge.tools", allow=["."], id="t")
     q = kernel.ctx.ensure_inbox("t")  # the test is the reader
     await kernel.emit("t", {"type": "hello", "n": 1})
     msg = q.get_nowait()
@@ -65,8 +65,8 @@ async def test_emit_puts_on_inbox(kernel):
 
 
 async def test_emit_fans_out_to_watchers(kernel):
-    kernel.create("file_bridge.tools", id="src")
-    kernel.create("file_bridge.tools", id="watcher")
+    kernel.create("file_bridge.tools", allow=["."], id="src")
+    kernel.create("file_bridge.tools", allow=["."], id="watcher")
     kernel.ctx.ensure_inbox("watcher")
     kernel.watch("src", "watcher")
     await kernel.emit("src", {"type": "x", "n": 42})
@@ -75,8 +75,8 @@ async def test_emit_fans_out_to_watchers(kernel):
 
 
 async def test_unwatch_stops_routing(kernel):
-    kernel.create("file_bridge.tools", id="src")
-    kernel.create("file_bridge.tools", id="w")
+    kernel.create("file_bridge.tools", allow=["."], id="src")
+    kernel.create("file_bridge.tools", allow=["."], id="w")
     kernel.ctx.ensure_inbox("w")
     kernel.watch("src", "w")
     kernel.unwatch("src", "w")

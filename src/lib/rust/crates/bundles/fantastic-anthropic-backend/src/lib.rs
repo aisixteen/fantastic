@@ -9,8 +9,8 @@
 //! See `fantastic_ai_core`'s module header for the canonical LLM backend
 //! contract. Anthropic-local extras:
 //!
-//! - the key is read from the ENVIRONMENT (`ANTHROPIC_KEY`, else
-//!   `ANTHROPIC_API_KEY`) at call time — python-canonical. There is no
+//! - the key is read from the ENVIRONMENT (`ANTHROPIC_API_KEY`) at call
+//!   time — python-canonical. There is no
 //!   key-storage verb and no sidecar: a connector is inert until the operator
 //!   wires the variable, and an absent key fails loud NAMING it.
 //! - `x-api-key` HTTP client cache (dropped on key change). NO 429 retry and no
@@ -30,6 +30,7 @@
 use async_trait::async_trait;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+    Unconfigured,
 };
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_repr_value, py_str, py_truthy};
@@ -48,20 +49,8 @@ pub const HANDLER_MODULE: &str = "anthropic_backend.tools";
 /// readme.md auto-seeded into the agent's dir on creation.
 pub const README: &str = include_str!("readme.md");
 
-/// Default Anthropic API base — the Messages API lives at `/messages`.
-/// The Anthropic messages URL, used VERBATIM — python parity.
-///
-/// This used to be a BASE that the provider appended `/messages` to, while
-/// python's `DEFAULT_ENDPOINT` was the full URL its provider POSTs as-is. One
-/// meta key, `endpoint`, meant two different things depending on the runtime,
-/// so a value that worked against a proxy on one kernel 404'd on another.
-/// Python is canonical: the value is the URL.
-pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
-
-/// NO guessy default (by default, no defaults): this connector never names a
-/// model that reaches the network. The sentinel exists only so reflect can say
-/// what's true; the request path fails loud when the model is unset/sentinel.
-pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
+/// The name a required-field refusal carries.
+const BACKEND: &str = "anthropic_backend";
 
 /// What `reflect` says this agent IS — python `anthropic_backend/tools.py`'s
 /// `sentence`, verbatim. Native tool-calling is NOT used: ai_core parses the
@@ -187,19 +176,14 @@ fn drop_cached_client(self_id: &AgentId) {
 
 // ── the api key: ENVIRONMENT ONLY ───────────────────────────────────
 
-/// The variables that carry the key, in python's order (`provider.py`).
-/// Named in the failure text so an unset connector says which one to set.
-const KEY_VARS: [&str; 2] = ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY"];
+/// The ONE variable that carries the key (python `provider.py`). Named in the
+/// failure text so an unset connector says which one to set.
+const KEY_VAR: &str = "ANTHROPIC_API_KEY";
 
 /// Read the key from the environment. No sidecar, no agent record — the key is
 /// never written to disk by this bundle and never appears in `agent.yaml`.
 fn read_api_key() -> Option<String> {
-    KEY_VARS.iter().find_map(|v| {
-        std::env::var(v)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    })
+    std::env::var(KEY_VAR).ok().filter(|s| !s.is_empty())
 }
 
 // ── plain messages → Anthropic translation ──────────────────────────
@@ -291,18 +275,18 @@ impl Provider for AnthropicProvider {
         // THE KEY IS CHECKED HERE, AND BEFORE THE MODEL — python
         // `provider.py:112-119`. It used to gate the PROVIDER BUILD, so an
         // unwired connector answered `{error: "anthropic_backend: no api key
-        // — set ANTHROPIC_KEY or ANTHROPIC_API_KEY"}` as a COMPLETED turn,
+        // — set <var>"}` as a COMPLETED turn,
         // before `status(thinking)`, with a sentence python does not have.
         // Inside `chat` the turn has already opened: the caller sees
         // `status(thinking)`, then `status(done, reason='error')`, and the
         // failure RAISES like every other provider failure.
         let Some(key) = read_api_key() else {
-            return Err(ProviderError::raised(
-                "ANTHROPIC_KEY not set in environment (.env)",
-            ));
+            return Err(ProviderError::raised(format!(
+                "{KEY_VAR} not set in environment (.env)"
+            )));
         };
         // NO guessy default: fail loud before the wire if no model is named.
-        if self.model.is_empty() || self.model == DEFAULT_MODEL {
+        if self.model.is_empty() {
             return Err(ProviderError::raised(
                 "anthropic_backend: no `model` set — this connector does \
                  not guess one. Name a model on the agent record (model=...).",
@@ -349,7 +333,7 @@ impl Provider for AnthropicProvider {
         let mut attempt: u32 = 0;
         let resp = loop {
             let client = get_or_build_client(&self.self_id, &key).map_err(ProviderError::raised)?;
-            // VERBATIM — `endpoint` IS the messages URL (see DEFAULT_ENDPOINT).
+            // VERBATIM — `endpoint` IS the messages URL (python parity).
             let url = self.endpoint.clone();
             let resp = client
                 .post(&url)
@@ -393,7 +377,11 @@ impl Provider for AnthropicProvider {
             tokio::time::sleep(Duration::from_secs_f64(BACKOFF * f64::from(attempt))).await;
         };
 
-        Ok(consume_sse(resp, Arc::clone(&self.report), max_tokens.is_some()))
+        Ok(consume_sse(
+            resp,
+            Arc::clone(&self.report),
+            max_tokens.is_some(),
+        ))
     }
 }
 
@@ -578,10 +566,14 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
                 .and_then(|m| m.get("usage"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            let n: i64 = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
-                .iter()
-                .map(|k| u.get(*k).and_then(Value::as_i64).unwrap_or(0))
-                .sum();
+            let n: i64 = [
+                "input_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ]
+            .iter()
+            .map(|k| u.get(*k).and_then(Value::as_i64).unwrap_or(0))
+            .sum();
             st.report.lock().expect("report poisoned").prompt_tokens = (n != 0).then_some(n);
         }
         "message_stop" => {
@@ -645,7 +637,12 @@ fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> Pr
     let inner = resp.bytes_stream();
     // `pending` holds the events decoded from ONE chunk: a chunk can carry
     // several lines, and each line several tokens.
-    let init = (inner, SseState::new(report, bounded), VecDeque::new(), false);
+    let init = (
+        inner,
+        SseState::new(report, bounded),
+        VecDeque::new(),
+        false,
+    );
     Box::pin(futures_util::stream::unfold(
         init,
         |(mut inner, mut st, mut pending, mut finished)| async move {
@@ -735,7 +732,10 @@ impl Bundle for AnthropicBundle {
             return Ok(Some(reflect_reply(agent_id, kernel)));
         }
         // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
-        let provider = |client: &str| { let _ = client; Some(build_provider(agent_id, kernel)) };
+        let provider = |client: &str| {
+            let _ = client;
+            Some(build_provider(agent_id, kernel))
+        };
         if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
             return Ok(Some(reply));
         }
@@ -796,29 +796,29 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
                 .collect()
         })
         .unwrap_or_default();
+    // `endpoint` and `model` are REQUIRED on the record — nothing is guessed.
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let (endpoint, model) = match (
+        helpers::required_meta(&meta, "endpoint", BACKEND),
+        helpers::required_meta(&meta, "model", BACKEND),
+    ) {
+        (Ok(e), Ok(m)) => (e, m),
+        (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
+    };
     Arc::new(AnthropicProvider {
         self_id: agent_id.clone(),
-        endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
-        model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
+        endpoint,
+        model,
         max_tokens,
         sampling,
         report: ReportCell::default(),
     })
 }
 
-
 /// `reflect` — python `_make_reflect` with no `reflect_extra`: the shared base
-/// body and nothing else. `max_tokens`, `tool_use`, `file_bridge_id` and
-/// `has_api_key` were rust-only keys; a model that read them learned a surface
-/// python's anthropic agent does not have.
+/// body and nothing else.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    Value::Object(verbs::reflect_base(
-        agent_id,
-        kernel,
-        SENTENCE,
-        DEFAULT_MODEL,
-        DEFAULT_ENDPOINT,
-    ))
+    Value::Object(verbs::reflect_base(agent_id, kernel, SENTENCE))
 }
 
 #[cfg(test)]

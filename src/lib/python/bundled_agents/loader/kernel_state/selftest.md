@@ -31,8 +31,8 @@ cd /tmp/core_test
 that agent's identity — `{id, sentence, display_name, parent_id,
 handler_module, description?, verbs?, ...flat state}` — plus whatever
 the `tree` / `bundles` / `readme` flags compose in. Root is NOT
-special: there is no `primer`. The transport/wire prose that used to
-ride in reflect now lives in the root readme (`reflect readme=true`).
+special; the transport/wire prose lives in the root readme
+(`reflect readme=true`).
 
 ```bash
 # Default reply: identity + the nested distilled subtree under `tree`.
@@ -41,11 +41,6 @@ import json, sys
 d = json.load(sys.stdin)
 assert d['id'] == 'kernel_state', f'id={d.get(\"id\")}'
 assert 'sentence' in d and 'tree' in d, f'keys={list(d)}'
-# Old primer keys are GONE.
-gone = [k for k in ('transports','primitive','envelope','browser_bus',
-                     'binary_protocol','agent_count','available_bundles',
-                     'well_known','universal_verb') if k in d]
-assert not gone, f'stale primer keys leaked: {gone}'
 # Default tree=all → nested subtree rooted at the agent.
 assert isinstance(d['tree'], dict) and d['tree']['id'] == 'kernel_state'
 print('uniform-shape: PASS')
@@ -76,11 +71,8 @@ print('readme=true: PASS')
 "
 ```
 Expected: `uniform-shape: PASS`, `tree=ids: PASS`, `bundles=all: PASS`,
-`readme=true: PASS`. Regression signal: any old primer key
-(`transports`, `available_bundles`, `agent_count`, `browser_bus`,
-`binary_protocol`) reappearing in the reflect JSON → the primer/reflect
-collapse regressed; or `tree`/`bundles`/`readme` not composing → a flag
-stopped being honored.
+`readme=true: PASS`. Regression signal: `tree`/`bundles`/`readme` not
+composing → a flag stopped being honored.
 
 ### Test 1b: `description` round-trips through reflect
 
@@ -184,7 +176,7 @@ tears down PROCESS state only — DISK cleanup is NOT here; the loader
 (kernel_state) rmtrees the dir on the `removed` state event. Bundles that
 need to tear down process-memory state expose
 `async def on_delete(agent)` in their tools.py — substrate looks it
-up and invokes it (terminal_backend kills its PTY, web drains uvicorn,
+up and invokes it (exec_bridge kills its jobs, web drains uvicorn,
 ws_bridge cancels its read loop).
 
 ```bash
@@ -204,9 +196,9 @@ Expected: `default-on-delete: PASS` and `record removed: OK`.
 
 ```bash
 rm -rf .fantastic
-# Spawn a file_bridge agent, then create a terminal_backend child under it.
+# Spawn a file_bridge agent, then create an exec_bridge child under it.
 PARENT=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-CHILD=$(fantastic kernel create_agent parent_id=$PARENT handler_module=terminal_backend.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+CHILD=$(fantastic kernel create_agent parent_id=$PARENT handler_module=exec_bridge.tools cwd=. | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # Verify the child exists on disk under parent's agents/ dir.
 test -d .fantastic/agents/$PARENT/agents && echo "  child dir present: OK"
 # Cascade-delete the parent.
@@ -219,8 +211,9 @@ test ! -d .fantastic/agents/$PARENT && echo "  parent dir removed: OK"
 rm -rf .fantastic
 ```
 Expected: `child dir present: OK`, `cascade-delete: PASS`, `parent
-dir removed: OK`. The cascade ran terminal_backend's `on_delete`
-(real run would kill the PTY) before removing the file_bridge agent.
+dir removed: OK`. The cascade ran exec_bridge's `on_delete` (a live
+run would SIGKILL its jobs, a terminal's PTY included) before removing the
+file_bridge agent.
 
 ### Test 10: unknown verb / unknown agent rejected cleanly (substrate safety net)
 

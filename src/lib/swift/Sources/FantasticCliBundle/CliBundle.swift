@@ -222,7 +222,7 @@ public struct CliBundle: AgentBundle {
             "  PULL  ask → reply        REST POST /<rest>/<id>        ·  this REPL: @<id> <verb> k=v",
             "  PUSH  async stream/emit  WS /<id>/ws : watch{src} · emit{target,payload} · state_subscribe",
             "  REACH one call by id, any unit: "
-                + "compute(exec_bridge) · infer(ai) · memory(text_file) · shell(terminal_backend)",
+                + "compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)",
         ]
     }
 

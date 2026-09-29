@@ -25,7 +25,7 @@ import re
 import threading
 import time
 
-from families import BASE, OPEN, call, save_kernel_log
+from families import BASE, MEMORY, OPEN, ai, call, save_kernel_log
 from spec import CTX_RESERVE, CTX_WINDOW, CTX_WINDOW_TINY
 from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
 
@@ -238,25 +238,25 @@ def run(ctx) -> None:  # noqa: C901
         # A PERSISTENCE PROVIDER FIRST. The reboot below is the only way to
         # measure a boot-time `context_recall`, and it needs rows on disk.
         rec.json("create_store", k.create(
-            parent_id=k.root_id, handler_module="file_bridge.tools", id="store", **OPEN,
+            parent_id=k.root_id, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
             root=".fantastic",
             callable_by={**BASE, "rest": "*", "web": "*", "ws": "*"}))
         roster = [
-            ("bigfiles", "file_bridge.tools", {"root": "big", "callable_by": {**cb, "docs": "*"}}),
-            ("docs", "text_file.tools", {"target_id": "bigfiles", "can_call": {"bigfiles": "*"},
-                                         "callable_by": {**cb, **{a: "*" for a in [*AIS, "ai_tiny"]}}}),
+            ("bigfiles", "file_bridge.tools", {"allow": ["."], "root": "big", "callable_by": cb}),
+            ("docs", "file_bridge.tools", {"allow": ["."], "root": "big",
+                                           "callable_by": {**cb, **{a: "*" for a in [*AIS, "ai_tiny"]}}}),
         ]
         for a in AIS:
-            roster.append((a, "anthropic_backend.tools", {
+            roster.append((a, "anthropic_backend.tools", ai(**{
                 "model": "stub-model", "endpoint": stub.url(), "context_window": CTX_WINDOW,
                 "output_reserve": CTX_RESERVE, "context_strategy": a.split("_", 1)[1],
                 "context_async": True, "context_titles": True, "recent_n": 4,
-                "callable_by": cb, "can_call": {**BASE, "docs": "*", "kernel": "*"}}))
-        roster.append(("ai_tiny", "anthropic_backend.tools", {
+                "callable_by": cb, "can_call": {**BASE, "docs": "*", "kernel": "*"}})))
+        roster.append(("ai_tiny", "anthropic_backend.tools", ai(**{
             "model": "stub-model", "endpoint": stub.url(), "context_window": CTX_WINDOW_TINY,
             "output_reserve": CTX_RESERVE, "context_strategy": "compact", "context_async": True,
             "context_titles": True, "recent_n": 4, "callable_by": cb,
-            "can_call": {**BASE, "docs": "*", "kernel": "*"}}))
+            "can_call": {**BASE, "docs": "*", "kernel": "*"}})))
         meta_all = {}
         for aid, hm, meta in roster:
             m = {"parent_id": k.root_id, "handler_module": hm, "id": aid, **OPEN, **meta}
@@ -282,7 +282,7 @@ def run(ctx) -> None:  # noqa: C901
                      harness={"idle_after_s": q})
             rec.json(f"{a}/context_status_1_after_chain", call(k, a, {"type": "context_status"}))
             rec.json(f"{a}/rows_read_1_after_chain",
-                     call(k, "kernel", {"type": "rows_read", "agent": a}))
+                     call(k, MEMORY, {"type": "read", "owner": a}))
             rec.json(f"{a}/history_1", call(k, a, {"type": "history", "client_id": "probe"}))
             rec.json(f"{a}/status_1", call(k, a, {"type": "status", "client_id": "probe"}))
             rec.json(f"{a}/recall_goal",
@@ -299,7 +299,7 @@ def run(ctx) -> None:  # noqa: C901
             quiesce_stub(max_s=30, idle=3)
             rec.json(f"{a}/context_status_3_after_too_small", call(k, a, {"type": "context_status"}))
             rec.json(f"{a}/rows_read_3_after_too_small",
-                     call(k, "kernel", {"type": "rows_read", "agent": a}))
+                     call(k, MEMORY, {"type": "read", "owner": a}))
             # B2.2 / B3.9 / B5.5 — a strategy name nothing implements, and a null one.
             rec.json(f"{a}/update_strategy_bogus",
                      call(k, k.root_id, {"type": "update_agent", "id": a,
@@ -316,7 +316,7 @@ def run(ctx) -> None:  # noqa: C901
                  call(k, a, {"type": "send", "text": GOAL, "client_id": "probe"}, timeout=120))
         quiesce_stub(max_s=30, idle=3)
         rec.json(f"{a}/context_status_1", call(k, a, {"type": "context_status"}))
-        rec.json(f"{a}/rows_read_1", call(k, "kernel", {"type": "rows_read", "agent": a}))
+        rec.json(f"{a}/rows_read_1", call(k, MEMORY, {"type": "read", "owner": a}))
         time.sleep(0.5)
         ws_close(a)
         rec.json("kernel_ps_end", call(k, "kernel", {"type": "ps"}))
@@ -336,7 +336,7 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("reboot/stub_requests_during_boot", index[n_before:])
         for a in [*AIS, "ai_tiny"]:
             rec.json(f"reboot/{a}_context_status", call(k2, a, {"type": "context_status"}))
-            rec.json(f"reboot/{a}_rows_read", call(k2, "kernel", {"type": "rows_read", "agent": a}))
+            rec.json(f"reboot/{a}_rows_read", call(k2, MEMORY, {"type": "read", "owner": a}))
         rec.json("reboot/kernel_list_agents", call(k2, "kernel", {"type": "list_agents"}))
         rec.http("http", http_before + k2.http)
         k = k2

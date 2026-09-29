@@ -4,8 +4,9 @@
 //! gated exactly like a bridge leg — SEALED BY DEFAULT (absent `ingress_rule` ⇒
 //! every verb except `reflect` denies with the teaching shape). Open it
 //! consciously with `ingress_rule=allow_all_ingress`. Even open, the LAW is
-//! running-dir only: the `root` AND every path are clamped inside the dir the
-//! kernel runs in (`../`, absolute escapes, outward symlinks all refuse).
+//! running-dir only: the `root` AND every path are clamped inside the kernel's
+//! running dir ([`Kernel::workdir`] — the dir holding its root's `.fantastic`;
+//! `../`, absolute escapes, outward symlinks all refuse).
 //!
 //! Each file_bridge owns a `root` directory and a `readonly` flag. The disk
 //! clamp + raw IO live in [`fs`] — the ONE disk surface; this bundle is the GATE
@@ -15,24 +16,31 @@
 //!
 //! | verb     | args                       | reply                                 |
 //! |----------|----------------------------|---------------------------------------|
-//! | `reflect`| _none_                     | `{id, sentence, root, readonly, hidden_count, verbs, ingress_rule, egress_rule, sealed}` |
+//! | `reflect`| _none_                     | `{id, sentence, root, readonly, allow_count, edit_grammar, compose, verbs, ingress_rule, egress_rule, sealed}` |
 //! | `boot`   | _none_                     | `null`                                |
 //! | `list`   | `path?`                    | `{path, files: [{name, path, type, size?}]}` |
+//! | `read`   | `path`, `offset?`, `limit?` | `{path, lines:[{n,text}], total, eof, version, origin}` |
+//! | `write`  | `path`, `bytes`, `if_match?` | `{path, size, version}` (atomic)     |
+//! | `edit`   | `edits`, `bytes`, `dry_run?` | `{edited, edits:[{path,hunks,size,version}]}` |
+//! | `append` | `path`, `bytes`            | `{path, size, version}`               |
+//! | `undo`   | `path`                     | `{undone, path, version|deleted}`     |
 //! | `read_stream` | `path`, `offset?`, `length?` | `{path, offset, bytes, next_offset, eof, size}` |
 //! | `write_stream`| `path`, `bytes`, `offset?`, `truncate?` | `{path, written, offset, size}` |
 //! | `pump`   | `source?`, `source_path`, `sink?`, `sink_path?` | server-side SOURCE→SINK copy |
 //! | `delete` | `path`, `recursive?`       | `{path, deleted: true}`               |
 //! | `rename` | `old_path`, `new_path`     | `{old_path, new_path}`                |
 //! | `mkdir`  | `path`                     | `{path, created: true}`               |
+//! | `allow` / `disallow` / `allowed` | `path` / `path` / `limit?, after?` | edit / page the `allow` list |
 //!
-//! There is NO string `read`/`write`: bytes move only over the stream verbs,
-//! raw, never base64 — the py-canonical shape. `readonly: true` on the record
-//! refuses every mutating verb with the one refusal shape,
-//! `reason: "unauthorized"`.
+//! The text verbs are this bridge's own (see [`text`]): a caller edits with ITS
+//! OWN grants. Raw bytes move over the stream verbs, never base64.
+//! `readonly: true` on the record refuses every mutating verb with the one
+//! refusal shape, `reason: "unauthorized"`.
 
 #![deny(missing_docs)]
 
 pub mod fs;
+mod text;
 
 use async_trait::async_trait;
 use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
@@ -49,13 +57,9 @@ pub const HANDLER_MODULE: &str = "file_bridge.tools";
 /// readme.md auto-seeded into the agent's dir on creation.
 pub const README: &str = include_str!("readme.md");
 
-/// Default hidden-file names hidden from `list`. Matches the Python
-/// bundle so cross-runtime workdirs stay symmetric.
-pub const DEFAULT_HIDDEN: &[&str] = &[".git", ".env", ".fantastic", "node_modules", "__pycache__"];
-
 /// The verb table, in python's `VERBS` order — reflect's `verbs` map, the
 /// unknown-verb refusal and the gate all read it.
-const VERBS: [(&str, &str); 9] = [
+const VERBS: [(&str, &str); 17] = [
     (
         "reflect",
         "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
@@ -63,7 +67,27 @@ const VERBS: [(&str, &str); 9] = [
     ("boot", "No-op. Returns None."),
     (
         "list",
-        "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …).",
+        "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]} — the exposed entries and the directories on the way to one.",
+    ),
+    (
+        "read",
+        "args: path:str (req), offset:int=0 (line), limit:int=200 — a text page {path, lines:[{n,text}], total, eof, version, origin}; refuses binary.",
+    ),
+    (
+        "write",
+        "args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), if_match:str? — atomic whole-document write; {path, size, version}.",
+    ),
+    (
+        "edit",
+        "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), dry_run:bool? — a TRANSACTION: every hunk of every edit verified before any write, any failure writes nothing (or restores what was written); {edited:true, edits:[{path,hunks,size,version}]}.",
+    ),
+    (
+        "append",
+        "args: path:str (req), bytes (req — one chunk; str is utf-8-encoded) — appends (creates if absent); {path, size, version}.",
+    ),
+    (
+        "undo",
+        "args: path:str (req) — swap the document with the bytes the last write/edit/append replaced (a second undo is redo); ONE slot per path, in RAM, lost on restart; {undone:true, path, version|deleted}.",
     ),
     (
         "read_stream",
@@ -89,13 +113,29 @@ const VERBS: [(&str, &str); 9] = [
         "mkdir",
         "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
     ),
+    (
+        "allow",
+        "args: path:str (req — a file, or a directory exposing everything under it; `.` = the whole root). Adds it to the `allow` list (idempotent). Returns {path, allowed:true, count}.",
+    ),
+    (
+        "disallow",
+        "args: path:str (req — an entry of the `allow` list). Removes it. Returns {path, allowed:false, count}.",
+    ),
+    (
+        "allowed",
+        "args: limit:int?, after:str? (the last path of the previous page). The `allow` list in path order. Returns {paths, next, total}.",
+    ),
 ];
 
 /// Discovery must work on a sealed bridge — python's `UNGATED`.
 const UNGATED: [&str; 1] = ["reflect"];
 
-/// The filesystem bundle.
-pub struct FileBundle;
+/// The filesystem bundle. Holds the text verbs' RAM state (undo slots, document
+/// locks) for the kernel it is registered in.
+#[derive(Default)]
+pub struct FileBundle {
+    text: text::TextState,
+}
 
 /// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
 ///
@@ -104,7 +144,7 @@ pub struct FileBundle;
 /// branch on the prose. `unauthorized` is the code the io SEAL answers with too
 /// — both say "this edge is not open for that", and neither is about the
 /// caller, which is why neither carries a `side`.
-fn readonly_refusal() -> Value {
+pub(crate) fn readonly_refusal() -> Value {
     rf::refusal_hint(
         rf::UNAUTHORIZED,
         "agent is readonly",
@@ -128,6 +168,21 @@ impl Bundle for FileBundle {
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
+        if let Some(a) = meta.get("allow") {
+            let ok = a.as_array().is_some_and(|items| {
+                items.iter().all(|x| {
+                    x.as_str()
+                        .is_some_and(|s| !s.is_empty() && !s.starts_with('/') && norm(s).is_some())
+                })
+            });
+            if !ok {
+                return Some(
+                    "allow must be a list of paths relative to the root (a file, or a \
+                     directory exposing everything under it; `.` = the whole root)"
+                        .to_string(),
+                );
+            }
+        }
         if let Some(spec) = meta.get("ingress_rule") {
             if fantastic_io_bridge::authorizer::ingress::unknown(Some(spec)).is_some() {
                 return Some(format!(
@@ -180,22 +235,49 @@ impl Bundle for FileBundle {
                 return Ok(Some(denied));
             }
         }
-        let base = workdir_base(kernel);
+        let base = kernel.workdir();
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, &meta, &base),
             "boot" => Value::Null,
+            v if text::TEXT_VERBS.contains(&v) => {
+                let root = clamp_root(&meta, &base);
+                text::dispatch(
+                    &self.text,
+                    v,
+                    &agent_id.0,
+                    &meta,
+                    &root,
+                    payload,
+                    None,
+                    readonly,
+                )
+                .await
+            }
             // The PUMP coordinates a SOURCE→SINK copy by id; it never touches
             // bytes/root itself, so it rides without a clamp.
             "pump" => pump_reply(agent_id, payload, kernel).await,
+            "allow" | "disallow" | "allowed" => {
+                let root = clamp_root(&meta, &base);
+                allow_verb(verb, agent_id, &root, payload, kernel)
+            }
             other => {
                 // THE RUNNING-DIR LAW. The clamp is resolved here but applied
                 // AFTER each verb's argument checks — python reaches `fs` only
                 // once the arguments are good, so a bad argument on a bridge with
                 // an escaping root answers `bad_arg`, not `transport_error`.
-                let root = fs::resolve_root(&root_str(&meta), &base);
+                let root = clamp_root(&meta, &base);
+                // DENY-ALL AT THE PATH LEVEL — after each verb's own argument
+                // checks (python's order), before any disk access.
+                if let Some(refused) = exposure(other, &root, &meta, payload, readonly) {
+                    return Ok(Some(refused));
+                }
                 match other {
-                    "list" => list_reply(agent_id, &root, payload, &hidden_list(&meta)),
+                    "list" => {
+                        let mut out = list_reply(agent_id, &root, payload);
+                        keep_exposed(&mut out, &allow_list(&meta), &root);
+                        out
+                    }
                     // THE STREAM VERBS ON THE TEXT CHANNEL, as python serves
                     // them: a model writes a document VERBATIM between `<bytes>`
                     // and `</bytes>` and python's parser delivers that as utf-8
@@ -239,6 +321,32 @@ impl Bundle for FileBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
+        if text::TEXT_VERBS.contains(&verb) {
+            // THE BLOB IS THE `bytes` ARGUMENT, present even when empty — the
+            // bytes-typed carrier a model's `<bytes>` document rides. A text verb
+            // answers a document, never a raw chunk: no reply body.
+            let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+                return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None));
+            };
+            let meta = agent.meta.read().expect("meta poisoned").clone();
+            if let Some(denied) = gate(&meta, agent_id, verb) {
+                return Ok((Some(denied), None));
+            }
+            let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
+            let root = clamp_root(&meta, &kernel.workdir());
+            let reply = text::dispatch(
+                &self.text,
+                verb,
+                &agent_id.0,
+                &meta,
+                &root,
+                &header,
+                Some(&blob),
+                readonly,
+            )
+            .await;
+            return Ok((Some(reply), None));
+        }
         if !matches!(verb, "read_stream" | "write_stream") {
             // file_bridge has no other binary verb — route the header through
             // the text path (which gates + dispatches); the blob is unused.
@@ -254,8 +362,11 @@ impl Bundle for FileBundle {
         if let Some(denied) = gate(&meta, agent_id, verb) {
             return Ok((Some(denied), None));
         }
-        let root = fs::resolve_root(&root_str(&meta), &workdir_base(kernel));
+        let root = clamp_root(&meta, &kernel.workdir());
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
+        if let Some(refused) = exposure(verb, &root, &meta, &header, readonly) {
+            return Ok((Some(refused), None));
+        }
         match verb {
             "read_stream" => {
                 let (reply, body) = read_stream_reply(agent_id, &root, &header, false);
@@ -283,6 +394,16 @@ impl Bundle for FileBundle {
             }
             _ => unreachable!("only the two stream verbs reach here"),
         }
+    }
+
+    /// The bridge is going away — its undo slots go with it.
+    async fn on_delete(
+        &self,
+        agent_id: &AgentId,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        self.text.drop_slots(&agent_id.0);
+        Ok(())
     }
 }
 
@@ -326,7 +447,7 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
 /// The clamped root, or the transport refusal python answers when the configured
 /// root escapes the running dir. Every data verb reaches it only after its
 /// argument checks.
-fn clamped(root: &Result<PathBuf, String>) -> Result<&Path, Value> {
+pub(crate) fn clamped(root: &Result<PathBuf, String>) -> Result<&Path, Value> {
     match root {
         Ok(p) => Ok(p.as_path()),
         Err(e) => Err(rf::refusal(rf::TRANSPORT_ERROR, e.clone())),
@@ -341,25 +462,14 @@ fn root_str(meta: &Map<String, Value>) -> String {
     }
 }
 
-/// python's `_hidden`: `list(rec.get("hidden", DEFAULT_HIDDEN))` — the stored
-/// list VERBATIM (duplicates and non-strings included; `hidden_count` counts
-/// them, and only the strings filter a listing).
-///
-/// A non-iterable `hidden` (a number, a bool, `null`) raises `TypeError` out of
-/// python's handler; this runtime has no exception to raise and reads it as no
-/// entries (D3 residual).
-fn hidden_list(meta: &Map<String, Value>) -> Vec<Value> {
-    match meta.get("hidden") {
-        None => DEFAULT_HIDDEN.iter().map(|s| json!(s)).collect(),
-        Some(Value::Array(a)) => a.clone(),
-        Some(Value::String(s)) => s.chars().map(|c| json!(c.to_string())).collect(),
-        Some(Value::Object(o)) => o.keys().map(|k| json!(k)).collect(),
-        Some(_) => Vec::new(),
-    }
-}
-
-fn is_hidden(name: &str, hidden: &[Value]) -> bool {
-    hidden.iter().any(|v| v.as_str() == Some(name))
+/// The clamped root: the configured root under the kernel's running dir
+/// ([`Kernel::workdir`] — the ONE source; no root ⇒ the refusal text).
+fn clamp_root(
+    meta: &Map<String, Value>,
+    base: &Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    base.clone()
+        .and_then(|b| fs::resolve_root(&root_str(meta), &b))
 }
 
 /// The SOURCE half — read ONE raw chunk at `offset`. `text_channel` carries the
@@ -448,7 +558,7 @@ fn missing_bytes() -> Value {
 /// non-string or an absolute path is `bad_arg` (the absolute form is refused,
 /// never silently re-rooted — python used to `lstrip("/")` against its own
 /// docstring).
-fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result<&'a str, Value> {
+pub(crate) fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result<&'a str, Value> {
     let p = match payload.get(name) {
         None | Some(Value::Null) => "",
         Some(Value::String(s)) => s.as_str(),
@@ -464,7 +574,7 @@ fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result<&'a str, V
 /// not a JSON integer (a bool, a float, a string) or is below `minimum` is
 /// `bad_arg` naming the arg. Mirrors py `_int_arg` — a negative `offset` used
 /// to trap swift and a huge `length` abort rust; now every runtime refuses.
-fn int_arg(
+pub(crate) fn int_arg(
     verb: &str,
     payload: &Value,
     name: &str,
@@ -648,20 +758,6 @@ fn target_id(v: &Value) -> String {
     }
 }
 
-/// The kernel's RUNNING DIRECTORY — the dir that holds its `.fantastic` (the
-/// root loader's `root_path` parent). In production this IS the process cwd (you
-/// run the kernel in your project dir), so the clamp matches Python's
-/// `Path.cwd()`; deriving it from the root's location instead of reading the
-/// process cwd keeps it robust under embedding/tests where they can differ.
-fn workdir_base(kernel: &Kernel) -> PathBuf {
-    kernel
-        .root()
-        .and_then(|r| r.root_path.parent().map(|p| p.to_path_buf()))
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
 /// `password_ingress` is meaningless on an in-process leg: the token is read
 /// off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
 /// presents one, so the rule could only ever refuse (python) or, worse, be
@@ -686,12 +782,295 @@ pub fn password_refusal(meta: &Map<String, Value>, edge: &str) -> Option<String>
     None
 }
 
+// ─── the allow list (what this bridge exposes) ──────────────────
+//
+// DENY-ALL AT THE PATH LEVEL — python `file_bridge` is canonical. The record's
+// `allow` list names what the bridge EXPOSES, relative to `root`: a file, or
+// everything under a directory (`.` = the whole root). No list exposes NOTHING.
+// Every path verb sees only exposed paths; anything else is `not_found` whether
+// or not it exists, and `list` also shows the directories on the way to one.
+
+/// python `posixpath.normpath(path or ".")` of a ROOT-RELATIVE path; `None` when
+/// it is absolute or climbs out.
+pub(crate) fn norm(path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    })
+}
+
+/// The `allow` list, normalised. Absent or empty ⇒ nothing is exposed.
+pub(crate) fn allow_list(meta: &Map<String, Value>) -> Vec<String> {
+    meta.get("allow")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|x| x.as_str().and_then(norm)).collect())
+        .unwrap_or_default()
+}
+
+/// Is `path` exposed — a listed path, or under a listed directory?
+fn exposed(allow: &[String], path: &str) -> bool {
+    let Some(p) = norm(path) else { return false };
+    allow
+        .iter()
+        .any(|s| s == "." || *s == p || p.starts_with(&format!("{s}/")))
+}
+
+/// Is `path` a directory on the way to an exposed path? (`list` shows it.)
+fn leads_to(allow: &[String], path: &str) -> bool {
+    let Some(p) = norm(path) else { return false };
+    !allow.is_empty() && (p == "." || allow.iter().any(|s| s.starts_with(&format!("{p}/"))))
+}
+
+/// Where `path` actually LANDS (symlinks followed) must be under the RESOLVED
+/// form of an allow entry — entries resolved now, because the disk changes. With
+/// [`exposed`] (the path as asked) this is the both-ends rule: a link inside an
+/// exposed area that points outside it serves nothing (audit 2026-09-28).
+fn lands_exposed(root: &Path, allow: &[String], path: &str) -> bool {
+    let Ok(target) = fs::resolve(root, path) else {
+        return false;
+    };
+    allow.iter().any(|s| {
+        // an entry that itself leads out of the root exposes nothing
+        fs::resolve(root, s).is_ok_and(|entry| target.starts_with(&entry))
+    })
+}
+
+/// The ONE answer for a path outside the list — the same whether it exists or not.
+fn unexposed(verb: &str, path: &str) -> Value {
+    let mut v = rf::refusal_hint(
+        rf::NOT_FOUND,
+        format!("{verb}: {} is not exposed by this bridge", py_repr(path)),
+        "expose it first — `allow {path}` (whoever holds that grant)",
+    );
+    rf::with(&mut v, "path", json!(path));
+    v
+}
+
+/// THE CLAMP FIRST, then the list, on BOTH ends — python `_gate_path`.
+pub(crate) fn gate_path(
+    verb: &str,
+    root: &Result<PathBuf, String>,
+    allow: &[String],
+    path: &str,
+) -> Option<Value> {
+    let r = match clamped(root) {
+        Ok(r) => r,
+        Err(e) => return Some(e),
+    };
+    if let Err(e) = fs::resolve(r, path) {
+        return Some(rf::refusal(rf::TRANSPORT_ERROR, e));
+    }
+    // BOTH ends: the path as asked AND the file it lands on.
+    (!(exposed(allow, path) && lands_exposed(r, allow, path))).then(|| unexposed(verb, path))
+}
+
+/// The exposure check for one path verb, placed where python places it: after
+/// that verb's own argument checks (an argument fault answers first — `None`
+/// here lets the verb report it), before any disk access.
+fn exposure(
+    verb: &str,
+    root: &Result<PathBuf, String>,
+    meta: &Map<String, Value>,
+    payload: &Value,
+    readonly: bool,
+) -> Option<Value> {
+    let allow = allow_list(meta);
+    match verb {
+        "list" => {
+            let p = path_arg("list", payload, "path").ok()?;
+            if leads_to(&allow, p) {
+                return None;
+            }
+            gate_path("list", root, &allow, p)
+        }
+        "read_stream" => {
+            let p = path_arg("read_stream", payload, "path").ok()?;
+            int_arg("read_stream", payload, "offset", 0, 0).ok()?;
+            int_arg("read_stream", payload, "length", 65536, 1).ok()?;
+            gate_path("read_stream", root, &allow, p)
+        }
+        "write_stream" => {
+            if readonly {
+                return None;
+            }
+            let p = path_arg("write_stream", payload, "path").ok()?;
+            gate_path("write_stream", root, &allow, p)
+        }
+        "delete" | "mkdir" => {
+            if readonly {
+                return None;
+            }
+            let p = target_arg(verb, root, payload, "path").ok()?;
+            gate_path(verb, root, &allow, p)
+        }
+        "rename" => {
+            if readonly {
+                return None;
+            }
+            let old = target_arg("rename", root, payload, "old_path").ok()?;
+            let new = target_arg("rename", root, payload, "new_path").ok()?;
+            gate_path("rename", root, &allow, old)
+                .or_else(|| gate_path("rename", root, &allow, new))
+        }
+        _ => None,
+    }
+}
+
+/// `list` shows only exposed entries (both ends) and the directories on the way
+/// to one.
+fn keep_exposed(out: &mut Value, allow: &[String], root: &Result<PathBuf, String>) {
+    let Ok(r) = clamped(root) else { return };
+    if let Some(files) = out.get_mut("files").and_then(Value::as_array_mut) {
+        files.retain(|f| {
+            let p = f.get("path").and_then(Value::as_str).unwrap_or("");
+            (exposed(allow, p) && lands_exposed(r, allow, p))
+                || (f.get("type") == Some(&json!("dir")) && leads_to(allow, p))
+        });
+    }
+}
+
+/// One edit of an `allow` list at a time: the read of the live record and its
+/// update happen under this lock, so two concurrent `allow`/`disallow` calls
+/// cannot both derive from one snapshot and lose an entry (audit d3).
+static ALLOW_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `allow` / `disallow` / `allowed` — edit and read the list one path at a time.
+/// The list is record state: edited through `Kernel::update`, persisted by the
+/// loader like any record field.
+fn allow_verb(
+    verb: &str,
+    agent_id: &AgentId,
+    root: &Result<PathBuf, String>,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Value {
+    let _one = ALLOW_EDIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let meta = match kernel.agents.get(agent_id) {
+        Some(a) => a.meta.read().expect("meta poisoned").clone(),
+        None => return json!({"error": format!("no agent {agent_id}")}),
+    };
+    let mut allow = allow_list(&meta);
+    let save = |list: &[String]| {
+        let mut patch = Map::new();
+        patch.insert("allow".to_string(), json!(list));
+        kernel.update(agent_id, patch);
+    };
+    match verb {
+        "allow" => {
+            let raw = match path_arg("allow", payload, "path") {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            if raw.is_empty() {
+                return rf::missing("allow", "path");
+            }
+            let Some(path) = norm(raw) else {
+                return rf::bad("allow", "path", "a path relative to the bridge's root");
+            };
+            let resolved = match root {
+                Ok(r) => fs::resolve(r, &path),
+                Err(e) => Err(e.clone()),
+            };
+            if let Err(e) = resolved {
+                return rf::bad("allow", "path", &format!("a path inside the root ({e})"));
+            }
+            if !allow.contains(&path) {
+                allow.push(path.clone());
+                save(&allow);
+            }
+            json!({"path": path, "allowed": true, "count": allow.len()})
+        }
+        "disallow" => {
+            let raw = match path_arg("disallow", payload, "path") {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            if raw.is_empty() {
+                return rf::missing("disallow", "path");
+            }
+            match norm(raw).filter(|p| allow.contains(p)) {
+                Some(path) => {
+                    allow.retain(|s| *s != path);
+                    save(&allow);
+                    json!({"path": path, "allowed": false, "count": allow.len()})
+                }
+                None => {
+                    let mut v = rf::refusal(
+                        rf::NOT_FOUND,
+                        format!("disallow: {} is not in the allow list", py_repr(raw)),
+                    );
+                    rf::with(&mut v, "path", json!(raw));
+                    v
+                }
+            }
+        }
+        _ => {
+            allow.sort();
+            if let Some(after) = payload
+                .get("after")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                allow.retain(|p| p.as_str() > after);
+            }
+            let total = allow.len();
+            let limit = match int_arg("allowed", payload, "limit", 0, 0) {
+                Ok(n) => n as usize,
+                Err(e) => return e,
+            };
+            let page: Vec<String> = if limit > 0 {
+                allow.into_iter().take(limit).collect()
+            } else {
+                allow
+            };
+            let next = (limit > 0 && total > page.len())
+                .then(|| page.last().cloned())
+                .flatten();
+            json!({"paths": page, "next": next, "total": total})
+        }
+    }
+}
+
+/// How an edit is written — python `_reflect`'s `edit_grammar`, verbatim.
+const EDIT_GRAMMAR: &str = "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / \
+     <new lines> / `>>>>>>> REPLACE`; each SEARCH must match its document EXACTLY ONCE. \
+     `edit` is a TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file rides \
+     the array; the blob holds every edit's hunks concatenated in `edits` order, split by \
+     the per-edit `hunks` count; any failure anywhere writes nothing";
+
+/// How a document rides a call — python `_reflect`'s `compose`, verbatim.
+const COMPOSE: &str = "every content-carrying verb (`write`, `edit`, `append`) takes its \
+     document in `bytes`, and `bytes` is VERBATIM: write the document between `<bytes>` and \
+     `</bytes>` exactly as it should land — real newlines, real quotes, nothing escaped, no \
+     fence — then close the call. The document ends at the first `</bytes>`. An edit names \
+     its files as tags: <edits><item><path>a.py</path><hunks>2</hunks></item></edits>";
+
 /// python's `_reflect`: identity + the resolved root + the readonly flag + the
 /// auth posture, in python's key order. It NEVER refuses — a root that escapes
 /// the running dir is shown as configured, with the violation in `root_error`.
-fn reflect_reply(agent_id: &AgentId, meta: &Map<String, Value>, base: &Path) -> Value {
+fn reflect_reply(
+    agent_id: &AgentId,
+    meta: &Map<String, Value>,
+    base: &Result<PathBuf, String>,
+) -> Value {
     let raw_root = root_str(meta);
-    let (root_display, root_error) = match fs::resolve_root(&raw_root, base) {
+    let (root_display, root_error) = match clamp_root(meta, base) {
         Ok(p) => (p.to_string_lossy().into_owned(), None),
         Err(e) => (raw_root, Some(e)),
     };
@@ -710,7 +1089,9 @@ fn reflect_reply(agent_id: &AgentId, meta: &Map<String, Value>, base: &Path) -> 
         "readonly".to_string(),
         json!(py_truthy(meta.get("readonly").unwrap_or(&Value::Null))),
     );
-    out.insert("hidden_count".to_string(), json!(hidden_list(meta).len()));
+    out.insert("allow_count".to_string(), json!(allow_list(meta).len()));
+    out.insert("edit_grammar".to_string(), json!(EDIT_GRAMMAR));
+    out.insert("compose".to_string(), json!(COMPOSE));
     out.insert("verbs".to_string(), Value::Object(verbs));
     // The auth POSTURE, python's `describe(rec)`: rule NAMES (never config),
     // keyed by the field a caller WRITES (read-key == write-key), + `sealed`.
@@ -725,12 +1106,7 @@ fn reflect_reply(agent_id: &AgentId, meta: &Map<String, Value>, base: &Path) -> 
     Value::Object(out)
 }
 
-fn list_reply(
-    agent_id: &AgentId,
-    root: &Result<PathBuf, String>,
-    payload: &Value,
-    hidden: &[Value],
-) -> Value {
+fn list_reply(agent_id: &AgentId, root: &Result<PathBuf, String>, payload: &Value) -> Value {
     let path_str = match path_arg("list", payload, "path") {
         Ok(p) => p,
         Err(e) => return e,
@@ -763,15 +1139,13 @@ fn list_reply(
     let mut files: Vec<Value> = Vec::new();
     for entry in entries {
         let name = fs::file_name(&entry);
-        if is_hidden(&name, hidden) {
-            continue;
-        }
-        // Relative to the RESOLVED root, as python's `entry.relative_to(rdir)`.
-        let rel = entry
-            .strip_prefix(root)
-            .unwrap_or(&entry)
-            .to_string_lossy()
-            .into_owned();
+        // The entry's path AS A CALLER NAMES IT — under the listed dir, links not
+        // followed (python `posixpath.join(_norm(path) or ".", entry.name)`), so an
+        // exposed symlinked dir lists what it serves.
+        let rel = match norm(path_str).as_deref() {
+            None | Some(".") => name.clone(),
+            Some(base) => format!("{base}/{name}"),
+        };
         let mut obj = Map::new();
         obj.insert("name".to_string(), json!(name));
         obj.insert("path".to_string(), json!(rel));
@@ -902,3 +1276,5 @@ fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) 
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_text;

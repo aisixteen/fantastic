@@ -7,10 +7,6 @@ omitted-span flag). It does NOT fabricate a notice turn: the single canonical
 `[context-notice]` is composed once at the seam (`core._context_notice`) from this
 artifact. The system block is re-prepended by the caller (`core._run`). The durable
 chat store is NEVER touched — strategies shape only what the model sees this turn.
-
-Tool-pairing is the load-bearing invariant: the OpenAI/NIM wire rejects a `role:tool`
-that isn't preceded by its `assistant.tool_calls` turn. Every cut here drops orphaned
-leading `role:tool` messages so the projected body is always wire-valid.
 """
 
 from __future__ import annotations
@@ -63,18 +59,9 @@ STRATEGY = Callable[
 STUB_SUMMARY = "[Earlier conversation omitted — summary unavailable]"
 
 
-def drop_orphan_tools(turns: list[dict]) -> list[dict]:
-    """Drop leading `role:tool` messages whose owning `assistant.tool_calls` turn is
-    not present — the model wire would reject them."""
-    i = 0
-    while i < len(turns) and turns[i].get("role") == "tool":
-        i += 1
-    return turns[i:]
-
-
 def fit_tail(turns: list[dict], budget: int) -> list[dict]:
     """Keep the largest SUFFIX of `turns` that fits `budget`, always including the last
-    turn (the live request), then drop any orphaned leading tool replies."""
+    turn (the live request)."""
     if not turns:
         return []
     kept = [turns[-1]]
@@ -85,15 +72,12 @@ def fit_tail(turns: list[dict], budget: int) -> list[dict]:
             break
         kept.insert(0, t)
         used += c
-    return drop_orphan_tools(kept)
+    return kept
 
 
 def recent_split(body: list[dict], recent_n: int) -> tuple[list[dict], list[dict]]:
-    """Split `body` into (overflow, recent) at the last `recent_n` turns, snapping the
-    boundary back so `recent` never STARTS on an orphaned `role:tool`."""
+    """Split `body` into (overflow, recent) at the last `recent_n` turns."""
     start = max(0, len(body) - recent_n)
-    while start > 0 and body[start].get("role") == "tool":
-        start -= 1
     return body[:start], body[start:]
 
 

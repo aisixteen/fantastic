@@ -14,7 +14,6 @@ composition instead.
 ## Pre-flight
 
 ```bash
-cd new_codebase
 rm -rf .fantastic
 ```
 

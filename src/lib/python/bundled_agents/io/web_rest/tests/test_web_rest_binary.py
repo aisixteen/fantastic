@@ -1,7 +1,7 @@
 """web_rest — the octet-stream binary leg.
 
 JSON has no bytes type, so a verb whose payload OR reply carries raw bytes
-(`text_file.patch`, `write_stream`, `read_stream`) rides an octet-stream body: the
+(a file_bridge `edit`, `write_stream`, `read_stream`) rides an octet-stream body: the
 bytes ARE the body, the rest of the envelope is JSON on `X-Fantastic-Payload`, and
 the one bytes-field is named by `X-Fantastic-Bytes-Field` (default `bytes`).
 Symmetric across request and reply. Never base64.
@@ -35,22 +35,14 @@ def test_binary_leg_request_and_reply_round_trip(seeded_kernel, tmp_path, monkey
         "web_rest.tools",
         id="rest_xyz",
         ingress_rule="allow_all_ingress",
-        can_call={"fb": ["*"], "ed": ["*"]},
+        can_call={"fb": ["*"]},
     )
     seeded_kernel.create(
         "file_bridge.tools",
+        allow=["."],
         id="fb",
         root="work",
         ingress_rule="allow_all_ingress",
-        callable_by={"rest_xyz": ["*"], "ed": ["*"]},
-    )
-    # The EDITOR: patch moved off the bridge — text_file owns the SEARCH/REPLACE
-    # verb and reaches disk only through gated sends to `fb`.
-    seeded_kernel.create(
-        "text_file.tools",
-        id="ed",
-        target_id="fb",
-        can_call={"fb": ["*"]},
         callable_by={"rest_xyz": ["*"]},
     )
     (tmp_path / "work").mkdir(parents=True, exist_ok=True)
@@ -60,18 +52,18 @@ def test_binary_leg_request_and_reply_round_trip(seeded_kernel, tmp_path, monkey
         # REQUEST binary: the patch is the octet body; the envelope is a header.
         patch = b"<<<<<<< SEARCH\nb = 2\n=======\nb = 20\n>>>>>>> REPLACE"
         r = c.post(
-            "/rest_xyz/ed",
+            "/rest_xyz/fb",
             content=patch,
             headers={
                 "content-type": "application/octet-stream",
                 "X-Fantastic-Payload": json.dumps(
-                    {"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}
+                    {"type": "edit", "edits": [{"path": "m.py", "hunks": 1}]}
                 ),
                 "X-Fantastic-Bytes-Field": "bytes",
             },
         )
         assert r.status_code == 200
-        assert r.json()["patched"] is True
+        assert r.json()["edited"] is True
         assert (tmp_path / "work" / "m.py").read_text() == "a = 1\nb = 20\n"
 
         # REPLY binary: read_stream's chunk comes back as an octet body.

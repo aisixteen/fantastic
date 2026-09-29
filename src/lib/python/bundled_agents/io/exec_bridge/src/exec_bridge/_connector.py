@@ -190,16 +190,10 @@ try:
                 )
             return m.get("data")
 
-        def emit(self, payload_or_target, payload=None):
-            # One-arg `emit(payload)` emits on the OWNER agent (the common form,
-            # parity with the lua/js runtimes + the genesis contract). Two-arg
-            # `emit(target, payload)` emits on a named target (back-compat).
-            if payload is None:
-                _frame({"op": "emit", "payload": payload_or_target or {}})
-            else:
-                _frame(
-                    {"op": "emit", "target": payload_or_target, "payload": payload or {}}
-                )
+        def emit(self, payload):
+            # Emits on the OWNER agent — the program publishes as the agent that
+            # runs it (parity with the js runtime + the genesis contract).
+            _frame({"op": "emit", "payload": payload or {}})
 
         def reflect(self, target="kernel"):
             return self.send(target, {"type": "reflect"})

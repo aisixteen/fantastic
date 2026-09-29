@@ -2,7 +2,7 @@
 
 Native Swift kernel for Apple platforms. macOS, iOS, iPadOS,
 visionOS, tvOS, watchOS. Used in-process by the Apple app — no
-UniFFI, no XCFramework, no native subprocess required.
+native subprocess required.
 
 **Python (`../python/`) is the canonical reference for the Fantastic
 protocol.** This Swift kernel mirrors Python's wire shape (HTTP
@@ -39,15 +39,14 @@ env var; skipped cleanly when unset.
 - 2 umbrella targets (`FantasticKernelEmbedded`,
   `FantasticKernelFull`) — Apple-app entry points
 - 1 CLI executable (`fantastic`)
-- 170+ tests across substrate, bundles, parity harness, public-API
-  shim
+- 1100+ tests across substrate, bundles, parity harness, public API
 
 ## Tiers
 
 | product | platforms | includes |
 |---|---|---|
 | `FantasticKernelEmbedded` | iOS, iPadOS, visionOS, tvOS, watchOS, sandboxed macOS | All bundles EXCEPT subprocess-using ones |
-| `FantasticKernelFull` | macOS Pro (unsandboxed) | All bundles including `terminal_backend`, `exec_bridge` |
+| `FantasticKernelFull` | macOS Pro (unsandboxed) | All bundles including `exec_bridge` (commands + PTY jobs) |
 
 Both tiers are first-class products of this `Package.swift`. The
 Apple app declares the dependency as:
@@ -75,9 +74,8 @@ kernel modules.
 | kernel_state | `FantasticKernelState` | both | the ROOT loader + persistence (records, blobs, the record-owner guard; a `root` meta serves a sub-namespace, e.g. a browser app's records) |
 | ram_store | `FantasticRamStore` | both | the MEMORY STORE in RAM — every message, fold refs, grants (anchor cascade), search, inject/dump; one lock over all tables |
 | static_loader | `FantasticStaticLoader` | both | declarative YAML roster loader — hydrates the declared agents as operator at boot |
-| file_bridge | `FantasticFile` | both | the gated fs edge — sealed by default, running-dir clamp; read/write + read_stream/write_stream/pump (raw bytes) |
-| text_file | `FantasticTextFile` | both | stateless text-document agent — read/write/patch/append, version/if_match, checkpoints; every byte a gated send |
-| scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.yaml`/`schedule_events.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
+| file_bridge | `FantasticFile` | both | the gated fs edge — sealed by default, deny-all `allow` list, running-dir clamp; text verbs read/write/edit/append/undo (version/if_match) + read_stream/write_stream/pump (raw bytes) |
+| scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.yaml`/`schedule_events.yaml` THROUGH the loader (`persist_blob`/`load_blob`); failfast when no store is wired |
 | cli | `FantasticCliBundle` | both | terminal render sink (`cli.tools`): token/done/say/error/status/context + the PTY intro to stdout; unknown verbs dropped |
 | ws_bridge / relay_connector | `FantasticKernelBridge` + `FantasticIoBridge` | both | cross-kernel comms, io_bridge derivations (sealed by default); frames carry a qualified `caller` (`<guid>|<agent>`), ingress refuses the local guid. `relay_connector` dials a relay-KERNEL router (`ws://host/<guid>`, `X-Fantastic-Auth`), reaches a `partner_guid` and tunnels io_bridge frames |
 | web | `FantasticWeb` | both | HTTP + WS server (swift-nio — serves on macOS + Linux) |
@@ -87,8 +85,7 @@ kernel modules.
 | nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, OpenAI-compatible, bearer auth + 429 retry (thin over `FantasticAICore`) |
 | llamacpp_backend | `FantasticLlamaCppBackend` | both | local LLM via llama-server, OpenAI-compatible (thin over `FantasticAICore`) |
 | anthropic_backend | `FantasticAnthropicBackend` | both | Claude via the Anthropic Messages API (thin over `FantasticAICore`) |
-| exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the process edge: a general-purpose command runner gated by a regex allowlist (`allowed`), sealed by default; jobs are kernel tasks |
-| terminal_backend | `FantasticTerminalBackend` | Pro | macOS-only — `forkpty` + DispatchIO |
+| exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the process edge: a general-purpose command runner gated by a regex allowlist (`allowed`), sealed by default; jobs are kernel tasks; a terminal is a PTY job (`forkpty`) |
 | scenario probes | `FantasticScenarioProbes` | test | fixture agents the shared e2e scenarios name |
 
 ## Wire compatibility
@@ -130,9 +127,9 @@ swift/
     FantasticRamStore/                 the memory store (in RAM)
     FantasticAICore/                   shared LLM machinery (memory-store conversation,
                                        tag grammar, folds, grants); AI backends are thin over this
-    Fantastic{Ollama,NvidiaNim,LlamaCpp,Anthropic}Backend/
+    Fantastic{Ollama,NvidiaNim,LlamaCpp,Anthropic,Responses}Backend/
                                        the AI backends
-    Fantastic{File,TextFile,Scheduler,StaticLoader,
+    Fantastic{File,Scheduler,StaticLoader,
               CliBundle,IoBridge,KernelBridge,WebWS,WebRest}/
                                        supporting bundles
     Fantastic{Terminal,Exec}{Backend,Bridge}/
@@ -144,29 +141,19 @@ swift/
   Tests/
     Fantastic*Tests/                   per-target unit suites
     FantasticParityTests/              cross-runtime byte-diff harness
-  docs/
-    CROSS_ANALYSIS.md                  capability matrix vs the historical Rust port
-    MIGRATION.md                       how the Apple app dropped UniFFI for native Swift
 ```
 
 ## Public API contract
 
-The UniFFI-compatibility surface is **deleted**. It existed to keep an Apple
-app's import lines unchanged through the XCFramework → native Swift migration;
-the migration is done, nothing outside its own tests called it, and an unused
-`registerTool`/`listToolsForLlm` registry is a native tool API sitting next to a
-substrate whose tool-calling is raw prompt-and-parse. Gone with it:
-`sendJson`/`sendJsonAs`, `proxyEmit`, the tool registry and the `StateListener`
-bridge.
-
-What the embedding surface is now:
+The embedding surface:
 - `Kernel.send([Item]) -> [Outcome]` — the ONE send; a single call is a
   one-element array
 - `Kernel.subscribe { event in }` — state events, closure not callback protocol
-- `save()` / `load(json:)` / `shutdown()`, `httpPort()`
-- HTTP routes (`/<agent_id>/`, `/<agent_id>/ws`, `/_assets/*`,
-  `/_fantastic/transport.js`)
-- Bundle names: `file_bridge.tools`, `text_file.tools`, `cli.tools`,
+- `saveJSON()` / `loadJSON(_:)` / `shutdown()`, `httpPort()`, `serial` (a
+  process-unique id for per-kernel side tables)
+- HTTP routes baked into `web`: `/_assets/favicon.png`, `/<agent_id>/file/<path>`;
+  verb routes are declared by `web_ws` / `web_rest` sub-agents
+- Bundle names: `file_bridge.tools`, `cli.tools`,
   `web.tools`, etc.
 
 ## Third-party dependencies

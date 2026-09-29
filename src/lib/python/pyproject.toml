@@ -15,9 +15,7 @@ dependencies = [
   "fantastic-web-rest",
   "fantastic-scheduler",
   "fantastic-file-bridge",
-  "fantastic-text-file",
   "fantastic-kernel-state",
-  "fantastic-terminal-backend",
   "fantastic-ollama-backend",
   "fantastic-llamacpp-backend",
   "fantastic-nvidia-nim-backend",
@@ -67,10 +65,8 @@ testpaths = [
   "bundled_agents/io/web_rest/tests",
   "bundled_agents/scheduler/tests",
   "bundled_agents/io/file_bridge/tests",
-  "bundled_agents/text_file/tests",
   "bundled_agents/loader/kernel_state/tests",
   "bundled_agents/loader/static_loader/tests",
-  "bundled_agents/terminal/tests",
   "bundled_agents/ai/ai_core/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",
   "bundled_agents/ai/llamacpp/llamacpp_backend/tests",
@@ -97,7 +93,6 @@ members = [
   "bundled_agents/io/web_rest",
   "bundled_agents/scheduler",
   "bundled_agents/io/file_bridge",
-  "bundled_agents/terminal",
   "bundled_agents/ai/ai_core",
   "bundled_agents/ai/ollama/ollama_backend",
   "bundled_agents/ai/llamacpp/llamacpp_backend",
@@ -108,7 +103,6 @@ members = [
   "bundled_agents/io/ws_bridge",
   "bundled_agents/io/relay_connector",
   "bundled_agents/io/exec_bridge",
-  "bundled_agents/text_file",
   "bundled_agents/loader/kernel_state",
   "bundled_agents/loader/static_loader",
   "bundled_agents/memory/ram_store",
@@ -122,8 +116,6 @@ fantastic-web-ws = { workspace = true }
 fantastic-web-rest = { workspace = true }
 fantastic-scheduler = { workspace = true }
 fantastic-file-bridge = { workspace = true }
-fantastic-text-file = { workspace = true }
-fantastic-terminal-backend = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
 fantastic-llamacpp-backend = { workspace = true }
 fantastic-nvidia-nim-backend = { workspace = true }

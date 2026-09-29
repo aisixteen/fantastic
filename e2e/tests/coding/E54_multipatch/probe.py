@@ -1,9 +1,9 @@
-"""coding/multipatch — the patch TRANSACTION across files. LLM-driven (C2).
+"""coding/multipatch — the edit TRANSACTION across files. LLM-driven (C2).
 
 A coordinated rename spanning two files — the kind of edit where a half-applied
-state is a broken program. The model must make BOTH changes with ONE `patch`
+state is a broken program. The model must make BOTH changes with ONE `edit`
 call (`edits` array over one hunk blob); the score is both files exact plus the
-transcript showing a single transactional call, not two independent patches.
+transcript showing a single transactional call, not two independent edits.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ TASK = (
     "The editor agent `editor` edits this run's files. Rename the function "
     "`make_widget` to `build_widget` EVERYWHERE it appears: its definition in "
     "`lib.py` and both uses in `app.py`. A half-renamed state is a broken "
-    "program, so make ALL the changes with ONE `patch` call — the patch verb "
+    "program, so make ALL the changes with ONE `edit` call — the edit verb "
     "is a TRANSACTION over an `edits` array (reflect `editor` for the exact "
-    "shape). Change nothing else. When the patch is applied, end your run by calling done — emit <call name=\"done\"></call>."
+    "shape). Change nothing else. When the edit is applied, end your run by calling done — emit <call name=\"done\"></call>."
 )
 
 
@@ -59,10 +59,10 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "editor": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
@@ -73,9 +73,9 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": "editor",
-                "handler_module": "text_file.tools",
-                "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."],
+                "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )

@@ -103,6 +103,37 @@ def test_explicit_grant_opens_exactly_the_named_privileged_verb():
     assert not _auth(g, "delete_agent", "kernel_state").allowed
 
 
+def test_the_baseline_never_reaches_the_kernel_controls():
+    # Measured 2026-09-28: `$parent: "*"` let every direct child of the root stop
+    # the kernel, kill ANY task and read the whole ledger. A structural token's
+    # wildcard covers none of them.
+    for verb in (
+        "kernel_stop",
+        "kernel_start",
+        "shutdown_agents",
+        "ps",
+        "cancel",
+        "ledger",
+        "ack_deadletter",
+        "persist_record",
+        "forget_record",
+        "load_tree",
+        "allow",
+        "disallow",
+    ):
+        assert not _auth(dict(DEFAULT_CAN_CALL), verb, "boss").allowed, verb
+        assert _auth({"boss": [verb]}, verb, "boss").allowed, verb
+
+
+def test_a_named_wildcard_covers_privileged_verbs():
+    # `*` under a NAMED id is the operator's own statement — it covers
+    # everything, privileged verbs included. Whoever writes it owns it.
+    g = {"kernel_state": "*"}
+    for verb in ("create_agent", "delete_agent", "kernel_stop", "cancel", "allow"):
+        assert _auth(g, verb, "kernel_state").allowed, verb
+    assert _auth({"kernel_state": ["*"]}, "update_agent", "kernel_state").allowed
+
+
 def test_ingress_wildcard_accepts_privileged_verbs():
     # enforce_privileged=False (the ingress posture): a callee's `$children:*`
     # legitimately accepts a privileged verb — escalation is blocked at egress.
@@ -145,3 +176,51 @@ def test_non_dict_grant_denies_without_raising():
     for bad in ("*", ["*"], 7):
         d = _auth(bad, "send", "peer")
         assert isinstance(d, Decision) and not d.allowed
+
+
+# ─── emit is gated like a send (audit 2026-09-28, a16) ───────────
+
+
+async def test_emit_on_another_agent_needs_both_halves(seeded_kernel):
+    from kernel import sender_context
+
+    for aid, grants in (("em_open", {"em_target": ["emit"]}), ("em_closed", {})):
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "id": aid,
+                        "can_call": grants,
+                    },
+                }
+            ]
+        )
+    await seeded_kernel.send(
+        [
+            {
+                "target": "kernel_state",
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": "kernel_state",
+                    "handler_module": "file_bridge.tools",
+                    "id": "em_target",
+                    "callable_by": {"em_open": ["emit"], "em_closed": ["emit"]},
+                },
+            }
+        ]
+    )
+    inbox = seeded_kernel.ctx.ensure_inbox("em_target")
+    with sender_context("em_closed"):
+        await seeded_kernel.emit("em_target", {"type": "poke", "n": 1})
+    assert inbox.empty(), "an emit with no egress grant must be dropped"
+    with sender_context("em_open"):
+        await seeded_kernel.emit("em_target", {"type": "poke", "n": 2})
+    got = inbox.get_nowait()
+    assert got == {"type": "poke", "n": 2}, got
+    # emitting on your OWN inbox is how every bundle publishes — ungated
+    with sender_context("em_closed"):
+        await seeded_kernel.emit("em_closed", {"type": "self"})

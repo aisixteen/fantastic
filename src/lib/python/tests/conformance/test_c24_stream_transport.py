@@ -6,7 +6,8 @@ after the events cross a wire: a remote stream arriving through a ws_bridge
 (io_bridge `{type:'event'}` frames over MemoryTransport) must reach local
 subscribers in emission order, terminal last, identically fanned out — the
 invariant a WS session hub builds on when it subscribes browsers to a kernel's
-activity.
+activity. Every event names its `src` on the wire and arrives as its payload plus
+that `src`; only a subscribed `src` (`watch_remote`) flows at all.
 
 Scope note: the SERVING half of a real deployment (`web_ws` answering the
 `{type:'watch'}` frame) has its own suite; here the peer transport plays that
@@ -92,15 +93,17 @@ async def test_a_remote_stream_arrives_in_order_terminal_last(tmp_path, monkeypa
 
     # the serving side streams: rapid-fire, no pacing — order must survive
     for ev in _events():
-        await mt_peer.send({"type": "event", "payload": ev})
+        await mt_peer.send({"type": "event", "src": "src", "payload": ev})
 
     want = N_EVENTS + 1
     seq1 = await _drain(k, "c24_sub1", want)
     seq2 = await _drain(k, "c24_sub2", want)
 
-    assert seq1 == _events(), "order or content changed crossing the transport"
+    assert seq1 == [{**e, "src": "src"} for e in _events()], (
+        "order or content changed crossing the transport"
+    )
     assert seq2 == seq1, "two subscribers must see the identical sequence"
-    assert seq1[-1] == {"type": "done"}, "terminal must arrive last"
+    assert seq1[-1] == {"type": "done", "src": "src"}, "terminal must arrive last"
     # nothing follows the terminal within the drained window
     assert all(e["type"] == "tick" for e in seq1[:-1])
 
@@ -108,7 +111,7 @@ async def test_a_remote_stream_arrives_in_order_terminal_last(tmp_path, monkeypa
 async def test_transport_stream_matches_the_inproc_reference(tmp_path, monkeypatch):
     """The C21 method applied to EVENTS: the same emission sequence delivered
     in-proc (kernel.emit on a local agent) and across the bridge must read
-    byte-identically to a subscriber."""
+    identically to a subscriber — the wire adds exactly the `src` it came from."""
     monkeypatch.chdir(tmp_path)
     k = boot_root()
 
@@ -122,10 +125,16 @@ async def test_transport_stream_matches_the_inproc_reference(tmp_path, monkeypat
 
     # transport leg
     a_id, mt_peer = await _bridge(k)
+    await k.send(
+        [{"target": a_id, "payload": {"type": "watch_remote", "target": "c24_local"}}]
+    )
+    assert (await asyncio.wait_for(mt_peer.recv(), timeout=2))["type"] == "watch"
     k.ctx.ensure_inbox("c24_wire")
     k.watch(a_id, "c24_wire")
     for ev in _events():
-        await mt_peer.send({"type": "event", "payload": ev})
+        await mt_peer.send({"type": "event", "src": "c24_local", "payload": ev})
     wire = await _drain(k, "c24_wire", N_EVENTS + 1)
 
-    assert wire == ref, "the wire changed what a subscriber sees"
+    assert wire == [{**e, "src": "c24_local"} for e in ref], (
+        "the wire changed what a subscriber sees"
+    )

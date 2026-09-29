@@ -206,6 +206,7 @@ extension Kernel {
         let isRoot = loader.parentId == nil
         let watching = loader.metaValue(forKey: "watch").map { $0 != .bool(false) } ?? true
         if !watching { return state }
+        if isRoot { checkStoreAllow() }
         state.writer = installPersistWriter(loader: loader.id)
         if isRoot, (loader.metaValue(forKey: "guid")?.asString ?? "").isEmpty {
             update(loader.id, ["guid": .string(Kernel.mintGuid())])

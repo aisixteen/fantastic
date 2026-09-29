@@ -21,7 +21,10 @@ struct FileBundleTests {
         let registry = BundleRegistry()
         registry.register("file_bridge.tools", FileBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
-        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        let root = Agent(
+        id: AgentId("kernel_state"), handlerModule: nil, parentId: nil,
+        rootPath: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".fantastic"))
         kernel.register(root)
         kernel.setRoot(root)
         let fm = FileManager.default
@@ -30,7 +33,7 @@ struct FileBundleTests {
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var meta: OrderedDictionary<String, JSON> = [
             "type": "create_agent", "parent_id": "kernel_state",
-            "handler_module": "file_bridge.tools", "id": "fs", "root": .string(rel),
+            "handler_module": "file_bridge.tools", "allow": ["."], "id": "fs", "root": .string(rel),
             "ingress_rule": "allow_all_ingress",
         ]
         for (k, v) in extra { meta[k] = v }
@@ -232,34 +235,16 @@ struct FileBundleTests {
             r5["reason"].asString == "unhandled" && r5["verb"].asString == "frobnicate", "\(r5)")
     }
 
-    @Test func listShowsDotfilesAndHonoursHiddenMeta() async {
+    @Test func listShowsEveryEntryUnderTheRoot() async {
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
         write(dir, ".gitignore", "g")
         write(dir, ".git/HEAD", "h")
         write(dir, "visible.txt", "v")
-        let names = { (r: JSON) -> [String] in
-            (r["files"].asArray ?? []).compactMap { $0["name"].asString }
-        }
-        // default: dotfiles show, DEFAULT_HIDDEN (.git) does not
         let r = await call(k, ["type": "list"])
-        #expect(names(r) == [".gitignore", "visible.txt"], "\(r)")
-        // an operator's `hidden` override is honoured — `.git` unhidden
-        _ = await k.send([
-            Item(
-                "kernel_state", .object(["type": "update_agent", "id": "fs", "hidden": .array([])]))
-        ])[0].result
-        let r2 = await call(k, ["type": "list"])
-        #expect(names(r2) == [".git", ".gitignore", "visible.txt"], "\(r2)")
-        _ = await k.send([
-            Item(
-                "kernel_state",
-                .object(["type": "update_agent", "id": "fs", "hidden": .array(["visible.txt"])]))
-        ])[0].result
-        let r3 = await call(k, ["type": "list"])
-        #expect(names(r3) == [".git", ".gitignore"], "\(r3)")
-        let refl = await call(k, ["type": "reflect"])
-        #expect(refl["hidden_count"].asInt == 1, "\(refl)")
+        #expect(
+            (r["files"].asArray ?? []).compactMap { $0["name"].asString }
+                == [".git", ".gitignore", "visible.txt"], "\(r)")
     }
 
     @Test func writeStreamReportsFileSizeNotCursor() async {
@@ -287,7 +272,6 @@ struct FileBundleTests {
         #expect(r["sealed"].asBool == false)
         #expect(r["root_error"].isNull)
         #expect(r["sentence"].asString?.hasPrefix("Filesystem edge of the io family") == true)
-        #expect(r["hidden_count"].asInt == 5)
         let b = await call(k, ["type": "boot"])
         #expect(b.isNull, "\(b)")
         // sealed + a root outside the running dir: reflect never refuses, it REPORTS
@@ -353,7 +337,7 @@ struct FileBundleTests {
                 "kernel_state",
                 .object([
                     "type": "create_agent", "parent_id": "kernel_state",
-                    "handler_module": "file_bridge.tools",
+                    "handler_module": "file_bridge.tools", "allow": ["."],
                     "id": "pw", "ingress_rule": "password_ingress",
                 ]))
         ])[0].result
@@ -371,16 +355,16 @@ struct FileBundleTests {
         // The BUNDLE's keys, in python's order (the kernel frame — can_call,
         // kernel_verbs, tree — is appended after them by the substrate).
         #expect(
-            Array(r.asObject?.keys ?? []).prefix(9) == [
-                "id", "sentence", "root", "readonly", "hidden_count", "verbs", "ingress_rule",
-                "egress_rule", "sealed",
+            Array(r.asObject?.keys ?? []).prefix(10) == [
+                "id", "sentence", "root", "readonly", "allow_count", "edit_grammar", "compose",
+                "verbs", "ingress_rule", "egress_rule",
             ], "\(Array(r.asObject?.keys ?? []))")
         let (k2, dir2) = await openBridge(meta: ["id": "fs2", "root": "../nope"])
         defer { try? FileManager.default.removeItem(at: dir2) }
         let r2 = await k2.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
         // `root_error` is last of the bundle's own keys.
         #expect(
-            Array(r2.asObject?.keys ?? []).prefix(10).last == "root_error",
+            Array(r2.asObject?.keys ?? []).prefix(12).last == "root_error",
             "\(Array(r2.asObject?.keys ?? []))")
     }
 
@@ -466,7 +450,7 @@ struct FileBundleTests {
         let r = await call(k, ["type": "read_stream", "path": "a.txt"])
         #expect(
             Array(r.asObject?.keys ?? [])
-                == ["path", "offset", "bytes", "next_offset", "eof", "size"], "\(r)")
+                == ["path", "offset", "bytes", "next_offset", "eof", "size", "origin"], "\(r)")
     }
 
     /// A2.7 — an ABSENT `bytes` key writes an EMPTY chunk (python
@@ -610,20 +594,6 @@ struct FileBundleTests {
         #expect((await call(k, ["type": "mkdir", "path": "q"]))["created"].asBool == true)
     }
 
-    /// A2.14 — `hidden_count` is the stored LIST's length (duplicates and
-    /// non-strings counted); only the filtering compares names.
-    @Test func hiddenCountIsListLength() async {
-        let (k, dir) = await openBridge(meta: [
-            "hidden": .array([.string(".a"), .string(".a"), .integer(5)])
-        ])
-        defer { try? FileManager.default.removeItem(at: dir) }
-        write(dir, ".a", "a")
-        write(dir, "b.txt", "b")
-        #expect((await call(k, ["type": "reflect"]))["hidden_count"].asInt == 3)
-        let l = await call(k, ["type": "list"])
-        #expect((l["files"].asArray ?? []).compactMap { $0["name"].asString } == ["b.txt"], "\(l)")
-    }
-
     /// A2.15 — a DANGLING symlink leaf pointing outside the root escapes
     /// (python's `realpath(strict=False)` follows it), and nothing is created
     /// through it.
@@ -675,7 +645,7 @@ struct FileBundleTests {
                 "kernel_state",
                 .object([
                     "type": "create_agent", "parent_id": "kernel_state",
-                    "handler_module": "file_bridge.tools",
+                    "handler_module": "file_bridge.tools", "allow": ["."],
                     "id": "wd", "ingress_rule": "allow_all_ingress",
                 ]))
         ])[0].result
@@ -723,7 +693,7 @@ struct FileBundleTests {
                 "kernel_state",
                 .object([
                     "type": "create_agent", "parent_id": "kernel_state",
-                    "handler_module": "file_bridge.tools",
+                    "handler_module": "file_bridge.tools", "allow": ["."],
                     "id": "fs2", "auth": "allow_all_ingress",
                 ]))
         ])[0].result

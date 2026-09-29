@@ -522,13 +522,19 @@ async fn cancel_unknown_or_finished_task_is_honest() {
 
 #[tokio::test]
 async fn agent_cancels_another_agents_task() {
-    // `cancel` is a PLAIN VERB, so an agent wields it: the killer agent's own
-    // handler discovers the victim's task through `ps` and sends `cancel`. No
-    // UI, no privileged caller — the capability is in the substrate.
+    // An agent wields `cancel`: the killer agent's own handler discovers the
+    // victim's task through `ps` and sends `cancel`. Both are PRIVILEGED — the
+    // baseline `$parent: "*"` does not reach them — so the killer holds a grant
+    // that names them on the root.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let victim = mk_agent(&kernel, "slow_victim").await;
-    let killer = mk_agent(&kernel, "slow_killer").await;
+    let killer = mk_agent_grant(
+        &kernel,
+        "slow_killer",
+        json!({"kernel_state": ["ps", "cancel"]}),
+    )
+    .await;
 
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
@@ -863,7 +869,7 @@ async fn a_second_shutdown_agents_answers_the_same_and_shuts_nothing_new() {
 #[tokio::test]
 async fn shutdown_agents_is_the_roots_control_surface_only() {
     // A CHILD MAY NOT STOP THE TREE. The verb is addressed to the kernel root
-    // (or its `kernel` alias); anything else answers with an error rather than
+    // (or the reserved `kernel` address); anything else answers with an error rather than
     // quietly draining the whole process on one agent's say-so.
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let child = AgentId::from("sd_child");

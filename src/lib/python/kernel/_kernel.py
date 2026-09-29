@@ -15,8 +15,6 @@ descendant. Holds:
     handler module). Hot path on every fresh-agent send.
   - `pending_forwards`: corr_id → asyncio.Future, for cross-tree
     `forward` reply correlation when bridges are involved.
-  - `well_known`: short-name → agent_id index for named singletons
-    (`webapp`, `file_root`, etc.).
   - `tasks`: the TASK TABLE — every in-flight dispatch, keyed by a
     task id (`"<agent_id>:<token>"`, a pid). Tasks form a TREE through the
     send chain; `ps` reads it, `cancel` kills a subtree.
@@ -361,9 +359,8 @@ def _summarize_payload(payload: Any) -> str:
 
 # Substrate constants — filesystem + entry-point conventions every
 # Agent shares.
-# Aligned with Rust's `DEFAULT_INBOX_BOUND = 256` (kernel/kernel.rs).
-# Smaller-than-historical (was 500) to bound per-agent memory under
-# bursty TUI output; drop-oldest still keeps the freshest events.
+# Aligned with Rust's `DEFAULT_INBOX_BOUND = 256` (kernel/kernel.rs); bounds
+# per-agent memory under bursty output; drop-oldest keeps the freshest events.
 INBOX_BOUND = 256
 BUNDLE_ENTRY_GROUP = "fantastic.bundles"
 
@@ -405,9 +402,6 @@ class Kernel:
     # awaits. Populated on `forward` send, resolved on reply, cleaned
     # on timeout / cascade. Empty in pure-local trees.
     pending_forwards: dict[str, Any] = field(default_factory=dict)
-
-    # Short-name → agent_id index for named singletons.
-    well_known: dict[str, str] = field(default_factory=dict)
 
     # The on-disk children-container dir name — `<agent>/<children_dir>/<child>`.
     # Declared config (not hardcoded): the root record may carry a
@@ -656,7 +650,7 @@ class Kernel:
                 ),
                 arg="memory_store_id",
             )
-        store = self.agents.get(self.well_known.get(sid, sid))
+        store = self.agents.get(sid)
         if store is None:
             return self.unknown_agent(
                 sid, hint="the root's `memory_store_id` names no agent in this tree"
@@ -1283,7 +1277,7 @@ class Kernel:
         """ARRAY-ONLY batch send from outside any handler:
         [{target, payload, timeout?}, ...] -> [{pid, status, result}].
         Delegates to the root Agent's `send` so all of its behavior — the
-        `kernel` primer alias, the call gate, the readme reflect
+        reserved `kernel` address, the call gate, the readme reflect
         post-process — applies uniformly whether you call through `Kernel`
         or an `Agent`. Single call = `(await send([{...}]))[0]`."""
         if self.root is None:
@@ -1646,6 +1640,14 @@ class Kernel:
             for a in self.agents.values()
         ]
 
+    @property
+    def workdir(self) -> Path:
+        """The kernel's RUNNING DIR — the dir holding its root's `.fantastic`. The
+        ONE source of the disk clamp base (`file_bridge.fs.Root`); no root ⇒ none."""
+        if self.root is None:
+            raise RuntimeError("kernel has no root — no running dir to clamp disk to")
+        return self.root._root_path.resolve().parent
+
     # ─── routing helpers ───────────────────────────────────────
 
     def get_agent(self, agent_id: str) -> "Agent | None":
@@ -1653,25 +1655,14 @@ class Kernel:
         return self.agents.get(agent_id)
 
     def register(self, agent: "Agent") -> None:
-        """Add agent to the flat global index. Idempotent on re-register.
-
-        If the agent declares an `alias` meta, wire it into `well_known` so
-        `send` (and the WS surface, which passes the raw target through) can
-        address it by that stable name — like the built-in `kernel`→root
-        alias. This is declared config the substrate makes functional, not
-        autonomous behavior."""
+        """Add agent to the flat global index. Idempotent on re-register."""
         self.agents[agent.id] = agent
-        alias = agent._meta.get("alias")
-        if isinstance(alias, str) and alias:
-            self.well_known[alias] = agent.id
 
     def unregister(self, agent_id: str) -> None:
-        """Remove agent from the flat global index + drop its inbox + any
-        alias pointing at it. No-op if absent."""
+        """Remove agent from the flat global index + drop its inbox. No-op if
+        absent."""
         self.agents.pop(agent_id, None)
         self.inboxes.pop(agent_id, None)
-        for name in [n for n, t in self.well_known.items() if t == agent_id]:
-            del self.well_known[name]
 
     def ensure_inbox(self, id: str) -> asyncio.Queue:
         """Register `id` as a READER and hand back its queue.

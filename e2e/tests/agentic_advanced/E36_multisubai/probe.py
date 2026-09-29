@@ -139,7 +139,7 @@ def kickoff(k: int) -> str:
         "a CANDIDATE, check the digit you own and reply `AGREE <code>` or "
         "`DISAGREE <code> <reason>`; (5) only when all three agree does ONE of you "
         "(the one who broadcast the candidate) write the code, alone on the first "
-        "line, to `answer.txt` on `notes` (a text document agent: verb `write`, "
+        "line, to `answer.txt` on `notes` (a file agent: verb `write`, "
         "`path`, `bytes`). End every turn with `done` once you have nothing more to "
         "send; you will be woken by the next message. Begin: ask your oracle now."
     )
@@ -150,7 +150,6 @@ def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], des
         "type": "create_agent",
         "parent_id": root.id,
         "id": agent_id,
-        "file_bridge_id": store["id"],
         "description": description,
         "context_window": CTX,
         "can_call": {
@@ -200,9 +199,9 @@ async def build(root):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
-                        "callable_by": {**{s: "*" for s in SOLVERS}, "notes": "*", "rest": "*", "web": "*"},
+                        "callable_by": {**{s: "*" for s in SOLVERS}, "rest": "*", "web": "*"},
                         "ingress_rule": "allow_all_ingress",
                         "root": ".fantastic",
                     },
@@ -217,12 +216,12 @@ async def build(root):
             "payload": {
                 "type": "create_agent",
                 "parent_id": root.id,
-                "handler_module": "text_file.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "notes",
-                "target_id": store["id"],
-                "can_call": {store["id"]: "*"},
+                # a DATA store — the records under `.fantastic` stay the loader's
+                "root": ".fantastic/data",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {**{s: "*" for s in SOLVERS}, "rest": "*", "web": "*"},
-                "file_bridge_id": store["id"],
                 "description": "Shared text documents. The team's answer goes to `answer.txt`.",
             },
         },
@@ -300,7 +299,7 @@ async def main() -> None:
         seen_rows: set = set()
         while time.monotonic() - t0 < UNATTENDED:
             await asyncio.sleep(15.0)
-            p = Path(".fantastic/answer.txt")
+            p = Path(".fantastic/data/answer.txt")
             if p.exists():
                 first = (p.read_text(errors="ignore").strip().splitlines() or [""])[0].strip()
                 if re.fullmatch(r"\d{3}", first):

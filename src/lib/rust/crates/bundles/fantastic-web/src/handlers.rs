@@ -7,12 +7,12 @@
 //! `PB/io/web_rest/src/web_rest/tools.py`.
 
 use crate::routes::{self, Handler, Resolved, RouteTable};
-use crate::{mimetypes, ws, AppState, FAVICON_PNG, ROOT_INDEX_HTML};
+use crate::{mimetypes, ws, AppState, FAVICON_PNG};
 use axum::body::Body;
 use axum::extract::FromRequestParts;
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use fantastic_bundle::{py_json_dumps, py_truthy};
+use fantastic_bundle::py_json_dumps;
 use fantastic_kernel::{AgentId, Item};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -85,7 +85,6 @@ async fn run(
     req: Request<Body>,
 ) -> Response {
     match handler {
-        Handler::Index => state.scoped(index_page(&state)).await,
         Handler::Favicon => {
             routes::respond(StatusCode::OK, &[], Some("image/png"), FAVICON_PNG.to_vec())
         }
@@ -130,73 +129,6 @@ async fn run(
         }
         Handler::Ws(leg) => ws_upgrade(state, leg, caps, req).await,
     }
-}
-
-// ─── `GET /` ────────────────────────────────────────────────────────
-
-/// python `_index_page` — render the substrate tree into the scaffold. NO
-/// per-agent `render_html` probe and no `↗` link: python deleted the
-/// server-side render route, frontend panels live in the TS kernel.
-async fn index_page(state: &AppState) -> Response {
-    let primer = state
-        .kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let tree = primer.get("tree").cloned().unwrap_or(Value::Null);
-    let body = if py_truthy(&tree) {
-        render_node(&tree)
-    } else {
-        "<li><em>empty tree</em></li>".to_string()
-    };
-    routes::respond(
-        StatusCode::OK,
-        &[],
-        Some("text/html; charset=utf-8"),
-        ROOT_INDEX_HTML.replace("{{tree_body}}", &body).into_bytes(),
-    )
-}
-
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn render_node(node: &Value) -> String {
-    let Some(obj) = node.as_object() else {
-        return String::new();
-    };
-    let aid = obj.get("id").and_then(Value::as_str).unwrap_or("");
-    let name = obj
-        .get("display_name")
-        .filter(|v| py_truthy(v))
-        .and_then(Value::as_str)
-        .unwrap_or(aid);
-    let hm = obj
-        .get("handler_module")
-        .filter(|v| py_truthy(v))
-        .and_then(Value::as_str)
-        .unwrap_or("(root)");
-    let children = obj.get("children").and_then(Value::as_array);
-    let kids = match children {
-        Some(c) if !c.is_empty() => {
-            let inner: String = c.iter().map(render_node).collect();
-            format!("<ul>{inner}</ul>")
-        }
-        _ => String::new(),
-    };
-    format!(
-        r#"<li><span class="id">{}</span> <code>{}</code> <span class="hm">{}</span>{}</li>"#,
-        esc(name),
-        esc(aid),
-        esc(hm),
-        kids
-    )
 }
 
 // ─── `GET /{agent_id}/file/{path:path}` ─────────────────────────────

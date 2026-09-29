@@ -14,7 +14,7 @@ struct AgentIdTests {
     /// produces too.
     @Test func mintIdTakesPythonsBundleComponent() {
         for (module, prefix) in [
-            ("terminal_backend.tools", "terminal_backend"),
+            ("exec_bridge.tools", "exec_bridge"),
             ("a.b.c", "b"),
             ("noop", "noop"),
             ("a.", "a"),

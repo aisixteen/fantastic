@@ -93,14 +93,14 @@ func emitStatus(
 /// the same name share one FIFO lock and one queue.
 enum AIRunStates {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var states: [ObjectIdentifier: [String: AIAgentRunState]] =
+    nonisolated(unsafe) private static var states: [UInt64: [String: AIAgentRunState]] =
         [:]
 
     /// The state for an agent of THIS kernel.
     static func of(_ kernel: Kernel, _ id: String) -> AIAgentRunState {
         lock.lock()
         defer { lock.unlock() }
-        let key = ObjectIdentifier(kernel)
+        let key = kernel.serial
         if let s = states[key]?[id] { return s }
         let s = AIAgentRunState()
         states[key, default: [:]][id] = s
@@ -110,7 +110,7 @@ enum AIRunStates {
     /// Drop a dead kernel's whole sub-table — see `AISideTables`.
     static func forget(_ kernel: Kernel) {
         lock.lock()
-        states.removeValue(forKey: ObjectIdentifier(kernel))
+        states.removeValue(forKey: kernel.serial)
         lock.unlock()
     }
 }

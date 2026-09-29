@@ -27,7 +27,7 @@ import struct
 import sys
 import time
 
-from families import BASE, OPEN, call, save_kernel_log
+from families import BASE, OPEN, ai, call, save_kernel_log
 from spec import CTX_RESERVE, CTX_WINDOW, wait_port
 from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
 
@@ -51,20 +51,19 @@ LEGS = ["rest", "web", "ws", "wsx", "wss", "rests", "web2", "web3"]
 
 def roster(stub_url: str, cb: dict, interp: str) -> list:
     return [
-        ("files", "file_bridge.tools", dict(root=".")),
-        ("private", "file_bridge.tools", dict(root=".", callable_by={"$self": "*", "$parent": "*"})),
+        ("files", "file_bridge.tools", dict(allow=["."], root=".")),
+        ("private", "file_bridge.tools", dict(allow=["."], root=".", callable_by={"$self": "*", "$parent": "*"})),
         ("cli", "cli.tools", {}),
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{re.escape(interp)} .*"])),
         ("sched", "scheduler.tools", dict(can_call={**BASE, "cli": "*"})),
-        ("term", "terminal_backend.tools", dict(command="/bin/sh", cwd=".")),
-        ("wsb", "ws_bridge.tools", dict(transport="ws", url="ws://127.0.0.1:9/nowhere/ws",
-                                        host="127.0.0.1", remote_port=9, peer_id="nowhere")),
+        ("wsb", "ws_bridge.tools", dict(transport="ws", host="127.0.0.1", port=9,
+                                        peer_id="nowhere")),
         ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere",
                                                 relay_url="ws://127.0.0.1:9/nowhere",
                                                 guid="wirecap-guid", partner_guid="wirecap-partner",
                                                 reconnect=3)),
         ("ai", "anthropic_backend.tools",
-         dict(model="stub-model", endpoint=stub_url, context_window=CTX_WINDOW,
+         ai(model="stub-model", endpoint=stub_url, context_window=CTX_WINDOW,
               output_reserve=CTX_RESERVE,
               can_call={**BASE, "files": "*", "cli": "*", "kernel": "*"})),
     ]
@@ -78,21 +77,22 @@ def seed_extra(k, w, port):
     and ungranted-leg cases can be told apart at all.
     """
     from helpers.host.driver import ROOT_VERBS
+    from spec import read_rec, write_rec
 
-    root = json.loads((w / "agent.json").read_text())
+    root = read_rec(w / "agent.yaml")
     root["callable_by"] = {**root["callable_by"], "ws": ["*", "state_subscribe"],
                            "web": ["*", "state_subscribe"], "wsx": "*"}
-    (w / "agent.json").write_text(json.dumps(root, indent=2))
-    for p in ("agents/web/agent.json", "agents/web/agents/ws/agent.json"):
-        rec = json.loads((w / p).read_text())
+    write_rec(w / "agent.yaml", root)
+    for p in ("agents/web/agent.yaml", "agents/web/agents/ws/agent.yaml"):
+        rec = read_rec(w / p)
         rec["can_call"][k.root_id] = ROOT_VERBS + ["state_subscribe"]
-        (w / p).write_text(json.dumps(rec, indent=2))
+        write_rec(w / p, rec)
     reach = {t: "*" for t in k.reach if t != k.root_id}
 
     def put(rel_path: str, rec: dict) -> None:
         d = w / rel_path
         d.mkdir(parents=True, exist_ok=True)
-        (d / "agent.json").write_text(json.dumps(rec, indent=2))
+        write_rec(d / "agent.yaml", rec)
 
     put("agents/web2", {"id": "web2", "handler_module": "web.tools", "parent_id": k.root_id,
                         "port": k.port2, "can_call": {**BASE, "kernel": "*", **reach}})
@@ -391,7 +391,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         ctx.meta["ws_client_ids_discovered"] = found
 
         W.mark("watch frames")
-        for src in ("ai", "runner", "sched", "term", "wsb", "relay"):
+        for src in ("ai", "runner", "sched", "wsb", "relay"):
             await ctrl.send(json.dumps({"type": "watch", "src": src}))
         await quiet(1000, 4)
         # A registered watcher that never reads: C28/C29's subject is the agent
@@ -489,7 +489,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
 
         W.mark("scheduler fire: create store")
         PROBES["store_create"] = {"harness": {"t": W.rel()}, "reply": k.create(
-            parent_id=k.root_id, handler_module="file_bridge.tools", id="store", **OPEN,
+            parent_id=k.root_id, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
             root=".fantastic", callable_by=cb)}
         await asyncio.sleep(1.0)
         W.mark("scheduler fire")
@@ -516,21 +516,6 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         rest_probe("store_delete", k.root_id, {"type": "delete_agent", "id": "store"})
         await quiet(800, 4)
 
-        W.mark("terminal stop/boot/write/output/stop")
-        await ws_call(ctrl, "term", {"type": "stop"})
-        await quiet(1000, 4)
-        await ws_call(ctrl, "term", {"type": "boot"})
-        await quiet(1000, 4)
-        await ws_call(ctrl, "term", {"type": "write", "data": "echo wirecap\n"})
-        await quiet(1200, 5)
-        await ws_call(ctrl, "term", {"type": "output"})
-        await ws_call(ctrl, "term", {"type": "stop"})
-        await quiet(1000, 4)
-        W.mark("terminal literal start/input verbs")
-        await ws_call(ctrl, "term", {"type": "start"})
-        await ws_call(ctrl, "term", {"type": "input", "data": "echo x\n"})
-        await quiet(600, 3)
-
         W.mark("ws_bridge + relay unreachable")
         await ws_call(ctrl, "wsb", {"type": "reconnect"}, timeout=40)
         await quiet(1500, 6)
@@ -543,7 +528,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         await quiet(1000, 4)
 
         W.mark("unwatch frames")
-        for src in ("ai", "runner", "sched", "term", "wsb", "relay", "files"):
+        for src in ("ai", "runner", "sched", "wsb", "relay", "files"):
             await ctrl.send(json.dumps({"type": "unwatch", "src": src}))
         await quiet(800, 3)
         W.mark("phase events end")
@@ -622,7 +607,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
             W.mark(f"proto {case}")
             await proto_case(wsx, case, data, eid)
 
-        W.mark("phase protocol: SEALED leg (web3/wss), auto-watch of term")
+        W.mark("phase protocol: SEALED leg (web3/wss), auto-watch of runner")
         ok = await sealed.open()
         await quiet(800, 3)
         if ok:
@@ -636,12 +621,12 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
             ]:
                 W.mark(f"proto {case}")
                 await proto_case(sealed, case, data, eid)
-            W.mark("proto sealed_autowatch_leak: term boot + write via REST")
+            W.mark("proto sealed_autowatch_leak: a runner job via REST")
             start = len(W.frames)
-            rest_probe("sealed_leak_term_boot", "term", {"type": "boot"})
-            rest_probe("sealed_leak_term_write", "term", {"type": "write", "data": "echo sealed\n"})
+            rest_probe("sealed_leak_runner_start", "runner",
+                       {"type": "start", "command": sys.executable,
+                        "args": ["-c", "print('sealed')"]})
             await asyncio.sleep(2.5)
-            rest_probe("sealed_leak_term_stop", "term", {"type": "stop"})
             await quiet(800, 3)
             rec.jsonl("protocol", {"case": "sealed_autowatch_leak", "sock": sealed.name,
                                    "url": sealed.url,
@@ -786,7 +771,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         auto_ai = Sock(W, "auto_ai", PORTS["main"], "/ai/ws")
         proto = Sock(W, "proto", PORTS["main"], "/web/ws")
         wsx = Sock(W, "wsx", PORTS["web2"], "/web2/ws")
-        sealed = Sock(W, "sealed", PORTS["web3"], "/term/ws")
+        sealed = Sock(W, "sealed", PORTS["web3"], "/runner/ws")
         socks = (ctrl, auto_ai, proto, wsx, sealed)
         try:
             await phase_events(ctrl, auto_ai)
@@ -811,7 +796,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
                    **OPEN, "callable_by": cb, **meta})
         # `outsider` is created but named in NO leg's reach: the egress refusal.
         setup["creates"]["outsider"] = k.create(
-            parent_id=k.root_id, id="outsider", handler_module="file_bridge.tools",
+            parent_id=k.root_id, id="outsider", handler_module="file_bridge.tools", allow=["."],
             root=".", **OPEN, callable_by=cb)
         rec.json("setup", setup)
         time.sleep(1.5)

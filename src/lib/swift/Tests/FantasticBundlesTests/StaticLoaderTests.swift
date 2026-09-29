@@ -22,7 +22,10 @@ private let MANIFEST = """
 
 private func mkKernel() -> Kernel {
     let kernel = Kernel(storage: .inMemory, bundles: defaultBundleRegistry())
-    let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+    let root = Agent(
+        id: AgentId("kernel_state"), handlerModule: nil, parentId: nil,
+        rootPath: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".fantastic"))
     kernel.register(root)
     kernel.setRoot(root)
     return kernel
@@ -115,51 +118,58 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     #expect(kernel.allAgents().count == before)
 }
 
-/// A8.8 / A8.12 — the manifest read is `fs.resolve(cwd, path)`: the error tail
-/// is python's own exception text, and a path outside the running dir (or an
-/// ABSOLUTE one, even inside it) escapes.
-@Test func anUnreadableManifestIsRefusedAtTheWRITE() async {
-    // A broken roster never becomes a booting record: `validateMeta` reads the
-    // manifest at create/update time, so the refusal lands on the WRITE and no
-    // agent is made. This runtime used to accept the record and only complain
-    // at boot — python and rust both refused it here, and the shared agentic
-    // corpus is what surfaced the difference (2026-08-28).
-    //
-    // The path is also outside the running dir, which is a second reason to
-    // refuse it: the manifest read is clamped, cold bring-up included.
-    let kernel = mkKernel()
-    let before = kernel.allAgents().count
-    let rec = await kernel.send([
-        Item(
-            "kernel_state",
-            [
-                "type": "create_agent",
-                "parent_id": "kernel_state",
-                "handler_module": .string(StaticLoaderBundle.handlerModule),
-                "id": "sl2", "manifest": "/no/such/path/nope.yaml",
-            ])
-    ])[0].result
-    #expect(rec["reason"].asString == "invalid_meta", "\(rec.serialize())")
-    #expect(
-        rec["error"].asString
-            == "static_loader: manifest '/no/such/path/nope.yaml' is not readable: "
-            + "fs: path '/no/such/path/nope.yaml' escapes root", "\(rec.serialize())")
-    #expect(kernel.agent("sl2") == nil, "a doomed record was created anyway")
-    #expect(kernel.allAgents().count == before)
-    // A MISSING relative manifest names the RESOLVED path, python's OSError str.
-    let cwd = FileManager.default.currentDirectoryPath
-    let miss = await kernel.send([
+/// Create a loader whose manifest is `manifest` — the write takes any non-empty
+/// path string; the file itself is the BOOT read's to judge.
+private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) async -> JSON {
+    await kernel.send([
         Item(
             "kernel_state",
             [
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(StaticLoaderBundle.handlerModule),
-                "id": "sl3", "manifest": "nope.yaml",
+                "id": .string(id), "manifest": manifest,
             ])
     ])[0].result
+}
+
+/// The WRITE judges the manifest's SHAPE only: a non-empty path string. The hook
+/// is handed no kernel, so a write-time read could only clamp to some base other
+/// than `Kernel.workdir` — whether the file is there is the boot's to report.
+@Test func theWriteJudgesTheManifestShapeOnly() async {
+    let kernel = mkKernel()
+    for bad: JSON in [.string(""), .integer(3), .array([.string("a.yaml")])] {
+        let rec = await createLoader(kernel, "sl_shape", bad)
+        #expect(rec["reason"].asString == "invalid_meta", "\(bad) → \(rec.serialize())")
+        #expect(
+            rec["error"].asString == "static_loader: manifest must be a non-empty path string",
+            "\(rec.serialize())")
+        #expect(kernel.agent("sl_shape") == nil, "a malformed record was created anyway")
+    }
+    // A path that names nothing is a well-formed record.
+    let rec = await createLoader(kernel, "sl_absent", "nope.yaml")
+    #expect(rec["id"].asString == "sl_absent", "\(rec.serialize())")
+}
+
+/// A8.8 / A8.12 — the manifest read is `fs.resolve(Kernel.workdir, path)`: the
+/// BOOT reports an unreadable manifest with python's own exception text, and a
+/// path outside the running dir (or an ABSOLUTE one, even inside it) escapes.
+@Test func anUnreadableManifestIsReportedAtBoot() async {
+    let kernel = mkKernel()
+    let outside = await createLoader(kernel, "sl2", "/no/such/path/nope.yaml")
+    #expect(outside["id"].asString == "sl2", "\(outside.serialize())")
+    let b = await kernel.send([Item("sl2", ["type": "boot"])])[0].result
+    #expect(b["booted"].asBool == false, "\(b.serialize())")
+    #expect(
+        b["error"].asString
+            == "static_loader: cannot read manifest '/no/such/path/nope.yaml': "
+            + "fs: path '/no/such/path/nope.yaml' escapes root", "\(b.serialize())")
+    // A MISSING relative manifest names the RESOLVED path, python's OSError str.
+    let cwd = FileManager.default.currentDirectoryPath
+    _ = await createLoader(kernel, "sl3", "nope.yaml")
+    let miss = await kernel.send([Item("sl3", ["type": "boot"])])[0].result
     #expect(
         miss["error"].asString
-            == "static_loader: manifest 'nope.yaml' is not readable: "
+            == "static_loader: cannot read manifest 'nope.yaml': "
             + "[Errno 2] No such file or directory: \(pyRepr(pyRealpath(cwd) + "/nope.yaml"))",
         "\(miss.serialize())")
 }
@@ -171,19 +181,13 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let (rel, cleanup) = writeManifest(MANIFEST)
     defer { cleanup() }
     let abs = FileManager.default.currentDirectoryPath + "/" + rel
-    let rec = await kernel.send([
-        Item(
-            "kernel_state",
-            [
-                "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": .string(StaticLoaderBundle.handlerModule),
-                "id": "sl_abs", "manifest": .string(abs),
-            ])
-    ])[0].result
+    _ = await createLoader(kernel, "sl_abs", .string(abs))
+    let b = await kernel.send([Item("sl_abs", ["type": "boot"])])[0].result
     #expect(
-        rec["error"].asString
-            == "static_loader: manifest \(pyRepr(abs)) is not readable: "
-            + "fs: path \(pyRepr(abs)) escapes root", "\(rec.serialize())")
+        b["error"].asString
+            == "static_loader: cannot read manifest \(pyRepr(abs)): "
+            + "fs: path \(pyRepr(abs)) escapes root", "\(b.serialize())")
+    #expect(kernel.agent("memory") == nil, "an escaping manifest hydrated its roster")
 }
 
 /// A8.12 — a symlink inside the running dir that points OUT of it is followed
@@ -195,19 +199,12 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let link = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(name)
     try fm.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: "/etc/hosts"))
     defer { try? fm.removeItem(at: link) }
-    let rec = await kernel.send([
-        Item(
-            "kernel_state",
-            [
-                "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": .string(StaticLoaderBundle.handlerModule),
-                "id": "sl_link", "manifest": .string(name),
-            ])
-    ])[0].result
+    _ = await createLoader(kernel, "sl_link", .string(name))
+    let b = await kernel.send([Item("sl_link", ["type": "boot"])])[0].result
     #expect(
-        rec["error"].asString
-            == "static_loader: manifest \(pyRepr(name)) is not readable: "
-            + "fs: path \(pyRepr(name)) escapes root", "\(rec.serialize())")
+        b["error"].asString
+            == "static_loader: cannot read manifest \(pyRepr(name)): "
+            + "fs: path \(pyRepr(name)) escapes root", "\(b.serialize())")
 }
 
 /// A8.1 / A8.2 — an unknown verb (and `shutdown`, which is not a verb here) is
@@ -339,7 +336,7 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let (kernel, cleanup) = await bootLoader(MANIFEST)
     defer { cleanup() }
     let (path, cleanup2) = writeManifest(
-        "agents:\n  - id: memory\n    handler_module: text_file.tools\n")
+        "agents:\n  - id: memory\n    handler_module: file_bridge.tools\n")
     defer { cleanup2() }
     _ = await kernel.send([
         Item(
@@ -352,7 +349,7 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     #expect(
         r["error"].asString
             == "static_loader: 'memory' exists as 'cli.tools' but the manifest declares "
-            + "'text_file.tools' — a handler_module is fixed at create; delete the agent "
+            + "'file_bridge.tools' — a handler_module is fixed at create; delete the agent "
             + "to re-declare it", "\(r.serialize())")
     #expect(r["booted"].asBool == false, "\(r.serialize())")
 }

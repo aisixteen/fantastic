@@ -205,8 +205,7 @@ impl Bundle for MockBundle {
             return Ok(Some(json!({
                 "id": agent_id.as_str(),
                 "sentence": "Mock LLM agent.",
-                "model": helpers::meta_string_or(agent_id, kernel, "model", "test-model"),
-                "file_bridge_id": helpers::file_bridge_id(agent_id, kernel),
+                "model": helpers::meta_string(agent_id, kernel, "model"),
                 "generating": crate::state::is_generating(agent_id),
                 "verbs": {"send": "send", "history": "history"},
                 "emits": {"token": "t"},
@@ -259,7 +258,7 @@ async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kern
     kernel.bundles.register(HANDLER_MODULE, MockBundle);
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
         fantastic_ram_store::RamStoreBundle::default(),
@@ -311,7 +310,7 @@ async fn add_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path,
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": id,
                 "root": root.to_string_lossy(),
                 // the fs edge seals by default — open it so history persists through it
@@ -384,15 +383,17 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
     // The conversation lives in the memory store the record names — wired both
     // ways (python `_testkit.memory_meta`). Deny-all otherwise: the backend
     // streams its turn to `cli` and names its leg, each an explicit grant.
-    let memory =
-        fantastic_ram_store::test_support::memory_meta(kernel, id, json!({file_id: "*", "cli": "*"}))
-            .await;
+    let memory = fantastic_ram_store::test_support::memory_meta(
+        kernel,
+        id,
+        json!({file_id: "*", "cli": "*"}),
+    )
+    .await;
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
         "handler_module": HANDLER_MODULE,
         "id": id,
-        "file_bridge_id": file_id,
         "model": "test-model",
         "context_window": 32768,
     });
@@ -447,14 +448,7 @@ async fn reflect_reports_state_shape() {
         .await
         .remove(0)
         .result;
-    for key in [
-        "id",
-        "sentence",
-        "model",
-        "file_bridge_id",
-        "generating",
-        "verbs",
-    ] {
+    for key in ["id", "sentence", "model", "generating", "verbs"] {
         assert!(r.get(key).is_some(), "reflect missing key {key:?}: {r:#?}");
     }
     assert_eq!(r["id"], backend.as_str());
@@ -1193,17 +1187,11 @@ async fn history_persists_and_round_trips() {
     );
 }
 
-/// THE REGRESSION THIS PORT EXISTS FOR: chat persists through the AI's OWN
-/// `file_bridge_id`, never through whatever provider the LOADER discovered.
-///
-/// Wired here so the loader has NO provider at all — the root's dir is
+/// The conversation lives in the agent's MEMORY STORE, whatever the loader
+/// discovered: here the loader has NO provider at all — the root's dir is
 /// `<tmp>/.fantastic` and the only `file_bridge` is rooted at `<tmp>/elsewhere`,
-/// which `find_store` (it matches on the root path) cannot match. That is a
-/// spawned kernel with no `.fantastic`-rooted store, and it is exactly where
-/// the old blob channel failed silently: `persist_blob` had nowhere to land, so
-/// every chat write vanished, `history` stayed empty forever, and `send` still
-/// reported success — which blinded any harness reading transcripts back out of
-/// `history`.
+/// which `find_store` (it matches on the root path) cannot match — and `history`
+/// still reads every row back.
 #[tokio::test]
 async fn chat_persists_with_no_loader_provider_wired() {
     let tmp = TempDir::new().unwrap();
@@ -3570,7 +3558,8 @@ async fn grep_answers_under_the_inline_cap_even_when_everything_matches() {
             &kernel,
             &backend,
             json!({"role": "user", "content": format!("needle {i} {}", "x".repeat(300))}),
-        ).await;
+        )
+        .await;
     }
     let r = kernel
         .send(vec![Item::new(
@@ -3604,18 +3593,21 @@ async fn a_fold_id_in_grep_scope_descends_to_its_members() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "the SECRET is in here"}),
-    ).await;
+    )
+    .await;
     let b = put_row(
         &kernel,
         &backend,
         json!({"role": "user", "content": "nothing"}),
-    ).await;
+    )
+    .await;
     let fid = kernel.mint_id();
     put_row(
         &kernel,
         &backend,
         crate::folds::make_fold(&[a, b], "old work", "a summary", false, fid, 1, None),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
@@ -3647,7 +3639,8 @@ async fn context_recall_fits_the_head_and_writes_the_view_it_chose() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "THE GOAL: audit the ledger"}),
-    ).await;
+    )
+    .await;
     for i in 0..60 {
         let pid = kernel.mint_id();
         put_row(
@@ -3694,7 +3687,9 @@ async fn context_recall_fits_the_head_and_writes_the_view_it_chose() {
     );
 
     // The decision is a ROW — the next reload reads why the last recall chose.
-    let rows = crate::memory::load_history(&backend, &kernel, false).await.expect("store read");
+    let rows = crate::memory::load_history(&backend, &kernel, false)
+        .await
+        .expect("store read");
     assert!(
         rows.iter()
             .any(|r| r.get("kind").and_then(Value::as_str) == Some("recall")),
@@ -3769,16 +3764,10 @@ async fn a_fold_projection_over_budget_writes_folds() {
         script: script_for(&backend),
     });
     let state = crate::state::state_for(&backend);
-    let (messages, store_len) = crate::assembly::assemble_messages(
-        &backend,
-        &state,
-        "next",
-        &kernel,
-        "cli",
-        Some("sys"),
-    )
-    .await
-    .expect("store read");
+    let (messages, store_len) =
+        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys"))
+            .await
+            .expect("store read");
     let ids_in_body = messages.iter().filter(|m| m.get("id").is_some()).count();
     let out = crate::projection::project_context(
         &provider,
@@ -3864,7 +3853,9 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             &provider, &backend, &state, &kernel, "cli", "mock", messages, store_len,
         )
         .await;
-        let rows: Vec<Value> = crate::memory::load_history(&backend, &kernel, false).await.expect("store read");
+        let rows: Vec<Value> = crate::memory::load_history(&backend, &kernel, false)
+            .await
+            .expect("store read");
         let mut levels: Vec<i64> = rows
             .iter()
             .filter(|r| crate::folds::is_fold(r))
@@ -4158,13 +4149,15 @@ async fn history_digest_of_caller_rows_follows_python() {
         &kernel,
         &backend,
         json!({"role": "user", "kind": "", "content": {"a": 1}}),
-    ).await;
+    )
+    .await;
     put_row(&kernel, &backend, json!({"role": "user", "content": null})).await;
     put_row(
         &kernel,
         &backend,
         json!({"role": "user", "kind": 5, "content": "x"}),
-    ).await;
+    )
+    .await;
     let h = kernel
         .send(vec![Item::new(backend, json!({"type": "history"}))])
         .await
@@ -4190,7 +4183,8 @@ async fn recall_renders_non_string_content_like_python_json_dumps() {
         &kernel,
         &backend,
         json!({"role": "user", "content": {"k": "é"}}),
-    ).await;
+    )
+    .await;
     put_row(&kernel, &backend, json!({"role": "user", "content": ""})).await;
     let r = kernel
         .send(vec![Item::new(backend, json!({"type": "recall"}))])
@@ -4211,7 +4205,8 @@ async fn recall_empty_page_says_why() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "hello"}),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(
             backend,
@@ -4237,7 +4232,8 @@ async fn grep_numeric_query_and_empty_ids_follow_python() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "order 586 shipped"}),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
@@ -4274,7 +4270,8 @@ async fn grep_splits_lines_like_python_splitlines() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "a\rneedle here\nb"}),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
@@ -4293,7 +4290,8 @@ async fn grep_splits_lines_like_python_splitlines() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "x\u{1c}needle"}),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(
             backend,
@@ -4316,7 +4314,8 @@ async fn grep_scans_non_string_content_as_python_json_dumps() {
         &kernel,
         &backend,
         json!({"role": "user", "content": {"k": "é"}}),
-    ).await;
+    )
+    .await;
     let ask = |q: &str| {
         let kernel = Arc::clone(&kernel);
         let backend = backend.clone();
@@ -4391,7 +4390,8 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "GOAL"}),
-    ).await;
+    )
+    .await;
     // A boot bumps the incarnation, so a delivery decided BEFORE it is late.
     let born = crate::state::incarnation(&backend);
     let _ = kernel
@@ -4408,7 +4408,9 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     )
     .await;
     assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
-    let rows = crate::memory::load_history(&backend, &kernel, false).await.expect("store read");
+    let rows = crate::memory::load_history(&backend, &kernel, false)
+        .await
+        .expect("store read");
     let last = rows.last().expect("a row");
     assert_eq!(last["kind"], "late");
     assert_eq!(
@@ -4517,7 +4519,10 @@ async fn grep_scope_scans_bodies_in_arrival_order() {
         .result;
     let m = r["matches"].as_array().unwrap();
     assert_eq!(m.len(), 1, "identical lines are deduped: {r:#?}");
-    assert_eq!(m[0]["id"], b, "the body that ARRIVED first owns the shared line: {r:#?}");
+    assert_eq!(
+        m[0]["id"], b,
+        "the body that ARRIVED first owns the shared line: {r:#?}"
+    );
 }
 
 #[tokio::test]
@@ -4534,7 +4539,8 @@ async fn context_recall_dry_is_python_truthy() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "THE GOAL"}),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(
             backend,
@@ -4563,7 +4569,8 @@ async fn an_empty_json_recall_answer_stays_degraded() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "THE GOAL"}),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(backend, json!({"type": "context_recall"}))])
         .await
@@ -4590,7 +4597,8 @@ async fn a_numeric_why_is_its_python_str() {
             &kernel,
             &backend,
             json!({"role": "user", "content": "THE GOAL"}),
-        ).await;
+        )
+        .await;
         let r = kernel
             .send(vec![Item::new(backend, json!({"type": "context_recall"}))])
             .await
@@ -4616,7 +4624,8 @@ async fn a_scalar_expand_is_wrapped_like_python() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "THE GOAL"}),
-    ).await;
+    )
+    .await;
     let before = conversation(&kernel, &backend).await.len();
     let r = kernel
         .send(vec![Item::new(
@@ -4644,7 +4653,8 @@ async fn a_scalar_expand_is_wrapped_like_python() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "THE GOAL"}),
-    ).await;
+    )
+    .await;
     let r = kernel
         .send(vec![Item::new(backend, json!({"type": "context_recall"}))])
         .await
@@ -4757,9 +4767,16 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
     let _ = kernel
         .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
         .await;
-    put_row(&kernel, &backend, json!({"role": "user", "content": "hello"})).await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "hello"}),
+    )
+    .await;
     // the cache is warm, then a role-less note is appended straight to the store
-    let _ = crate::memory::load_history(&backend, &kernel, false).await.expect("store read");
+    let _ = crate::memory::load_history(&backend, &kernel, false)
+        .await
+        .expect("store read");
     let out = fantastic_kernel::with_sender(
         backend.clone(),
         kernel.send(vec![Item::new(
@@ -4774,7 +4791,9 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
 
     let calls = fantastic_kernel::test_support::rows_about(&kernel, &backend);
     assert!(
-        calls.iter().any(|r| r.get("kind").and_then(Value::as_str) == Some("call")),
+        calls
+            .iter()
+            .any(|r| r.get("kind").and_then(Value::as_str) == Some("call")),
         "the kernel must actually hold a call row: {calls:?}"
     );
     let stored = conversation(&kernel, &backend).await;
@@ -4785,17 +4804,26 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
         )),
         "execution rows reached the agent's key: {stored:?}"
     );
-    let hist = crate::memory::load_history(&backend, &kernel, false).await.expect("store read");
+    let hist = crate::memory::load_history(&backend, &kernel, false)
+        .await
+        .expect("store read");
     assert_eq!(
-        hist.iter().map(|r| r["content"].clone()).collect::<Vec<_>>(),
+        hist.iter()
+            .map(|r| r["content"].clone())
+            .collect::<Vec<_>>(),
         vec![json!("hello")],
         "only the turn is in the conversation"
     );
-    let behind = crate::memory::load_history(&backend, &kernel, true).await.expect("store read");
+    let behind = crate::memory::load_history(&backend, &kernel, true)
+        .await
+        .expect("store read");
     assert!(behind.iter().all(|r| r.get("role").is_some()));
     // …and grep still finds the note: it is memory.
     let g = kernel
-        .send(vec![Item::new(backend.clone(), json!({"type": "grep", "query": "vault code"}))])
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "grep", "query": "vault code"}),
+        )])
         .await
         .remove(0)
         .result;
@@ -4925,12 +4953,14 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "the codename is HALCYON"}),
-    ).await;
+    )
+    .await;
     put_row(
         &kernel,
         &backend,
         json!({"role": "assistant", "content": "noted"}),
-    ).await;
+    )
+    .await;
     assert_eq!(
         crate::memory::load_history(&backend, &kernel, false)
             .await
@@ -4953,7 +4983,9 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
         .and_then(Value::as_i64)
         .expect("the clear row's id");
 
-    let hist = crate::memory::load_history(&backend, &kernel, false).await.expect("store read");
+    let hist = crate::memory::load_history(&backend, &kernel, false)
+        .await
+        .expect("store read");
     assert_eq!(hist.len(), 1, "the view starts at the clear: {hist:?}");
     assert_eq!(hist[0].get("kind").and_then(Value::as_str), Some("clear"));
     let content = hist[0].get("content").and_then(Value::as_str).unwrap_or("");
@@ -5015,8 +5047,11 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
         &kernel,
         &backend,
         json!({"role": "user", "content": "hello again"}),
-    ).await;
-    let hist = crate::memory::load_history(&backend, &kernel, false).await.expect("store read");
+    )
+    .await;
+    let hist = crate::memory::load_history(&backend, &kernel, false)
+        .await
+        .expect("store read");
     assert_eq!(
         hist.last()
             .and_then(|r| r.get("content"))

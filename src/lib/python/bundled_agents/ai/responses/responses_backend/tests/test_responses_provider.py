@@ -16,7 +16,6 @@ import httpx
 import pytest
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 from responses_backend.provider import (
-    DEFAULT_ENDPOINT,
     KEY_VAR,
     RETRIES,
     ResponsesProvider,
@@ -128,6 +127,14 @@ async def test_budget_and_sampling_ride_the_body():
     assert json.loads(sink[0].content)["max_output_tokens"] == 64
 
 
+def test_sampling_may_not_override_what_the_provider_owns():
+    """`store:false` keeps the conversation ours and `model` is the record's — a
+    `sampling` key naming either is refused, not merged over it (audit d8)."""
+    for key in ("store", "model", "max_output_tokens"):
+        with pytest.raises(ValueError, match=key):
+            ResponsesProvider("http://x/v1/responses", "m", sampling={key: 1})
+
+
 async def test_thinking_is_wrapped_not_dropped():
     """A reasoning model splits its output; reading the output deltas alone returns a
     turn spent thinking as an EMPTY completion, killing the chain with no error."""
@@ -222,9 +229,9 @@ async def test_a_native_function_call_is_a_loud_error_not_a_silent_drop():
 
 async def test_missing_endpoint_model_or_key_fail_loud_naming_it(monkeypatch):
     with pytest.raises(RuntimeError, match="endpoint"):
-        await _drain(ResponsesProvider(endpoint=DEFAULT_ENDPOINT, model="m"))
+        await _drain(ResponsesProvider(endpoint="", model="m"))
     with pytest.raises(RuntimeError, match="model"):
-        await _drain(ResponsesProvider(endpoint=EP))
+        await _drain(ResponsesProvider(endpoint=EP, model=""))
     monkeypatch.delenv(KEY_VAR)
     with pytest.raises(RuntimeError, match=KEY_VAR):
         await _drain(ResponsesProvider(endpoint=EP, model="m"))

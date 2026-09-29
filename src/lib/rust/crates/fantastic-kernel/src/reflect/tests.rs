@@ -37,18 +37,6 @@ async fn bare_reflect(kernel: &Arc<Kernel>, agent: &Arc<Agent>, payload: &Value)
     r
 }
 
-const PRIMER_KEYS_GONE: [&str; 9] = [
-    "transports",
-    "primitive",
-    "envelope",
-    "universal_verb",
-    "binary_protocol",
-    "browser_bus",
-    "well_known",
-    "agent_count",
-    "available_bundles",
-];
-
 #[test]
 fn tree_node_includes_id_and_empty_children() {
     let a = mk_agent("leaf", Some(AgentId::from("p")));
@@ -59,7 +47,7 @@ fn tree_node_includes_id_and_empty_children() {
 }
 
 #[tokio::test]
-async fn root_reflect_is_uniform_no_primer_keys() {
+async fn root_reflect_is_uniform() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("kernel_state", None);
     kernel.register(Arc::clone(&root));
@@ -80,9 +68,6 @@ async fn root_reflect_is_uniform_no_primer_keys() {
     // No FANTASTIC_ENV / FANTASTIC_VERSION in the test process → host defaults.
     assert_eq!(v["env"], "host");
     assert!(v["version"].is_null());
-    for k in PRIMER_KEYS_GONE {
-        assert!(v.get(k).is_none(), "deleted primer key {k} still present");
-    }
 }
 
 #[tokio::test]
@@ -135,9 +120,6 @@ async fn child_reflect_is_uniform() {
     assert!(v.get("runtime").is_none());
     assert!(v.get("env").is_none());
     assert!(v.get("version").is_none());
-    for k in PRIMER_KEYS_GONE {
-        assert!(v.get(k).is_none());
-    }
 }
 
 #[tokio::test]

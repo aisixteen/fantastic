@@ -4,9 +4,8 @@
 > requires: `cargo build --release --bin fantastic_kernel`. `reflect`/`boot`
 > are stateless one-shots; `forward`/`watch_remote` need a LIVE remote
 > daemon serving `web_ws` over WS (boot a second `fantastic` on a free
-> port first — same live-daemon rule as ollama/terminal/web).
-> out-of-scope: SSH+WS transport (needs a real remote host + `full`
-> feature; covered by `ssh_runner`), MemoryTransport pair + the
+> port first — same live-daemon rule as ollama/web).
+> out-of-scope: MemoryTransport pair + the
 > `ingress_rule`/`egress_rule` gates (`deny_inbound_refuses_inbound_call`
 > / `password_gate_checks_inbound_and_presents_on_forward` /
 > `asymmetric_ingress_egress_via_engine` + the `authorizer::{ingress,egress}`
@@ -37,7 +36,7 @@ PORT_B=18190
 
 ```bash
 BR=$($FANTASTIC kernel_state create_agent handler_module=ws_bridge.tools \
-  transport=ws host=127.0.0.1 local_port=$PORT_B peer_id=wws | jq -r .id)
+  transport=ws host=127.0.0.1 port=$PORT_B peer_id=wws | jq -r .id)
 $FANTASTIC $BR reflect | jq -e '.transport == "ws" and .connected == false and .pending_count == 0 and .auth == "allow_all"'
 ```
 

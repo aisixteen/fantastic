@@ -426,3 +426,78 @@ async fn oracle_limit_coerces_like_python() {
     let r = call(&p, &k, &id, json!({"type": "ask", "question": "fact here"})).await;
     assert_eq!(r["answers"].as_array().expect("answers").len(), 6);
 }
+
+// ── slow ────────────────────────────────────────────────────────────────────
+
+/// The slow probe's reflect is python's, verb order included.
+#[tokio::test]
+async fn slow_reflect_is_pythons_bytes() {
+    let k = kernel();
+    let id = AgentId::from("slow");
+    let r = call(&SlowProbe::default(), &k, &id, json!({"type": "reflect"})).await;
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        serde_json::to_string(&json!({
+            "id": "slow",
+            "sentence": "Probe work: `slow` (never finishes by itself), `work` (counts), \
+                         `fail` (raises), `sleep` (takes `seconds`).",
+            "verbs": {
+                "slow": "sleeps for an hour — in flight until cancelled",
+                "work": "counts one run, returns {runs}",
+                "fail": "raises — a failed execution, a dead letter",
+                "started": "how many `slow` calls have started",
+                "sleep": "seconds:number (req) — sleeps that long, then returns {slept}",
+            },
+        }))
+        .unwrap()
+    );
+}
+
+/// `sleep` takes the stated time and echoes the value; a missing, boolean or
+/// negative `seconds` is refused naming the arg; `fail` raises python's class.
+#[tokio::test]
+async fn slow_sleep_work_and_fail_are_pythons() {
+    let k = kernel();
+    let id = AgentId::from("slow");
+    let p = SlowProbe::default();
+    let t0 = std::time::Instant::now();
+    let r = call(&p, &k, &id, json!({"type": "sleep", "seconds": 0.2})).await;
+    assert_eq!(r, json!({"slept": 0.2}));
+    assert!(t0.elapsed() >= std::time::Duration::from_millis(200));
+    assert_eq!(
+        call(&p, &k, &id, json!({"type": "sleep", "seconds": 0})).await,
+        json!({"slept": 0})
+    );
+    for bad in [json!(null), json!(true), json!(-1), json!("2")] {
+        let r = call(&p, &k, &id, json!({"type": "sleep", "seconds": bad})).await;
+        assert_eq!(
+            r,
+            json!({
+                "error": "slow_probe: sleep needs seconds, a non-negative number",
+                "reason": "bad_arg",
+                "arg": "seconds",
+            }),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        call(&p, &k, &id, json!({"type": "work"})).await,
+        json!({"runs": 1})
+    );
+    assert_eq!(
+        call(&p, &k, &id, json!({"type": "started"})).await,
+        json!({"started": 0})
+    );
+    let err = p
+        .handle(&id, &json!({"type": "fail"}), &k)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "RuntimeError: slow_probe: failed on purpose"
+    );
+    assert_eq!(
+        call(&p, &k, &id, json!({"type": "zap"})).await,
+        json!({"error": "slow_probe: unknown verb 'zap'", "reason": "unhandled"})
+    );
+}

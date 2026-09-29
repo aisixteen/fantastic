@@ -36,7 +36,6 @@ use serde_json::{Map, Number, Value};
 use yaml_rust2::parser::{Event, Parser};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
 
-
 /// What starts every stream document.
 pub const SEPARATOR: &str = "---\n";
 

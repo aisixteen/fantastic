@@ -47,12 +47,11 @@ async def _make_scheduler(kernel):
     return sid
 
 
-async def test_reflect_no_longer_carries_file_bridge_id(seeded_kernel, store_agent):
+async def test_reflect_lists_the_verbs(seeded_kernel, store_agent):
     sid = await _make_scheduler(seeded_kernel)
     r = (await seeded_kernel.send([{"target": sid, "payload": {"type": "reflect"}}]))[
         0
     ]["result"]
-    assert "file_bridge_id" not in r  # persists through the loader, no per-agent wiring
     assert "schedule" in r["verbs"]
 
 

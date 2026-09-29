@@ -117,6 +117,18 @@ where
     REMOTE_CALLER.scope(Some((leg, address)), fut).await
 }
 
+/// The foreign `<guid>|<agent>` a bridge leg is relaying RIGHT NOW, when that
+/// leg is `sender` — what the gate judges a relayed call's INGRESS by (never the
+/// leg). Python reads `_remote_caller` at the gate the same way.
+pub(crate) fn relayed_caller(sender: &AgentId) -> Option<String> {
+    REMOTE_CALLER
+        .try_with(|r| r.clone())
+        .ok()
+        .flatten()
+        .filter(|(leg, _)| leg == sender)
+        .map(|(_, address)| address)
+}
+
 /// The qualified `<guid>|<agent id>` of a caller on ANOTHER kernel, when this
 /// dispatch was relayed by a bridge leg that carried it; `None` otherwise.
 /// Python `current_remote_caller()`.
@@ -610,8 +622,7 @@ impl Kernel {
             }
         }
 
-        // 9. resolve — `"kernel"` aliases to the root, else through
-        // `well_known` (C35) then a literal id.
+        // 9. resolve — `"kernel"` names the root, else a literal id.
         let Some(target) = self.resolve_target(item.target.as_str()) else {
             return Launched::Settled(Outcome::refused(crate::refusal::unknown_agent(
                 item.target.as_str(),
@@ -635,9 +646,9 @@ impl Kernel {
         let caller = current_sender();
 
         // C88: the UNNAMED `kernel` reflect fast path. python checks the
-        // LITERAL alias the caller sent (`target_id == "kernel"`, not the
-        // resolved root id — a call spelling the root's real id directly, or
-        // any other alias that also resolves to it, does NOT take this
+        // LITERAL reserved address the caller sent (`target_id == "kernel"`,
+        // not the resolved root id — a call spelling the root's real id
+        // directly does NOT take this
         // path), applied AFTER the gate so it is authorized like any other
         // reflect (`_agent.py:846`). A NAMED or JOINING send (an `id` in the
         // payload) still opens the ledger (`_agent.py:816`) — this fast path
@@ -1269,8 +1280,7 @@ impl Kernel {
         if target_id.as_str().is_empty() {
             return (crate::refusal::missing("send", "target"), None);
         }
-        // Resolve target: `"kernel"` aliases to the root, else through
-        // `well_known` (C35) then a literal id.
+        // Resolve target: `"kernel"` names the root, else a literal id.
         let Some(target) = self.resolve_target(target_id.as_str()) else {
             // The SAME refusal the text channel gives — coded, and carrying the
             // live id index so the caller can see what it could have meant.
@@ -1339,10 +1349,20 @@ impl Kernel {
     /// [`Self::emit`] for a payload carrying raw bytes — a `read_stream` chunk a
     /// bridge re-emits from a remote watch, which must reach a local watcher
     /// WHOLE. Same no-op rule for a non-agent id.
+    ///
+    /// GATED LIKE A SEND when the emitter is another agent (audit 2026-09-28,
+    /// a16): the emitter's `can_call` and the target's `callable_by` must both
+    /// allow verb `emit`. Not privileged — the baseline keeps emits to self,
+    /// parent and children. A denied emit is dropped; an emit has no reply.
     pub async fn emit_item(self: &Arc<Self>, target_id: &AgentId, item: crate::inbox::InboxItem) {
         let Some(target) = self.agents.get(target_id).map(|e| Arc::clone(&e)) else {
             return;
         };
+        if let Some(orig) = current_sender() {
+            if orig != *target_id && self.gate(&orig, "emit", &target, &item.payload).is_some() {
+                return;
+            }
+        }
         self.fanout(&target, "emit", &item).await;
     }
 
@@ -1606,7 +1626,7 @@ fn dispatch(
         // it carries a handler_module (the root loader): its persistence verbs
         // (load_tree / persist_record / boot) still route to the bundle below,
         // but `reflect <root>` is the kernel's own identity + tree, matching the
-        // `kernel` alias. Python `_agent.py`: `if verb == "reflect" and
+        // `kernel` address. Python `_agent.py`: `if verb == "reflect" and
         // self.parent is None`.
         if verb == "reflect" && target.parent_id.is_none() {
             return crate::reflect::reflect_identity(&target);

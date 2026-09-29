@@ -249,12 +249,44 @@ func pathSize(_ path: String) -> Int64? {
 /// `static_loader` prints either one verbatim.
 public func fsReadText(_ root: String, _ path: String, base: String) throws(FsError) -> String {
     let target = try fsResolve(root, path, base: base)
-    let data = try fsReadBytes(target)
+    let data = try readWhole(target)
     if let bad = pyUtf8DecodeError(data) { throw FsError(bad) }
     return String(decoding: data, as: UTF8.self)
 }
 
-private func fsReadBytes(_ target: String) throws(FsError) -> Data {
+/// python `fs.read_bytes` — the whole file.
+public func fsReadBytes(_ root: String, _ path: String, base: String) throws(FsError) -> Data {
+    try readWhole(try fsResolve(root, path, base: base))
+}
+
+/// python `fs.write_bytes` (atomic) — whole-file write through a tmp sibling
+/// (`<name>.tmp`) and an atomic rename; parent dirs created.
+public func fsWriteBytes(_ root: String, _ path: String, _ data: Data, base: String)
+    throws(FsError)
+{
+    let target = try fsResolve(root, path, base: base)
+    try pyMkdirParents(parentPath(target))
+    let tmp = target + ".tmp"
+    let fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0o666)
+    if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }
+    var written = 0
+    while written < data.count {
+        let n = data.withUnsafeBytes { raw -> Int in
+            write(fd, raw.baseAddress!.advanced(by: written), data.count - written)
+        }
+        if n < 0 {
+            let e = errno
+            close(fd)
+            throw FsError(osErrorStr(e))
+        }
+        if n == 0 { break }
+        written += n
+    }
+    close(fd)
+    if rename(tmp, target) != 0 { throw FsError(osErrorStr(errno, tmp, target)) }
+}
+
+private func readWhole(_ target: String) throws(FsError) -> Data {
     let fd = open(target, O_RDONLY)
     if fd < 0 { throw FsError(osErrorStr(errno, target)) }
     defer { close(fd) }
@@ -340,7 +372,7 @@ public func fsWriteChunk(
 
 /// python `fs.list_dir` — the dir's entries as resolved absolute paths, sorted
 /// the way `sorted(Path...)` sorts them (by path string, code point order).
-/// Hidden-filtering is an AGENT policy, not a disk concern.
+/// Exposure is the AGENT's `allow` list, not a disk concern.
 public func fsListDir(_ root: String, _ path: String, base: String) throws(FsError) -> [String] {
     let target = try fsResolve(root, path, base: base)
     return try listNames(target).sorted {

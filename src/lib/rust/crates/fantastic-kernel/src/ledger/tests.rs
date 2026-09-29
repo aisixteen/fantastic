@@ -348,7 +348,15 @@ fn an_unnamed_settle_comes_back_as_what_it_kept() {
     assert!(l.put_settled(301, &call_row(301, "desk", 0, None), &oc, 1));
     assert!(l.is_done(301));
     // Joined by its int id, the recalled outcome IS the kept digest.
-    match l.open(301, &json!(301), &tid("desk"), &json!({"type": "probe"}), 0, None, None) {
+    match l.open(
+        301,
+        &json!(301),
+        &tid("desk"),
+        &json!({"type": "probe"}),
+        0,
+        None,
+        None,
+    ) {
         Opened::Settled(o, _) => assert_eq!(o.result, json!({"bytes": 12})),
         _ => panic!("a recalled execution returns what the store kept"),
     }

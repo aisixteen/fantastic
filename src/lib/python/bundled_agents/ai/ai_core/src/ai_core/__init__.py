@@ -23,7 +23,7 @@ ollama / anthropic / nvidia_nim backends. Holds:
 
 from __future__ import annotations
 
-from .core import CANCEL_DOC, build, on_cancel
+from .core import CANCEL_DOC, build, on_cancel, required_meta
 from .provider import Provider
 
-__all__ = ["CANCEL_DOC", "Provider", "build", "on_cancel"]
+__all__ = ["CANCEL_DOC", "Provider", "build", "on_cancel", "required_meta"]

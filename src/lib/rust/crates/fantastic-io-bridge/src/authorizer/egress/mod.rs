@@ -19,7 +19,7 @@ pub use password::Password;
 pub use silent::Silent;
 
 /// Resolve an egress rule spec (string | `{type, env}` | null) BY NAME. Absent ⇒
-/// `Silent` (back-compat — present nothing). Unknown type ⇒ `Err`.
+/// `Silent` (present nothing). Unknown type ⇒ `Err`.
 pub fn resolve(spec: Option<&Value>) -> Result<Arc<dyn EgressRule>, String> {
     let (name, token_env) = parse_spec(spec)?;
     let rule: Arc<dyn EgressRule> = match name.as_deref() {

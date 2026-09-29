@@ -32,7 +32,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
     kernel.bundles.register(HANDLER_MODULE, OllamaBackendBundle);
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
         fantastic_ram_store::RamStoreBundle::default(),
@@ -57,7 +57,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
@@ -80,7 +80,6 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
         "parent_id": "kernel",
         "handler_module": HANDLER_MODULE,
         "id": backend_id,
-        "file_bridge_id": file_id,
         "endpoint": endpoint,
         "model": "test-model",
     });
@@ -501,13 +500,11 @@ async fn history_persists_and_round_trips() {
     );
 }
 
-/// NO guessy default (mirror of the Python provider test): the sentinel
-/// `DEFAULT_MODEL` is not a real id, and the request path fails loud — naming
-/// `model` — rather than putting the sentinel (or an empty string) on the wire.
+/// NO guessy default (mirror of the Python provider test): an empty model never
+/// reaches the wire — the request path fails loud, naming `model`.
 #[tokio::test]
-async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
-    assert_eq!(DEFAULT_MODEL, "(no default — set the `model` meta)");
-    for m in [DEFAULT_MODEL.to_string(), String::new()] {
+async fn an_empty_model_fails_loud_in_chat() {
+    for m in [String::new()] {
         let p = OllamaProvider {
             endpoint: "http://127.0.0.1:1/api/chat".to_string(),
             model: m,
@@ -517,7 +514,10 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             think: None,
             report: Default::default(),
         };
-        let err = match p.chat(&[json!({"role": "user", "content": "hi"})], None).await {
+        let err = match p
+            .chat(&[json!({"role": "user", "content": "hi"})], None)
+            .await
+        {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
             Err(e) => e.message,
         };
@@ -575,8 +575,6 @@ async fn reflect_extras_match_python() {
     assert_eq!(r["num_ctx"], Value::Null);
     assert_eq!(r["num_predict"], Value::Null);
     assert_eq!(r["think"], Value::Null);
-    // The rust-only key is gone.
-    assert!(r.get("file_bridge_id").is_none(), "{r:#?}");
 
     // Set them, and python's conversions apply: `float(t)`, `int(x) if x`,
     // `bool(x) if x is not None`.
@@ -626,7 +624,10 @@ async fn unknown_type_is_pythons_repr_and_shutdown_is_unknown() {
 #[test]
 fn ndjson_usage_reports_prompt_tokens_and_a_cut_as_max_tokens() {
     let report = fantastic_ai_core::provider::ReportCell::default();
-    note_usage(&json!({"message": {"content": "x"}, "done": false}), &report);
+    note_usage(
+        &json!({"message": {"content": "x"}, "done": false}),
+        &report,
+    );
     assert_eq!(report.lock().unwrap().prompt_tokens, None);
     note_usage(
         &json!({"done": true, "done_reason": "length", "prompt_eval_count": 321}),

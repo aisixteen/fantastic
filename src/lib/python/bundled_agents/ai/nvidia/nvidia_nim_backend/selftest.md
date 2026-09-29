@@ -2,9 +2,10 @@
 
 > scopes: kernel, ai, persistence, http
 > requires: `uv sync`; live network for any test marked AI.
-> Pre-flight: an `NVAPI_KEY` env var with an `nvapi-...` key from
-> https://build.nvidia.com (free signup, ~40 RPM/model rate limit).
-> If `NVAPI_KEY` is absent, AI tests are skipped (the rest still run).
+> Pre-flight: `NVIDIA_API_KEY` in the kernel's environment (an `nvapi-...` key from
+> https://build.nvidia.com, ~40 RPM/model), and ASK the user for the endpoint + model
+> (both REQUIRED on the record — nothing is guessed). Without the key, AI tests are
+> skipped (the rest still run).
 > out-of-scope: chat UI flow (now the TS `ai_view` in `ts/`)
 
 Rate-limit handling: on HTTP 429 BEFORE any chunk has been streamed,
@@ -15,17 +16,15 @@ second 429 surfaces a clean error
 and propagates without retry to avoid duplicate tokens.
 
 NVIDIA NIM-backed LLM agent (OpenAI-compatible). Same surface as
-`ollama_backend` (send/history/status/recall/context_status) plus
-`set_api_key`/`clear_api_key`. There is no `interrupt` verb — an in-flight
-`send` is a kernel task, killed with the universal `ps` → `cancel` system
-verbs (the bundle's `on_cancel` closes the turn out). The api_key is stored as a sidecar
-file at `.fantastic/agents/<id>/api_key` via `file_bridge_id` —
-never in `agent.yaml`, never returned by reflect.
+`ollama_backend` (send/history/status/recall/context_status/…). There is no
+`interrupt` verb — an in-flight `send` is a kernel task, killed with the universal
+`ps` → `cancel` system verbs (the bundle's `on_cancel` closes the turn out). The key
+is read from `NVIDIA_API_KEY` in the kernel's environment at call time — never on
+the record, never returned by reflect (`has_api_key` is a boolean).
 
 ## Pre-flight
 
 ```bash
-cd new_codebase
 rm -rf .fantastic
 PORT=18904
 pkill -9 -f "fantastic" 2>/dev/null
@@ -53,8 +52,9 @@ asyncio.run(main())
 PY
 }
 
-FA=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"file_bridge.tools","root":".fantastic","ingress_rule":"allow_all_ingress"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-NB=$(call kernel_state "{\"type\":\"create_agent\",\"handler_module\":\"nvidia_nim_backend.tools\",\"file_bridge_id\":\"$FA\"}" \
+MEM=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"ram_store.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+# ENDPOINT / MODEL: what the user named in pre-flight.
+NB=$(call kernel "{\"type\":\"create_agent\",\"parent_id\":\"kernel_state\",\"handler_module\":\"nvidia_nim_backend.tools\",\"endpoint\":\"$ENDPOINT\",\"model\":\"$MODEL\",\"memory_store_id\":\"$MEM\",\"can_call\":{\"$MEM\":\"*\"}}" \
   | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 ```
 
@@ -65,87 +65,60 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/n.log
 
 ## Tests
 
-### Test 1: `_send` failfast when no api_key (no `file_bridge_id` ⇒ no sidecar)
-
-History no longer needs `file_bridge_id` (it auto-mounts a chat
-the chat sidecar through the loader), but the nvidia api_key sidecar still
-rides `file_bridge_id` — with none wired there is no key, so send
-failfasts on the missing provider before any network call.
+### Test 1: no endpoint/model on the record ⇒ send fails loud naming the field
 
 ```bash
 NB2=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $NB2 '{"type":"send","text":"hi"}' | python -m json.tool
 ```
-Expected: `{"error":"nvidia_nim_backend: api_key not set; call set_api_key first", ...}`.
+Expected: an error naming `endpoint` (the first missing field) — nothing is guessed.
 
-### Test 2: `set_api_key` failfast when `file_bridge_id` unset
+### Test 2: no key ⇒ send fails loud naming `NVIDIA_API_KEY`
 
-```bash
-call $NB2 '{"type":"set_api_key","api_key":"nvapi-x"}' | python -m json.tool
-```
-Expected: `{"error":"nvidia_nim_backend: file_bridge_id required"}`.
-
-### Test 3: `_send` failfast when api_key not set
+Run with `NVIDIA_API_KEY` unset in the kernel's environment.
 
 ```bash
 call $NB '{"type":"send","text":"hi"}' | python -m json.tool
 ```
-Expected: `{"error":"nvidia_nim_backend: api_key not set; call set_api_key first"}`.
+Expected: `{"error":"nvidia_nim_backend: no api key — set NVIDIA_API_KEY", …}`.
 
-### Test 4: `set_api_key` writes sidecar; `reflect.has_api_key` flips
-
-Skip if `NVAPI_KEY` is unset.
+### Test 3: `reflect.has_api_key` reports the key, never its value
 
 ```bash
-[ -n "$NVAPI_KEY" ] && {
-  call $NB "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}" | python -m json.tool
-
-  test -f ".fantastic/agents/$NB/api_key" && echo "key file present"
-  call $NB '{"type":"reflect"}' | python -c "import json,sys;d=json.load(sys.stdin);print('has_api_key:',d['has_api_key'])"
-} || echo "SKIPPED (no NVAPI_KEY)"
+call $NB '{"type":"reflect"}' | python -c "import json,sys;d=json.load(sys.stdin);print('has_api_key:',d['has_api_key']);print('leak:', 'nvapi-' in json.dumps(d))"
 ```
-Expected: `{"ok": true}`, sidecar exists, `has_api_key: True`. The
-reflect blob never contains the key value.
+Expected: `has_api_key` matches whether the kernel has the env var; `leak: False`.
 
 ### Test 5: live single-shot generation (AI)
 
-Skip if `NVAPI_KEY` is unset.
+Skip if `NVIDIA_API_KEY` is unset.
 
 ```bash
-[ -n "$NVAPI_KEY" ] && {
+[ -n "$NVIDIA_API_KEY" ] && {
   call $NB '{"type":"send","text":"reply with the single word: ok","client_id":"selftest"}' \
     | python -c "import json,sys;d=json.load(sys.stdin);print(repr(d.get('final','')))"
-} || echo "SKIPPED (no NVAPI_KEY)"
+} || echo "SKIPPED (no NVIDIA_API_KEY)"
 ```
 Expected: a string containing `ok` (case-insensitive). Verifies the
 SSE stream + auth + model selection round-trip.
 
 ### Test 6: per-client chat threads persist
 
-Skip if `NVAPI_KEY` is unset.
+Skip if `NVIDIA_API_KEY` is unset.
 
-History persists THROUGH the loader in a mounted chat JSONL sidecar (the AI
-writes no disk itself); read each thread back via the `history` verb.
+The conversation is rows in the memory store the record names (the AI writes no
+disk itself); read each thread back via the `history` verb.
 
 ```bash
-[ -n "$NVAPI_KEY" ] && {
+[ -n "$NVIDIA_API_KEY" ] && {
   call $NB '{"type":"send","text":"my color is blue","client_id":"alice"}' >/dev/null
   call $NB '{"type":"send","text":"my color is red","client_id":"bob"}' >/dev/null
   call $NB '{"type":"history","client_id":"alice"}' | python -c "import json,sys;print('alice:', json.load(sys.stdin)['messages'][0]['content'])"
   call $NB '{"type":"history","client_id":"bob"}'   | python -c "import json,sys;print('bob:',   json.load(sys.stdin)['messages'][0]['content'])"
-} || echo "SKIPPED (no NVAPI_KEY)"
+} || echo "SKIPPED (no NVIDIA_API_KEY)"
 ```
 Expected: alice's thread opens with "my color is blue", bob's with "my
 color is red" — distinct per-client threads.
-
-### Test 7: `clear_api_key` removes sidecar; subsequent send refuses
-
-```bash
-call $NB '{"type":"clear_api_key"}' | python -m json.tool
-test -f ".fantastic/agents/$NB/api_key" && echo "FAIL: still present" || echo "key file removed"
-call $NB '{"type":"send","text":"hi"}' | python -c "import json,sys;d=json.load(sys.stdin);print('error' in d and 'api_key' in d['error'])"
-```
-Expected: `{"ok": true, "deleted": true}`, file gone, `True`.
 
 ### Test 8: status verb + reflect document the new pipeline
 
@@ -163,10 +136,10 @@ Expected: idle snapshot `{generating:false, current:null, mine_pending:[], other
 
 ### Test 9: status events fire across phase transitions (AI)
 
-Skip if `NVAPI_KEY` is unset.
+Skip if `NVIDIA_API_KEY` is unset.
 
 ```bash
-[ -n "$NVAPI_KEY" ] && uv run --active python -c "
+[ -n "$NVIDIA_API_KEY" ] && uv run --active python -c "
 import asyncio, json, os, websockets
 PORT = '$PORT'
 NB = '$NB'
@@ -189,7 +162,7 @@ async def main():
         print('phases:', phases)
         print('PASS' if ok else 'FAIL')
 asyncio.run(main())
-" || echo "SKIPPED (no NVAPI_KEY)"
+" || echo "SKIPPED (no NVIDIA_API_KEY)"
 ```
 Expected: `PASS`. Sequence starts with `thinking`, contains
 `streaming`, ends with `done`. If the model emits a tool_call on this
@@ -203,40 +176,15 @@ selftest is informational — if you hit a real 429 in normal use, the
 chat UI will pulse a "rate-limited; waiting Ns" hint in the status
 footer. See `bundled_agents/ai/nvidia/nvidia_nim_backend/tests/test_nvidia_nim_handler.py::test_status_thinking_during_429_wait`.
 
-### Test 11: chat UI integration via the TS frontend (ai_view)
-
-Skip if `NVAPI_KEY` is unset. Manual / browser-based.
-
-The chat UI is now `ai_view` — a TS view-agent in `ts/` that renders
-INLINE in the canvas, fronting any backend answering
-send/history/status. The backend surface is covered by Tests
-5-10; this is the end-to-end browser check.
-
-```bash
-# A NIM backend on the host; the TS ai_view (frontend) fronts it by id
-# over the bridge and renders the chat inline.
-NB2=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"nvidia_nim_backend.tools","provider":"nvidia_nim"}' \
-  | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-call kernel_state "{\"type\":\"update_agent\",\"id\":\"$NB2\",\"file_bridge_id\":\"$FA\"}"
-call $NB2 "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}"
-echo "open the TS canvas in a browser, point ai_view at $NB2 — see ts/SERVE.md"
-```
-Expected: the inline chat view loads, typing streams tokens, stop button
-or ESC cancels mid-stream (`ps` → `cancel` on the in-flight send task).
-ai_view is provider-agnostic.
-
 ## Summary
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | send failfast w/o api_key (no file_bridge_id ⇒ no sidecar) | |
-| 2 | set_api_key failfast w/o file_bridge_id | |
-| 3 | send failfast w/o api_key | |
-| 4 | set_api_key writes sidecar, flips has_api_key, reflect doesn't leak key | |
+| 1 | send fails loud w/o endpoint/model | |
+| 2 | send fails loud w/o NVIDIA_API_KEY | |
+| 3 | reflect.has_api_key, no key leak | |
 | 5 (AI) | live single-shot generation | |
-| 6 (AI) | per-client chat persistence | |
-| 7 | clear_api_key + send refuses | |
+| 6 (AI) | per-client chat threads | |
 | 8 | status verb idle snapshot + reflect lists status | |
 | 9 (AI) | status events fire across phase transitions | |
 | 10 (unit-only) | rate-limit retry → status(thinking, waiting_on='rate_limit') | |
-| 11 (manual) | TS ai_view drives nvidia_nim_backend | |

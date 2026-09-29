@@ -11,7 +11,7 @@ function withRoot(): Kernel {
   return k;
 }
 
-test("'kernel' alias resolves to the root agent", async () => {
+test("the reserved 'kernel' address resolves to the root agent", async () => {
   const k = withRoot();
   const viaAlias = ((await k.send([{ target: "kernel", payload: { type: "reflect" } }]))[0]!.result) as Payload;
   const viaId = ((await k.send([{ target: "kernel_state", payload: { type: "reflect" } }]))[0]!.result) as Payload;

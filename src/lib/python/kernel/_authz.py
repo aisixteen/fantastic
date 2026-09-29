@@ -13,13 +13,26 @@ The model is **fully-gated, two-sided, from-above-only**:
   this module — the gate skips it. That is the one trust boundary, not a carve-out.
 
 Both `can_call` and `callable_by` are grant maps of the same shape,
-`{ id | token : ["<verb>", …] | "*" }`. Tokens resolve relative to the grant's
+`{ id | token : ["<verb>", …] | "*" }`. An id is a local agent id (never
+containing `|`) or a FOREIGN agent `<guid>|<agent>` — a call relayed by a bridge
+leg pinned to that peer; `<guid>|*` names every agent of that one kernel. A
+foreign caller is judged on the TARGET's `callable_by` by its qualified id; the
+structural tokens never match it, so the baseline gives foreign agents nothing. Tokens resolve relative to the grant's
 HOLDER (the sender for `can_call`, the target for `callable_by`):
 
   - `$self`     → the holder's own id
   - `$parent`   → the holder's parent id
   - `$children` → the holder's direct children (set membership)
   - `$loader`   → the persistence root (rarely named; not in the baseline)
+  - `$subtree:<X>` → X or any LIVE descendant of X, resolved at call time
+    (callable_by ONLY — a target accepting a whole subtree that is spawned
+    dynamically, so nobody has to name each member; never a foreign id)
+
+A `can_call` value may also be a HERITABLE entry,
+`{<target id>: {"verbs": [...], "for": "descendants"}}`: it reaches for the
+holder's DESCENDANTS, never for the holder itself — the egress half for agents
+spawned under an owner that must not hold the reach itself. The egress check
+walks the sender's ancestors for one when the sender's own `can_call` refuses.
 
 The baseline stamped + MERGED on every `create_agent`, on BOTH fields, is
 `{$self:*, $parent:*, $children:*}` — reach/accept your own subtree and your
@@ -31,13 +44,18 @@ granter's own `can_call`). An agent can NEVER raise its own authority
 (`update_agent` on its own `can_call`/`callable_by` is refused) — enforced at the
 gate, not here.
 
-PRIVILEGED verbs (`create_agent`/`delete_agent`/`update_agent`) are never covered
-by a wildcard — only an explicit list entry names them — EXCEPT when the other end
-is the holder itself (forking/acting on your OWN subtree is baseline).
+PRIVILEGED verbs (the tree mutators, the bulk reads, the kernel's lifecycle and
+task controls, the loader's record verbs) are never covered by a wildcard under a
+STRUCTURAL token (`$self`/`$parent`/`$children`/`$loader`/`$subtree:<X>`) or in a
+heritable entry — EXCEPT when the other end is the holder itself (acting on your
+OWN subtree is baseline). A NAMED verb covers one. A `*` under a NAMED id is the
+operator's own statement and covers everything, privileged verbs included: whoever
+writes it owns it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 
@@ -67,13 +85,13 @@ DEFAULT_CALLABLE_BY: dict[str, object] = {
     "$children": "*",
 }
 
-# Structural graph mutation. PRIVILEGED: a wildcard never satisfies these — they
-# must be named explicitly — so "talk to your parent" can never silently become
-# "mutate the graph through your parent". (Except when acting on your own subtree,
-# where the holder == the other end.)
-# Verbs a WILDCARD never covers — they must be named explicitly, because a
-# wildcard grant is a statement about REACH and these are statements about
-# AUTHORITY or about BULK READS.
+# Verbs a STRUCTURAL wildcard never covers (`$parent: "*"` and the other tokens —
+# the baseline the kernel stamps on every agent). Under a token they must be named
+# explicitly, because the baseline is a statement about REACH and these are
+# statements about AUTHORITY or about BULK READS: "talk to your parent" can never
+# silently become "mutate the graph / stop the kernel / kill any task through your
+# parent". (Except when acting on your own subtree, where the holder == the other
+# end.) A `*` under a NAMED id covers them — that grant is the operator's own.
 #
 # The mutators are here because they change the tree. `state_subscribe` is here
 # because its operand is the WHOLE tree: the stream carries every send's sender,
@@ -87,14 +105,54 @@ PRIVILEGED_VERBS: frozenset[str] = frozenset(
         "delete_agent",
         "update_agent",
         "state_subscribe",
-        # HYDRATION's pair — reading a conversation WHOLE and writing one into
-        # an agent. `messages` is the grantable read (digests, no bodies); these
-        # two are what a loader does from above, so a wildcard must never carry
-        # them: only a grant that NAMES them opens either.
-        "rows_read",
-        "rows_write",
+        # A file_bridge's EXPOSURE: `allow` widens what the bridge serves,
+        # `disallow` narrows it. Under the baseline alone any parent or child
+        # could `allow .` and reopen the deny-all (audit 2026-09-28).
+        "allow",
+        "disallow",
+        # The kernel's LIFECYCLE and TASK CONTROLS, answered by the root. Under the
+        # baseline alone, every direct child of the root could stop the kernel or
+        # kill ANY task (audit 2026-09-28). `ledger` is the bulk read of every
+        # execution; `ack_deadletter` retires one.
+        "kernel_start",
+        "kernel_stop",
+        "shutdown_agents",
+        "ps",
+        "cancel",
+        "ledger",
+        "ack_deadletter",
+        # The LOADER's record verbs — they write, delete and read the persisted
+        # tree, grants included.
+        "persist_record",
+        "forget_record",
+        "load_tree",
     }
 )
+
+# The structural tokens — the baseline's vocabulary. A privileged verb loses a
+# wildcard's cover only under one of these (and under a `$subtree:<X>` key).
+STRUCTURAL_TOKENS: frozenset[str] = frozenset(
+    {"$self", "$parent", "$children", "$loader"}
+)
+
+# `$subtree:<X>` — X or any live descendant of X. callable_by ONLY.
+SUBTREE_PREFIX = "$subtree:"
+
+# A heritable `can_call` entry's one audience.
+HERITABLE_FOR = "descendants"
+
+
+def is_heritable(value: object) -> bool:
+    """A heritable `can_call` entry: exactly `{"verbs": [...], "for": "descendants"}`."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"verbs", "for"}
+        and value.get("for") == HERITABLE_FOR
+        and isinstance(value.get("verbs"), list)
+        and bool(value["verbs"])
+        and all(isinstance(v, str) for v in value["verbs"])
+    )
+
 
 # The remedy shown on any denial: authority descends, it is never self-raised.
 _FROM_ABOVE = (
@@ -109,6 +167,8 @@ def _verb_allowed(grant, verb: str, privileged: bool) -> bool:
     """A grant value is `"*"` (any verb) or a list of verb names (which may itself
     contain `"*"`). A PRIVILEGED verb loses its wildcard cover — only an explicit
     list entry names it."""
+    if isinstance(grant, dict):
+        return False  # a heritable entry never grants its HOLDER
     if privileged:
         return isinstance(grant, (list, tuple)) and verb in grant
     if grant == "*":
@@ -128,6 +188,7 @@ def authorize_call(
     holder_children: frozenset[str] | set[str] | None = None,
     loader_id: str | None = None,
     enforce_privileged: bool = True,
+    in_subtree: Callable[[str, str], bool] | None = None,
 ) -> Decision:
     """One matching engine, used BOTH ways. `grant` is the holder's grant map
     (`can_call` for egress, `callable_by` for ingress); `other_id` is the id at the
@@ -140,6 +201,10 @@ def authorize_call(
     who may REACH a mutation. On the INGRESS side the escalation is already blocked
     at egress, so a callee's `$children:*` ("I trust my own subtree") legitimately
     accepts a privileged verb; the gate passes `enforce_privileged=False` there.
+
+    `in_subtree(other_id, x)` answers "is other_id x or a live descendant of x" —
+    the caller's live tree, asked at call time; absent ⇒ `$subtree:` keys match
+    nothing.
     """
     grant = grant or {}
     if not isinstance(grant, dict):
@@ -150,8 +215,9 @@ def authorize_call(
         # writer's job.
         return Decision(False)
     kids = holder_children or frozenset()
-    # Privileged verbs lose wildcard cover UNLESS the other end is the holder
-    # itself (acting on your own subtree is baseline, not escalation) — egress only.
+    # Privileged verbs lose a STRUCTURAL wildcard's cover UNLESS the other end is
+    # the holder itself (acting on your own subtree is baseline, not escalation) —
+    # egress only. A named id's `*` keeps its cover (checked per key below).
     privileged = (
         enforce_privileged and verb in PRIVILEGED_VERBS and other_id != holder_id
     )
@@ -164,10 +230,40 @@ def authorize_call(
             matched = other_id == holder_parent
         elif key == "$loader":
             matched = other_id == loader_id
+        elif key.startswith(SUBTREE_PREFIX):
+            x = key[len(SUBTREE_PREFIX) :]
+            matched = (
+                in_subtree is not None
+                and bool(x)
+                and "|" not in other_id
+                and in_subtree(other_id, x)
+            )
         elif key.startswith("$"):
             matched = False
-        else:  # literal id
+        elif key.endswith("|*"):
+            # every agent of ONE foreign kernel: `<guid>|*` (a local id never
+            # carries `|`, so this can only ever match a foreign caller)
+            matched = other_id.startswith(key[:-1])
+        else:  # literal id (a local id, or a foreign `<guid>|<agent>`)
             matched = key == other_id
-        if matched and _verb_allowed(g, verb, privileged):
+        structural = key in STRUCTURAL_TOKENS or key.startswith(SUBTREE_PREFIX)
+        if matched and _verb_allowed(g, verb, privileged and structural):
+            return ALLOW
+    return Decision(False)
+
+
+def authorize_heritable(
+    ancestor_grants: Iterable[dict], verb: str, target_id: str
+) -> Decision:
+    """The heritable half of EGRESS: may a sender call `target_id` through a
+    heritable `can_call` entry one of its ANCESTORS holds? `ancestor_grants` is
+    their `can_call` maps, nearest first. A NAMED verb covers a privileged one;
+    `*` covers only an ordinary verb. First allow wins."""
+    for grant in ancestor_grants:
+        entry = (grant or {}).get(target_id) if isinstance(grant, dict) else None
+        if not is_heritable(entry):
+            continue
+        verbs = entry["verbs"]
+        if verb in verbs or ("*" in verbs and verb not in PRIVILEGED_VERBS):
             return ALLOW
     return Decision(False)

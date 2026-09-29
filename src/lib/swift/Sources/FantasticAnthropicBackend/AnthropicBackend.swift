@@ -26,38 +26,27 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "anthropic_backend.tools"
 
-/// The API's own default host. An `endpoint` on the record overrides it — and
-/// MUST, for any proxy: without it the record falls back here while carrying
-/// whatever key the run exported, which is a 401 the moment that key belongs to
-/// a different host.
-public let DEFAULT_ENDPOINT = "https://api.anthropic.com/v1/messages"
-
-/// The variables that carry the key, in python's order (`provider.py`).
-/// Named in the failure text so an unwired connector says what to set.
-let KEY_VARS = ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY"]
+/// The ONE variable that carries the key (`provider.py`). Named in the failure
+/// text so an unwired connector says what to set.
+let KEY_VAR = "ANTHROPIC_API_KEY"
 
 /// Read the key from the environment. Nothing else is consulted: not the agent
 /// record, not a sidecar, not settings.
 ///
-/// Python's `os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")`
-/// — an EMPTY variable is no key, and the value is used as it stands.
+/// Python's `os.environ.get("ANTHROPIC_API_KEY")` — an EMPTY variable is no key,
+/// and the value is used as it stands.
 func readApiKey() -> String? {
-    for v in KEY_VARS {
-        if let raw = ProcessInfo.processInfo.environment[v], !raw.isEmpty { return raw }
+    guard let raw = ProcessInfo.processInfo.environment[KEY_VAR], !raw.isEmpty else {
+        return nil
     }
-    return nil
+    return raw
 }
 
 /// What an unwired connector RAISES, inside the turn (`provider.py:112-119`).
 /// Not a refusal body: python raises here, so the caller's settle reads
 /// `{error:"RuntimeError: …", raised:true}` and the status event `str(e)`.
-let MISSING_KEY_ERROR = "ANTHROPIC_KEY not set in environment (.env)"
+let MISSING_KEY_ERROR = "\(KEY_VAR) not set in environment (.env)"
 
-/// NO guessy default (by default, no defaults): this connector never names a
-/// model that reaches the network. The sentinel exists ONLY so `reflect` can say
-/// what is true; `chat()` fails loud when the model is unset or still this value.
-/// (py-canonical `anthropic_backend.provider.DEFAULT_MODEL`.)
-public let DEFAULT_MODEL = "(no default — set the `model` meta)"
 public let ANTHROPIC_VERSION = "2023-06-01"
 /// `max_tokens` is REQUIRED by the Messages API — defaulted when unset.
 public let DEFAULT_MAX_TOKENS = 8192
@@ -66,7 +55,7 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     public let name = "anthropic_backend"
     public var verbs: [String] { AIBackend.verbNames }
 
-    private let core: AIBackend
+    let core: AIBackend
 
     public init() {
         self.core = buildAIBackend(
@@ -74,8 +63,6 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
                 kind: "anthropic_backend",
                 sentence:
                     "Anthropic-backed LLM agent (raw prompt-and-parse tool-calling).",
-                defaultModel: DEFAULT_MODEL,
-                defaultEndpoint: DEFAULT_ENDPOINT,
                 // NO reflect extras: python's anthropic binding passes no
                 // `reflect_extra`, and `model`/`endpoint` are base fields.
                 makeProvider: { agent, _, _ in
@@ -92,8 +79,8 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
                     // answered a body python never sends.
                     .provider(
                         AnthropicProvider(
-                            endpoint: Self.endpoint(agent: agent),
-                            model: Self.model(agent: agent),
+                            endpoint: try requiredMeta(agent, "endpoint", "anthropic_backend"),
+                            model: try requiredMeta(agent, "model", "anthropic_backend"),
                             apiKey: readApiKey(),
                             maxTokens: agent.metaValue(forKey: "max_tokens")?.asInt
                                 ?? Int64(DEFAULT_MAX_TOKENS),
@@ -113,18 +100,13 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     /// summary of it was a second, shorter truth about the same bundle.
     static let readmeText = #"""
     # anthropic_backend — Claude, a context-managed completion agent
-    Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
+    Talks to the Anthropic Messages API. `endpoint` and `model` are REQUIRED on the record — nothing is guessed. Key read from `ANTHROPIC_API_KEY` in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
 
     ## Implementation
     This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
-    ## Bare completion — the tool loop is the CALLER's
-    This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-    provider pass. It NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use`
-    blocks; the `AnthropicProvider` streams plain `text_delta` content, returned verbatim.
-    Any tool convention is the caller's — an authored agent teaches it in the prompt (via
-    `system_prompt`), reads the completion, dispatches, and feeds the result back as the
-    next `{send, text}` turn.
+    ## Bare completion + the `<call>` grammar — no native tool API
+    `send` performs exactly ONE provider pass: the `AnthropicProvider` streams plain `text_delta` content and never sends Anthropic `tools`/`input_schema` nor reads `tool_use` blocks. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
     ## Context management — owned HERE
     The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
@@ -183,14 +165,6 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     }
 
     // MARK: - meta helpers
-
-    fileprivate static func endpoint(agent: Agent) -> String {
-        agent.metaValue(forKey: "endpoint")?.asString ?? DEFAULT_ENDPOINT
-    }
-
-    fileprivate static func model(agent: Agent) -> String {
-        agent.metaValue(forKey: "model")?.asString ?? DEFAULT_MODEL
-    }
 
     /// The record's `sampling` object with null values dropped, in the record's
     /// key order — python's `{k: v for k, v in sampling.items() if v is not None}`.
@@ -279,7 +253,7 @@ struct AnthropicProvider: AIProvider {
                     continuation.finish(throwing: PyError("RuntimeError", MISSING_KEY_ERROR))
                     return
                 }
-                if model.isEmpty || model == DEFAULT_MODEL {
+                if model.isEmpty {
                     continuation.finish(
                         throwing: PyError(
                             "RuntimeError",
@@ -287,10 +261,7 @@ struct AnthropicProvider: AIProvider {
                                 + "guess one. Name a model on the agent record (model=...)."))
                     return
                 }
-                // VERBATIM — `endpoint` IS the messages URL, as in python
-                // (see DEFAULT_ENDPOINT). It used to be treated as a base with
-                // `/messages` appended, so one meta key meant two things across
-                // runtimes and a working proxy URL 404'd on the other kernel.
+                // VERBATIM — `endpoint` IS the messages URL, as in python.
                 let url = endpoint
 
                 var attempt = 0

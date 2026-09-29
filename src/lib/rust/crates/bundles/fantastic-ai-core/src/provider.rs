@@ -43,6 +43,9 @@ pub struct ProviderError {
     /// string): the caller reads `{error, client_id}` and the handler does not
     /// fail. `false` is python's propagate-and-raise.
     pub mapped: bool,
+    /// The python exception class a raise renders as (`RuntimeError`, or
+    /// `ValueError` for a record field the backend cannot run without).
+    pub kind: &'static str,
 }
 
 impl ProviderError {
@@ -51,6 +54,17 @@ impl ProviderError {
         Self {
             message: message.into(),
             mapped: false,
+            kind: "RuntimeError",
+        }
+    }
+
+    /// python's `ValueError` — a connector field the record MUST name (see
+    /// [`crate::helpers::required_meta`]).
+    pub fn value_error(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            mapped: false,
+            kind: "ValueError",
         }
     }
 
@@ -60,6 +74,7 @@ impl ProviderError {
         Self {
             message: message.into(),
             mapped: true,
+            kind: "RuntimeError",
         }
     }
 }
@@ -79,6 +94,26 @@ impl From<String> for ProviderError {
 impl From<&str> for ProviderError {
     fn from(message: &str) -> Self {
         Self::raised(message)
+    }
+}
+
+/// The provider of an agent whose record lacks a field its backend cannot run
+/// without: every pass raises the refusal (python `required_meta` raising out of
+/// the provider build).
+pub struct Unconfigured(pub ProviderError);
+
+#[async_trait]
+impl Provider for Unconfigured {
+    async fn chat(
+        &self,
+        _messages: &[Value],
+        _max_tokens: Option<i64>,
+    ) -> Result<ProviderStream, ProviderError> {
+        Err(self.0.clone())
+    }
+
+    fn model(&self) -> String {
+        String::new()
     }
 }
 

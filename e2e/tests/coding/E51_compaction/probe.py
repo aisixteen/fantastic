@@ -53,14 +53,14 @@ async def main():
         for payload in (
             {
                 "type": "create_agent", "parent_id": root.id, "id": FB,
-                "handler_module": "file_bridge.tools", "root": ".",
+                "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "notes": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent", "parent_id": root.id, "id": "notes",
-                "handler_module": "text_file.tools", "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         ):
@@ -88,7 +88,7 @@ async def main():
             # FAILFAST, not compaction, and the run died with `context_insufficient`
             # while still scoring PASS (runs/20260904-043318, python). A window has to
             # leave room for one filler reply (~2400 tok) plus the notice envelope.
-            record={"file_bridge_id": FB, "context_window": 12000, "num_ctx": 12000,
+            record={"context_window": 12000, "num_ctx": 12000,
                     "context_strategy": "truncate"},
         )
         await drive(conn, task, client_id="cmp", via="user")

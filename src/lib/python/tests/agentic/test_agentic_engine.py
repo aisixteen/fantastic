@@ -51,6 +51,7 @@ async def _mk(kernel, **meta) -> str:
         "type": "create_agent",
         "parent_id": kernel.id,
         "handler_module": "file_bridge.tools",
+        "allow": ["."],
         "ingress_rule": "allow_all_ingress",
     }
     payload.update(meta)
@@ -274,7 +275,7 @@ async def test_dehydrate_reads_the_running_system_back_through_one_reflect(
     # walks the subtree, so declaring it in the manifest is enough.
     assert d["agents"]["store"]["parent_id"] == "static_loader"
     assert d["agents"]["memory"]["parent_id"] == "static_loader"
-    assert d["agents"]["memory"]["handler_module"] == "text_file.tools"
+    assert d["agents"]["memory"]["handler_module"] == "file_bridge.tools"
     assert set(d["children"]["static_loader"]) == {
         "store",
         "memory",

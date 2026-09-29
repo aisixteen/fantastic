@@ -36,7 +36,7 @@ fn mk_kernel(tmp: &TempDir, register_ws: bool, register_rest: bool) -> Arc<Kerne
     // The file proxy and the stream verbs need a real SOURCE to talk to.
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -429,7 +429,7 @@ async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": id,
                 "root": root.to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
@@ -569,7 +569,15 @@ async fn binary_ws_frame_routes_like_a_text_call() {
         .collect();
     assert_eq!(
         keys,
-        vec!["path", "offset", "bytes", "next_offset", "eof", "size", "origin"],
+        vec![
+            "path",
+            "offset",
+            "bytes",
+            "next_offset",
+            "eof",
+            "size",
+            "origin"
+        ],
         "python's key order, `bytes` nulled IN PLACE"
     );
     assert_eq!(body, vec![7u8; 4096]);
@@ -739,6 +747,14 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
         t.iter().any(|f| f["type"] == "event"),
         "an open leg must auto-watch the host: {t:?}"
     );
+    // Every mirrored event names the agent it came from — the name the socket
+    // watched — so a bridge on the other end re-emits only what it subscribed to.
+    let ev = t.iter().find(|f| f["type"] == "event").unwrap();
+    assert_eq!(ev["src"], json!(web_id), "{ev}");
+    assert_eq!(
+        ev.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["type", "src", "payload"]
+    );
 
     let frame = json!({"type": "call", "target": "private_one", "id": "p1", "payload": {"type": "reflect"}});
     let (t, _) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
@@ -803,13 +819,13 @@ async fn call_frame_without_id_or_payload_replies_like_python() {
 // and verify content-type + non-empty body + immutable cache header.
 
 /// The BINARY leg of the REST surface (octet-stream body) — mirror of the
-/// Python `web_rest` binary leg. An octet POST of a `text_file.patch` carries
+/// Python `web_rest` binary leg. An octet POST of a file_bridge `edit` carries
 /// the patch in the raw body and the envelope on `X-Fantastic-Payload`; the
-/// reply is JSON `{patched:true}`. A `read_stream` returns an OCTET reply whose
+/// reply is JSON `{edited:true}`. A `read_stream` returns an OCTET reply whose
 /// body is the raw file bytes and whose `X-Fantastic-Payload` header carries the
 /// rest of the envelope. Never base64.
 #[tokio::test]
-async fn web_rest_octet_leg_patch_and_read_stream() {
+async fn web_rest_octet_leg_edit_and_read_stream() {
     // Kernel with web + web_rest + file_bridge registered.
     let tmp = TempDir::new().unwrap();
     let mut kernel = Kernel::new();
@@ -819,11 +835,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
         .register("web_rest.tools", fantastic_web_rest::WebRestBundle);
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
-    kernel.bundles.register(
-        fantastic_text_file::HANDLER_MODULE,
-        fantastic_text_file::TextFileBundle,
-    );
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -867,32 +879,16 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": "file_bridge.tools", "id": fb_id,
+                "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id,
                 "root": "served",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": { "$self": "*", "$parent": "*", "$children": "*", rest_id: "*", "ed_octet": "*" },
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    // The EDITOR: patch moved off the bridge — text_file owns SEARCH/REPLACE
-    // and reaches disk only through gated sends to the file leg.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": "text_file.tools", "id": "ed_octet",
-                "target_id": fb_id,
-                "can_call": { fb_id: "*" },
                 "callable_by": { "$self": "*", "$parent": "*", "$children": "*", rest_id: "*" },
             }),
         )])
         .await
         .remove(0)
         .result;
-    // web_rest child — may reach the file_bridge AND the editor (egress side).
+    // web_rest child — may reach the file_bridge (egress side).
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -900,7 +896,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
                 "type": "create_agent", "parent_id": web_id,
                 "handler_module": "web_rest.tools", "id": rest_id,
                 "ingress_rule": "allow_all_ingress",
-                "can_call": { fb_id: "*", "ed_octet": "*" },
+                "can_call": { fb_id: "*" },
             }),
         )])
         .await
@@ -918,17 +914,16 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     wait_until_port_accepts(port).await;
 
     let url = format!("http://127.0.0.1:{port}/{rest_id}/{fb_id}");
-    let ed_url = format!("http://127.0.0.1:{port}/{rest_id}/ed_octet");
     let client = reqwest::Client::new();
 
-    // ── text_file.patch: patch rides the raw octet body, to the EDITOR ───
+    // ── edit: the patch rides the raw octet body ─────────────────────────
     let patch = "<<<<<<< SEARCH\nhello world\n=======\ngoodbye world\n>>>>>>> REPLACE\n";
     let resp = client
-        .post(&ed_url)
+        .post(&url)
         .header("Content-Type", "application/octet-stream")
         .header(
             "X-Fantastic-Payload",
-            r#"{"type":"patch","edits":[{"path":"greeting.txt","hunks":1}]}"#,
+            r#"{"type":"edit","edits":[{"path":"greeting.txt","hunks":1}]}"#,
         )
         .body(patch)
         .send()
@@ -948,7 +943,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
         .to_string();
     assert!(ct.starts_with("application/json"), "patch reply ct: {ct}");
     let pbody: Value = resp.json().await.expect("patch reply json");
-    assert_eq!(pbody["patched"], true, "patch reply: {pbody}");
+    assert_eq!(pbody["edited"], true, "patch reply: {pbody}");
     assert_eq!(pbody["edits"][0]["hunks"], 1, "patch reply: {pbody}");
 
     // ── read_stream: reply is an OCTET body = the raw (patched) file bytes ─
@@ -1246,7 +1241,7 @@ async fn stage_host(
         .register("web_ws.tools", fantastic_web_ws::WebWsBundle);
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -1270,7 +1265,7 @@ async fn stage_host(
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": "kernel_state",
-               "handler_module": "file_bridge.tools", "id": fb_id, "root": "served",
+               "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id, "root": "served",
                "ingress_rule": "allow_all_ingress",
                "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
                                rest_id: "*", web_id: "*"}}),
@@ -1309,16 +1304,6 @@ fn readme_is_python_verbatim() {
     assert_eq!(
         README,
         include_str!("../../../../../python/bundled_agents/web/host/src/web/readme.md")
-    );
-}
-
-/// A11.3 — the `/` scaffold is python's template, byte for byte (no `.visit`
-/// rule, no legend, no `transport.js` tag).
-#[test]
-fn index_html_is_python_verbatim() {
-    assert_eq!(
-        ROOT_INDEX_HTML,
-        include_str!("../../../../../python/bundled_agents/web/host/src/web/templates/index.html")
     );
 }
 
@@ -1384,74 +1369,7 @@ fn server_pings_and_closes_1011_without_pong() {
     );
 }
 
-/// `GET /` runs as the WEB HOST, not as the operator — so the distilled
-/// roster's per-node gate denies a LATERAL sibling and never dispatches
-/// `reflect` on it.
-///
-/// python creates the uvicorn serve task inside the `boot` dispatch, so the
-/// request inherits `_current_sender = <web id>`. Measured 2026-09-21 on
-/// python: sender `web`, the sibling's watcher saw 0 events. Rust ran the
-/// index with no sender scope (operator = ungated), fanned `reflect` out over
-/// the whole tree, and the acceptance capture's `wsx` leg — auto-watching a
-/// sibling web host — saw one `{"type":"event","payload":{"type":"reflect"}}`
-/// python never sends.
-#[tokio::test]
-async fn index_page_reflects_as_the_web_host_not_the_operator() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = mk_kernel(&tmp, false, false);
-    let port = free_port();
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "id": "web_gate", "port": port}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    // A SIBLING under the root — no `callable_by` for the web host, so
-    // `web_gate -> sib_gate reflect` is lateral and the gate denies it.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": "file_bridge.tools", "id": "sib_gate"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let watcher = AgentId::from("sib_tap");
-    let mut rx = kernel.ensure_inbox(&watcher);
-    assert!(kernel
-        .watch(&AgentId::from("sib_gate"), watcher)
-        .await
-        .is_none());
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("web_gate"),
-            json!({"type": "boot"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    wait_until_port_accepts(port).await;
-    let resp = reqwest::get(format!("http://127.0.0.1:{port}/"))
-        .await
-        .expect("get /");
-    assert_eq!(resp.status().as_u16(), 200);
-    let page = resp.text().await.unwrap();
-    // The SHAPE stays public (`tree=ids`): the node is in the page.
-    assert!(page.contains("<code>sib_gate</code>"), "{page}");
-    // What the node SAYS about itself is not: it was never dispatched.
-    assert!(
-        rx.try_recv().is_none(),
-        "the index roster must not reflect a lateral sibling"
-    );
-    stop(&kernel, "web_gate").await;
-}
-
-/// A11.3 (D11) — the route table is python's FOUR baked routes. The rust-only
+/// A11.3 (D11) — the route table is python's baked routes (no `/`). The rust-only
 /// extras are gone: no `/<id>/` server-side render, no `/transport.js`, no
 /// `/_assets/*` vendored JS, no `/favicon.ico`.
 #[tokio::test]
@@ -1461,9 +1379,11 @@ async fn render_route_is_absent() {
     let kernel = stage_host(&tmp, port, "web_d11", "wr_d11", "fb_d11").await;
     let client = reqwest::Client::new();
     for gone in [
+        "/",
         "/web_d11/",
         "/transport.js",
         "/favicon.ico",
+        "/favicon.png",
         "/_assets/three.module.js",
         "/_assets/xterm.min.js",
     ] {
@@ -1474,8 +1394,9 @@ async fn render_route_is_absent() {
             .expect("get");
         assert_eq!(resp.status().as_u16(), 404, "{gone} must not be a route");
     }
-    // The four that remain DO serve.
-    for kept in ["/", "/favicon.png", "/_assets/favicon.png"] {
+    // The baked routes that remain DO serve — `/` is not one of them: the host
+    // renders nothing of its own.
+    for kept in ["/_assets/favicon.png"] {
         let resp = client
             .get(format!("http://127.0.0.1:{port}{kept}"))
             .send()
@@ -1483,23 +1404,6 @@ async fn render_route_is_absent() {
             .expect("get");
         assert_eq!(resp.status().as_u16(), 200, "{kept} must serve");
     }
-    // `/` is python's `_index_page` markup: id, code, hm — no `↗` visit link,
-    // because there is no server-side render route to link to.
-    let resp = client
-        .get(format!("http://127.0.0.1:{port}/"))
-        .send()
-        .await
-        .expect("get /");
-    assert_eq!(resp.headers()["content-type"], "text/html; charset=utf-8");
-    let page = resp.text().await.unwrap();
-    assert!(!page.contains("class=\"visit\""), "no ↗ link: {page}");
-    assert!(!page.contains("transport.js"), "no transport tag");
-    assert!(
-        page.contains(
-            r#"<li><span class="id">kernel_state</span> <code>kernel_state</code> <span class="hm">(root)</span>"#
-        ),
-        "python's node markup: {page}"
-    );
     let resp = client
         .get(format!("http://127.0.0.1:{port}/fb_d11/file/hello.txt"))
         .send()
@@ -2781,6 +2685,49 @@ async fn gate_denial_404_carries_the_hint_but_a_missing_file_does_not() {
     stop(&kernel, "web_fp").await;
 }
 
+/// Python `test_the_web_serves_only_what_the_list_exposes`: the file proxy
+/// serves exactly the bridge's `allow` list — an unlisted file is the same bare
+/// 404 as a missing one.
+#[tokio::test]
+async fn the_web_serves_only_what_the_list_exposes() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_al", "rest", "fb_al").await;
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(served.join("docs")).unwrap();
+    std::fs::write(served.join("docs/a.pdf"), b"%PDF-a").unwrap();
+    std::fs::write(served.join("docs/b.pdf"), b"%PDF-b").unwrap();
+    std::fs::write(served.join("secret.txt"), b"private\n").unwrap();
+    for payload in [
+        json!({"type": "disallow", "path": "."}),
+        json!({"type": "allow", "path": "docs/a.pdf"}),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("fb_al"), payload)])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    let client = reqwest::Client::new();
+    let ok = client
+        .get(format!("http://127.0.0.1:{port}/fb_al/file/docs/a.pdf"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(ok.status().as_u16(), 200);
+    assert_eq!(ok.bytes().await.unwrap().as_ref(), b"%PDF-a");
+    for path in ["docs/b.pdf", "secret.txt", "missing.txt"] {
+        let r = client
+            .get(format!("http://127.0.0.1:{port}/fb_al/file/{path}"))
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(r.status().as_u16(), 404, "{path}");
+    }
+    stop(&kernel, "web_al").await;
+}
+
 /// C40 — an agent that is not there at all is a bare 404, before any dispatch.
 #[tokio::test]
 async fn file_proxy_404_for_missing_agent() {
@@ -2889,9 +2836,12 @@ async fn open_ws_shows_ws_drain_in_ps() {
         .into_iter()
         .filter(|r| r["verb"] == json!("ws_drain") && r["agent"] == json!(web_id))
         .count();
+    // One for the connection's own inbox, one for the connect-time auto-watch of
+    // the host — each watch has its own reader, so every mirrored event can go out
+    // stamped with the `src` it came from.
     assert_eq!(
-        drains, 1,
-        "an open socket must show one `ws_drain` on the host"
+        drains, 2,
+        "an open, auto-watching socket shows two `ws_drain`s on the host"
     );
 
     // A `call` frame is its own registered task under the HOST, not the leg.
@@ -3016,7 +2966,7 @@ async fn foreign_post_is_403_own_and_originless_pass_get_is_not_gated() {
     let r = c.post(&url).json(&body).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let r = c
-        .get(format!("http://127.0.0.1:{port}/"))
+        .get(format!("http://127.0.0.1:{port}/_assets/favicon.png"))
         .header("Origin", "http://evil.example")
         .send()
         .await

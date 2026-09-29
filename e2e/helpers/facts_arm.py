@@ -2,7 +2,7 @@
 window, same model — `context_strategy` is the only variable.
 
 Every probe that compares `halve`+facts against recency needs the same dance: create the
-bridge and editor with both arms' ids on their ingress, create the human, run each arm to
+two file agents (`fb` and the `notes` editor) with both arms' ids on their ingress, create the human, run each arm to
 completion, rename its artifact out of the way, read its history and fact log. This is
 that dance, once. A probe supplies the fixture, the task and the scorer.
 
@@ -60,14 +60,6 @@ FOLD_ARMS = (
     ("ai_recency", "truncate", {}),
     ("ai_fold", "fold", {"context_async": True, "context_titles": True}),
 )
-
-
-def leg(fb: str) -> dict:
-    """The record fields that name a file leg — NONE on python (the conversation lives
-    in the agent's memory store), `file_bridge_id` on the runtimes not yet ported."""
-    from helpers.kernel import runtime_name
-
-    return {} if runtime_name() == "python" else {"file_bridge_id": fb}
 
 
 async def call(root, target, payload):
@@ -158,7 +150,7 @@ async def connect_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: d
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
-        record={**leg(fb), "context_window": WINDOW, "num_ctx": WINDOW,
+        record={"context_window": WINDOW, "num_ctx": WINDOW,
                 "context_strategy": strategy, **extra},
     )
 
@@ -182,25 +174,25 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
-        record={**leg(fb), "context_window": WINDOW, "num_ctx": WINDOW,
+        record={"context_window": WINDOW, "num_ctx": WINDOW,
                 "context_strategy": strategy, **extra},
     )
 
 
 async def fixture(root, fb: str, *, arms=ARMS, extra_callable: tuple[str, ...] = ()):
-    """Bridge + editor, both arms granted at CREATE time, then the human."""
+    """The two file agents (`fb`, `notes`), both arms granted at CREATE time, then the human."""
     ids = [a for a, _, _ in arms] + list(extra_callable)
     for payload in (
         {
             "type": "create_agent", "parent_id": root.id, "id": fb,
-            "handler_module": "file_bridge.tools", "root": ".",
+            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {**{i: "*" for i in ids}, "notes": "*", "rest": "*", "web": "*"},
+            "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"},
         },
         {
             "type": "create_agent", "parent_id": root.id, "id": "notes",
-            "handler_module": "text_file.tools", "target_id": fb,
-            "can_call": {fb: "*"},
+            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+            "ingress_rule": "allow_all_ingress",
             "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"},
         },
     ):
@@ -216,7 +208,7 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
-        record={**leg(fb), "context_window": WINDOW, "num_ctx": WINDOW,
+        record={"context_window": WINDOW, "num_ctx": WINDOW,
                 "context_strategy": strategy, **extra},
     )
     try:

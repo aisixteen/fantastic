@@ -26,7 +26,7 @@ TASK, killed with the universal `ps` → `cancel` system verbs.
 
 from __future__ import annotations
 
-from ai_core import build
+from ai_core import build, required_meta
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -43,14 +43,14 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
 def make_provider(id, kernel):
     """Build a LlamaCppProvider from the agent record
     (endpoint/model/api_key/temperature/num_predict/think)."""
-    from llamacpp_backend.provider import DEFAULT_ENDPOINT, LlamaCppProvider
+    from llamacpp_backend.provider import LlamaCppProvider
 
     rec = kernel.get(id) or {}
     temperature = rec.get("temperature")
     num_predict = rec.get("num_predict")
     think = rec.get("think")
     return LlamaCppProvider(
-        endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
+        endpoint=required_meta(rec, "endpoint", "llamacpp_backend"),
         model=rec.get("model"),
         api_key=rec.get("api_key"),
         temperature=float(temperature) if temperature is not None else None,
@@ -76,12 +76,9 @@ async def _reflect_extra(id, kernel):
 
 
 def _build():
-    from llamacpp_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
 
     return build(
         sentence="llama.cpp-backed local LLM agent (raw prompt-and-parse tool-calling).",
-        default_model=DEFAULT_MODEL,
-        default_endpoint=DEFAULT_ENDPOINT,
         make_provider=make_provider,
         name="llamacpp_backend",
         module_name=__name__,

@@ -154,7 +154,7 @@ func deliverTurn(
 }
 
 /// How to get a reply's body again, in ONE line: the replying agent's own
-/// `origin` when it wrote one (a text_file read names path, range and version);
+/// `origin` when it wrote one (a file_bridge `read` names path, range and version);
 /// otherwise the call that produced it — re-sending it may not give the same
 /// bytes, and the line says so. Python `_origin_line`.
 func originLine(_ result: JSON, target: String, verb: String, payload: JSON) -> String {
@@ -479,8 +479,8 @@ func routeReply(
 
         // NO `send_binary`, NO FENCE, NO BLOB LIFT. The document rides in the
         // payload as `bytes`, verbatim, because the grammar carries it verbatim
-        // — and `text_file` takes exactly that (its handler REFUSES a
-        // `write`/`patch`/`append` whose `bytes` is not a string). Lifting it
+        // — and file_bridge's text verbs take exactly that (`write`/`edit`/
+        // `append` REFUSE a `bytes` that is not a string). Lifting it
         // into the item's binary channel would delete the key the target reads
         // and route to the binary handler, which is not where a document goes.
 

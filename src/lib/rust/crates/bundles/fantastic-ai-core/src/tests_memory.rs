@@ -51,7 +51,9 @@ async fn alice_shares_with_bob(kernel: &Arc<Kernel>, alice: &AgentId, bob: &Agen
         json!({"type": "share", "with": bob.as_str(), "scope": {"head_until": 1_000_000_000}}),
     )
     .await;
-    g["grant"].as_i64().unwrap_or_else(|| panic!("share refused: {g}"))
+    g["grant"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("share refused: {g}"))
 }
 
 // ── the trigger, calibrated by provider-reported usage ─────────────────
@@ -66,7 +68,9 @@ impl Provider for Reporting {
         _messages: &[Value],
         _max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
-        let ev = Ok(ProviderEvent::Token("ok <call name=\"done\"></call>".into()));
+        let ev = Ok(ProviderEvent::Token(
+            "ok <call name=\"done\"></call>".into(),
+        ));
         Ok(Box::pin(futures_util::stream::iter(vec![ev])))
     }
     fn model(&self) -> String {
@@ -84,7 +88,12 @@ impl Provider for Reporting {
 async fn the_endpoints_count_calibrates_the_estimate() {
     let tmp = TempDir::new().unwrap();
     let (kernel, ai) = mk_kernel(&tmp, "calib").await;
-    set_meta(&kernel, &ai, json!({"context_window": 12000, "output_reserve": 0})).await;
+    set_meta(
+        &kernel,
+        &ai,
+        json!({"context_window": 12000, "output_reserve": 0}),
+    )
+    .await;
     let state = crate::state::state_for(&ai);
     let msgs = vec![
         json!({"role": "system", "content": "s"}),
@@ -93,7 +102,14 @@ async fn the_endpoints_count_calibrates_the_estimate() {
     let provider: Arc<dyn Provider> = Arc::new(Reporting(0));
     // under the trigger by our own estimate (~1000 of a ~12k budget)
     let out = crate::projection::project_context(
-        &provider, &ai, &state, &kernel, "cli", "mock", msgs.clone(), 1,
+        &provider,
+        &ai,
+        &state,
+        &kernel,
+        "cli",
+        "mock",
+        msgs.clone(),
+        1,
     )
     .await
     .expect("projection");
@@ -103,7 +119,14 @@ async fn the_endpoints_count_calibrates_the_estimate() {
     // the endpoint said the same prompt was TEN times bigger — the budget shrinks
     *state.calib.lock().unwrap() = Some(10.0);
     let out = crate::projection::project_context(
-        &provider, &ai, &state, &kernel, "cli", "mock", msgs.clone(), 1,
+        &provider,
+        &ai,
+        &state,
+        &kernel,
+        "cli",
+        "mock",
+        msgs.clone(),
+        1,
     )
     .await;
     assert!(out.is_ok(), "{out:?}");
@@ -116,7 +139,12 @@ async fn the_endpoints_count_calibrates_the_estimate() {
 async fn a_turn_records_what_the_endpoint_reported() {
     let tmp = TempDir::new().unwrap();
     let (kernel, ai) = mk_kernel(&tmp, "reported").await;
-    set_meta(&kernel, &ai, json!({"context_window": 32000, "output_reserve": 0})).await;
+    set_meta(
+        &kernel,
+        &ai,
+        json!({"context_window": 32000, "output_reserve": 0}),
+    )
+    .await;
     let provider: Arc<dyn Provider> = Arc::new(Reporting(777));
     let out = crate::verbs::send(
         Some(provider),
@@ -207,24 +235,42 @@ async fn fork_from_reads_the_owners_rows_under_the_grant() {
         text.contains(&format!("[shared from {alice} · read-only")),
         "{text}"
     );
-    assert!(text.contains("4711"), "the owner's row, read back under the grant: {text}");
+    assert!(
+        text.contains("4711"),
+        "the owner's row, read back under the grant: {text}"
+    );
 
     // the kickstart: a turn on bob, framed, ending in the message
-    assert!(until_passes(&s_bob, 2).await, "the fork never started a turn");
+    assert!(
+        until_passes(&s_bob, 2).await,
+        "the fork never started a turn"
+    );
     let msgs = s_bob.request_messages(1);
-    let last = msgs.last().and_then(|m| m["content"].as_str()).unwrap_or("");
+    let last = msgs
+        .last()
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("");
     assert!(
         last.contains(&format!("you are a new agent, not {alice}")),
         "{last}"
     );
-    assert!(last.ends_with("what is the code?"), "the kickstart message: {last}");
+    assert!(
+        last.ends_with("what is the code?"),
+        "the kickstart message: {last}"
+    );
     assert!(
         Value::Array(msgs.clone()).to_string().contains("4711"),
         "the shared rows are in the fork's view"
     );
 
     // the owner revokes — the reader's next read fails fast
-    let r = call_as(&kernel, &alice, MEMORY, json!({"type": "unshare", "grant": grant})).await;
+    let r = call_as(
+        &kernel,
+        &alice,
+        MEMORY,
+        json!({"type": "unshare", "grant": grant}),
+    )
+    .await;
     assert!(r.get("error").is_none(), "{r}");
     let err = crate::memory::load_history(&bob, &kernel, false).await;
     assert!(err.is_err(), "a revoked grant must fail the read: {err:?}");
@@ -271,7 +317,11 @@ async fn request_share_reaches_the_owners_model() {
     let tmp = TempDir::new().unwrap();
     let (kernel, alice) = mk_kernel(&tmp, "reqshare").await;
     let bob = add_peer(&kernel, &tmp, &alice).await;
-    let s_alice = script(&alice, vec![pass("<call name=\"done\"></call>")], Duration::ZERO);
+    let s_alice = script(
+        &alice,
+        vec![pass("<call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
     let out = call_as(
         &kernel,
         &bob,
@@ -283,7 +333,10 @@ async fn request_share_reaches_the_owners_model() {
         out,
         json!({"requested": true, "owner": alice.as_str(), "row": 42})
     );
-    assert!(until_passes(&s_alice, 1).await, "the owner's model never got the ask");
+    assert!(
+        until_passes(&s_alice, 1).await,
+        "the owner's model never got the ask"
+    );
     let turn = s_alice.request(0);
     assert!(
         turn.contains(&format!("[request_share from {bob} · row 42] need it")),
@@ -316,9 +369,13 @@ fn a_shared_scope_shows_a_third_owners_row_as_a_stub() {
 async fn a_row_another_writer_appends_reaches_the_next_head_read() {
     let tmp = TempDir::new().unwrap();
     let (kernel, alice) = mk_kernel(&tmp, "planted").await;
-    crate::memory::save_history(&alice, &kernel, &[json!({"role": "user", "content": "first"})])
-        .await
-        .expect("append");
+    crate::memory::save_history(
+        &alice,
+        &kernel,
+        &[json!({"role": "user", "content": "first"})],
+    )
+    .await
+    .expect("append");
     let hist = crate::memory::load_history(&alice, &kernel, false)
         .await
         .expect("store read");
@@ -368,7 +425,9 @@ impl Provider for MidTurnWriter {
         )
         .await
         .map_err(|e| ProviderError::raised(e.0))?;
-        let ev = Ok(ProviderEvent::Token("ok <call name=\"done\"></call>".into()));
+        let ev = Ok(ProviderEvent::Token(
+            "ok <call name=\"done\"></call>".into(),
+        ));
         Ok(Box::pin(futures_util::stream::iter(vec![ev])))
     }
     fn model(&self) -> String {
@@ -415,18 +474,29 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
 async fn watch_announces_each_appended_row_until_unwatch() {
     let tmp = TempDir::new().unwrap();
     let (kernel, ai) = mk_kernel(&tmp, "watch").await;
-    let refused = call(&kernel, ai.as_str(), json!({"type": "watch", "watcher": "nobody"})).await;
+    let refused = call(
+        &kernel,
+        ai.as_str(),
+        json!({"type": "watch", "watcher": "nobody"}),
+    )
+    .await;
     assert_eq!(refused["reason"], json!("no_consumer"), "{refused}");
 
     let mut rx = kernel.ensure_inbox(&AgentId::from("ui_probe"));
-    let w = call(&kernel, ai.as_str(), json!({"type": "watch", "watcher": "ui_probe"})).await;
+    let w = call(
+        &kernel,
+        ai.as_str(),
+        json!({"type": "watch", "watcher": "ui_probe"}),
+    )
+    .await;
     assert_eq!(
         w,
         json!({"watching": true, "watcher": "ui_probe", "body": false})
     );
-    let ids = crate::memory::save_history(&ai, &kernel, &[json!({"role": "user", "content": "hello"})])
-        .await
-        .expect("append");
+    let ids =
+        crate::memory::save_history(&ai, &kernel, &[json!({"role": "user", "content": "hello"})])
+            .await
+            .expect("append");
     let ev = rx.try_recv().expect("a row event").payload;
     assert_eq!(
         ev,
@@ -435,7 +505,12 @@ async fn watch_announces_each_appended_row_until_unwatch() {
         "a content-free digest"
     );
 
-    let u = call(&kernel, ai.as_str(), json!({"type": "unwatch", "watcher": "ui_probe"})).await;
+    let u = call(
+        &kernel,
+        ai.as_str(),
+        json!({"type": "unwatch", "watcher": "ui_probe"}),
+    )
+    .await;
     assert_eq!(u["watching"], json!(false), "{u}");
     crate::memory::save_history(&ai, &kernel, &[json!({"role": "user", "content": "again"})])
         .await

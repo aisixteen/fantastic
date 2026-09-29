@@ -63,6 +63,8 @@ pub struct Job {
     pub stdout: String,
     /// Collected stderr (newlines preserved).
     pub stderr: String,
+    /// The terminal of a PTY job (`start pty={cols,rows}`); `None` for a pipe job.
+    pub pty: Option<Arc<crate::pty::Pty>>,
 }
 
 static JOBS: OnceLock<Mutex<IndexMap<String, Job>>> = OnceLock::new();
@@ -110,10 +112,18 @@ pub fn snap(job_id: &str, j: &Job, full: bool) -> Value {
         // WHAT ran — so a caller can re-issue this job verbatim.
         "command": j.command,
         "args": j.args,
+        "pty": j.pty.is_some(),
     });
+    if let Some(p) = &j.pty {
+        let (cols, rows) = p.dims();
+        v["cols"] = json!(cols);
+        v["rows"] = json!(rows);
+    }
     if full {
-        v["stdout"] = json!(j.stdout);
-        v["stderr"] = json!(j.stderr);
+        if j.pty.is_none() {
+            v["stdout"] = json!(j.stdout);
+            v["stderr"] = json!(j.stderr);
+        }
         v["cwd"] = j.cwd.clone();
     }
     v
@@ -237,14 +247,22 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
 /// the row was immortal and the job could never be forgotten. Python's pump
 /// catches `CancelledError` and finalises to `stopped`; this guard is the same
 /// guarantee, spelled as a `Drop`.
-struct FinalizeRow {
+pub(crate) struct FinalizeRow {
     job_id: String,
     armed: bool,
 }
 
 impl FinalizeRow {
+    /// Armed until the pump writes the real outcome itself.
+    pub(crate) fn new(job_id: &str) -> Self {
+        Self {
+            job_id: job_id.to_string(),
+            armed: true,
+        }
+    }
+
     /// The pump reached the end and wrote the REAL outcome itself.
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -355,21 +373,26 @@ pub async fn pump(
 /// `ExitStatus::code()` answers `None` for a signal death, which read as "still
 /// running" everywhere liveness is `exit_code.is_none()` and lost the cause of death
 /// from `job_done` (A4.6).
-fn exit_code(s: std::process::ExitStatus) -> Option<i32> {
+pub(crate) fn exit_code(s: std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt;
     s.code().or_else(|| s.signal().map(|n| -n))
 }
 
-/// SIGKILL the process and ask the relay to stop. Idempotent; every death path
-/// (`stop`, `cancel`, `on_delete`) goes through here.
+/// SIGKILL one job: its whole SESSION — the command and everything it launched
+/// (a pipe job's `server &`, a PTY shell's background jobs). Every job leads its
+/// own session (`spawn`), so this never reaches the kernel. Returns whether the
+/// job's own process was signalled.
+pub fn kill(j: &Job) -> bool {
+    crate::spawn::kill_session(j.pid as i32)
+}
+
+/// SIGKILL the job's whole session and ask the relay to stop.
+/// Idempotent; every death path (`stop`, `cancel`, `on_delete`) goes through here.
 pub fn teardown(j: &mut Job) {
     if alive(j) {
         j.status = "stopping".to_string();
         // Best effort: an already-reaped pid is not an error.
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(j.pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
+        kill(j);
     }
     // SIGNAL, never `ctrl.abort()`. Aborting drops `serve` at its await point, so
     // the proxy/watcher release that runs after its read loop is skipped and every

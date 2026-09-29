@@ -30,6 +30,7 @@ async def test_top_level_agent_rehydrates(tmp_path, monkeypatch):
                         "type": "create_agent",
                         "parent_id": k1.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "x": 7,
                     },
                 }
@@ -60,6 +61,7 @@ async def test_nested_pair_rehydrates(tmp_path, monkeypatch):
                         "type": "create_agent",
                         "parent_id": k1.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -75,6 +77,7 @@ async def test_nested_pair_rehydrates(tmp_path, monkeypatch):
                         "type": "create_agent",
                         "parent_id": parent_id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -105,6 +108,7 @@ async def test_persistence_survives_corrupted_sibling(tmp_path, monkeypatch):
                         "type": "create_agent",
                         "parent_id": k1.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -136,6 +140,7 @@ async def test_reboot_resets_in_flight_counters(tmp_path, monkeypatch):
                         "type": "create_agent",
                         "parent_id": k1.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -155,7 +160,7 @@ def test_agent_record_roundtrip_on_disk(tmp_path, monkeypatch):
     arbitrary meta. The exact JSON shape is the contract."""
     monkeypatch.chdir(tmp_path)
     k = boot_root()
-    k.create("file_bridge.tools", id="ondisk", x=1, y=2, display_name="d")
+    k.create("file_bridge.tools", allow=["."], id="ondisk", x=1, y=2, display_name="d")
     persist(k)
     af = tmp_path / ".fantastic" / "agents" / "ondisk" / "agent.yaml"
     rec = yaml.safe_load(af.read_text())

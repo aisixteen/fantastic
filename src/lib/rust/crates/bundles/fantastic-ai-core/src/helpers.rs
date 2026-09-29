@@ -1,18 +1,5 @@
-//! Shared low-level helpers: meta access, client sanitisation, time + id
-//! minting.
-//!
-//! The tool-call id minter that used to live here (`mint_tool_call_id`, no
-//! callers) moved to [`crate::tool_parse::mint_call_id`]: the parser is the only
-//! thing that mints one, and python keeps `_mint_id` inside `tool_parse.py` for
-//! the same reason.
-//!
-//! The blob-channel file I/O that used to live here (`chat_path` / `file_read` /
-//! `file_write` / `file_delete`, all four riding the LOADER's `persist_blob` /
-//! `load_blob`) is GONE. Chat was its only caller, and chat now lives in an
-//! append-only JSONL sidecar (`agents/<self>/chat_<client>.jsonl`) written
-//! through the AI's OWN `file_bridge_id` (see [`crate::history`]) —
-//! python-canonical, and independent of whether the loader discovered a
-//! persistence provider.
+//! Shared low-level helpers: meta access, required connector fields, client
+//! sanitisation, time + id minting.
 
 use fantastic_bundle::{is_alnum, py_strip};
 use fantastic_kernel::{AgentId, Kernel};
@@ -30,14 +17,24 @@ pub fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Str
     meta.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Read a string meta field, falling back to `default`.
-pub fn meta_string_or(agent_id: &AgentId, kernel: &Kernel, key: &str, default: &str) -> String {
-    meta_string(agent_id, kernel, key).unwrap_or_else(|| default.to_string())
-}
-
-/// The bound file agent id, if any.
-pub fn file_bridge_id(self_id: &AgentId, kernel: &Kernel) -> Option<String> {
-    meta_string(self_id, kernel, "file_bridge_id")
+/// A connector field the record MUST name — an endpoint or a model is never
+/// guessed (python `ai_core.required_meta`). `Err` is the refusal a pass raises,
+/// naming the field.
+///
+/// # Errors
+/// The field is absent, not a string, or blank.
+pub fn required_meta(
+    meta: &serde_json::Map<String, Value>,
+    key: &str,
+    backend: &str,
+) -> Result<String, crate::provider::ProviderError> {
+    match meta.get(key).and_then(Value::as_str) {
+        Some(v) if !v.trim().is_empty() => Ok(v.to_string()),
+        _ => Err(crate::provider::ProviderError::value_error(format!(
+            "{backend}: `{key}` is required on the agent record — nothing is guessed \
+             (update_agent <id> {key}=…)"
+        ))),
+    }
 }
 
 /// A snapshot of the agent record's meta map (the per-agent config). Empty

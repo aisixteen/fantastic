@@ -56,6 +56,7 @@ from typing import Any
 
 import pytest
 import yaml
+from file_bridge import fs
 from kernel_state.tools import read_tree
 
 from _testkit import boot_root, persist
@@ -256,7 +257,7 @@ class LoaderSpec:
     """One `static_loader` agent and the manifest it hydrates. Exactly one of
     `manifest` / `manifest_text` / `missing_manifest` is set — a mapping written
     out as yaml, a verbatim string (for the malformed-yaml cases), or nothing at
-    all written, so `validate_meta` refuses the loader at write time."""
+    all written, so the loader's boot read fails."""
 
     id: str
     file: str
@@ -471,9 +472,9 @@ def _parse_loaders(raw) -> tuple[LoaderSpec, ...]:
 
 
 # THIS RUNTIME'S root id. `$root` anywhere in a config or spec means exactly
-# this — python's root is `kernel_state`, rust's and swift's is `core`. A grant
-# or a target that named one runtime's root by literal id could never be read by
-# the others, so the corpus names it abstractly and each runner substitutes.
+# this. A grant or a target that named a root by literal id would bind the corpus
+# to one runtime's choice, so the corpus names it abstractly and each runner
+# substitutes.
 ROOT_ID = "kernel_state"
 
 
@@ -638,11 +639,10 @@ class Hydration:
 def _write_manifests(cfg: Config, cwd: Path) -> None:
     """Materialize each loader's manifest in the cwd.
 
-    It has to be the cwd and it has to be relative: `static_loader` reads through
-    `fs.read_text(Path.cwd(), path)` (`static_loader/tools.py:52`), clamped to
-    cwd by the running-dir law — so a config living in `configs/` can NEVER be
-    handed over by absolute path, and `fs.resolve` silently reinterprets a
-    leading `/` as cwd-relative rather than refusing it."""
+    It has to be the cwd and it has to be relative: `static_loader` reads its
+    manifest clamped to the kernel's running dir (`Kernel.workdir` — the test's
+    cwd), and `fs.resolve` refuses an absolute path — so a config living in
+    `configs/` can NEVER be handed over by path."""
     for ln in cfg.loaders:
         if ln.missing_manifest:
             continue
@@ -795,7 +795,7 @@ async def dehydrate(kernel, *, disk: bool = False) -> dict:
     }
     if disk:
         root_dir = Path(".fantastic")
-        records = read_tree(root_dir)
+        records = read_tree(fs.Root(Path.cwd(), root_dir))
         out["disk"] = {
             r["id"]: r for r in records if isinstance(r, dict) and r.get("id")
         }

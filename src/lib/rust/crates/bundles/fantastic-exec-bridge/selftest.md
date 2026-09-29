@@ -1,90 +1,144 @@
-> scopes: cli
-> requires: a real python3 NAMED in the `pr` record's `interpreters` allowlist — there is no default and no PATH probing
+# exec_bridge selftest
 
-# exec_bridge selftest — durable script agents
+> scopes: kernel
+> requires: `cargo build --release --bin fantastic_kernel --features full`; a real
+> interpreter path to allowlist
+> out-of-scope: HTTP, AI, sandboxing (there is none — see Test 1's note)
 
-Your `code` is a SCRIPT, not a set of verb handlers. It is run top to bottom, once per
-`start` (and again on `boot`). Defining a function does not register a verb —
-`def run(payload): ...` and nothing else defines `run`, exits, and does no work at all.
-Put the work at module level. If the tool must survive its first pass to receive later
-sends, keep it running; only a LIVE job acks `{queued:true}`.
+The process edge of the io family. Sealed by default, a regex command allowlist, the
+control wire, mail to a live program, task-table integration.
 
-The loader lays the `code` down as `main.py` beside `agent.yaml`. `start` spawns in the
-BACKGROUND and returns at once; `boot` revives it after a reboot. There is **no `exec`**
-— any verb the bundle does not own is MAIL for the running program, so a blocking
-run-and-wait verb could never reach a live job's `on_message`.
+`CONN` is the reference wire client this crate ships (`src/connector.py`, python's
+`CONNECTOR_SRC` verbatim) — a program includes it itself; the bridge prepends nothing.
 
-The interpreter must be NAMED — `create_agent … python=/path/to/python3` (or `venv=`, or
-the `FANTASTIC_PYTHON` env). Nothing is discovered off PATH, so an unconfigured agent
-refuses `start` with `no Python interpreter resolved` instead of picking one for you.
-ASK USER which python to use; do not guess an interpreter. And an explicitly named `venv`
-that holds no interpreter is an ERROR naming the path — never a quiet downgrade to
-another python, which would surface as `ModuleNotFoundError` for the packages you named
-the venv for.
+## Pre-flight
 
-### Test 1: the verb surface
+All state under `/tmp/xb_test/`. `PY` is the interpreter the leg will allowlist —
+the OPERATOR's choice, which is what the allowlist models. A program is a FILE; we
+write it with a `file_bridge` leg and run it as a command.
 
-```sh
-$FANTASTIC pr reflect | jq -e '[.verbs | keys[]] | contains(["start","status","clear","interrupt","stop","boot","reflect"])'
+```bash
+rm -rf /tmp/xb_test && mkdir -p /tmp/xb_test && cd /tmp/xb_test
+PY=$(python3 -c 'import sys; print(sys.executable)')
+K=/path/to/rust/target/release/fantastic_kernel
+CONN=/path/to/rust/crates/bundles/fantastic-exec-bridge/src/connector.py
+# The store first, or one-shot seeds stay in RAM and the next call sees nothing.
+$K kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools id=store root=. 'allow=["."]' ingress_rule=allow_all_ingress >/dev/null
 ```
 
-Expect: `true`. Also expect NO `exec` key — its presence is a regression.
+## Tests
 
-### Test 2: start returns at once and streams
+### Test 0: sealed by default — every verb but `reflect` denies
 
-```sh
-$FANTASTIC pr start code="import time
-for i in range(3):
-    print(i); time.sleep(0.2)"
+```bash
+SEALED=$($K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=sealed | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+$K $SEALED start command=$PY args='["-c","print(1)"]'
+$K $SEALED reflect | python3 -m json.tool | grep -F '"sealed": true'
 ```
 
-Expect: `{job_id, status:"running"}` back immediately (well under a second), then
-`progress` events one per line, then `job_done` with `ok:true` and `exit_code:0`.
+Expect `start` → `{"error": ..., "reason": "unauthorized", "hint": ...}` naming
+`ingress_rule=allow_all_ingress`, and `reflect` to answer anyway — discovery must work on a
+sealed leg. Expect `"ingress_rule": "deny_ingress"`.
 
-### Test 3: the program lands on disk as a file
+### Test 1: the allowlist is law, and the refusal names the legal set
 
-```sh
-cat .fantastic/agents/<pr-id>/main.py
-jq -e 'has("code") | not' .fantastic/agents/<pr-id>/agent.yaml
+```bash
+$K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=noalw cwd=. ingress_rule=allow_all_ingress >/dev/null
+$K noalw start command=$PY args='["-c","print(1)"]'   # empty allowlist → nothing runs
+$K kernel update_agent id=noalw allowed='["/nope/python3 .*"]' >/dev/null
+$K noalw start command=$PY args='["-c","print(1)"]'   # line does not match the pattern
 ```
 
-Expect: `main.py` holds the program verbatim, and `agent.yaml` does NOT carry a `code`
-key. Two sources of truth for one program is the failure this split removes.
+Expect the first to refuse with "no commands are allowed on this leg ... an operator must
+set `allowed=[...]`", and the second to refuse naming the `allowed` patterns it did not
+match. A refusal that does not say what would work is a regression.
 
-### Test 4: the connector reaches another agent
+NOT a sandbox: an allowlisted CPython still has `open()`, `socket`, `subprocess`. The
+allowlist fixes WHICH commands may run; it grants nothing else.
 
-```sh
-$FANTASTIC pr start code="print(kernel.send('kernel', {'type':'reflect'})['id'])"
+### Test 2: `start` → `status` → `stop`, and the job is a task-table row
+
+```bash
+XB=$($K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=xb cwd=. ingress_rule=allow_all_ingress allowed="[\"$PY .*\"]" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+JOB=$($K xb start command=$PY args='["-c","import time; print(\"up\", flush=True); time.sleep(30)"]' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("job_id",""))')
+$K xb status job_id=$JOB | python3 -m json.tool | grep -E '"(status|task_id|last_line)"'
+$K kernel ps | grep -F '"verb": "start"'
+$K xb stop | grep -F '"killed": 1'
 ```
 
-Expect: the kernel's root id in a `progress` line. This proves the control socket, the
-frame codec and reply correlation in one shot.
+Expect `status` → `running`, a non-null `task_id`, `last_line: "up"`; `ps` to list the
+row; `stop` to report one kill.
 
-### Test 5: per-call arguments are ARGV
+### Test 3: `cancel` reaps the real OS process
 
-```sh
-$FANTASTIC pr start command=$PY args='["-c","import sys; print(int(sys.argv[1]) + 1)","41"]'
+```bash
+JOB2=$($K xb start command=$PY args='["-c","import time; time.sleep(60)"]' | python3 -c 'import json,sys;print(json.load(sys.stdin)["job_id"])')
+TID=$($K xb status job_id=$JOB2 | python3 -c 'import json,sys;print(json.load(sys.stdin)["jobs"][0]["task_id"])')
+$K kernel cancel task_id=$TID
+$K xb status job_id=$JOB2 | grep -E '"status": "(stopped|failed)"'
 ```
 
-Expect: `42`. Arguments reach a program the way they reach any command — through
-`argv`. There is no `kernel.args` and no `FANTASTIC_ARGS`: the howto advertised one
-for months and no spawner in any runtime ever set it, so a program written from the
-docs read `{}` and raised `KeyError`.
+Expect the row to finalize, NOT to stay `running`. The OS subprocess is SIGKILLed by
+`on_cancel` before the kernel aborts the pump task — the orphan-bug regression.
 
-### Test 6: an unknown verb is mail, and its absence is loud
+### Test 4: a program reaches another agent over the control wire
 
-Start a durable tool that registers `kernel.on_message`, then send it any verb the
-bundle does not own.
+```bash
+$K kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools id=mem root=. allow='["."]' ingress_rule=allow_all_ingress callable_by='{"xb":"*"}' >/dev/null
+$K kernel update_agent id=xb can_call='{"mem":"*"}' >/dev/null
+# Write the program to a FILE (connector + body), then run it as a command.
+{ cat $CONN; printf '%s' 'kernel.send("mem", {"type":"write","path":"k.txt","bytes":"via-wire"})
+'; } > prog.py
+$K xb start command=$PY args='["prog.py"]'
+sleep 1; $K mem read path=k.txt | grep -F 'via-wire'
+$K xb reflect | python3 -m json.tool | grep -E '"(allowed|wire)"'
+```
 
-Expect: `{queued:true}`, and the program receives it EXACTLY once. With no running job,
-expect a loud error naming the verb — never a silent drop.
+Expect the value to land, and `reflect` to advertise the `allowed` gate + the `wire`
+one-liner. The program includes the reference wire client itself — the bridge prepends
+nothing.
 
-### Test 7: the orphan gate
+### Test 5: mail to a live program, and the loud error with none
 
-Start a job that writes its pid and sleeps forever, then `ps` and `cancel task_id=<id>`.
+```bash
+{ cat $CONN; printf '%s' 'import threading
+kernel.on_message(lambda m: kernel.emit({"type":"say","text":"got"}))
+threading.Event().wait()
+'; } > mailer.py
+$K xb start command=$PY args='["mailer.py"]'
+sleep 1
+$K xb anything_at_all | grep -F '"queued": true'
+$K xb stop >/dev/null
+$K xb anything_at_all | grep -F 'no running job to receive it'
+```
 
-Expect: `{cancelled:true}`, and `kill -0 <pid>` fails with ESRCH — the process is gone
-AND reaped (a zombie would still answer). Then close the kernel while a job is parked:
-the child must exit on its own, because the connector self-reaps on control-socket EOF.
+Expect `{queued:true}` while a job is live and a loud error once none is. The bundle
+performs no delivery — the substrate's dispatch fanout already mirrored the payload into
+the program's proxy inbox; the handler only ACKs.
 
-If unreachable or a python is missing → STOP and report. Never silently fake a skip.
+### Test 6: a durable program re-runs against fresh input
+
+```bash
+echo 100 > a.txt; echo 200 > b.txt
+{ cat $CONN; printf '%s' 'import os
+t=sum(int(open(f).read()) for f in os.listdir(".") if f.endswith(".txt"))
+kernel.send("mem", {"type":"write","path":"total.out","bytes":str(t)})
+'; } > total.py
+$K xb start command=$PY args='["total.py"]'
+sleep 1; $K mem read path=total.out | grep -F '300'
+echo 50 > c.txt                         # fresh input
+$K xb start command=$PY args='["total.py"]'   # SAME command, re-run
+sleep 1; $K mem read path=total.out | grep -F '350'
+```
+
+Expect the total to be recomputed from disk each run — 300, then 350. The program is a
+durable FILE; re-running the same command is what "keeps it up to date". Probe 04's canary
+depends on exactly this.
+
+## Regression signals
+
+- `start` on a sealed leg SUCCEEDING — the gate is bypassed.
+- A refusal that does not name the legal `allowed` patterns.
+- Two `say` events after restarting a durable tool — the `_owner_inbox` supersede
+  failed and every inbound send is doubled.
+- An `exec` key in `reflect.verbs` — that verb never existed here.

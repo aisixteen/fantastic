@@ -16,8 +16,16 @@
 // Both `can_call` and `callable_by` are grant maps of the same shape,
 // `{ id | token : ["<verb>", …] | "*" }`. Tokens resolve at the gate relative to
 // the grant's HOLDER: `$self`, `$parent`, `$children` (set membership), `$loader`
-// (the persistence root; rarely named, NOT in the baseline). The structural
-// baseline stamped + MERGED on every agent (root, created, disk-loaded — in
+// (the persistence root; rarely named, NOT in the baseline), `$subtree:<X>` (X or
+// any LIVE descendant of X, resolved at call time — callable_by ONLY, never a
+// foreign id: a target accepting a whole subtree spawned dynamically).
+//
+// A `can_call` value may also be a HERITABLE entry,
+// `{<target id>: {"verbs": [...], "for": "descendants"}}`: it reaches for the
+// holder's DESCENDANTS, never for the holder itself. The egress check walks the
+// sender's ancestors for one when the sender's own `can_call` refuses.
+//
+// The structural baseline stamped + MERGED on every agent (root, created, disk-loaded — in
 // `Agent.init`), on BOTH fields, is `{$self:*, $parent:*, $children:*}` — reach/
 // accept your own subtree and your creator. No `"*"` wildcard token.
 //
@@ -25,9 +33,18 @@
 // create_agent, or a parent delegates a subset of its own `can_call`; an agent
 // can NEVER raise its own authority (enforced at the gate, not here).
 //
-// PRIVILEGED verbs (`create_agent`/`delete_agent`/`update_agent`) are never
-// covered by a wildcard — named explicitly — EXCEPT when the other end is the
-// holder itself (forking your OWN subtree is baseline). This is an EGRESS rule
+// An id in a grant is a local agent id (never containing `|`) or a FOREIGN agent
+// `<guid>|<agent>` — a call relayed by a bridge leg pinned to that peer;
+// `<guid>|*` names every agent of that one kernel. A foreign caller is judged on
+// the TARGET's `callable_by` by its qualified id; the structural tokens never
+// match it, so the baseline gives foreign agents nothing.
+//
+// PRIVILEGED verbs (the tree mutators, the bulk reads, the kernel's lifecycle and
+// task controls, the loader's record verbs) are never covered by a wildcard under
+// a STRUCTURAL token (the baseline, and `$subtree:<X>`) or in a heritable entry —
+// a NAMED verb covers one — EXCEPT when the other end is the holder
+// itself (acting on your OWN subtree is baseline). A `*` under a NAMED id is the
+// operator's own statement and covers everything. This is an EGRESS rule
 // (`enforcePrivileged`): on the ingress side a `$children:*` callee legitimately
 // accepts a privileged verb, since egress already guards escalation.
 
@@ -44,10 +61,13 @@ public struct Decision {
     public let hint: String
 }
 
-/// Structural graph mutation — privileged (a wildcard never satisfies these).
-/// Verbs a WILDCARD never covers — they must be named explicitly, because a
-/// wildcard grant is a statement about REACH and these are statements about
-/// AUTHORITY or about BULK READS.
+/// Verbs a STRUCTURAL wildcard never covers (`$parent: "*"` and the other tokens —
+/// the baseline the kernel stamps on every agent). Under a token they must be
+/// named explicitly, because the baseline is a statement about REACH and these are
+/// statements about AUTHORITY or about BULK READS: "talk to your parent" can never
+/// silently become "mutate the graph / stop the kernel / kill any task through
+/// your parent". A `*` under a NAMED id covers them — that grant is the
+/// operator's own.
 ///
 /// The mutators are here because they change the tree. `state_subscribe` is here
 /// because its operand is the WHOLE tree: the stream carries every send's
@@ -57,10 +77,45 @@ public struct Decision {
 /// while holding no grant that names it (production audit, 2026-08-27).
 public let privilegedVerbs: Set<String> = [
     "create_agent", "delete_agent", "update_agent", "state_subscribe",
-    // HYDRATION's pair — reading a conversation WHOLE and writing one into an
-    // agent. A wildcard never carries them; only a grant that NAMES them does.
-    "rows_read", "rows_write",
+    // A file_bridge's EXPOSURE: `allow` widens what the bridge serves, `disallow`
+    // narrows it. Under the baseline alone any parent or child could `allow .`
+    // and reopen the deny-all (audit 2026-09-28).
+    "allow", "disallow",
+    // The kernel's LIFECYCLE and TASK CONTROLS, answered by the root. Under the
+    // baseline alone, every direct child of the root could stop the kernel or kill
+    // ANY task (audit 2026-09-28). `ledger` is the bulk read of every execution;
+    // `ack_deadletter` retires one.
+    "kernel_start", "kernel_stop", "shutdown_agents", "ps", "cancel", "ledger",
+    "ack_deadletter",
+    // The LOADER's record verbs — they write, delete and read the persisted tree,
+    // grants included.
+    "persist_record", "forget_record", "load_tree",
 ]
+
+/// The structural tokens — the baseline's vocabulary. A privileged verb loses a
+/// wildcard's cover only under one of these (and under a `$subtree:<X>` key).
+public let structuralTokens: Set<String> = ["$self", "$parent", "$children", "$loader"]
+
+/// `$subtree:<X>` — X or any live descendant of X. callable_by ONLY.
+public let subtreePrefix = "$subtree:"
+
+/// A heritable `can_call` entry's one audience.
+public let heritableFor = "descendants"
+
+/// A heritable `can_call` entry: exactly `{"verbs": [<non-empty str list>], "for": "descendants"}`.
+/// Returns its verbs, or nil when `value` is not one.
+public func heritableVerbs(_ value: JSON) -> [String]? {
+    guard case .object(let m) = value, m.count == 2,
+        m["for"]?.asString == heritableFor,
+        case .array(let items)? = m["verbs"], !items.isEmpty
+    else { return nil }
+    var verbs: [String] = []
+    for item in items {
+        guard let v = item.asString else { return nil }
+        verbs.append(v)
+    }
+    return verbs
+}
 
 /// The remedy shown on any denial: authority descends, it is never self-raised.
 public let fromAbove: String =
@@ -86,6 +141,7 @@ public func defaultCallableBy() -> JSON {
 /// contain `"*"`). A PRIVILEGED verb loses its wildcard cover — only an explicit
 /// list entry names it.
 private func verbAllowed(_ grant: JSON, _ verb: String, privileged: Bool) -> Bool {
+    if case .object = grant { return false }  // a heritable entry never grants its HOLDER
     if privileged {
         if case .array(let items) = grant {
             return items.contains { $0.asString == verb }
@@ -106,6 +162,9 @@ private func verbAllowed(_ grant: JSON, _ verb: String, privileged: Bool) -> Boo
 ///
 /// `enforcePrivileged` gates the wildcard-exclusion for PRIVILEGED verbs — an
 /// EGRESS concern only; the gate passes `false` on the ingress check.
+///
+/// `inSubtree(otherId, x)` answers "is otherId x or a live descendant of x" — the
+/// caller's live tree, asked at call time; absent ⇒ `$subtree:` keys match nothing.
 public func authorizeCall(
     grant: JSON,
     verb: String,
@@ -114,7 +173,8 @@ public func authorizeCall(
     parentId: String?,
     childIds: Set<String>,
     loaderId: String?,
-    enforcePrivileged: Bool = true
+    enforcePrivileged: Bool = true,
+    inSubtree: ((String, String) -> Bool)? = nil
 ) -> Decision {
     // Privileged verbs lose wildcard cover UNLESS the other end is the holder
     // itself (acting on your own subtree is baseline) — egress only.
@@ -128,12 +188,37 @@ public func authorizeCall(
             case "$parent": matched = parentId == otherId
             case "$children": matched = childIds.contains(otherId)
             case "$loader": matched = loaderId == otherId
+            case let k where k.hasPrefix(subtreePrefix):
+                let x = String(k.dropFirst(subtreePrefix.count))
+                matched =
+                    !x.isEmpty && !otherId.contains("|") && (inSubtree?(otherId, x) ?? false)
             case let k where k.hasPrefix("$"): matched = false
+            // every agent of ONE foreign kernel: `<guid>|*` (a local id never
+            // carries `|`, so this can only ever match a foreign caller)
+            case let k where k.hasSuffix("|*"): matched = otherId.hasPrefix(String(k.dropLast()))
+            // a local id, or a foreign `<guid>|<agent>`
             default: matched = key == otherId
             }
-            if matched && verbAllowed(g, verb, privileged: privileged) {
+            let structural = structuralTokens.contains(key) || key.hasPrefix(subtreePrefix)
+            if matched && verbAllowed(g, verb, privileged: privileged && structural) {
                 return Decision(allowed: true, reason: "", hint: "")
             }
+        }
+    }
+    return Decision(allowed: false, reason: "", hint: fromAbove)
+}
+
+/// The heritable half of EGRESS: may a sender call `targetId` through a heritable
+/// `can_call` entry one of its ANCESTORS holds? `ancestorGrants` is their `can_call`
+/// maps, nearest first. A NAMED verb covers a privileged one; `*` covers only an
+/// ordinary verb. First allow wins.
+public func authorizeHeritable(ancestorGrants: [JSON], verb: String, targetId: String) -> Decision {
+    for grant in ancestorGrants {
+        guard case .object(let map) = grant, let entry = map[targetId],
+            let verbs = heritableVerbs(entry)
+        else { continue }
+        if verbs.contains(verb) || (verbs.contains("*") && !privilegedVerbs.contains(verb)) {
+            return Decision(allowed: true, reason: "", hint: "")
         }
     }
     return Decision(allowed: false, reason: "", hint: fromAbove)

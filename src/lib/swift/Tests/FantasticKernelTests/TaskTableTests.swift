@@ -365,7 +365,10 @@ struct TaskTableCancelTests {
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let victim = await makeAgent(kernel, "slow_victim")
-        let killer = await makeAgent(kernel, "slow_killer")
+        // `ps` and `cancel` are privileged: the baseline does not reach them.
+        let killer = await makeAgent(
+            kernel, "slow_killer",
+            canCall: .object(["kernel_state": .array([.string("ps"), .string("cancel")])]))
 
         let caller = spawnCaller(kernel, victim, .object(["type": .string("slow")]))
         defer { caller.cancel() }

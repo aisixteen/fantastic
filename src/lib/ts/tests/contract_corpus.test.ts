@@ -627,6 +627,30 @@ const SKIP_STEPS: { [spec: string]: { [n: number]: { name: string; why: string }
     21: { name: "a near-miss rule name is refused AT THE WRITE, leaving the leg as it was", why: CRUD },
     22: { name: "so the leg it named is still sealed", why: IO },
   },
+  subtree_grants: {
+    1: { name: "the owner carries a heritable egress entry on `served`", why: CRUD },
+    2: { name: "a child spawned under the owner", why: CRUD },
+    3: { name: "a descendant reaches the target — heritable egress + $subtree ingress", why: dep(2) },
+    4: { name: "the holder of the heritable entry is NOT covered by it", why: dep(1) },
+    5: { name: "a verb the heritable entry does not name dies at egress", why: dep(2) },
+    6: { name: "a NAMED privileged verb crosses both forms", why: dep(2) },
+    7: { name: "a non-privileged named verb crosses too", why: dep(2) },
+    8: { name: "a grandchild spawned after every grant was written", why: CRUD },
+    9: { name: "is covered by both forms with no record edit", why: dep(8) },
+    11: { name: "an owner whose heritable entry is `*`", why: CRUD },
+    12: { name: "", why: CRUD },
+    13: { name: "`*` covers an ordinary verb", why: dep(12) },
+    14: { name: "`*` does not cover a privileged verb", why: dep(12) },
+    15: { name: "a holder of the entry confers a subset of it to its own child", why: CRUD },
+    16: { name: "an agent that only BENEFITS from the entry cannot confer it", why: CRUD },
+    17: { name: "a holder cannot confer MORE than it holds", why: CRUD },
+    18: { name: "`$subtree:` is callable_by-only", why: CRUD },
+    19: { name: "`$subtree:` needs an id", why: CRUD },
+    20: { name: "`$subtree:` names a LOCAL id", why: CRUD },
+    21: { name: "a heritable entry is `for: descendants`, nothing else", why: CRUD },
+    22: { name: "a heritable entry names a literal target, not a token", why: CRUD },
+    23: { name: "a heritable entry is can_call-only", why: CRUD },
+  },
 };
 
 // ─── core: PC-1..PC-5 ──────────────────────────────────────────────────────
@@ -932,11 +956,11 @@ for (const f of SPECS) {
 // What this kernel is expected to prove, decided up front: a requirement moving
 // between these sets is a change someone has to look at, not a silent drift.
 const EXPECTED = {
-  covered: ["PC-1", "PC-2", "C14", "C16", "TSG-1", "TSG-2", "TSG-3", "TSG-4", "TSG-5"],
+  covered: ["PC-1", "PC-2", "C14", "C16", "TSG-1", "TSG-2", "TSG-3", "TSG-4", "TSG-5", "SUB-2"],
   // C18: only its PRECONDITIONS run here (the roster is live, the neighbour's
   // edge works) — the cascade itself is `delete_agent`, which this kernel lacks.
   partial: ["PC-3", "PC-4", "C15", "C18", "C20", "TSG-6"],
-  notApplicable: ["PC-5", "C17", "C23"],
+  notApplicable: ["PC-5", "C17", "C23", "SUB-1", "SUB-3", "SUB-4", "SUB-5", "SUB-6"],
   // Registry rows whose evidence is NOT in the data corpus: the registry itself
   // points at host test files (C1, C24) or at conformance/cases.json (C21, which
   // `c21_conformance.test.ts` replays against this kernel).

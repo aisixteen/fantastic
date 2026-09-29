@@ -4,25 +4,55 @@ The disk is OUTSIDE the trust domain: crossing kernel↔disk is an IO edge,
 gated exactly like a bridge leg — SEALED BY DEFAULT (absent `ingress_rule`
 ⇒ every verb except `reflect` denies with the teaching shape). Open it
 consciously with `ingress_rule=allow_all_ingress`. Even open, the LAW is
-running-dir only: the `root` AND every path are clamped inside the dir the
-kernel runs in (`../`, `~`, absolute escapes, outward symlinks all refuse).
+running-dir only: the `root` AND every path are clamped inside the kernel's
+running dir (`Kernel.workdir`; `../`, `~`, absolute escapes, outward symlinks all
+refuse).
 
 Each file_bridge owns a `root` directory and a `readonly` flag. Path safety:
 every verb resolves `root/path` and refuses if the result escapes `root`.
 
 Verbs:
-  reflect            -> {sentence, root, readonly, hidden_count, ingress, egress, sealed, see}
+  reflect            -> {sentence, root, readonly, allow_count, edit_grammar, compose, ingress_rule, egress_rule, sealed, …}
   list   path?       -> {files: [{name, path, type, size?}, ...]}
+  read   path offset? limit?   -> {lines:[{n,text}], total, eof, version}   (text)
+  write  path bytes if_match?  -> {path, size, version}   (atomic, whole document)
+  edit   edits bytes dry_run?  -> {edited, edits:[…]}     (SEARCH/REPLACE transaction)
+  append path bytes            -> {path, size, version}
+  undo   path                  -> {undone, path, version|deleted}   (one RAM slot)
   read_stream  path offset? length?        -> {bytes, next_offset, eof, size} (SOURCE)
   write_stream path bytes offset? truncate? -> {written, offset, size}        (SINK)
   pump   source? source_path sink? sink_path? -> {bytes, chunks}  (server-side copy)
   delete path        -> {path, deleted: true}            (refused if readonly)
   rename old_path new_path -> {old_path, new_path}        (refused if readonly)
   mkdir  path        -> {path, created: true}            (refused if readonly)
+  allow    path      -> {path, allowed: true, count}    (expose one path)
+  disallow path      -> {path, allowed: false, count}   (hide it again)
+  allowed  limit? after? -> {paths, next, total}
+
+THE TEXT VERBS are this bridge's own: a caller edits with ITS OWN grants on the
+bridge. `write`/`edit` commit through `fs.write_bytes` (a tmp sibling + atomic
+replace); the tmp is judged by the TARGET path's exposure, never on its own. `version` (a content hash) rides
+every reply and `if_match` guards any write. UNDO is ONE slot per path in RAM:
+each `write`/`edit`/`append` keeps the bytes it replaced; `undo` swaps them back
+(a second `undo` is redo); nothing on disk, lost on restart.
+
+DENY-ALL AT THE PATH LEVEL. The `allow` list on the record names what this bridge
+EXPOSES, relative to `root`: a listed file, or everything under a listed
+directory (`.` exposes the whole root). No list, or an empty one, exposes
+NOTHING. Every path verb (`list`, `read_stream`, `write_stream`, `delete`,
+`rename`, `mkdir`, and `pump` through them) sees only exposed paths; anything
+else is `not_found` whether or not it exists, so nothing leaks. `list` also shows
+the directories on the way to an exposed path. `allow`/`disallow` edit the list
+one path at a time (gated like any verb); it is record state — settable at
+`create_agent`, persisted by the loader. Writes are still governed by `readonly`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import posixpath
+from contextlib import asynccontextmanager
 
 from file_bridge import fs
 from io_bridge import describe as _describe
@@ -38,7 +68,6 @@ from kernel._refusal import (
     refusal,
 )
 
-DEFAULT_HIDDEN = [".git", ".env", ".fantastic", "node_modules", "__pycache__"]
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 # The disk clamp + raw IO live in `fs` — the ONE disk surface. This agent is the
@@ -46,16 +75,14 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 
 def _root_str(rec: dict) -> str:
-    """The bridge's configured root string — the clamp boundary `fs` enforces."""
+    """The bridge's configured root string."""
     return rec.get("root", "") or ""
 
 
-def _hidden(rec: dict) -> list[str]:
-    return list(rec.get("hidden", DEFAULT_HIDDEN))
-
-
-def _is_hidden(name: str, hidden: list[str]) -> bool:
-    return name in hidden or any(name == p for p in hidden)
+def _root(kernel, rec: dict) -> fs.Root:
+    """The clamp boundary `fs` enforces: the configured root under the kernel's
+    running dir (`Kernel.workdir`, the one source)."""
+    return fs.Root(kernel.ctx.workdir, _root_str(rec))
 
 
 # ─── argument validation ────────────────────────────────────────
@@ -64,6 +91,88 @@ def _is_hidden(name: str, hidden: list[str]) -> bool:
 # out of the handler; a negative `length` read 0 bytes and `pump` spun forever), and
 # an empty `path` on delete/rename/mkdir resolved to the ROOT itself — `delete
 # {path:"", recursive:true}` removed the whole served store.
+
+
+def _norm(path: str) -> str | None:
+    """A root-relative path, normalised (`posixpath.normpath`); None when it is
+    absolute or climbs out. The empty path is the root, `.`."""
+    if path.startswith("/"):
+        return None
+    p = posixpath.normpath(path or ".")
+    if p == ".." or p.startswith("../"):
+        return None
+    return p
+
+
+def _allow(rec: dict) -> list[str]:
+    """The `allow` list, normalised. Absent or empty ⇒ nothing is exposed."""
+    raw = rec.get("allow")
+    out = []
+    for s in raw if isinstance(raw, list) else []:
+        n = _norm(s) if isinstance(s, str) else None
+        if n is not None:
+            out.append(n)
+    return out
+
+
+def _exposed(allow: list[str], path: str) -> bool:
+    """Is `path` exposed — a listed path, or under a listed directory?"""
+    p = _norm(path)
+    if p is None:
+        return False
+    return any(s == "." or p == s or p.startswith(s + "/") for s in allow)
+
+
+def _leads_to(allow: list[str], path: str) -> bool:
+    """Is `path` a directory on the way to an exposed path? (`list` shows it.)"""
+    p = _norm(path)
+    if p is None or not allow:
+        return False
+    return p == "." or any(s.startswith(p + "/") for s in allow)
+
+
+def _lands_exposed(root: fs.Root, allow: list[str], path: str) -> bool:
+    """Where `path` actually LANDS (symlinks followed) must be under the RESOLVED
+    form of an allow entry — entries resolved now, because the disk changes. With
+    `_exposed` (the path as asked) this is the both-ends rule: a link inside an
+    exposed area that points outside it serves nothing (audit 2026-09-28)."""
+    try:
+        target = fs.resolve(root, path)
+    except ValueError:
+        return False
+    for s in allow:
+        try:
+            entry = fs.resolve(root, s)
+        except ValueError:
+            continue  # an entry that itself leads out of the root exposes nothing
+        if target == entry or entry in target.parents:
+            return True
+    return False
+
+
+def _gate_path(verb: str, root: fs.Root, allow: list[str], path: str) -> dict | None:
+    """THE CLAMP FIRST, then the list — on BOTH ends: a root or a path that leaves
+    the running dir answers the clamp's own refusal; an in-root path is exposed only
+    when the path as asked AND the file it lands on are both inside the list, else
+    `_unexposed`."""
+    try:
+        fs.resolve(root, path)
+    except ValueError as e:
+        return refusal(TRANSPORT_ERROR, str(e))
+    if not (_exposed(allow, path) and _lands_exposed(root, allow, path)):
+        return _unexposed(verb, path)
+    return None
+
+
+def _unexposed(verb: str, path: str) -> dict:
+    """The ONE answer for a path outside the `allow` list — the same whether it
+    exists or not, so a caller learns nothing about what lies beyond the list."""
+    return refusal(
+        NOT_FOUND,
+        f"{verb}: {path!r} is not exposed by this bridge",
+        hint="expose it first — `allow {path}` (whoever holds that grant)",
+        path=path,
+    )
 
 
 def _int_arg(verb: str, payload: dict, name: str, default: int, minimum: int):
@@ -91,7 +200,7 @@ def _path_arg(verb: str, payload: dict, name: str = "path"):
     return p, None
 
 
-def _target_arg(verb: str, root: str, payload: dict, name: str = "path"):
+def _target_arg(verb: str, root: fs.Root, payload: dict, name: str = "path"):
     """`_path_arg` for a MUTATING verb: the path must name something INSIDE the
     root — empty/`.` is `missing`, anything resolving to the root itself is
     `bad`. The root is the served boundary, not an operand."""
@@ -145,7 +254,7 @@ async def _reflect(id, payload, kernel):
     """Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args."""
     rec = kernel.get(id) or {}
     try:
-        root_display = str(fs.resolve_root(_root_str(rec)))
+        root_display = str(fs.resolve_root(_root(kernel, rec)))
         root_error = None
     except ValueError as e:
         # Reflect NEVER raises — show the configured string + the violation.
@@ -156,7 +265,24 @@ async def _reflect(id, payload, kernel):
         "sentence": "Filesystem edge of the io family — sealed by default, running-dir only.",
         "root": root_display,
         "readonly": bool(rec.get("readonly")),
-        "hidden_count": len(_hidden(rec)),
+        "allow_count": len(_allow(rec)),
+        "edit_grammar": (
+            "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / "
+            "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match its "
+            "document EXACTLY ONCE. `edit` is a TRANSACTION over "
+            "`edits:[{path, hunks, if_match?}]` — even one file rides the "
+            "array; the blob holds every edit's hunks concatenated in `edits` "
+            "order, split by the per-edit `hunks` count; any failure anywhere "
+            "writes nothing"
+        ),
+        "compose": (
+            "every content-carrying verb (`write`, `edit`, `append`) takes its "
+            "document in `bytes`, and `bytes` is VERBATIM: write the document "
+            "between `<bytes>` and `</bytes>` exactly as it should land — real "
+            "newlines, real quotes, nothing escaped, no fence — then close the "
+            "call. The document ends at the first `</bytes>`. An edit names its "
+            "files as tags: <edits><item><path>a.py</path><hunks>2</hunks></item></edits>"
+        ),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },
@@ -173,27 +299,31 @@ async def _boot(id, payload, kernel):
 
 
 async def _list(id, payload, kernel):
-    """args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …)."""
+    """args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]} — the exposed entries and the directories on the way to one."""
     rec = kernel.get(id) or {}
-    root = _root_str(rec)
+    root = _root(kernel, rec)
     path, err = _path_arg("list", payload)
     if err:
+        return err
+    allow = _allow(rec)
+    if not _leads_to(allow, path) and (err := _gate_path("list", root, allow, path)):
         return err
     try:
         if not fs.exists(root, path):
             return refusal(NOT_FOUND, f"path {path!r} does not exist", path=path)
         if not fs.is_dir(root, path):
             return bad("list", "path", f"a directory; {path!r} is not one")
-        rdir = fs.resolve_root(root)
         entries = fs.list_dir(root, path)
     except (ValueError, OSError) as e:
         return refusal(TRANSPORT_ERROR, str(e))
-    hidden = _hidden(rec)
     files = []
     for entry in entries:
-        if _is_hidden(entry.name, hidden):
+        # the entry's path AS A CALLER NAMES IT (under the listed dir, links not
+        # followed), judged by the same both-ends rule as every other verb
+        rel = posixpath.normpath(posixpath.join(_norm(path) or ".", entry.name))
+        shown = _exposed(allow, rel) and _lands_exposed(root, allow, rel)
+        if not (shown or (entry.is_dir() and _leads_to(allow, rel))):
             continue
-        rel = str(entry.relative_to(rdir))
         if entry.is_dir():
             files.append({"name": entry.name, "path": rel, "type": "dir"})
         else:
@@ -216,9 +346,11 @@ async def _delete(id, payload, kernel):
     rec = kernel.get(id) or {}
     if err := _readonly_or_none(rec):
         return err
-    root = _root_str(rec)
+    root = _root(kernel, rec)
     path, err = _target_arg("delete", root, payload)
     if err:
+        return err
+    if err := _gate_path("delete", root, _allow(rec), path):
         return err
     try:
         # `exists` follows symlinks — a DANGLING link is still a deletable name.
@@ -235,13 +367,16 @@ async def _rename(id, payload, kernel):
     rec = kernel.get(id) or {}
     if err := _readonly_or_none(rec):
         return err
-    root = _root_str(rec)
+    root = _root(kernel, rec)
     old, err = _target_arg("rename", root, payload, "old_path")
     if err:
         return err
     new, err = _target_arg("rename", root, payload, "new_path")
     if err:
         return err
+    for p in (old, new):
+        if err := _gate_path("rename", root, _allow(rec), p):
+            return err
     try:
         if not fs.exists(root, old):
             return refusal(NOT_FOUND, f"path {old!r} does not exist", path=old)
@@ -256,11 +391,13 @@ async def _mkdir(id, payload, kernel):
     rec = kernel.get(id) or {}
     if err := _readonly_or_none(rec):
         return err
-    path, err = _target_arg("mkdir", _root_str(rec), payload)
+    path, err = _target_arg("mkdir", _root(kernel, rec), payload)
     if err:
         return err
+    if err := _gate_path("mkdir", _root(kernel, rec), _allow(rec), path):
+        return err
     try:
-        fs.mkdir(_root_str(rec), path)
+        fs.mkdir(_root(kernel, rec), path)
     except (ValueError, OSError) as e:
         return refusal(TRANSPORT_ERROR, str(e))
     return {"path": path, "created": True}
@@ -280,7 +417,7 @@ async def _read_stream(id, payload, kernel):
     transport as raw bytes (web_ws / bridge binary frame, in-proc dict), NEVER base64.
     Stateless cursor — no open handle, weak-coupled by id."""
     rec = kernel.get(id) or {}
-    root = _root_str(rec)
+    root = _root(kernel, rec)
     path, err = _path_arg("read_stream", payload)
     if err:
         return err
@@ -289,6 +426,8 @@ async def _read_stream(id, payload, kernel):
         return err
     length, err = _int_arg("read_stream", payload, "length", 65536, 1)
     if err:
+        return err
+    if err := _gate_path("read_stream", root, _allow(rec), path):
         return err
     try:
         if not fs.is_file(root, path):
@@ -313,14 +452,16 @@ async def _write_stream(id, payload, kernel):
     """args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default = append at end), truncate:bool=False. The SINK half — a producer pushes RAW chunks by offset.
     A producer pushes RAW chunks by
     calling repeatedly. Pass truncate:true on the first chunk to start fresh. Returns
-    {path, written, offset, size}. Refused if readonly. The chunk is raw bytes — text
-    files go through the whole-file `write` verb, not here."""
+    {path, written, offset, size}. Refused if readonly. The chunk is raw bytes — a
+    text document goes through `write`/`edit` (atomic, versioned, undoable)."""
     rec = kernel.get(id) or {}
     if err := _readonly_or_none(rec):
         return err
-    root = _root_str(rec)
+    root = _root(kernel, rec)
     path, err = _path_arg("write_stream", payload)
     if err:
+        return err
+    if err := _gate_path("write_stream", root, _allow(rec), path):
         return err
     data = payload.get("bytes", b"")
     if not isinstance(data, (bytes, bytearray)):
@@ -414,6 +555,483 @@ async def _pump(id, payload, kernel):
     return {"source": spath, "sink": dpath, "bytes": offset, "chunks": chunks}
 
 
+# ─── the text verbs (the editing organ) ─────────────────────────
+# A text document is edited HERE, with the caller's OWN grants on this bridge —
+# no deputy sends to a bridge as itself. Every byte goes through `fs` under this
+# bridge's clamp, `allow` list and `readonly`; a commit is `fs.write_bytes`
+# (tmp sibling + atomic replace), the tmp judged by the TARGET path's exposure.
+
+#: lines per `read` page when the caller names no `limit`.
+READ_LIMIT = 200
+_H_START, _H_DIV, _H_END = "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"
+
+#: ONE undo slot per (bridge, path): the bytes the last `write`/`edit`/`append`
+#: replaced (None = the file did not exist). `undo` swaps file ↔ slot, so a
+#: second `undo` is redo. RAM only — nothing on disk, lost on restart.
+#: TODO: memory leak possible — one slot per edited path, unbounded paths × size.
+_UNDO: dict[tuple[str, str], bytes | None] = {}
+
+
+# ─── per-document serialization ─────────────────────────────────
+# A mutate is read → verify → commit; two concurrent mutates on ONE document
+# interleaved there would both derive from the same pre-image and the second
+# commit would silently discard the first. One lock per (bridge, path), held
+# from the first read through the commit; `if_match` is checked UNDER it. A
+# multi-file edit takes its locks in sorted order so overlapping transactions
+# cannot deadlock. Entries are ref-counted and dropped at zero.
+_LOCKS: dict[tuple[str, str], list] = {}
+
+
+@asynccontextmanager
+async def _held(bridge: str, *paths: str):
+    table = _LOCKS
+    keys = sorted({(bridge, p) for p in paths})
+    entries: list[list] = []
+    for k in keys:
+        e = table.get(k)
+        if e is None:
+            e = table[k] = [asyncio.Lock(), 0]
+        e[1] += 1
+        entries.append(e)
+    acquired: list[list] = []
+    try:
+        for e in entries:
+            await e[0].acquire()
+            acquired.append(e)
+        yield
+    finally:
+        for e in reversed(acquired):
+            e[0].release()
+        for k, e in zip(keys, entries):
+            e[1] -= 1
+            if e[1] == 0:
+                table.pop(k, None)
+
+
+def _version(data: bytes) -> str:
+    """The on-demand version: a content hash, computed, never stored."""
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _doc(verb: str, payload: dict, what: str):
+    """`(bytes, None)` or `(None, refusal)`. A str is utf-8-encoded: a spawned
+    program's ctrl-fd wire is JSON (no bytes type), and every caller gets the same
+    treatment."""
+    data = payload.get("bytes")
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    if not isinstance(data, (bytes, bytearray)):
+        return None, missing(verb, f"bytes ({what} — str is utf-8-encoded)")
+    return bytes(data), None
+
+
+def _current(root: fs.Root, path: str) -> bytes | None:
+    """The document's bytes, or None when no file is there."""
+    return fs.read_bytes(root, path) if fs.is_file(root, path) else None
+
+
+def _mismatch(path: str, want: str, have_bytes: bytes | None) -> dict | None:
+    """The on-demand optimistic guard: a refusal when `if_match` names another
+    version (an absent document has no version and never matches)."""
+    have = None if have_bytes is None else _version(have_bytes)
+    if have == want:
+        return None
+    return {
+        "error": "version mismatch — the document changed since you read it",
+        "reason": "version_mismatch",
+        "path": path,
+        "expected": want,
+        "actual": have,
+    }
+
+
+def _text_gate(verb: str, kernel, rec: dict, path: str, mutate: bool):
+    """`(root, None)` or `(None, refusal)`: readonly for a mutate, a real path,
+    the clamp and the allow list on both ends."""
+    if mutate and (err := _readonly_or_none(rec)):
+        return None, err
+    if not path:
+        return None, missing(verb, "path")
+    root = _root(kernel, rec)
+    if err := _gate_path(verb, root, _allow(rec), path):
+        return None, err
+    return root, None
+
+
+async def _read(id, payload, kernel):
+    """args: path:str (req), offset:int=0 (line), limit:int=200 — a text page {path, lines:[{n,text}], total, eof, version, origin}; refuses binary."""
+    rec = kernel.get(id) or {}
+    path, err = _path_arg("read", payload)
+    if err:
+        return err
+    off, err = _int_arg("read", payload, "offset", 0, 0)
+    if err:
+        return err
+    limit, err = _int_arg("read", payload, "limit", READ_LIMIT, 1)
+    if err:
+        return err
+    root, err = _text_gate("read", kernel, rec, path, mutate=False)
+    if err:
+        return err
+    try:
+        data = _current(root, path)
+    except (ValueError, OSError) as e:
+        return refusal(TRANSPORT_ERROR, str(e))
+    if data is None:
+        return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
+    if b"\x00" in data:
+        return bad("read", "path", "a text file (this one is binary)")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return bad("read", "path", "valid utf-8 (this file is not)")
+    all_lines = text.split("\n")
+    # A trailing newline yields one phantom empty tail element — dropped so
+    # `total` counts real lines.
+    if all_lines and all_lines[-1] == "":
+        all_lines.pop()
+    page = all_lines[off : off + limit]
+    ver = _version(data)
+    return {
+        "path": path,
+        "lines": [{"n": off + i + 1, "text": t} for i, t in enumerate(page)],
+        "total": len(all_lines),
+        "eof": off + limit >= len(all_lines),
+        "version": ver,
+        # HOW TO GET THIS BODY AGAIN — one line; a reader that keeps no body keeps this.
+        "origin": f"{id} {path} lines {off + 1}-{off + len(page)} version {ver} — "
+        f"read {{path: {path}, offset: {off}, limit: {limit}}}; a different version "
+        "means the file changed since",
+    }
+
+
+async def _write(id, payload, kernel):
+    """args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), if_match:str? — atomic whole-document write; {path, size, version}."""
+    rec = kernel.get(id) or {}
+    path, err = _path_arg("write", payload)
+    if err:
+        return err
+    root, err = _text_gate("write", kernel, rec, path, mutate=True)
+    if err:
+        return err
+    data, err = _doc("write", payload, "the whole document")
+    if err:
+        return err
+    async with _held(id, _norm(path)):
+        try:
+            before = _current(root, path)
+            want = payload.get("if_match")
+            if want is not None and (err := _mismatch(path, want, before)):
+                return err
+            fs.write_bytes(root, path, data)
+        except (ValueError, OSError) as e:
+            return refusal(TRANSPORT_ERROR, str(e))
+        _UNDO[(id, _norm(path))] = before
+    return {"path": path, "size": len(data), "version": _version(data)}
+
+
+async def _append(id, payload, kernel):
+    """args: path:str (req), bytes (req — one chunk; str is utf-8-encoded) — appends (creates if absent); {path, size, version}."""
+    rec = kernel.get(id) or {}
+    path, err = _path_arg("append", payload)
+    if err:
+        return err
+    root, err = _text_gate("append", kernel, rec, path, mutate=True)
+    if err:
+        return err
+    data, err = _doc("append", payload, "one chunk")
+    if err:
+        return err
+    async with _held(id, _norm(path)):
+        try:
+            before = _current(root, path)
+            _, size = fs.write_chunk(root, path, data, None)
+            whole = fs.read_bytes(root, path)
+        except (ValueError, OSError) as e:
+            return refusal(TRANSPORT_ERROR, str(e))
+        _UNDO[(id, _norm(path))] = before
+    return {"path": path, "size": size, "version": _version(whole)}
+
+
+def _parse_hunks(text: str) -> list[tuple[str, str]]:
+    """SEARCH/REPLACE blocks → (search, replace) pairs, taken VERBATIM (the marker
+    lines excluded). Raises ValueError on a block that opens but does not close."""
+    lines = text.split("\n")
+    hunks: list[tuple[str, str]] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i] != _H_START:
+            i += 1
+            continue
+        j = i + 1
+        search: list[str] = []
+        while j < n and lines[j] != _H_DIV:
+            search.append(lines[j])
+            j += 1
+        if j >= n:
+            raise ValueError("a SEARCH block has no `=======` divider")
+        j += 1
+        replace: list[str] = []
+        while j < n and lines[j] != _H_END:
+            replace.append(lines[j])
+            j += 1
+        if j >= n:
+            raise ValueError("a block has no closing `>>>>>>> REPLACE`")
+        hunks.append(("\n".join(search), "\n".join(replace)))
+        i = j + 1
+    return hunks
+
+
+async def _edit(id, payload, kernel):
+    """args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), dry_run:bool? — a TRANSACTION: every hunk of every edit verified before any write, any failure writes nothing (or restores what was written); {edited:true, edits:[{path,hunks,size,version}]}."""
+    rec = kernel.get(id) or {}
+    if err := _readonly_or_none(rec):
+        return err
+    edits = payload.get("edits")
+    if not isinstance(edits, list) or not edits:
+        return missing("edit", "edits (a list of {path, hunks, if_match?})")
+    data, err = _doc("edit", payload, "the patch — all hunks, in edits order")
+    if err:
+        return err
+    if not data:
+        return missing("edit", "bytes (the patch — all hunks, in edits order)")
+    try:
+        hunks = _parse_hunks(data.decode("utf-8"))
+    except UnicodeDecodeError:
+        return bad("edit", "bytes", "valid utf-8 (the patch is text)")
+    except ValueError as e:
+        return bad("edit", "bytes", f"a well-formed patch — {e}")
+    if not hunks:
+        return bad(
+            "edit",
+            "bytes",
+            "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block",
+        )
+    root = _root(kernel, rec)
+    allow = _allow(rec)
+    plan: list[dict] = []
+    cursor = 0
+    for i, e in enumerate(edits):
+        if (
+            not isinstance(e, dict)
+            or not isinstance(e.get("path"), str)
+            or not e["path"]
+        ):
+            return bad("edit", "edits", f"edit {i}: an object with a `path`")
+        n = e.get("hunks")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            return bad("edit", "edits", f"edit {i} ({e['path']!r}): `hunks` (int >= 1)")
+        if any(_norm(p["path"]) == _norm(e["path"]) for p in plan):
+            return bad(
+                "edit",
+                "edits",
+                "each path at most once — put all of a file's hunks in one edit",
+            )
+        if gate := _gate_path("edit", root, allow, e["path"]):
+            return gate
+        plan.append(
+            {
+                "path": e["path"],
+                "hunks": hunks[cursor : cursor + n],
+                "if_match": e.get("if_match"),
+            }
+        )
+        cursor += n
+    if cursor != len(hunks):
+        return bad(
+            "edit",
+            "edits",
+            f"hunk counts that sum to the blob's blocks — edits claim {cursor}, "
+            f"the patch holds {len(hunks)}",
+        )
+    async with _held(id, *(_norm(e["path"]) for e in plan)):
+        return _edit_txn(id, root, plan, bool(payload.get("dry_run")), _UNDO)
+
+
+def _edit_txn(id: str, root: fs.Root, plan: list[dict], dry_run: bool, slots: dict):
+    """The locked half of `edit`: verify every hunk against the CURRENT document
+    (`if_match` checked here, under the lock), then commit all; a mid-commit
+    failure restores every document already written from its pre-image."""
+    try:
+        for e in plan:
+            raw = _current(root, e["path"])
+            if raw is None:
+                return refusal(
+                    NOT_FOUND, f"file {e['path']!r} not found", path=e["path"]
+                )
+            if e["if_match"] is not None and (
+                err := _mismatch(e["path"], e["if_match"], raw)
+            ):
+                return err
+            try:
+                working = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return bad("edit", "edits", f"{e['path']!r}: a utf-8 text file")
+            for idx, (search, replace) in enumerate(e["hunks"]):
+                hits = working.count(search)
+                if hits != 1:
+                    return {
+                        "error": "a hunk did not apply — nothing written",
+                        "reason": "no_match" if hits == 0 else "ambiguous",
+                        "failed": [
+                            {
+                                "path": e["path"],
+                                "index": idx,
+                                "reason": "search text not found"
+                                if hits == 0
+                                else f"search text matches {hits} places",
+                            }
+                        ],
+                    }
+                working = working.replace(search, replace, 1)
+            e["before"] = raw
+            e["new"] = working.encode("utf-8")
+    except (ValueError, OSError) as err:
+        return refusal(TRANSPORT_ERROR, str(err))
+    if dry_run:
+        return {
+            "dry_run": True,
+            "edits": [{"path": e["path"], "hunks": len(e["hunks"])} for e in plan],
+        }
+    written: list[dict] = []
+    for e in plan:
+        try:
+            fs.write_bytes(root, e["path"], e["new"])
+        except (ValueError, OSError) as err:
+            # ROLL BACK what already landed — every pre-image is in hand.
+            for w in written:
+                try:
+                    fs.write_bytes(root, w["path"], w["before"])
+                except (ValueError, OSError):
+                    pass
+            return {
+                **refusal(TRANSPORT_ERROR, str(err)),
+                "restored": [w["path"] for w in written],
+                "failed_path": e["path"],
+            }
+        written.append(e)
+    for e in plan:
+        slots[(id, _norm(e["path"]))] = e["before"]
+    return {
+        "edited": True,
+        "edits": [
+            {
+                "path": e["path"],
+                "hunks": len(e["hunks"]),
+                "size": len(e["new"]),
+                "version": _version(e["new"]),
+            }
+            for e in plan
+        ],
+    }
+
+
+async def _undo(id, payload, kernel):
+    """args: path:str (req) — swap the document with the bytes the last write/edit/append replaced (a second undo is redo); ONE slot per path, in RAM, lost on restart; {undone:true, path, version|deleted}."""
+    rec = kernel.get(id) or {}
+    path, err = _path_arg("undo", payload)
+    if err:
+        return err
+    root, err = _text_gate("undo", kernel, rec, path, mutate=True)
+    if err:
+        return err
+    key = (id, _norm(path))
+    slots = _UNDO
+    async with _held(*key):
+        if key not in slots:
+            return refusal(
+                NOT_FOUND,
+                f"undo: nothing to undo for {path!r}",
+                hint="the slot holds what the LAST write/edit/append on this path "
+                "replaced; it lives in RAM, one per path, and is gone after a restart",
+                path=path,
+            )
+        slot = slots[key]
+        try:
+            now = _current(root, path)
+            if slot is None:
+                if now is not None:
+                    fs.remove(root, path)
+            else:
+                fs.write_bytes(root, path, slot)
+        except (ValueError, OSError) as e:
+            return refusal(TRANSPORT_ERROR, str(e))
+        slots[key] = now
+    if slot is None:
+        return {"undone": True, "path": path, "deleted": True}
+    return {"undone": True, "path": path, "version": _version(slot)}
+
+
+async def on_delete(agent) -> None:
+    """The bridge is going away — its undo slots go with it."""
+    slots = _UNDO
+    for k in [k for k in slots if k[0] == agent.id]:
+        del slots[k]
+
+
+# ─── the allow list (what this bridge exposes) ──────────────────
+
+
+async def _allow_verb(id, payload, kernel):
+    """args: path:str (req — a file, or a directory exposing everything under it; `.` = the whole root). Adds it to the `allow` list (idempotent). Returns {path, allowed:true, count}."""
+    rec = kernel.get(id) or {}
+    raw, err = _path_arg("allow", payload)
+    if err:
+        return err
+    if not raw:
+        return missing("allow", "path")
+    path = _norm(raw)
+    if path is None:
+        return bad("allow", "path", "a path relative to the bridge's root")
+    try:
+        fs.resolve(_root(kernel, rec), path)  # THE CLAMP: nothing outside the root
+    except ValueError as e:
+        return bad("allow", "path", f"a path inside the root ({e})")
+    allow = _allow(rec)
+    if path not in allow:
+        allow = [*allow, path]
+        kernel.update(id, allow=allow)
+    return {"path": path, "allowed": True, "count": len(allow)}
+
+
+async def _disallow_verb(id, payload, kernel):
+    """args: path:str (req — an entry of the `allow` list). Removes it. Returns {path, allowed:false, count}."""
+    rec = kernel.get(id) or {}
+    raw, err = _path_arg("disallow", payload)
+    if err:
+        return err
+    if not raw:
+        return missing("disallow", "path")
+    path = _norm(raw)
+    allow = _allow(rec)
+    if path is None or path not in allow:
+        return refusal(
+            NOT_FOUND, f"disallow: {raw!r} is not in the allow list", path=raw
+        )
+    allow = [s for s in allow if s != path]
+    kernel.update(id, allow=allow)
+    return {"path": path, "allowed": False, "count": len(allow)}
+
+
+async def _allowed_verb(id, payload, kernel):
+    """args: limit:int?, after:str? (the last path of the previous page). The `allow` list in path order. Returns {paths, next, total}."""
+    rec = kernel.get(id) or {}
+    paths = sorted(_allow(rec))
+    after = payload.get("after")
+    if isinstance(after, str) and after:
+        paths = [p for p in paths if p > after]
+    total = len(paths)
+    limit, err = _int_arg("allowed", payload, "limit", 0, 0)
+    if err:
+        return err
+    page = paths[:limit] if limit else paths
+    return {
+        "paths": page,
+        "next": page[-1] if limit and total > len(page) else None,
+        "total": total,
+    }
+
+
 # ─── dispatch ───────────────────────────────────────────────────
 
 
@@ -421,12 +1039,20 @@ VERBS = {
     "reflect": _reflect,
     "boot": _boot,
     "list": _list,
+    "read": _read,
+    "write": _write,
+    "edit": _edit,
+    "append": _append,
+    "undo": _undo,
     "read_stream": _read_stream,
     "write_stream": _write_stream,
     "pump": _pump,
     "delete": _delete,
     "rename": _rename,
     "mkdir": _mkdir,
+    "allow": _allow_verb,
+    "disallow": _disallow_verb,
+    "allowed": _allowed_verb,
 }
 
 UNGATED = {"reflect"}  # discovery must work on a sealed bridge
@@ -447,6 +1073,15 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     unknown rule now seals rather than raising (see io_bridge.ingress_rules), so the
     edge is SAFE either way — but safe-and-wrong is still wrong, and the mistake
     belongs at the write, next to the typo, not three calls later."""
+    if "allow" in meta:
+        a = meta["allow"]
+        if not isinstance(a, list) or not all(
+            isinstance(x, str) and x and _norm(x) is not None for x in a
+        ):
+            return (
+                "allow must be a list of paths relative to the root (a file, or a "
+                "directory exposing everything under it; `.` = the whole root)"
+            )
     if "ingress_rule" in meta:
         spec = meta["ingress_rule"]
         if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):

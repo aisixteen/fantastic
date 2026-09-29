@@ -264,12 +264,15 @@ async def test_cancel_unknown_or_finished_task_is_honest(seeded_kernel):
 
 
 async def test_agent_cancels_another_agents_task(seeded_kernel):
-    """`cancel` is a PLAIN VERB, so an agent wields it: the killer agent's own
-    handler discovers the victim's task through `ps` and sends `cancel`. No UI,
-    no privileged caller — the capability is in the substrate."""
+    """An agent wields `cancel`: the killer agent's own handler discovers the
+    victim's task through `ps` and sends `cancel`. Both are PRIVILEGED — the
+    baseline `$parent: "*"` does not reach them — so the killer holds a grant that
+    names them on the root."""
     _hook_calls.clear()
     victim = await _mk(seeded_kernel, "slow_victim")
-    killer = await _mk(seeded_kernel, "slow_killer")
+    killer = await _mk(
+        seeded_kernel, "slow_killer", can_call={"kernel_state": ["ps", "cancel"]}
+    )
 
     caller = asyncio.create_task(
         seeded_kernel.send([{"target": victim, "payload": {"type": "slow"}}])
@@ -294,7 +297,7 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
     """The same capability from OUT OF PROCESS: an `exec_bridge` job — a real
     script, holding only the `kernel` connector — reads `ps`, picks the victim's
     task id, and sends `cancel`. Nothing about cancellation is special-cased for
-    in-process callers."""
+    in-process callers; the runner holds the same explicit `ps`/`cancel` grant."""
     victim = await _mk(seeded_kernel, "slow_victim")
     rec = (
         await seeded_kernel.send(
@@ -304,7 +307,9 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": "kernel_state",
-                        **__import__("_testkit").py_runner_meta(),
+                        **__import__("_testkit").py_runner_meta(
+                            can_call={"kernel_state": ["ps", "cancel"]}
+                        ),
                     },
                 }
             ]

@@ -111,7 +111,9 @@ pub async fn store_call(
     payload: Value,
 ) -> MemResult<Map<String, Value>> {
     let sid = store_of(self_id, kernel)?;
-    let verb = payload.get("type").map_or_else(|| "None".to_string(), py_str);
+    let verb = payload
+        .get("type")
+        .map_or_else(|| "None".to_string(), py_str);
     let out = fantastic_kernel::with_sender(
         self_id.clone(),
         kernel.send(vec![Item::new(sid.clone(), payload)]),
@@ -227,7 +229,11 @@ pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<
         .cloned();
     let ids: Vec<i64> = cached
         .as_ref()
-        .map(|h| h.iter().filter_map(|r| r.get("id").and_then(Value::as_i64)).collect())
+        .map(|h| {
+            h.iter()
+                .filter_map(|r| r.get("id").and_then(Value::as_i64))
+                .collect()
+        })
         .unwrap_or_default();
     let Some(newest) = ids.iter().copied().max() else {
         m.heads.lock().expect("heads poisoned").remove(&self_id.0);
@@ -519,14 +525,21 @@ async fn expand_forks(
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let content = r.get("content").filter(|c| py_truthy(c)).map(py_str).unwrap_or_default();
+        let content = r
+            .get("content")
+            .filter(|c| py_truthy(c))
+            .map(py_str)
+            .unwrap_or_default();
         let head = content.split('\n').next().unwrap_or("").to_string();
         let owner = r.get("owner").map_or_else(|| "None".to_string(), py_str);
         let as_of = r.get("as_of").cloned().unwrap_or(Value::Null);
         let mut m = r.as_object().cloned().unwrap_or_default();
         m.insert(
             "content".to_string(),
-            Value::from(format!("{head}\n{}", render_shared(&owner, &as_of, &shared))),
+            Value::from(format!(
+                "{head}\n{}",
+                render_shared(&owner, &as_of, &shared)
+            )),
         );
         out.push(Value::Object(m));
     }
@@ -553,9 +566,15 @@ pub fn row_digest(row: &Value) -> Value {
         _ => row.get("role").cloned().unwrap_or(Value::Null),
     };
     let mut d = Map::new();
-    d.insert("id".to_string(), row.get("id").cloned().unwrap_or(Value::Null));
+    d.insert(
+        "id".to_string(),
+        row.get("id").cloned().unwrap_or(Value::Null),
+    );
     d.insert("kind".to_string(), kind);
-    d.insert("role".to_string(), row.get("role").cloned().unwrap_or(Value::Null));
+    d.insert(
+        "role".to_string(),
+        row.get("role").cloned().unwrap_or(Value::Null),
+    );
     d.insert("bytes".to_string(), Value::from(text.chars().count()));
     Value::Object(d)
 }
@@ -661,7 +680,12 @@ pub fn remove_watcher(self_id: &AgentId, kernel: &Kernel, watcher: &str) {
 /// `_announce_row`.
 pub fn announce_row(self_id: &AgentId, kernel: &Arc<Kernel>, row: &Value) {
     let m = mem(kernel);
-    let list = match m.watchers.lock().expect("watchers poisoned").get(&self_id.0) {
+    let list = match m
+        .watchers
+        .lock()
+        .expect("watchers poisoned")
+        .get(&self_id.0)
+    {
         Some(l) if !l.is_empty() => l.clone(),
         _ => return,
     };
@@ -682,7 +706,11 @@ pub fn announce_row(self_id: &AgentId, kernel: &Arc<Kernel>, row: &Value) {
     let rid = row.get("id").and_then(Value::as_i64).unwrap_or(0);
     let mut gone: Vec<String> = Vec::new();
     for (wid, body) in list {
-        let Some(q) = kernel.inboxes.get(&AgentId::from(wid.as_str())).map(|e| e.clone()) else {
+        let Some(q) = kernel
+            .inboxes
+            .get(&AgentId::from(wid.as_str()))
+            .map(|e| e.clone())
+        else {
             gone.push(wid);
             continue;
         };

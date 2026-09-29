@@ -1,10 +1,9 @@
-"""coding/undo — checkpoints live: edit WITH a pre-image, then restore it. LLM-driven.
+"""coding/undo — edit, then take it back with `undo`. LLM-driven.
 
-The `text_file` editor's on-demand checkpoints (C2): the model patches with
-`checkpoint:true`, reads the `ckpt_id` out of the reply, is asked (in the same
-task) to revert, and must `restore` by that id. The score is the FILE — ending
+The file agent keeps ONE undo slot per path, in RAM (C2): the model edits, is
+asked (in the same task) to revert, and must `undo`. The score is the FILE — ending
 byte-identical to the original — plus the transcript showing BOTH organs
-(`patch` and `restore`): an original file that was simply never touched would
+(`edit` and `undo`): an original file that was simply never touched would
 pass the byte check alone.
 """
 
@@ -35,11 +34,10 @@ CONFIG = (
 
 TASK = (
     "The editor agent `editor` edits this run's files. Step 1: in `config.txt` "
-    "change `port = 8080` to `port = 9090` using the editor's `patch` verb "
-    "WITH `checkpoint: true` (reflect `editor` for the shape) — the reply "
-    "carries `ckpt_ids`. Step 2: the change is cancelled — restore "
-    "`config.txt` to its pre-edit state with the editor's `restore` verb and "
-    "that exact `ckpt_id`. When the file is restored, stop — a turn with no "
+    "change `port = 8080` to `port = 9090` using the editor's `edit` verb "
+    "(reflect `editor` for the shape). Step 2: the change is cancelled — put "
+    "`config.txt` back to its pre-edit state with the editor's `undo` verb. "
+    "When the file is restored, stop — a turn with no "
     "tool call ends your run."
 )
 
@@ -60,10 +58,10 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "editor": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
@@ -74,9 +72,9 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": "editor",
-                "handler_module": "text_file.tools",
-                "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."],
+                "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
@@ -103,16 +101,15 @@ async def main():
         after = Path("config.txt").read_text()
         checks = [
             ("the file ends byte-identical to the original", after == CONFIG),
-            ("the edit actually happened (a patch call)", '<type>patch</type>' in transcript),
-            ("the revert used restore", '<type>restore</type>' in transcript),
-            ("a checkpoint id crossed the wire", "ckpt_id" in transcript),
+            ("the edit actually happened (an edit call)", '<type>edit</type>' in transcript),
+            ("the revert used undo", '<type>undo</type>' in transcript),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")
         allok = all(ok for _, ok in checks)
         verdict(
             allok,
-            "edited under a checkpoint, reverted by its id"
+            "edited, then reverted with undo"
             if allok
             else "an undo check failed",
         )

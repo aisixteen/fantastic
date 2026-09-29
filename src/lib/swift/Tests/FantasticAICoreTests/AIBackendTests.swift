@@ -46,8 +46,8 @@ struct AIBackendTests {
         #expect(r["memory_store_id"].asString == "memory")
         #expect(r["id"].asString == id.value)
         #expect(r["kind"].isNull && r["provider"].isNull)
-        #expect(r["model"].asString == "(no default — set the `model` meta)")
-        #expect(r["endpoint"].asString == "http://mock.invalid")
+        // the record's own fields, or null — nothing is guessed
+        #expect(r["model"].isNull && r["endpoint"].isNull, "\(r)")
         #expect(r["generating"] == .bool(false))
         #expect(r["concurrency"].asString == CONCURRENCY_DOC)
         #expect(r["extra"].asString == "yes")
@@ -519,9 +519,9 @@ struct AIBackendTests {
     }
 
     @Test func historyNeedsNoFileLegButAMemoryStore() async throws {
-        // The conversation lives in the agent's MEMORY STORE — no
-        // `file_bridge_id`, no sidecar, no chat agent. A backend with no leg at
-        // all keeps its turns in the store it names; with NO store named, the
+        // The conversation lives in the agent's MEMORY STORE — no file leg,
+        // no sidecar, no chat agent. A backend keeps its turns in the store it
+        // names; with NO store named, the
         // send fails loud before any turn (python `_send`'s `_store_of`).
         let registry = BundleRegistry()
         registry.register(
@@ -922,7 +922,7 @@ struct AIBackendTests {
     }
 
     // B1.9 + B1.22: the opt-in blocks read python TRUTHINESS, and the primer
-    // reflect goes to the `kernel` ALIAS (the root id differs per runtime).
+    // reflect goes to the reserved `kernel` address (the root id differs per runtime).
     @Test func primerReflectTargetsKernelAliasAndFlagsArePythonTruthy() async throws {
         let cfg = baseConfig { .provider(MockProvider()) }
         let (kernel, ids, _) = await bootMockKernel(
@@ -931,7 +931,7 @@ struct AIBackendTests {
         let agent = kernel.agent(ids["mock"]!)!
         let prompt = await backend.assembleSystemPrompt(
             agent: agent, systemPrompt: nil, kernel: kernel)
-        // The alias resolved to the ROOT: its reflect is the first block. An
+        // The `kernel` address resolved to the ROOT: its reflect is the first block. An
         // unresolved target would have rendered an error here instead.
         #expect(prompt.contains("id=kernel_state"), "\(prompt.prefix(200))")
         #expect(!prompt.contains("unknown agent"))

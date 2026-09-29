@@ -30,7 +30,6 @@ from ai_core.context import ProjectionCtx, estimate_one, estimate_tokens
 from ai_core.strategies.base import (
     NOTICE_ENVELOPE_RESERVE,
     Projection,
-    drop_orphan_tools,
     fit_tail,
 )
 
@@ -38,14 +37,9 @@ LOW = 0.6  # strip down to this fraction of the budget once over it
 
 
 def _halve(body: list[dict]) -> list[dict]:
-    """The back half, snapped so it never STARTS on an orphaned `role:tool` (the wire
-    rejects a tool reply whose `assistant.tool_calls` turn is not present). The cut is
-    strip's second stage — what happens when every body is already a stub and the prose
-    alone still overflows."""
-    cut = len(body) // 2
-    while cut > 0 and body[cut].get("role") == "tool":
-        cut -= 1
-    return drop_orphan_tools(body[cut:])
+    """The back half — strip's second stage, what happens when every body is already
+    a stub and the prose alone still overflows."""
+    return body[len(body) // 2 :]
 
 
 # pid off a reply block's first line: `[reply to <pid> · …`

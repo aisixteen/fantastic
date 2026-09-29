@@ -2,8 +2,9 @@
 // one way to boot it.
 //
 // The library is the BASE ONLY: the kernel, the WS bridge to the host, the
-// loader that persists this kernel's tree through the host, the memory store,
-// the AI backend. It has no page, no views, no seeding and nothing to mount — an
+// loader that persists this kernel's tree through the host, the memory store.
+// It is a THIN CLIENT — AI agents run on host kernels and are reached over the
+// bridge by id; no key ever sits in a browser or a record. It has no page, no views, no seeding and nothing to mount — an
 // APP (the canvas, a test harness, any other page) registers its own bundles,
 // decides what an empty tree is seeded with, and mounts what it renders:
 //
@@ -37,15 +38,12 @@ export { ProxyLoader } from "./bundles/loader/proxy_loader.ts";
 export type { ProxyLoaderOptions } from "./bundles/loader/proxy_loader.ts";
 export { Host } from "./bundles/host.ts";
 export { registerRamStore, RAM_STORE_README } from "./bundles/memory/ram_store.ts";
-export { registerAIBackend, makeAIBackend, OpenAIProvider, AI_README, SEND_TIMEOUT } from "./bundles/ai/ai_backend.ts";
-export type { AIRecord, AIBackendOptions } from "./bundles/ai/ai_backend.ts";
-export { ResponsesProvider } from "./bundles/ai/responses.ts";
 
 export interface BootOptions {
   /** The host's WS origin, e.g. `ws://127.0.0.1:8888` — never guessed. */
   origin: string;
   /** The host-side loader this kernel's tree persists THROUGH (a `kernel_state`
-   *  the operator created, e.g. alias `web_loader`). It is also the bridge's
+   *  the operator created, e.g. id `web_loader`). It is also the bridge's
    *  control endpoint. */
   loader: string;
   /** The app's turn: register its bundles (`kernel.registerBundle`) and their

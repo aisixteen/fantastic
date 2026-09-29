@@ -13,7 +13,6 @@ roster:
   parent_id: <root.id>
   callable_by:
     ai: '*'
-    totals: '*'
     rest: '*'
     web: '*'
 - id: readings
@@ -33,9 +32,8 @@ roster:
     rest: '*'
     web: '*'
 - id: totals
-  handler_module: text_file.tools
+  handler_module: file_bridge.tools
   parent_id: <root.id>
-  can_call: '<{store[''id'']: ''*''}>'
   callable_by: '<{''ai'': ''*'', EXECUTOR_LEG: ''*'', ''rest'': ''*'', ''web'': ''*''}>'
 - id: ai
   created_by: helpers.ai.connect

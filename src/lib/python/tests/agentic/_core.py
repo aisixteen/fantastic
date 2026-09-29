@@ -60,11 +60,11 @@ def _built(h) -> bool:
 
 
 async def core_the_hydration_verdict_matches_the_declaration(h):
-    """A bad manifest is refused at WRITE time — but only the kind that cannot be
-    READ. Measured: `manifest: nope.yaml` is refused by `validate_meta` and never
-    becomes a record; a manifest that parses and then names a bad ENTRY produces
-    a clean-looking create reply, a silently PARTIAL roster, and no complaint
-    anywhere, because `_verb_create_agent` boots the child, DISCARDS the reply
+    """A bad manifest is refused at WRITE time — but only a malformed `manifest`
+    FIELD (`validate_meta` checks the shape, never the file). A path that is not
+    there becomes a record and fails its boot read; a manifest that parses and
+    then names a bad ENTRY produces a clean-looking create reply, a silently
+    PARTIAL roster, and no complaint anywhere, because `_verb_create_agent` boots the child, DISCARDS the reply
     and swallows the exception (`kernel/_agent.py:1231-1236`) while
     `static_loader._boot` never raises — it RETURNS `{"error": …, booted: False}`.
 
@@ -252,6 +252,7 @@ async def core_the_roster_is_closed_after_boot(h):
             "type": "create_agent",
             "parent_id": h.kernel.id,
             "handler_module": "file_bridge.tools",
+            "allow": ["."],
             "id": "smuggled",
         },
     )
@@ -289,6 +290,7 @@ async def core_the_roster_is_closed_after_boot(h):
         {
             "type": "create_agent",
             "handler_module": "file_bridge.tools",
+            "allow": ["."],
             "id": "smuggled",
         },
     )

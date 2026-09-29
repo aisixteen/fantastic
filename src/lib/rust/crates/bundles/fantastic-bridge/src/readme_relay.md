@@ -13,7 +13,7 @@ gate the tunneled calls and are INDEPENDENT of the relay's own connection auth.
 
 **Self-healing** — the leg auto-connects (eager initial dial + background
 auto-connect) and auto-reconnects with the `reconnect` backoff (seconds, default
-10; `0` = one-shot/legacy, raise on first failure). `reflect.connected` tracks the
+10; `0` = one-shot, raise on first failure). `reflect.connected` tracks the
 LIVE socket. A no-reply `keepalive` verb is sent every `heartbeat` seconds to keep
 the relay's liveness view of us green.
 
@@ -55,4 +55,12 @@ peer (no typed keys) advertises nothing — identical to an un-typed leg.
 
 Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` (peer to
 reach) · `relay_token` (X-Fantastic-Auth) · `heartbeat` (s, default 30) ·
-`reconnect` (s, default 10) · `role` · `owner_guid` · `exposes`. Transport: `relay`.
+`reconnect` (s, default 10) · `role` · `owner_guid` · `exposes` · `peer_guid`.
+Transport: `relay`.
+
+**Inbound calls are served only from the ONE pinned peer**: `peer_guid` is the partner
+KERNEL's instance guid (its root reflect's `guid` — not the leg's path `guid`). Every
+tunneled call names its caller `<guid>|<agent>`; a caller from any other guid, or a leg
+with no pin, is refused. The call is then gated AS that foreign id: the target's
+`callable_by` must name `<guid>|<agent>` or `<guid>|*` — accepting this leg is not
+accepting its peer. Remote events re-emit only for a `watch_remote` subscription.

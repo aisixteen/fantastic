@@ -11,7 +11,10 @@
 #
 # FILLED IN 2026-09-20 from the owner's statement that every item in
 # `tmp/py_parity_plan.md` was implemented in both ports EXCEPT the four named
-# below. It is 460 items minus two per runtime, not a measurement — what the
+# below. It is 459 items minus the 31 A6 terminal items (terminal_backend was deleted
+# 2026-09-28, merged into exec_bridge PTY jobs) minus the 15 A3 text_file items (text_file
+# was deleted 2026-09-29, its verbs moved to file_bridge) minus two per runtime (C35, the declared
+# `alias`, was deleted 2026-09-28), not a measurement — what the
 # harness measures is whether each claim survives its selector, and that is the
 # `pass` half of the status line. An item claimed here that produces a diff line
 # reads as a REGRESSION, which is the point of writing the claim down.
@@ -25,23 +28,23 @@
 #                canonical equivalence: U+212B == U+00C5). Residual R-D14-1.
 #   swift C87    the two shutdown lines. No swift code path can produce them.
 #
-# EVIDENCE CLASS. 451 of the 460 are claimed against a capture selector in
+# EVIDENCE CLASS. All but the items below are claimed against a capture selector in
 # `proofs.yaml`. The rest are claimed against something the capture cannot
 # reach, and are named here so no one reads their `pass` as a measurement:
 #
-#   unit twins only (proofs.yaml `unit`): A0.1-A0.6, A5.9, A5.12, A6.3, A6.13,
+#   unit twins only (proofs.yaml `unit`): A0.1-A0.6, A5.9, A5.12,
 #     A7.10, A7.24, A11.30, B2.10, B2.19, C44, C49, C51, C82
-#   no proof at all (proofs.yaml `no_proof`): A6.29, A15.1, A15.2, A15.3
+#   no proof at all (proofs.yaml `no_proof`): A15.1, A15.2, A15.3
 #     (C87 is in that set too, and is NOT claimed for swift)
 #
-# `run.py capture` reads the root id off `.fantastic/agent.json` after seeding
+# `run.py capture` reads the root id off `.fantastic/agent.yaml` after seeding
 # and records it in each family's `meta.json`. All three runtimes answered
 # `kernel_state` on 2026-09-19, which is what C12 is.
 
 version: 4
 
 
-# rust: 458 of 460; open: A14.14, C55
+# rust: 457 of 459; open: A14.14, C55
 rust:
   - A0.1
   - A0.2
@@ -73,21 +76,6 @@ rust:
   - A2.19
   - A2.20
   - A2.21
-  - A3.1
-  - A3.2
-  - A3.3
-  - A3.4
-  - A3.5
-  - A3.6
-  - A3.7
-  - A3.8
-  - A3.9
-  - A3.10
-  - A3.11
-  - A3.12
-  - A3.13
-  - A3.14
-  - A3.15
   - A4.1
   - A4.2
   - A4.3
@@ -138,37 +126,6 @@ rust:
   - A5.14
   - A5.15
   - A5.16
-  - A6.1
-  - A6.2
-  - A6.3
-  - A6.4
-  - A6.5
-  - A6.6
-  - A6.7
-  - A6.8
-  - A6.9
-  - A6.10
-  - A6.11
-  - A6.12
-  - A6.13
-  - A6.14
-  - A6.15
-  - A6.16
-  - A6.17
-  - A6.18
-  - A6.19
-  - A6.20
-  - A6.21
-  - A6.22
-  - A6.23
-  - A6.24
-  - A6.25
-  - A6.26
-  - A6.27
-  - A6.28
-  - A6.29
-  - A6.30
-  - A6.31
   - A7.1
   - A7.2
   - A7.3
@@ -446,7 +403,6 @@ rust:
   - C32
   - C33
   - C34
-  - C35
   - C36
   - C37
   - C38
@@ -502,7 +458,7 @@ rust:
   - C89
   - C90
 
-# swift: 458 of 460; open: C75, C87
+# swift: 457 of 459; open: C75, C87
 swift:
   - A0.1
   - A0.2
@@ -534,21 +490,6 @@ swift:
   - A2.19
   - A2.20
   - A2.21
-  - A3.1
-  - A3.2
-  - A3.3
-  - A3.4
-  - A3.5
-  - A3.6
-  - A3.7
-  - A3.8
-  - A3.9
-  - A3.10
-  - A3.11
-  - A3.12
-  - A3.13
-  - A3.14
-  - A3.15
   - A4.1
   - A4.2
   - A4.3
@@ -599,37 +540,6 @@ swift:
   - A5.14
   - A5.15
   - A5.16
-  - A6.1
-  - A6.2
-  - A6.3
-  - A6.4
-  - A6.5
-  - A6.6
-  - A6.7
-  - A6.8
-  - A6.9
-  - A6.10
-  - A6.11
-  - A6.12
-  - A6.13
-  - A6.14
-  - A6.15
-  - A6.16
-  - A6.17
-  - A6.18
-  - A6.19
-  - A6.20
-  - A6.21
-  - A6.22
-  - A6.23
-  - A6.24
-  - A6.25
-  - A6.26
-  - A6.27
-  - A6.28
-  - A6.29
-  - A6.30
-  - A6.31
   - A7.1
   - A7.2
   - A7.3
@@ -908,7 +818,6 @@ swift:
   - C32
   - C33
   - C34
-  - C35
   - C36
   - C37
   - C38

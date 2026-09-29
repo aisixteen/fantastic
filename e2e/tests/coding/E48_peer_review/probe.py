@@ -61,15 +61,15 @@ async def main():
 
         for payload in (
             {"type": "create_agent", "parent_id": root.id, "id": FB,
-             "handler_module": "file_bridge.tools", "root": ".",
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
-             "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*", "editor": "*"}},
+             "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
             {"type": "create_agent", "parent_id": root.id, "id": "editor",
-             "handler_module": "text_file.tools", "target_id": FB,
-             "can_call": {FB: "*"},
+             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+             "ingress_rule": "allow_all_ingress",
              "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
             {"type": "create_agent", "parent_id": root.id, "id": RUNNER,
-             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(),
+             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
              "ingress_rule": "allow_all_ingress", "allowed": ["git .*"],
              "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
         ):
@@ -95,11 +95,11 @@ async def main():
         rv = await connect(root, core, BK, agent_id="ai_rev",
                            can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*"},
                            callable_by={"ai": "*"},
-                           limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
+                           limits=Limits.from_env(os.environ))
 
         coder_task = (
             "In `config.py`, change `timeout = 30` to `timeout = 300` using the "
-            "editor `editor`'s `patch` verb (reflect it for the shape) — change "
+            "editor `editor`'s `edit` verb (reflect it for the shape) — change "
             "nothing else. THEN GET IT REVIEWED: `ai_rev` is a colleague, "
             "another agent like you. `send` it an `inquiry` on whether the "
             "change satisfies `spec.md`, telling it to read the spec through "
@@ -112,7 +112,7 @@ async def main():
         c = await connect(root, core, BK, agent_id="ai",
                           can_call={FB: "*", "editor": "*", "cli": "*", "ai_rev": "*"},
                           callable_by={"user": "*"},
-                          limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
+                          limits=Limits.from_env(os.environ))
         # THE TASK COMES FROM THE HUMAN — gated, ledgered, a real sender.
         await drive(c, coder_task, client_id="coder", via="user")
         tr_coder = "".join(c.proxy.transcript)

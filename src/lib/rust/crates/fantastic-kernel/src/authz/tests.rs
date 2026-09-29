@@ -20,6 +20,7 @@ fn auth(grant: &Value, verb: &str, other: &str) -> Decision {
         &kids(&["kid"]),
         Some("root"),
         true,
+        None,
     )
 }
 
@@ -34,6 +35,7 @@ fn auth_ingress(grant: &Value, verb: &str, other: &str) -> Decision {
         &kids(&["kid"]),
         Some("root"),
         false,
+        None,
     )
 }
 
@@ -139,4 +141,246 @@ fn explicit_kernel_grant_opens_mutation() {
     let g = json!({"root": ["create_agent"]});
     assert!(auth(&g, "create_agent", "root").allowed);
     assert!(!auth(&g, "delete_agent", "root").allowed);
+}
+
+/// Measured 2026-09-28: `$parent: "*"` let every direct child of the root stop the
+/// kernel, kill ANY task and read the whole ledger. A structural token's wildcard
+/// covers none of them; a grant that names the verb does.
+#[test]
+fn the_baseline_never_reaches_the_kernel_controls() {
+    let baseline = Value::Object(default_can_call());
+    for verb in [
+        "kernel_stop",
+        "kernel_start",
+        "shutdown_agents",
+        "ps",
+        "cancel",
+        "ledger",
+        "ack_deadletter",
+        "persist_record",
+        "forget_record",
+        "load_tree",
+    ] {
+        assert!(!auth(&baseline, verb, "boss").allowed, "{verb}");
+        assert!(
+            auth(&json!({"boss": [verb]}), verb, "boss").allowed,
+            "{verb}"
+        );
+    }
+}
+
+/// `*` under a NAMED id is the operator's own statement — it covers everything,
+/// privileged verbs included. Whoever writes it owns it.
+#[test]
+fn a_named_wildcard_covers_privileged_verbs() {
+    let g = json!({"root": "*"});
+    for verb in [
+        "create_agent",
+        "delete_agent",
+        "kernel_stop",
+        "cancel",
+        "allow",
+    ] {
+        assert!(auth(&g, verb, "root").allowed, "{verb}");
+    }
+    assert!(auth(&json!({"root": ["*"]}), "update_agent", "root").allowed);
+}
+
+/// A foreign caller is named `<guid>|<agent>`, or every agent of that one kernel
+/// with `<guid>|*`; the structural tokens never match it.
+#[test]
+fn a_foreign_caller_matches_only_by_name() {
+    assert!(auth_ingress(&json!({"g1|ai": "*"}), "read", "g1|ai").allowed);
+    assert!(!auth_ingress(&json!({"g1|ai": "*"}), "read", "g1|other").allowed);
+    assert!(auth_ingress(&json!({"g1|*": "*"}), "read", "g1|anyone").allowed);
+    assert!(!auth_ingress(&json!({"g1|*": "*"}), "read", "g2|anyone").allowed);
+    let baseline = Value::Object(default_callable_by());
+    assert!(!auth_ingress(&baseline, "read", "boss|x").allowed);
+}
+
+// ── $subtree:<X> + heritable entries ─────────────────────────────────────────
+
+/// A live tree for the resolver: parent links, nearest first up to the root.
+fn tree_parent(id: &str) -> Option<&'static str> {
+    match id {
+        "hub" => Some("root"),
+        "kid" => Some("hub"),
+        "grandkid" => Some("kid"),
+        "outsider" => Some("root"),
+        _ => None,
+    }
+}
+
+fn in_tree(other: &str, x: &str) -> bool {
+    if other != "root" && tree_parent(other).is_none() {
+        return false; // not a live agent
+    }
+    let mut cur = Some(other);
+    while let Some(id) = cur {
+        if id == x {
+            return true;
+        }
+        cur = tree_parent(id);
+    }
+    false
+}
+
+fn auth_sub(grant: &Value, verb: &str, other: &str, egress: bool) -> Decision {
+    authorize_call(
+        grant,
+        verb,
+        other,
+        "served",
+        Some("root"),
+        &kids(&[]),
+        Some("root"),
+        egress,
+        Some(&in_tree),
+    )
+}
+
+#[test]
+fn subtree_matches_x_and_every_live_descendant() {
+    let g = json!({"$subtree:hub": ["list"]});
+    for other in ["hub", "kid", "grandkid"] {
+        assert!(auth_sub(&g, "list", other, false).allowed, "{other}");
+    }
+    assert!(!auth_sub(&g, "list", "outsider", false).allowed);
+    assert!(!auth_sub(&g, "list", "root", false).allowed);
+    assert!(!auth_sub(&g, "mkdir", "kid", false).allowed);
+}
+
+#[test]
+fn subtree_never_matches_a_foreign_id() {
+    let g = json!({"$subtree:hub": "*"});
+    assert!(!auth_sub(&g, "list", "g1|hub", false).allowed);
+    assert!(!auth_sub(&g, "list", "g1|kid", false).allowed);
+}
+
+#[test]
+fn subtree_of_an_absent_id_matches_nothing() {
+    let g = json!({"$subtree:gone": "*"});
+    assert!(!auth_sub(&g, "list", "gone", false).allowed);
+    assert!(!auth_sub(&g, "list", "kid", false).allowed);
+    // an absent OTHER is under nobody either
+    assert!(!auth_sub(&json!({"$subtree:hub": "*"}), "list", "ghost", false).allowed);
+}
+
+#[test]
+fn subtree_without_a_resolver_matches_nothing() {
+    let g = json!({"$subtree:hub": "*"});
+    assert!(!auth_ingress(&g, "list", "hub").allowed);
+}
+
+#[test]
+fn subtree_is_structural_for_privileged_verbs() {
+    // enforce_privileged: a NAMED verb covers, `*` never does
+    assert!(auth_sub(&json!({"$subtree:hub": ["allow"]}), "allow", "kid", true).allowed);
+    assert!(!auth_sub(&json!({"$subtree:hub": "*"}), "allow", "kid", true).allowed);
+    assert!(!auth_sub(&json!({"$subtree:hub": ["*"]}), "allow", "kid", true).allowed);
+    // ingress posture accepts it
+    assert!(auth_sub(&json!({"$subtree:hub": "*"}), "allow", "kid", false).allowed);
+}
+
+#[test]
+fn a_heritable_entry_never_grants_its_holder() {
+    let g = json!({"served": {"verbs": ["list"], "for": "descendants"}});
+    assert!(!auth(&g, "list", "served").allowed);
+    assert!(!auth_ingress(&g, "list", "served").allowed);
+}
+
+#[test]
+fn heritable_shape_is_exact() {
+    assert!(is_heritable(
+        &json!({"verbs": ["list"], "for": "descendants"})
+    ));
+    assert!(is_heritable(&json!({"verbs": ["*"], "for": "descendants"})));
+    assert!(!is_heritable(
+        &json!({"verbs": ["list"], "for": "siblings"})
+    ));
+    assert!(!is_heritable(&json!({"verbs": [], "for": "descendants"})));
+    assert!(!is_heritable(
+        &json!({"verbs": "list", "for": "descendants"})
+    ));
+    assert!(!is_heritable(&json!({"verbs": [1], "for": "descendants"})));
+    assert!(!is_heritable(&json!({"verbs": ["list"]})));
+    assert!(!is_heritable(
+        &json!({"verbs": ["list"], "for": "descendants", "x": 1})
+    ));
+    assert!(!is_heritable(&json!(["list"])));
+}
+
+#[test]
+fn heritable_egress_walks_ancestors() {
+    let owner = json!({"served": {"verbs": ["list", "allow"], "for": "descendants"}});
+    let plain = json!({"served": ["mkdir"]}); // a plain grant is not heritable
+    assert!(authorize_heritable([&plain, &owner], "list", "served").allowed);
+    assert!(authorize_heritable([&owner], "allow", "served").allowed); // named privileged
+    assert!(!authorize_heritable([&plain, &owner], "mkdir", "served").allowed);
+    assert!(!authorize_heritable([&owner], "list", "other").allowed);
+    assert!(!authorize_heritable(std::iter::empty(), "list", "served").allowed);
+}
+
+#[test]
+fn heritable_wildcard_never_covers_a_privileged_verb() {
+    let owner = json!({"served": {"verbs": ["*"], "for": "descendants"}});
+    assert!(authorize_heritable([&owner], "list", "served").allowed);
+    for verb in PRIVILEGED_VERBS {
+        assert!(
+            !authorize_heritable([&owner], verb, "served").allowed,
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn heritable_conferral_is_a_subset() {
+    let held = json!({"verbs": ["list", "allow"], "for": "descendants"});
+    let wild = json!({"verbs": ["*"], "for": "descendants"});
+    let w = |v: Value| v.as_array().cloned().unwrap();
+    assert_eq!(heritable_uncovered(Some(&held), &w(json!(["list"]))), None);
+    assert_eq!(
+        heritable_uncovered(Some(&held), &w(json!(["list", "allow"]))),
+        None
+    );
+    assert_eq!(
+        heritable_uncovered(Some(&held), &w(json!(["list", "disallow"]))).as_deref(),
+        Some("disallow")
+    );
+    assert_eq!(
+        heritable_uncovered(Some(&held), &w(json!(["*"]))).as_deref(),
+        Some("*")
+    );
+    // `*` requires `*`; a held `*` covers an ordinary verb, not a privileged one
+    assert_eq!(heritable_uncovered(Some(&wild), &w(json!(["*"]))), None);
+    assert_eq!(heritable_uncovered(Some(&wild), &w(json!(["list"]))), None);
+    assert_eq!(
+        heritable_uncovered(Some(&wild), &w(json!(["allow"]))).as_deref(),
+        Some("allow")
+    );
+    // a plain grant, or none, holds nothing heritable
+    assert_eq!(
+        heritable_uncovered(Some(&json!("*")), &w(json!(["list"]))).as_deref(),
+        Some("list")
+    );
+    assert_eq!(
+        heritable_uncovered(None, &w(json!(["list"]))).as_deref(),
+        Some("list")
+    );
+}
+
+#[test]
+fn a_heritable_grant_round_trips_through_the_record_yaml() {
+    let rec = json!({
+        "handler_module": "file_bridge.tools",
+        "can_call": {
+            "$self": "*",
+            "served": {"verbs": ["list", "allow"], "for": "descendants"},
+        },
+        "callable_by": {"$subtree:hub": ["list"], "$parent": "*"},
+    });
+    let text = crate::yaml_io::dump(&rec);
+    let back = crate::yaml_io::load(&text).unwrap();
+    assert_eq!(back, rec, "{text}");
+    assert!(is_heritable(&back["can_call"]["served"]));
 }

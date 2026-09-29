@@ -17,23 +17,20 @@ still looking like one table.
 
 The roster names a ROLE; each runner supplies whatever its kernel has:
 
-| role | python | js | rust | swift |
-|---|---|---|---|---|
-| `memory` | `text_file` bundle | in-process handler | pending text_file port | pending text_file port |
-| `purchase_desk` | in-process handler | in-process handler | **none — skipped** | **none — skipped** |
-| `render_sink` | `cli` | — | `cli` bundle | `cli` bundle |
+| role | python | rust | swift |
+|---|---|---|---|
+| `memory` | `file_bridge` data store | `file_bridge` data store | `file_bridge` data store |
+| `purchase_desk` | `purchase_probe` (test-only) | `purchase_probe` (test-only) | `purchase_probe` (test-only) |
+| `render_sink` | `cli` | `cli` bundle | `cli` bundle |
 
-**Skipped on rust and swift**, by name: a compiled kernel runs only bundles
-compiled INTO it, and no shipped bundle plays `purchase_desk` — a stateful fixture
-with bespoke verbs. The runner refuses up front rather than approximating it
-with something that behaves differently, because a number that looks
-comparable and is not is worse than an honest skip.
+`purchase_probe` is a TEST-ONLY bundle on every runtime (a rust feature `scenario-probes`, a
+swift define `SCENARIO_PROBES`, a `PYTHONPATH` entry for python); a default build
+carries none of it.
 
 ## Running it
 
 ```sh
 cd src/lib/python && KERNEL=python uv run python ../../../e2e/runners/host.py user_actions
-cd e2e && node runners/inproc_js.mjs user_actions
 cd src/lib/python && KERNEL=rust  uv run python ../../../e2e/runners/host.py user_actions
 cd src/lib/python && KERNEL=swift uv run python ../../../e2e/runners/host.py user_actions
 ```

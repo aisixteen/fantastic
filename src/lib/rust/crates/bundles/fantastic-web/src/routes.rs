@@ -32,9 +32,7 @@ pub(crate) enum Seg {
 /// What a matched route runs.
 #[derive(Clone, Debug)]
 pub(crate) enum Handler {
-    /// `GET /` — the agent-tree index.
-    Index,
-    /// `GET /_assets/favicon.png` and `GET /favicon.png`.
+    /// `GET /_assets/favicon.png`.
     Favicon,
     /// `GET /{agent_id}/file/{path:path}` — the gated read_stream proxy.
     FileProxy,
@@ -160,14 +158,12 @@ pub(crate) struct RouteTable {
 }
 
 impl RouteTable {
-    /// python `make_app` — the four baked rendering routes, in FastAPI's
-    /// declaration order.
+    /// python `make_app` — the baked routes, in FastAPI's declaration order. No
+    /// `/`: the host renders nothing of its own, so an undeclared `/` is a 404.
     pub(crate) fn base() -> Self {
         let mut t = Self {
             base: vec![
-                Route::http(Method::GET, "/", Handler::Index),
                 Route::http(Method::GET, "/_assets/favicon.png", Handler::Favicon),
-                Route::http(Method::GET, "/favicon.png", Handler::Favicon),
                 Route::http(
                     Method::GET,
                     "/{agent_id}/file/{path:path}",

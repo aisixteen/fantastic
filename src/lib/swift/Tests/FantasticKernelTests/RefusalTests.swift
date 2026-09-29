@@ -106,6 +106,19 @@ struct RefusalTests {
     }
 
     /// `guard_agent_id` spells the offending id with `{agent_id!r}`.
+    /// `kernel` names the operator; `|` marks a FOREIGN `guid|agent` (audit
+    /// 2026-09-28: `create_agent id=kernel` made an agent the operator to every
+    /// memory store).
+    @Test func theReservedIdAndAForeignIdAreRefused() {
+        #expect(
+            Refusal.guardAgentId("create_agent", "kernel")?["error"].asString
+                == "create_agent: id must be a name other than the reserved 'kernel'")
+        #expect(
+            Refusal.guardAgentId("create_agent", "a|b")?["error"].asString
+                == "create_agent: id must be a local name without `|` (it marks a foreign `guid|agent`); got 'a|b'")
+        #expect(Refusal.guardAgentId("create_agent", "kernel_notes") == nil)
+    }
+
     @Test func guardAgentIdQuotesWithPythonRepr() {
         // Python tests the separator FIRST, so `../x` is refused as a separator.
         #expect(

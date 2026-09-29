@@ -53,8 +53,7 @@ _CORPUS = (
     Path(__file__).resolve().parents[5] / "contract" / "conformance" / "cases.json"
 )
 _DOC = json.loads(_CORPUS.read_text())
-# `$root` means THIS runtime's root id. Parity asserts the per-runtime value,
-# never equality — python's root is `kernel_state`, rust's and swift's is `core`.
+# `$root` means THIS runtime's root id; each runner substitutes its own.
 ROOT_ID = "kernel_state"
 
 
@@ -120,6 +119,16 @@ async def wired(tmp_path, monkeypatch):
     ka = boot_root()  # scratch kernel: the ws bridge's CALLING side
     monkeypatch.chdir(b_dir)
     kb = boot_root()  # THE target kernel — every transport dispatches here
+    # Instance guids: a bridge stamps `<guid>|<agent>` on every outbound call, and
+    # the serving legs on B are PINNED to A's.
+    ka.update(ka.id, guid="c21-a")
+    kb.update(kb.id, guid="c21-b")
+    # B's root accepts A's agents by their foreign id (a reflect of the root is not
+    # a kernel verb, so its `callable_by` is asked)
+    kb.update(
+        kb.id,
+        callable_by={**kb.ctx.agents[kb.id]._meta["callable_by"], "c21-a|*": "*"},
+    )
 
     async def send1(k, t, p):
         return (await k.send([{"target": t, "payload": p}]))[0]["result"]
@@ -146,6 +155,7 @@ async def wired(tmp_path, monkeypatch):
             "handler_module": "ws_bridge.tools",
             "transport": "memory",
             "peer_id": rec_a["id"],
+            "peer_guid": "c21-a",
             "ingress_rule": "allow_all_ingress",
             # The serving leg DISPATCHES AS ITSELF — same reach as every other leg.
             "can_call": {
@@ -161,6 +171,8 @@ async def wired(tmp_path, monkeypatch):
                     "delete_agent",
                     "list_agents",
                     "reflect",
+                    # `ledger` is privileged too: the baseline no longer reaches it
+                    "ledger",
                 ],
             },
         },
@@ -195,6 +207,8 @@ async def wired(tmp_path, monkeypatch):
                     "delete_agent",
                     "list_agents",
                     "reflect",
+                    # `ledger` is privileged too: the baseline no longer reaches it
+                    "ledger",
                 ],
             },
         },
@@ -224,6 +238,8 @@ async def wired(tmp_path, monkeypatch):
                     "delete_agent",
                     "list_agents",
                     "reflect",
+                    # `ledger` is privileged too: the baseline no longer reaches it
+                    "ledger",
                 ],
             },
         },
@@ -254,6 +270,7 @@ async def wired(tmp_path, monkeypatch):
             "relay_url": "ws://relay",
             "guid": "B",
             "partner_guid": "A",
+            "peer_guid": "c21-a",
             "ingress_rule": "allow_all_ingress",
             "can_call": {
                 "c21_probe": "*",
@@ -268,6 +285,8 @@ async def wired(tmp_path, monkeypatch):
                     "delete_agent",
                     "list_agents",
                     "reflect",
+                    # `ledger` is privileged too: the baseline no longer reaches it
+                    "ledger",
                 ],
             },
         },
@@ -290,8 +309,9 @@ async def wired(tmp_path, monkeypatch):
             "callable_by": {
                 rest["id"]: "*",
                 xrec["id"]: "*",
-                rec_b["id"]: "*",
-                rel_b["id"]: "*",
+                # the bridge legs relay A's agents — accepted by their FOREIGN id,
+                # never by the leg
+                "c21-a|*": "*",
             },
         },
     )

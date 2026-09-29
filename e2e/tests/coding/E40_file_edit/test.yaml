@@ -2,7 +2,7 @@
 # or a backend name — those live in e2e/backends/.
 id: file_edit
 group: coding
-title: the model EDITS a file with the patch organ — surgical, not a rewrite
+title: the model EDITS a file with the file agent's edit verb — surgical, not a rewrite
 runner: probe.py
 runtimes: [python, rust, swift]
 costs: turns

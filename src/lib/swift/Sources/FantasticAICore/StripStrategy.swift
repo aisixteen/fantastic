@@ -115,14 +115,10 @@ public enum AIStripStrategy {
         return (out, n, saved)
     }
 
-    /// The back half, snapped so it never STARTS on an orphaned `role:tool` (the
-    /// wire rejects a tool reply whose `assistant.tool_calls` turn is not present).
-    /// The cut is strip's second stage — what happens when every body is already a
-    /// stub and the prose alone still overflows. Python `_halve`.
+    /// The back half — strip's second stage, what happens when every body is
+    /// already a stub and the prose alone still overflows. Python `_halve`.
     static func halve(_ body: [JSON]) -> [JSON] {
-        var cut = body.count / 2
-        while cut > 0 && body[cut]["role"].asString == "tool" { cut -= 1 }
-        return AIStrategies.dropOrphanTools(Array(body[cut...]))
+        Array(body[(body.count / 2)...])
     }
 
     /// SEEDED FROM THE VIEW ARRAY on first use — stubs survive a restart, and the

@@ -46,7 +46,7 @@ async fn mk_kernel_with(
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     kernel
         .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
         fantastic_ram_store::RamStoreBundle::default(),
@@ -70,7 +70,7 @@ async fn mk_kernel_with(
             json!({
                 "type":"create_agent",
                 "parent_id": "kernel",
-                "handler_module":"file_bridge.tools",
+                "handler_module":"file_bridge.tools", "allow": ["."],
                 "id": fid,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
@@ -93,14 +93,12 @@ async fn mk_kernel_with(
         "parent_id": "kernel",
         "handler_module":HANDLER_MODULE,
         "id": ant,
-        "file_bridge_id": fid.clone(),
         "model": "test-model",
+        // REQUIRED — nothing is guessed; an unreachable one unless a test serves it.
+        "endpoint": endpoint.unwrap_or_else(|| "http://127.0.0.1:1/v1/messages".to_string()),
     });
     for (k, v) in memory {
         create[k] = v;
-    }
-    if let Some(e) = endpoint {
-        create["endpoint"] = json!(e);
     }
     for (k, v) in extra {
         create[k] = v;
@@ -234,13 +232,11 @@ struct KeyEnv {
 impl KeyEnv {
     async fn set(value: Option<&str>) -> Self {
         let guard = ENV_LOCK.lock().await;
-        let vars = ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY"];
-        let prev: Vec<_> = vars.iter().map(|v| (*v, std::env::var(v).ok())).collect();
-        for v in vars {
-            std::env::remove_var(v);
-        }
+        let var = "ANTHROPIC_API_KEY";
+        let prev = vec![(var, std::env::var(var).ok())];
+        std::env::remove_var(var);
         if let Some(k) = value {
-            std::env::set_var("ANTHROPIC_API_KEY", k);
+            std::env::set_var(var, k);
         }
         Self {
             prev,
@@ -262,9 +258,7 @@ impl Drop for KeyEnv {
 
 #[tokio::test]
 async fn reflect_keys_are_python_keys_in_python_order() {
-    // python `_make_reflect` with no `reflect_extra`. `max_tokens`, `tool_use`,
-    // `file_bridge_id` and `has_api_key` were rust-only keys — a model that read
-    // them off this reflect learned a surface the canonical runtime does not have.
+    // python `_make_reflect` with no `reflect_extra`.
     let _key = KeyEnv::set(None).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
@@ -294,9 +288,6 @@ async fn reflect_keys_are_python_keys_in_python_order() {
         ],
         "{r:#?}"
     );
-    for gone in ["max_tokens", "tool_use", "file_bridge_id", "has_api_key"] {
-        assert!(r.get(gone).is_none(), "{gone} is not a python reflect key");
-    }
     assert_eq!(r["id"], ant.as_str());
     assert_eq!(r["model"], "test-model");
     assert_eq!(r["generating"], false);
@@ -328,7 +319,7 @@ async fn reflect_sentence_is_python_verbatim() {
 /// raises, `status(done, reason='error')` carries `str(e)`, and the caller reads
 /// the kernel's settle of a handler raise. Rust used to refuse BEFORE the
 /// provider was built, with a sentence (`anthropic_backend: no api key — set
-/// ANTHROPIC_KEY or ANTHROPIC_API_KEY`) python does not have, as a COMPLETED
+/// <var>`) python does not have, as a COMPLETED
 /// execution with no events at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_key_raises_inside_chat_after_status_thinking() {
@@ -346,7 +337,7 @@ async fn a_missing_key_raises_inside_chat_after_status_thinking() {
         .result;
     assert_eq!(
         r["error"],
-        json!("RuntimeError: ANTHROPIC_KEY not set in environment (.env)")
+        json!("RuntimeError: ANTHROPIC_API_KEY not set in environment (.env)")
     );
     assert_eq!(r["raised"], json!(true));
 
@@ -368,18 +359,19 @@ async fn a_missing_key_raises_inside_chat_after_status_thinking() {
     assert_eq!(done["reason"], json!("error"));
     assert_eq!(
         done["error"],
-        json!("ANTHROPIC_KEY not set in environment (.env)")
+        json!("ANTHROPIC_API_KEY not set in environment (.env)")
     );
 }
 
-/// The key is checked BEFORE the model — with neither wired, the key error is
-/// the one the caller reads (python's order in `chat`).
+/// The RECORD is checked before the key: with neither a model nor a key, the
+/// caller reads the model refusal (python's `required_meta` runs at the
+/// provider build; the key is read in `chat`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_missing_key_wins_over_a_missing_model() {
+async fn a_missing_model_is_named_before_a_missing_key() {
     let _key = KeyEnv::set(None).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let mut extra = Map::new();
-    extra.insert("model".to_string(), json!(DEFAULT_MODEL));
+    extra.insert("model".to_string(), json!(""));
     let (kernel, ant, _fid) = mk_kernel_with(&tmp, None, extra).await;
     let r = kernel
         .send(vec![Item::new(
@@ -391,7 +383,10 @@ async fn a_missing_key_wins_over_a_missing_model() {
         .result;
     assert_eq!(
         r["error"],
-        json!("RuntimeError: ANTHROPIC_KEY not set in environment (.env)")
+        json!(
+            "ValueError: anthropic_backend: `model` is required on the agent record — \
+             nothing is guessed (update_agent <id> model=…)"
+        )
     );
 }
 
@@ -840,14 +835,12 @@ async fn a_native_tool_use_block_is_a_loud_error_not_a_silent_drop() {
     );
 }
 
-/// NO guessy default (mirror of the Python provider test): the sentinel
-/// `DEFAULT_MODEL` is not a real id, and the request path fails loud — naming
-/// `model` — rather than putting the sentinel (or an empty string) on the wire.
+/// NO guessy default (mirror of the Python provider test): an empty model never
+/// reaches the wire — the request path fails loud, naming `model`.
 #[tokio::test]
-async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
-    assert_eq!(DEFAULT_MODEL, "(no default — set the `model` meta)");
+async fn an_empty_model_fails_loud_in_chat() {
     let _key = KeyEnv::set(Some("sk-ant-x")).await;
-    for m in [DEFAULT_MODEL.to_string(), String::new()] {
+    for m in [String::new()] {
         let p = AnthropicProvider {
             self_id: AgentId::from("ant_x"),
             endpoint: "http://127.0.0.1:1/v1/messages".to_string(),
@@ -856,7 +849,10 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             sampling: Map::new(),
             report: Default::default(),
         };
-        let err = match p.chat(&[json!({"role": "user", "content": "hi"})], None).await {
+        let err = match p
+            .chat(&[json!({"role": "user", "content": "hi"})], None)
+            .await
+        {
             Ok(_) => panic!("chat must refuse an unset/sentinel model"),
             Err(e) => e.message,
         };
@@ -963,10 +959,16 @@ fn message_start_usage_and_a_bounded_cut_are_reported() {
     }
     assert_eq!(report.lock().unwrap().prompt_tokens, Some(123));
     assert_eq!(st.finish(), None, "a bounded cut is an answer");
-    assert_eq!(report.lock().unwrap().stop_reason.as_deref(), Some("max_tokens"));
+    assert_eq!(
+        report.lock().unwrap().stop_reason.as_deref(),
+        Some("max_tokens")
+    );
     // unbounded, the same cut is a terminality error
     let mut st = SseState::new(Default::default(), false);
-    decode_sse_line(&mut st, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}")
-        .expect("decodes");
+    decode_sse_line(
+        &mut st,
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}",
+    )
+    .expect("decodes");
     assert!(st.finish().is_some());
 }

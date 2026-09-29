@@ -16,7 +16,6 @@ fantastic-kernel = { path = "../fantastic-kernel" }
 fantastic-core = { path = "../bundles/fantastic-core" }
 fantastic-file = { path = "../bundles/fantastic-file" }
 fantastic-ram-store = { path = "../bundles/fantastic-ram-store" }
-fantastic-text-file = { path = "../bundles/fantastic-text-file" }
 fantastic-web = { path = "../bundles/fantastic-web" }
 fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
 fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
@@ -34,7 +33,6 @@ fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
 fantastic-scenario-probes = { path = "../bundles/fantastic-scenario-probes", optional = true }
 # Full-tier-only bundles — subprocess-using; only compiled into the
 # `full` feature build. iOS embedded slice MUST NOT pull them in.
-fantastic-terminal-backend = { path = "../bundles/fantastic-terminal-backend", optional = true }
 fantastic-exec-bridge = { path = "../bundles/fantastic-exec-bridge", optional = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
@@ -42,16 +40,14 @@ serde_json = { workspace = true }
 [features]
 # Default for the standalone CLI binary is the full tier — it runs on
 # Linux servers, macOS Pro builds, CI runners, and any unsandboxed
-# host. Subprocess-spawning bundles (terminal_backend, exec_bridge) gate
+# host. The subprocess-spawning bundle (exec_bridge — commands and PTY jobs) gates
 # to this feature; the `embedded` build excludes them at compile time.
 default = ["full"]
 
 # Full tier — no sandbox constraints. Subprocess-spawning bundles are
 # allowed. Server, CLI, macOS Pro app.
 full = [
-    "dep:fantastic-terminal-backend",
     "dep:fantastic-exec-bridge",
-    "fantastic-bridge/full",
 ]
 
 # Sandboxed / embedded-library tier — must compile clean for iOS /

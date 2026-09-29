@@ -45,6 +45,8 @@
             "id": .string(id),
             "ingress_rule": .string("allow_all_ingress"),
             "allowed": .array([.string(".*")]),
+            // WHERE a command runs is the record's, required — never guessed
+            "cwd": .string("."),
         ]
         for (k, v) in meta { payload[k] = v }
         let r = await kernel.send([Item(AgentId("kernel_state"), .object(payload))])[0].result
@@ -210,13 +212,8 @@
             #expect(b.validateMeta(["ingress_rule": "allow_all_ingress"], record: [:]) == nil)
         }
 
-        @Test func validateMetaRefusesWithdrawnFieldsAndBadAllowed() {
+        @Test func validateMetaRefusesABadAllowed() {
             let b = ExecBridgeBundle()
-            for gone in ["code", "shim", "interpreter", "interpreters", "argv_template"] {
-                let e = b.validateMeta([gone: .string("whatever")], record: [:])
-                #expect(e?.contains(gone) == true, "\(gone) must be refused: \(e ?? "nil")")
-                #expect(e?.contains("allowed") == true, "refusal must point to `allowed`")
-            }
             #expect(b.validateMeta(["allowed": .array([])], record: [:]) != nil)
             #expect(
                 b.validateMeta(["allowed": .array([.string("(")])], record: [:])?
@@ -226,32 +223,18 @@
                     == nil)
         }
 
-        @Test func reflectAdvertisesTheAllowlistNotInterpreters() async throws {
+        @Test func reflectAdvertisesTheAllowlist() async throws {
             let kernel = freshKernel()
             let a = await create(kernel, id: "refl", allowed: ["ls( .*)?"])
             let r = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
             #expect(r["id"].asString == a.value)
             #expect(r["running"].asInt == 0)
             #expect(r["allowed"].asArray?.compactMap { $0.asString } == ["ls( .*)?"])
-            // The retired interpreter/shim keys are gone.
-            #expect(r["interpreters"].isNull, "\(r.serialize())")
-            #expect(r["shims"].isNull, "\(r.serialize())")
             #expect(r["wire"].asString?.contains("FANTASTIC_CTRL_FD") == true)
             let verbs = try #require(r["verbs"].asObject)
             for v in ["reflect", "start", "status", "clear", "interrupt", "stop", "boot"] {
                 #expect(verbs[v] != nil, "verb \(v) missing from reflect")
             }
-        }
-
-        @Test func startRefusesACodeField() async {
-            let kernel = freshKernel()
-            let a = await createPy(kernel, id: "code_field")
-            let r = await kernel.send([Item(a, .object(["type": .string("start"), "code": .string("x = 1")]))])[0].result
-            #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
-            #expect(r["arg"].asString == "code", "\(r.serialize())")
-            #expect(
-                r["error"].asString == "start: code must be absent — run a command instead",
-                "\(r.serialize())")
         }
 
         /// A command matching no `allowed` pattern is refused, naming the patterns, and
@@ -593,9 +576,6 @@
             var r = await ask([:])
             #expect(r["reason"].asString == "missing_arg", "\(r.serialize())")
             #expect(r["arg"].asString == "command", "\(r.serialize())")
-            r = await ask(["command": .string("echo"), "code": .string("x = 1")])
-            #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
-            #expect(r["arg"].asString == "code", "\(r.serialize())")
             r = await ask(["command": .string("echo"), "args": .array([.object(["no": .integer(1)])])])
             #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
             #expect(r["arg"].asString == "args", "\(r.serialize())")
@@ -824,7 +804,7 @@
                 """
             let sp = try Spawn.job(
                 argv: [py, "-u", "-c", code], selfId: "owner_agent",
-                envExtra: ["MYVAR": "hello"], cwd: nil)
+                env: ["MYVAR": "hello"], cwd: ".")
             let outData = sp.stdout.readDataToEndOfFile()
             _ = await sp.child.wait()
             close(sp.ctrlFd)
@@ -987,19 +967,27 @@
             #expect(ExecBridgeBundle().readme == (try pythonExecReadme()))
         }
 
-        /// A4.10 — reflect coerces the way python does: a FALSY `cwd` is
-        /// `<process default>` (truthiness, not presence), and `allowed` items go
-        /// through `str(x)`, so `5` reads `5` and `true` reads `True`.
+        /// A4.10 — reflect reports the record's `cwd` as written (null when unset —
+        /// there is no process default any more) and the `inherit_env` it runs with;
+        /// `allowed` items go through `str(x)`, so `5` reads `5` and `true` reads `True`.
         @Test func reflectCoercesLikePython() async throws {
             let kernel = freshKernel()
             let a = await createPy(
                 kernel, id: "coer",
-                meta: ["cwd": .string(""), "allowed": .array([.integer(5), .bool(true)])])
+                meta: [
+                    "cwd": .string("/wd"), "inherit_env": .array([.string("PATH")]),
+                    "allowed": .array([.integer(5), .bool(true)]),
+                ])
             let r = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
-            #expect(r["cwd"].asString == "<process default>", "\(r.serialize())")
+            #expect(r["cwd"].asString == "/wd", "\(r.serialize())")
+            #expect(r["inherit_env"] == .array([.string("PATH")]), "\(r.serialize())")
             #expect(
                 r["allowed"].asArray?.compactMap { $0.asString } == ["5", "True"],
                 "\(r.serialize())")
+            let b = await createPy(kernel, id: "coer2", meta: ["cwd": .null])
+            let r2 = await kernel.send([Item(b, .object(["type": .string("reflect")]))])[0].result
+            #expect(r2["cwd"].isNull, "\(r2.serialize())")
+            #expect(r2["inherit_env"] == .array([]), "\(r2.serialize())")
         }
 
         // MARK: A4.3 — `shutdown` is mail
@@ -1166,8 +1154,8 @@
 
         /// A4.9 — python's coercions: an explicit null `args` is not a list (the
         /// KEY being absent is `[]`), scalars go through `str()` so a bool reads
-        /// `True`, a falsy `env` is the empty block, and a command that is all
-        /// whitespace is MISSING.
+        /// `True`, `env`/`cwd` are the RECORD's (any per-call value refuses, only an
+        /// explicit null is absent), and a command that is all whitespace is MISSING.
         @Test func startCoercesArgumentsLikePython() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "coerce")
@@ -1185,14 +1173,18 @@
             let objArgs = await start(["args": .object([:])])
             #expect(objArgs["reason"].asString == "bad_arg", "\(objArgs.serialize())")
 
-            // A falsy `env` is `{}` — `payload.get("env") or {}`, not a type error.
-            for falsy in [JSON.null, .array([]), .object([:]), .string(""), .integer(0)] {
-                let r = await start(["env": falsy, "args": .array([.string("x")])])
-                #expect(r["job_id"].asString != nil, "falsy env must spawn: \(r.serialize())")
-                _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
+            // `env` and `cwd` are the RECORD's: any per-call value refuses (py `is not
+            // None`), even an empty one; only an explicit null is "absent".
+            for (arg, val) in [
+                ("env", JSON.object([:])), ("env", .array([.string("A=1")])), ("cwd", .string("/")),
+            ] {
+                let r = await start([arg: val])
+                #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
+                #expect(r["arg"].asString == arg, "\(r.serialize())")
             }
-            let badEnv = await start(["env": .array([.integer(1)])])
-            #expect(badEnv["arg"].asString == "env", "\(badEnv.serialize())")
+            let nulls = await start(["env": .null, "cwd": .null, "args": .array([.string("x")])])
+            #expect(nulls["job_id"].asString != nil, "an explicit null is absent: \(nulls.serialize())")
+            _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
 
             // `command.strip()` spans newlines and tabs.
             let blank = await kernel.send([
@@ -1224,6 +1216,45 @@
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
             #expect(out.contains("['1', '2.5', 'True']"), "argv was not python-stringified: \(out)")
+        }
+
+        /// A bare command is found on the CHILD's `PATH` only (python `proc.resolve`):
+        /// no `PATH` in the child env refuses naming it, and the kernel's own PATH is
+        /// never searched — `posix_spawnp` would have.
+        @Test func aBareCommandIsFoundOnTheChildsPathOnly() async throws {
+            let fm = FileManager.default
+            let bin = fm.temporaryDirectory.appendingPathComponent("ft-path-\(UUID().uuidString)")
+            try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: bin) }
+            let tool = bin.appendingPathComponent("ft_only_here")
+            try "#!/bin/sh\necho found-by-child-path\n".write(
+                to: tool, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+            let kernel = freshKernel()
+            func start(_ id: AgentId, _ command: String) async -> JSON {
+                await kernel.send([
+                    Item(id, .object(["type": .string("start"), "command": .string(command)]))
+                ])[0].result
+            }
+            let a = await createPy(kernel, id: "nopath")
+            let r = await start(a, "echo")
+            #expect(
+                r["reason"].asString == "missing_arg" && r["arg"].asString == "PATH",
+                "\(r.serialize())")
+            let b = await createPy(
+                kernel, id: "ownpath", meta: ["env": .object(["PATH": .string(bin.path)])])
+            let stream = kernel.ensureInbox(b)
+            let s = await start(b, "ft_only_here")
+            #expect(s["job_id"].asString != nil, "\(s.serialize())")
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString
+            #expect(out == "found-by-child-path\n", "\(out ?? "nil")")
+            // …and one only the kernel's PATH holds is not found.
+            let miss = await start(b, "echo")
+            #expect(
+                miss["reason"].asString == "transport_error"
+                    && (miss["error"].asString ?? "").contains("No such file"),
+                "\(miss.serialize())")
         }
 
         /// A4.31 — a command that never reaches `exec` is a TRANSPORT refusal whose

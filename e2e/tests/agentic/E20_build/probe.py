@@ -229,6 +229,7 @@ async def wire_executor_leg(
                         "handler_module": "exec_bridge.tools",
                         "id": agent_id,
                         "cwd": os.getcwd(),
+                        "inherit_env": ["PATH", "HOME"],
                         "ingress_rule": "allow_all_ingress",
                         # Two-sided deny-all: the AI reflects + starts on this leg. The wire
                         # surfaces too — the harness DISCOVERS the leg the same way the model
@@ -350,25 +351,6 @@ async def pick_program_runner(root) -> tuple[str, list[dict]]:
     return max(busy, key=lambda c: max(j.get("started_at") or 0 for j in c[1]))
 
 
-async def job_cwd(root, runner_id: str, job_id: str) -> str | None:
-    """The directory a job actually ran in — only `status job_id=…` carries it.
-
-    The canary re-issues the job VERBATIM, and `cwd` is part of that invocation: an
-    exec agent the model authored may sit in a different directory from the operator's
-    leg, and re-running its program from the wrong one reads the wrong `readings/`.
-    The summary rows `status` returns for ALL jobs deliberately omit it, so this is a
-    second, job-scoped call rather than a field read off the row already in hand.
-    """
-    js = (
-        await root.send(
-            [{"target": runner_id, "payload": {"type": "status", "job_id": job_id}}]
-        )
-    )[0]["result"]
-    for j in (js or {}).get("jobs") or []:
-        return j.get("cwd")
-    return None
-
-
 async def find_value(
     root, mem_id: str, want: int
 ) -> tuple[str | None, str | None, bool]:
@@ -380,7 +362,7 @@ async def find_value(
     appears without having been STORED by the model:
       dirs: `readings/` (the inputs the number is derived from), `.fantastic/`
       (kernel records + chat sidecars — the number appears in conversation),
-      `.ckpt/` (pre-images), `__pycache__`;
+      `__pycache__`;
       files: `*.py` (the model's program may embed constants), `*.jsonl`
       (transcripts), `*.tmp.*` (in-flight commit debris).
     `.json` is deliberately NOT skipped — models legitimately store results as
@@ -391,7 +373,7 @@ async def find_value(
     a wrong answer is still visible. `mem_id` is unused — kept for call-site
     stability."""
     _ = mem_id
-    skip_dirs = {"readings", ".fantastic", ".ckpt", "__pycache__", "repo"}
+    skip_dirs = {"readings", ".fantastic", "__pycache__", "repo"}
     first: tuple[str | None, str | None] = (None, None)
     pat = re.compile(rf"\b{want}\b")
     for dirpath, dirnames, filenames in os.walk("."):
@@ -461,7 +443,7 @@ async def run(
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         # The RUN DIR itself: a program written here lands beside readings/ and in
                         # the command runner's cwd, so `<interp> <file>` and open('readings/..') both
@@ -474,7 +456,6 @@ async def run(
                         # `rest`/`web`, and ingress is two-sided (inert in-process — no such ids).
                         "callable_by": {
                             "ai": "*",
-                            "totals": "*",
                             "rest": "*",
                             "web": "*",
                         },
@@ -497,7 +478,7 @@ async def run(
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "readings",
                         "root": "readings",
                         "ingress_rule": "allow_all_ingress",
@@ -542,13 +523,13 @@ async def run(
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "text_file.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "totals",
-                        "target_id": store["id"],
-                        "can_call": {store["id"]: "*"},
+                        "root": ".",
+                        "ingress_rule": "allow_all_ingress",
                         "description": "Durable store for computed results.",
                         # Two-sided deny-all: accept the AI directly, AND the command runner — the
-                        # program's `set` lands from the runner leg (its owner) over the control wire.
+                        # program's writes land from the runner leg (its owner) over the control wire.
                         "callable_by": {
                             "ai": "*",
                             EXECUTOR_LEG: "*",
@@ -591,20 +572,8 @@ async def run(
         EXECUTOR_LEG: "*",  # to reflect its `allowed` gate + start the program
         store["id"]: "*",
     }
-    # The sidecar is asked for as a CAPABILITY, never by backend name — a probe
-    # that branches on `BACKEND ==` is a probe that has stopped being agnostic.
-    # ...and the RUNTIME, which is a separate question the plug cannot answer:
-    # python's anthropic backend persists its history through the loader and
-    # needs no leg, while rust's and swift's refuse `send` outright with
-    # "file_bridge_id required". One bundle, two contracts — recorded here
-    # rather than papered over, and the store exists either way so binding it
-    # costs nothing.
-    # ALWAYS. The AI's chat store persists through ITS OWNER'S leg and nothing
-    # else — the loader path died with yaml_state — so an AI without a
-    # `file_bridge_id` runs AMNESIAC: every turn starts with empty history.
-    # Measured 2026-08-30 on plan:python — turn 6 said "I don't see any prior
-    # conversation context" and walked away from a task it had been doing.
-    EXTRA = {"file_bridge_id": store["id"]}
+    # The AI keeps its conversation in its memory store; it needs no file leg.
+    EXTRA: dict = {}
 
     # ONE connector (helpers/ai.py). It creates the agent, opens `cli`'s reciprocal
     # ingress, hands the plug its key where one is needed, subscribes to the AI's own
@@ -787,7 +756,6 @@ async def run(
     runner_id, jobs = await pick_program_runner(root)
     job = _last_successful_job(jobs)
     has_artifact = job is not None
-    cwd_of_job = None if job is None else await job_cwd(root, runner_id, job["job_id"])
     program = (
         None if job is None else shlex.join([job["command"], *(job.get("args") or [])])
     )
@@ -832,9 +800,9 @@ async def run(
                             "type": "start",
                             "command": job["command"],
                             "args": job.get("args") or [],
-                            # The job's OWN directory, when it recorded one — an authored
-                            # exec agent need not share the operator leg's cwd.
-                            **({"cwd": cwd_of_job} if cwd_of_job else {}),
+                            # No `cwd`: WHERE a command runs is the runner's record,
+                            # and a per-call `cwd` is refused (audit 2026-09-28, a10).
+                            # Re-issued on the same runner, it runs where it ran.
                         },
                     }
                 ]
@@ -877,7 +845,7 @@ async def run(
                 _dn[:] = [
                     d
                     for d in _dn
-                    if d not in ("readings", ".fantastic", ".ckpt", "__pycache__")
+                    if d not in ("readings", ".fantastic", "__pycache__")
                 ]
                 for _n in sorted(_fn):
                     if _n.endswith((".py", ".jsonl")) or ".tmp." in _n:

@@ -9,6 +9,8 @@ kernel only converts between the live tree and this flat list.
 
 from __future__ import annotations
 
+from kernel._refusal import guard_agent_id
+
 # Snapshot schema version. Bump when the wire shape breaks; a kernel
 # reads `version <= CURRENT` and refuses `version > CURRENT`.
 CURRENT_VERSION = 1
@@ -52,6 +54,11 @@ def validate_records(records: list[dict], *, version: int = CURRENT_VERSION) -> 
         rid = r.get("id")
         if not rid:
             raise SnapshotError("snapshot record missing id")
+        # THE SAME ID RULE AS A CREATE: a record edited on disk to carry the
+        # reserved `kernel`, a foreign `guid|agent`, or a path-walking id is
+        # refused here, before the live tree is torn down.
+        if (bad_id := guard_agent_id("load", rid)) is not None:
+            raise SnapshotError(f"record {rid!r}: {bad_id['error']}")
         reserved = RESERVED_RECORD_KEYS & set(r)
         if reserved:
             raise SnapshotError(

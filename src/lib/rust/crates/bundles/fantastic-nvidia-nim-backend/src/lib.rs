@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use fantastic_ai_core::events::emit_status;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+    Unconfigured,
 };
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
@@ -44,13 +45,8 @@ pub const HANDLER_MODULE: &str = "nvidia_nim_backend.tools";
 /// readme.md auto-seeded into the agent's dir on creation.
 pub const README: &str = include_str!("readme.md");
 
-/// Default NIM endpoint — OpenAI-compatible.
-pub const DEFAULT_ENDPOINT: &str = "https://integrate.api.nvidia.com/v1";
-
-/// NO guessy default (by default, no defaults): never name a network-reaching
-/// model. The sentinel exists only so reflect can say what's true; the request
-/// path fails loud when the model is unset/sentinel.
-pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
+/// The name a required-field refusal carries.
+const BACKEND: &str = "nvidia_nim_backend";
 
 /// What `reflect` says this agent IS — python `nvidia_nim_backend/tools.py`'s
 /// `sentence`, verbatim.
@@ -235,7 +231,7 @@ impl Provider for NimProvider {
         max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
         // NO guessy default: fail loud before the wire if no model is named.
-        if self.model.is_empty() || self.model == DEFAULT_MODEL {
+        if self.model.is_empty() {
             return Err(ProviderError::raised(
                 "nvidia_nim_backend: no `model` set — this connector does \
                  not guess one. Name a model on the agent record (model=...).",
@@ -531,22 +527,30 @@ fn build_provider(
     client_id: &str,
 ) -> Option<Arc<dyn Provider>> {
     read_api_key()?;
+    // `endpoint` and `model` are REQUIRED on the record — nothing is guessed.
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let (endpoint, model) = match (
+        helpers::required_meta(&meta, "endpoint", BACKEND),
+        helpers::required_meta(&meta, "model", BACKEND),
+    ) {
+        (Ok(e), Ok(m)) => (e, m),
+        (Err(e), _) | (_, Err(e)) => return Some(Arc::new(Unconfigured(e))),
+    };
     Some(Arc::new(NimProvider {
         self_id: agent_id.clone(),
-        endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
-        model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
+        endpoint,
+        model,
         kernel: Arc::clone(kernel),
         client_id: client_id.to_string(),
         report: ReportCell::default(),
     }))
 }
 
-
 /// `reflect` — python `_make_reflect` + `nvidia_nim_backend/tools.py`'s
 /// `_reflect_extra`: the shared base body, then `has_api_key`. The KEY itself is
-/// never returned, and `file_bridge_id` (a rust-only key) is gone.
+/// never returned.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, DEFAULT_MODEL, DEFAULT_ENDPOINT);
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE);
     out.insert("has_api_key".to_string(), json!(read_api_key().is_some()));
     Value::Object(out)
 }

@@ -3,22 +3,12 @@
 A subprocess is OUTSIDE the trust domain: crossing kernel↔process is an IO edge, gated
 exactly like a bridge leg — SEALED BY DEFAULT (absent `ingress_rule` ⇒ every verb except
 `reflect` denies with the teaching shape). Open it consciously with
-`ingress_rule=allow_all_ingress`. Even open, the LAW is the ALLOWLIST: only an interpreter the
-operator allowed by regex can be spawned, and that choice is not overridable per
+`ingress_rule=allow_all_ingress`. Even open, the LAW is the ALLOWLIST: only a command line
+the operator allowed by regex can be spawned, and that choice is not overridable per
 call. The spawn primitive lives in `proc` — the ONE process surface. This agent is the
-GATE + verb shape over it; it never spawns directly.
-
-## Why this exists, and what it replaces
-
-A per-language runtime is an entire executor — job table, connector, relay, boot
-rehydration, addressable inbox — bound to ONE language, and that machinery ended up
-duplicated once per language. It was also the only boundary in this kernel that was not a
-sealed io edge: registering one "GRANTS ARBITRARY LOCAL CODE EXECUTION".
-
-Here the interpreter is a FIELD. "A python agent" stops being a bundle and becomes a
-record. Everything that is not language-specific — the job table, the pump, the relay,
-the fd passing, the task-table integration, the mail contract — is the same code it
-always was, because none of it ever knew a language.
+GATE + verb shape over it; it never spawns directly. It knows no language: the job
+table, the pump, the relay, the fd passing, the task-table integration and the mail
+contract are the same for every command.
 
 ## The wire is the contract
 
@@ -28,34 +18,49 @@ runs exactly like any OS process.
 ## Verbs
 
   start · status · stop · interrupt · clear · reflect · boot
+  PTY jobs (`start pty={cols,rows}`): write · resize · ack · output · paste_image
+
+A terminal is a PTY JOB of this bundle — the same gate, the same `proc`, the same
+task table. Every spawn parameter comes from the RECORD, which only the operator
+writes: `allowed`, `cwd` (required), `env` (extras), `inherit_env` (which kernel env
+vars pass through; nothing by default, `["*"]` = all), `shell` (which line of the
+child's own `$SHELL` a PTY start may run without an `allowed` entry: true = bare,
+"login" = `-l`). A PTY `start` with no `command` runs that `$SHELL`, read from the
+child's environment — autodiscovery, never a default.
 
 Any verb this bundle does not own is MAIL for the running program — see `inbox` in
 `reflect`.
 
 ## What is NOT claimed
 
-An allowlisted interpreter is a NAMED interpreter, not a sandbox — see `proc`. The
-allowlist means the operator chose which runtime and which environment, and that a
-program cannot choose a different one. Stated plainly because the executor this replaces
-carried a documented hole, and swapping an honest hole for a dishonest reassurance would
-be the worse trade.
+An allowlisted command is a NAMED command, not a sandbox — see `proc`. The allowlist
+means the operator chose which command and which environment, and that a program
+cannot choose a different one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import codecs
+import collections
+import fcntl
 import json
+import os
 import secrets
 import signal as signal_mod
 import socket
 import struct
+import tempfile
+import termios
 import time
 
 from exec_bridge import proc
+from file_bridge import fs
 from io_bridge import decode_frame, describe as _describe, encode_frame
 from io_bridge import gate_inbound, resolve_ingress
 from io_bridge._base import parse_spec
 from kernel._refusal import (
+    MISSING_ARG,
     NOT_FOUND,
     TRANSPORT_ERROR,
     UNAUTHORIZED,
@@ -179,6 +184,7 @@ def _inbox_framer(payload):
     telemetry (its progress/job_started/job_done emits echo back via the owner)."""
     if isinstance(payload, dict) and payload.get("type") in (
         "progress",
+        "output",
         "job_started",
         "job_done",
     ):
@@ -293,9 +299,8 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                 await writer.drain()
             elif op == "emit":
                 try:
-                    # No `target` → emit on the OWNER agent (one-arg `emit(payload)`).
-                    tgt = m.get("target") or owner_id
-                    await kernel.emit(tgt, m.get("payload") or {})
+                    # A program emits on its OWNER agent — the one it runs as.
+                    await kernel.emit(owner_id, m.get("payload") or {})
                 except Exception:
                     pass
             elif op == "watch":
@@ -392,6 +397,168 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             pass
 
 
+# ─── PTY jobs — a terminal is a job ─────────────────────────────
+# terminal_backend's robustness, ported onto the job table: incremental UTF-8
+# decode (a multi-byte char split across reads is not `<?>` litter), writes in FULL
+# and serialized per job (a bracketed paste is never truncated or interleaved), a
+# bounded scrollback RING for re-attach, and VSCode's flow control (the reader pauses
+# past HIGH_WATERMARK unacked chars; a streamer's `ack` resumes it under LOW).
+
+PTY_RING = 256 * 1024
+HIGH_WATERMARK = 100_000
+LOW_WATERMARK = 5_000
+# Image paste — the formats a CLI like Claude Code accepts, and its size cap. A
+# browser xterm cannot hand a server-side program the browser clipboard, so the
+# image is saved and its path typed (a file drag-drop).
+_IMAGE_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+MAX_PASTE_IMAGE = 5 * 1024 * 1024
+
+
+def _set_winsize(fd: int, cols: int, rows: int) -> None:
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def _ring_add(pt: dict, text: str) -> None:
+    pt["ring"].append(text)
+    pt["ring_bytes"] += len(text.encode("utf-8", errors="replace"))
+    while pt["ring_bytes"] > PTY_RING and pt["ring"]:
+        old = pt["ring"].popleft()
+        pt["ring_bytes"] -= len(old.encode("utf-8", errors="replace"))
+
+
+def _pty_readable(owner: str, job_id: str, kernel) -> None:
+    """The master fd is readable: one chunk out as an `output` event. EOF (or EIO —
+    the slave closed with the child) wakes the pump; a backlog past HIGH_WATERMARK
+    detaches the reader so the tty fills and the program throttles."""
+    job = _jobs.get(job_id)
+    if job is None:
+        return
+    pt = job["pty"]
+    try:
+        data = os.read(pt["fd"], 4096)
+    except BlockingIOError:
+        return
+    except OSError:
+        data = b""
+    if not data:
+        asyncio.get_running_loop().remove_reader(pt["fd"])
+        pt["eof"] = True
+        pt["wake"].set()
+        return
+    text = pt["decoder"].decode(data)
+    if not text:
+        return
+    _ring_add(pt, text)
+    asyncio.ensure_future(
+        kernel.emit(owner, {"type": "output", "job_id": job_id, "data": text})
+    )
+    pt["unacked"] += len(text)
+    if pt["unacked"] > HIGH_WATERMARK:
+        asyncio.get_running_loop().remove_reader(pt["fd"])
+        pt["paused"] = True
+        pt["wake"].set()
+
+
+async def _pty_pump(owner, job_id, process, kernel):
+    """THE JOB'S TASK for a PTY job. It owns the reader — attaching it HERE, never in
+    a verb's dispatch, keeps every `output` emit in the job's own context — re-attaches
+    it when an `ack` drains the backlog, and ends at EOF with `job_done`."""
+    job = _jobs.get(job_id)
+    if job is None:
+        return
+    pt = job["pty"]
+    loop = asyncio.get_running_loop()
+    try:
+        try:
+            while not pt["eof"]:
+                pt["wake"].clear()
+                if not pt["paused"]:
+                    loop.add_reader(pt["fd"], _pty_readable, owner, job_id, kernel)
+                await pt["wake"].wait()
+            code = await process.wait()
+        except asyncio.CancelledError:
+            job["status"] = "stopped"
+            job["exit_code"] = process.returncode
+            raise
+    finally:
+        try:
+            loop.remove_reader(pt["fd"])
+        except (ValueError, OSError):
+            pass
+        try:
+            os.close(pt["fd"])
+        except OSError:
+            pass
+        if pt.get("paste_dir"):
+            try:
+                fs.remove(pt["paste_dir"], "", recursive=True, external=True)
+            except (OSError, ValueError):
+                pass
+    job["exit_code"] = code
+    job["status"] = (
+        "stopped"
+        if job["status"] == "stopping"
+        else ("done" if code == 0 else "failed")
+    )
+    await kernel.emit(
+        owner,
+        {"type": "job_done", "job_id": job_id, "exit_code": code, "ok": code == 0},
+    )
+
+
+async def _write_all(fd: int, buf: bytes) -> int:
+    """Write the FULL buffer to the non-blocking master fd. `os.write` short-writes
+    and raises `BlockingIOError` when the tty buffer is full; one unchecked write
+    drops the tail — a bracketed paste then loses its end marker and the shell
+    sticks in paste mode. Loop until every byte lands."""
+    loop = asyncio.get_running_loop()
+    written = 0
+    while written < len(buf):
+        try:
+            written += os.write(fd, buf[written:])
+        except BlockingIOError:
+            ev = asyncio.Event()
+            loop.add_writer(fd, ev.set)
+            try:
+                await ev.wait()
+            finally:
+                loop.remove_writer(fd)
+    return written
+
+
+def _pty_job(verb: str, id: str, payload: dict):
+    """`(job, None)` for a live PTY job this agent owns, or `(None, refusal)`."""
+    jid = payload.get("job_id")
+    if not isinstance(jid, str) or not jid:
+        return None, missing(verb, "job_id")
+    job = _jobs.get(jid)
+    if job is None or job.get("owner") != id:
+        return None, refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    if job.get("pty") is None:
+        return None, bad(verb, "job_id", "a PTY job (started with `pty`)")
+    if not _alive(job) or job["pty"]["eof"]:
+        return None, refusal(
+            NOT_FOUND, f"exec_bridge: job {jid!r} has ended", job_id=jid
+        )
+    return job, None
+
+
+def _dims(verb: str, raw) -> tuple[tuple[int, int] | None, dict | None]:
+    """`((cols, rows), None)` or `(None, refusal)` — both required, positive."""
+    if not isinstance(raw, dict):
+        return None, bad(verb, "pty", "an object {cols, rows}")
+    cols, rows = raw.get("cols"), raw.get("rows")
+    for name, v in (("cols", cols), ("rows", rows)):
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            return None, bad(verb, name, "a positive integer")
+    return (cols, rows), None
+
+
 # ─── the command gate: a REGEX allowlist ────────────────────────
 
 
@@ -409,7 +576,7 @@ def _command_permitted(rec: dict, line: str) -> str | None:
     The FULL command line (command + args, shell-joined) is matched, anchored —
     `re.fullmatch`, so `echo.*` cannot smuggle `echo; rm -rf /` past a prefix.
     An empty allowlist runs nothing: the leg is inert until an operator states
-    what it may run, the same no-defaults posture the interpreter allowlist had.
+    what it may run.
     """
     import re as _re
 
@@ -431,80 +598,213 @@ def _command_permitted(rec: dict, line: str) -> str | None:
     return f"exec_bridge: command not allowed: {line!r} — this leg permits: {pats}"
 
 
+# ─── the child's own shell ──────────────────────────────────────
+#
+# A PTY `start` that names no `command` runs the CHILD's `$SHELL`: a client with
+# no environment of its own (a browser page) cannot name the shell, but the
+# record can — `inherit_env`/`env` decide what the child's environment holds,
+# and `SHELL` is read from THAT, never from the kernel's own env unless it was
+# passed down. One read, no chain: a child env without `SHELL` is refused loud.
+#
+# The ALLOWLIST still decides what may run. A record writer who does not know
+# the shell's path cannot write an exact `allowed` line for it, so the record's
+# `shell` field permits the resolved shell line itself — and nothing wider:
+#
+#   shell: true     → exactly [$SHELL]        (the bare shell)
+#   shell: "login"  → exactly [$SHELL, "-l"]  (a login shell)
+#
+# It is a LINE, not a pattern: any other argv, and every pipe job, still has to
+# fullmatch `allowed`. Who may set `shell` is who may write the record — the
+# same authority that writes `allowed`.
+
+SHELL_VAR = "SHELL"
+
+
+def _shell_tail(rec: dict) -> list[str] | None:
+    """The argv the record's `shell` permits AFTER `$SHELL`, or None when the
+    record permits no shell line. `True` is compared by identity so a stray
+    `1` never reads as `true`."""
+    v = rec.get("shell")
+    if v is True:
+        return []
+    if v == "login":
+        return ["-l"]
+    return None
+
+
+def _shell_permits(rec: dict, env: dict, argv: list[str], pty: bool) -> bool:
+    """True when `argv` is exactly the shell line the record's `shell` permits:
+    a PTY job whose argv is the child's own `$SHELL` plus the tail its `shell`
+    value names. Judged on the RESOLVED argv, so it holds whether the caller
+    named the shell or left `command` out."""
+    tail = _shell_tail(rec)
+    shell = env.get(SHELL_VAR)
+    return pty and tail is not None and bool(shell) and argv == [shell, *tail]
+
+
 # ─── verbs ──────────────────────────────────────────────────────
 
 
+def _child_env(rec: dict) -> dict:
+    """The child's WHOLE environment, from the record: the kernel env vars named in
+    `inherit_env` (nothing by default; `["*"]` = every one — the operator's wildcard),
+    then the operator's `env` extras. Nothing else leaks in — the kernel's `.env` keys
+    reach a child only when the operator names them."""
+    names = rec.get("inherit_env") or []
+    if "*" in names:
+        env = dict(os.environ)
+    else:
+        env = {n: os.environ[n] for n in names if n in os.environ}
+    env.update({str(k): str(v) for k, v in (rec.get("env") or {}).items()})
+    return env
+
+
 async def _start(id, payload, kernel):
-    """args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the `allowed` regexes.
+    """args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.
     The FULL line (command + args) must fullmatch one of the
     record's `allowed` regexes or the start is refused naming the patterns.
-    Spawns in the BACKGROUND and returns {job_id, status:'running'} at once;
-    streams `progress` per output line + a final `job_done`. Many run in parallel.
+    A PTY start with no `command` runs the CHILD's own `$SHELL` (read from the
+    environment `env` + `inherit_env` give the child; none → refused naming
+    SHELL), and the record's `shell` (true → bare, "login" → `-l`) permits that
+    exact line without an `allowed` entry. A pipe job always names its command.
+    Everything else comes from the RECORD, never the call: `cwd` (required),
+    `env` + `inherit_env` (the child's environment). Spawns in the BACKGROUND and
+    returns {job_id, status:'running', pty} at once. A pipe job streams `progress`
+    per output line + a final `job_done`; a PTY job streams `output` chunks and is
+    driven with write/resize/ack/output/paste_image. Many run in parallel.
 
-    A GENERAL-PURPOSE runner: it runs COMMANDS. It is not a code runner and not
-    an interpreter runner — no `code`, no `interpreters`, no shims. A program is
-    a file some process (or stream) put on disk; running it is `command` +
-    `args`, exactly like anything else.
+    A GENERAL-PURPOSE runner: it runs COMMANDS. A program is a file some process
+    (or stream) put on disk; running it is `command` + `args`, exactly like
+    anything else.
     """
     import shlex
 
     rec = kernel.get(id) or {}
-    # Every refusal on this verb carries a CODE. Sibling argument errors used to
-    # split — `args`/`env` answered `bad_arg` while `command`/`code`/the policy wall
-    # answered a bare `{error}` — so a model could not tell a typo from a policy
-    # refusal without reading the prose.
-    if payload.get("code") is not None:
-        return bad("start", "code", "absent — run a command instead")
-    command = payload.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return missing("start", "command")
+    # Every refusal on this verb carries a CODE, so a model can tell a typo from a
+    # policy refusal without reading the prose.
+    # WHERE and WITH WHAT a command runs are the OPERATOR's: a per-call `env`
+    # (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted line actually
+    # ran (audit 2026-09-28).
+    for gone in ("env", "cwd"):
+        if payload.get(gone) is not None:
+            return bad(
+                "start",
+                gone,
+                f"absent — `{gone}` is the record's (update_agent {id} {gone}=…)",
+            )
     raw_args = payload.get("args", [])
     if not isinstance(raw_args, list) or any(
         not isinstance(a, (str, int, float)) for a in raw_args
     ):
         return bad("start", "args", "a list of strings")
+    dims = None
+    if payload.get("pty") is not None:
+        dims, err = _dims("start", payload["pty"])
+        if err:
+            return err
+    # The child's WHOLE environment, from the record — built before the command
+    # is resolved, because an absent `command` on a PTY start is read from it.
+    env = _child_env(rec)
+    command = payload.get("command")
+    if command is None and dims is not None:
+        # AUTODISCOVERY, not a default: the shell is whatever the record passed
+        # down to the child as SHELL. No chain (zsh → bash → sh) behind it — a
+        # child env without one is refused, naming where it comes from.
+        command = env.get(SHELL_VAR)
+        if not command:
+            return refusal(
+                MISSING_ARG,
+                "exec_bridge: start named no command and the child's environment "
+                f"has no {SHELL_VAR} to run — a PTY start without `command` runs "
+                "the shell the record passes down, never a guessed one",
+                hint=f'update_agent {id} inherit_env=["{SHELL_VAR}"] '
+                f'(or env={{"{SHELL_VAR}": …}}), or name `command`',
+                arg=SHELL_VAR,
+            )
+    if not isinstance(command, str) or not command.strip():
+        # A pipe job always names its command; so does a PTY start that passed
+        # one explicitly (an empty string is a typo, not "use the shell").
+        return missing("start", "command")
     argv = [command, *[str(a) for a in raw_args]]
     line = shlex.join(argv)
-    if why := _command_permitted(rec, line):
+    # Two ways a line is permitted, both written on the RECORD: the shell line
+    # its `shell` field names, or a fullmatch against `allowed`. Checked in that
+    # order only because the first is an exact comparison; neither widens the
+    # other.
+    if not _shell_permits(rec, env, argv, dims is not None) and (
+        why := _command_permitted(rec, line)
+    ):
         # An AUTHORIZATION denial, not a bad argument: the command line is
         # well-formed and the LEG refused it. Same code the ingress gate answers,
         # so one branch covers "the operator has not opened this".
+        if _shell_tail(rec) is not None:
+            # Say what `shell` DOES permit, so a caller that passed extra args
+            # (or a pipe job) learns why the shell permission did not cover it.
+            # The value is JSON (`true`/`"login"`), the wire's own spelling, so
+            # every runtime prints the same bytes.
+            why += (
+                f" (`shell={json.dumps(rec.get('shell'))}` permits only the PTY line "
+                f"{shlex.join([env.get(SHELL_VAR) or '$' + SHELL_VAR, *_shell_tail(rec)])!r})"
+            )
         return refusal(
             UNAUTHORIZED,
             why,
             hint="the leg's `allowed` policy decides; an operator may widen it",
         )
-    cwd = payload.get("cwd") or rec.get("cwd") or None
-
-    env_extra_user = payload.get("env") or {}
-    if not isinstance(env_extra_user, dict) or any(
-        not isinstance(k, str) or not isinstance(v, (str, int, float))
-        for k, v in env_extra_user.items()
-    ):
-        return bad("start", "env", "a dict of str -> str")
+    cwd = rec.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return refusal(
+            MISSING_ARG,
+            "exec_bridge: this leg names no `cwd` — where a command runs is the "
+            "operator's decision, never guessed",
+            hint=f"update_agent {id} cwd=<dir>",
+            arg="cwd",
+        )
 
     job_id = secrets.token_hex(4)
     parent_sock, child_sock = socket.socketpair()
+    env["FANTASTIC_CTRL_FD"] = str(child_sock.fileno())
+    # The OWNER AGENT id (the tool's public id), NOT the ephemeral job id — so a
+    # tool can address and tag itself by the id others use.
+    env["FANTASTIC_SELF_ID"] = id
+    master = slave = None
     try:
-        process = await proc.spawn_argv(
-            argv,
-            cwd=cwd,
-            env_extra={
-                **{str(k): str(v) for k, v in env_extra_user.items()},
-                "FANTASTIC_CTRL_FD": str(child_sock.fileno()),
-                # The OWNER AGENT id (the tool's public id), NOT the ephemeral job id —
-                # so a tool can address and tag itself by the id others use.
-                "FANTASTIC_SELF_ID": id,
-            },
-            pass_fd=child_sock.fileno(),
+        if dims is None:
+            process = await proc.spawn_argv(
+                argv, cwd=cwd, env=env, pass_fd=child_sock.fileno()
+            )
+        else:
+            master, slave = os.openpty()
+            _set_winsize(master, *dims)
+            env["TERM"] = "xterm-256color"
+            process = await proc.spawn_pty(
+                argv, cwd=cwd, env=env, pass_fd=child_sock.fileno(), slave=slave
+            )
+            os.set_blocking(master, False)
+    except proc.NoPath:
+        parent_sock.close()
+        if master is not None:
+            os.close(master)
+        return refusal(
+            MISSING_ARG,
+            f"exec_bridge: {command!r} is a bare command and this leg gives the "
+            "child no PATH to find it in — the kernel's own PATH is not the child's",
+            hint=f'update_agent {id} inherit_env=["PATH"] (or env={{"PATH": …}}), '
+            "or start an absolute path",
+            arg="PATH",
         )
     except Exception as e:
         parent_sock.close()
+        if master is not None:
+            os.close(master)
         return refusal(TRANSPORT_ERROR, f"exec_bridge: spawn failed: {e}")
     finally:
         # The parent's copy of the CHILD end must go, or EOF never fires and a parked
-        # program never learns the kernel died.
+        # program never learns the kernel died. Same for the PTY slave: the master
+        # sees EOF only once every slave copy is closed.
         child_sock.close()
+        if slave is not None:
+            os.close(slave)
 
     _jobs[job_id] = {
         "owner": id,
@@ -526,11 +826,32 @@ async def _start(id, payload, kernel):
         "task_id": None,
         "ctrl_sock": parent_sock,
         "ctrl_task": None,
+        "pty": None
+        if dims is None
+        else {
+            "fd": master,
+            "cols": dims[0],
+            "rows": dims[1],
+            "ring": collections.deque(),
+            "ring_bytes": 0,
+            "decoder": codecs.getincrementaldecoder("utf-8")(errors="replace"),
+            "unacked": 0,
+            "paused": False,
+            "eof": False,
+            "wake": asyncio.Event(),
+            "write_lock": asyncio.Lock(),
+            "paste_dir": None,
+        },
     }
     # THE PUMP IS THE JOB'S TASK. Its id is minted here and installed inside
     # the fork, so everything the job does — including a program's sends over
     # the control fd — is parented to work that is still alive.
-    tid = kernel.ctx.spawn_task(id, "start", _pump(id, job_id, process, kernel))
+    pump = (
+        _pump(id, job_id, process, kernel)
+        if dims is None
+        else _pty_pump(id, job_id, process, kernel)
+    )
+    tid = kernel.ctx.spawn_task(id, "start", pump)
     _jobs[job_id]["task_id"] = tid
     _jobs[job_id]["task"] = kernel.ctx.tasks[tid]["_task"]
     # The relay is the job's too: a program's `kernel.send` must be rowed under
@@ -538,8 +859,18 @@ async def _start(id, payload, kernel):
     _jobs[job_id]["ctrl_task"] = kernel.ctx.tasks[
         kernel.ctx.spawn_task(id, "relay", _serve_ctrl(parent_sock, id, job_id, kernel))
     ]["_task"]
-    await kernel.emit(id, {"type": "job_started", "job_id": job_id})
-    return {"job_id": job_id, "status": "running"}
+    # The RESOLVED invocation rides the announcement: a client that let the
+    # kernel pick the shell learns which one ran, and can re-issue it verbatim.
+    await kernel.emit(
+        id,
+        {
+            "type": "job_started",
+            "job_id": job_id,
+            "command": command,
+            "args": [str(a) for a in raw_args],
+        },
+    )
+    return {"job_id": job_id, "status": "running", "pty": dims is not None}
 
 
 def _snap(job_id: str, full: bool = False) -> dict:
@@ -557,10 +888,14 @@ def _snap(job_id: str, full: bool = False) -> dict:
         # WHAT ran — so a caller can re-issue this job verbatim.
         "command": j.get("command"),
         "args": j.get("args"),
+        "pty": j.get("pty") is not None,
     }
+    if j.get("pty") is not None:
+        s["cols"], s["rows"] = j["pty"]["cols"], j["pty"]["rows"]
     if full:
-        s["stdout"] = j["stdout"]
-        s["stderr"] = j["stderr"]
+        if j.get("pty") is None:
+            s["stdout"] = j["stdout"]
+            s["stderr"] = j["stderr"]
         s["cwd"] = j.get("cwd")
     return s
 
@@ -593,7 +928,7 @@ def _no_job(id: str, jid) -> dict | None:
 
 
 async def _stop(id, payload, kernel):
-    """args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs.
+    """args: job_id:str? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.
     Returns {killed:int}."""
     jid = payload.get("job_id")
     if gone := _no_job(id, jid):
@@ -604,10 +939,7 @@ async def _stop(id, payload, kernel):
             continue
         if _alive(v):
             v["status"] = "stopping"
-            try:
-                v["proc"].kill()
-            except (ProcessLookupError, OSError):
-                pass
+            _kill(v)
             n += 1
     return {"killed": n}
 
@@ -648,6 +980,116 @@ async def _clear(id, payload, kernel):
     return {"cleared": len(targets)}
 
 
+async def _write(id, payload, kernel):
+    """args: job_id:str (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."""
+    job, err = _pty_job("write", id, payload)
+    if err:
+        return err
+    data = payload.get("data")
+    if not isinstance(data, str):
+        return bad("write", "data", "a string")
+    pt = job["pty"]
+    try:
+        async with pt["write_lock"]:
+            written = await _write_all(pt["fd"], data.encode("utf-8"))
+    except OSError as e:
+        return refusal(TRANSPORT_ERROR, f"exec_bridge: write failed: {e}")
+    return {"written": written}
+
+
+async def _resize(id, payload, kernel):
+    """args: job_id:str (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."""
+    job, err = _pty_job("resize", id, payload)
+    if err:
+        return err
+    dims, err = _dims("resize", payload)
+    if err:
+        return err
+    pt = job["pty"]
+    pt["cols"], pt["rows"] = dims
+    try:
+        _set_winsize(pt["fd"], *dims)
+    except OSError as e:
+        return refusal(TRANSPORT_ERROR, f"exec_bridge: resize failed: {e}")
+    return {"resized": True, "cols": dims[0], "rows": dims[1]}
+
+
+async def _ack(id, payload, kernel):
+    """args: job_id:str (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."""
+    job, err = _pty_job("ack", id, payload)
+    if err:
+        return err
+    chars = payload.get("chars")
+    if isinstance(chars, bool) or not isinstance(chars, int) or chars < 0:
+        return bad("ack", "chars", "a non-negative integer")
+    pt = job["pty"]
+    pt["unacked"] = max(0, pt["unacked"] - chars)
+    if pt["paused"] and pt["unacked"] < LOW_WATERMARK:
+        pt["paused"] = False
+        pt["wake"].set()  # the pump re-attaches the reader in the job's own context
+    return {"unacked": pt["unacked"], "paused": pt["paused"]}
+
+
+async def _output(id, payload, kernel):
+    """args: job_id:str (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."""
+    jid = payload.get("job_id")
+    job = _jobs.get(jid) if isinstance(jid, str) else None
+    if job is None or job.get("owner") != id:
+        return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    if job.get("pty") is None:
+        return bad("output", "job_id", "a PTY job (a pipe job's output is in `status`)")
+    text = "".join(job["pty"]["ring"])
+    mb = payload.get("max_bytes")
+    if mb is not None:
+        if isinstance(mb, bool) or not isinstance(mb, int) or mb < 0:
+            return bad("output", "max_bytes", "a non-negative integer")
+        raw = text.encode("utf-8")
+        text = (
+            raw[len(raw) - mb :].decode("utf-8", errors="ignore")
+            if mb < len(raw)
+            else text
+        )
+    return {
+        "job_id": jid,
+        "output": text,
+        "origin": f"{id} output {{job_id: {jid}}} — the ring NOW; re-send, it moves",
+    }
+
+
+async def _paste_image(id, payload, kernel):
+    """args: job_id:str (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."""
+    job, err = _pty_job("paste_image", id, payload)
+    if err:
+        return err
+    data = payload.get("data")
+    if not isinstance(data, (bytes, bytearray)):
+        return bad("paste_image", "data", "raw bytes")
+    if len(data) > MAX_PASTE_IMAGE:
+        return bad("paste_image", "data", f"at most {MAX_PASTE_IMAGE} bytes")
+    mime = payload.get("mime")
+    if not isinstance(mime, str) or not mime:
+        return missing("paste_image", "mime")
+    ext = _IMAGE_EXT.get(mime.lower())
+    if ext is None:
+        return bad("paste_image", "mime", f"one of {sorted(_IMAGE_EXT)}")
+    pt = job["pty"]
+    if not pt["paste_dir"]:
+        pt["paste_dir"] = tempfile.mkdtemp(prefix=f"fantastic_paste_{id}_")
+    name = f"paste_{secrets.token_hex(4)}.{ext}"
+    # The scratch dir is a system temp dir (outside cwd by design) — written through
+    # fs's external surface, the one disk module.
+    try:
+        fs.write_bytes(pt["paste_dir"], name, bytes(data), atomic=False, external=True)
+        path = os.path.join(pt["paste_dir"], name)
+        async with pt["write_lock"]:
+            # the path at the cursor with a trailing space, no newline — pasting
+            # must not submit
+            await _write_all(pt["fd"], (path + " ").encode("utf-8"))
+    except (OSError, ValueError) as e:
+        return refusal(TRANSPORT_ERROR, f"exec_bridge: paste_image failed: {e}")
+    return {"path": path, "bytes": len(data)}
+
+
 async def _reflect(id, payload, kernel):
     """Identity + running job count + auth posture. No args."""
     rec = kernel.get(id) or {}
@@ -659,17 +1101,23 @@ async def _reflect(id, payload, kernel):
             "sealed by default, gated by the `allowed` regexes. Spawns commands in "
             "the background; a child may speak the kernel over a private control fd."
         ),
-        "cwd": rec.get("cwd") or "<process default>",
-        # THE GATE, advertised: a caller must see what it may run.
+        "cwd": rec.get("cwd"),
+        # THE GATE, advertised: a caller must see what it may run, where, and with
+        # which of the kernel's env vars.
         "allowed": _allowed_patterns(rec),
+        "inherit_env": rec.get("inherit_env") or [],
+        # The shell line the record permits without an `allowed` entry:
+        # false (none), true ($SHELL bare) or "login" ($SHELL -l).
+        "shell": rec.get("shell") or False,
         "running": running,
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },
         "emits": {
-            "job_started": "{type:'job_started', job_id}",
+            "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
             "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
-            "job_done": "{type:'job_done', job_id, exit_code, ok, stdout, stderr}",
+            "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
+            "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
         },
         "wire": (
             "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, "
@@ -741,6 +1189,11 @@ VERBS = {
     "stop": _stop,
     "interrupt": _interrupt,
     "clear": _clear,
+    "write": _write,
+    "resize": _resize,
+    "ack": _ack,
+    "output": _output,
+    "paste_image": _paste_image,
     "connector": _connector,
     "reflect": _reflect,
     "boot": _boot,
@@ -781,11 +1234,30 @@ def validate_meta(meta: dict, record: dict) -> str | None:
                     "a leg with no wire envelope can never present a token — "
                     "legal values: allow_all_ingress, deny_ingress"
                 )
-    for gone in ("code", "shim", "interpreter", "interpreters", "argv_template"):
-        if gone in meta and meta[gone] is not None:
+    if "cwd" in meta and meta["cwd"] is not None:
+        if not isinstance(meta["cwd"], str) or not meta["cwd"]:
+            return "cwd must be a non-empty directory path"
+    if "env" in meta and meta["env"] is not None:
+        env = meta["env"]
+        if not isinstance(env, dict) or any(
+            not isinstance(k, str) or not isinstance(v, (str, int, float))
+            for k, v in env.items()
+        ):
+            return "env must be a map of NAME -> value"
+    if "inherit_env" in meta and meta["inherit_env"] is not None:
+        names = meta["inherit_env"]
+        if not isinstance(names, list) or any(
+            not isinstance(n, str) or not n for n in names
+        ):
+            return 'inherit_env must be a list of env var names (["*"] = all)'
+    if "shell" in meta and meta["shell"] is not None:
+        # `bool` first: a bare `1` equals True in Python and must not read as
+        # permission. The legal set is closed — each value names ONE exact line.
+        v = meta["shell"]
+        if not (isinstance(v, bool) or v == "login"):
             return (
-                f"exec_bridge: `{gone}` is not a field — this is a general-purpose "
-                "COMMAND runner; gate it with `allowed=[<regex>, ...]`"
+                f"shell={v!r} is not a shell permission — legal values: true "
+                '(the child\'s $SHELL, bare), "login" ($SHELL -l), false (none)'
             )
     if "allowed" in meta and meta["allowed"] is not None:
         import re as _re
@@ -835,15 +1307,23 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     return await fn(id, payload, kernel)
 
 
+def _kill(job: dict) -> None:
+    """SIGKILL one job: its whole SESSION — the command and everything it launched
+    (a pipe job's `server &`, a PTY shell's background jobs). Every job leads its
+    own session (`proc`), so this never reaches the kernel."""
+    try:
+        proc.kill_session(job["proc"].pid)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 def _teardown(job: dict) -> None:
-    """Free the REAL resources of ONE job: SIGKILL the OS subprocess + cancel its relay.
-    The single teardown both lifecycle hooks use. Idempotent."""
+    """Free the REAL resources of ONE job: SIGKILL the OS subprocess (a PTY job's
+    whole session) + cancel its relay. The single teardown both lifecycle hooks
+    use. Idempotent."""
     if _alive(job):
         job["status"] = "stopping"
-        try:
-            job["proc"].kill()
-        except (ProcessLookupError, OSError):
-            pass
+        _kill(job)
     t = job.get("ctrl_task")
     if t is not None:
         t.cancel()
@@ -865,3 +1345,7 @@ async def on_cancel(id, task_id, kernel) -> None:
     for v in _jobs.values():
         if v.get("owner") == id and v.get("task_id") == task_id:
             _teardown(v)
+
+
+# Shutdown frees the same process resources — declared, never inferred.
+on_shutdown = on_delete

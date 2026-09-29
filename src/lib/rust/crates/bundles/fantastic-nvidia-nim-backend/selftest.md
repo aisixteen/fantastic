@@ -22,20 +22,22 @@ All test state lives under `/tmp/nim_test/`.
 ```bash
 rm -rf /tmp/nim_test && mkdir -p /tmp/nim_test && cd /tmp/nim_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
-FA=$($FANTASTIC kernel_state create_agent handler_module=file_bridge.tools root=/tmp/nim_test | jq -r .id)
-NB=$($FANTASTIC kernel_state create_agent handler_module=nvidia_nim_backend.tools file_agent_id=$FA | jq -r .id)
+# ENDPOINT / MODEL: ASK the user — nothing is guessed.
+MEM=$($FANTASTIC kernel_state create_agent handler_module=ram_store.tools | jq -r .id)
+NB=$($FANTASTIC kernel_state create_agent handler_module=nvidia_nim_backend.tools \
+  endpoint=$ENDPOINT model=$MODEL memory_store_id=$MEM can_call="{\"$MEM\":\"*\"}" | jq -r .id)
 NB2=$($FANTASTIC kernel_state create_agent handler_module=nvidia_nim_backend.tools | jq -r .id)
 ```
 
 ## Tests
 
-### Test 1: `send` failfast when `file_agent_id` unset
+### Test 1: no endpoint/model on the record ⇒ send fails loud naming the field
 
 ```bash
-$FANTASTIC $NB2 send text=hi | jq -e '.error | contains("file_agent_id required")'
+$FANTASTIC $NB2 send text=hi | jq -e '.error | contains("`endpoint` is required")'
 ```
 
-Expect: `{"error":"nvidia_nim_backend: file_agent_id required"}`.
+Expect: an error naming `endpoint` (the first missing field) — nothing is guessed.
 
 ### Test 2: `send` failfast when the key variable is unset — and it NAMES the var
 
@@ -65,7 +67,7 @@ blob, and NO sidecar file — the bundle stores nothing.
 ```bash
 $FANTASTIC kernel_state delete_agent id=$NB
 $FANTASTIC kernel_state delete_agent id=$NB2
-$FANTASTIC kernel_state delete_agent id=$FA
+$FANTASTIC kernel_state delete_agent id=$MEM
 rm -rf /tmp/nim_test
 ```
 
@@ -73,6 +75,6 @@ rm -rf /tmp/nim_test
 
 | Test | Pass / Fail | Notes |
 |---|---|---|
-| 1. send failfast w/o file_agent_id |  |  |
+| 1. send failfast w/o endpoint (names the field) |  |  |
 | 2. send failfast w/o NVIDIA_API_KEY (names the var) |  |  |
 | 3 (AI). reflect flips has_api_key, leaks nothing, writes nothing |  |  |

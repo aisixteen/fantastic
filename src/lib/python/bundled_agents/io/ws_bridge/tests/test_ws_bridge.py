@@ -54,6 +54,16 @@ def two_kernels(tmp_path, monkeypatch):
     kb._test_transport_inject.clear()
 
 
+def _accept(kernel, agent_id: str, foreign: str) -> None:
+    """Open `agent_id`'s `callable_by` to a FOREIGN caller (`<guid>|*` or
+    `<guid>|<agent>`): an inbound bridge call is judged by its qualified id,
+    never by the leg that relays it."""
+    agent = kernel.ctx.agents[agent_id]
+    cb = dict(agent._meta.get("callable_by") or {})
+    cb[foreign] = "*"
+    kernel.update(agent_id, callable_by=cb)
+
+
 async def _make_bridge(kernel, peer_id: str, transport: str = "memory") -> str:
     rec = (
         await kernel.send(
@@ -85,6 +95,12 @@ async def _wire_memory_pair(ka, kb_kern):
     "inbound call dispatcher" role that `web_ws._on_call` plays over
     a real WS.
     """
+    # Each kernel's instance guid — what a bridge stamps on its outbound frames
+    # and what the peer's leg is PINNED to.
+    ka.update(ka.id, guid="guid-a")
+    kb_kern.update(kb_kern.id, guid="guid-b")
+    _accept(ka, ka.id, "guid-b|*")
+    _accept(kb_kern, kb_kern.id, "guid-a|*")
     # Allocate ids first so each can know its peer.
     rec_a = (
         await ka.send(
@@ -97,6 +113,7 @@ async def _wire_memory_pair(ka, kb_kern):
                         "handler_module": "ws_bridge.tools",
                         "transport": "memory",
                         "peer_id": "PLACEHOLDER",
+                        "peer_guid": "guid-b",
                     },
                 }
             ]
@@ -115,8 +132,10 @@ async def _wire_memory_pair(ka, kb_kern):
                         "transport": "memory",
                         "peer_id": a_id,
                         # B is the SERVING leg: its read_loop dispatches the call A forwards.
-                        # Sealed-by-default ⇒ open it explicitly so inbound dispatch is permitted.
+                        # Sealed-by-default ⇒ open it explicitly so inbound dispatch is permitted,
+                        # and PIN the one peer whose agents it serves.
                         "ingress_rule": "allow_all_ingress",
+                        "peer_guid": "guid-a",
                     },
                 }
             ]
@@ -304,6 +323,7 @@ async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
     frame = {
         "type": "call",
         "id": "test_corr",
+        "caller": "test-peer-g|probe",
         "target": "no_such_agent_xyz",
         "payload": {"type": "reflect"},
     }
@@ -324,7 +344,9 @@ async def _boot_solo_bridge(kernel, *, auth=None):
         "handler_module": "ws_bridge.tools",
         "transport": "memory",
         "peer_id": "test_peer",
+        "peer_guid": "test-peer-g",
     }
+    _accept(kernel, kernel.id, "test-peer-g|*")
     if auth is not None:
         # `auth` used to be a shorthand for both legs. It is gone — say which leg.
         # Rule names are MANIFOLD-SCOPED, so the same policy is a different name on
@@ -365,6 +387,7 @@ async def test_deny_inbound_refuses_inbound_call(two_kernels):
         {
             "type": "call",
             "id": "c1",
+            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
         }
@@ -384,6 +407,7 @@ async def test_deny_inbound_default_refuses_inbound_call(two_kernels):
         {
             "type": "call",
             "id": "c1",
+            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
         }
@@ -407,6 +431,7 @@ async def test_password_dispatches_inbound_call_with_valid_token(
         {
             "type": "call",
             "id": "c1",
+            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
             "auth_token": "s3cret",  # rides the frame envelope, not the payload
@@ -427,6 +452,7 @@ async def test_password_refuses_inbound_call_with_wrong_token(two_kernels, monke
         {
             "type": "call",
             "id": "c1",
+            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
             "auth_token": "WRONG",
@@ -619,10 +645,12 @@ async def test_watch_remote_sends_watch_frame(two_kernels):
     assert frame == {"type": "watch", "src": "remote_core"}
 
 
-async def test_event_frame_re_emits_on_bridge_inbox(two_kernels):
-    """When the remote sends `{type:'event', payload}`, the bridge's
-    read loop re-emits `payload` on the bridge agent's own inbox so
-    local watchers see remote streams via `kernel.watch(<bridge>, ...)`."""
+async def test_event_frame_re_emits_on_bridge_inbox_only_when_subscribed(two_kernels):
+    """A remote `{type:'event', src, payload}` is re-emitted on the bridge agent's
+    own inbox (payload + `src`) ONLY for a `src` this leg subscribed to with
+    `watch_remote`. Nothing flows before the subscription, nothing without a
+    `src`, nothing after `unwatch_remote` (audit 2026-09-28: a peer could push
+    arbitrary payloads to the bridge's local watchers)."""
     ka, _ = two_kernels
     rec_a = (
         await ka.send(
@@ -646,19 +674,43 @@ async def test_event_frame_re_emits_on_bridge_inbox(two_kernels):
     r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True
 
-    # Attach a synthetic watcher to the bridge BEFORE the event
-    # arrives. `_watcher_ids` is the substrate's fanout target set —
-    # any id in it gets a copy of every payload emitted on the bridge.
+    # `_watcher_ids` is the substrate's fanout target set — any id in it gets a
+    # copy of every payload emitted (and sent) on the bridge.
     ka.ctx.ensure_inbox("test_watcher")
     ka.ctx.agents[a_id]._watcher_ids.add("test_watcher")
-
-    await mt_peer.send({"type": "event", "payload": {"type": "token", "text": "hi"}})
-
     watcher_inbox = ka.ctx.inboxes["test_watcher"]
-    ev = await asyncio.wait_for(watcher_inbox.get(), timeout=2.0)
-    assert ev.get("type") == "token" and ev.get("text") == "hi", (
-        f"expected re-emitted token event, got: {ev}"
-    )
+
+    async def _next():
+        return await asyncio.wait_for(watcher_inbox.get(), timeout=2.0)
+
+    async def _remote(verb, target):
+        await ka.send([{"target": a_id, "payload": {"type": verb, "target": target}}])
+        assert (await mt_peer.recv())["src"] == target
+        assert (await _next())["type"] == verb  # the watcher mirrors the send too
+
+    def _ev(src, **payload):
+        frame = {"type": "event", "payload": {"type": "token", **payload}}
+        if src is not None:
+            frame["src"] = src
+        return frame
+
+    # before any subscription: nothing flows (an unasked src, a src-less event)
+    await mt_peer.send(_ev("ghost", text="early"))
+    await mt_peer.send(_ev(None, text="no-src"))
+    await _remote("watch_remote", "ai")
+    await _remote("watch_remote", "fence")
+    # the transport is ordered: whatever arrives FIRST after these tells the truth
+    await mt_peer.send(_ev(None, text="no-src"))
+    await mt_peer.send(_ev("ghost", text="unasked"))
+    await mt_peer.send(_ev("ai", text="hi"))
+    assert await _next() == {"type": "token", "text": "hi", "src": "ai"}
+
+    # after an unwatch: nothing for that src, the other subscription still flows
+    await _remote("unwatch_remote", "ai")
+    await mt_peer.send(_ev("ai", text="late"))
+    await mt_peer.send(_ev("fence", text="fenced"))
+    assert await _next() == {"type": "token", "text": "fenced", "src": "fence"}
+    assert watcher_inbox.empty()
 
 
 async def test_forward_read_stream_cursor_round_trips(two_kernels):
@@ -681,6 +733,7 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": "bfiles",
                         "ingress_rule": "allow_all_ingress",
                     },
@@ -706,10 +759,11 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
             ]
         )
     )[0]["result"]
-    # Two-sided deny-all: `fb` must reciprocally ACCEPT the bridge's relayed calls.
+    # Two-sided deny-all: `fb` must ACCEPT the FOREIGN caller the bridge relays —
+    # judged by its qualified `<guid>|<agent>`, never by the leg.
     fb_agent = kb_kern.ctx.agents.get(fb)
     cb = dict(fb_agent._meta.get("callable_by") or {})
-    cb[b_id] = "*"
+    cb["guid-a|*"] = "*"
     (
         await kb_kern.send(
             [

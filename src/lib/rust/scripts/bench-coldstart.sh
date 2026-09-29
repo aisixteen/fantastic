@@ -106,7 +106,7 @@ FAILED=0
     # spin forever if it never comes up.
     DEADLINE=$(( $(now_ms) + 5000 ))
     while [ "$(now_ms)" -lt "$DEADLINE" ]; do
-        if curl -sf -m 1 "http://localhost:$PORT/" >/dev/null 2>&1; then
+        if curl -sf -m 1 "http://localhost:$PORT/_assets/favicon.png" >/dev/null 2>&1; then
             break
         fi
         # Tight loop — sleep would inflate the measurement.

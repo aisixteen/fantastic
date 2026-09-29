@@ -7,8 +7,8 @@
 > in-flight tasks stay alive across calls
 > out-of-scope: HTTP routes (covered by webapp selftest), browser
 
-Reflect-driven LLM agent. Tests prompt assembly, native tool-calls,
-file_bridge persistence.
+Reflect-driven LLM agent. Tests prompt assembly, `<call>` tag tool-calls,
+the conversation in its memory store.
 
 **Why a running serve is required:** ollama_backend caches the
 `OllamaProvider` HTTP client and in-flight `_run` tasks in
@@ -18,18 +18,17 @@ process-memory. Multi-step tests would lose state between separate
 ## Pre-flight
 
 ASK USER which provider + model:
-- ollama endpoint (default `http://localhost:11434`)
+- ollama endpoint (REQUIRED on the record — there is no default)
 - model name (e.g. `gemma4:e2b`, `llama3.1:8b`)
 
 Verify reachable BEFORE wiping state:
 ```bash
-curl -s http://localhost:11434/api/tags | head
+curl -s "$ENDPOINT/api/tags" | head
 # confirm the named model is in the list
 ```
 If unreachable or model missing → STOP, report.
 
 ```bash
-cd new_codebase
 rm -rf .fantastic
 PORT=18911
 pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
@@ -65,17 +64,17 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
 
 ## Tests
 
-### Test 1: send works without file_bridge_id (history auto-mounts)
+### Test 1: send works (the conversation lives in the memory store)
 
-ollama has no api_key sidecar, so it needs NO `file_bridge_id`. Its
-per-client history auto-mounts as a `chat` the chat sidecar persisted THROUGH
-the loader (the AI writes no disk itself).
+The AI writes no disk itself: its conversation is rows in the memory store its
+record names (`memory_store_id`).
 
 ```bash
-OB=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+MEM=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"ram_store.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+OB=$(call kernel "{\"type\":\"create_agent\",\"parent_id\":\"kernel_state\",\"handler_module\":\"ollama_backend.tools\",\"endpoint\":\"$ENDPOINT\",\"model\":\"$MODEL\",\"memory_store_id\":\"$MEM\",\"can_call\":{\"$MEM\":\"*\"}}" | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $OB '{"type":"send","text":"reply with the single word: ready"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
 ```
-Expected: a `final` reply containing "ready" — no file_bridge wiring needed.
+Expected: a `final` reply containing "ready".
 
 ### Test 2: reflect surfaces the context-window posture
 
@@ -92,21 +91,20 @@ is a string (default `compact`).
 
 ### Test 3: simple send streams tokens, persists history
 
-The default caller is `client_id="cli"` (REPL/daemon flow). History is
-per-client, persisted THROUGH the loader in a mounted chat JSONL sidecar —
-the AI writes no disk itself. Read it back via the `history` verb (NOT a
-chat_<client>.json sidecar — that path is gone). A different `client_id`
-addresses a different thread.
+The default caller is `client_id="cli"` (REPL/daemon flow). The conversation is
+rows in the memory store the record names — the AI writes no disk itself. Read it
+back via the `history` verb, a DIGEST of rows. A different `client_id` addresses a
+different thread.
 
 ```bash
 call $OB '{"type":"send","text":"reply with the single word: ok"}' | python -m json.tool | grep -F '"final"'
 call $OB '{"type":"history"}' | python -c "
 import json,sys
-d = json.load(sys.stdin)['messages']
-print('messages:', len(d), 'last:', d[-1]['content'][:50])
+d = json.load(sys.stdin)['rows']
+print('rows:', len(d), 'last:', d[-1]['head'][:50])
 "
 ```
-Expected: messages ≥ 2; last message contains "ok" (case-insensitive).
+Expected: rows ≥ 2; the last row's head contains "ok" (case-insensitive).
 
 ### Test 4: tool-call round-trip — and the history keeps the round-trip
 
@@ -233,7 +231,6 @@ async def main():
                 'id':'B',
             }))
 
-            queued_seen = False
             status_queued_seen = False
             token_after_queued = False
             async for msg in wsB:
@@ -241,21 +238,18 @@ async def main():
                 if ev.get('type') != 'event': continue
                 p = ev['payload']
                 if p.get('client_id') != 'bob': continue
-                if p.get('type') == 'queued':
-                    queued_seen = True
-                elif p.get('type') == 'status' and p.get('phase') == 'queued':
+                if p.get('type') == 'status' and p.get('phase') == 'queued':
                     status_queued_seen = True
-                elif p.get('type') == 'token' and queued_seen:
+                elif p.get('type') == 'token' and status_queued_seen:
                     token_after_queued = True
                     break
-            ok = queued_seen and status_queued_seen and token_after_queued
-            print('PASS' if ok else f'FAIL queued={queued_seen} status_queued={status_queued_seen} token={token_after_queued}')
+            ok = status_queued_seen and token_after_queued
+            print('PASS' if ok else f'FAIL status_queued={status_queued_seen} token={token_after_queued}')
 asyncio.run(main())
 "
 ```
-Expected: `PASS`. Bob's WS sees BOTH the back-compat `queued` event
-AND a `status` event with `phase='queued'` before any token, then
-tokens arrive once alice releases the lock.
+Expected: `PASS`. Bob's WS sees a `status` event with `phase='queued'`
+before any token, then tokens arrive once alice releases the lock.
 
 ### Test 10: status verb privacy filter (mid-flight)
 
@@ -329,7 +323,7 @@ blocked caller's `send` resolves to `{cancelled:true}`, and `$OB` reports
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | send works without file_bridge_id (history auto-mounts) | |
+| 1 | send works (conversation in the memory store) | |
 | 2 | reflect surfaces context_window + context_strategy | |
 | 3 | send streams + persists per-client history (history verb) | |
 | 4 | tool-call round-trip + lossless tool history (history verb) | |

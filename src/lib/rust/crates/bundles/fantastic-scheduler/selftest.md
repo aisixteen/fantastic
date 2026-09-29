@@ -6,8 +6,9 @@
 > a live daemon + WS to observe `schedule_fired` over time; one-shot CLI
 > exercises the synchronous surface via `tick_now`
 
-Recurring-task scheduler. Schedules + fire history persist through the
-configured `file_agent_id` (failfast if unset). One-shot CLI:
+Recurring-task scheduler. Schedules + fire history persist THROUGH the
+loader (`persist_blob`/`load_blob`) — nothing to wire; a write failfasts only
+when the loader has no store. One-shot CLI:
 `fantastic <id> <verb> [k=v ...]`. JSON-valued args (`payload='{...}'`)
 are coerced.
 
@@ -19,31 +20,31 @@ All test state lives under `/tmp/sc_test/`.
 rm -rf /tmp/sc_test && mkdir -p /tmp/sc_test && cd /tmp/sc_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 SC=$($FANTASTIC kernel_state create_agent handler_module=scheduler.tools | jq -r .id)
-FA=$($FANTASTIC kernel_state create_agent handler_module=file_bridge.tools root=/tmp/sc_test | jq -r .id)
 ```
 
 ## Tests
 
-### Test 1: schedule without file_agent_id → failfast
+### Test 1: schedule without a store → failfast
 
 ```bash
 $FANTASTIC $SC schedule target=core payload='{"type":"reflect"}' interval_seconds=5 \
-  | jq -e '.error == "scheduler: file_agent_id required"'
+  | jq -e '.error | contains("no store wired")'
 ```
 
-Expect: no implicit fallback — persistence is mandatory.
+Expect: no implicit fallback — a write needs the loader's store.
 
-### Test 2: configure file_agent_id, then schedule persists
+### Test 2: open a store at `.fantastic`, then schedule persists through the loader
 
 ```bash
-$FANTASTIC kernel_state update_agent id=$SC file_agent_id=$FA
+FA=$($FANTASTIC kernel_state create_agent handler_module=file_bridge.tools root=.fantastic \
+  allow='["."]' ingress_rule=allow_all_ingress | jq -r .id)
 SCH=$($FANTASTIC $SC schedule target=core payload='{"type":"reflect"}' interval_seconds=60 \
   | jq -r .schedule_id)
 $FANTASTIC $SC list | jq -e --arg s "$SCH" '[.schedules[].id] | contains([$s])'
-test -f /tmp/sc_test/.fantastic/agents/$SC/schedules.yaml && echo "OK persisted via file agent"
+test -f /tmp/sc_test/.fantastic/agents/$SC/schedules.yaml && echo "OK persisted through the loader"
 ```
 
-Expect: `OK persisted via file agent`; the file routes through the file agent.
+Expect: `OK persisted through the loader`.
 
 ### Test 3: tick_now fires synchronously + appends history
 
@@ -77,7 +78,7 @@ rm -rf /tmp/sc_test
 
 | Test | Pass / Fail | Notes |
 |---|---|---|
-| 1. schedule fails without file_agent_id |  |  |
+| 1. schedule fails without a store |  |  |
 | 2. schedule persists via file agent |  |  |
 | 3. tick_now fires + history |  |  |
 | 4. pause/resume + unschedule |  |  |

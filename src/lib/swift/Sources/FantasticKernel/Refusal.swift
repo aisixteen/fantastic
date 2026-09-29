@@ -143,8 +143,24 @@ public enum Refusal {
                 verb, "id",
                 "a name, not a number (message ids are ints); got \(pyRepr(agentId))")
         }
+        // `|` qualifies a FOREIGN agent (`<guid>|<agent>`): a local id never
+        // carries one, so a gate can tell local from foreign by the id alone.
+        if agentId.contains("|") {
+            return bad(
+                verb, "id",
+                "a local name without `|` (it marks a foreign `guid|agent`); got \(pyRepr(agentId))")
+        }
+        // `kernel` names the operator: sends to it reach the root, and a memory
+        // store serves the operator under it. An agent holding that id would BE
+        // the operator to every store (measured in python 2026-09-28).
+        if agentId == reservedId {
+            return bad(verb, "id", "a name other than the reserved \(pyRepr(reservedId))")
+        }
         return nil
     }
+
+    /// The one reserved agent id — the operator's name (send target, store identity).
+    public static let reservedId = "kernel"
 
     /// `<verb>: <arg> required` — the commonest refusal, spelled once.
     public static func missing(_ verb: String, _ arg: String, hint: String = "") -> JSON {
@@ -180,7 +196,7 @@ public enum Refusal {
         make(
             notHere,
             "\(verb) is a kernel verb — \(id) does not answer it",
-            hint: "address the kernel root (alias 'kernel'); name the agent you mean in "
+            hint: "address the kernel root ('kernel'); name the agent you mean in "
                 + "`parent_id` / `id`",
             extra: [("verb", .string(verb))]
         )

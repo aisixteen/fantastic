@@ -4,25 +4,48 @@ Spawns a COMMAND in the BACKGROUND and hands it a kernel wire. Crossing kernel�
 an IO edge, so this leg is gated exactly like `file_bridge`/`web_ws`: **sealed by default**,
 and the commands it may run come from an operator **allowlist** of regexes.
 
-It is a GENERAL-PURPOSE command runner, not a code runner: there is no `code` field, no
-`interpreters`, no shim. A program is a FILE some process (or a `write_stream`) put on disk;
+It is a GENERAL-PURPOSE command runner. A program is a FILE some process (or a `write_stream`) put on disk;
 running it is `command` + `args`, exactly like anything else.
 
-Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `reflect` · `boot`.
+Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `reflect` · `boot`, and for a
+PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
 Any verb NOT in that list is **MAIL** for the running program (see below).
 
-- `start(command, args?, env?, cwd?)` → `{job_id, status:'running'}` at once — non-blocking,
+WHERE and WITH WHAT a command runs is the RECORD's, never the call's: `cwd` (REQUIRED — a
+leg without one runs nothing), `env` (the operator's extra vars), `inherit_env` (which of
+the kernel's env vars pass through — none by default, `["*"]` = all; the kernel's `.env`
+keys reach a child only when named). A per-call `env`/`cwd` is refused. A bare `command`
+is found on the CHILD's `PATH` only — pass `PATH` through `inherit_env`/`env`, or start an
+absolute path; with no `PATH` the start is refused naming it.
+
+- `start(command, args?, pty?)` → `{job_id, status:'running', pty}` at once — non-blocking,
   many jobs in parallel. `command` is the program/binary; `args` is its argv (a list of
   strings). The FULL line (`command` + `args`, shell-joined) must fullmatch one of the
-  record's `allowed` regexes or the start is refused, naming the patterns. `env` adds
-  environment vars; `cwd` overrides the record's. There is no blocking run-and-wait verb:
-  output streams as `progress` events on this agent's inbox (one per line, `{n, line,
-  stream}`) with a final `job_done` (`{exit_code, ok, stdout, stderr}`), after a
-  `job_started`.
-- `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr, or every job of
-  this agent as summaries.
-- `stop(job_id?)` SIGKILL · `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished
-  rows. Omit `job_id` and it applies to all of this agent's jobs.
+  record's `allowed` regexes or the start is refused, naming the patterns. There is no
+  blocking run-and-wait verb: a pipe job's output streams as `progress` events on this
+  agent's inbox (one per line, `{n, line, stream}`) with a final `job_done`
+  (`{exit_code, ok, stdout, stderr}`), after a `job_started`.
+- **A terminal is a PTY job**: `start(command, args, pty={cols, rows})` runs the command on
+  a pseudo-terminal (`TERM=xterm-256color`), same gate. **Leave `command` out** and it runs
+  the CHILD's own `$SHELL` — read from the environment the record passes down
+  (`inherit_env`/`env`), never guessed; a child env with no `SHELL` is refused naming it.
+  `job_started` and `status` report the resolved `command`. It streams `output {job_id, data}`
+  chunks and ends with `job_done {job_id, exit_code, ok}`. Drive it with
+  `write(job_id, data)` (keystrokes, written in full, serialized), `resize(job_id, cols,
+  rows)`, `ack(job_id, chars)` (flow control — the reader pauses past 100K unacked chars,
+  resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
+  re-attach) and `paste_image(job_id, data, mime)` (saves the image, types its path).
+  Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
+  Nothing respawns a terminal — `boot` starts nothing; a client that attaches and finds no
+  live PTY job `start`s one.
+- `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr (a PTY job: its
+  `cols`/`rows`), or every job of this agent as summaries.
+- `stop(job_id?)` SIGKILL the job's whole session — the command and everything it
+  launched (`server &`, a `nohup`, a shell's background jobs); deleting the agent or
+  stopping the kernel does the same. A process that leaves the session on purpose
+  (`setsid`) escapes — containment beyond that is the OS's ·
+  `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished rows. Omit `job_id` and
+  it applies to all of this agent's jobs.
 - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
 Every running job is a row in the kernel TASK TABLE (`task_id` in each `status` snapshot,
@@ -55,6 +78,26 @@ message. An empty list is a legal state — the leg then runs nothing and says s
 PER RECORD (nothing is inherited from a parent). Which interpreter/binary may run is the
 operator's decision, never the caller's — that is exactly why the gate is a record field a
 caller cannot edit.
+
+**The child's own shell — `shell`.** A client that cannot name the shell (a browser page
+has no environment) cannot write an exact `allowed` line for it either. The record's `shell`
+field permits the resolved shell line itself, and nothing wider:
+
+```
+update_agent <id> inherit_env='["SHELL", "PATH"]' shell=true     # PTY start → exactly $SHELL
+update_agent <id> inherit_env='["SHELL", "PATH"]' shell=login    # PTY start → exactly $SHELL -l
+```
+
+It is ONE exact line on a PTY job, not a pattern: other args, and every pipe job, still need
+an `allowed` match. A shell on a terminal runs whatever is typed into it — `shell` states which
+program `start` spawns, not a limit on what that program can do.
+
+**Know what a `.*` tail grants.** `*` is allowed here like on every gate — whoever writes
+it owns it. But a pattern names a COMMAND, and a command can run others:
+- an interpreter with `-c`/`-e` (`python3 -c .*`, `node -e .*`), or any shell
+  (`bash .*`, `zsh`), runs ANY code;
+- `find … -exec`, `git -c …` / git hooks / aliases, `xargs`, `env` run ANY command.
+Grant a fixed argv, or a program file, when the caller should get less than that.
 
 ## Build a durable program: a FILE plus a command
 

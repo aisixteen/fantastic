@@ -195,6 +195,14 @@ impl Bundle for SchedulerBundle {
         shutdown_tick(agent_id, kernel).await;
         Ok(())
     }
+    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        self.on_delete(agent_id, kernel).await
+    }
 }
 
 // ── argument typing ─────────────────────────────────────────────────

@@ -24,6 +24,7 @@
 use async_trait::async_trait;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+    Unconfigured,
 };
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
@@ -40,8 +41,8 @@ pub const HANDLER_MODULE: &str = "llamacpp_backend.tools";
 
 pub const README: &str = include_str!("readme.md");
 
-/// Where a local llama-server listens by default.
-pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8080/v1";
+/// The name a required-field refusal carries.
+const BACKEND: &str = "llamacpp_backend";
 
 /// A SENTINEL, never sent on the wire — python `llamacpp_backend/provider.py`.
 /// `llama-server` serves exactly ONE model (whichever `-hf`/`-m` loaded it) and
@@ -302,8 +303,15 @@ fn build_provider(
     kernel: &Arc<Kernel>,
     _client_id: &str,
 ) -> Option<Arc<dyn Provider>> {
+    // `endpoint` is REQUIRED on the record — nothing is guessed. `model` is
+    // optional: llama-server serves the one model it loaded.
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let endpoint = match helpers::required_meta(&meta, "endpoint", BACKEND) {
+        Ok(e) => e,
+        Err(e) => return Some(Arc::new(Unconfigured(e))),
+    };
     Some(Arc::new(LlamaCppProvider {
-        endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
+        endpoint,
         requested_model: helpers::meta_string(agent_id, kernel, "model"),
         api_key: helpers::meta_string(agent_id, kernel, "api_key"),
         max_tokens: meta_u64(agent_id, kernel, "num_predict"),
@@ -317,13 +325,11 @@ fn build_provider(
     }))
 }
 
-
 /// `reflect` — python `_make_reflect` + `llamacpp_backend/tools.py`'s
 /// `_reflect_extra`: the shared base body, then the sampling knobs. `num_ctx` is
-/// deliberately ABSENT (llama-server fixes the window at start), and so are the
-/// rust-only `note`/`file_bridge_id` keys python never answered with.
+/// deliberately ABSENT (llama-server fixes the window at start).
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, DEFAULT_MODEL, DEFAULT_ENDPOINT);
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE);
     let meta = helpers::agent_meta(agent_id, kernel);
     out.insert(
         "temperature".to_string(),

@@ -162,4 +162,16 @@ fn guard_refuses_all_digit_ids_and_accepts_colons() {
         guard_agent_id("create_agent", ".hidden").unwrap()["error"],
         "create_agent: id must be a name that is not hidden; got '.hidden'"
     );
+    // `kernel` names the operator; `|` marks a FOREIGN `guid|agent` (audit
+    // 2026-09-28: `create_agent id=kernel` made an agent the operator to every
+    // memory store).
+    assert_eq!(
+        guard_agent_id("create_agent", "kernel").unwrap()["error"],
+        "create_agent: id must be a name other than the reserved 'kernel'"
+    );
+    assert_eq!(
+        guard_agent_id("create_agent", "a|b").unwrap()["error"],
+        "create_agent: id must be a local name without `|` (it marks a foreign `guid|agent`); got 'a|b'"
+    );
+    assert!(guard_agent_id("create_agent", "kernel_notes").is_none());
 }

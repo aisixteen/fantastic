@@ -36,7 +36,7 @@ live in the readme, not the reflect JSON.
 ### Test 2: persistence round-trip — merge-only
 
 ```bash
-$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=foo root=/tmp/fk_root
+$FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=foo root=/tmp/fk_root allow='["."]'
 test -f .fantastic/agents/foo/agent.yaml
 jq -e '.handler_module == "file_bridge.tools"' .fantastic/agents/foo/agent.yaml
 # Plant a custom field the kernel doesn't know:

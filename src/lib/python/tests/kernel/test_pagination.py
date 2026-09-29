@@ -104,6 +104,7 @@ async def test_list_agents_pages_and_the_walk_reassembles_the_whole_registry(ker
                             "type": "create_agent",
                             "parent_id": kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             "id": f"fb{i}",
                         },
                     }
@@ -158,6 +159,7 @@ async def test_reflect_pages_the_flat_id_index_but_never_the_nested_tree(kernel)
                             "type": "create_agent",
                             "parent_id": kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             "id": f"n{i}",
                         },
                     }

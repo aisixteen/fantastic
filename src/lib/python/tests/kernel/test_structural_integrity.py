@@ -34,6 +34,7 @@ async def test_save_drops_the_ephemeral_SUBTREE_not_just_the_ephemeral_agent(ker
                         "type": "create_agent",
                         "parent_id": "cli",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "kid",
                     },
                 }
@@ -52,6 +53,7 @@ async def test_save_drops_the_ephemeral_SUBTREE_not_just_the_ephemeral_agent(ker
                         "type": "create_agent",
                         "parent_id": "kid",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "grandkid",
                     },
                 }
@@ -83,6 +85,7 @@ async def test_a_saved_document_never_names_a_parent_it_does_not_contain(kernel)
                         "type": "create_agent",
                         "parent_id": "cli",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "kid",
                     },
                 }
@@ -121,6 +124,7 @@ async def test_a_record_cannot_claim_a_parent_it_does_not_have(kernel):
                             "type": "create_agent",
                             "parent_id": kernel.id,
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             "id": aid,
                         },
                     }
@@ -161,6 +165,7 @@ async def test_parent_id_places_the_agent_and_is_required(kernel):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "a",
                     },
                 }
@@ -177,6 +182,7 @@ async def test_parent_id_places_the_agent_and_is_required(kernel):
                         "type": "create_agent",
                         "parent_id": "a",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "c",
                     },
                 }
@@ -195,6 +201,7 @@ async def test_parent_id_places_the_agent_and_is_required(kernel):
                     "payload": {
                         "type": "create_agent",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -213,6 +220,7 @@ async def test_parent_id_places_the_agent_and_is_required(kernel):
                         "type": "create_agent",
                         "parent_id": "nobody",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -266,6 +274,7 @@ async def test_a_sidecar_round_trips_whatever_its_size(kernel, size):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "store",
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
@@ -309,8 +318,8 @@ async def test_a_sidecar_round_trips_whatever_its_size(kernel, size):
 
 
 async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
-    """The same defect at the level it actually bites: a `text_file` document
-    that outgrew one stream chunk silently lost its tail on the next read."""
+    """The same defect at the level it actually bites: a text document that
+    outgrew one stream chunk silently lost its tail on the next read."""
     (
         await kernel.send(
             [
@@ -320,27 +329,10 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "store",
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
-                        "callable_by": {"memory": "*"},
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    (
-        await kernel.send(
-            [
-                {
-                    "target": kernel.id,
-                    "payload": {
-                        "type": "create_agent",
-                        "parent_id": kernel.id,
-                        "handler_module": "text_file.tools",
-                        "id": "memory",
-                        "target_id": "store",
-                        "can_call": {"store": "*"},
                     },
                 }
             ]
@@ -353,7 +345,7 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
             await kernel.send(
                 [
                     {
-                        "target": "memory",
+                        "target": "store",
                         "payload": {
                             "type": "write",
                             "path": "big.txt",
@@ -366,7 +358,7 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
     )
     got = (
         await kernel.send(
-            [{"target": "memory", "payload": {"type": "read", "path": "big.txt"}}]
+            [{"target": "store", "payload": {"type": "read", "path": "big.txt"}}]
         )
     )[0]["result"]
     assert got["lines"][0]["text"] == blob
@@ -394,6 +386,7 @@ async def test_an_agent_cannot_write_another_agents_namespace(kernel):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "store",
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
@@ -411,6 +404,7 @@ async def test_an_agent_cannot_write_another_agents_namespace(kernel):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "victim",
                     },
                 }
@@ -426,6 +420,7 @@ async def test_an_agent_cannot_write_another_agents_namespace(kernel):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "thief",
                         "can_call": {"kernel_state": ["persist_blob"]},
                     },

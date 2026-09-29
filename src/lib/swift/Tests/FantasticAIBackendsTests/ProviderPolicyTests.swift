@@ -178,14 +178,14 @@ struct ProviderPolicyTests {
     /// agent missing both is told about the variable it must export.
     @Test func anthropicMissingKeyRaisesBeforeTheModelCheck() async {
         let (_, error) = await drain(
-            anthropic(port: 1, model: FantasticAnthropicBackend.DEFAULT_MODEL, key: nil)
+            anthropic(port: 1, model: "", key: nil)
                 .chat(messages: oneUser))
-        #expect(pyErrorText(error!) == "ANTHROPIC_KEY not set in environment (.env)")
-        #expect("\(error!)" == "RuntimeError: ANTHROPIC_KEY not set in environment (.env)")
+        #expect(pyErrorText(error!) == "ANTHROPIC_API_KEY not set in environment (.env)")
+        #expect("\(error!)" == "RuntimeError: ANTHROPIC_API_KEY not set in environment (.env)")
         // An EMPTY variable is no key either.
         let (_, empty) = await drain(
             anthropic(port: 1, key: "").chat(messages: oneUser))
-        #expect(pyErrorText(empty!) == "ANTHROPIC_KEY not set in environment (.env)")
+        #expect(pyErrorText(empty!) == "ANTHROPIC_API_KEY not set in environment (.env)")
     }
 
     // ── B4.3 / B4.7: the nvidia key and endpoint ─────────────────────────
@@ -197,8 +197,8 @@ struct ProviderPolicyTests {
         unsetenv("NVIDIA_API_KEY")
         defer { if let saved { setenv("NVIDIA_API_KEY", saved, 1) } }
 
-        let result = await NvidiaNimBundle().core.config.makeProvider(agent, "c", kernel)
-        guard case .refused(let body) = result else {
+        let result = try? await NvidiaNimBundle().core.config.makeProvider(agent, "c", kernel)
+        guard case .refused(let body)? = result else {
             Issue.record("an unwired connector must refuse")
             return
         }
@@ -240,9 +240,6 @@ struct ProviderPolicyTests {
         #expect(
             stub.requests.first?.hasPrefix("POST /v1/chat/completions HTTP") == true,
             Comment(rawValue: stub.requests.first ?? "no request"))
-        // The default endpoint is the API's own base — and reflect says so.
-        #expect(
-            NvidiaNimBundle().core.config.defaultEndpoint == "https://integrate.api.nvidia.com/v1")
     }
 
     // ── B4.8: the nvidia 429 retry ───────────────────────────────────────
@@ -341,7 +338,7 @@ struct ProviderPolicyTests {
             meta: ["endpoint": .string("http://127.0.0.1:\(stub.port)/v1")])
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
         guard
-            case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
+            case .provider(let provider)? = try? await bundle.core.config.makeProvider(agent, "c", kernel)
         else {
             Issue.record("llamacpp never refuses a provider")
             return
@@ -354,24 +351,23 @@ struct ProviderPolicyTests {
 
     // ── B4.6: the ollama model and endpoint ──────────────────────────────
 
-    /// An unset model FAILS LOUD INSIDE THE TURN, with python's wording — not a
-    /// refusal before it with a sentence swift invented.
+    /// An unset model FAILS LOUD when the provider is built, naming the field —
+    /// python's `required_meta`.
     @Test func ollamaUnsetModelFailsLoudWithPythonText() async {
         let bundle = OllamaBackendBundle()
-        let agent = Agent(id: AgentId("ol"), handlerModule: nil, parentId: nil)
+        let agent = Agent(
+            id: AgentId("ol"), handlerModule: nil, parentId: nil,
+            meta: ["endpoint": .string("http://127.0.0.1:9")])
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-        guard
-            case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
-        else {
-            Issue.record("an unset model is no longer a refusal before the turn")
-            return
+        do {
+            _ = try await bundle.core.config.makeProvider(agent, "c", kernel)
+            Issue.record("an unset model must refuse the provider")
+        } catch {
+            #expect(
+                "\(error)"
+                    == "ValueError: ollama_backend: `model` is required on the agent record — "
+                    + "nothing is guessed (update_agent <id> model=…)")
         }
-        let (_, error) = await drain(provider.chat(messages: oneUser))
-        #expect(
-            pyErrorText(error!)
-                == "ollama_backend: no `model` set — this connector does not guess one. "
-                + "Name a model on the agent record (model=...).")
-        #expect("\(error!)".hasPrefix("RuntimeError: "))
     }
 
     /// The record's `endpoint` is where ollama listens; `/api/chat` is appended.
@@ -385,7 +381,7 @@ struct ProviderPolicyTests {
             meta: ["model": .string("m"), "endpoint": .string("http://127.0.0.1:\(stub.port)")])
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
         guard
-            case .provider(let provider) = await bundle.core.config.makeProvider(agent, "c", kernel)
+            case .provider(let provider)? = try? await bundle.core.config.makeProvider(agent, "c", kernel)
         else {
             Issue.record("unexpected refusal")
             return
@@ -394,7 +390,6 @@ struct ProviderPolicyTests {
         #expect(
             stub.requests.first?.hasPrefix("POST /api/chat HTTP") == true,
             Comment(rawValue: stub.requests.first ?? "no request"))
-        #expect(bundle.core.config.defaultEndpoint == "http://localhost:11434")
     }
 }
 

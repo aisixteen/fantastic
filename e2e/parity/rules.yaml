@@ -152,7 +152,9 @@ rules:
     #: quoted verbatim into every system prompt, into cli stdout and into HTTP
     #: bodies recorded as strings, where the key-based pass never sees it. 664 of
     #: the 1855 lines of the v3 self-diff were this one token.
-    text_forms: ['guid[:=]\s*"?[0-9a-f]{32}']
+    #: …and as the kernel half of a qualified caller, `<hex32>|<agent>` — every
+    #: bridge call names its sender that way; the agent half stays compared.
+    text_forms: ['guid[:=]\s*"?[0-9a-f]{32}', '[0-9a-f]{32}(?=\|)']
     replacement: <GUID:hex32>
     literal_when_shape_mismatch: true
     must_not_hide:
@@ -167,7 +169,7 @@ rules:
       appearance keeps every RELATIONSHIP (which row a reply cites, which parent a
       fold names) while dropping a number that means nothing across runtimes. The
       TYPE is kept in the placeholder because an int id and a digit-string id are
-      a difference (C17, A3.10, A4.20, B5.9).
+      a difference (C17, A4.20, B5.9).
     keys: [id, ids, parent, task_id, message_id, pid, refs, expand, after, next,
            bundles_next, view_ids, killed]
     only_when: int or digit-string; never an agent-id string
@@ -209,7 +211,6 @@ rules:
       - 'reuse-1'
     must_not_hide:
       - C17   # the cursor TYPE a walk accepts and returns
-      - A3.10 # a checkpoint id's shape
       - A4.20 # `task_id` as an int
       - B5.9  # a pid rendered into prompt text
 
@@ -218,14 +219,13 @@ rules:
     why: >
       A process id is the operating system's, not the kernel's. What the kernel
       does with it (report it, kill it, write it into a lock) is the item.
-    keys: [pid, tunnel_pid]
-    contexts: [terminal reflect, lock.json, '(pid=N)', 'pid=N', 'pid N', 'kill N',
+    keys: [pid]
+    contexts: [lock.json, '(pid=N)', 'pid=N', 'pid N', 'kill N',
                '"pid":N inside an embedded json document']
     replacement: <OSPID>
     keep_literal: ['999999', '0']   # the stale-lock pids the HARNESS wrote
     must_not_hide:
       - A14.10  # a STALE lock's pid, which the harness WROTE (999999 / 0)
-      - A6.21   # the pty_reader rows, which are about existence, not value
 
   - id: N6
     name: kernel_time
@@ -284,9 +284,9 @@ rules:
       the measurement — a reply naming the web2 port where python named main is a
       real difference and survives this rule.
     forms: ['<host>:N where <host> is an IPv4 literal, `localhost` or `[::1]`',
-            'port/local_port/remote_port as an integer VALUE',
+            'port as an integer VALUE',
             '`port` followed by `:`, `=` or a space, then N — `"port": 54928` in a
-             persisted agent.json, `bound on port N` in a cli line']
+             persisted agent.yaml, `bound on port N` in a cli line']
     never: 'a bare `:N`. That form read `"max_tokens":4096` as a port in every
             prompt the capture recorded, and the count max_tokens carries is an
             item (measured 2026-09-20).'
@@ -394,13 +394,13 @@ rules:
   - id: N12
     name: persisted_files
     why: >
-      `agent.json`, `readme.md` and `docs/**` are compared BYTE FOR BYTE — they
+      `agent.yaml`, `readme.md` and `docs/**` are compared BYTE FOR BYTE — they
       are the product. The four files the kernel rewrites continuously are parsed
       first and then normalised by N4–N6, and their sha and length are excluded,
       because `ledger.json` is rewritten DURING the snapshot that reads it (C47)
       and a byte compare of a moving file measures the clock.
-    exact: [agent.json, readme.md, 'docs/**']
-    parsed_then_normalised: [ledger.json, messages.xml, schedules.json, lock.json, history lines]
+    exact: [agent.yaml, readme.md, 'docs/**']
+    parsed_then_normalised: [schedules.yaml, lock.yaml, history lines]
     #: A record ABOUT one of the four keeps its path, its keys and its envelope,
     #: and loses every number over its moving bytes and the bytes themselves.
     #: `store.py` records each persisted file three ways, so the same moving
@@ -497,14 +497,14 @@ rules:
     why: >
       A digest over bytes that embed a value the rules have already declared
       incomparable can only ever differ, and it says nothing about the file.
-      `agent.json` is the case: the root's carries the kernel's minted guid (N3),
+      `agent.yaml` is the case: the root's carries the kernel's minted guid (N3),
       a web leg's its OS-chosen port and an ai leg's the stub endpoint (N8). The
       BYTES ARE STILL COMPARED — normalised — everywhere the capture recorded
-      them: `store/*/raw/agent.json`, `store/*/disk_raw/agent.json`, the `utf8`
-      field beside the digest in `store/*/body/agent.json.json`, and the `text`
+      them: `store/*/raw/agent.yaml`, `store/*/disk_raw/agent.yaml`, the `utf8`
+      field beside the digest in `store/*/body/agent.yaml.json`, and the `text`
       field beside it in the cli's before/after snapshots. Only the sha goes, and
       only for that file.
-    files: [agent.json]
+    files: [agent.yaml]
     drops_keys: [sha256, __sha256__]
     replacement: <DIGEST_OF_MINTED>
     must_not_hide:
@@ -700,7 +700,6 @@ rules:
       re-parented row and changed verb → lines
     must_not_hide:
       - C17   # the cursor TYPE — carried in the placeholder, as in N4
-      - A3.10
       - A4.20
       - B5.9
       - C63   # a missing or extra row — fewer ordinals, different array length

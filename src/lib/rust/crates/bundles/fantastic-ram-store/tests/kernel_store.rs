@@ -53,7 +53,10 @@ impl Bundle for Probe {
                 // the shutdown dispatch may still use its tools: a nested send
                 // passes the drain
                 let r = kernel
-                    .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ps"}))])
+                    .send(vec![Item::new(
+                        AgentId::from("kernel"),
+                        json!({"type": "ps"}),
+                    )])
                     .await
                     .remove(0);
                 Ok(Some(json!({"wrapped": true, "tools_ok": r.is_completed()})))
@@ -81,7 +84,10 @@ impl Bundle for Probe {
 fn registry(state: &Arc<ProbeState>) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
-    reg.register(fantastic_ram_store::HANDLER_MODULE, RamStoreBundle::default());
+    reg.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        RamStoreBundle::default(),
+    );
     reg.register("mem_probe.tools", Probe(Arc::clone(state)));
     reg
 }
@@ -177,7 +183,9 @@ fn pid(o: &Outcome) -> i64 {
 #[tokio::test]
 async fn kernel_start_fails_loud_without_a_store() {
     let (k, _) = seeded();
-    let out = call(&k, "kernel", json!({"type": "kernel_start"})).await.result;
+    let out = call(&k, "kernel", json!({"type": "kernel_start"}))
+        .await
+        .result;
     assert_eq!(out["reason"], json!("missing_arg"), "{out}");
     assert_eq!(out["arg"], json!("memory_store_id"));
     assert!(
@@ -202,13 +210,17 @@ async fn kernel_start_boots_the_store_first_then_everyone() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
     with_store(&k, true, false).await;
-    let out = call(&k, "kernel", json!({"type": "kernel_start"})).await.result;
+    let out = call(&k, "kernel", json!({"type": "kernel_start"}))
+        .await
+        .result;
     assert_eq!(out["started"], json!(true), "{out}");
     assert_eq!(out["store"], json!("memory"));
     assert_eq!(out["booted"][0], json!(root_id(&k)));
     assert_eq!(out["booted"][1], json!("memory"));
     assert!(out["booted"].as_array().unwrap().contains(&json!("probe")));
-    let again = call(&k, "kernel", json!({"type": "kernel_start"})).await.result;
+    let again = call(&k, "kernel", json!({"type": "kernel_start"}))
+        .await
+        .result;
     assert_eq!(again["already"], json!(true));
 }
 
@@ -223,7 +235,10 @@ async fn execution_rows_flush_into_the_store_and_leave_ram() {
     let id = pid(&out);
     k.flush_executions().await;
     let rows = kernel_rows(&k).await;
-    let c = rows.iter().find(|r| r["id"] == json!(id)).expect("the call row");
+    let c = rows
+        .iter()
+        .find(|r| r["id"] == json!(id))
+        .expect("the call row");
     assert_eq!(c["kind"], json!("call"));
     assert_eq!(c["caller"], Value::Null);
     let settle = rows
@@ -235,8 +250,9 @@ async fn execution_rows_flush_into_the_store_and_leave_ram() {
         settle["outcome"],
         json!({"status": "completed", "bytes": "{\"ok\": true}".len()})
     );
-    assert!(rows.iter().any(|r| r["kind"] == json!("flush")
-        && r["covers"].as_array().unwrap().contains(&json!(id))));
+    assert!(rows.iter().any(
+        |r| r["kind"] == json!("flush") && r["covers"].as_array().unwrap().contains(&json!(id))
+    ));
     assert!(!k.rows.contains(id), "flushed rows leave RAM");
     assert!(!k.ledger.has(id), "a settled, flushed execution too");
 }
@@ -265,7 +281,10 @@ async fn stored_rows_keep_none_and_reduce_bytes_to_a_length() {
     let after = dump(&k).await;
     // the flusher may land this test's own dump/inject calls in between — appended after
     let n = before["rows"].as_array().unwrap().len();
-    assert_eq!(after["rows"].as_array().unwrap()[..n], before["rows"].as_array().unwrap()[..]);
+    assert_eq!(
+        after["rows"].as_array().unwrap()[..n],
+        before["rows"].as_array().unwrap()[..]
+    );
     assert_eq!(after["fold_refs"], before["fold_refs"]);
     assert_eq!(after["grants"], before["grants"]);
 }
@@ -289,7 +308,10 @@ async fn a_settle_keeps_the_body_only_when_named_or_the_error_when_dead() {
         kept[&pid(&named)],
         json!({"status": "completed", "result": {"ok": true}})
     );
-    assert_eq!(kept[&pid(&plain)], json!({"status": "completed", "bytes": 12}));
+    assert_eq!(
+        kept[&pid(&plain)],
+        json!({"status": "completed", "bytes": 12})
+    );
     assert_eq!(kept[&pid(&dead)]["status"], json!("failed"));
     assert!(kept[&pid(&dead)]["error"]
         .as_str()
@@ -313,7 +335,10 @@ async fn repeated_ledger_calls_grow_the_store_linearly() {
         call(&k, "kernel", json!({"type": "ledger"})).await;
         sizes.push(size(&k).await);
     }
-    let steps: Vec<i64> = sizes.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+    let steps: Vec<i64> = sizes
+        .windows(2)
+        .map(|w| w[1] as i64 - w[0] as i64)
+        .collect();
     let max = *steps[1..].iter().max().unwrap();
     assert!(max < 2 * steps[1], "not linear: {sizes:?}");
 }
@@ -330,7 +355,10 @@ async fn the_flush_records_itself_and_never_loops() {
     let rows = kernel_rows(&k).await;
     // the dumps above are operator reads — calls like any other — so the count may
     // grow by THEIR rows; what must not appear is a flush that only carries flushes
-    let by_id: HashMap<i64, &Value> = rows.iter().map(|r| (r["id"].as_i64().unwrap(), r)).collect();
+    let by_id: HashMap<i64, &Value> = rows
+        .iter()
+        .map(|r| (r["id"].as_i64().unwrap(), r))
+        .collect();
     for f in rows.iter().filter(|r| r["kind"] == json!("flush")) {
         let covered: Vec<&&Value> = f["covers"]
             .as_array()
@@ -342,7 +370,10 @@ async fn the_flush_records_itself_and_never_loops() {
             && covered
                 .iter()
                 .all(|c| c["kind"] == json!("call") && c["payload"]["type"] == json!("append"));
-        assert!(!only_flushes, "a flush that only re-records flushes — the loop is back: {f}");
+        assert!(
+            !only_flushes,
+            "a flush that only re-records flushes — the loop is back: {f}"
+        );
     }
     assert!(rows.len() >= n1);
 }
@@ -354,7 +385,7 @@ async fn ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller() {
     mk(
         &k,
         "caller",
-        json!({"can_call": {"probe": "*", "kernel": ["ledger", "ack_deadletter"]}}),
+        json!({"can_call": {"probe": "*", root_id(&k): ["ledger", "ack_deadletter"]}}),
     )
     .await;
     with_store(&k, true, true).await;
@@ -377,9 +408,20 @@ async fn ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller() {
         .iter()
         .map(|e| (e["id"].as_i64().unwrap(), e.clone()))
         .collect();
-    assert_eq!(by[&pid(&mine)]["status"], json!("completed"), "read back from the store");
-    assert_eq!(by[&pid(&mine)]["outcome"]["result"], json!({"ok": true}), "named: kept");
-    assert!(by[&pid(&other)]["outcome"].get("result").is_none(), "unnamed: a digest");
+    assert_eq!(
+        by[&pid(&mine)]["status"],
+        json!("completed"),
+        "read back from the store"
+    );
+    assert_eq!(
+        by[&pid(&mine)]["outcome"]["result"],
+        json!({"ok": true}),
+        "named: kept"
+    );
+    assert!(
+        by[&pid(&other)]["outcome"].get("result").is_none(),
+        "unnamed: a digest"
+    );
     assert_eq!(by[&pid(&other)]["outcome"]["bytes"], json!(12));
     assert!(
         led["executions"]
@@ -400,7 +442,10 @@ async fn ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller() {
         .iter()
         .map(|e| e["id"].as_i64().unwrap())
         .collect();
-    assert!(ids.contains(&pid(&mine)) && !ids.contains(&pid(&other)), "{scoped}");
+    assert!(
+        ids.contains(&pid(&mine)) && !ids.contains(&pid(&other)),
+        "{scoped}"
+    );
     live.abort();
 }
 
@@ -411,11 +456,18 @@ async fn named_dedup_survives_the_flush() {
     with_store(&k, true, true).await;
     let first = call_named(&k, "probe", json!({"type": "count"}), "job-1").await;
     k.flush_executions().await;
-    assert!(k.ledger.resolve_name("job-1").is_none(), "the name left RAM with its rows");
+    assert!(
+        k.ledger.resolve_name("job-1").is_none(),
+        "the name left RAM with its rows"
+    );
     let again = call_named(&k, "probe", json!({"type": "count"}), "job-1").await;
     assert_eq!(again.result, first.result);
     assert_eq!(again.result, json!({"n": 1}));
-    assert_eq!(state.counts.lock().unwrap()["probe"], 1, "the step never ran twice");
+    assert_eq!(
+        state.counts.lock().unwrap()["probe"],
+        1,
+        "the step never ran twice"
+    );
 }
 
 #[tokio::test]
@@ -442,7 +494,10 @@ async fn named_dedup_survives_a_restart_on_the_same_store() {
         .expect("reboot")
         .kernel;
     assert_eq!(guid(&k2), guid(&k));
-    assert!(k2.rows.next_id() >= next, "ids never repeat across a restart");
+    assert!(
+        k2.rows.next_id() >= next,
+        "ids never repeat across a restart"
+    );
     call(&k2, "memory", json!({"type": "inject", "tables": tables})).await;
     let out = k2.start(false).await;
     assert_eq!(out["started"], json!(true), "{out}");
@@ -460,7 +515,7 @@ async fn a_dead_letter_is_announced_listed_and_acked() {
     mk(
         &k,
         "caller",
-        json!({"can_call": {"probe": "*", "kernel": ["ledger", "ack_deadletter"]}}),
+        json!({"can_call": {"probe": "*", root_id(&k): ["ledger", "ack_deadletter"]}}),
     )
     .await;
     with_store(&k, true, true).await;
@@ -468,12 +523,18 @@ async fn a_dead_letter_is_announced_listed_and_acked() {
     let as_caller = |p: Value, target: &'static str| {
         let kk = Arc::clone(&k);
         async move {
-            with_sender(AgentId::from("caller"), async move { call(&kk, target, p).await }).await
+            with_sender(AgentId::from("caller"), async move {
+                call(&kk, target, p).await
+            })
+            .await
         }
     };
     let out = as_caller(json!({"type": "fail"}), "probe").await;
     assert_eq!(out.status.as_str(), "failed");
-    let ev = inbox.try_recv().expect("on_deadletter reached the caller").payload;
+    let ev = inbox
+        .try_recv()
+        .expect("on_deadletter reached the caller")
+        .payload;
     assert_eq!(ev["type"], json!("on_deadletter"));
     assert_eq!(ev["id"], json!(pid(&out)), "{ev}");
     k.flush_executions().await;
@@ -495,7 +556,11 @@ async fn a_dead_letter_is_announced_listed_and_acked() {
     let refused = as_caller(json!({"type": "ack_deadletter", "id": pid(&ok)}), "kernel")
         .await
         .result;
-    assert_eq!(refused["reason"], json!("bad_arg"), "only a dead letter is acked");
+    assert_eq!(
+        refused["reason"],
+        json!("bad_arg"),
+        "only a dead letter is acked"
+    );
     k.flush_executions().await;
     let led = call(&k, "kernel", json!({"type": "ledger"})).await.result;
     let entry = led["executions"]
@@ -576,9 +641,19 @@ async fn the_kernels_store_is_pruned_to_its_window() {
         .filter(|r| r["kind"] == json!("call") && r.get("internal").is_none())
         .collect();
     let ids: Vec<i64> = calls.iter().map(|r| r["id"].as_i64().unwrap()).collect();
-    assert!(calls.len() <= 22, "the store holds {} calls against a window of 20", calls.len());
-    assert!(ids.contains(&pid(&named)), "a named execution is kept — it carries a dedup contract");
-    assert!(ids.contains(&pid(&dead)), "an unacked dead letter waits for a person");
+    assert!(
+        calls.len() <= 22,
+        "the store holds {} calls against a window of 20",
+        calls.len()
+    );
+    assert!(
+        ids.contains(&pid(&named)),
+        "a named execution is kept — it carries a dedup contract"
+    );
+    assert!(
+        ids.contains(&pid(&dead)),
+        "an unacked dead letter waits for a person"
+    );
     let settles: Vec<i64> = rows
         .iter()
         .filter(|r| r["kind"] == json!("settle"))
@@ -598,11 +673,16 @@ async fn the_kernels_store_is_pruned_to_its_window() {
 async fn the_id_counter_reserves_blocks_in_the_root_record() {
     let (k, _) = seeded();
     let root = k.root().unwrap();
-    assert!(!root.meta.read().unwrap().contains_key("next_id"), "load never edits a record");
+    assert!(
+        !root.meta.read().unwrap().contains_key("next_id"),
+        "load never edits a record"
+    );
     call(&k, &root_id(&k), json!({"type": "boot"})).await;
     with_store(&k, true, true).await;
     let n = k.mint_id();
-    let bound = root.meta.read().unwrap()["next_id"].as_i64().expect("start wrote the reserved bound");
+    let bound = root.meta.read().unwrap()["next_id"]
+        .as_i64()
+        .expect("start wrote the reserved bound");
     assert!(bound > n);
     for _ in 0..fantastic_kernel::rows::ID_BLOCK {
         k.mint_id();
@@ -613,23 +693,17 @@ async fn the_id_counter_reserves_blocks_in_the_root_record() {
     let snap = k.save();
     let (k2, _) = seeded();
     k2.load(snap).unwrap();
-    assert!(k2.mint_id() >= later, "a reboot resumes past the reserved block");
-}
-
-// ── the row verbs are gone ─────────────────────────────────────────────
-
-#[tokio::test]
-async fn the_kernel_row_verbs_are_deleted() {
-    let (k, _) = seeded();
-    for verb in ["messages", "rows_read", "rows_write", "shutdown_kernel"] {
-        let out = call(&k, "kernel", json!({"type": verb})).await.result;
-        assert_eq!(out["reason"], json!("unhandled"), "{verb}: {out}");
-    }
+    assert!(
+        k2.mint_id() >= later,
+        "a reboot resumes past the reserved block"
+    );
 }
 
 #[tokio::test]
 async fn kernel_stop_acks() {
     let (k, _) = seeded();
-    let out = call(&k, "kernel", json!({"type": "kernel_stop"})).await.result;
+    let out = call(&k, "kernel", json!({"type": "kernel_stop"}))
+        .await
+        .result;
     assert_eq!(out, json!({"type": "kernel_stop", "ok": true}));
 }

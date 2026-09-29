@@ -34,7 +34,7 @@ import os
 
 import httpx
 
-from ai_core import build
+from ai_core import build, required_meta
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -93,16 +93,14 @@ async def make_provider(id, kernel):
     if not key:
         return None
     from nvidia_nim_backend.provider import (
-        DEFAULT_ENDPOINT,
-        DEFAULT_MODEL,
         NvidiaNimProvider,
     )
 
     rec = kernel.get(id) or {}
     return NvidiaNimProvider(
         api_key=key,
-        endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
-        model=rec.get("model", DEFAULT_MODEL),
+        endpoint=required_meta(rec, "endpoint", "nvidia_nim_backend"),
+        model=required_meta(rec, "model", "nvidia_nim_backend"),
     )
 
 
@@ -167,12 +165,9 @@ async def _reflect_extra(id, kernel):
 
 
 def _build():
-    from nvidia_nim_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
 
     return build(
         sentence="NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
-        default_model=DEFAULT_MODEL,
-        default_endpoint=DEFAULT_ENDPOINT,
         make_provider=make_provider,
         name="nvidia_nim_backend",
         module_name=__name__,

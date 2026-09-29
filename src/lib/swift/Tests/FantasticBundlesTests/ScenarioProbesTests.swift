@@ -288,3 +288,60 @@ struct ScenarioProbesTests {
         #expect(bad["arg"].asString == "target")
     }
 }
+
+// ─── slow ───────────────────────────────────────────────────
+
+/// Twins of rust `slow_reflect_is_pythons_bytes` and
+/// `slow_sleep_work_and_fail_are_pythons`.
+@Suite("slow probe")
+struct SlowProbeTests {
+    private let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+    private let probe = SlowProbe()
+    private let id = AgentId("slow")
+
+    private func call(_ p: JSON) async throws -> JSON {
+        try await probe.handle(agentId: id, payload: p, kernel: kernel) ?? .null
+    }
+
+    @Test func slowReflectIsPythonsBytes() async throws {
+        let r = try await call(["type": "reflect"])
+        #expect(
+            r.serialize()
+                == JSON.object([
+                    "id": "slow",
+                    "sentence": .string(
+                        "Probe work: `slow` (never finishes by itself), `work` (counts), "
+                            + "`fail` (raises), `sleep` (takes `seconds`)."),
+                    "verbs": .object([
+                        "slow": "sleeps for an hour — in flight until cancelled",
+                        "work": "counts one run, returns {runs}",
+                        "fail": "raises — a failed execution, a dead letter",
+                        "started": "how many `slow` calls have started",
+                        "sleep": "seconds:number (req) — sleeps that long, then returns {slept}",
+                    ]),
+                ]).serialize(), "\(r.serialize())")
+    }
+
+    @Test func slowSleepWorkAndFailArePythons() async throws {
+        let t0 = Date()
+        #expect(try await call(["type": "sleep", "seconds": .double(0.2)]) == ["slept": .double(0.2)])
+        #expect(Date().timeIntervalSince(t0) >= 0.2)
+        #expect(try await call(["type": "sleep", "seconds": 0]) == ["slept": 0])
+        for bad: JSON in [.null, .bool(true), -1, "2"] {
+            #expect(
+                try await call(["type": "sleep", "seconds": bad])
+                    == [
+                        "error": "slow_probe: sleep needs seconds, a non-negative number",
+                        "reason": "bad_arg", "arg": "seconds",
+                    ], "\(bad.serialize())")
+        }
+        #expect(try await call(["type": "work"]) == ["runs": 1])
+        #expect(try await call(["type": "started"]) == ["started": 0])
+        await #expect(throws: PyError("RuntimeError", "slow_probe: failed on purpose")) {
+            try await call(["type": "fail"])
+        }
+        #expect(
+            try await call(["type": "zap"])
+                == ["error": "slow_probe: unknown verb 'zap'", "reason": "unhandled"])
+    }
+}

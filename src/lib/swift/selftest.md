@@ -106,12 +106,11 @@ Surviving bundles that run cross-runtime against the Swift binary
 | ollama_backend | [`ai/ollama/ollama_backend/selftest.md`](../python/bundled_agents/ai/ollama/ollama_backend/selftest.md) (needs running ollama) |
 | nvidia_nim_backend | [`ai/nvidia/nvidia_nim_backend/selftest.md`](../python/bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md) (needs `NVAPI_KEY`) |
 | exec_bridge | [`io/exec_bridge/selftest.md`](../python/bundled_agents/io/exec_bridge/selftest.md) (Full tier only) |
-| terminal_backend | [`terminal/selftest.md`](../python/bundled_agents/terminal/selftest.md) (Full tier only) |
 
 View/webapp specs live in the decoupled frontend kernel — see
 [`../ts/`](../ts/); this host serves it generically via a `file` agent.
 
-The subprocess bundles (terminal_backend, exec_bridge) exist
+The subprocess bundle (exec_bridge — commands and PTY jobs) exists
 **only in the Full (macOS) tier** —
 the `.build/debug/fantastic` binary IS the Full tier, so their
 cross-runtime specs run as written. Under the Embedded tier they are

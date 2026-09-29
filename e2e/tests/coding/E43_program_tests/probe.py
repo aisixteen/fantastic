@@ -1,7 +1,7 @@
 """coding/program_tests — the model runs the tests, FIXES the bug, proves green.
 
 Two organs COMPOSED, LLM-driven: pytest behind an exec_bridge allowlist (C20)
-and the `text_file` editor's `patch` (C2). The fixture ships a program with a real off-by-one
+and the file agent's `edit` (C2). The fixture ships a program with a real off-by-one
 and a suite that catches it; the task is the coder loop itself — run, read the
 failure, fix the PROGRAM (not the test), rerun to green. Scored by the probe
 rerunning the suite at the end + reading the program, plus transcript checks
@@ -41,7 +41,7 @@ TASK = (
     "command; start a job, poll {type:'status', job_id} for stdout). The suite "
     "currently FAILS. Run it, read the failure, then fix the bug IN `prog.py` "
     "— never touch `test_prog.py` — using the editor agent `editor`'s "
-    "`patch` verb (reflect it for the shape). Rerun the suite until "
+    "`edit` verb (reflect it for the shape). Rerun the suite until "
     "it passes. When it is green, end your run by calling done — emit <call name=\"done\"></call>."
 )
 
@@ -63,18 +63,18 @@ async def main():
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": FB,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*", "editor": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
                 "parent_id": root.id,
                 "id": "editor",
-                "handler_module": "text_file.tools",
-                "target_id": FB,
-                "can_call": {FB: "*"},
+                "handler_module": "file_bridge.tools", "allow": ["."],
+                "root": ".",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
@@ -83,6 +83,7 @@ async def main():
                 "id": RUNNER,
                 "handler_module": "exec_bridge.tools",
                 "cwd": os.getcwd(),
+                "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": [re.escape(INTERP) + r" -m pytest .*"],
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -122,7 +123,7 @@ async def main():
             ("the fix is in the PROGRAM", "x + 1" in Path("prog.py").read_text()),
             ("the test was never touched", Path("test_prog.py").read_text() == TEST),
             ("the runner organ ran", "pytest" in transcript and RUNNER in transcript),
-            ("the edit organ made the fix", "<type>patch</type>" in transcript),
+            ("the edit organ made the fix", "<type>edit</type>" in transcript),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

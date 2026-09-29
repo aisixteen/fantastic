@@ -66,7 +66,9 @@ async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Va
 async fn setup(k: &Arc<Kernel>, tmp: &TempDir) {
     let root = k.root().expect("root").id.0.clone();
     for rec in [
-        json!({"id": "wws", "handler_module": LEG, "parent_id": root}),
+        // the loader's record verbs are privileged: the owning leg names them
+        json!({"id": "wws", "handler_module": LEG, "parent_id": root,
+               "can_call": {"web_loader": ["persist_record", "forget_record", "load_tree"]}}),
         json!({"id": "rest_leg", "handler_module": LEG, "parent_id": root,
                "can_call": {"web_loader": "*"}}),
         json!({"id": "web_loader", "handler_module": HANDLER_MODULE, "parent_id": "wws",
@@ -97,9 +99,18 @@ async fn the_owning_leg_persists_records_nested_under_a_federated_record() {
     let tmp = TempDir::new().unwrap();
     let k = booted_with_legs(&tmp);
     setup(&k, &tmp).await;
-    assert_eq!(persist(&k, "wws", "canvas", "web_loader").await, json!({"ok": true}));
-    assert_eq!(persist(&k, "wws", "terminal_view", "canvas").await, json!({"ok": true}));
-    assert_eq!(persist(&k, "wws", "deep", "terminal_view").await, json!({"ok": true}));
+    assert_eq!(
+        persist(&k, "wws", "canvas", "web_loader").await,
+        json!({"ok": true})
+    );
+    assert_eq!(
+        persist(&k, "wws", "terminal_view", "canvas").await,
+        json!({"ok": true})
+    );
+    assert_eq!(
+        persist(&k, "wws", "deep", "terminal_view").await,
+        json!({"ok": true})
+    );
     assert!(
         web_root(&tmp)
             .join("agents/canvas/agents/terminal_view/agents/deep/agent.yaml")
@@ -111,7 +122,12 @@ async fn the_owning_leg_persists_records_nested_under_a_federated_record() {
         .as_array()
         .expect("records")
         .iter()
-        .map(|r| (r["id"].as_str().unwrap().to_string(), r["parent_id"].clone()))
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_string(),
+                r["parent_id"].clone(),
+            )
+        })
         .collect();
     assert_eq!(parents["terminal_view"], json!("canvas"), "{tree}");
     assert_eq!(parents["deep"], json!("terminal_view"), "{tree}");
@@ -161,7 +177,13 @@ async fn forget_record_removes_a_nested_record_where_it_is() {
     persist(&k, "wws", "canvas", "web_loader").await;
     persist(&k, "wws", "terminal_view", "canvas").await;
     persist(&k, "wws", "deep", "terminal_view").await;
-    let r = call_as(&k, "wws", "web_loader", json!({"type": "forget_record", "id": "deep"})).await;
+    let r = call_as(
+        &k,
+        "wws",
+        "web_loader",
+        json!({"type": "forget_record", "id": "deep"}),
+    )
+    .await;
     assert_eq!(r, json!({"ok": true}));
     assert!(!web_root(&tmp)
         .join("agents/canvas/agents/terminal_view/agents/deep")

@@ -2,7 +2,7 @@
 //
 // Each egress rule is its own file (an `extension EgressRules`); `resolve` registers
 // them BY NAME. Inbound-only policy names (`allow_all` / `deny_inbound`) map to
-// `Silent` (present nothing), so the legacy `auth` shorthand stays consistent.
+// `Silent` (present nothing), so the `auth` both-directions shorthand stays consistent.
 
 import FantasticJSON
 

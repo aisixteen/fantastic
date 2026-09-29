@@ -26,11 +26,9 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "llamacpp_backend.tools"
 
-/// Where a local llama-server listens by default.
-public let DEFAULT_ENDPOINT = "http://127.0.0.1:8080/v1"
-
-/// What `reflect.model` says when the record names none: the server loaded it.
-/// (py-canonical `llamacpp_backend.provider.DEFAULT_MODEL`.)
+/// What the provider reports as its model when the record names none: the server
+/// loaded it. Never sent on the wire. (py-canonical
+/// `llamacpp_backend.provider.DEFAULT_MODEL`.)
 public let DEFAULT_MODEL = "(server-loaded)"
 
 public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
@@ -47,8 +45,6 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
                     "llama.cpp-backed local LLM agent (raw prompt-and-parse tool-calling).",
                 // THE SERVER OWNS THE MODEL: llama-server serves exactly one,
                 // named at ITS start, so reflect says so instead of guessing.
-                defaultModel: DEFAULT_MODEL,
-                defaultEndpoint: DEFAULT_ENDPOINT,
                 // The sampling knobs, python's order. `num_ctx` is deliberately
                 // ABSENT — llama-server fixes the window at start (`-c N`) and
                 // this agent does not claim to own one.
@@ -65,7 +61,7 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
                 makeProvider: { agent, _, _ in
                     .provider(
                         LlamaCppProvider(
-                            endpoint: Self.endpoint(agent: agent),
+                            endpoint: try requiredMeta(agent, "endpoint", "llamacpp_backend"),
                             requestedModel: agent.metaValue(forKey: "model")?.asString,
                             apiKey: agent.metaValue(forKey: "api_key")?.asString,
                             maxTokens: agent.metaValue(forKey: "num_predict")?.asInt,
@@ -140,7 +136,7 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
     inline and in the field; `none` → unparsed inline in `content`.
 
     ## Record fields
-    - `endpoint` — default `http://127.0.0.1:8080/v1` (llama-server's own bind + path).
+    - `endpoint` — REQUIRED: the llama-server's base URL (its bind + `/v1`); nothing is guessed.
     - `model` — usually omit it. `llama-server` serves exactly ONE model, whichever
       `-hf`/`-m` loaded, and ignores the request's `model` field; when unset the key is
       not sent at all. Set it only when a proxy in front of the server routes on it.
@@ -188,10 +184,6 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
         await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
-    fileprivate static func endpoint(agent: Agent) -> String {
-        agent.metaValue(forKey: "endpoint")?.asString ?? DEFAULT_ENDPOINT
-    }
-
     /// `int(rec[k]) if rec.get(k) else None` — a falsy value (0, "", null) is
     /// NOT a knob, exactly as python's reflect_extra reads it.
     fileprivate static func posInt(_ agent: Agent, _ k: String) -> Int64? {
@@ -212,7 +204,7 @@ struct LlamaCppProvider: AIProvider {
 
     /// The protocol wants a model id. Reporting a guess here would be a lie the
     /// reflect surface then repeats, so an unset one says whose choice it is.
-    var model: String { requestedModel ?? "(llama-server default)" }
+    var model: String { requestedModel ?? DEFAULT_MODEL }
     let apiKey: String?
     let maxTokens: Int64?
     /// ALWAYS SENT. python's provider defaults it to 0.3 at construction and

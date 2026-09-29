@@ -176,13 +176,14 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
         d,
         "store",
         handler_module="file_bridge.tools",
+        allow=["."],
         root=".fantastic",
         ingress_rule="allow_all_ingress",
     )
     # `web` is what keeps a non-tty kernel alive as a daemon at all; the
     # scheduler is the service loop that used to hold the quiet phase open.
     _record(d, "web", handler_module="web.tools", port=_free_port())
-    _record(d, "sched", handler_module="scheduler.tools", file_bridge_id="store")
+    _record(d, "sched", handler_module="scheduler.tools")
 
     klog = tmp_path / "klog.txt"
     with klog.open("wb") as out:

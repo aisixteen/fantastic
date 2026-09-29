@@ -284,8 +284,8 @@ private func isWordScalar(_ c: Unicode.Scalar) -> Bool {
 ///
 /// `bytes` is the one value python delivers as real bytes. `JSON` has no such
 /// case, so it rides as the string it was written as — byte-identical, since
-/// python's own value is that text encoded utf-8 — and `text_file` takes exactly
-/// that (its handler REFUSES a `write`/`patch`/`append` whose `bytes` is not a
+/// python's own value is that text encoded utf-8 — and file_bridge's text verbs
+/// take exactly that (`write`/`edit`/`append` REFUSE a `bytes` that is not a
 /// string).
 func value(_ name: [Unicode.Scalar], _ chars: [Unicode.Scalar], lo: Int, hi: Int) throws -> JSON {
     if name == BYTES_NAME { return .string(scalarText(chars, lo, hi)) }

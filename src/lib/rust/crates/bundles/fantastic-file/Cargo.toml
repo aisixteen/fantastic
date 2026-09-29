@@ -4,7 +4,7 @@ name = "fantastic-file"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Filesystem-as-agent — read/write/list/delete/rename/mkdir rooted at the `root` field."
+description = "Filesystem-as-agent — text verbs, streams, list/delete/rename/mkdir and the allow list, rooted at the `root` field."
 
 [dependencies]
 # python-format helpers: repr/str/truthiness/OSError text, python-canonical.
@@ -13,7 +13,10 @@ fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+# the on-demand document `version` (sha256[:16]).
+sha2 = "0.10"
+# the per-document edit locks.
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true }

@@ -70,8 +70,12 @@ from kernel._state import RESERVED_RECORD_KEYS
 from kernel._authz import (
     DEFAULT_CALLABLE_BY,
     DEFAULT_CAN_CALL,
+    PRIVILEGED_VERBS,
+    SUBTREE_PREFIX,
     _FROM_ABOVE,
     authorize_call,
+    authorize_heritable,
+    is_heritable,
 )
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
@@ -747,9 +751,7 @@ class Agent:
         if target_id == "kernel":
             target = self._root()
         else:
-            # Resolve a well-known alias (declared via an `alias` meta, e.g.
-            # `web_loader`) to its agent id; a literal id resolves to itself.
-            target = self.ctx.agents.get(self.ctx.well_known.get(target_id, target_id))
+            target = self.ctx.agents.get(target_id)
         if target is None:
             return outcome(None, FAILED, self.ctx.unknown_agent(target_id))
         # ── CALL GATE — fully-gated, two-sided, from-above ──────────────
@@ -1214,13 +1216,35 @@ class Agent:
         return self._root().id
 
     def _resolve_agent(self, agent_id: object) -> "Agent | None":
-        """Resolve an id the way `send` does — the `kernel` alias, a declared
-        `alias`, or a literal id. None when it names no live agent."""
+        """Resolve an id the way `send` does — the reserved `kernel` address or a literal id.
+        None when it names no live agent."""
         if not isinstance(agent_id, str) or not agent_id:
             return None
         if agent_id == "kernel":
             return self._root()
-        return self.ctx.agents.get(self.ctx.well_known.get(agent_id, agent_id))
+        return self.ctx.agents.get(agent_id)
+
+    def _in_subtree(self, other_id: str, x: str) -> bool:
+        """Is `other_id` X or a live descendant of X? The `$subtree:<X>` resolver,
+        asked at call time so an agent spawned after the grant is covered."""
+        node = self.ctx.agents.get(other_id)
+        while node is not None:
+            if node.id == x:
+                return True
+            node = node.parent
+        return False
+
+    def _heritable_egress(self, sender_id: str, verb: str, target_id: str) -> bool:
+        """May `sender_id` call `target_id` through a HERITABLE `can_call` entry one
+        of its ANCESTORS holds? Nearest ancestor first; the sender's own entries
+        never count (a heritable entry does not reach for its holder)."""
+        sender = self.ctx.agents.get(sender_id)
+        node = sender.parent if sender is not None else None
+        grants = []
+        while node is not None:
+            grants.append((self.ctx.get(node.id) or {}).get("can_call") or {})
+            node = node.parent
+        return authorize_heritable(grants, verb, target_id).allowed
 
     def _gate_placement(self, sender_id, s_can, s_parent, s_kids, root_id, parent):
         """Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
@@ -1245,7 +1269,9 @@ class Agent:
             holder_children=s_kids,
             loader_id=root_id,
         )
-        if not d.allowed:
+        if not d.allowed and not self._heritable_egress(
+            sender_id, "create_agent", parent.id
+        ):
             return refusal(
                 UNAUTHORIZED,
                 f"{sender_id} may not create under {parent.id}",
@@ -1261,6 +1287,7 @@ class Agent:
             holder_children=frozenset(parent._children),
             loader_id=root_id,
             enforce_privileged=False,
+            in_subtree=self._in_subtree,
         )
         if not di.allowed:
             return refusal(
@@ -1316,7 +1343,7 @@ class Agent:
             holder_children=s_kids,
             loader_id=root_id,
         )
-        if not d.allowed:
+        if not d.allowed and not self._heritable_egress(sender_id, verb, target.id):
             return refusal(
                 UNAUTHORIZED,
                 f"{sender_id} may not call {verb!r} on {target.id}",
@@ -1342,24 +1369,36 @@ class Agent:
                 )
             return None
         # Ingress — does the TARGET accept the sender? (tokens relative to target)
+        # A bridge leg relaying a FOREIGN caller is judged by that caller's
+        # qualified `<guid>|<agent>`, never by the leg: the target names who on the
+        # other kernel it accepts, and the baseline tokens never match a foreign id.
+        rc = _remote_caller.get()
+        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
         t_call = target._meta.get("callable_by") or {}
         t_parent = target.parent.id if target.parent is not None else None
         t_kids = frozenset(target._children)
         di = authorize_call(
             t_call,
             verb,
-            sender_id,
+            in_sender,
             holder_id=target.id,
             holder_parent=t_parent,
             holder_children=t_kids,
             loader_id=root_id,
             enforce_privileged=False,
+            in_subtree=self._in_subtree,
         )
         if not di.allowed:
             return refusal(
                 UNAUTHORIZED,
-                f"{target.id} does not accept {verb!r} from {sender_id}",
-                hint=_FROM_ABOVE,
+                f"{target.id} does not accept {verb!r} from {in_sender}",
+                hint=(
+                    f"a foreign caller is accepted only by name: callable_by "
+                    f"{{{in_sender!r}: [...]}} or {{'{in_sender.split('|')[0]}|*': "
+                    f"[...]}} on {target.id}"
+                    if in_sender != sender_id
+                    else _FROM_ABOVE
+                ),
                 side="ingress",
             )
         # Authority conferral — no self-raise, delegate only a subset you hold.
@@ -1367,6 +1406,30 @@ class Agent:
             return self._check_conferral(
                 sender_id, s_can, s_parent, s_kids, root_id, payload
             )
+        return None
+
+    @staticmethod
+    def _heritable_conferral(sender_id, s_can, key, want):
+        """A heritable entry is conferred only by an agent whose OWN `can_call`
+        holds the same entry, and only a subset of its verbs (`*` needs `*`; a
+        named verb needs the name, or `*` when the verb is not privileged)."""
+        held = s_can.get(key) if isinstance(s_can, dict) else None
+        have = held["verbs"] if is_heritable(held) else []
+        for v in want:
+            covered = v in have or (
+                v != "*" and "*" in have and v not in PRIVILEGED_VERBS
+            )
+            if not covered:
+                return {
+                    "error": (
+                        f"{sender_id} cannot confer a heritable {v!r} on {key}: you "
+                        "do not hold that heritable entry — only the operator, or a "
+                        "holder of the same entry, confers one (a subset of it)"
+                    ),
+                    "reason": "unauthorized",
+                    "side": "delegation",
+                    "hint": _FROM_ABOVE,
+                }
         return None
 
     def _check_conferral(self, sender_id, s_can, s_parent, s_kids, root_id, payload):
@@ -1394,6 +1457,19 @@ class Agent:
             for key, verbs in conferred.items():
                 if key in ("$self", "$parent", "$children"):
                     continue  # relative to the HOLDER — no lateral reach
+                if isinstance(verbs, dict) or key.startswith(SUBTREE_PREFIX):
+                    # A heritable entry is conferred only by a holder of the SAME
+                    # entry (subset). A malformed one, and a `$subtree:` key (which
+                    # is callable_by-only), are refused by the write-time shape
+                    # check with the shape's own words.
+                    if is_heritable(verbs) and not key.startswith("$"):
+                        if (
+                            denied := self._heritable_conferral(
+                                sender_id, s_can, key, verbs["verbs"]
+                            )
+                        ) is not None:
+                            return denied
+                    continue
                 if key == "$loader":
                     # NOT relative: `$loader` resolves to the ROOT for whoever
                     # holds it, so conferring it hands over real reach on the
@@ -1624,7 +1700,7 @@ class Agent:
           and the inlined doc frame. The default is distilled because selection
           happens on every message while orientation happens once, and because the
           full view is NOT a superset: it carries `handler_module` and
-          `file_bridge_id` but no `sentence`, so two agents of the same bundle
+          posture but no `sentence`, so two agents of the same bundle
           are indistinguishable in it at any price. Escalation rides in the
           reply's own `more` line, not in any caller's system prompt.
         - `tree=all|ids|none` (default all): `all` nests the distilled
@@ -1810,10 +1886,20 @@ class Agent:
     async def emit(self, target_id: str, payload: dict) -> None:
         """Drop a payload into target_id's inbox + tell watchers.
         Non-routing — does NOT invoke any handler. Telemetry sees an
-        `emit` event."""
+        `emit` event.
+
+        GATED LIKE A SEND when an agent emits on ANOTHER agent (verb `emit`): an
+        open ws leg used to drop events on any inbox, an AI's input stream
+        included (audit 2026-09-28). Emitting on your OWN inbox — how every
+        bundle publishes its events — and an operator emit are ungated. A
+        refused emit is dropped: an emit has no reply channel."""
         target = self.ctx.agents.get(target_id)
         if target is None:
             return
+        sender = _current_sender.get()
+        if sender is not None and sender != target_id:
+            if self._gate(sender, "emit", target, payload) is not None:
+                return
         target._fanout(payload, kind="emit")
 
     def watch(self, src_id: str, tgt_id: str) -> dict | None:
@@ -1898,9 +1984,8 @@ class Agent:
         return a.record if a else None
 
     def list(self) -> list[dict]:
-        """Flat list of every agent's record across the whole tree.
-        Compat with today's Kernel.list(). For own-children only,
-        use `list_children()`."""
+        """Flat list of every agent's record across the whole tree (the same as
+        `Kernel.list()`). For own-children only, use `list_children()`."""
         return [a.record for a in self.ctx.agents.values()]
 
     def list_children(self) -> list[dict]:
@@ -2078,7 +2163,7 @@ class Agent:
                     return refusal(
                         NOT_HERE,
                         f"{verb} is a kernel verb — {self.id} does not answer it",
-                        hint="address the kernel root (alias 'kernel'); name the "
+                        hint="address the kernel root ('kernel'); name the "
                         "agent you mean in `parent_id` / `id`",
                         verb=verb,
                     )
@@ -2087,7 +2172,7 @@ class Agent:
             # even when it carries a handler_module (the root loader): its
             # persistence verbs (load_tree / persist_record / boot) still
             # route to the bundle below, but `reflect <root>` is the
-            # kernel's own identity + tree, matching the `kernel` alias.
+            # kernel's own identity + tree, matching the `kernel` address.
             if verb == "reflect" and self.parent is None:
                 return self._reflect_identity()
             if not self.handler_module:
@@ -2441,11 +2526,45 @@ class Agent:
                     f"bare value"
                 )
             for k, v in g.items():
-                if not isinstance(k, str) or not (
+                if not isinstance(k, str):
+                    return f"{field} keys must be strings — got {k!r}"
+                if k.startswith(SUBTREE_PREFIX):
+                    x = k[len(SUBTREE_PREFIX) :]
+                    if field != "callable_by":
+                        return (
+                            f"{field}[{k!r}]: `$subtree:` is callable_by-only — it "
+                            "names who may call you, never whom you may call"
+                        )
+                    if not x or "|" in x:
+                        return (
+                            f"{field}[{k!r}]: `$subtree:` names one LOCAL agent id "
+                            "(`$subtree:<id>`, no `|`)"
+                        )
+                if isinstance(v, dict):
+                    if field != "can_call":
+                        return (
+                            f"{field}[{k!r}]: a heritable entry "
+                            '{"verbs": [...], "for": "descendants"} is can_call-only'
+                        )
+                    if k.startswith("$"):
+                        return (
+                            f"{field}[{k!r}]: a heritable entry names a literal "
+                            "target id, never a token"
+                        )
+                    if not is_heritable(v):
+                        return (
+                            f"{field}[{k!r}] must be exactly "
+                            '{"verbs": ["<verb>", …], "for": "descendants"}'
+                        )
+                    continue
+                if not (
                     v == "*"
                     or (isinstance(v, list) and all(isinstance(x, str) for x in v))
                 ):
-                    return f'{field}[{k!r}] must be "*" or a list of verb strings'
+                    return (
+                        f'{field}[{k!r}] must be "*", a list of verb strings, or '
+                        '(can_call) {"verbs": [...], "for": "descendants"}'
+                    )
         return None
 
     async def _verb_create_agent(self, payload: dict) -> dict:
@@ -2475,12 +2594,12 @@ class Agent:
                 "tool you keep, or the root ('kernel_state') for a top-level agent",
             )
         # Resolve the same way `send` does, so `parent_id` accepts anything a
-        # caller could have addressed — including the `kernel` alias for the root,
+        # caller could have addressed — including the reserved `kernel` address for the root,
         # which is otherwise special-cased in `send` alone.
         if parent_id == "kernel":
             parent = self._root()
         else:
-            parent = self.ctx.agents.get(self.ctx.well_known.get(parent_id, parent_id))
+            parent = self.ctx.agents.get(parent_id)
         if parent is None:
             return self.ctx.unknown_agent(parent_id)
         # Reserved keys name substrate wiring; a record may not carry them (the
@@ -2730,14 +2849,12 @@ class Agent:
         tasks). The agent tree survives in `ctx.agents` and on disk,
         so the next boot rehydrates cleanly.
 
-        Hook resolution per agent: a bundle that wants to distinguish
-        "I'm being shut down, will restart" from "I'm being deleted
-        forever" can define a module-level `on_shutdown(agent)` — this
-        walker calls it. If absent, it falls back to the bundle's
-        `on_delete(agent)` (most bundles just kill subprocesses there,
-        which is exactly what shutdown wants). Run on SIGTERM /
-        SIGINT / SIGHUP (see kernel.modes._default) and as an
-        atexit safety net from main.py."""
+        Hook per agent: the bundle's module-level `on_shutdown(agent)` — and
+        only that. A bundle whose shutdown is its delete teardown says so
+        explicitly (`on_shutdown = on_delete`); an absent hook means nothing
+        to free, never a silent fall back to `on_delete`. Run on SIGTERM /
+        SIGINT / SIGHUP (see kernel.modes._default) and as an atexit safety
+        net from main.py."""
         for cid in list(self._children.keys()):
             child = self._children.get(cid)
             if child is None:
@@ -2756,7 +2873,7 @@ class Agent:
                 file=sys.stderr,
             )
             return
-        fn = getattr(mod, "on_shutdown", None) or getattr(mod, "on_delete", None)
+        fn = getattr(mod, "on_shutdown", None)
         if fn is None:
             return
         try:
@@ -2781,7 +2898,8 @@ class Agent:
     # only exposes its own record fields (no rule interpretation, no bundle import) —
     # the LLM reads `ingress_rule: deny_ingress` (sealed) / `allow_all` (open) /
     # `password` (gated) and acts per the keystone readme (read-key == write-key);
-    # ABSENT on an io leg ⇒ sealed-by-default. `root`/`file_bridge_id` show the binding.
+    # ABSENT on an io leg ⇒ sealed-by-default. `root` shows a file_bridge's binding,
+    # `allow` what it exposes under that root.
     # The CALL gate belongs here too. It was left out, and the omission is not
     # cosmetic: `can_call`/`callable_by` decide whether a send is even attempted,
     # and with them absent an agent cannot read its OWN authority — it can only
@@ -2798,7 +2916,7 @@ class Agent:
         "egress_rule",
         "auth",
         "root",
-        "file_bridge_id",
+        "allow",
         "can_call",
         "callable_by",
     )
@@ -2850,6 +2968,5 @@ class Agent:
     # ─── reflect surface ───────────────────────────────────────
     #
     # The composable `reflect` flags (tree / bundles / readme) live in
-    # `_apply_reflect_flags` (next to `send`). There is no `primer()` —
-    # transport/wire docs moved into the root readme (`reflect
-    # readme=true`); `available_bundles` is now the `bundles` flag.
+    # `_apply_reflect_flags` (next to `send`); transport/wire docs live in
+    # the root readme (`reflect readme=true`).

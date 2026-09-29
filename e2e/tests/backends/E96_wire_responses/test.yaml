@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: wire_responses
+group: backends
+title: "OpenAI Responses wire, raw: non-stream + stream shape, reasoning channel, max_output_tokens cut ends response.incomplete, refusals"
+runner: probe.py
+only_backend: responses
+costs: turns
+limits:
+  idle_seconds: 90
+  turn_seconds: 300

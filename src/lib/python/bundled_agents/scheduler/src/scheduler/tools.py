@@ -519,3 +519,7 @@ async def on_delete(agent):
     t = _tick_tasks.pop(agent.id, None)
     if t is not None and not t.done():
         t.cancel()
+
+
+# Shutdown frees the same process resources — declared, never inferred.
+on_shutdown = on_delete

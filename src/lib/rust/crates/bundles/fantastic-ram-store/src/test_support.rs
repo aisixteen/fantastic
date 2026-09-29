@@ -22,7 +22,9 @@ pub const MEMORY: &str = "memory";
 /// # Panics
 /// When the kernel has no root, or the store cannot be created.
 pub async fn ensure_memory(kernel: &Arc<Kernel>) -> AgentId {
-    let root = kernel.root().expect("ensure_memory: the kernel has no root");
+    let root = kernel
+        .root()
+        .expect("ensure_memory: the kernel has no root");
     let has_guid = root
         .meta
         .read()

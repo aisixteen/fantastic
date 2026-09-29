@@ -4,8 +4,8 @@ The taught contract: a chain ends on an explicit `{"name":"done"}` call; a
 silent turn is nudged ONCE by the runtime. This probe measures that a model
 under that contract (1) does a small task and (2) then ends its own chain.
 
-Memory is FILES now: the task's artifact is a text file written through the
-`text_file` editor onto a gated file leg. Scored on the FILE plus HOW the run
+Memory is FILES: the task's artifact is a text file written through a gated
+file agent's `write`. Scored on the FILE plus HOW the run
 ended — the work must be present, and the chain must have ended by itself, not
 been cut for looping (NO_PROGRESS), a runaway turn, or the turn cap.
 """
@@ -51,22 +51,22 @@ async def main():
             {
                 "type": "create_agent",
                 "parent_id": root.id,
-                "handler_module": "file_bridge.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "kernel_store",
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 # Two-sided deny-all: the editor writes through this leg; the AI's
                 # chat sidecar rides it too; the wire surfaces read as rest/web.
-                "callable_by": {"notes": "*", "ai": "*", "rest": "*", "web": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
                 "parent_id": root.id,
-                "handler_module": "text_file.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "notes",
-                "target_id": "kernel_store",
-                "can_call": {"kernel_store": "*"},
-                "description": "Text editor over this run's files.",
+                "root": ".",
+                "ingress_rule": "allow_all_ingress",
+                "description": "This run's files.",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         ):
@@ -81,7 +81,6 @@ async def main():
             BK,
             can_call={"notes": "*", "cli": "*", "kernel_store": "*"},
             limits=Limits.from_env(os.environ),
-            record={"file_bridge_id": "kernel_store"},
         )
         capped = await drive(conn, TASK, client_id="selfdone")
         await conn.close()

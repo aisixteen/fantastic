@@ -382,7 +382,10 @@ struct WebSocketTests {
                 break
             }
         }
-        #expect(frame.hasPrefix("{\"type\": \"event\", \"payload\": {"), "\(frame)")
+        // The auto-watch's own reader stamps the `src` the event came from.
+        #expect(
+            frame.hasPrefix("{\"type\": \"event\", \"src\": \"kernel_state\", \"payload\": {"),
+            "\(frame)")
         #expect(frame.contains("\\u00b7"), "\(frame)")
         #expect(frame.contains("\\u2191"), "\(frame)")
         #expect(!frame.contains("·"), "\(frame)")
@@ -658,7 +661,7 @@ struct WebSocketTests {
                 AgentId("kernel"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("wsfiles"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("wsfiles"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
@@ -778,11 +781,14 @@ struct WebSocketTests {
     }
 
     /// A11.29 (r2 WSF-5) — WITHOUT the root grant the leg gets python's
-    /// FLATTENED denial frame, not a `data`-wrapped reply and not silence.
-    @Test func stateSubscribeWithoutRootGrantAnswersFlattenedError() async throws {
+    /// FLATTENED denial frame, not a `data`-wrapped reply and not silence. The
+    /// leg holds only the structural baseline: a NAMED `*` on the root would
+    /// cover `state_subscribe` (audit 2026-09-28).
+    @Test(.timeLimit(.minutes(1)))
+    func stateSubscribeWithoutRootGrantAnswersFlattenedError() async throws {
         let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
-        await mountWebWS(kernel)
+        await mountWebWS(kernel, granted: false)
         defer { Task { await stopWebHost(kernel) } }
         let port = kernel.httpPort()
         let task = URLSession(configuration: .ephemeral)
@@ -794,7 +800,9 @@ struct WebSocketTests {
                 JSON.object([
                     "type": .string("state_subscribe"), "id": .string("x-s-1"),
                 ]).serialize()))
-        let err = await awaitFrame(task) { $0["type"].asString == "error" }
+        let err = await awaitFrame(task) {
+            $0["type"].asString == "error" && $0["id"].asString == "x-s-1"
+        }
         let e = try #require(err, "the ungranted state_subscribe answered nothing")
         #expect(e["id"].asString == "x-s-1", "\(e)")
         #expect(e["reason"].asString == "unauthorized", "\(e)")
@@ -920,7 +928,7 @@ struct WebSocketTests {
                 AgentId("kernel"),
                 .object([
                     "type": .string("create_agent"), "parent_id": .string(wsId),
-                    "handler_module": .string("file_bridge.tools"), "id": .string("wsfiles"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("wsfiles"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                 ]))
         ])[0].result

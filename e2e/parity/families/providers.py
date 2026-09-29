@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 
-from families import BASE, OPEN, call, save_kernel_log
+from families import BASE, MEMORY, OPEN, ai, call, save_kernel_log
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
 from stubs.ollama_chat import Handler as OllamaHandler, OllamaStub
@@ -39,7 +39,7 @@ ANTHROPIC_CASES = [
     ("stream_cut_before_stop", [{"text": DONE, "cut": True}], (), {}),
     ("stop_reason_tool_use_no_block", [{"text": "thinking about a tool",
                                         "stop_reason": "tool_use"}], (), {}),
-    ("no_key_at_all", [DONE], ("ANTHROPIC_KEY", "ANTHROPIC_API_KEY"), {}),
+    ("no_key_at_all", [DONE], ("ANTHROPIC_API_KEY",), {}),
 ]
 
 OPENAI_CASES = [
@@ -86,11 +86,11 @@ def drive(ctx, provider: str, case: str, stub, handler_meta: dict, env_drop) -> 
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         rec.json(f"{rel}/create_readings", k.create(
-            parent_id=k.root_id, id="readings", handler_module="file_bridge.tools", root=".",
+            parent_id=k.root_id, id="readings", handler_module="file_bridge.tools", allow=["."], root=".",
             **OPEN, callable_by=cb))
         rec.json(f"{rel}/create_ai", k.create(
             **{"parent_id": k.root_id, "id": "ai", **OPEN, "callable_by": cb,
-               "can_call": {**BASE, "readings": "*"},
+               **ai(can_call={**BASE, "readings": "*"}),
                "context_window": CTX_WINDOW, "output_reserve": CTX_RESERVE,
                **handler_meta}))
         time.sleep(0.8)
@@ -101,7 +101,7 @@ def drive(ctx, provider: str, case: str, stub, handler_meta: dict, env_drop) -> 
         rec.json(f"{rel}/send_reply", {"reply": reply},
                  harness={"waited_s": round(time.monotonic() - t0, 2)})
         time.sleep(2.0)
-        rec.json(f"{rel}/rows_read", call(k, "kernel", {"type": "rows_read", "agent": "ai"}))
+        rec.json(f"{rel}/rows_read", call(k, MEMORY, {"type": "read", "owner": "ai"}))
         rec.json(f"{rel}/status", call(k, "ai", {"type": "status", "client_id": "probe"}))
         rec.json(f"{rel}/requests", stub.requests)
     finally:

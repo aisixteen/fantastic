@@ -8,21 +8,16 @@ import type { AgentRecord, StateEvent } from "../../kernel/state.ts";
 // "no automation"). It owns NO storage — it PROXIES the loader contract
 // (`load_tree` / `persist_record` / `forget_record`) over the WS channel to the
 // host's `web_loader` (a `web/kernel_state` rooted at .fantastic/web/, reached by
-// that alias). Hydration flows: host disk → web_loader → channel → proxy_loader
+// its id). Hydration flows: host disk → web_loader → channel → proxy_loader
 // → kernel.load. The browser kernel is a real STATEFUL peer whose view-agent
 // records persist on the host and rehydrate on reload. Registration (which
 // bundles can RUN) is separate; the proxy_loader supplies the RECORDS.
 //
 // Re-rooting: on the host, the JS subtree nests under `web_loader`'s namespace
-// anchor. The constructor's `hostLoaderId` is the ADDRESSING alias (`web_loader`)
-// — but on disk the anchor carries the loader's REAL id, and host paths resolve
-// against that id, not the alias. So `loadTree` learns the real id from the
-// anchor (the record whose `alias`/`id` is the one we addressed), re-roots the
-// JS root (parent_id == realId → null), and drops the anchor; `flush` rewrites
-// the JS root's parent_id (local null → realId) so it lands as a direct child of
-// the namespace. The middle of the tree is untouched. (Before any loadTree the
-// real id is unknown, so we fall back to the alias — fine for an in-memory host
-// that stores parent_ids verbatim.)
+// anchor (the loader's own record, id `hostLoaderId`). `loadTree` re-roots the JS
+// root (parent_id == hostLoaderId → null) and drops the anchor; `flush` rewrites
+// the JS root's parent_id (local null → hostLoaderId) so it lands as a direct
+// child of the namespace. The middle of the tree is untouched.
 
 export interface ProxyLoaderOptions {
   /** Coalesce window before flushing dirty records (ms, default 150). */
@@ -32,10 +27,6 @@ export interface ProxyLoaderOptions {
 export class ProxyLoader {
   private readonly kernel: Kernel;
   private readonly hostLoaderId: string;
-  /** The host loader's REAL id (the anchor's on-disk id) — learned from
-   *  `loadTree`; the addressing alias until then. Host paths resolve against
-   *  this, so re-rooting (load + persist) must use it, not the alias. */
-  private hostRootId: string;
   private readonly debounceMs: number;
   private unsub: (() => void) | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -52,31 +43,24 @@ export class ProxyLoader {
   ) {
     this.kernel = kernel;
     this.hostLoaderId = hostLoaderId;
-    this.hostRootId = hostLoaderId; // until loadTree learns the real id
     this.debounceMs = opts.debounceMs ?? 150;
   }
 
   /** Read the JS subtree from the host (forward `load_tree` over the bridge),
-   *  drop the host loader's namespace anchor, and re-root the JS root so
-   *  `kernel.load(records)` builds a clean, self-rooted tree. The anchor is the
-   *  loader's OWN record — matched by the addressed id/alias — and its on-disk
-   *  id (the real one the host nests under) is learned here for later flushes. */
+   *  drop the host loader's namespace anchor (its OWN record, id
+   *  `hostLoaderId`), and re-root the JS root so `kernel.load(records)` builds a
+   *  clean, self-rooted tree. */
   async loadTree(): Promise<AgentRecord[]> {
     const reply = (await this.kernel.send([
       { target: this.hostLoaderId, payload: { type: "load_tree" } },
     ]))[0]!.result as unknown as { records?: AgentRecord[] };
     const records = reply.records ?? [];
-    const anchor = records.find(
-      (r) => r.id === this.hostLoaderId || r["alias"] === this.hostLoaderId,
-    );
-    const anchorId = anchor?.id;
-    if (anchorId !== undefined) this.hostRootId = anchorId;
     const out: AgentRecord[] = [];
     for (const r of records) {
-      if (r.id === anchorId) continue; // the namespace anchor — not a JS agent
+      if (r.id === this.hostLoaderId) continue; // the namespace anchor — not a JS agent
       const parent = r.parent_id ?? null;
-      // re-root the JS root: its parent is the anchor (real id) or the alias
-      if (parent === anchorId || parent === this.hostLoaderId) {
+      // re-root the JS root: its parent is the anchor
+      if (parent === this.hostLoaderId) {
         out.push({ ...r, parent_id: null });
       } else {
         out.push(r);
@@ -102,7 +86,7 @@ export class ProxyLoader {
    *  nests directly under the namespace the host resolves on disk); every other
    *  parent is unchanged. */
   private rewrittenParent(parentId: string | null): string {
-    return parentId ?? this.hostRootId;
+    return parentId ?? this.hostLoaderId;
   }
 
   private onState(e: StateEvent): void {
@@ -115,7 +99,7 @@ export class ProxyLoader {
       this.schedule();
     } else if (e.kind === "removed") {
       this.dirtyPersist.delete(aid);
-      this.dirtyForget.set(aid, this.parents.get(aid) ?? this.hostRootId);
+      this.dirtyForget.set(aid, this.parents.get(aid) ?? this.hostLoaderId);
       this.parents.delete(aid);
       this.schedule();
     }

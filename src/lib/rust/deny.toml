@@ -14,15 +14,7 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-ignore = [
-    # serial v0.4.0 — unmaintained since 2017. Transitive via
-    # portable-pty (used by fantastic-terminal-backend for PTY
-    # spawning on Unix). Our code path doesn't touch portable-pty's
-    # serial-port adapter — only the openpty/spawn surface — so the
-    # unmaintained crate isn't reachable from our binary's runtime.
-    # No safe upgrade exists; revisit when portable-pty drops it.
-    { id = "RUSTSEC-2017-0008", reason = "transitive via portable-pty; code path not reachable" },
-]
+ignore = []
 
 [licenses]
 # The project's own license (workspace crates are AGPL-3.0-or-later), plus the

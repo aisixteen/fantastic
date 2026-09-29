@@ -1,9 +1,8 @@
 // HTTP server backed by swift-nio (cross-platform: macOS + Linux).
 //
 // Routes (python `bundled_agents/web/host/src/web/app.py` — the reference):
-//   GET  /                          → the agent-tree index (templates/index.html)
+//   (no `/` — the host renders nothing of its own, so an undeclared `/` is a 404)
 //   GET  /_assets/favicon.png       → the bundled favicon
-//   GET  /favicon.png               → the bundled favicon
 //   GET  /{agent_id}/file/{path}    → proxy to the agent's `read_stream` SOURCE
 //   <method> /<leg>/<...>           → routes a child leg declared via `get_routes`,
 //                                     served by the endpoint it handed over
@@ -175,7 +174,6 @@ public func webOriginAllowed(_ rec: JSON, _ origin: String?) -> Bool {
 
 /// What a matched route runs.
 enum RouteTarget: Sendable {
-    case index
     case favicon
     case fileProxy
     case leg(RouteSpec)
@@ -300,17 +298,10 @@ public final class WebServer: @unchecked Sendable {
         let dynamic = liveRoutes
         lock.unlock()
         var table: [(path: String, route: Route)] = [
-            ("/", Route(kind: .http, methods: ["GET"], template: parseTemplate("/"), target: .index)),
             (
                 "/_assets/favicon.png",
                 Route(
                     kind: .http, methods: ["GET"], template: parseTemplate("/_assets/favicon.png"),
-                    target: .favicon)
-            ),
-            (
-                "/favicon.png",
-                Route(
-                    kind: .http, methods: ["GET"], template: parseTemplate("/favicon.png"),
                     target: .favicon)
             ),
             (
@@ -557,8 +548,6 @@ public final class WebServer: @unchecked Sendable {
         request: HTTPRequest
     ) async -> HTTPResponse {
         switch route.target {
-        case .index:
-            return await serveIndex()
         case .favicon:
             return HTTPResponse(status: 200, contentType: "image/png", body: Self.faviconBytes)
         case .fileProxy:
@@ -568,56 +557,6 @@ public final class WebServer: @unchecked Sendable {
             return await dispatchLegRoute(
                 spec: spec, params: params, query: query, pathOnly: pathOnly, request: request)
         }
-    }
-
-    /// python `_index_page` — the substrate tree rendered into
-    /// `templates/index.html`.
-    ///
-    /// AS THE WEB AGENT, like every other route on this host. Python starts
-    /// uvicorn INSIDE the `boot` dispatch, so the `_current_sender` ContextVar
-    /// the request handlers inherit is already the web agent's id and the
-    /// roster walk is gated per node. Swift's listener is a NIO channel with no
-    /// task-local to inherit, so this send carried NO sender, i.e. OPERATOR
-    /// authority — the walk reached a sibling host with no `callable_by` and
-    /// that sibling's watcher saw an event python's browser never produces (one
-    /// extra `wsx` frame in the acceptance capture).
-    private func serveIndex() async -> HTTPResponse {
-        let web = self.agentId
-        let primer = await KernelTaskLocals.$currentSender.withValue(web) {
-            await kernel.send([
-                Item(AgentId("kernel"), .object(["type": .string("reflect")]))
-            ])[0].result
-        }
-        let tree = primer["tree"]
-        let body = pyTruthy(tree) ? Self.renderNode(tree) : "<li><em>empty tree</em></li>"
-        let html = Self.indexTemplate.replacingOccurrences(of: "{{tree_body}}", with: body)
-        return HTTPResponse(
-            status: 200, contentType: "text/html; charset=utf-8", body: Data(html.utf8))
-    }
-
-    /// python `_index_page._render`.
-    static func renderNode(_ node: JSON) -> String {
-        let aid = text(node["id"])
-        let nameVal = node["display_name"]
-        let name = pyTruthy(nameVal) ? text(nameVal) : aid
-        let hmVal = node["handler_module"]
-        let hm = pyTruthy(hmVal) ? text(hmVal) : "(root)"
-        let children = node["children"].asArray ?? []
-        let kids =
-            children.isEmpty
-            ? "" : "<ul>" + children.map { renderNode($0) }.joined() + "</ul>"
-        return "<li><span class=\"id\">\(esc(name))</span>"
-            + " <code>\(esc(aid))</code>"
-            + " <span class=\"hm\">\(esc(hm))</span>\(kids)</li>"
-    }
-
-    private static func text(_ v: JSON) -> String { v.asString ?? pyStr(v) }
-
-    /// python `_esc`.
-    static func esc(_ s: String) -> String {
-        s.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     /// python `agent_file` — pipe the agent's `read_stream` SOURCE.
@@ -904,11 +843,6 @@ public final class WebServer: @unchecked Sendable {
 
     // MARK: - bundled resources
 
-    /// python `templates/index.html`, byte for byte.
-    static let indexTemplate: String =
-        loadResource("index", "html").flatMap {
-            String(data: $0, encoding: .utf8)
-        } ?? ""
     /// python `favicon.png`, byte for byte.
     static let faviconBytes: Data = loadResource("favicon", "png") ?? Data()
 

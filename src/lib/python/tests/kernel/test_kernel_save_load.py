@@ -20,6 +20,7 @@ def test_load_builds_tree_in_memory():
             {
                 "id": "f",
                 "handler_module": "file_bridge.tools",
+                "allow": ["."],
                 "parent_id": "kernel_state",
             },
         ]
@@ -41,7 +42,12 @@ def test_save_load_roundtrip():
                 "parent_id": "kernel_state",
                 "port": 9,
             },
-            {"id": "f", "handler_module": "file_bridge.tools", "parent_id": "web"},
+            {
+                "id": "f",
+                "handler_module": "file_bridge.tools",
+                "allow": ["."],
+                "parent_id": "web",
+            },
         ]
     )
     snap = k.save()
@@ -69,11 +75,13 @@ def test_weak_load_skips_unknown_bundle_and_subtree():
             {
                 "id": "y",
                 "handler_module": "file_bridge.tools",
+                "allow": ["."],
                 "parent_id": "x",
             },  # child of x
             {
                 "id": "z",
                 "handler_module": "file_bridge.tools",
+                "allow": ["."],
                 "parent_id": "kernel_state",
             },
         ]

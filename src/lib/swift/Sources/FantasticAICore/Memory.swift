@@ -60,12 +60,12 @@ final class AIMemoryState: @unchecked Sendable {
 
 enum AIMemory {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var states: [ObjectIdentifier: AIMemoryState] = [:]
+    nonisolated(unsafe) private static var states: [UInt64: AIMemoryState] = [:]
 
     static func of(_ kernel: Kernel) -> AIMemoryState {
         lock.lock()
         defer { lock.unlock() }
-        let key = ObjectIdentifier(kernel)
+        let key = kernel.serial
         if let s = states[key] { return s }
         let s = AIMemoryState()
         states[key] = s
@@ -75,7 +75,7 @@ enum AIMemory {
     /// Drop a dead kernel's memory — see `AISideTables`.
     static func forget(_ kernel: Kernel) {
         lock.lock()
-        states.removeValue(forKey: ObjectIdentifier(kernel))
+        states.removeValue(forKey: kernel.serial)
         lock.unlock()
     }
 }

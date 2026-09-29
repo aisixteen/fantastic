@@ -22,7 +22,6 @@ roster:
     brain: '*'
     rest: '*'
     web: '*'
-    totals: '*'
 - id: readings
   handler_module: file_bridge.tools
   parent_id: <root.id>
@@ -32,9 +31,8 @@ roster:
     rest: '*'
     web: '*'
 - id: totals
-  handler_module: text_file.tools
+  handler_module: file_bridge.tools
   parent_id: <root.id>
-  can_call: '<{store[''id'']: ''*''}>'
   callable_by:
     ai: '*'
     brain: '*'

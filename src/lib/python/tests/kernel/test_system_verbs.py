@@ -87,6 +87,7 @@ async def test_create_agent_emits_agent_created(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -110,6 +111,7 @@ async def test_delete_agent(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -134,6 +136,7 @@ async def test_delete_agent_emits_event(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -173,6 +176,7 @@ async def test_delete_agent_runs_on_delete_hook(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -203,6 +207,7 @@ async def test_delete_agent_handler_module_without_on_delete(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -232,6 +237,7 @@ async def test_update_agent(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -268,6 +274,7 @@ async def test_update_agent_emits_event_with_changed_keys(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -308,6 +315,7 @@ async def test_delete_agent_refused_when_locked(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "delete_lock": True,
                     },
                 }
@@ -337,6 +345,7 @@ async def test_delete_agent_succeeds_after_unlock(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "delete_lock": True,
                     },
                 }
@@ -387,6 +396,7 @@ async def test_delete_agent_unlocked_record_works(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]

@@ -4,13 +4,9 @@
 
 **A durable program is a FILE plus a command — not a `code`-carrying agent.**
 
-The old way — a program pasted into a `code` field as a JSON string — is GONE:
-a whole program escaped into an envelope is exactly how a call gets lost to one
-stray quote. There is no `code` field, no `interpreters`, no `shim`;
-`create_agent` with `code` is refused, and the refusal says so.
-
-The way that WORKS now, and it makes something that genuinely persists and
-re-runs:
+A whole program escaped into a JSON string is exactly how a call gets lost to one
+stray quote, so a program is never carried that way. The way that works, and makes
+something that genuinely persists and re-runs:
 
 1. **Write the program to a file** on the file leg, its bytes carried over a
    stream so nothing is escaped — `write_stream {path, bytes:<raw>, truncate:true}`.
@@ -26,7 +22,7 @@ The program reaches the other agents itself, over its control wire, exactly as
 any agent does. Assemble these pieces and you have built something durable
 without any `code` field at all.
 
-## What you CAN do now
+## What you can do
 
 - **Compose the agents you were given.** Send `kernel` `<type>list_agents</type>`
   for the tree, `reflect` each for its verbs, then `send`. Most tasks are solved
@@ -81,6 +77,23 @@ call `totals`: give the worker `can_call:{totals:[…]}` at `create_agent`, AND
 `update_agent id='totals'` to add the worker to `totals.callable_by` (send the
 WHOLE map — update replaces, not merges). Both ends granted, the edge exists. New
 reach for YOURSELF still comes only from your creator or the operator.
+
+**Agents you spawn later, under one owner, need no per-id grant** — two forms name
+a whole subtree, resolved against the LIVE tree at call time, so an agent created
+after the grant is covered:
+
+- **ingress `$subtree:<X>`** — in a target's `callable_by`, `{"$subtree:hub":
+  ["list"]}` accepts `hub` and every descendant of `hub`. `callable_by` only; a
+  local id only (a `<guid>|<agent>` caller never matches); an absent `hub` matches
+  nothing.
+- **egress, heritable** — in `hub`'s `can_call`, `{"served": {"verbs": ["list"],
+  "for": "descendants"}}` lets every descendant of `hub` call `served` — never `hub`
+  itself. A literal target id, never a token.
+
+Both count as structural for privileged verbs: a NAMED verb (`allow`) is covered,
+`*` never covers one on egress. Only the operator, or an agent holding the SAME
+heritable entry, confers one — and only a subset of it (`side:"delegation"`
+otherwise); an agent that merely benefits from it cannot pass it on.
 
 Reach everything by id. A denied send's `hint` and `side` are
 discovery-through-denial — the same way a sealed io leg's denial teaches

@@ -48,7 +48,7 @@ Strict rules:
 Some bundles hold state in process-memory that doesn't survive
 separate `fantastic <id> <verb> …` invocations:
 
-- `terminal_backend` — PTY child process; dies with the kernel.
+- `exec_bridge` — its jobs (pipe or PTY) are child processes; they die with the kernel.
 - `ollama_backend` — cached HTTP client + in-flight `_run` tasks.
 - `web` — uvicorn instance.
 
@@ -132,31 +132,27 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/web/host/selftest.md` | http, web, binary | uvicorn rendering host — index, file proxy, favicon, lock |
 | `bundled_agents/io/web_ws/selftest.md` | http, ws, web, web_ws | WS verb-invocation surface — mounts `/<host_id>/ws` on parent web |
 | `bundled_agents/io/web_rest/selftest.md` | http, web, web_rest | REST diagnostic surface — `POST /<rest_id>/<target_id>` body=payload |
-| `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, schedule_events.yaml, file_bridge_id failfast |
+| `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, schedule_events.yaml persisted through the loader (no store ⇒ fails loud) |
 | `bundled_agents/io/file_bridge/selftest.md` | kernel, persistence | sealed-by-default fs edge — read/write/list/delete/rename/mkdir, running-dir clamp, path safety |
-| `bundled_agents/text_file/selftest.md` | kernel, persistence | stateless text-document agent — read/write/patch/append over a gated file leg, on-demand version+if_match, checkpoint/restore, unwired failfast |
-| `bundled_agents/terminal/selftest.md` | kernel, pty | PTY spawn, shell done-token, timeout recovery |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
 | `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |
-| `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
-| `bundled_agents/io/exec_bridge/selftest.md` | kernel | sealed-by-default command runner — regex `allowed` allowlist (refusal names the patterns), start/status/stop/interrupt/clear/boot, control wire, mail to a live program, task-table row + cancel |
+| `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS transports; streaming via `watch_remote` (subscribed `src` only) |
+| `bundled_agents/io/exec_bridge/selftest.md` | kernel, pty | sealed-by-default command runner — regex `allowed` allowlist (refusal names the patterns), record-owned cwd/env/inherit_env, start/status/stop/interrupt/clear/boot, PTY jobs (write/resize/ack/output/paste_image), control wire, mail to a live program, task-table row + cancel |
 
 The root selftest is the `kernel_state` one (id `"kernel_state"`) — the
-persistence/hydration root that owns `.fantastic/`; there's no `core`
-selftest anymore. The view/content selftests (the canvas compositor and
-its view/content agents) live with the FRONTEND kernel in `ts/`, NOT
-here — they're `*.ts` bundles, not host bundles.
+persistence/hydration root that owns `.fantastic/`. View/content
+selftests belong to the apps on the TS kernel library, not here.
 
 ## Selection examples
 
 | user says | filter | files run |
 |---|---|---|
 | "all tests" | (all) | every file |
-| "non-web tests" / "no browser" | EXCLUDE {http, ws, web, webapp, bus} | kernel_state, cli, scheduler, file, terminal_backend, ollama_backend |
+| "non-web tests" / "no browser" | EXCLUDE {http, ws, web, webapp, bus} | kernel_state, cli, scheduler, file, exec_bridge, ollama_backend |
 | "in canvas, run view tests" | INCLUDE {web, webapp, bus} | (none here — the TS view-agents live in `ts/`) |
 | "kernel only" | INCLUDE {kernel}, EXCLUDE {pty, ai, web} | kernel_state, cli, scheduler, file |
 | "I have ollama running" | + ai | adds ollama_backend AI tests |
-| "no PTY" | EXCLUDE {pty} | drops terminal_backend |
+| "no PTY" | EXCLUDE {pty} | drops exec_bridge |
 | "binary protocol" | INCLUDE {binary} | web/host's binary subset |
 
 ## Aggregate report format
@@ -174,5 +170,5 @@ files run: <N>   files skipped: <N>
 
 skipped:
 - ollama_backend/selftest.md — no AI provider configured
-- terminal/selftest.md — user excluded `pty`
+- io/exec_bridge/selftest.md — user excluded `pty`
 ```

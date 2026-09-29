@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 import time
 
-from families import BASE, OPEN, call, quiesce, save_kernel_log
+from families import BASE, MEMORY, OPEN, ai, call, quiesce, save_kernel_log
 from spec import AI_FILL_CHARS, AI_RESERVE, AI_WINDOW
 from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
 
@@ -93,10 +93,10 @@ CASES = {
                      "<id></id></call>", DONE],
     "tag_payloadless": ['<call name="send"><target_id>readings</target_id></call>', DONE],
     # C31 — a real timeout on a slow verb, then the SAME exec id with a smaller one.
-    "tag_timeout_short": [tag("term", "shell", command="sleep 2", timeout="0.2"), DONE],
+    "tag_timeout_short": [tag("slow", "sleep", seconds=2, timeout="0.2"), DONE],
     "tag_exec_id_reuse": [
-        tag("term", "shell", command="sleep 2", exec_id="reuse-1", timeout="5"),
-        tag("term", "shell", command="sleep 2", exec_id="reuse-1", timeout="0.2"),
+        tag("slow", "sleep", seconds=2, exec_id="reuse-1", timeout="5"),
+        tag("slow", "sleep", seconds=2, exec_id="reuse-1", timeout="0.2"),
         DONE,
     ],
     # C38 — an exec id that is a number, and retries that are not.
@@ -113,7 +113,7 @@ CASES = {
     # B2.3 — a stall long enough for a `kernel cancel` to land mid-stream.
     "cancel_midstream": [{"text": DONE, "stall": 8}],
     # B1.17 — a slow local verb, then a `boot` of the AI while it is in flight.
-    "boot_midflight": [tag("term", "shell", command="sleep 3"), DONE],
+    "boot_midflight": [tag("slow", "sleep", seconds=3), DONE],
     "noop": [DONE],
     # C-context — THE family's one compaction, forced. Turn 1 answers with a
     # call-less block of `AI_FILL_CHARS`; the nudge that follows carries it into
@@ -132,15 +132,15 @@ def run(ctx) -> None:  # noqa: C901
     stub.start(AnthropicHandler)
 
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*", "ai": "*", "ai2": "*"}
-    reach = ["readings", "term", "plant", "ai", "ai2", "web", "rest", "ws"]
+    reach = ["readings", "slow", "plant", "ai", "ai2", "web", "rest", "ws"]
     k = ctx.boot(reach=reach, port=ports.take("main"))
     try:
         rec.json("setup/readings", k.create(parent_id=k.root_id, id="readings",
-                                            handler_module="file_bridge.tools", root=".",
+                                            handler_module="file_bridge.tools", allow=["."], root=".",
                                             **OPEN, callable_by=cb))
-        rec.json("setup/term", k.create(parent_id=k.root_id, id="term",
-                                        handler_module="terminal_backend.tools",
-                                        command="/bin/sh", cwd=".", **OPEN, callable_by=cb))
+        rec.json("setup/slow", k.create(parent_id=k.root_id, id="slow",
+                                        handler_module="slow_probe.tools", **OPEN,
+                                        callable_by=cb))
         rec.json("setup/plant", k.create(parent_id=k.root_id, id="plant",
                                          handler_module="plant_probe.tools", **OPEN,
                                          callable_by=cb))
@@ -149,15 +149,15 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("setup/ai", k.create(parent_id=k.root_id, id="ai",
                                       handler_module="anthropic_backend.tools", **OPEN,
                                       callable_by=cb,
-                                      can_call={**BASE, "readings": "*", "term": "*",
-                                                "plant": "*", "kernel": "*", "ai2": "*"},
-                                      **ai_meta))
+                                      **ai(can_call={**BASE, "readings": "*", "slow": "*",
+                                                     "plant": "*", "kernel": "*", "ai2": "*"},
+                                           **ai_meta)))
         rec.json("setup/ai2", k.create(parent_id=k.root_id, id="ai2",
                                        handler_module="anthropic_backend.tools", **OPEN,
                                        callable_by=cb,
-                                       can_call={**BASE, "readings": "*", "kernel": "*",
-                                                 "ai": "*"},
-                                       **ai_meta))
+                                       **ai(can_call={**BASE, "readings": "*", "kernel": "*",
+                                                      "ai": "*"},
+                                            **ai_meta)))
         time.sleep(1.2)
 
         from helpers.host.ws import WSWatcher
@@ -234,7 +234,7 @@ def run(ctx) -> None:  # noqa: C901
                 "case": case, "agent": agent,
                 "reply": holder.get("reply", {"__harness_error__": "send did not return"}),
                 "mid_flight": mid,
-                "rows_read": call(k, "kernel", {"type": "rows_read", "agent": agent}),
+                "rows_read": call(k, MEMORY, {"type": "read", "owner": agent}),
                 "events": list(mine), "events_peer": {"agent": peer, "events": list(theirs)}},
                 harness={"quiesce": q,
                          "request_numbers": [r["n"] for r in stub.requests[before_req:]]})
@@ -275,8 +275,8 @@ def run(ctx) -> None:  # noqa: C901
         run_case("boot_midflight", timeout=90, during=boot_mid)
 
         rec.json("final/kernel_ps", call(k, "kernel", {"type": "ps"}))
-        rec.json("final/rows_read_ai", call(k, "kernel", {"type": "rows_read", "agent": "ai"}))
-        rec.json("final/rows_read_ai2", call(k, "kernel", {"type": "rows_read", "agent": "ai2"}))
+        rec.json("final/rows_read_ai", call(k, MEMORY, {"type": "read", "owner": "ai"}))
+        rec.json("final/rows_read_ai2", call(k, MEMORY, {"type": "read", "owner": "ai2"}))
         rec.json("events", events)
         loop.call_soon_threadsafe(loop.stop)
         http_1 = list(k.http)
@@ -288,12 +288,12 @@ def run(ctx) -> None:  # noqa: C901
         # changed in a running kernel. 0.5 s against a 3 s stall: the send must
         # give up before the model does, and what it says then is the item.
         stub.set_cases({**CASES, "send_timeout": [{"text": DONE, "stall": 3}]})
-        k2 = ctx.boot(reach=reach, port=k.port,
+        k2 = ctx.boot(reach=[*reach, "ai_to"], port=k.port,
                       env_extra={"FANTASTIC_AI_SEND_TIMEOUT": "0.5"})
         try:
             rec.json("send_timeout/create_ai", k2.create(
                 parent_id=k2.root_id, id="ai_to", handler_module="anthropic_backend.tools",
-                **OPEN, callable_by=cb, can_call={**BASE, "readings": "*"}, **ai_meta))
+                **OPEN, callable_by=cb, **ai(can_call={**BASE, "readings": "*"}, **ai_meta)))
             time.sleep(1.0)
             t0 = time.monotonic()
             reply = call(k2, "ai_to", {"type": "send", "text": "CASE=send_timeout#1 stall me",
@@ -302,7 +302,7 @@ def run(ctx) -> None:  # noqa: C901
                      harness={"waited_s": round(time.monotonic() - t0, 2)})
             time.sleep(4.0)
             rec.json("send_timeout/rows_read",
-                     call(k2, "kernel", {"type": "rows_read", "agent": "ai_to"}))
+                     call(k2, MEMORY, {"type": "read", "owner": "ai_to"}))
             rec.json("send_timeout/status", call(k2, "ai_to", {"type": "status",
                                                                "client_id": "probe"}))
         finally:

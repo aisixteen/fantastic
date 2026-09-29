@@ -24,7 +24,7 @@ import threading
 import time
 from pathlib import Path
 
-from families import BASE, OPEN, call, disk_walk, page_walk, quiesce, save_kernel_log
+from families import BASE, MEMORY, OPEN, ai, call, disk_walk, page_walk, quiesce, save_kernel_log
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
 
@@ -95,18 +95,17 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
     return [
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{re.escape(interp)} \S+"])),
         ("readings", "file_bridge.tools",
-         dict(root="readings", description="Sensor readings — one integer per file.")),
-        ("kernel_store", "file_bridge.tools", dict(root=".", callable_by={**cb, "totals": "*"})),
-        ("totals", "text_file.tools", dict(target_id="kernel_store", can_call={"kernel_store": "*"})),
+         dict(allow=["."], root="readings", description="Sensor readings — one integer per file.")),
+        ("kernel_store", "file_bridge.tools", dict(allow=["."], root=".", callable_by=cb)),
+        ("totals", "file_bridge.tools", dict(allow=["."], root=".")),
         ("sched", "scheduler.tools", {}),
-        ("term", "terminal_backend.tools", {}),
         ("wsb", "ws_bridge.tools", dict(url="ws://127.0.0.1:9/nowhere")),
         ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere")),
         ("sload", "static_loader.tools", dict(root=".")),
         ("cli", "cli.tools", {}),
-        ("olla", "ollama_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
-        ("llama", "llamacpp_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
-        ("nim", "nvidia_nim_backend.tools", dict(model="m", endpoint="http://127.0.0.1:9")),
+        ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("llama", "llamacpp_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("nim", "nvidia_nim_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
         ("absent", "absent_bundle.tools", {}),
         ("dispenser", "dispenser_probe.tools", {}),
         ("plant", "plant_probe.tools", {}),
@@ -114,7 +113,7 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("user", "user_probe.tools", {}),
         ("oracle", "oracle_probe.tools", dict(lines=["the answer is 42"])),
         ("ai", "anthropic_backend.tools",
-         dict(model="stub-model", endpoint=stub_url, sampling={"x": 1, "y": None},
+         ai(model="stub-model", endpoint=stub_url, sampling={"x": 1, "y": None},
               context_async=True, context_window=CTX_WINDOW, output_reserve=CTX_RESERVE,
               can_call={"readings": "*", "totals": "*", "runner": "*",
                         "kernel_store": "*", "kernel": "*"})),
@@ -270,7 +269,7 @@ def run(ctx) -> None:
     try:
         # ══ s1 — the store first, then the roster ══
         rec.json("s1/create_store", k.create(
-            parent_id=k.root_id, handler_module="file_bridge.tools", id="store", **OPEN,
+            parent_id=k.root_id, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
             root=".fantastic", callable_by={**BASE, **cb}))
         for aid, hm, meta in agents:
             rec.json(f"s1/create_{aid}", k.create(
@@ -343,32 +342,32 @@ def run(ctx) -> None:
             {"role": "user", "content": "", "title": ""},
         ]
         rec.json("s3/seed_rows_input", seed_rows)
-        w = call(k, "kernel", {"type": "rows_write", "agent": "readings", "rows": seed_rows})
+        w = call(k, MEMORY, {"type": "append", "owner": "readings", "rows": seed_rows})
         rec.json("s3/rows_write", w)
         ids = w.get("ids") if isinstance(w, dict) and isinstance(w.get("ids"), list) else []
         if not ids:
-            raise RuntimeError(f"rows_write returned no ids: {w!r}")
-        rec.json("s3/messages_all", call(k, "kernel", {"type": "messages", "ids": ids}))
+            raise RuntimeError(f"append returned no ids: {w!r}")
+        rec.json("s3/messages_all", call(k, MEMORY, {"type": "read", "owner": "readings", "ids": ids}))
         rec.json("s3/messages_ids_as_strings",
-                 call(k, "kernel", {"type": "messages", "ids": [str(i) for i in ids]}))
-        rec.json("s3/messages_limit_str_2", call(k, "kernel", {"type": "messages", "ids": ids, "limit": "2"}))
-        rec.json("s3/messages_limit_1", call(k, "kernel", {"type": "messages", "ids": ids, "limit": 1}))
+                 call(k, MEMORY, {"type": "read", "owner": "readings", "ids": [str(i) for i in ids]}))
+        rec.json("s3/messages_limit_str_2", call(k, MEMORY, {"type": "read", "owner": "readings", "ids": ids, "limit": "2"}))
+        rec.json("s3/messages_limit_1", call(k, MEMORY, {"type": "read", "owner": "readings", "ids": ids, "limit": 1}))
         # The id shapes that are not ids: python's `int()` semantics, verbatim.
-        rec.json("s3/messages_ids_edge", call(k, "kernel", {"type": "messages", "ids": [
+        rec.json("s3/messages_ids_edge", call(k, MEMORY, {"type": "read", "owner": "readings", "ids": [
             0, -1, "007", "+5", 12345678901234567890, "²"]}))
         if len(ids) > 1:
-            rec.json("s3/messages_after_int", call(k, "kernel", {"type": "messages", "ids": ids, "after": ids[1]}))
-            rec.json("s3/messages_after_str", call(k, "kernel", {"type": "messages", "ids": ids, "after": str(ids[1])}))
+            rec.json("s3/messages_after_int", call(k, MEMORY, {"type": "read", "owner": "readings", "ids": ids, "after": ids[1]}))
+            rec.json("s3/messages_after_str", call(k, MEMORY, {"type": "read", "owner": "readings", "ids": ids, "after": str(ids[1])}))
             rec.json("s3/messages_after_limit1",
-                     call(k, "kernel", {"type": "messages", "ids": ids, "after": ids[1], "limit": 1}))
-        rec.json("s3/rows_read", call(k, "kernel", {"type": "rows_read", "agent": "readings"}))
+                     call(k, MEMORY, {"type": "read", "owner": "readings", "ids": ids, "after": ids[1], "limit": 1}))
+        rec.json("s3/rows_read", call(k, MEMORY, {"type": "read", "owner": "readings"}))
         if len(ids) > 1:
             rec.json("s3/rows_read_after_limit2",
-                     call(k, "kernel", {"type": "rows_read", "agent": "readings", "after": ids[0], "limit": 2}))
+                     call(k, MEMORY, {"type": "read", "owner": "readings", "after": ids[0], "limit": 2}))
         for raw, tag in (("\n", "newline"), ("\x1c", "fs")):
-            rec.json(f"s3/rows_read_agent_{tag}", call(k, "kernel", {"type": "rows_read", "agent": raw}))
+            rec.json(f"s3/rows_read_agent_{tag}", call(k, MEMORY, {"type": "read", "owner": raw}))
             rec.json(f"s3/rows_write_agent_{tag}",
-                     call(k, "kernel", {"type": "rows_write", "agent": raw,
+                     call(k, MEMORY, {"type": "append", "owner": raw,
                                         "rows": [{"role": "user", "content": "x"}]}))
 
         # ══ s4 — a short chain, then every AI self verb ══
@@ -427,7 +426,7 @@ def run(ctx) -> None:
         rec.json("s4/context_status", call(k, "ai", {"type": "context_status"}))
         rec.json("s4/status_noargs", call(k, "ai", {"type": "status"}))
         rec.json("s4/status_client_probe", call(k, "ai", {"type": "status", "client_id": "probe"}))
-        rec.json("s4/rows_read_ai_after_chain", call(k, "kernel", {"type": "rows_read", "agent": "ai"}))
+        rec.json("s4/rows_read_ai_after_chain", call(k, MEMORY, {"type": "read", "owner": "ai"}))
 
         # ══ s5 — one human send per tool-parse fault ══
         for case in FAULT_CASES:
@@ -446,7 +445,7 @@ def run(ctx) -> None:
         stub.responder = None
         rec.json("s4/context_status_after_recall", call(k, "ai", {"type": "context_status"}))
         rec.json("s4/history_final", call(k, "ai", {"type": "history"}))
-        rec.json("s4/rows_read_ai_final", call(k, "kernel", {"type": "rows_read", "agent": "ai"}))
+        rec.json("s4/rows_read_ai_final", call(k, MEMORY, {"type": "read", "owner": "ai"}))
 
         time.sleep(3.0)
         for verb in ("list_agents", "ps", "ledger"):

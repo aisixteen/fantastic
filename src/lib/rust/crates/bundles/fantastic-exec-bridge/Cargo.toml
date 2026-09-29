@@ -10,6 +10,8 @@ description = "Process edge of the io family — a general-purpose COMMAND runne
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
+# The one disk module — a PTY job's pasted-image scratch file goes through it.
+fantastic-file = { path = "../fantastic-file" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -22,6 +24,8 @@ fancy-regex = "0.11"
 # The job table is python's insertion-ordered `dict`: `status` lists jobs in START
 # order (A4.12), so removal must be order-preserving (`shift_remove`).
 indexmap = "2"
+# A PTY job's incremental UTF-8 decode (a char split across reads is held, not shattered).
+encoding_rs = "0.8"
 
 [dev-dependencies]
 # The ROOT LOADER bundle — tests need it registered so the root answers the

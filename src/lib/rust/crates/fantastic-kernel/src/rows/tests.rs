@@ -75,7 +75,11 @@ fn the_first_mint_reserves_a_block_and_the_bound_is_reported() {
     }
     let (n, bound) = s.mint();
     assert_eq!(n, 1 + ID_BLOCK);
-    assert_eq!(bound, Some(1 + 2 * ID_BLOCK), "a spent block reserves the next");
+    assert_eq!(
+        bound,
+        Some(1 + 2 * ID_BLOCK),
+        "a spent block reserves the next"
+    );
 }
 
 #[test]
@@ -88,7 +92,11 @@ fn restore_resumes_at_the_persisted_bound_and_never_lowers() {
     assert_eq!(s.next_id(), 5000, "never lowered");
     let t = RowStore::new();
     t.restore_counter(None);
-    assert_eq!(t.id_reserved(), 1 + ID_BLOCK, "no bound: the first block in memory");
+    assert_eq!(
+        t.id_reserved(),
+        1 + ID_BLOCK,
+        "no bound: the first block in memory"
+    );
 }
 
 #[tokio::test]

@@ -21,13 +21,6 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "responses_backend.tools"
 
-/// NO guessed host: the sentinel `reflect` shows until the record names the full
-/// `…/v1/responses` URL. `chat()` fails loud naming `endpoint` while it is unset.
-public let DEFAULT_ENDPOINT = "(no default — set the `endpoint` meta: the full …/v1/responses URL)"
-
-/// NO guessed model — python `responses_backend.provider.DEFAULT_MODEL`.
-public let DEFAULT_MODEL = "(no default — set the `model` meta)"
-
 /// The ONE variable the key is read from. No second spelling.
 public let KEY_VAR = "OPENAI_API_KEY"
 
@@ -44,7 +37,7 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     public let name = "responses_backend"
     public var verbs: [String] { AIBackend.verbNames }
 
-    private let core: AIBackend
+    let core: AIBackend
 
     public init() {
         self.core = buildAIBackend(
@@ -52,18 +45,15 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
                 kind: "responses_backend",
                 sentence:
                     "OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling).",
-                defaultModel: DEFAULT_MODEL,
-                defaultEndpoint: DEFAULT_ENDPOINT,
                 // NO reflect extras: python's binding passes no `reflect_extra`.
                 makeProvider: { agent, _, _ in
-                    // Built unconditionally from the record; the key is checked
-                    // INSIDE `chat()`, so an unwired connector reaches
+                    // `endpoint` and `model` are REQUIRED on the record; the key
+                    // is checked INSIDE `chat()`, so an unwired connector reaches
                     // `status(thinking)` and then raises — python's order.
                     .provider(
-                        ResponsesProvider(
-                            endpoint: agent.metaValue(forKey: "endpoint")?.asString
-                                ?? DEFAULT_ENDPOINT,
-                            model: agent.metaValue(forKey: "model")?.asString ?? DEFAULT_MODEL,
+                        try ResponsesProvider(
+                            endpoint: try requiredMeta(agent, "endpoint", "responses_backend"),
+                            model: try requiredMeta(agent, "model", "responses_backend"),
                             apiKey: readApiKey(),
                             maxTokens: Self.maxTokens(agent.metaValue(forKey: "max_tokens")),
                             sampling: Self.sampling(agent.metaValue(forKey: "sampling"))))
@@ -84,13 +74,8 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     ## The wire
     Stateless: every pass sends `store:false` and the whole conversation as `input` items (the system block as `instructions`) — the conversation is this agent's, never the endpoint's. The stream is read on BOTH channels: `response.reasoning_text` / `reasoning_summary_text` deltas are wrapped in `<think>…</think>` (parsed for calls, stripped before the turn is stored), `response.output_text` deltas are the output. A turn ends `completed`; one cut at `max_output_tokens` (`response.incomplete`) is a loud error on a main turn and an answer (`last_stop_reason:"max_tokens"`) on a bounded side call such as a fold summary. Sampling knobs on the record (`sampling`) merge verbatim into the request body.
 
-    ## Bare completion — the tool loop is the CALLER's
-    This backend does NOT parse tool calls and does NOT loop. `send` performs exactly ONE
-    provider pass. It NEVER sends Responses `tools` nor reads `function_call` items (one
-    arriving is a loud error); the stream's text is returned verbatim. Any tool convention
-    is the caller's — an authored agent teaches it in the prompt (via `system_prompt`),
-    reads the completion, dispatches, and feeds the result back as the next `{send, text}`
-    turn.
+    ## Bare completion + the `<call>` grammar — no native tool API
+    `send` performs exactly ONE provider pass: the stream's text is read; it never sends Responses `tools` nor reads `function_call` items (one arriving is a loud error). Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
     ## Context management — owned HERE
     The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
@@ -160,6 +145,11 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
+/// Request-body keys this provider sets itself; `sampling` may not touch them.
+let OWNED_KEYS: Set<String> = [
+    "model", "input", "instructions", "max_output_tokens", "stream", "store",
+]
+
 /// Responses-API SSE provider — Bearer auth and a bounded retry for transient
 /// GATEWAY failures (the anthropic provider's rule; nothing else is retried).
 struct ResponsesProvider: AIProvider {
@@ -170,11 +160,36 @@ struct ResponsesProvider: AIProvider {
     let maxTokens: Int64
     /// The record's `sampling`, merged VERBATIM after the fixed fields.
     let sampling: OrderedDictionary<String, JSON>
+
+    /// The keys this provider owns are refused, never silently overridden
+    /// (audit d8 — python raises the same `ValueError` in its constructor).
+    init(
+        endpoint: String, model: String, apiKey: String?, maxTokens: Int64,
+        sampling: OrderedDictionary<String, JSON>
+    ) throws(PyError) {
+        let owned = sampling.keys.filter { OWNED_KEYS.contains($0) }.sorted()
+        if !owned.isEmpty {
+            throw PyError(
+                "ValueError",
+                "responses_backend: `sampling` may not set \(owned.joined(separator: ", ")) — "
+                    + "those are the record's (`model`, `max_tokens`) or the provider's own")
+        }
+        self.endpoint = endpoint
+        self.model = model
+        self.apiKey = apiKey
+        self.maxTokens = maxTokens
+        self.sampling = sampling
+    }
     /// What the endpoint REPORTED for the last pass — the prompt size and the stop
     /// reason.
     let usage: AIUsage? = AIUsage()
 
     static let transportCodes: Set<Int> = [502, 503, 504, 520, 521, 522, 523, 524]
+
+    /// One client for every pass: connect bounded at 15 s, no read clock.
+    static let client = HTTPClient(
+        eventLoopGroupProvider: .singleton,
+        configuration: .init(timeout: .init(connect: .seconds(15))))
     static let retries = 2
     static let backoff = 1.5
 
@@ -216,7 +231,7 @@ struct ResponsesProvider: AIProvider {
                         throwing: PyError("RuntimeError", "\(KEY_VAR) not set in environment (.env)"))
                     return
                 }
-                if endpoint.isEmpty || endpoint == DEFAULT_ENDPOINT {
+                if endpoint.isEmpty {
                     continuation.finish(
                         throwing: PyError(
                             "RuntimeError",
@@ -225,7 +240,7 @@ struct ResponsesProvider: AIProvider {
                                 + "record (endpoint=...)."))
                     return
                 }
-                if model.isEmpty || model == DEFAULT_MODEL {
+                if model.isEmpty {
                     continuation.finish(
                         throwing: PyError(
                             "RuntimeError",
@@ -242,7 +257,10 @@ struct ResponsesProvider: AIProvider {
                     req.headers.add(name: "Accept", value: "text/event-stream")
                     req.body = .bytes(ByteBuffer(string: payload))
                     do {
-                        let response = try await HTTPClient.shared.execute(req, timeout: .seconds(600))
+                        // NO READ CLOCK ON THE STREAM — the turn's one bound is ai_core's
+                        // send timeout; a queued turn is not a dead one. Connect stays
+                        // finite (15 s, the client's configuration). Python d8.
+                        let response = try await Self.client.execute(req, deadline: .distantFuture)
                         let code = Int(response.status.code)
                         if code >= 400 {
                             let collected = try? await response.body.collect(upTo: 1 << 20)

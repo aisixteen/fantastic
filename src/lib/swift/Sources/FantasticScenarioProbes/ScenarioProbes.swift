@@ -534,3 +534,76 @@ public struct OracleProbe: AgentBundle {
         }
     }
 }
+
+// ── slow ────────────────────────────────────────────────────────────────────
+
+/// `slow` — work that is still IN FLIGHT when something else happens (a kernel
+/// stop, a caller's timeout, a reboot of the AI that called it), work that FAILS,
+/// work that just runs, and work that takes a stated time. `sleep` is the slow
+/// verb the parity AI paths time out on.
+///
+/// Mirrors `e2e/probes/slow_probe/tools.py` (its `_STATE` is module-wide, so the
+/// tallies here are the bundle's, not per agent).
+public struct SlowProbe: AgentBundle {
+    public let name = "slow_probe"
+    public var verbs: [String] { Array(Self.verbDocs.keys) }
+
+    static let verbDocs: OrderedDictionary<String, JSON> = [
+        "slow": .string("sleeps for an hour — in flight until cancelled"),
+        "work": .string("counts one run, returns {runs}"),
+        "fail": .string("raises — a failed execution, a dead letter"),
+        "started": .string("how many `slow` calls have started"),
+        "sleep": .string("seconds:number (req) — sleeps that long, then returns {slept}"),
+    ]
+    private let started = Counter()
+    private let runs = Counter()
+    public init() {}
+
+    public func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString {
+        case "boot", "shutdown": return nil
+        case "reflect":
+            return .object([
+                "id": .string(agentId.value),
+                "sentence": .string(
+                    "Probe work: `slow` (never finishes by itself), `work` (counts), "
+                        + "`fail` (raises), `sleep` (takes `seconds`)."),
+                "verbs": .object(Self.verbDocs),
+            ])
+        case "slow":
+            _ = started.bump()
+            try await Task.sleep(nanoseconds: 3_600_000_000_000)
+            return .object(["finished": .bool(true)])
+        case "work":
+            return .object(["runs": .integer(Int64(runs.bump()))])
+        case "fail":
+            throw PyError("RuntimeError", "slow_probe: failed on purpose")
+        case "started":
+            return .object(["started": .integer(Int64(started.value))])
+        case "sleep":
+            let seconds = payload["seconds"]
+            let secs: Double? =
+                switch seconds {
+                case .integer(let i): Double(i)
+                case .double(let d): d
+                default: nil
+                }
+            guard let secs, secs >= 0 else {
+                return .object([
+                    "error": .string("slow_probe: sleep needs seconds, a non-negative number"),
+                    "reason": .string("bad_arg"),
+                    "arg": .string("seconds"),
+                ])
+            }
+            try await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+            return .object(["slept": seconds])
+        default:
+            return .object([
+                "error": .string("slow_probe: unknown verb \(pyRepr(payload["type"]))"),
+                "reason": .string("unhandled"),
+            ])
+        }
+    }
+}
+
+public let SLOW_MODULE = "slow_probe.tools"

@@ -34,8 +34,7 @@ BUDGET_FLOOR = 256  # never project to a budget below this
 
 def estimate_one(message: dict) -> int:
     """Rough token estimate for ONE message — counts the SERIALIZED form, because the
-    role + content + tool_calls + role:tool replies + JSON envelope all consume real
-    context (and dominate agentic turns)."""
+    role + content + JSON envelope all consume real context."""
     n = len(json.dumps(message, default=str))
     return (n + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
 

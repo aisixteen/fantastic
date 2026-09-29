@@ -3,7 +3,7 @@
 Each egress rule is its own module here; this package registers them BY NAME in
 `REGISTRY`. `forward` resolves a leg's rule via `resolve_egress(record)` and stamps
 its `credential()` onto the outbound frame envelope. Inbound-only policy names
-(`allow_all` / `deny_inbound`) map to `Silent` — they present nothing — so the legacy
+(`allow_all` / `deny_inbound`) map to `Silent` — they present nothing.
 """
 
 from __future__ import annotations

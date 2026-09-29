@@ -16,7 +16,9 @@
 //   client → server : {"type":"state_subscribe"|"state_unsubscribe"}
 //   server → client : {"type":"reply",  "id":"<id>", "data":{...}}
 //   server → client : {"type":"error",  "id":"<id>", ...denial}
-//   server → client : {"type":"event",  "payload":{...}}   (watcher fanout)
+//   server → client : {"type":"event",  "src":…, "payload":{...}}  (a watched agent;
+//                     `src` = the name the client watched)
+//                     {"type":"event",  "payload":{...}}   (emitted to this connection)
 //   server → client : {"type":"state_snapshot"|"state_event", ...}
 //
 // Each connection auto-watches the URL-path agent (`hostId`) onto a synthetic
@@ -96,7 +98,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// Only a watch that REALLY registered is recorded (see `watchPath`).
     /// Mutated ONLY on the event loop (handlerAdded / channelRead / teardown all
     /// run there).
-    private var watching: OrderedDictionary<String, AgentId> = [:]
+    private var watching: OrderedDictionary<String, WatchEntry> = [:]
+    /// EVERY READER THIS SOCKET DRAINS — its own inbox (events emitted to the
+    /// connection, no `src`) and ONE PER WATCH (so each mirrored event goes out
+    /// stamped with the `src` it came from; a bridge on the other end re-emits
+    /// only what it subscribed to). A reply flushes them ALL first.
+    private let readers = ReaderSet()
     /// The kernel task ids of the two REGISTERED loops python spawns on the HOST
     /// agent — `ws_drain` (the inbox pump) and one `ws_call` per dispatching
     /// frame. A bare `Task` was in no `ps` row and no `cancel` reached it.
@@ -131,13 +138,14 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         let hostAgent = AgentId(hostId)
         let inbox = kernel.ensureInbox(clientId)
         self.inbox = inbox
+        readers.add(nil, inbox)
         // THE CONNECT-TIME AUTO-WATCH IS GATED (C41). Only mirror the host's
         // inbox when THIS leg's rule admits an inbound `watch` with NO
         // credential (an open `allow_all` leg). On a sealed or credentialed leg
         // a client that merely completed the handshake would otherwise receive
         // every event the host sees without ever passing the gate — measured,
         // the sealed swift socket delivered term boot/output/write/stop events
-        // python never sent. It goes through THE ONE WATCH PATH, so an alias
+        // python never sent. It goes through THE ONE WATCH PATH, so the `kernel` address
         // resolves and a refusal is an `error` frame, never silence.
         if gateWebLeg(
             kernel: kernel, legId: legId, kind: "watch", target: hostId, verb: "watch",
@@ -157,7 +165,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         drainTask = KernelTaskLocals.$currentTask.withValue(bootParent) {
             kernel.spawnTask(agent: hostAgent, verb: "ws_drain", keepalive: true) {
                 while true {
-                    outLock.sync { Self.flushEvents(inbox: inbox, channel: channel) }
+                    outLock.sync { Self.flushEvents(inbox: inbox, channel: channel, src: nil) }
                     if await inbox.ready() == false { return }
                 }
             }
@@ -211,14 +219,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         callTasks.removeAll()
         let drain = drainTask
         drainTask = nil
-        let watched = Array(watching.values)
+        let watched = Array(watching)
         watching.removeAll()
         let tokens = stateTokens
         stateTokens.removeAll()
         for t in tokens { kernel.unsubscribe(t) }
-        for aid in watched {
-            kernel.unwatch(src: aid, watcher: clientId)
-        }
+        for (src, entry) in watched { dropWatch(src, entry) }
         let kernel = self.kernel
         let clientId = self.clientId
         Task {
@@ -363,12 +369,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// frame both come here. FAIL LOUD: a name that resolves to no agent, or a
     /// gate refusal, is answered with an `error` frame and NOT recorded as
     /// watched. (The connect-time watch used to discard the result and mark the
-    /// name watched anyway; a name the kernel's `watch` did not resolve — an
-    /// alias like `exec` for `exec_real` — mirrored nothing, said nothing, and
-    /// the explicit watch that followed was then skipped as a duplicate.)
+    /// name watched anyway; a name the kernel's `watch` did not resolve mirrored
+    /// nothing, said nothing, and the explicit watch that followed was then
+    /// skipped as a duplicate.)
     ///
-    /// The name resolves the way `send` resolves a target (`kernel`, a declared
-    /// `alias`, a literal id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
+    /// The name resolves the way `send` resolves a target (`kernel` or a literal
+    /// id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
     /// sees a real caller: without it `currentSender` is nil, the kernel reads the
     /// watch as an OPERATOR's, and the two-sided gate never runs — which is
     /// exactly how a leg granted only `assistant:[send]` could mirror any agent's
@@ -380,7 +386,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         guard let target = kernel.resolveAgent(src) else {
             let r = Refusal.make(
                 Refusal.unknownAgent,
-                "watch: no agent \(pyRepr(src)) (an id, a declared alias, or `kernel`)",
+                "watch: no agent \(pyRepr(src)) (an id, or `kernel`)",
                 extra: [("src", .string(src))])
             outLock.sync {
                 Self.writeText(
@@ -388,17 +394,42 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             return
         }
+        // THIS WATCH'S OWN READER — registered before the watch asks for one.
+        let reader = AgentId("\(clientId.value)>\(target.id.value)")
+        let rInbox = kernel.ensureInbox(reader)
         let denial = KernelTaskLocals.$currentSender.withValue(legId) {
-            kernel.watch(src: target.id, watcher: clientId)
+            kernel.watch(src: target.id, watcher: reader)
         }
         if let d = denial {
+            kernel.removeInbox(reader)
             outLock.sync {
                 Self.writeText(
                     channel: channel, text: Codec.encodeText(Self.errorFrame(id: frameId, denial: d)))
             }
             return
         }
-        watching[src] = target.id
+        let outLock = self.outLock
+        let task = KernelTaskLocals.$currentTask.withValue(bootParent) {
+            kernel.spawnTask(agent: AgentId(hostId), verb: "ws_drain", keepalive: true) {
+                while true {
+                    outLock.sync { Self.flushEvents(inbox: rInbox, channel: channel, src: src) }
+                    if await rInbox.ready() == false { return }
+                }
+            }
+        }
+        readers.add(src, rInbox)
+        watching[src] = WatchEntry(target: target.id, reader: reader, task: task)
+    }
+
+    /// Give a watch back: unwatch, stop its drain, DROP ITS INBOX, forget the reader.
+    private func dropWatch(_ src: String, _ entry: WatchEntry) {
+        kernel.unwatch(src: entry.target, watcher: entry.reader)
+        readers.remove(src)
+        let kernel = self.kernel
+        Task {
+            _ = await kernel.cancelTask(entry.task)
+            kernel.removeInbox(entry.reader)
+        }
     }
 
     private static func errorFrame(id: JSON, denial: JSON) -> JSON {
@@ -490,7 +521,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             let body = inbound.body
             // The queue this dispatch's own fanout fills, and the lock that
             // keeps the flush and the reply one step.
-            guard let inbox = self.inbox else { return }
+            guard self.inbox != nil else { return }
+            let readers = self.readers
             let outLock = self.outLock
             trackCall(channel: channel) {
                 // THE FRAME ID IS THE EXECUTION ID. One id space: the same id
@@ -531,7 +563,9 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 // so the drain cannot be mid-frame — and only then write the
                 // reply. One order, one wire.
                 outLock.sync {
-                    Self.flushEvents(inbox: inbox, channel: channel)
+                    for (src, rInbox) in readers.snapshot() {
+                        Self.flushEvents(inbox: rInbox, channel: channel, src: src)
+                    }
                     Self.sendEnvelope(
                         channel: channel, envelope: env, body: out.body,
                         path: Self.replyBinaryPath)
@@ -574,8 +608,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             // NO GATE — python gates the four inbound actions and leaves
             // `unwatch` (a client giving something up) ungated.
             guard let src = frame["src"].asString, !src.isEmpty else { return }
-            if let aid = watching.removeValue(forKey: src) {
-                kernel.unwatch(src: aid, watcher: clientId)
+            if let entry = watching.removeValue(forKey: src) {
+                dropWatch(src, entry)
             }
         case "state_subscribe":
             // A SEALED LEG LEAKS NO TELEMETRY, not merely no dispatch.
@@ -657,9 +691,9 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// Forward every payload ALREADY QUEUED for this client, oldest first.
     /// Non-blocking: it stops at the first empty take, never waits. The caller
     /// holds `outLock`, so no other writer of this connection can interleave.
-    static func flushEvents(inbox: Inbox, channel: Channel) {
+    static func flushEvents(inbox: Inbox, channel: Channel, src: String?) {
         while let item = inbox.tryTake() {
-            writeEvent(item: item, channel: channel)
+            writeEvent(item: item, channel: channel, src: src)
         }
     }
 
@@ -670,8 +704,11 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// `[4B len | head with _binary_path | body]`. The swift carrier keeps the
     /// body beside the payload, so the path is the item's own path nested under
     /// this envelope's `payload`.
-    static func writeEvent(item: InboxItem, channel: Channel) {
-        let frame: JSON = .object(["type": .string("event"), "payload": item.payload])
+    static func writeEvent(item: InboxItem, channel: Channel, src: String?) {
+        let frame: JSON =
+            src.map {
+                .object(["type": .string("event"), "src": .string($0), "payload": item.payload])
+            } ?? .object(["type": .string("event"), "payload": item.payload])
         guard let body = item.body else {
             writeText(channel: channel, text: Codec.encodeText(frame))
             return
@@ -742,4 +779,33 @@ final class OutboundLock: @unchecked Sendable {
 /// One `TaskId`, written by the spawner and read by the task it spawned.
 final class TaskIdSlot: @unchecked Sendable {
     var value: TaskId?
+}
+
+/// One registered watch — python's `watching[src] = (aid, reader, drain)`.
+struct WatchEntry {
+    let target: AgentId
+    let reader: AgentId
+    let task: TaskId
+}
+
+/// The readers a socket drains, shared with its `ws_call` tasks (which flush them
+/// all before a reply) — hence the lock.
+final class ReaderSet: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [(String?, Inbox)] = []
+    func add(_ src: String?, _ inbox: Inbox) {
+        lock.lock()
+        items.append((src, inbox))
+        lock.unlock()
+    }
+    func remove(_ src: String) {
+        lock.lock()
+        items.removeAll { $0.0 == src }
+        lock.unlock()
+    }
+    func snapshot() -> [(String?, Inbox)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return items
+    }
 }

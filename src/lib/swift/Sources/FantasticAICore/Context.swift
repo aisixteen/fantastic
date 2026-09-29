@@ -38,8 +38,7 @@ public enum AIContext {
     public static let noticeEnvelopeReserve: Int64 = 160
 
     /// Rough token estimate for ONE message — counts the SERIALIZED form,
-    /// because role + content + tool_calls + the JSON envelope all consume
-    /// real context.
+    /// because role + content + the JSON envelope all consume real context.
     ///
     /// SERIALIZED THE WAY PYTHON SERIALIZES: `json.dumps(message, default=str)`
     /// — `', '`/`': '` separators and `ensure_ascii`, so `—` costs six chars, not

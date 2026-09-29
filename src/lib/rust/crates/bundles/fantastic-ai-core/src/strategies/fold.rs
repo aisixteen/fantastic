@@ -99,7 +99,8 @@ pub const SUMMARY_FLOOR: i64 = 48;
 pub const THINK_ALLOWANCE: i64 = 1024;
 
 /// The fold ask — python `FOLD_PROMPT`, `{budget}` filled in.
-pub const FOLD_PROMPT: &str = "FOLD this finished piece of work in AT MOST ~{budget} tokens. First line: a \
+pub const FOLD_PROMPT: &str =
+    "FOLD this finished piece of work in AT MOST ~{budget} tokens. First line: a \
 one-sentence title (what it was and how it ended). Then a blank line. Then these \
 sections, each one line or a few, in this order, omitting none (write `none`):\n\
 ASKED: what was asked.\n\
@@ -111,12 +112,14 @@ If the piece contains earlier fold summaries, MERGE them — on a conflict the n
 statement wins, and unfinished work is carried forward. Output only that.\n\n";
 
 /// The one re-summarise for an OVERSIZED summary — python `RESUMMARIZE`.
-pub const RESUMMARIZE: &str = "Your summary below is ~{got} tokens; the budget is {budget}. Rewrite it to fit — \
+pub const RESUMMARIZE: &str =
+    "Your summary below is ~{got} tokens; the budget is {budget}. Rewrite it to fit — \
 keep the title line, the reasons, the binding rules and every quoted error; drop \
 narration. Output only the summary.\n\n";
 
 /// The one re-summarise for a CUT summary — python `RESUMMARIZE_CUT`.
-pub const RESUMMARIZE_CUT: &str = "Your summary below was CUT OFF at the budget ({budget} tokens) before it ended. \
+pub const RESUMMARIZE_CUT: &str =
+    "Your summary below was CUT OFF at the budget ({budget} tokens) before it ended. \
 Write it again, shorter, so it ENDS within the budget — keep the title line, the \
 reasons, the binding rules and every quoted error; drop narration. Output only \
 the summary.\n\n";
@@ -219,7 +222,8 @@ pub fn mechanical_index(rows: &[Value], chain: &[usize]) -> String {
 pub fn summary_budget(ctx_budget: i64, rows: &[Value], chain: &[usize]) -> i64 {
     let span: Vec<Value> = chain.iter().map(|&i| rows[i].clone()).collect();
     let span = estimate_tokens(&span);
-    SUMMARY_FLOOR.max(((span as f64 * SUMMARY_SHARE) as i64).min((ctx_budget as f64 * WINDOW_SHARE) as i64))
+    SUMMARY_FLOOR
+        .max(((span as f64 * SUMMARY_SHARE) as i64).min((ctx_budget as f64 * WINDOW_SHARE) as i64))
 }
 
 /// `(title, body)` off a summary's text — `None` when it is no summary (empty, or
@@ -509,9 +513,11 @@ mod tests {
                 a.push((max_tokens, ask));
                 a.len()
             };
-            self.report.lock().unwrap().stop_reason = (n <= self.cuts).then(|| "max_tokens".to_string());
+            self.report.lock().unwrap().stop_reason =
+                (n <= self.cuts).then(|| "max_tokens".to_string());
             let text = self.answers.lock().unwrap().pop().unwrap_or_default();
-            let ev: Vec<Result<ProviderEvent, ProviderError>> = vec![Ok(ProviderEvent::Token(text))];
+            let ev: Vec<Result<ProviderEvent, ProviderError>> =
+                vec![Ok(ProviderEvent::Token(text))];
             Ok(Box::pin(futures_util::stream::iter(ev)))
         }
         fn model(&self) -> String {
@@ -530,7 +536,8 @@ mod tests {
     }
 
     fn rows6() -> Vec<Value> {
-        let mut rows = vec![json!({"role": "user", "id": 1, "content": "the goal: write report.md"})];
+        let mut rows =
+            vec![json!({"role": "user", "id": 1, "content": "the goal: write report.md"})];
         for i in 0..6 {
             rows.push(json!({"role": "assistant", "id": 10 + i, "content": "x".repeat(2000)}));
         }
@@ -578,7 +585,10 @@ mod tests {
         let p = Scripted::new(&[&big, &big], 0);
         let dp: Arc<dyn Provider> = p.clone();
         let out = summarize(&dp, 4000, &rows6(), &[1, 2, 3, 4, 5], 0).await;
-        assert!(out.is_none(), "still over budget after the retry — nothing is folded");
+        assert!(
+            out.is_none(),
+            "still over budget after the retry — nothing is folded"
+        );
         let asked = p.asked.lock().unwrap();
         assert_eq!(asked.len(), 2);
         assert!(asked[1].1.contains("Rewrite it to fit"));
@@ -602,7 +612,9 @@ mod tests {
         let p = Scripted::new(&["TITLE\n\npartial", "TITLE\n\nwhole summary"], 1);
         let dp: Arc<dyn Provider> = p.clone();
         let rows = rows6();
-        let (_, body, _) = summarize(&dp, 4000, &rows, &[1, 2, 3, 4, 5], 0).await.unwrap();
+        let (_, body, _) = summarize(&dp, 4000, &rows, &[1, 2, 3, 4, 5], 0)
+            .await
+            .unwrap();
         assert_eq!(body, "whole summary");
         let want = summary_budget(4000, &rows, &[1, 2, 3, 4, 5]);
         let bound = want + THINK_ALLOWANCE; // the thought counts against max_tokens
@@ -613,7 +625,9 @@ mod tests {
     #[tokio::test]
     async fn a_summary_cut_twice_is_refused_nothing_folded() {
         let dp: Arc<dyn Provider> = Scripted::new(&["TITLE\n\npartial", "TITLE\n\npartial"], 2);
-        assert!(summarize(&dp, 4000, &rows6(), &[1, 2, 3, 4, 5], 0).await.is_none());
+        assert!(summarize(&dp, 4000, &rows6(), &[1, 2, 3, 4, 5], 0)
+            .await
+            .is_none());
     }
 
     #[test]
@@ -624,9 +638,15 @@ mod tests {
             json!({"role": "user", "id": 3, "content": "[reply to 9 · notes read]\nbody"}),
         ];
         let idx = mechanical_index(&rows, &[0, 1, 2]);
-        assert!(idx.contains("filler_3.txt") && idx.contains("notes/a.md"), "{idx}");
+        assert!(
+            idx.contains("filler_3.txt") && idx.contains("notes/a.md"),
+            "{idx}"
+        );
         assert!(idx.contains("deadbeef99"));
         assert!(idx.contains("user said: please check filler_3.txt for deadbeef99"));
-        assert!(!idx.contains("[reply to"), "runtime lines are not the user's words");
+        assert!(
+            !idx.contains("[reply to"),
+            "runtime lines are not the user's words"
+        );
     }
 }

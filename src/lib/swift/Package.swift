@@ -20,9 +20,9 @@
 // FantasticKernelEmbedded is the multi-platform sandbox-safe tier
 // (iOS, iPadOS, visionOS, tvOS, watchOS, sandboxed macOS).
 // FantasticKernelFull is the macOS-only Pro tier and additionally
-// pulls in the subprocess-using bundles (terminal_backend,
-// exec_bridge) which are gated by `#if os(macOS)` inside the kernel
-// itself.
+// pulls in the subprocess-using bundle (exec_bridge — commands and PTY
+// jobs, the one spawner) which is gated by `#if os(macOS)` inside the
+// kernel itself.
 
 import PackageDescription
 
@@ -45,7 +45,6 @@ let package = Package(
         .library(name: "FantasticBundles", targets: [
             "FantasticKernelState",
             "FantasticFile",
-            "FantasticTextFile",
             "FantasticScheduler",
             "FantasticCliBundle",
             "FantasticKernelBridge",
@@ -145,11 +144,6 @@ let package = Package(
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
-            name: "FantasticTextFile",
-            dependencies: ["FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
-        ),
-        .target(
             name: "FantasticScheduler",
             // OrderedCollections: `validateMeta`'s signature names
             // `OrderedDictionary<String, JSON>` (the record shape).
@@ -205,9 +199,8 @@ let package = Package(
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
             ],
             resources: [
-                // python `web/templates/index.html` + `web/favicon.png`, byte
-                // for byte — the only static bytes the host serves.
-                .copy("Resources/index.html"),
+                // python `web/favicon.png`, byte for byte — the only static
+                // bytes the host serves (it renders nothing of its own).
                 .copy("Resources/favicon.png"),
             ]
         ),
@@ -293,13 +286,7 @@ let package = Package(
         // ── The process edge (macOS only) ────────────────────────
         .target(
             name: "FantasticExecBridge",
-            dependencies: ["FantasticKernel", "FantasticIoBridge", "FantasticJSON"]
-        ),
-        .target(
-            name: "FantasticTerminalBackend",
-            // `fs` is the one disk surface: the pasted-image scratch file is
-            // written and dropped through it, as python's terminal does.
-            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticFile"]
+            dependencies: ["FantasticKernel", "FantasticIoBridge", "FantasticJSON", "FantasticFile"]
         ),
 
         // ── Startup layer (Phase 8A) ─────────────────────────────
@@ -320,13 +307,12 @@ let package = Package(
                 "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticTextFile",
                 "FantasticRamStore",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
                 "FantasticResponsesBackend",
                 "FantasticLlamaCppBackend",
-                "FantasticExecBridge", "FantasticTerminalBackend",
+                "FantasticExecBridge",
             ]
         ),
         .testTarget(
@@ -369,7 +355,7 @@ let package = Package(
             dependencies: [
                 "FantasticJSON", "FantasticKernel",
                 "FantasticKernelStartup",
-                "FantasticExecBridge", "FantasticTerminalBackend",
+                "FantasticExecBridge",
             ]
         ),
 
@@ -424,7 +410,7 @@ let package = Package(
                 "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticTextFile", "FantasticKernelStartup", "FantasticRamStore",
+                "FantasticKernelStartup", "FantasticRamStore",
                 // The scenario fixtures are unit-tested here; only their
                 // REGISTRATION is behind -DSCENARIO_PROBES.
                 "FantasticScenarioProbes",

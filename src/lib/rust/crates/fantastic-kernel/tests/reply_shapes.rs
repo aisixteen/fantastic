@@ -175,7 +175,7 @@ async fn a_kernel_verb_at_a_child_says_pythons_words_and_names_the_verb() {
     );
     assert_eq!(
         r["hint"],
-        "address the kernel root (alias 'kernel'); name the agent you mean in \
+        "address the kernel root ('kernel'); name the agent you mean in \
          `parent_id` / `id`",
         "{r}"
     );

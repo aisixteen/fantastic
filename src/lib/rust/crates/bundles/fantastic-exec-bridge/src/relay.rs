@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use fantastic_bundle::{py_str, py_truthy};
+use fantastic_bundle::py_truthy;
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame, set_path};
 use fantastic_kernel::call_guard::guard_call_stack;
 use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
@@ -132,7 +132,7 @@ async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
 /// tool does not receive its own `progress`/`job_started`/`job_done` as inbox mail.
 fn inbox_framer(p: &Value) -> Option<Value> {
     match p.get("type").and_then(Value::as_str) {
-        Some("progress") | Some("job_started") | Some("job_done") => None,
+        Some("progress") | Some("output") | Some("job_started") | Some("job_done") => None,
         _ => Some(json!({"op": "inbox", "payload": p})),
     }
 }
@@ -238,17 +238,12 @@ pub async fn serve(
                 }
             }
             Some("emit") => {
-                // py `m.get("target") or owner_id`: a FALSY target is the one-arg
-                // `emit(payload)` form and lands on the owner.
-                let tgt = match m.get("target").filter(|v| py_truthy(v)) {
-                    Some(t) => AgentId::from(py_str(t).as_str()),
-                    None => owner.clone(),
-                };
+                // A program emits on its OWNER agent — the one it runs as.
                 let payload = match m.get("payload").filter(|v| py_truthy(v)) {
                     Some(p) => p.clone(),
                     None => json!({}),
                 };
-                kernel.emit(&tgt, payload).await;
+                kernel.emit(&owner, payload).await;
             }
             Some("watch") => {
                 let Some(src) = m.get("src").and_then(Value::as_str).map(AgentId::from) else {

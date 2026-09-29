@@ -348,17 +348,18 @@ test("WITH the grant the call is forwarded, carrying the agent as its caller", a
   bridge.close();
 });
 
-test("a PRIVILEGED verb to a host agent is never covered by a `*` grant", async () => {
+test("a privileged verb to a host agent crosses only on a NAMED grant (a12)", async () => {
   const { k, bridge, frames } = hostKernel();
-  k.register(new Agent({ id: "view", parentId: "kernel_state", meta: { can_call: { host_root: "*" } } }));
-  for (const verb of ["create_agent", "update_agent", "delete_agent", "state_subscribe", "rows_read", "rows_write"]) {
+  // no grant naming host_root: refused locally, nothing leaves the kernel
+  k.register(new Agent({ id: "view", parentId: "kernel_state" }));
+  for (const verb of ["create_agent", "update_agent", "delete_agent", "state_subscribe", "allow", "disallow"]) {
     const [out] = await k.scopedFor("view", null).send([{ target: "host_root", payload: { type: verb } }]);
     assert.equal((out!.result as Payload)["side"], "egress", verb);
   }
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(frames(), [], "no privileged call left the kernel");
-  // an explicit NAME covers it
-  k.updateMeta("view", { can_call: { host_root: ["delete_agent"] } });
+  // a NAMED id's `*` is the operator's own statement — it covers the verb
+  k.updateMeta("view", { can_call: { host_root: "*" } });
   void k.scopedFor("view", null).send([{ target: "host_root", payload: { type: "delete_agent", id: "x" } }]).catch(() => undefined);
   await until(() => frames().length === 1);
   assert.equal(frames()[0]!["target"], "host_root");

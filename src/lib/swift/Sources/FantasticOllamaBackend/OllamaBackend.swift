@@ -18,14 +18,6 @@ import NIOCore
 
 public let HANDLER_MODULE = "ollama_backend.tools"
 
-/// NO guessy default: this connector never names a model that reaches the
-/// network. The sentinel exists ONLY so `reflect` can say what is true.
-/// (py-canonical `ollama_backend.provider.DEFAULT_MODEL`.)
-public let DEFAULT_MODEL = "(no default — set the `model` meta)"
-
-/// Where a local ollama listens by default (py `ollama_backend.provider`).
-public let DEFAULT_ENDPOINT = "http://localhost:11434"
-
 public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     public let name = "ollama_backend"
     public var verbs: [String] { AIBackend.verbNames }
@@ -37,8 +29,6 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
             AIBackendConfig(
                 kind: "ollama_backend",
                 sentence: "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
-                defaultModel: DEFAULT_MODEL,
-                defaultEndpoint: DEFAULT_ENDPOINT,
                 // The SAMPLING KNOBS, in python's order — `model` and `endpoint`
                 // are base fields now. `temperature` falls back to the provider's
                 // 0.3; the rest are null unless the record sets them.
@@ -51,15 +41,12 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                     ]
                 },
                 makeProvider: { agent, _, _ in
-                    // AN UNSET MODEL IS NOT A REFUSAL BEFORE THE TURN. python
-                    // builds the provider with the SENTINEL and raises inside
-                    // `chat()`, so the turn reaches `status(thinking)` and the
-                    // failure is the provider's, with python's own wording —
-                    // swift refused early with a sentence of its own invention.
+                    // `endpoint` and `model` are REQUIRED on the record — nothing
+                    // is guessed; an absent one fails the turn loud, naming it.
                     .provider(
                         OllamaProvider(
-                            endpoint: Self.endpoint(agent: agent),
-                            model: Self.model(agent: agent),
+                            endpoint: try requiredMeta(agent, "endpoint", "ollama_backend"),
+                            model: try requiredMeta(agent, "model", "ollama_backend"),
                             temperature: Self.temperature(agent: agent),
                             numCtx: Self.numCtx(agent: agent),
                             numPredict: Self.numPredict(agent: agent),
@@ -87,13 +74,8 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     model from the agent record) and `ai_core.build()` wires the rest into
     `(VERBS, handler)`.
 
-    ## Bare completion — the tool loop is the CALLER's
-    This backend does NOT parse tool calls and does NOT loop. `send` performs exactly
-    ONE provider pass: it streams the model's pure text and returns it. Any tool
-    convention is the caller's: an authored agent teaches its convention in the
-    prompt (via `system_prompt`), reads the completion, dispatches, and feeds the
-    result back as the next `{send, text}` turn. The `OllamaProvider` never receives a
-    `tools` array and no `message.tool_calls` are read — model-agnostic.
+    ## Bare completion + the `<call>` grammar — no native tool API
+    `send` performs exactly ONE provider pass: the `OllamaProvider` streams the model's text and never receives a `tools` array nor reads `message.tool_calls`. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
     ## Context management — owned HERE
     The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
@@ -148,21 +130,6 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
 
     // MARK: - meta helpers
 
-    /// The record's `endpoint` — where ollama listens, with `/api/chat` appended
-    /// by the provider (python `rec.get("endpoint", DEFAULT_ENDPOINT)`). It used
-    /// to read a `host` meta and ignore `endpoint` entirely, so a record that
-    /// pointed python at another box left swift talking to 127.0.0.1.
-    fileprivate static func endpoint(agent: Agent) -> String {
-        agent.metaValue(forKey: "endpoint")?.asString ?? DEFAULT_ENDPOINT
-    }
-
-    /// The model id from the record's `model` meta, or the SENTINEL. No default
-    /// is guessed: a bad guess reaches the network (a wrong model 404s), and the
-    /// sentinel is what `chat()` fails loud on.
-    fileprivate static func model(agent: Agent) -> String {
-        agent.metaValue(forKey: "model")?.asString ?? DEFAULT_MODEL
-    }
-
     // Sampling knobs (parity with the rust/python ollama backends). ollama's own
     // defaults (temperature 0.8, num_ctx 4096) are wrong for an agentic backend;
     // temperature defaults LOW (0.3), the rest pass through only when set.
@@ -211,7 +178,7 @@ struct OllamaProvider: AIProvider {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 // FAILS LOUD, INSIDE THE TURN — python's wording, verbatim.
-                if model.isEmpty || model == DEFAULT_MODEL {
+                if model.isEmpty {
                     continuation.finish(
                         throwing: PyError(
                             "RuntimeError",

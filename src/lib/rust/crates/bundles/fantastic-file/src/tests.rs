@@ -47,7 +47,13 @@ fn resolve_refuses_absolute_path() {
     let err = fs::resolve(tmp.path(), "/etc/passwd").unwrap_err();
     assert_eq!(err, "fs: path '/etc/passwd' escapes root");
     // The agent layer answers the same shape with `bad_arg` BEFORE reaching fs.
-    let r = read_stream_reply(&fb(), &at(tmp.path()), &json!({"path": "/etc/passwd"}), true).0;
+    let r = read_stream_reply(
+        &fb(),
+        &at(tmp.path()),
+        &json!({"path": "/etc/passwd"}),
+        true,
+    )
+    .0;
     assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "path");
 }
@@ -231,13 +237,19 @@ use serde_json::Map as JsonMap;
 /// A kernel with ONE open file_bridge (`fb`) rooted at `tmp`'s served dir —
 /// the running dir is `tmp` (root loader at `tmp/.fantastic`).
 async fn mk_kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
-    mk_kernel_with(tmp, json!({"ingress_rule": "allow_all_ingress"})).await
+    mk_kernel_with(
+        tmp,
+        json!({"ingress_rule": "allow_all_ingress", "allow": ["."]}),
+    )
+    .await
 }
 
 /// …with extra record fields (posture, `readonly`, a different `root`).
 async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
-    kernel.bundles.register(HANDLER_MODULE, FileBundle);
+    kernel
+        .bundles
+        .register(HANDLER_MODULE, FileBundle::default());
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -325,7 +337,15 @@ fn text_read_stream_reply_key_order() {
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["path", "offset", "bytes", "next_offset", "eof", "size", "origin"]
+        [
+            "path",
+            "offset",
+            "bytes",
+            "next_offset",
+            "eof",
+            "size",
+            "origin"
+        ]
     );
     assert_eq!(m["bytes"], "abc");
     assert_eq!(
@@ -341,7 +361,15 @@ fn text_read_stream_reply_key_order() {
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["path", "offset", "bytes", "next_offset", "eof", "size", "origin"]
+        [
+            "path",
+            "offset",
+            "bytes",
+            "next_offset",
+            "eof",
+            "size",
+            "origin"
+        ]
     );
     assert_eq!(m["bytes"], Value::Null);
     assert_eq!(body, Some(b"abc".to_vec()));
@@ -361,7 +389,12 @@ fn huge_length_reads_only_what_exists() {
     );
     assert_eq!(b, Some(b"abc".to_vec()), "{m}");
     assert_eq!(m["eof"], true);
-    let (m, b) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt", "length": i64::MAX}), false);
+    let (m, b) = read_stream_reply(
+        &fb(),
+        &root,
+        &json!({"path": "a.txt", "length": i64::MAX}),
+        false,
+    );
     assert_eq!(b, Some(b"abc".to_vec()), "{m}");
 }
 
@@ -379,7 +412,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     assert_eq!(m["reason"], "transport_error", "{m}");
     assert_eq!(m["error"], "fs: path 'docs/secret.txt' escapes root");
     assert_eq!(b, None);
-    let l = list_reply(&fb(), &r, &json!({"path": "docs"}), &[]);
+    let l = list_reply(&fb(), &r, &json!({"path": "docs"}));
     assert_eq!(l["reason"], "transport_error", "{l}");
     let w = write_stream_reply(&r, &json!({"path": "docs/new.txt"}), Some(b"x"), false);
     assert_eq!(w["reason"], "transport_error", "{w}");
@@ -571,7 +604,7 @@ fn absolute_path_is_refused_with_bad_arg() {
     let replies = [
         read_stream_reply(&fb(), &r, &json!({"path": "/README.md"}), true).0,
         write_stream_reply(&r, &json!({"path": "/x"}), Some(b"b"), false),
-        list_reply(&fb(), &r, &json!({"path": "/"}), &[]),
+        list_reply(&fb(), &r, &json!({"path": "/"})),
         delete_reply(&r, &json!({"path": "/README.md"}), false),
         mkdir_reply(&r, &json!({"path": "/x"}), false),
         rename_reply(
@@ -597,11 +630,11 @@ fn refusal_texts_use_python_repr() {
     let root = served(&tmp);
     std::fs::write(root.join("f.txt"), b"f").unwrap();
     let r = at(&root);
-    let reply = list_reply(&fb(), &r, &json!({"path": "nope"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "nope"}));
     assert_eq!(reply["error"], "path 'nope' does not exist");
     assert_eq!(reply["reason"], "not_found");
     assert_eq!(reply["path"], "nope");
-    let reply = list_reply(&fb(), &r, &json!({"path": "f.txt"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "f.txt"}));
     assert_eq!(
         reply["error"],
         "list: path must be a directory; 'f.txt' is not one"
@@ -616,7 +649,7 @@ fn refusal_texts_use_python_repr() {
     assert_eq!(reply["error"], "file 'nope' not found");
     assert_eq!(reply["reason"], "not_found");
     // a path holding a quote quotes python's way
-    let reply = list_reply(&fb(), &r, &json!({"path": "it's"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "it's"}));
     assert_eq!(reply["error"], "path \"it's\" does not exist");
 }
 
@@ -631,7 +664,7 @@ fn list_paths_are_relative_to_resolved_root() {
     std::fs::write(root.join("x/a.txt"), b"ab").unwrap();
     std::os::unix::fs::symlink(root.join("x/gone.txt"), root.join("x/dangling")).unwrap();
     let r = at(&root);
-    let reply = list_reply(&fb(), &r, &json!({"path": "sub/../x"}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "sub/../x"}));
     let files = reply["files"].as_array().unwrap();
     assert_eq!(
         files
@@ -642,7 +675,7 @@ fn list_paths_are_relative_to_resolved_root() {
     );
     assert_eq!(files[0]["size"], 2);
     assert_eq!(files[1]["size"], -1, "a dangling link stats as -1");
-    let reply = list_reply(&fb(), &r, &json!({"path": "."}), &[]);
+    let reply = list_reply(&fb(), &r, &json!({"path": "."}));
     let names: Vec<&str> = reply["files"]
         .as_array()
         .unwrap()
@@ -693,21 +726,9 @@ fn root_ok(p: &Path) -> Result<PathBuf, String> {
 }
 
 #[test]
-fn hidden_count_is_list_length() {
-    // A2.14 — the STORED list's length (duplicates and non-strings counted);
-    // only the strings filter a listing.
-    let mut meta = Map::new();
-    meta.insert("hidden".into(), json!([".git", ".git", 7]));
-    assert_eq!(hidden_list(&meta).len(), 3);
-    assert!(is_hidden(".git", &hidden_list(&meta)));
-    assert!(!is_hidden("7", &hidden_list(&meta)));
-    assert_eq!(hidden_list(&Map::new()).len(), DEFAULT_HIDDEN.len());
-}
-
-#[test]
 fn auth_stem_is_not_judged_as_an_ingress_rule() {
     // A2.18 — python judges only a PRESENT `ingress_rule`.
-    let b = FileBundle;
+    let b = FileBundle::default();
     let mut auth_only = Map::new();
     auth_only.insert("auth".into(), json!("nonsense"));
     assert!(b.validate_meta(&auth_only, &Map::new()).is_none());
@@ -735,7 +756,7 @@ fn auth_stem_is_not_judged_as_an_ingress_rule() {
 #[test]
 fn password_ingress_is_refused_on_fs_and_process_legs() {
     // The fs half (the process half lives in fantastic-exec-bridge).
-    let b = FileBundle;
+    let b = FileBundle::default();
     for (field, spec, shown) in [
         (
             "ingress_rule",
@@ -795,7 +816,7 @@ async fn reflect_key_order_matches_python() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(9)
+        .take(11)
         .collect();
     assert_eq!(
         keys,
@@ -804,7 +825,9 @@ async fn reflect_key_order_matches_python() {
             "sentence",
             "root",
             "readonly",
-            "hidden_count",
+            "allow_count",
+            "edit_grammar",
+            "compose",
             "verbs",
             "ingress_rule",
             "egress_rule",
@@ -818,7 +841,6 @@ async fn reflect_key_order_matches_python() {
     assert_eq!(r["ingress_rule"], "allow_all_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
     assert_eq!(r["sealed"], false);
-    assert_eq!(r["hidden_count"], DEFAULT_HIDDEN.len());
     assert_eq!(
         r["sentence"],
         "Filesystem edge of the io family — sealed by default, running-dir only."
@@ -829,7 +851,7 @@ async fn reflect_key_order_matches_python() {
 #[test]
 fn reflect_verbs_are_python_docstring_first_lines() {
     // A2.16 — the first line of each python docstring, in python's VERBS order.
-    let reply = reflect_reply(&AgentId::from("fb"), &Map::new(), Path::new("/"));
+    let reply = reflect_reply(&AgentId::from("fb"), &Map::new(), &Ok(PathBuf::from("/")));
     let verbs = reply["verbs"].as_object().unwrap();
     assert_eq!(
         verbs.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -837,12 +859,20 @@ fn reflect_verbs_are_python_docstring_first_lines() {
             "reflect",
             "boot",
             "list",
+            "read",
+            "write",
+            "edit",
+            "append",
+            "undo",
             "read_stream",
             "write_stream",
             "pump",
             "delete",
             "rename",
             "mkdir",
+            "allow",
+            "disallow",
+            "allowed",
         ]
     );
     assert_eq!(verbs["boot"], "No-op. Returns None.");
@@ -862,7 +892,7 @@ async fn reflect_root_is_resolved_absolute_path() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mut meta = Map::new();
     meta.insert("root".into(), json!("../nope"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, tmp.path());
+    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(tmp.path().to_path_buf()));
     assert_eq!(r["root"], "../nope");
     assert_eq!(
         r["root_error"],
@@ -878,7 +908,11 @@ async fn reflect_root_is_resolved_absolute_path() {
         "root_error stays last"
     );
     // An ABSENT root serves the workdir base.
-    let r = reflect_reply(&AgentId::from("fb"), &Map::new(), tmp.path());
+    let r = reflect_reply(
+        &AgentId::from("fb"),
+        &Map::new(),
+        &Ok(tmp.path().to_path_buf()),
+    );
     assert_eq!(
         r["root"],
         json!(fs::realpath(tmp.path()).display().to_string())
@@ -892,7 +926,7 @@ fn reflect_posture_keeps_an_already_scoped_auth_stem() {
     // reported as written, so what reflect prints can be written straight back.
     let mut meta = Map::new();
     meta.insert("auth".into(), json!("allow_all_ingress"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, Path::new("/"));
+    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "allow_all_ingress");
     // …and the egress manifold still appends ITS suffix to the same stem —
     // measured in python, which is the point of pinning `describe` verbatim.
@@ -901,18 +935,18 @@ fn reflect_posture_keeps_an_already_scoped_auth_stem() {
     // `allow_all` / `deny` are the two stems that mean "present nothing" outbound.
     let mut meta = Map::new();
     meta.insert("auth".into(), json!("allow_all"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, Path::new("/"));
+    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "allow_all_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
     // A bare stem is scoped per manifold.
     let mut meta = Map::new();
     meta.insert("auth".into(), json!("password"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, Path::new("/"));
+    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "password_ingress");
     assert_eq!(r["egress_rule"], "password_egress");
     assert_eq!(r["sealed"], true);
     // No posture at all ⇒ sealed by default.
-    let r = reflect_reply(&AgentId::from("fb"), &Map::new(), Path::new("/"));
+    let r = reflect_reply(&AgentId::from("fb"), &Map::new(), &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "deny_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
     assert_eq!(r["sealed"], true);
@@ -936,7 +970,7 @@ async fn unknown_verb_on_sealed_bridge_is_unhandled() {
     );
     // A payload with no `type` never reaches a bundle in either runtime (the
     // kernel refuses it), so the bundle's `None` rendering is asserted directly.
-    let bundle = FileBundle;
+    let bundle = FileBundle::default();
     let reply = bundle
         .handle(&AgentId::from("fb"), &json!({}), &kernel)
         .await
@@ -1105,4 +1139,293 @@ async fn pump_falsy_args_fall_back_like_python() {
             .starts_with("pump: read from 'nobody' failed: {'error':"),
         "{r}"
     );
+}
+
+// ─── the allow list — python `file_bridge/tests/test_allow_list.py` ───────────
+
+fn site(tmp: &tempfile::TempDir) {
+    let s = served(tmp);
+    std::fs::create_dir_all(s.join("docs")).unwrap();
+    std::fs::write(s.join("docs/a.pdf"), b"%PDF-a").unwrap();
+    std::fs::write(s.join("docs/b.pdf"), b"%PDF-b").unwrap();
+    std::fs::write(s.join("secret.txt"), b"private\n").unwrap();
+}
+
+async fn bridge(tmp: &tempfile::TempDir, allow: Option<Value>) -> Arc<Kernel> {
+    site(tmp);
+    let mut meta = json!({"ingress_rule": "allow_all_ingress"});
+    if let Some(a) = allow {
+        meta["allow"] = a;
+    }
+    mk_kernel_with(tmp, meta).await
+}
+
+async fn read(kernel: &Arc<Kernel>, path: &str) -> Value {
+    call(kernel, json!({"type": "read_stream", "path": path})).await
+}
+
+#[tokio::test]
+async fn a_bridge_with_no_list_exposes_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = bridge(&tmp, None).await;
+    for path in ["docs/a.pdf", "secret.txt", "missing.txt"] {
+        let r = read(&k, path).await;
+        assert_eq!(r["reason"], "not_found", "{path}: {r}");
+        assert!(r["error"].as_str().unwrap().contains("not exposed"), "{r}");
+    }
+    assert_eq!(
+        call(&k, json!({"type": "list"})).await["reason"],
+        "not_found"
+    );
+    let w = call(&k, json!({"type": "write_stream", "path": "new.txt"})).await;
+    assert_eq!(w["reason"], "not_found", "{w}");
+    assert!(!served(&tmp).join("new.txt").exists());
+}
+
+#[tokio::test]
+async fn one_file_exposes_that_file_and_the_way_to_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = bridge(&tmp, Some(json!(["docs/a.pdf"]))).await;
+    assert_eq!(read(&k, "docs/a.pdf").await["size"], 6);
+    assert_eq!(read(&k, "docs/b.pdf").await["reason"], "not_found");
+    assert_eq!(read(&k, "secret.txt").await["reason"], "not_found");
+    let top = call(&k, json!({"type": "list"})).await;
+    let names: Vec<&str> = top["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["docs"]);
+    let docs = call(&k, json!({"type": "list", "path": "docs"})).await;
+    let names: Vec<&str> = docs["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["a.pdf"]);
+}
+
+#[tokio::test]
+async fn a_directory_exposes_everything_under_it_and_dot_the_whole_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = bridge(&tmp, Some(json!(["docs"]))).await;
+    assert_eq!(read(&k, "docs/b.pdf").await["size"], 6);
+    assert_eq!(read(&k, "secret.txt").await["reason"], "not_found");
+    let tmp2 = tempfile::TempDir::new().unwrap();
+    let k2 = bridge(&tmp2, Some(json!(["."]))).await;
+    assert_eq!(read(&k2, "secret.txt").await["size"], 8);
+}
+
+#[tokio::test]
+async fn allow_disallow_and_allowed_edit_the_record_one_path_at_a_time() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = bridge(&tmp, Some(json!([]))).await;
+    assert_eq!(
+        call(&k, json!({"type": "allow", "path": "docs/a.pdf"})).await,
+        json!({"path": "docs/a.pdf", "allowed": true, "count": 1})
+    );
+    let r = call(&k, json!({"type": "allow", "path": "./docs//a.pdf"})).await;
+    assert_eq!(r["count"], 1, "idempotent, normalised: {r}");
+    call(&k, json!({"type": "allow", "path": "docs/b.pdf"})).await;
+    let rec = k
+        .agents
+        .get(&AgentId::from("fb"))
+        .unwrap()
+        .meta
+        .read()
+        .unwrap()
+        .clone();
+    assert_eq!(rec["allow"], json!(["docs/a.pdf", "docs/b.pdf"]));
+    assert_eq!(read(&k, "docs/b.pdf").await["size"], 6);
+    assert_eq!(
+        call(&k, json!({"type": "allowed", "limit": 1})).await,
+        json!({"paths": ["docs/a.pdf"], "next": "docs/a.pdf", "total": 2})
+    );
+    let rest = call(&k, json!({"type": "allowed", "after": "docs/a.pdf"})).await;
+    assert_eq!(rest["paths"], json!(["docs/b.pdf"]));
+    assert_eq!(rest["next"], Value::Null);
+    assert_eq!(
+        call(&k, json!({"type": "disallow", "path": "docs/b.pdf"})).await["count"],
+        1
+    );
+    assert_eq!(read(&k, "docs/b.pdf").await["reason"], "not_found");
+    assert_eq!(
+        call(&k, json!({"type": "disallow", "path": "nope"})).await["reason"],
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn nothing_outside_the_root_can_be_allowed_or_read() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = bridge(&tmp, Some(json!(["."]))).await;
+    for bad in ["../x", "docs/../../x", "/etc/hosts"] {
+        let r = call(&k, json!({"type": "allow", "path": bad})).await;
+        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
+    }
+    let r = read(&k, "../../etc/passwd").await;
+    assert!(
+        r["error"].as_str().unwrap().contains("escape"),
+        "the clamp answers first: {r}"
+    );
+}
+
+#[test]
+fn the_list_is_validated_at_write() {
+    for bad in [
+        json!("docs"),
+        json!(["../up"]),
+        json!([""]),
+        json!(["/abs"]),
+    ] {
+        let mut m = JsonMap::new();
+        m.insert("allow".to_string(), bad.clone());
+        assert!(
+            FileBundle::default()
+                .validate_meta(&m, &JsonMap::new())
+                .is_some(),
+            "{bad}"
+        );
+    }
+    let mut ok = JsonMap::new();
+    ok.insert("allow".to_string(), json!([".", "docs/a.pdf"]));
+    assert!(FileBundle::default()
+        .validate_meta(&ok, &JsonMap::new())
+        .is_none());
+}
+
+#[tokio::test]
+async fn writes_stay_inside_the_list_and_readonly_still_holds() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = bridge(&tmp, Some(json!(["docs"]))).await;
+    let out = call(
+        &k,
+        json!({"type": "rename", "old_path": "docs/a.pdf", "new_path": "a.pdf"}),
+    )
+    .await;
+    assert_eq!(
+        out["reason"], "not_found",
+        "the target is outside the list: {out}"
+    );
+    assert_eq!(
+        call(&k, json!({"type": "delete", "path": "secret.txt"})).await["reason"],
+        "not_found"
+    );
+    assert!(served(&tmp).join("secret.txt").exists());
+    assert_eq!(
+        call(&k, json!({"type": "mkdir", "path": "docs/sub"})).await["created"],
+        true
+    );
+}
+
+async fn call_as(kernel: &Arc<Kernel>, sender: &str, payload: Value) -> Value {
+    let k = Arc::clone(kernel);
+    fantastic_kernel::send::with_sender(AgentId::from(sender), async move {
+        k.send(vec![Item::new(AgentId::from("fb"), payload)])
+            .await
+            .remove(0)
+            .result
+    })
+    .await
+}
+
+/// A handler-less agent under the root holding `can_call` — python
+/// `kernel.create(None, id=…, can_call=…)`.
+fn bare(kernel: &Arc<Kernel>, id: &str, can_call: Value) {
+    let mut meta = JsonMap::new();
+    meta.insert("can_call".into(), can_call);
+    kernel.register(Agent::new(
+        AgentId::from(id),
+        None,
+        Some(AgentId::from("kernel_state")),
+        meta,
+        PathBuf::new(),
+        true,
+    ));
+}
+
+/// Python `test_an_agent_granted_allow_publishes_a_file`: the exposure verbs are
+/// PRIVILEGED — an agent granted them by name publishes a file; one holding only
+/// a `*` on the bridge is refused at the gate.
+#[tokio::test]
+async fn an_agent_granted_allow_publishes_a_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    site(&tmp);
+    let k = mk_kernel_with(
+        &tmp,
+        json!({"ingress_rule": "allow_all_ingress", "allow": [],
+               "callable_by": {"ai": ["allow", "disallow", "allowed"]}}),
+    )
+    .await;
+    bare(&k, "ai", json!({"fb": ["allow", "disallow", "allowed"]}));
+    let r = call_as(&k, "ai", json!({"type": "allow", "path": "docs/a.pdf"})).await;
+    assert_eq!(r["allowed"], true, "{r}");
+    bare(&k, "stranger", json!({"fb": "*"}));
+    let r = call_as(&k, "stranger", json!({"type": "allow", "path": "."})).await;
+    assert_eq!(r["reason"], "unauthorized", "{r}");
+}
+
+// ─── symlinks: BOTH ends must be exposed (audit 2026-09-28) ──────────────────
+// The list was checked on the path AS ASKED while the fs follows links, so a link
+// inside an exposed dir served whatever in-root file it pointed at. Python
+// `test_allow_list.py`'s symlink twins.
+
+async fn linked(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
+    let k = bridge(tmp, Some(allow)).await;
+    let s = served(tmp);
+    std::os::unix::fs::symlink("../secret.txt", s.join("docs/leak")).unwrap();
+    std::os::unix::fs::symlink("b.pdf", s.join("docs/sib")).unwrap();
+    std::fs::create_dir_all(s.join("shared")).unwrap();
+    std::fs::write(s.join("shared/c.txt"), b"c\n").unwrap();
+    std::os::unix::fs::symlink("../shared", s.join("docs/shared")).unwrap();
+    k
+}
+
+#[tokio::test]
+async fn a_link_inside_the_list_to_a_file_outside_it_serves_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = linked(&tmp, json!(["docs"])).await;
+    let r = read(&k, "docs/leak").await;
+    assert_eq!(r["reason"], "not_found", "{r}");
+    let names: Vec<Value> = call(&k, json!({"type": "list", "path": "docs"})).await["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].clone())
+        .collect();
+    assert!(
+        !names.contains(&json!("leak")) && !names.contains(&json!("shared")),
+        "{names:?}"
+    );
+    let out = call(
+        &k,
+        json!({"type": "rename", "old_path": "docs/leak", "new_path": "docs/moved"}),
+    )
+    .await;
+    assert_eq!(out["reason"], "not_found", "{out}");
+    assert!(served(&tmp).join("secret.txt").exists());
+}
+
+#[tokio::test]
+async fn a_link_that_stays_inside_the_list_still_serves() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = linked(&tmp, json!(["docs"])).await;
+    assert_eq!(read(&k, "docs/sib").await["size"], json!(6));
+}
+
+#[tokio::test]
+async fn an_exposed_linked_dir_lists_what_it_serves() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = linked(&tmp, json!(["docs", "shared"])).await;
+    let listed = call(&k, json!({"type": "list", "path": "docs/shared"})).await;
+    let paths: Vec<Value> = listed["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].clone())
+        .collect();
+    assert_eq!(paths, vec![json!("docs/shared/c.txt")], "{listed}");
+    assert_eq!(read(&k, "docs/shared/c.txt").await["size"], json!(2));
 }

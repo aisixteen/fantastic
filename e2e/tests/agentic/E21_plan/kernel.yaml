@@ -14,9 +14,8 @@ roster:
     rest: '*'
     web: '*'
 - id: yaml_store
-  handler_module: text_file.tools
+  handler_module: file_bridge.tools
   parent_id: <root.id>
-  can_call: '<{store[''id'']: ''*''}>'
   callable_by:
     ai: '*'
 - id: shell

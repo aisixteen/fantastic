@@ -1,6 +1,5 @@
 // Unit tests for the uniform `reflect` surface — tree/bundles/readme
-// flags, the `description` field, and the guarantee that the old
-// root-only primer keys are gone. Mirrors Python's test_reflect_flags
+// flags and the `description` field. Mirrors Python's test_reflect_flags
 // and Rust's reflect/tests.rs.
 
 import FantasticJSON
@@ -14,13 +13,7 @@ import FantasticKernelState
 
 @Suite("Uniform reflect")
 struct ReflectUniformTests {
-    private static let primerKeysGone = [
-        "transports", "primitive", "envelope", "universal_verb",
-        "binary_protocol", "browser_bus", "well_known", "agent_count",
-        "available_bundles",
-    ]
-
-    @Test func rootReflectIsUniformNoPrimerKeys() async {
+    @Test func rootReflectIsUniform() async {
         let kernel = makeKernel()
         let r = await kernel.send([Item("kernel_state", ["type": "reflect"])])[0].result
         #expect(r["id"].asString == "kernel_state")
@@ -32,9 +25,6 @@ struct ReflectUniformTests {
         #expect(r["bundles"].asArray == nil)
         // kernel runtime identity — root only, lowercase enum.
         #expect(r["runtime"].asString == "swift")
-        for k in Self.primerKeysGone {
-            #expect(r[k] == nil || r[k] == .null, "primer key \(k) still present")
-        }
     }
 
     @Test func rootReflectSurfacesGuidFromMeta() async {
@@ -498,7 +488,7 @@ struct RootWithHandlerTests {
     /// C12 — the tree root answers `reflect` with the SUBSTRATE identity even
     /// though it now carries `handler_module: kernel_state.tools`. Its other
     /// verbs still route to the bundle; `reflect <root>` is the kernel's own
-    /// identity + tree, matching the `kernel` alias (python `_agent.py`:
+    /// identity + tree, matching the reserved `kernel` address (python `_agent.py`:
     /// `if verb == "reflect" and self.parent is None`).
     @Test func rootWithHandlerReflectsIdentity() async {
         let kernel = makeLoaderKernel()
@@ -514,7 +504,7 @@ struct RootWithHandlerTests {
         // But the loader's ROOT FRAME does — through `reflectRootExtra`.
         #expect(r["persistence"]["provider"] == .null)
         #expect(r["self_extension"].asString?.hasPrefix("A DURABLE PROGRAM is a FILE plus") == true)
-        // …and the `kernel` alias answers identically.
+        // …and the `kernel` address answers identically.
         let viaAlias = await kernel.send([Item("kernel", ["type": "reflect"])])[0].result
         #expect(viaAlias["id"].asString == "kernel_state")
     }

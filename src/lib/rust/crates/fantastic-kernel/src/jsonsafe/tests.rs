@@ -42,7 +42,7 @@ fn a_record_with_a_non_finite_meta_value_still_serializes() {
     );
     let rec = AgentRecord {
         id: "coerced".to_string(),
-        handler_module: Some("text_file.tools".to_string()),
+        handler_module: Some("file_bridge.tools".to_string()),
         meta,
         parent_id: Some("kernel_state".to_string()),
     };
@@ -50,7 +50,7 @@ fn a_record_with_a_non_finite_meta_value_still_serializes() {
     // is the reply `create_agent` answers with, so `null` here is the bug.
     assert_eq!(
         record_value(&rec).to_string(),
-        r#"{"id":"coerced","handler_module":"text_file.tools","nan":NaN,"big":123456789012345678901234567890,"parent_id":"kernel_state"}"#
+        r#"{"id":"coerced","handler_module":"file_bridge.tools","nan":NaN,"big":123456789012345678901234567890,"parent_id":"kernel_state"}"#
     );
     assert!(serde_json::to_value(&rec).is_err(), "the derived impl dies");
 }

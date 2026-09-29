@@ -14,6 +14,7 @@ import FantasticJSON
 import FantasticKernel
 import FantasticKernelBridge
 import Foundation
+import OrderedCollections
 import Testing
 
 // ── kernels ────────────────────────────────────────────────────
@@ -27,16 +28,13 @@ private final class EchoBundle: AgentBundle {
 
 private func makeKernel(
     withEcho: Bool, leg: String? = nil, ingress: JSON? = nil, egress: JSON? = nil,
-    auth: JSON? = nil
+    auth: JSON? = nil, guid: String? = nil, peerGuid: String? = nil
 ) async -> (Kernel, KernelBridgeBundle) {
     let registry = BundleRegistry()
     if withEcho { registry.register("echo.tools", EchoBundle()) }
     let bundle = KernelBridgeBundle(family: .relay)
     registry.register("relay_connector.tools", bundle)
-    let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
-    kernel.register(root)
-    kernel.setRoot(root)
+    let kernel = rootedKernel(registry, guid: guid)
     if withEcho {
         _ = await kernel.send([
             Item(
@@ -51,9 +49,24 @@ private func makeKernel(
     if let leg {
         await makeLeg(
             kernel, id: leg, canCall: withEcho ? ["echo"] : ["kernel_state"], ingress: ingress,
-            egress: egress, auth: auth)
+            egress: egress, auth: auth, peerGuid: peerGuid)
     }
     return (kernel, bundle)
+}
+
+/// A kernel whose root carries `guid` — the half of `<guid>|<agent>` its legs
+/// stamp as `caller` on every outbound call.
+private func rootedKernel(_ registry: BundleRegistry, guid: String?) -> Kernel {
+    let kernel = Kernel(storage: .inMemory, bundles: registry)
+    var meta: OrderedDictionary<String, JSON> = [:]
+    if let guid { meta["guid"] = .string(guid) }
+    let root = Agent(
+        id: "kernel_state", handlerModule: nil, parentId: nil, meta: meta,
+        rootPath: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".fantastic"))
+    kernel.register(root)
+    kernel.setRoot(root)
+    return kernel
 }
 
 /// Create the relay leg's OWN agent record, with the grants for wherever its
@@ -66,7 +79,7 @@ private func makeKernel(
 /// gate never ran and a peer with a passing ingress rule could call anything.
 private func makeLeg(
     _ kernel: Kernel, id: String, canCall: [String], ingress: JSON? = nil, egress: JSON? = nil,
-    auth: JSON? = nil
+    auth: JSON? = nil, peerGuid: String? = nil
 ) async {
     var grants: JSON = .object([:])
     for t in canCall { grants[t] = .string("*") }
@@ -81,14 +94,18 @@ private func makeLeg(
     if let ingress { create["ingress_rule"] = ingress }
     if let egress { create["egress_rule"] = egress }
     if let auth { create["auth"] = auth }
+    // The ONE peer this leg serves inbound calls for (audit 2026-09-28).
+    if let peerGuid { create["peer_guid"] = .string(peerGuid) }
     _ = await kernel.send([Item("kernel_state", create)])[0].result
-    // The INGRESS half. `core` is the leg's parent, so `$children` already
-    // covers it; a SIBLING needs the edge opened by name.
-    for t in canCall where t != "kernel_state" {
+    // The INGRESS half. An inbound call is judged as its FOREIGN caller
+    // (`<peer guid>|<agent>`), so every target opens the edge to `<peer guid>|*`;
+    // a local sibling call through the leg still needs the leg by name.
+    for t in canCall where t != "kernel_state" || peerGuid != nil {
         var accept: JSON = .object([
             "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
         ])
         accept[id] = .string("*")
+        if let peerGuid { accept["\(peerGuid)|*"] = .string("*") }
         _ = await kernel.send([
             Item(
                 "kernel_state",
@@ -262,8 +279,10 @@ struct RelayTransportTests {
     @Test func forwardRoundTripsOverRelay() async throws {
         try await withDeadline(15) {
             let open: JSON = .string("allow_all_ingress")
-            let (kernelA, bundleA) = await makeKernel(withEcho: false, leg: "brA", ingress: open)
-            let (kernelB, bundleB) = await makeKernel(withEcho: true, leg: "brB", ingress: open)
+            let (kernelA, bundleA) = await makeKernel(
+                withEcho: false, leg: "brA", ingress: open, guid: "gA", peerGuid: "gB")
+            let (kernelB, bundleB) = await makeKernel(
+                withEcho: true, leg: "brB", ingress: open, guid: "gB", peerGuid: "gA")
             await pairLegs(
                 kernelA: kernelA, bundleA: bundleA, kernelB: kernelB, bundleB: bundleB)
 
@@ -291,16 +310,14 @@ struct RelayTransportTests {
     @Test func binaryForwardStreamsRawBytesOverRelay() async throws {
         try await withDeadline(20) {
             let open: JSON = .string("allow_all_ingress")
-            let (kernelA, bundleA) = await makeKernel(withEcho: false, leg: "brA", ingress: open)
+            let (kernelA, bundleA) = await makeKernel(
+                withEcho: false, leg: "brA", ingress: open, guid: "gA", peerGuid: "gB")
             // kernelB hosts an OPEN file_bridge in a cwd-relative dir.
             let registry = BundleRegistry()
             registry.register("file_bridge.tools", FileBundle())
             let bundleB = KernelBridgeBundle(family: .relay)
             registry.register("relay_connector.tools", bundleB)
-            let kernelB = Kernel(storage: .inMemory, bundles: registry)
-            let rootB = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
-            kernelB.register(rootB)
-            kernelB.setRoot(rootB)
+            let kernelB = rootedKernel(registry, guid: "gB")
             let fm = FileManager.default
             let rel = "fantastic-relaystream-\(UUID().uuidString)"
             let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
@@ -311,11 +328,11 @@ struct RelayTransportTests {
                     "kernel_state",
                     [
                         "type": "create_agent", "parent_id": "kernel_state",
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "fs", "root": .string(rel), "ingress_rule": "allow_all_ingress",
                     ])
             ])[0].result
-            await makeLeg(kernelB, id: "brB", canCall: ["fs"], ingress: open)
+            await makeLeg(kernelB, id: "brB", canCall: ["fs"], ingress: open, peerGuid: "gA")
 
             await pairLegs(
                 kernelA: kernelA, bundleA: bundleA, kernelB: kernelB, bundleB: bundleB)
@@ -371,10 +388,10 @@ struct RelayTransportTests {
         // The kernel appends its own reflect flags (can_call, kernel_verbs, tree)
         // after the bundle's keys, so the BUNDLE half is the prefix.
         #expect(
-            Array((r.asObject?.keys ?? []).prefix(17)) == [
+            Array((r.asObject?.keys ?? []).prefix(18)) == [
                 "id", "sentence", "transport", "connected", "pending_count", "ingress_rule",
-                "egress_rule", "sealed", "relay_url", "guid", "partner_guid", "reconnect",
-                "role", "owner_guid", "exposes", "verbs", "emits",
+                "egress_rule", "sealed", "peer_guid", "relay_url", "guid", "partner_guid",
+                "reconnect", "role", "owner_guid", "exposes", "verbs", "emits",
             ], "\(r.serialize())")
         #expect(r["transport"].asString == "relay")
         #expect(r["connected"].asBool == false && r["pending_count"].asInt == 0)
@@ -400,23 +417,23 @@ struct RelayTransportTests {
                 .object([
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("ws_bridge.tools"), "id": .string("wb"),
-                    "peer_id": .string("kernel_state"), "local_port": .integer(8123),
+                    "peer_id": .string("kernel_state"), "port": .integer(8123),
                 ]))
         ])[0].result
         let r = await kernel.send([Item("wb", ["type": "reflect"])])[0].result
         #expect(
-            Array((r.asObject?.keys ?? []).prefix(15)) == [
+            Array((r.asObject?.keys ?? []).prefix(14)) == [
                 "id", "sentence", "transport", "connected", "pending_count", "ingress_rule",
-                "egress_rule", "sealed", "host", "peer_id", "local_port", "remote_port",
-                "tunnel_pid", "verbs", "emits",
+                "egress_rule", "sealed", "peer_guid", "host", "peer_id", "port", "verbs",
+                "emits",
             ], "\(r.serialize())")
         #expect(r["transport"].asString == "ws")
         // A7.24 — the dial to a dead port FAILED, so nothing attached: boot is
         // not a half-success that reflects `connected:true` and times out later.
         #expect(r["connected"].asBool == false)
         #expect(r["host"].isNull && r["peer_id"].asString == "kernel_state")
-        #expect(r["local_port"].asInt == 8123 && r["remote_port"].isNull)
-        #expect(r["tunnel_pid"].isNull)
+        #expect(r["port"].asInt == 8123)
+        #expect(r["peer_guid"].isNull)
         #expect(r["verbs"].asObject?.count == 6)
         #expect(
             r["sentence"].asString
@@ -507,7 +524,7 @@ struct RelayTransportTests {
             booted
                 == .object([
                     "error": .string(
-                        "bridge: ws boot failed: peer_id required for ws/ssh+ws transports")
+                        "bridge: ws boot failed: peer_id required for the ws transport")
                 ]), "\(booted.serialize())")
         // memory needs the test seam.
         _ = await kernel.send([
@@ -640,8 +657,10 @@ struct RelayTransportTests {
     }
 
     /// A7.34 — an `error` frame with no `error` field is python's `str(None)`.
-    /// A7.3 — an `event` frame with no payload re-emits `{}`.
-    @Test func errorFrameWithoutErrorSaysNoneAndAnEmptyEventReEmits() async throws {
+    /// A7.3 — a SUBSCRIBED `event` frame with no payload is dropped (the payload
+    /// must be an object); the next one re-emits as its payload plus `src`.
+    @Test(.timeLimit(.minutes(1)))
+    func errorFrameWithoutErrorSaysNoneAndAnEmptyEventReEmits() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
         let inbox = kernel.ensureInbox("leg_watcher2")
         kernel.watch(src: "brA", watcher: "leg_watcher2")
@@ -651,6 +670,11 @@ struct RelayTransportTests {
         bundle.injectTransport(
             agentId: "brA", transport: await RelayTransport.attach(wire: wire, partnerGuid: "B"))
         _ = await kernel.send([Item("brA", ["type": "boot"])])[0].result
+        // Nothing re-emits until subscribed: the leg watches `sensor` first, and
+        // the partner reads that `watch` frame before the forward.
+        _ = await kernel.send([Item("brA", ["type": "watch_remote", "target": "sensor"])])[0]
+            .result
+        _ = try await peer.receive()
         // The partner answers the forward with a bare `error` frame.
         Task {
             let msg = try? await peer.receive()
@@ -662,26 +686,37 @@ struct RelayTransportTests {
                         "type": .string("send"), "target": .string("A"),
                         "payload": .object(["type": .string("error"), "id": id]),
                     ]).serialize()))
-            // …and a payload-less event, which re-emits as `{}`.
+            // …then a payload-less event from the subscribed src (dropped), then
+            // one with a payload (re-emitted) — the transport keeps their order.
             try? await peer.send(
                 .text(
                     JSON.object([
                         "type": .string("send"), "target": .string("A"),
-                        "payload": .object(["type": .string("event")]),
+                        "payload": .object(["type": .string("event"), "src": .string("sensor")]),
+                    ]).serialize()))
+            try? await peer.send(
+                .text(
+                    JSON.object([
+                        "type": .string("send"), "target": .string("A"),
+                        "payload": .object([
+                            "type": .string("event"), "src": .string("sensor"),
+                            "payload": .object(["n": .integer(2)]),
+                        ]),
                     ]).serialize()))
         }
         let r = await forward(kernel, "brA", target: "x", payload: ["type": "reflect"])
         #expect(r == .object(["error": .string("remote error: None")]), "\(r.serialize())")
-        var sawEmpty = false
+        var first: JSON?
         var iter = inbox.makeAsyncIterator()
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline, let ev = await iter.next() {
-            if ev.payload == .object([:]) {
-                sawEmpty = true
+        while let ev = await iter.next() {
+            if ev.payload["src"].asString == "sensor" {
+                first = ev.payload
                 break
             }
         }
-        #expect(sawEmpty, "a payload-less remote event must re-emit as {}")
+        #expect(
+            first == .object(["n": .integer(2), "src": .string("sensor")]),
+            "the payload-less event must be dropped: \(first?.serialize() ?? "nil")")
         _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
             .result
     }
@@ -740,8 +775,10 @@ struct RelayTransportTests {
     @Test func inboundCallToAnUnknownTargetRepliesTheKernelRefusal() async throws {
         try await withDeadline(15) {
             let open: JSON = .string("allow_all_ingress")
-            let (kernelA, bundleA) = await makeKernel(withEcho: false, leg: "brA", ingress: open)
-            let (kernelB, bundleB) = await makeKernel(withEcho: true, leg: "brB", ingress: open)
+            let (kernelA, bundleA) = await makeKernel(
+                withEcho: false, leg: "brA", ingress: open, guid: "gA", peerGuid: "gB")
+            let (kernelB, bundleB) = await makeKernel(
+                withEcho: true, leg: "brB", ingress: open, guid: "gB", peerGuid: "gA")
             await pairLegs(
                 kernelA: kernelA, bundleA: bundleA, kernelB: kernelB, bundleB: bundleB)
             let miss = await forward(
@@ -758,9 +795,11 @@ struct RelayTransportTests {
     @Test func denyInboundRefusesReverseCall() async throws {
         try await withDeadline(15) {
             let open: JSON = .string("allow_all_ingress")
-            let (kernelA, bundleA) = await makeKernel(withEcho: false, leg: "brA", ingress: open)
+            let (kernelA, bundleA) = await makeKernel(
+                withEcho: false, leg: "brA", ingress: open, guid: "gA", peerGuid: "gB")
             // B's leg is SEALED (no `ingress_rule` — python's default).
-            let (kernelB, bundleB) = await makeKernel(withEcho: true, leg: "brB")
+            let (kernelB, bundleB) = await makeKernel(
+                withEcho: true, leg: "brB", guid: "gB", peerGuid: "gA")
             await pairLegs(
                 kernelA: kernelA, bundleA: bundleA, kernelB: kernelB, bundleB: bundleB)
             let r = await forward(kernelA, "brA", target: "echo", payload: ["type": "echo"])
@@ -782,8 +821,10 @@ struct RelayPasswordTests {
         let stem: JSON = ["type": "password", "env": .string(env)]
         try await withDeadline(15) {
             // A presents the group token (egress); B checks it (ingress). Both pass.
-            let (kernelA, bundleA) = await makeKernel(withEcho: false, leg: "brA", auth: stem)
-            let (kernelB, bundleB) = await makeKernel(withEcho: true, leg: "brB", auth: stem)
+            let (kernelA, bundleA) = await makeKernel(
+                withEcho: false, leg: "brA", auth: stem, guid: "gA", peerGuid: "gB")
+            let (kernelB, bundleB) = await makeKernel(
+                withEcho: true, leg: "brB", auth: stem, guid: "gB", peerGuid: "gA")
             await pairLegs(
                 kernelA: kernelA, bundleA: bundleA, kernelB: kernelB, bundleB: bundleB)
             let r = await forward(
@@ -800,9 +841,11 @@ struct RelayPasswordTests {
         try await withDeadline(15) {
             // A presents NOTHING (silent egress); B requires the token → deny.
             let (kernelA, bundleA) = await makeKernel(
-                withEcho: false, leg: "brA", ingress: .string("allow_all_ingress"))
+                withEcho: false, leg: "brA", ingress: .string("allow_all_ingress"), guid: "gA",
+                peerGuid: "gB")
             let (kernelB, bundleB) = await makeKernel(
-                withEcho: true, leg: "brB", auth: ["type": "password", "env": .string(env)])
+                withEcho: true, leg: "brB", auth: ["type": "password", "env": .string(env)],
+                guid: "gB", peerGuid: "gA")
             await pairLegs(
                 kernelA: kernelA, bundleA: bundleA, kernelB: kernelB, bundleB: bundleB)
             let r = await forward(kernelA, "brA", target: "echo", payload: ["type": "echo"])

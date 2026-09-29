@@ -24,11 +24,6 @@ from ai_core.core import THINK_CLOSE, THINK_OPEN
 
 #: The ONE env var the key is read from. No second spelling.
 KEY_VAR = "OPENAI_API_KEY"
-# NO guessy defaults (by default, no defaults): this connector names neither a host
-# nor a model. The sentinels exist ONLY so `reflect` can say what is true; `chat()`
-# fails loud naming the missing meta.
-DEFAULT_ENDPOINT = "(no default — set the `endpoint` meta: the full …/v1/responses URL)"
-DEFAULT_MODEL = "(no default — set the `model` meta)"
 
 # EDGE TRANSPORT FAILURES — the same rule as the anthropic provider. A 4xx, or any
 # 5xx carrying a JSON body, is the endpoint DELIBERATELY answering and stays loud.
@@ -80,6 +75,12 @@ def _to_responses(messages: list[dict]) -> tuple[str | None, list[dict]]:
     return instructions, items
 
 
+#: Request-body keys this provider sets itself; `sampling` may not touch them.
+_OWNED_KEYS = frozenset(
+    {"model", "input", "instructions", "max_output_tokens", "stream", "store"}
+)
+
+
 class ResponsesProvider:
     #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
     #: ai_core calibrates its own token estimate with it.
@@ -91,8 +92,8 @@ class ResponsesProvider:
 
     def __init__(
         self,
-        endpoint: str = DEFAULT_ENDPOINT,
-        model: str = DEFAULT_MODEL,
+        endpoint: str,
+        model: str,
         *,
         max_tokens: int = MAX_TOKENS,
         sampling: dict | None = None,
@@ -103,6 +104,13 @@ class ResponsesProvider:
         self._max_tokens = max_tokens
         # Extra body params merged verbatim into the request (temperature, top_p,
         # reasoning, …). A record edit, not an ai_core concern. None values omitted.
+        # The keys this provider owns are refused, never silently overridden.
+        owned = sorted(set(sampling or {}) & _OWNED_KEYS)
+        if owned:
+            raise ValueError(
+                f"responses_backend: `sampling` may not set {', '.join(owned)} — "
+                "those are the record's (`model`, `max_tokens`) or the provider's own"
+            )
         self._sampling = {k: v for k, v in (sampling or {}).items() if v is not None}
         # Test seam: an httpx transport to hand the client. None = the real network.
         self._transport = transport
@@ -124,13 +132,13 @@ class ResponsesProvider:
         key = os.environ.get(KEY_VAR)
         if not key:
             raise RuntimeError(f"{KEY_VAR} not set in environment (.env)")
-        if not self._endpoint or self._endpoint == DEFAULT_ENDPOINT:
+        if not self._endpoint:
             raise RuntimeError(
                 "responses_backend: no `endpoint` set — this connector does not "
                 "guess a host. Name the full …/v1/responses URL on the agent "
                 "record (endpoint=...)."
             )
-        if not self._model or self._model == DEFAULT_MODEL:
+        if not self._model:
             raise RuntimeError(
                 "responses_backend: no `model` set — this connector does not guess "
                 "one. Name a model on the agent record (model=...)."

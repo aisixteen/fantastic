@@ -60,9 +60,9 @@ fi
 pass "daemon up (pid=$DAEMON_PID)"
 
 # ── HTTP rendering surface ──────────────────────────────────────────
-curl -sf -m 5 "http://localhost:$PORT/" >/dev/null \
-    || fail "GET /" "endpoint not 200"
-pass "GET /                    → 200"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://localhost:$PORT/")" = "404" ] \
+    || fail "GET /" "the host renders nothing of its own — expected 404"
+pass "GET /                    → 404"
 
 curl -sf -m 5 "http://localhost:$PORT/transport.js" | head -c 50 | grep -q "fantastic_transport" \
     || fail "GET /transport.js" "missing fantastic_transport"

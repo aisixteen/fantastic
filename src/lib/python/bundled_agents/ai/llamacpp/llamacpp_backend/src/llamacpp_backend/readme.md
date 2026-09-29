@@ -53,7 +53,7 @@ LLAMA_CACHE="$HOME/Projects/models" llama-server \
 inline and in the field; `none` → unparsed inline in `content`.
 
 ## Record fields
-- `endpoint` — default `http://127.0.0.1:8080/v1` (llama-server's own bind + path).
+- `endpoint` — REQUIRED: the llama-server's base URL (its bind + `/v1`); nothing is guessed.
 - `model` — usually omit it. `llama-server` serves exactly ONE model, whichever
   `-hf`/`-m` loaded, and ignores the request's `model` field; when unset the key is
   not sent at all. Set it only when a proxy in front of the server routes on it.

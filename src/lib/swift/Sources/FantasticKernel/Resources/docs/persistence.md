@@ -3,30 +3,46 @@
 # Durable state: wire a persistence provider (or stay in RAM)
 
 The root (`kernel_state`) auto-persists records ONLY through a stream
-provider it **discovers**: the first `file_bridge` child of the root whose
+provider it **discovers**: the shallowest `file_bridge` in the root's subtree whose
 `root` resolves to `.fantastic`. **No provider ⇒ no persistence — the tree
 lives in RAM** (lost on restart). There is no direct-write fallback (this is
 a kernel, not a SaaS — one path, no hidden second route). Wire one to make
 the kernel durable:
 
     fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools \
-        id=store root=.fantastic ingress_rule=allow_all_ingress   # the persistence sink
+        id=store root=.fantastic allow='["."]' ingress_rule=allow_all_ingress   # the persistence sink
 
 Once it exists, every record auto-persists through its `write_stream`/`delete`
 (readme-seeding too). It's a normal, visible, re-gateable agent — reflect it
 like any other. Point it at a `network_bridge` instead and state persists to
-a remote store. (`allow_all` lets the loader's own writes through; **seal it
-and persistence stops** — that's your choice, with no fallback to soften it.)
+a remote store. (`allow_all` lets the loader's own writes through and
+`allow=["."]` exposes its whole root to them — a bridge exposes nothing without an
+`allow` list; **seal it or narrow the list and persistence stops** — that's your
+choice, with no fallback to soften it. It stops LOUDLY: see below.)
 
 **You don't have to guess the wiring — read it.** The ROOT reflect carries
-`persistence: {provider:<id>|null}` (which store is persisting records, or
-`null` = RAM); each tree node carries its posture inline (`ingress_rule` —
-absent on an io leg ⇒ sealed; `root`; `file_bridge_id`). One `reflect
-tree=all` shows every leg's lock + the live provider. And **one store serves
-both**: bundles that need a sidecar (`text_file`, `scheduler`, the ai
-backends) point their `file_bridge_id` at this same `.fantastic` store and
-write store-relative `agents/<id>/<file>`, so their state lands next to their
-own `agent.yaml` — one bridge, records + sidecars together.
+`persistence: {provider:<id>|null, error?}` — which store is persisting records;
+`null` = RAM, or a store that refuses: a store whose `allow` does not expose the
+records is reported at boot, and every refused persist write prints to stderr and
+sets `error` `{store, path, error}` (with `provider:null`) until a write lands
+again. With `detail:"full"` each tree node carries its posture inline
+(`ingress_rule` — absent on an io leg ⇒ sealed; `root`; `allow`). One
+`reflect detail=full` shows every leg's lock + the live provider.
+
+**Records vs data — keep them in two stores.** The records store above holds the
+tree: every `agent.yaml`, each agent's grants included. Whoever can WRITE through it
+can rewrite any record — its own `can_call` too — so it is the loader's: grant it to
+no one else. A bundle's sidecar needs no grant on it either: `persist_blob` /
+`load_blob` on the loader write it store-relative at `agents/<id>/<name>`, next to
+the agent's own `agent.yaml` (the `scheduler` does this). Data your agents read and
+write — notes, app files, an AI's working files — goes in a DATA store, a separate
+bridge the loader never discovers:
+
+    fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools \
+        id=data root=.fantastic/data allow='["."]' ingress_rule=allow_all_ingress
+
+A data store rooted at `.fantastic` itself works too — that is your explicit choice,
+and it hands whoever holds it every record.
 
 The root's `reflect` ALSO carries a stable **`guid`** — the kernel's own
 instance identity, minted ONCE at boot and persisted into the root record

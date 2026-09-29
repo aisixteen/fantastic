@@ -16,17 +16,19 @@ bridge is an asymmetric client. Streaming uses `watch_remote` →
 `{type:'watch', src}`; `{type:'event'}` frames re-emit on the bridge's own inbox.
 
 This bundle is THIN: the transport-agnostic engine (read loop, verbs, lifecycle,
-reply correlation) lives in `io_bridge`; here we only supply the `ws`/`ssh+ws`
+reply correlation) lives in `io_bridge`; here we only supply the `ws`
 transport builder (`_ws.build_transport`) + reflect dressing. The sibling
 `relay_connector` bundle reuses the same engine with a relay-router transport.
 
-Transports: `memory` (test backbone) / `ws` / `ssh+ws`.
+Transports: `memory` (test backbone) / `ws`. A tunnel is not this bundle's job —
+an ssh tunnel is an `exec_bridge` job (or devops); the bridge dials its local end.
 """
 
 from __future__ import annotations
 
 from io_bridge import dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
+from io_bridge import validate_meta  # noqa: F401  (the `peer_guid` write check)
 
 # Re-exported so the bundle's tests can inject a MemoryTransport / inspect engine
 # state via `ws_bridge.tools.<name>` (the engine lives in io_bridge now).
@@ -51,6 +53,10 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
 
 
 async def on_delete(agent):
-    """Cascade hook — cancels the read loop, closes the transport, kills the SSH
-    tunnel (if any), rejects pending Futures. Delegated to the shared engine."""
+    """Cascade hook — cancels the read loop, closes the transport, rejects
+    pending Futures. Delegated to the shared engine."""
     return await _engine_on_delete(agent)
+
+
+# Shutdown frees the same process resources — declared, never inferred.
+on_shutdown = on_delete

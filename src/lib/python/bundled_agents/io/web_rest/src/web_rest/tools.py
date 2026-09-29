@@ -75,7 +75,7 @@ def _deny(decision) -> JSONResponse:
 
 # ─── the binary leg ─────────────────────────────────────────────
 # JSON has no bytes type, so a verb whose payload (or reply) carries RAW bytes —
-# `text_file.patch`, `write_stream`, `read_stream` — rides an octet-stream body
+# a file_bridge `edit`, `write_stream`, `read_stream` — rides an octet-stream body
 # instead: the bytes ARE the body, the rest of the envelope is JSON on
 # `X-Fantastic-Payload`, and the one bytes-valued FIELD is named by
 # `X-Fantastic-Bytes-Field` (default `bytes`). Symmetric in both directions, never
@@ -93,9 +93,9 @@ def _json_reply(reply) -> Response:
     the ASGI app: uvicorn then answered a bare text/plain 500 and logged
     `Exception in ASGI application` with a full traceback (measured, parity
     capture 20260921b). Naming it here keeps that a stated transport refusal in
-    the shape every other answer on this leg uses. (`get_routes` is no longer
-    such a reply — it is pure data now; the live endpoints reach `web` through
-    the `route_endpoints(agent)` module hook.)
+    the shape every other answer on this leg uses. (`get_routes` is pure data;
+    the live endpoints reach `web` through the `route_endpoints(agent)` module
+    hook.)
     """
     try:
         return JSONResponse(reply)

@@ -29,7 +29,7 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             // settled. Terminal non-completed rows ARE the dead-letter queue:
             // parked, inspectable, never silently retried; `ack_deadletter`
             // retires one. (NOT `ack`: kernel verbs shadow bundle verbs, and
-            // `terminal_backend` owns `ack` for flow control.)
+            // exec_bridge owns `ack` for a PTY job's flow control.)
             | "ledger"
             | "ack_deadletter"
             // The kernel's LIFECYCLE. `kernel_start` is the one start sequence
@@ -192,9 +192,7 @@ pub(super) async fn handle_kernel_verb(
                     let caller = e.shift_remove("_caller").unwrap_or(Value::Null);
                     match &viewer {
                         None => Some(Value::Object(e)),
-                        Some(v) if caller.as_str() == Some(v.0.as_str()) => {
-                            Some(Value::Object(e))
-                        }
+                        Some(v) if caller.as_str() == Some(v.0.as_str()) => Some(Value::Object(e)),
                         Some(_) => None,
                     }
                 })
@@ -264,11 +262,11 @@ pub(super) async fn handle_kernel_verb(
         "shutdown_agents" => {
             // Privileged: root control surface only, gated on rootness like
             // `kernel_stop` so it holds whether the verb was addressed to
-            // the literal root id or via the `kernel` alias.
+            // the literal root id or via the reserved `kernel` address.
             if target.parent_id.is_some() {
                 return json!({
                     "error": "shutdown_agents: root control surface only; \
-                              address the kernel root (alias 'kernel')"
+                              address the kernel root ('kernel')"
                 });
             }
             return kernel.shutdown_agents().await;
@@ -276,12 +274,12 @@ pub(super) async fn handle_kernel_verb(
         "kernel_stop" => {
             // Privileged: root control surface only. Gate on rootness
             // (parent_id is None) so it holds whether the verb was
-            // addressed to the literal root id or via the `kernel` alias —
+            // addressed to the literal root id or via the reserved `kernel` address —
             // never an arbitrary child agent.
             if target.parent_id.is_some() {
                 return json!({
                     "error": "kernel_stop: root control surface only; \
-                              address the kernel root (alias 'kernel')"
+                              address the kernel root ('kernel')"
                 });
             }
             // Order: (1) ack and let it flush; (2) AFTER the reply is on the wire,
@@ -504,10 +502,7 @@ async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     };
     let hid = hit.get("id").and_then(Value::as_i64).unwrap_or(0);
     let status = hit.get("status").cloned().unwrap_or(Value::Null);
-    if !matches!(
-        status.as_str(),
-        Some("failed" | "timed_out" | "cancelled")
-    ) {
+    if !matches!(status.as_str(), Some("failed" | "timed_out" | "cancelled")) {
         let mut r = crate::refusal::refusal(
             crate::refusal::BAD_ARG,
             format!(
@@ -528,7 +523,9 @@ async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         row.insert("parent".to_string(), Value::from(hid));
         row.insert(
             "caller".to_string(),
-            viewer.as_ref().map_or(Value::Null, |v| Value::from(v.0.clone())),
+            viewer
+                .as_ref()
+                .map_or(Value::Null, |v| Value::from(v.0.clone())),
         );
         let _ = kernel.rows_put(&root.id, row);
     }

@@ -2,7 +2,7 @@
 
 # Recipe: add an interactive panel
 
-`web_loader` is a second `kernel_state` rooted at `.fantastic/web/` (alias
+`web_loader` is a second `kernel_state` rooted at `.fantastic/web/` (its id
 `web_loader`; created once — see `readme=daemon`). The browser `load_tree`s
 it on boot and `persist_record`s changes back. These records are stored
 OPAQUELY here (`handler_module` ending in `.ts` → inert on the host); the TS

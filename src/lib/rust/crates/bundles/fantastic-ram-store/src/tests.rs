@@ -22,13 +22,19 @@ fn agent(id: &str, hm: Option<&str>, parent: Option<&str>, meta: Value) -> Arc<A
 
 fn store() -> Arc<Kernel> {
     let mut k = Kernel::new();
-    k.bundles.register(HANDLER_MODULE, RamStoreBundle::default());
+    k.bundles
+        .register(HANDLER_MODULE, RamStoreBundle::default());
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
     k.register(Arc::clone(&root));
     k.set_root(root);
     for a in ["alice", "bob", "carol", "leg"] {
-        k.register(agent(a, None, Some("kernel_state"), json!({"can_call": {"mem": "*"}})));
+        k.register(agent(
+            a,
+            None,
+            Some("kernel_state"),
+            json!({"can_call": {"mem": "*"}}),
+        ));
     }
     k.register(agent(
         "mem",
@@ -37,7 +43,9 @@ fn store() -> Arc<Kernel> {
         json!({
             "operator": true,
             "admins": ["kernel"],
-            "callable_by": {"alice": "*", "bob": "*", "carol": "*", "leg": "*"},
+            "callable_by": {"alice": "*", "bob": "*", "carol": "*", "leg": "*",
+                            // a relayed call is gated AS the foreign caller: named
+                            "g2|scout": "*"},
         }),
     ));
     k
@@ -76,10 +84,18 @@ fn update(k: &Arc<Kernel>, id: &str, patch: Value) {
 #[tokio::test]
 async fn rows_are_keyed_by_caller() {
     let k = store();
-    let out = append(&k, "alice", json!([{"id": 101, "role": "user", "content": "hi"}])).await;
+    let out = append(
+        &k,
+        "alice",
+        json!([{"id": 101, "role": "user", "content": "hi"}]),
+    )
+    .await;
     assert_eq!(out, json!({"ids": [101], "appended": 1}));
     // the same id is free under another owner — keys are (owner, id)
-    assert_eq!(append(&k, "bob", json!([{"id": 101, "content": "bob"}])).await["ids"], json!([101]));
+    assert_eq!(
+        append(&k, "bob", json!([{"id": 101, "content": "bob"}])).await["ids"],
+        json!([101])
+    );
     let a = call(&k, json!({"type": "read"}), Some("alice")).await;
     let b = call(&k, json!({"type": "read"}), Some("bob")).await;
     assert_eq!(a["rows"][0]["content"], json!("hi"));
@@ -120,7 +136,12 @@ async fn operator_needs_explicit_service() {
     let out = call(&k, json!({"type": "read"}), None).await;
     assert_eq!(out["reason"], json!("unauthorized"));
     update(&k, "mem", json!({"operator": true}));
-    call(&k, json!({"type": "append", "rows": [{"id": 7, "kind": "call"}]}), None).await;
+    call(
+        &k,
+        json!({"type": "append", "rows": [{"id": 7, "kind": "call"}]}),
+        None,
+    )
+    .await;
     let got = call(&k, json!({"type": "read", "kinds": ["call"]}), None).await;
     assert_eq!(ids(&got), vec![7]);
     // the operator's rows are its own key — alice sees none of them
@@ -147,7 +168,12 @@ async fn admin_may_name_an_owner() {
 async fn refs_must_name_own_rows() {
     let k = store();
     append(&k, "bob", json!([{"id": 10}])).await;
-    let out = append(&k, "alice", json!([{"id": 20, "kind": "fold", "refs": [10]}])).await;
+    let out = append(
+        &k,
+        "alice",
+        json!([{"id": 20, "kind": "fold", "refs": [10]}]),
+    )
+    .await;
     assert_eq!(out["reason"], json!("not_found"));
     // members in the same batch are fine
     let out = append(
@@ -177,10 +203,20 @@ async fn share_read_and_zero_tolerance() {
     .await;
     assert_eq!(g["created"], json!(true));
     assert_eq!(g["anchor"], json!(1));
-    let got = call(&k, json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
+    let got = call(
+        &k,
+        json!({"type": "read", "grant": g["grant"]}),
+        Some("bob"),
+    )
+    .await;
     assert_eq!(ids(&got), vec![1, 2]);
     // carol holds no grant
-    let out = call(&k, json!({"type": "read", "grant": g["grant"]}), Some("carol")).await;
+    let out = call(
+        &k,
+        json!({"type": "read", "grant": g["grant"]}),
+        Some("carol"),
+    )
+    .await;
     assert_eq!(out["reason"], json!("unauthorized"));
     // bob cannot share alice's rows — not under his key
     let out = call(
@@ -218,8 +254,18 @@ async fn frozen_stops_live_follows() {
     )
     .await;
     append(&k, "alice", json!([{"id": 3}])).await;
-    let f = call(&k, json!({"type": "read", "grant": frozen["grant"]}), Some("bob")).await;
-    let lv = call(&k, json!({"type": "read", "grant": live["grant"]}), Some("bob")).await;
+    let f = call(
+        &k,
+        json!({"type": "read", "grant": frozen["grant"]}),
+        Some("bob"),
+    )
+    .await;
+    let lv = call(
+        &k,
+        json!({"type": "read", "grant": live["grant"]}),
+        Some("bob"),
+    )
+    .await;
     assert_eq!(ids(&f), vec![1, 2]);
     assert_eq!(ids(&lv), vec![1, 2, 3]);
 }
@@ -239,7 +285,12 @@ async fn fold_scope_reaches_members() {
         Some("alice"),
     )
     .await;
-    let got = call(&k, json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
+    let got = call(
+        &k,
+        json!({"type": "read", "grant": g["grant"]}),
+        Some("bob"),
+    )
+    .await;
     assert_eq!(ids(&got), vec![1, 2, 3]);
     assert_eq!(got["rows"][2]["refs"], json!([1, 2]));
 }
@@ -261,11 +312,21 @@ async fn prune_cascades_to_grants_and_fold_refs() {
     .await;
     let out = call(&k, json!({"type": "prune", "before_id": 2}), Some("alice")).await;
     assert_eq!(out, json!({"pruned": 1, "grants_removed": 1}));
-    let gone = call(&k, json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
+    let gone = call(
+        &k,
+        json!({"type": "read", "grant": g["grant"]}),
+        Some("bob"),
+    )
+    .await;
     assert_eq!(gone["reason"], json!("not_found"));
     let fold = call(&k, json!({"type": "read", "ids": [3]}), Some("alice")).await;
     assert_eq!(fold["rows"][0]["refs"], json!([2]));
-    let listed = call(&k, json!({"type": "grants", "side": "given"}), Some("alice")).await;
+    let listed = call(
+        &k,
+        json!({"type": "grants", "side": "given"}),
+        Some("alice"),
+    )
+    .await;
     assert_eq!(listed["grants"], json!([]));
 }
 
@@ -279,14 +340,34 @@ async fn unshare_and_grants_listing() {
         Some("alice"),
     )
     .await;
-    let rec = call(&k, json!({"type": "grants", "side": "received"}), Some("bob")).await;
+    let rec = call(
+        &k,
+        json!({"type": "grants", "side": "received"}),
+        Some("bob"),
+    )
+    .await;
     assert_eq!(rec["grants"][0]["owner"], json!("alice"));
     assert_eq!(rec["grants"].as_array().unwrap().len(), 1);
-    let out = call(&k, json!({"type": "unshare", "grant": g["grant"]}), Some("bob")).await;
+    let out = call(
+        &k,
+        json!({"type": "unshare", "grant": g["grant"]}),
+        Some("bob"),
+    )
+    .await;
     assert_eq!(out["reason"], json!("unauthorized"));
-    let ok = call(&k, json!({"type": "unshare", "grant": g["grant"]}), Some("alice")).await;
+    let ok = call(
+        &k,
+        json!({"type": "unshare", "grant": g["grant"]}),
+        Some("alice"),
+    )
+    .await;
     assert_eq!(ok["unshared"], json!(true));
-    let out = call(&k, json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
+    let out = call(
+        &k,
+        json!({"type": "read", "grant": g["grant"]}),
+        Some("bob"),
+    )
+    .await;
     assert_eq!(out["reason"], json!("not_found"));
 }
 
@@ -303,7 +384,12 @@ async fn search_lines_and_fold_descent() {
         ]),
     )
     .await;
-    let got = call(&k, json!({"type": "search", "query": "AUDIT"}), Some("alice")).await;
+    let got = call(
+        &k,
+        json!({"type": "search", "query": "AUDIT"}),
+        Some("alice"),
+    )
+    .await;
     assert_eq!(
         got["matches"],
         json!([{"id": 1, "line": 2, "text": "the audit marker is 7"}])
@@ -331,9 +417,19 @@ async fn read_paging_and_selectors() {
         ]),
     )
     .await;
-    let head = call(&k, json!({"type": "read", "from_last_kind": "clear"}), Some("alice")).await;
+    let head = call(
+        &k,
+        json!({"type": "read", "from_last_kind": "clear"}),
+        Some("alice"),
+    )
+    .await;
     assert_eq!(ids(&head), vec![2, 3, 4]);
-    let named = call(&k, json!({"type": "read", "match": {"name": "job"}}), Some("alice")).await;
+    let named = call(
+        &k,
+        json!({"type": "read", "match": {"name": "job"}}),
+        Some("alice"),
+    )
+    .await;
     assert_eq!(ids(&named), vec![1]);
     let last_view = call(
         &k,
@@ -373,19 +469,28 @@ async fn dump_inject_roundtrip() {
     assert_eq!(empty["rows"], json!([]));
     let out = call(&k, json!({"type": "inject", "tables": tables}), None).await;
     assert_eq!(out, json!({"rows": 3, "grants": 1}));
-    assert_eq!(call(&k, json!({"type": "dump"}), None).await["tables"], tables);
+    assert_eq!(
+        call(&k, json!({"type": "dump"}), None).await["tables"],
+        tables
+    );
     // a broken FK is refused and nothing changes
     let mut bad = tables.clone();
     bad["grants"][0]["anchor"] = json!(999);
     let refused = call(&k, json!({"type": "inject", "tables": bad}), None).await;
     assert_eq!(refused["reason"], json!("bad_arg"));
-    assert_eq!(call(&k, json!({"type": "dump"}), None).await["tables"], tables);
+    assert_eq!(
+        call(&k, json!({"type": "dump"}), None).await["tables"],
+        tables
+    );
 }
 
 #[tokio::test]
 async fn remote_caller_is_keyed_by_its_qualified_address() {
     let k = store();
-    let item = Item::new(AgentId::from("mem"), json!({"type": "append", "rows": [{"id": 1}]}));
+    let item = Item::new(
+        AgentId::from("mem"),
+        json!({"type": "append", "rows": [{"id": 1}]}),
+    );
     let out = with_remote_caller(
         AgentId::from("leg"),
         "g2|scout".to_string(),
@@ -431,8 +536,8 @@ async fn reflect_names_the_posture_and_the_verbs() {
     assert_eq!(
         verbs,
         vec![
-            "reflect", "boot", "append", "read", "search", "share", "unshare", "grants",
-            "prune", "inject", "dump"
+            "reflect", "boot", "append", "read", "search", "share", "unshare", "grants", "prune",
+            "inject", "dump"
         ]
     );
 }
@@ -444,9 +549,16 @@ async fn verb_docs_are_pythons_first_docstring_lines() {
     let src = std::fs::read_to_string(&py).expect("python ram_store");
     for (name, doc) in VERB_DOCS {
         let head = format!("async def _{name}(id, payload, agent):\n    \"\"\"");
-        let at = src.find(&head).unwrap_or_else(|| panic!("no python _{name}"));
+        let at = src
+            .find(&head)
+            .unwrap_or_else(|| panic!("no python _{name}"));
         let rest = &src[at + head.len()..];
-        let line = rest.split('\n').next().unwrap().trim_end_matches("\"\"\"").trim();
+        let line = rest
+            .split('\n')
+            .next()
+            .unwrap()
+            .trim_end_matches("\"\"\"")
+            .trim();
         assert_eq!(doc, line, "{name}");
     }
 }
@@ -462,10 +574,45 @@ fn readme_is_pythons_verbatim() {
 async fn validate_meta_refuses_bad_posture_fields() {
     let b = RamStoreBundle::default();
     let m = |v: Value| v.as_object().unwrap().clone();
-    assert!(b.validate_meta(&m(json!({"operator": "yes"})), &Map::new()).is_some());
-    assert!(b.validate_meta(&m(json!({"admins": [1]})), &Map::new()).is_some());
-    assert!(b.validate_meta(&m(json!({"admins": "kernel"})), &Map::new()).is_none());
     assert!(b
-        .validate_meta(&m(json!({"operator": true, "admins": ["kernel"]})), &Map::new())
+        .validate_meta(&m(json!({"operator": "yes"})), &Map::new())
+        .is_some());
+    assert!(b
+        .validate_meta(&m(json!({"admins": [1]})), &Map::new())
+        .is_some());
+    assert!(b
+        .validate_meta(&m(json!({"admins": "kernel"})), &Map::new())
         .is_none());
+    assert!(b
+        .validate_meta(
+            &m(json!({"operator": true, "admins": ["kernel"]})),
+            &Map::new()
+        )
+        .is_none());
+}
+
+/// A row may carry the one number the kernel keeps whose text is not JSON — the
+/// `Infinity` a model's `3e500123` (a hex job id `float()` reads as infinity)
+/// coerces to. Reading it back must answer, not panic: a panic here fires under
+/// the store's lock and poisons it, so every later call on EVERY owner failed
+/// (E30 subai on rust, 2026-09-29).
+#[tokio::test]
+async fn a_row_holding_a_non_json_number_reads_back_and_the_store_survives() {
+    let k = store();
+    let inf = fantastic_kernel::coerce_scalar("3e500123");
+    assert_eq!(inf.to_string(), "Infinity", "the token under test");
+    // Assembled by hand: `json!` over this value is exactly the panic.
+    let mut row = Map::new();
+    row.insert("id".to_string(), Value::from(7));
+    row.insert("job_id".to_string(), inf);
+    let mut payload = Map::new();
+    payload.insert("type".to_string(), Value::from("append"));
+    payload.insert("rows".to_string(), Value::Array(vec![Value::Object(row)]));
+    let out = call(&k, Value::Object(payload), Some("alice")).await;
+    assert_eq!(out["appended"], json!(1), "{out}");
+    let read = call(&k, json!({"type": "read"}), Some("alice")).await;
+    assert_eq!(read["rows"][0]["job_id"].to_string(), "Infinity", "{read}");
+    // the lock is not poisoned: another owner's call still answers
+    let other = append(&k, "bob", json!([{"id": 1, "content": "after"}])).await;
+    assert_eq!(other["appended"], json!(1), "{other}");
 }

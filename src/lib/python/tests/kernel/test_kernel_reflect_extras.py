@@ -1,34 +1,18 @@
 """Uniform `reflect` surface — the composable flags (tree / bundles /
-readme), the `description` field, and the guarantee that the old
-root-only `primer` keys are GONE (transports/wire docs moved into the
-root readme; `available_bundles` is now the `bundles` flag).
+readme) and the `description` field.
 """
 
 from __future__ import annotations
 
-_PRIMER_KEYS_GONE = (
-    "transports",
-    "primitive",
-    "envelope",
-    "universal_verb",
-    "binary_protocol",
-    "browser_bus",
-    "well_known",
-    "agent_count",
-    "available_bundles",
-)
 
-
-async def test_reflect_root_uniform_no_primer_keys(seeded_kernel):
-    """Root reflect is the uniform identity — no special primer shape."""
+async def test_reflect_root_uniform(seeded_kernel):
+    """Root reflect is the uniform identity."""
     r = (
         await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
     )[0]["result"]
     assert r["id"] == "kernel_state"
     assert r["sentence"].startswith("Fantastic kernel")
     assert r["parent_id"] is None
-    for k in _PRIMER_KEYS_GONE:
-        assert k not in r, f"deleted primer key {k!r} still present"
 
 
 async def test_reflect_root_has_runtime(seeded_kernel):
@@ -62,9 +46,9 @@ async def test_reflect_root_env_version_from_environ(seeded_kernel, monkeypatch)
     assert r["version"] == "v9.9.9"
 
 
-async def test_kernel_alias_equals_core(seeded_kernel):
-    """`kernel` is an alias for the root; reflecting it == reflecting kernel_state."""
-    via_alias = (
+async def test_kernel_address_equals_the_root(seeded_kernel):
+    """`kernel` is the reserved address of the root; reflecting it == reflecting kernel_state."""
+    via_address = (
         await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
     )[0]["result"]
     via_id = (
@@ -72,7 +56,7 @@ async def test_kernel_alias_equals_core(seeded_kernel):
             [{"target": "kernel_state", "payload": {"type": "reflect"}}]
         )
     )[0]["result"]
-    assert via_alias == via_id
+    assert via_address == via_id
 
 
 # ─── tree tiers ────────────────────────────────────────────────
@@ -87,6 +71,19 @@ async def test_reflect_tree_all_default(seeded_kernel):
     assert tree["id"] == "kernel_state"
     child_ids = {c["id"] for c in tree.get("children", [])}
     assert "cli" in child_ids
+
+
+async def test_reflect_tree_node_carries_a_bridges_allow(seeded_kernel):
+    """`allow` is posture (audit 2026-09-28, d7): what a file_bridge exposes is
+    readable from the ONE root reflect (`detail:full`), like its root and its lock."""
+    seeded_kernel.create("file_bridge.tools", allow=["src", "README.md"], id="fb_d7")
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+        )
+    )[0]["result"]
+    node = next(c for c in r["tree"]["children"] if c["id"] == "fb_d7")
+    assert node.get("allow") == ["src", "README.md"], node
 
 
 async def test_reflect_tree_ids(seeded_kernel):
@@ -185,6 +182,7 @@ async def test_reflect_description_surfaces_top_and_tree(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "description": "holds my notes",
                     },
                 }

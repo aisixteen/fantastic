@@ -20,7 +20,7 @@ from _testkit import persist
 async def test_create_seeds_readme_from_bundle(kernel):
     """Persisting a freshly created agent copies the bundle's shipped
     readme.md into the new agent's directory."""
-    rec = kernel.create("file_bridge.tools")
+    rec = kernel.create("file_bridge.tools", allow=["."])
     aid = rec["id"]
     persist(kernel)
     readme = Path(kernel.ctx.agents[aid]._root_path) / "readme.md"
@@ -32,7 +32,7 @@ async def test_create_seeds_readme_from_bundle(kernel):
 async def test_seed_readme_copy_if_missing(kernel):
     """Re-seeding never clobbers an operator-edited readme. The copy
     only happens when the dest is absent."""
-    kernel.create("file_bridge.tools", id="fa")
+    kernel.create("file_bridge.tools", allow=["."], id="fa")
     persist(kernel)
     readme = Path(kernel.ctx.agents["fa"]._root_path) / "readme.md"
     readme.write_text("OPERATOR EDIT")
@@ -62,6 +62,7 @@ async def test_reflect_omits_readme_by_default(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -87,6 +88,7 @@ async def test_reflect_readme_attaches_content(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]
@@ -115,6 +117,7 @@ async def test_reflect_readme_null_when_absent(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                     },
                 }
             ]

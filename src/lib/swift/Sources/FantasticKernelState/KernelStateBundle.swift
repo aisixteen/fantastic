@@ -134,6 +134,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// agent's own dir if present, else computed under this loader's root from
     /// the record's parent chain.
     private func persistRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) -> JSON {
+        if let denied = guardOwnTree("persist_record", agent) { return denied }
         guard let record = payload["record"].asObject, pyTruthy(record["id"] ?? .null),
             let id = record["id"]?.asString
         else {
@@ -160,6 +161,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// verb ends in a recursive delete: measured 2026-08-28, an agent with NO
     /// explicit grant sent `id="../../important_project_dir"`.
     private func forgetRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) -> JSON {
+        if let denied = guardOwnTree("forget_record", agent) { return denied }
         guard pyTruthy(payload["id"]), let target = payload["id"].asString else {
             return Refusal.missing("forget_record", "id")
         }
@@ -193,10 +195,17 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     public func reflectRootExtra(agent: Agent, full: Bool, kernel: Kernel) throws(PyError)
         -> OrderedDictionary<String, JSON>?
     {
+        // `provider` only while writes land; a refused/failed write reports
+        // `error` and no provider until one lands again (d2).
+        var persistence: OrderedDictionary<String, JSON> = [:]
+        if let err = kernel.persistError {
+            persistence["provider"] = .null
+            persistence["error"] = .object(err)
+        } else {
+            persistence["provider"] = kernel.findStore().map { JSON.string($0.value) } ?? .null
+        }
         var out: OrderedDictionary<String, JSON> = [
-            "persistence": .object([
-                "provider": kernel.findStore().map { JSON.string($0.value) } ?? .null
-            ]),
+            "persistence": .object(persistence),
             "guid": agent.metaValue(forKey: "guid") ?? .null,
         ]
         if !full {
@@ -335,6 +344,22 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// disk position, never by the payload — else naming a sibling's id with
     /// `parent_id` = yourself passed. The payload's `parent_id` places only a
     /// record that exists in neither. Python `_guard_record_owner`.
+    /// The ROOT loader's tree is the one this kernel HYDRATES at boot, so only
+    /// the operator (its own flush, the CLI, boot) writes it. An agent's record
+    /// changes through `update_agent`, where the conferral rule runs — a record
+    /// written here by an agent would be hydrated with whatever grants it named
+    /// (audit 2026-09-28, a15). A session loader (a remote's sub-namespace,
+    /// never hydrated here) keeps serving its remote. Python `_guard_own_tree`.
+    private func guardOwnTree(_ verb: String, _ agent: Agent) -> JSON? {
+        guard agent.parentId == nil, KernelTaskLocals.currentOrigin != nil else { return nil }
+        return Refusal.make(
+            Refusal.unauthorized,
+            "\(verb): the kernel's own tree is written only by the operator — "
+                + "an agent's record changes through update_agent",
+            hint: "update_agent id=<id> …  (the conferral rule applies there)",
+            extra: [("side", .string("store"))])
+    }
+
     private func guardRecordOwner(
         _ verb: String, _ recordId: String, _ parentId: String?, _ agent: Agent,
         _ kernel: Kernel
@@ -388,5 +413,5 @@ extension KernelStateBundle {
     /// The LONG `self_extension` a `detail:"full"` root reflect carries — python's
     /// full branch, verbatim (it has no fd-wire tail sentence).
     static let selfExtensionFull =
-        "A DURABLE PROGRAM is a FILE you write plus a command that runs it — not a `code`-carrying agent. There is no `code` field: a program used to be embedded as a JSON string, which is exactly how a call gets lost to escaping. Assemble these THREE pieces and you have built something that persists and re-runs, with no `code` field at all:\n1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> <truncate>true</truncate> <bytes>…</bytes> to write, <type>read_stream</type> <path>…</path> <offset>0</offset> to read, one raw chunk at a time. `bytes` is VERBATIM: the program between `<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped. That is the only byte path; the string read/write verbs are gone.\n2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect it, read its `allowed` regexes, then send <type>start</type> <command>path</command> <args><item>…</item></args>; poll <type>status</type>. It runs commands, not inline programs.\n3. RE-RUN: the file is durable on disk, so the SAME `start` command run again later re-executes the SAME program against whatever the inputs hold THEN — that is how a thing 'keeps itself up to date'.\nA WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING command runner) that owns a program file — you never author a new handler_module (you cannot add modules to the catalog and do not need to). 'A specialist with child workers' = a parent agent whose children are exec_bridge runners, each with its own program file.\nWIRING TO A SIBLING: you cannot raise your OWN authority, but if you hold `update_agent` (e.g. on the root) you may open ANY agent's ingress — including a sibling like `totals`/`readings` that is not your child. To let your worker call `totals`: grant the worker `can_call:{totals}` AND `update_agent id='totals'` to add the worker to `totals.callable_by` (send the WHOLE map — update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, data}. It is not inline — read frames until one carries your `rid`, skipping event/inbox frames.\nCOMPOSE the agents you were given for everything else (`list_agents`, reflect each, send). CREATE/DELETE plain agents (create_agent with a handler_module and grants, delete_agent) work as before."
+        "A DURABLE PROGRAM is a FILE you write plus a command that runs it — not a `code`-carrying agent (there is no `code` field). A program carried as a JSON string is exactly how a call gets lost to escaping. Assemble these THREE pieces and you have built something that persists and re-runs:\n1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> <truncate>true</truncate> <bytes>…</bytes> to write, <type>read_stream</type> <path>…</path> <offset>0</offset> to read, one raw chunk at a time. `bytes` is VERBATIM: the program between `<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped. The text verbs (`write`, `edit`, `append`) take `bytes` the same way.\n2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect it, read its `allowed` regexes, then send <type>start</type> <command>path</command> <args><item>…</item></args>; poll <type>status</type>. It runs commands, not inline programs.\n3. RE-RUN: the file is durable on disk, so the SAME `start` command run again later re-executes the SAME program against whatever the inputs hold THEN — that is how a thing 'keeps itself up to date'.\nA WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING command runner) that owns a program file — you never author a new handler_module (you cannot add modules to the catalog and do not need to). 'A specialist with child workers' = a parent agent whose children are exec_bridge runners, each with its own program file.\nWIRING TO A SIBLING: you cannot raise your OWN authority, but if you hold `update_agent` (e.g. on the root) you may open ANY agent's ingress — including a sibling like `totals`/`readings` that is not your child. To let your worker call `totals`: grant the worker `can_call:{totals}` AND `update_agent id='totals'` to add the worker to `totals.callable_by` (send the WHOLE map — update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, data}. It is not inline — read frames until one carries your `rid`, skipping event/inbox frames.\nCOMPOSE the agents you were given for everything else (`list_agents`, reflect each, send). CREATE/DELETE plain agents (create_agent with a handler_module and grants, delete_agent) work as before."
 }

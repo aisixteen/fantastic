@@ -1,6 +1,8 @@
 // A bridge frame's qualified `caller` (`<guid>|<agent id>`) is checked on
-// INGRESS, before the kernel sees it: malformed or claiming THIS kernel's guid ⇒
-// refused. Twin of python `io_bridge/tests/test_caller_check.py`.
+// INGRESS, before the kernel sees it. Every inbound call names its caller, and the
+// guid must be the ONE peer the leg is pinned to (`peer_guid`): a peer cannot pose
+// as a third kernel's agent (audit 2026-09-28). No pin, no inbound call. Twin of
+// python `io_bridge/tests/test_caller_check.py`.
 
 import FantasticJSON
 import FantasticKernel
@@ -10,37 +12,38 @@ import Testing
 
 @Suite("bridge caller check")
 struct BridgeCallerCheckTests {
-    private func kernel(_ guid: String) -> Kernel {
-        let k = Kernel()
-        let root = Agent(
-            id: AgentId("kernel_state"), handlerModule: nil, parentId: nil,
-            meta: ["guid": .string(guid)])
-        k.register(root)
-        k.setRoot(root)
-        return k
-    }
-
     private let bridge = KernelBridgeBundle(family: .ws)
 
-    @Test func aRemoteCallersQualifiedAddressPasses() {
-        #expect(bridge.checkCaller(kernel("local-g"), .string("remote-g|ai")) == nil)
+    @Test func aCallerFromThePinnedPeerPasses() {
+        #expect(bridge.checkCaller(pin: "peer-g", .string("peer-g|ai")) == nil)
     }
 
-    @Test func noCallerIsNotAClaim() {
-        #expect(bridge.checkCaller(kernel("local-g"), .null) == nil)
-    }
-
-    @Test func aRemoteClaimingThisKernelsGuidIsRefused() {
-        let out = bridge.checkCaller(kernel("local-g"), .string("local-g|ai"))
+    @Test func aCallerFromAnyOtherKernelIsRefused() {
+        let out = bridge.checkCaller(pin: "peer-g", .string("third-g|ai"))
         #expect(out?["reason"].asString == "unauthorized")
-        #expect(out?["error"].asString?.contains("THIS kernel's guid") == true)
+        #expect(out?["error"].asString?.contains("pinned peer") == true)
     }
 
-    @Test func aMalformedCallerIsRefused() {
-        for bad: JSON in [.string("ai"), .string("g|"), .string("|ai"), .string("a|b|c"), .integer(42)] {
+    @Test func noPinServesNoInboundCall() {
+        let out = bridge.checkCaller(pin: nil, .string("peer-g|ai"))
+        #expect(out?["reason"].asString == "unauthorized")
+        #expect(out?["hint"].asString?.contains("peer_guid") == true)
+    }
+
+    @Test func aMissingOrMalformedCallerIsRefused() {
+        for bad: JSON in [
+            .null, .string("ai"), .string("g|"), .string("|ai"), .string("a|b|c"), .integer(42),
+        ] {
             #expect(
-                bridge.checkCaller(kernel("local-g"), bad)?["reason"].asString == "unauthorized",
+                bridge.checkCaller(pin: "peer-g", bad)?["reason"].asString == "unauthorized",
                 "\(bad.serialize())")
+        }
+    }
+
+    @Test func thePinIsValidatedAtWrite() {
+        #expect(bridge.validateMeta(["peer_guid": "peer-g"], record: [:]) == nil)
+        for bad: JSON in [.string(""), .string("a|b"), .integer(7)] {
+            #expect(bridge.validateMeta(["peer_guid": bad], record: [:]) != nil, "\(bad.serialize())")
         }
     }
 }

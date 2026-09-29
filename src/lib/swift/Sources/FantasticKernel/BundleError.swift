@@ -11,11 +11,6 @@
 
 import Foundation
 
-/// Marker protocol for errors a bundle's `handle` / `onDelete` /
-/// `onShutdown` can throw. Any `Swift.Error` works — this just
-/// names the contract.
-public typealias BundleError = Swift.Error
-
 /// Substrate-level kernel errors. These are the conditions the
 /// kernel surfaces as structured JSON replies on the wire.
 public enum KernelError: Error, Equatable, Sendable {

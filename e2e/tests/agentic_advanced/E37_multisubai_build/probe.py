@@ -79,7 +79,7 @@ TASK = (
     f"This kernel holds THREE oracles, `{ORACLES[0]}` (the PEOPLE ledger), "
     f"`{ORACLES[1]}` (the ROOMS ledger), `{ORACLES[2]}` (the OWNERSHIP ledger) — each "
     "answers `ask` with a `question` and knows ONLY its own ledger. Together they hide "
-    "a 3-digit SAFE CODE. There is also `notes` (a text document agent; verbs write/"
+    "a 3-digit SAFE CODE. There is also `notes` (a file agent; verbs write/"
     "read, args `path` and `bytes`) and `brain`, an AI agent whose RECORD is your "
     "template. Do NOT solve the puzzle yourself and do NOT relay facts between "
     "solvers. Build the team, start it, walk away, and come back only when it calls "
@@ -138,12 +138,12 @@ async def fixture(root, *, interpreter=None):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": root.id,
-                        "handler_module": "file_bridge.tools",
+                        "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         # `notes` is the one that actually reads/writes here (the solvers
                         # and the creator go THROUGH it) — measured 2026-09-10: without
                         # it, every write failed and the creator had to open the door.
-                        "callable_by": {CREATOR: "*", "brain": "*", "notes": "*", "rest": "*", "web": "*"},
+                        "callable_by": {CREATOR: "*", "brain": "*", "rest": "*", "web": "*"},
                         "ingress_rule": "allow_all_ingress",
                         "root": ".fantastic",
                     },
@@ -157,12 +157,12 @@ async def fixture(root, *, interpreter=None):
             "payload": {
                 "type": "create_agent",
                 "parent_id": root.id,
-                "handler_module": "text_file.tools",
+                "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "notes",
-                "target_id": store["id"],
-                "can_call": {store["id"]: "*"},
+                # a DATA store — the records under `.fantastic` stay the loader's
+                "root": ".fantastic/data",
+                "ingress_rule": "allow_all_ingress",
                 "callable_by": {CREATOR: "*", "rest": "*", "web": "*"},
-                "file_bridge_id": store["id"],
                 "description": "Shared text documents. The team's answer goes to `answer.txt`.",
             },
         },
@@ -260,7 +260,7 @@ async def score(root, store_id, total, new_total, transcript):
     t0 = time.monotonic()
     answer = None
     while time.monotonic() - t0 < UNATTENDED:
-        p = Path(".fantastic/answer.txt")
+        p = Path(".fantastic/data/answer.txt")
         if p.exists():
             first = (p.read_text(errors="ignore").strip().splitlines() or [""])[0].strip()
             if re.fullmatch(r"\d{3}", first):

@@ -16,8 +16,7 @@ use crate::memory::{load_history, save_view, MemoryStoreError};
 use crate::provider::Provider;
 use crate::state::BackendState;
 use crate::strategies::{
-    compact, drop_orphan_tools, fold::fold, is_known_strategy, strip::strip, truncate,
-    ProjectionCtx,
+    compact, fold::fold, is_known_strategy, strip::strip, truncate, ProjectionCtx,
 };
 use crate::view::res_of;
 use fantastic_bundle::py_repr_value;
@@ -242,13 +241,13 @@ pub async fn project_context(
     while out_body.len() > 2 && over(&out_body) {
         let mut next = vec![out_body[0].clone()];
         next.extend(out_body[2..].iter().cloned());
-        out_body = drop_orphan_tools(next);
+        out_body = next;
     }
     // Last resort, and only when nothing else is left to give: [goal, live] still
     // over budget. The live turn is what the model must answer, so the goal is
     // what goes — loudly, in the notice's own count, not silently.
     while out_body.len() > 1 && over(&out_body) {
-        out_body = drop_orphan_tools(out_body[1..].to_vec());
+        out_body = out_body[1..].to_vec();
     }
     let dropped_n = body.len().saturating_sub(out_body.len());
     let summarized = proj.summary.is_some();
@@ -373,10 +372,8 @@ pub async fn derive_reaction(
 /// The reaction read itself, over the durable turns AFTER the notice cursor: did
 /// the model `recall` to its OWN id, or write to memory?
 ///
-/// THE MEMORY VERBS ARE `text_file`'s (`write`/`patch`/`append`). They were
-/// durable_memory's (`set`/`replace`) until 2026-09-02 — a bundle that no longer
-/// exists — so a model that DID persist, in the only way the substrate now
-/// offers, was scored as not having reacted at all.
+/// THE MEMORY VERBS are a file_bridge's MUTATING text verbs (`write`/`edit`/
+/// `append`) — a model persists what it must keep as plain files.
 ///
 /// Pure, so the SHAPES it recognizes can be pinned. The parser rewrite widened
 /// that set on purpose: an UNTERMINATED envelope (nemotron omits the closing tag)
@@ -404,7 +401,7 @@ pub fn reaction_from(self_id: &str, turns: &[Value]) -> Value {
             if target == Some(self_id) && ptype == Some("recall") {
                 recalled = true;
                 recall_count += 1;
-            } else if matches!(ptype, Some("write") | Some("patch") | Some("append")) {
+            } else if matches!(ptype, Some("write") | Some("edit") | Some("append")) {
                 persisted = true;
             }
         }

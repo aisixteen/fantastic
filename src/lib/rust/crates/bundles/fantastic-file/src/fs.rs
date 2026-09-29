@@ -179,8 +179,9 @@ fn bytes_path(b: &[u8]) -> PathBuf {
     PathBuf::from(OsString::from_vec(b.to_vec()))
 }
 
-/// python `fs.resolve_root` — clamp `root` to the running dir (`base`, python's
-/// `Path.cwd()`). A relative root resolves under `base`; an absolute root is
+/// python `fs.resolve_root` — clamp `root` to the running dir `base` (the
+/// kernel's [`fantastic_kernel::Kernel::workdir`], python's `fs.Root.base` — the
+/// ONE source). A relative root resolves under `base`; an absolute root is
 /// allowed only if it lies inside `base`; `..`/symlink escapes refuse.
 ///
 /// # Errors
@@ -265,6 +266,15 @@ pub fn read_text(root: &Path, path: &str) -> Result<String, String> {
     let target = resolve(root, path)?;
     let bytes = std::fs::read(&target).map_err(|e| io_error_str(&e, &target))?;
     String::from_utf8(bytes).map_err(|e| utf8_decode_error_str(e.as_bytes(), &e.utf8_error()))
+}
+
+/// python `fs.read_bytes` — the whole file.
+///
+/// # Errors
+/// python's `OSError` text.
+pub fn read_bytes(root: &Path, path: &str) -> Result<Vec<u8>, String> {
+    let target = resolve(root, path)?;
+    std::fs::read(&target).map_err(|e| io_error_str(&e, &target))
 }
 
 /// python `fs.read_chunk` — one chunk at `offset`, plus the file's total size.
@@ -355,7 +365,7 @@ pub fn write_bytes(root: &Path, path: &str, data: &[u8], atomic: bool) -> Result
 }
 
 /// python `fs.list_dir` — the dir's entries as resolved paths, sorted by name
-/// (raw: hidden-filtering is an AGENT policy, not a disk concern).
+/// (raw: exposure is the AGENT's `allow` list, not a disk concern).
 ///
 /// # Errors
 /// python's `OSError` text when the walk fails.

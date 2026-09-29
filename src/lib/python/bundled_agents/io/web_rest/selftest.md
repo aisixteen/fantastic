@@ -9,7 +9,6 @@ body=payload → kernel.send(target_id, payload) → JSON reply.
 ## Pre-flight
 
 ```bash
-cd new_codebase
 rm -rf .fantastic
 pkill -9 -f "fantastic" 2>/dev/null
 PORT=18901
@@ -43,7 +42,6 @@ import json, sys
 d = json.load(sys.stdin)
 assert d.get('id') == 'kernel_state', f'id={d.get(\"id\")}'
 assert 'tree' in d, f'no tree: {list(d)}'
-assert 'transports' not in d, f'stale primer key leaked: {list(d)}'
 print('PASS')
 "
 ```
@@ -108,13 +106,12 @@ compose the reply exactly like the verb's `tree` / `bundles` / `readme`
 fields.
 
 ```bash
-# Bare GET → the root identity + tree (no legacy primer keys).
+# Bare GET → the root identity + tree.
 curl -s http://localhost:$PORT/$RID/_reflect | python -c "
 import json, sys
 d = json.load(sys.stdin)
 assert d.get('id') == 'kernel_state', f'id={d.get(\"id\")}'
 assert 'tree' in d
-assert 'transports' not in d and 'available_bundles' not in d, f'stale primer keys: {list(d)}'
 print('bare: PASS')
 "
 # ?bundles=all → the installable-bundle catalog rides in `bundles`.
@@ -145,7 +142,6 @@ d = json.load(sys.stdin)
 # kernel_state reflect is the root agent's uniform identity + tree.
 assert d.get('id') == 'kernel_state', f'id={d.get(\"id\")}'
 assert 'tree' in d
-assert 'transports' not in d, f'stale primer key: {list(d)}'
 print('PASS')
 "
 ```

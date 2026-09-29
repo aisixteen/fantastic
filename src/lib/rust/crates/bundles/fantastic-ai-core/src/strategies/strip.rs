@@ -29,7 +29,7 @@
 //!
 //! Mirrors python `ai_core/strategies/strip.py`.
 
-use super::{drop_orphan_tools, fit_tail, Projection, ProjectionCtx};
+use super::{fit_tail, Projection, ProjectionCtx};
 use crate::context::{estimate_one, estimate_tokens, NOTICE_ENVELOPE_RESERVE};
 use crate::history_view::reply_blocks;
 use serde_json::{json, Value};
@@ -128,15 +128,10 @@ fn render(body: &[Value], done: &HashSet<String>) -> (Vec<Value>, usize, i64) {
     (out, n, saved)
 }
 
-/// The back half, snapped so it never STARTS on an orphaned `role:tool`. The cut
-/// is strip's second stage — what happens when every body is already a stub and
-/// the prose alone still overflows.
+/// The back half — strip's second stage, what happens when every body is
+/// already a stub and the prose alone still overflows.
 fn halve(body: &[Value]) -> Vec<Value> {
-    let mut cut = body.len() / 2;
-    while cut > 0 && body[cut].get("role").and_then(Value::as_str) == Some("tool") {
-        cut -= 1;
-    }
-    drop_orphan_tools(body[cut..].to_vec())
+    body[body.len() / 2..].to_vec()
 }
 
 /// SEEDED FROM THE VIEW ARRAY on first use — stubs survive a restart, and the

@@ -17,7 +17,7 @@ OpenAI Chat Completions (`/chat/completions`), this one the Responses wire
 
 from __future__ import annotations
 
-from ai_core import build
+from ai_core import build, required_meta
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -34,16 +34,14 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
 def make_provider(id, kernel):
     """Build a ResponsesProvider from the agent record (endpoint/model/max_tokens/sampling)."""
     from responses_backend.provider import (
-        DEFAULT_ENDPOINT,
-        DEFAULT_MODEL,
         MAX_TOKENS,
         ResponsesProvider,
     )
 
     rec = kernel.get(id) or {}
     return ResponsesProvider(
-        endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
-        model=rec.get("model", DEFAULT_MODEL),
+        endpoint=required_meta(rec, "endpoint", "responses_backend"),
+        model=required_meta(rec, "model", "responses_backend"),
         max_tokens=int(rec.get("max_tokens") or MAX_TOKENS),
         # RUNNER (meta) params — sampling knobs saved on the record, distinct from
         # connection (endpoint/key/model). Merged verbatim into the request body.
@@ -52,12 +50,9 @@ def make_provider(id, kernel):
 
 
 def _build():
-    from responses_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
 
     return build(
         sentence="OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling).",
-        default_model=DEFAULT_MODEL,
-        default_endpoint=DEFAULT_ENDPOINT,
         make_provider=make_provider,
         name="responses_backend",
         module_name=__name__,

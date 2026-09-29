@@ -87,7 +87,7 @@ impl std::fmt::Display for Status {
 /// is a caller-declared budget the kernel never defaults either.
 #[derive(Debug, Clone)]
 pub struct Item {
-    /// Who to call. `"kernel"` aliases the root.
+    /// Who to call. The reserved `"kernel"` address names the root.
     pub target: AgentId,
     /// The verb payload — `type` names the verb.
     pub payload: Value,

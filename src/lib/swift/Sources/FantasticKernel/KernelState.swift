@@ -62,11 +62,6 @@ extension Kernel {
 
     /// Write the snapshot to `<workdir>/.fantastic/state.json` in
     /// Disk mode. In InMemory mode this is a no-op.
-    ///
-    /// Distinct from the shim `save() -> String` in PublicAPI.swift
-    /// (which mirrors Rust UniFFI's `save() -> String` and returns
-    /// the JSON in-memory). Use this when you have a Disk-mode
-    /// kernel and want it to flush.
     public func saveToDisk() throws {
         guard let stateFile = storage.stateFile else { return }
         let json = try saveJSON()
@@ -109,6 +104,13 @@ extension Kernel {
                 throw KernelError.invalidSnapshot(
                     "record \(rec.id) carries reserved key \(k) — that names substrate "
                         + "wiring, not agent meta")
+            }
+            // THE SAME ID RULE AS A CREATE: a record edited on disk to carry the
+            // reserved `kernel`, a foreign `guid|agent`, or a path-walking id is
+            // refused here, before the live tree is torn down.
+            if let bad = Refusal.guardAgentId("load", rec.id) {
+                throw KernelError.invalidSnapshot(
+                    "record \(rec.id): \(bad["error"].asString ?? "")")
             }
             if seen.contains(rec.id) {
                 throw KernelError.invalidSnapshot("duplicate id \(rec.id)")

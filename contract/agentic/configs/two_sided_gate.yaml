@@ -11,6 +11,7 @@ loaders:
         # verb list here is half of an intersection, never a permission.
         - id: caller
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           can_call:
             both_grant: [list]
@@ -21,6 +22,7 @@ loaders:
         # the caller may send, so `mkdir` here dies on the CALLER's half.
         - id: both_grant
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           callable_by:
             caller: [list, mkdir]
@@ -30,12 +32,14 @@ loaders:
         # reachable, the send says otherwise.
         - id: only_caller_grants
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
 
         # Only the CALLEE's half is declared → refused by the sender's own half
         # (egress). An open door is not a road.
         - id: only_callee_grants
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           callable_by:
             caller: [list]
@@ -44,12 +48,14 @@ loaders:
         # never consulted.
         - id: neither_grants
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
 
         # The mirror of `both_grant`: the caller may send more verbs than the
         # callee accepts, so `mkdir` dies on the CALLEE's half.
         - id: callee_narrows_verbs
           handler_module: file_bridge.tools
+          allow: ['.']
           ingress_rule: allow_all_ingress
           callable_by:
             caller: [list]

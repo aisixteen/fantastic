@@ -151,27 +151,67 @@ private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Deci
     #expect(src.watcherIds().contains(AgentId("cli")))
 }
 
-@Test func theStateStreamIsNotCoveredByAWildcard() {
+@Test func theStateStreamIsNotCoveredByTheBaseline() {
     // The broadest read the kernel offers. The structural baseline grants
     // `$parent: "*"`, so WITHOUT `state_subscribe` being privileged every direct
     // child of the root could tap the whole stream while holding no grant that
-    // names it.
+    // names it. A `*` under the root's NAMED id is the operator's own statement
+    // and covers it (audit 2026-09-28: whoever writes a `*` owns it).
     let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
+    // Two-sided: the root's `callable_by` names `named` too — a structural
+    // `$children: "*"` would not carry a privileged verb on either side.
+    var rootMeta: OrderedDictionary<String, JSON> = [:]
+    rootMeta["callable_by"] = .object(["named": .string("*")])
+    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil, meta: rootMeta)
     kernel.register(root)
     kernel.setRoot(root)
-    // A wildcard on the root — deliberately generous, and still not enough.
-    var meta: OrderedDictionary<String, JSON> = [:]
-    meta["can_call"] = .object(["kernel_state": .string("*")])
-    let leaf = Agent(
-        id: "leaf", handlerModule: nil, parentId: AgentId("kernel_state"), meta: meta)
+    let leaf = Agent(id: "leaf", handlerModule: nil, parentId: AgentId("kernel_state"))
     kernel.register(leaf)
-
     let denial = KernelTaskLocals.$currentSender.withValue(AgentId("leaf")) {
         kernel.authorizeStateSubscribe(AgentId("leaf"))
     }
-    #expect(denial != nil, "a wildcard covered the whole state stream")
+    #expect(denial != nil, "the baseline covered the whole state stream")
     #expect(denial?["reason"].asString == "unauthorized")
+    var meta: OrderedDictionary<String, JSON> = [:]
+    meta["can_call"] = .object(["kernel_state": .string("*")])
+    let named = Agent(
+        id: "named", handlerModule: nil, parentId: AgentId("kernel_state"), meta: meta)
+    kernel.register(named)
+    #expect(
+        KernelTaskLocals.$currentSender.withValue(AgentId("named")) {
+            kernel.authorizeStateSubscribe(AgentId("named"))
+        } == nil, "a named `*` is the operator's own statement")
     // An OPERATOR tap is ungated.
     #expect(kernel.authorizeStateSubscribe(AgentId("cli")) == nil)
+}
+
+/// Measured 2026-09-28: `$parent: "*"` let every direct child of the root stop the
+/// kernel, kill ANY task and read the whole ledger. A structural token's wildcard
+/// covers none of them; a grant that names the verb does.
+@Test func theBaselineNeverReachesTheKernelControls() {
+    for verb in [
+        "kernel_stop", "kernel_start", "shutdown_agents", "ps", "cancel", "ledger",
+        "ack_deadletter", "persist_record", "forget_record", "load_tree",
+    ] {
+        #expect(!auth(defaultCanCall(), verb, "boss").allowed, "\(verb)")
+        #expect(auth(.object(["boss": .array([.string(verb)])]), verb, "boss").allowed, "\(verb)")
+    }
+}
+
+/// `*` under a NAMED id covers everything, privileged verbs included.
+@Test func aNamedWildcardCoversPrivilegedVerbs() {
+    let g: JSON = .object(["root": .string("*")])
+    for verb in ["create_agent", "delete_agent", "kernel_stop", "cancel", "allow"] {
+        #expect(auth(g, verb, "root").allowed, "\(verb)")
+    }
+}
+
+/// A foreign caller is named `<guid>|<agent>`, or every agent of that one kernel
+/// with `<guid>|*`; the structural tokens never match it.
+@Test func aForeignCallerMatchesOnlyByName() {
+    #expect(authIngress(.object(["g1|ai": .string("*")]), "read", "g1|ai").allowed)
+    #expect(!authIngress(.object(["g1|ai": .string("*")]), "read", "g1|other").allowed)
+    #expect(authIngress(.object(["g1|*": .string("*")]), "read", "g1|anyone").allowed)
+    #expect(!authIngress(.object(["g1|*": .string("*")]), "read", "g2|anyone").allowed)
+    #expect(!authIngress(defaultCallableBy(), "read", "boss|x").allowed)
 }

@@ -86,13 +86,13 @@ cat bundled_agents/web/host/selftest.md
 Specs that work cross-runtime without modification: file, web, web_ws,
 web_rest, ollama_backend (needs running ollama),
 nvidia_nim_backend (needs api_key), scheduler,
-kernel_bridge (WS-only, asymmetric; memory + WS + SSH+WS transports), local_runner, ssh_runner.
+kernel_bridge (WS-only, asymmetric; memory + WS transports), local_runner, ssh_runner.
 
 View/webapp specs now live in the decoupled frontend kernel — see
 [`../ts/`](../ts/); this host serves it generically via a `file` agent.
 
 Specs with Rust-specific deltas worth noting (verbs match; only the
-binary path + a few env vars differ): terminal_backend (image-paste via
+binary path + a few env vars differ): exec_bridge PTY jobs (image-paste via
 WS binary frame channel, covered in overlay).
 
 ### Rust-specific overlay specs

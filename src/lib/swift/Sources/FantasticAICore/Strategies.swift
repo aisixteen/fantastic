@@ -7,10 +7,6 @@
 // strategy that WRITES (a mark that does not persist is a prefix that rewrites
 // every turn). Mirrors Python `ai_core/strategies` / Rust `strategies/`.
 //
-// Tool-pairing is load-bearing: the OpenAI/NIM wire rejects a `role:tool` that
-// isn't preceded by its `assistant.tool_calls` turn. Every cut drops orphaned
-// leading `role:tool` messages so the body stays wire-valid.
-//
 // Selection is STATIC per agent (`context_strategy`, default `compact`); no
 // runtime try-X-else-Y (NO-FALLBACKS). `memgpt` was removed — its persist
 // nudge is now universal in the seam notice.
@@ -116,20 +112,8 @@ public enum AIStrategies {
     /// Python `DEFAULT_STRATEGY`.
     public static let defaultStrategy = "compact"
 
-    static func isTool(_ turn: JSON) -> Bool {
-        turn["role"].asString == "tool"
-    }
-
-    /// Drop leading `role:tool` messages whose owning `assistant.tool_calls`
-    /// turn is not present — the model wire would reject them.
-    public static func dropOrphanTools(_ turns: [JSON]) -> [JSON] {
-        var i = 0
-        while i < turns.count && isTool(turns[i]) { i += 1 }
-        return Array(turns[i...])
-    }
-
     /// Keep the largest SUFFIX of `turns` that fits `budget`, always including
-    /// the last turn (the live request), then drop orphaned leading tools.
+    /// the last turn (the live request).
     public static func fitTail(_ turns: [JSON], _ budget: Int64) -> [JSON] {
         guard let last = turns.last else { return [] }
         var kept = [last]
@@ -140,14 +124,12 @@ public enum AIStrategies {
             kept.insert(t, at: 0)
             used += c
         }
-        return dropOrphanTools(kept)
+        return kept
     }
 
-    /// Split `body` into (overflow, recent) at the last `recentN` turns,
-    /// snapping the boundary back so `recent` never STARTS on an orphan tool.
+    /// Split `body` into (overflow, recent) at the last `recentN` turns.
     public static func recentSplit(_ body: [JSON], _ recentN: Int) -> ([JSON], [JSON]) {
-        var start = max(0, body.count - recentN)
-        while start > 0 && isTool(body[start]) { start -= 1 }
+        let start = max(0, body.count - recentN)
         return (Array(body[..<start]), Array(body[start...]))
     }
 

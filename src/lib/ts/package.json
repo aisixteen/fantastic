@@ -3,7 +3,7 @@
   "license": "AGPL-3.0-or-later",
   "private": true,
   "type": "module",
-  "description": "Fantastic ts kernel library — the BASE: kernel, WS bridge, proxy loader, memory store, AI backend, and `boot` (src/index.ts, the public entry). No page and no views: an app (e.g. src/tui/web/canvas) registers its bundles, seeds and mounts. Zero runtime deps.",
+  "description": "Fantastic ts kernel library — the BASE: kernel, WS bridge, proxy loader, memory store, and `boot` (src/index.ts, the public entry). No page and no views: an app (e.g. src/tui/web/canvas) registers its bundles, seeds and mounts. Zero runtime deps.",
   "scripts": {
     "test": "node --test \"tests/**/*.test.ts\"",
     "build": "tsc -p tsconfig.json",

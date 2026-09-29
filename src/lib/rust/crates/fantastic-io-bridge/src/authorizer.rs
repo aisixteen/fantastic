@@ -12,7 +12,7 @@
 //! BY NAME from a registry — the [`ingress`] and [`egress`] modules, each a folder
 //! of one-rule-per-file plus a `mod.rs` importer that registers names. Add a rule =
 //! drop a file + one registry arm; the engine never changes. The record carries
-//! `ingress_rule`/`egress_rule` (symmetric), or the legacy `auth` shorthand (sets
+//! `ingress_rule`/`egress_rule` (symmetric), or the `auth` shorthand (sets
 //! both sides). Rules are TRANSITIONAL (inline plumbing), not invocational (agents).
 
 use fantastic_bundle::py_truthy;
@@ -129,9 +129,7 @@ pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
 /// `{}`) is `(None, None)`, a string is `(name, None)`, an object is
 /// `(type, env)`.
 ///
-/// `type` and `env` are the only spellings. This used to also accept `policy` and
-/// `token_env`; python's `parse_spec` never did, so those were rust-only legacy aliases
-/// giving one wire key two names.
+/// `type` and `env` are the only spellings.
 ///
 /// An object with no `type` is `(None, env)` — a plain SEAL, as python resolves
 /// it. It used to be an `Err` that every caller turned into its own shape: the

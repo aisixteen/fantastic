@@ -12,8 +12,8 @@
 #                       only in the "compose a web" hint, not bound by the entrypoint
 #   FANTASTIC_WORKDIR = /work (bind-mounted; holds .fantastic/lock.json)
 #
-# On EVERY runtime the web's `/` is the agent-tree index — the kernel's own web
-# owns no `fs` surface. A custom landing (e.g. the all-readmes head page baked at
+# On EVERY runtime the web's `/` is a 404 — the kernel's own web renders nothing
+# and owns no `fs` surface. A custom landing (e.g. the all-readmes head page baked at
 # /opt/fantastic/head/index.html) is served the one gated way: create a read-only
 # `file_bridge` over that dir and let `/<file_bridge>/file/index.html` serve it.
 # There is no `FANTASTIC_WEB_INDEX` env back-channel any more (deleted to match
@@ -80,7 +80,7 @@ has_web() { grep -rqs '"handler_module"[[:space:]]*:[[:space:]]*"web.tools"' .fa
 if ! has_web; then
   echo "entrypoint: no web agent in $WORKDIR/.fantastic — this image composes nothing." >&2
   echo "  Mount a project that carries its own web stack, or compose one explicitly:" >&2
-  echo "    $BIN $ROOT create_agent handler_module=web.tools id=web port=$PORT" >&2
+  echo "    $BIN $ROOT create_agent handler_module=web.tools id=web port=$PORT host=0.0.0.0 allowed_origins=http://localhost:$PORT" >&2
   echo "    $BIN web create_agent handler_module=web_ws.tools id=web_ws" >&2
   echo "    $BIN web create_agent handler_module=web_rest.tools id=rest" >&2
   echo "  (without a web host the kernel boots, has nothing to serve, and exits.)" >&2

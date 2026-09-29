@@ -1,5 +1,5 @@
 id: tricky_0a1b2c
-handler_module: text_file.tools
+handler_module: file_bridge.tools
 parent_id: kernel_state
 one: '1'
 truthy: 'true'

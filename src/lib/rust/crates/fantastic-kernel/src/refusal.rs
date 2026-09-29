@@ -197,8 +197,33 @@ pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
             ),
         ));
     }
+    if agent_id.contains('|') {
+        // `|` qualifies a FOREIGN agent (`<guid>|<agent>`): a local id never
+        // carries one, so a gate can tell local from foreign by the id alone.
+        return Some(bad(
+            verb,
+            "id",
+            &format!(
+                "a local name without `|` (it marks a foreign `guid|agent`); got {}",
+                py_repr(agent_id)
+            ),
+        ));
+    }
+    if agent_id == RESERVED_ID {
+        // `kernel` names the operator: sends to it reach the root, and a memory
+        // store serves the operator under it. An agent holding that id would BE
+        // the operator to every store (measured in python 2026-09-28).
+        return Some(bad(
+            verb,
+            "id",
+            &format!("a name other than the reserved {}", py_repr(RESERVED_ID)),
+        ));
+    }
     None
 }
+
+/// The one reserved agent id — the operator's name (send target, store identity).
+pub const RESERVED_ID: &str = "kernel";
 
 /// `<verb>: <arg> required` — the commonest refusal, spelled once.
 #[must_use]
@@ -247,7 +272,7 @@ pub fn not_here(verb: &str, id: &str) -> Value {
     let mut v = refusal_hint(
         NOT_HERE,
         format!("{verb} is a kernel verb — {id} does not answer it"),
-        "address the kernel root (alias 'kernel'); name the agent you mean in \
+        "address the kernel root ('kernel'); name the agent you mean in \
          `parent_id` / `id`",
     );
     with(&mut v, "verb", Value::String(verb.to_string()));

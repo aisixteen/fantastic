@@ -54,7 +54,7 @@ async fn a_record_updated_just_before_shutdown_always_lands() {
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": "file_bridge.tools", "id": "sp_late",
+                "handler_module": "file_bridge.tools", "allow": ["."], "id": "sp_late",
                 "root": store.to_string_lossy(),
             }),
         )])

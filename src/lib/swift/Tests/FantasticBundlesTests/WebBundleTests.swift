@@ -378,7 +378,7 @@ struct WebBundleTests {
             kernel, "kernel_state",
             .object([
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
-                "handler_module": .string("file_bridge.tools"), "id": .string("files"),
+                "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("files"),
                 "root": .string(rel),
             ]))
         // Sealed leg + no grants: not reachable.
@@ -410,6 +410,59 @@ struct WebBundleTests {
                 "type": .string("update_agent"), "id": .string("files"),
                 "ingress_rule": .string("deny_ingress"),
             ]))
+        #expect(
+            await call(kernel, "web", .object(["type": .string("reflect")]))["browser_reachable"]
+                .asArray?.isEmpty == true)
+    }
+
+    /// The same three gates, opened by the SUBTREE forms: the web's ancestor holds a
+    /// heritable `read_stream` entry on the served agent, and that agent accepts
+    /// `$subtree:web`. Neither side names the web by id in a plain grant.
+    @Test func browserReachableHonoursHeritableAndSubtreeGrants() async throws {
+        let kernel = try await startWebKernel()
+        defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
+        let rel = "fantastic-reach-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(rel)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await call(
+            kernel, "kernel_state",
+            .object([
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                "handler_module": .string("file_bridge.tools"), "allow": ["."],
+                "id": .string("files"), "root": .string(rel),
+                "ingress_rule": .string("allow_all_ingress"),
+                "callable_by": .object(["$subtree:web": ["read_stream"]]),
+            ]))
+        // Ingress + leg open, no egress yet: not reachable.
+        #expect(
+            await call(kernel, "web", .object(["type": .string("reflect")]))["browser_reachable"]
+                .asArray?.isEmpty == true)
+        let heritable: JSON = .object([
+            "files": .object(["verbs": ["read_stream"], "for": .string("descendants")])
+        ])
+        let up = await call(
+            kernel, "kernel_state",
+            .object([
+                "type": .string("update_agent"), "id": .string("kernel_state"),
+                "can_call": heritable,
+            ]))
+        #expect(up["updated"].asBool == true, "\(up.serialize())")
+        let opened = await call(kernel, "web", .object(["type": .string("reflect")]))
+        #expect(
+            opened["browser_reachable"].asArray?.compactMap { $0.asString } == ["files"],
+            "\(opened["browser_reachable"])")
+        // The heritable entry on the web ITSELF reaches nothing.
+        _ = await call(
+            kernel, "kernel_state",
+            .object([
+                "type": .string("update_agent"), "id": .string("kernel_state"),
+                "can_call": .object(["files": .array([])]),
+            ]))
+        _ = await call(
+            kernel, "kernel_state",
+            .object(["type": .string("update_agent"), "id": .string("web"), "can_call": heritable]))
         #expect(
             await call(kernel, "web", .object(["type": .string("reflect")]))["browser_reachable"]
                 .asArray?.isEmpty == true)

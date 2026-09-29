@@ -15,7 +15,7 @@ killed with the universal `ps` → `cancel` system verbs).
 
 from __future__ import annotations
 
-from ai_core import build
+from ai_core import build, required_meta
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -32,16 +32,14 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
 def make_provider(id, kernel):
     """Build an AnthropicProvider from the agent record (endpoint/model)."""
     from anthropic_backend.provider import (
-        DEFAULT_ENDPOINT,
-        DEFAULT_MODEL,
         MAX_TOKENS,
         AnthropicProvider,
     )
 
     rec = kernel.get(id) or {}
     return AnthropicProvider(
-        endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
-        model=rec.get("model", DEFAULT_MODEL),
+        endpoint=required_meta(rec, "endpoint", "anthropic_backend"),
+        model=required_meta(rec, "model", "anthropic_backend"),
         max_tokens=int(rec.get("max_tokens") or MAX_TOKENS),
         # RUNNER (meta) params — sampling/budget knobs saved on the record, distinct
         # from connection (endpoint/key/model). Merged verbatim into the request body.
@@ -50,12 +48,9 @@ def make_provider(id, kernel):
 
 
 def _build():
-    from anthropic_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
 
     return build(
         sentence="Anthropic-backed LLM agent (raw prompt-and-parse tool-calling).",
-        default_model=DEFAULT_MODEL,
-        default_endpoint=DEFAULT_ENDPOINT,
         make_provider=make_provider,
         name="anthropic_backend",
         module_name=__name__,

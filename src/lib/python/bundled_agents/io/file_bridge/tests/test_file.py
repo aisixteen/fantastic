@@ -93,7 +93,9 @@ async def test_list(seeded_kernel, file_bridge, tmp_path):
     assert {"a.txt", "b.txt", "subdir"} <= names
 
 
-async def test_list_excludes_hidden_default(seeded_kernel, file_bridge, tmp_path):
+async def test_list_shows_every_exposed_entry(seeded_kernel, file_bridge, tmp_path):
+    """No hidden list: `allow` alone decides exposure, so `allow ["."]` shows the
+    dot-entries too — narrowing is the operator's, by naming what to expose."""
     (tmp_path / ".git").mkdir()
     (tmp_path / "visible.txt").write_text("v")
     r = (
@@ -102,7 +104,7 @@ async def test_list_excludes_hidden_default(seeded_kernel, file_bridge, tmp_path
         )
     )[0]["result"]
     names = {f["name"] for f in r["files"]}
-    assert ".git" not in names
+    assert ".git" in names
     assert "visible.txt" in names
 
 
@@ -228,6 +230,7 @@ async def test_update_agent_refuses_a_rule_the_bundle_cannot_honour(seeded_kerne
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": ".",
                     },
                 }
@@ -289,6 +292,7 @@ async def _fb(kernel, tmp_path, **meta) -> str:
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "root": "wr",
                         "ingress_rule": "allow_all_ingress",
                         **meta,
@@ -460,6 +464,7 @@ async def test_password_ingress_is_refused_on_fs_and_process_legs(seeded_kernel)
                             "type": "create_agent",
                             "parent_id": "kernel_state",
                             "handler_module": "file_bridge.tools",
+                            "allow": ["."],
                             **meta,
                         },
                     }
