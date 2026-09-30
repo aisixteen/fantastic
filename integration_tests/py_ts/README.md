@@ -48,20 +48,25 @@ FANTASTIC_IMAGE=fantastic:latest FANTASTIC_TARGET=container npm run test:integra
 
 Container target: needs the image built (`sh container/build.sh`, **host arch**)
 and podman/docker; the daemon runs the python runtime with `-p 127.0.0.1:port:port`
-(its `/` is the dynamic agent index), seeding one-shots run inside the image, and the frontend
-`dist/` is bind-mounted at `/work/dist` (inside the workdir — file_bridge
-clamps roots to the running dir) so the `ts_dist` file_bridge agent serves it. Everything is
+(its `/` is the dynamic agent index), seeding one-shots run inside the image, and the canvas
+page is extracted into the bind-mounted workdir (file_bridge clamps roots to the
+running dir) so the `canvas_page` file_bridge agent serves it. Everything is
 host/browser → container (no container↔container), so it works over `-p`. The
 workdir lives under `py_ts/tmp/` (a VM-mounted path) since the OS tmpdir may not
 be mounted in the podman/docker VM.
 
-Prereqs: `cd ../../python && uv sync` (the `fantastic` venv), `cd ../../ts &&
-npm run build` (the `dist/` the browser loads), and system Chrome for the
-`*.browser.itest.ts`. `bundle_revive.browser.itest.ts` additionally needs the
-sovereign artifact: `cd ../../ts && sh scripts/pack.sh` (→
-`ts/dist/js_kernel.zip`). A test **skips** (never fails) when its prerequisite
-— the venv, a built `dist/`, the zip, Chrome, or `ANTHROPIC_KEY` for the
-live-LLM cases — is missing; nothing hangs or silently "passes".
+Prereqs: `cd ../../src/lib/python && uv sync` (the `fantastic` venv) and system
+Chrome for the `*.browser.itest.ts`. The page the browser loads is the CANVAS
+APP (`src/tui/web/canvas`): `bootHost({serveDist})` packs it
+(`scripts/pack.sh` → `dist/canvas.zip`, the vendored esbuild, no npm), extracts
+its `bundle.min.js` into the workdir beside a one-tag page, and serves it at
+`host.pageUrl`. A test **skips** (never fails) when its prerequisite — the venv,
+Chrome, or a reachable LLM backend for the live cases — is missing; nothing
+hangs or silently "passes".
+
+Every page agent SENDS AS ITSELF, so a fixture record carries its own
+`can_call` (the host agents and verbs it calls or watches), and the harness
+grants the socket leg onto each host agent it seeds, both halves.
 
 ## What's covered
 
@@ -72,20 +77,19 @@ live-LLM cases — is missing; nothing hangs or silently "passes".
   only in halves.
 - `html_agent.browser.itest.ts`, `two_tree.browser.itest.ts` — panels render +
   hydrate in a browser against the host.
-- `canvas_terminal.browser.itest.ts` — the Part-3 discover-and-pair lifecycle: a
-  canvas dblclick **discovers** a PTY-capable `terminal_backend` from the host
-  catalog (no hardcoded handler), pairs a `terminal_view` 1:1, then closing the
-  frame **cascades** removal of both — the frontend view *and* the host backend it
-  owns — over the bridge.
+- `canvas_terminal.browser.itest.ts` — the canvas pair: a dblclick spawns the
+  backend the terminal view DECLARES it fronts (`exec_bridge.tools`) as a
+  child of the socket leg carrying `view_id` + `canvas_id`, binds the view to it
+  (and grants exactly it), then closing the frame removes both.
 - `scheduler_ai_html.browser.itest.ts` — the deep cross-kernel cascade
-  (scheduler ⇄ python ⇄ AI ⇄ JS panels); `A` + `G` are deterministic, `B–J` need
-  `ANTHROPIC_KEY`.
-- `llm_e2e.browser.itest.ts` — a live-LLM browser round-trip.
-- `bundle_revive.browser.itest.ts` — revives the sovereign artifact
-  (`ts/dist/js_kernel.zip`) in a real browser: serves the single
-  `bundle.min.js` through a `file_bridge` agent (no import map, no external
-  stylesheet) and proves `three` + xterm + xterm.css are inlined, and
-  that bridge + terminal pairing work through the rolled-up bundle.
+  (scheduler ⇄ python ⇄ AI ⇄ JS panels); `A` + `G` are deterministic, `B–J` are
+  live (PAID — real tokens on the active backend).
+- `llm_e2e.browser.itest.ts` — a live-LLM browser round-trip (PAID).
+- `bundle_revive.browser.itest.ts` — revives the canvas artifact
+  (`src/tui/web/canvas/dist/canvas.zip`) as its readme says: the stamped sha256
+  matches the served bundle, the single `bundle.min.js` runs with no import map
+  and no external stylesheet (`three` + xterm + xterm.css inlined), and the
+  bridge + the terminal pair work through it.
 
 ---
 

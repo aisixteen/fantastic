@@ -46,7 +46,32 @@ const CHAT_CSS = `
   .chat-view .c-send { background:rgba(110,90,220,0.45); border:0; box-shadow:inset 0 1px 0 rgba(255,255,255,0.12),inset 0 0 0 1px rgba(255,255,255,0.10); border-radius:10px; color:#fff; padding:8px 14px; cursor:pointer; }
   .chat-view .c-send:hover { background:rgba(130,110,240,0.55); }
   .chat-view .c-send.stop { background:rgba(200,80,80,0.55); }
+  .chat-view .msg .spot { display:block; font-size:10px; opacity:0.6; margin-bottom:2px; font-family:ui-monospace,SFMono-Regular,monospace; }
+  .chat-view .c-badge { font-size:11px; margin-left:8px; padding:1px 8px; border-radius:999px; background:rgba(255,255,255,0.08); color:rgba(220,230,245,0.75); }
+  .chat-view .c-badge.kept { background:rgba(126,226,168,0.18); color:#7ee2a8; cursor:pointer; }
+  .chat-view .c-keep { margin-left:6px; font-size:11px; padding:1px 10px; border-radius:999px; border:0; cursor:pointer; background:rgba(183,140,255,0.28); color:#fff; }
+  .chat-view .c-rename { font-size:11px; margin-left:8px; padding:1px 6px; border-radius:6px; border:0; background:rgba(255,255,255,0.12); color:#fff; width:140px; }
 `;
+
+/** An AI cell's turn carries WHERE it was typed, as the LAST line of its text
+ *  (so it is in the conversation's own rows, and a history digest — the first
+ *  line — still shows what was said). */
+const SPOT = /\n?\[at (-?\d+),(-?\d+)\]$/;
+/** The `[from <sender> …]` line ai_core opens a non-operator's message with —
+ *  the cell's own sends come through the leg, so the stored turn carries it. */
+const FROM = /^\[from [^\]]*\]\s*/;
+
+/** The model's calls are the harness's business (tool blocks show them); the
+ *  bubble shows its words. Complete `<call …>…</call>` blocks are hidden. */
+const CALLS = /<call\b[^>]*>[\s\S]*?<\/call>/g;
+const words = (t: string): string => t.replace(CALLS, "").trimEnd();
+
+/** What an AI cell is told about living on the canvas (per send). */
+export const SPATIAL_PROMPT =
+  "You are an AI cell on a spatial 2D canvas (Aisixteen Fantastic). Each user turn ends with " +
+  "[at X,Y]: where on the canvas it was typed, in canvas coordinates (x grows right, y grows down). " +
+  "Words like here, next to, above and below refer to canvas geometry around that spot. " +
+  "Answer in text; keep it concise.";
 
 function ensureStyle(): void {
   if (document.getElementById("fantastic-chat-style")) return;
@@ -119,7 +144,7 @@ export const aiView: ViewBundle = {
   handles: ["ai_view.ts"],
   // Fronts a backend it never spawns; cancels a turn through the host root's
   // task table.
-  grants: (backend) => ({ [backend]: ["reflect", "history", "status", "send"], kernel: ["ps", "cancel"] }),
+  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send"], kernel: ["ps", "cancel"], ai_cells: ["keep", "rename"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
@@ -159,14 +184,80 @@ export const aiView: ViewBundle = {
       clientId = "web_" + Math.random().toString(36).slice(2, 10);
       localStorage.setItem(CLIENT_KEY, clientId);
     }
-    $<HTMLElement>(".c-agent").textContent = `${selfId} (client ${clientId})`;
+    const tpl = record && typeof record["template"] === "string" ? (record["template"] as string) : "";
+    $<HTMLElement>(".c-agent").textContent = tpl ? `✦ ${tpl} · ${backend}` : `${selfId} (client ${clientId})`;
+    // THE DIALOG'S STORE, in the header: `○ ephemeral` (RAM — closing the
+    // cell forgets it) with [keep], or `● kept · <name>` (the project's SQLite —
+    // it outlives the cell; click the name to rename it).
+    if (tpl) {
+      const badge = document.createElement("span");
+      badge.className = "c-badge";
+      const keepBtn = document.createElement("button");
+      keepBtn.className = "c-keep";
+      keepBtn.textContent = "keep";
+      keepBtn.title = "keep this dialog: it moves to the project's memory and outlives the cell";
+      const showKept = (name: string): void => {
+        badge.className = "c-badge kept";
+        badge.textContent = `● kept · ${name}`;
+        badge.title = "click to rename";
+        keepBtn.remove();
+      };
+      if (record && record["kept"] === true) showKept(typeof record["dialog_name"] === "string" ? (record["dialog_name"] as string) : backend);
+      else {
+        badge.textContent = "○ ephemeral";
+        badge.title = "this dialog lives in RAM: closing the cell forgets it";
+      }
+      keepBtn.onclick = async (): Promise<void> => {
+        const r = (await host.callHost("ai_cells", { type: "keep", id: backend } as never)) as Dict;
+        if (typeof r["error"] === "string") {
+          addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
+          return;
+        }
+        kernel.updateMeta(selfId, { kept: true, dialog_name: r["name"], owns_backend: false } as never);
+        showKept(String(r["name"]));
+      };
+      badge.onclick = (): void => {
+        if (!badge.classList.contains("kept")) return;
+        const input = document.createElement("input");
+        input.className = "c-rename";
+        input.value = badge.textContent?.replace(/^● kept · /, "") ?? "";
+        badge.replaceWith(input);
+        input.focus();
+        input.select();
+        const done = async (save: boolean): Promise<void> => {
+          if (save && input.value.trim()) {
+            const r = (await host.callHost("ai_cells", { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
+            if (typeof r["error"] !== "string") {
+              kernel.updateMeta(selfId, { dialog_name: r["name"] } as never);
+              showKept(String(r["name"]));
+            }
+          }
+          input.replaceWith(badge);
+        };
+        input.onkeydown = (e: KeyboardEvent): void => {
+          if (e.key === "Enter") void done(true);
+          if (e.key === "Escape") void done(false);
+        };
+        input.onblur = (): void => void done(true);
+      };
+      $<HTMLElement>(".c-agent").after(badge);
+      if (!badge.classList.contains("kept")) badge.after(keepBtn);
+    }
     const upRefl = (await host.call(backend, { type: "reflect" })) as Dict;
     $<HTMLElement>(".c-model").textContent = s(upRefl, "model");
 
     const addMsg = (role: string, text: string, parent: HTMLElement): HTMLElement => {
       const div = document.createElement("div");
       div.className = "msg " + role;
-      div.textContent = text;
+      const spot = role === "user" ? SPOT.exec(text) : null;
+      if (spot !== null) {
+        const tag = document.createElement("span");
+        tag.className = "spot";
+        tag.textContent = `you · at ${spot[1]},${spot[2]}`;
+        div.append(tag, text.slice(0, spot.index).replace(FROM, ""));
+      } else {
+        div.textContent = role === "assistant" ? words(text) : text;
+      }
       parent.appendChild(div);
       if (parent === dialogEl) dialogEl.scrollTop = dialogEl.scrollHeight;
       return div;
@@ -332,7 +423,7 @@ export const aiView: ViewBundle = {
     const offToken = host.on(backend, "token", (p) => {
       if (mine(p) && inflight !== null) {
         inflight.streamText += s(p, "text");
-        inflight.assistantBubble.textContent = inflight.streamText;
+        inflight.assistantBubble.textContent = words(inflight.streamText);
         dialogEl.scrollTop = dialogEl.scrollHeight;
       }
     });
@@ -395,10 +486,20 @@ export const aiView: ViewBundle = {
       refreshBusy();
     }
 
-    const submit = (): void => {
-      const text = inputEl.value.trim();
-      if (!text) return;
-      inputEl.value = "";
+    // A cell's turns are typed at a SPOT: its own position unless a first turn
+    // names one (the spot input's). Plain chat views (not cells) send plain text.
+    const isCell = tpl !== "";
+    const cellSpot = (): [number, number] => {
+      const x = typeof record?.["x"] === "number" ? (record["x"] as number) : 0;
+      const y = typeof record?.["y"] === "number" ? (record["y"] as number) : 0;
+      return [Math.round(x), Math.round(y)];
+    };
+    const submit = (override?: string, at?: [number, number]): void => {
+      const typed = (override ?? inputEl.value).trim();
+      if (!typed) return;
+      if (override === undefined) inputEl.value = "";
+      const [sx, sy] = at ?? cellSpot();
+      const text = isCell ? `${typed}\n[at ${sx},${sy}]` : typed;
       const localKey = "local_" + Math.random().toString(36).slice(2, 10);
       const bubble = addMsg("user", text, queuedEl);
       bubble.classList.add("queued");
@@ -406,7 +507,27 @@ export const aiView: ViewBundle = {
       queuedOrder.push(localKey);
       localPending.push(localKey);
       refreshBusy();
-      void host.call(backend, { type: "send", text, client_id: clientId }).catch((e: Error) => {
+      const payload: Dict = { type: "send", text, client_id: clientId };
+      if (isCell) payload["system_prompt"] = SPATIAL_PROMPT;
+      const dropLocal = (): void => {
+        queuedBubbles.get(localKey)?.remove();
+        queuedBubbles.delete(localKey);
+        const i = queuedOrder.indexOf(localKey);
+        if (i >= 0) queuedOrder.splice(i, 1);
+        const j = localPending.indexOf(localKey);
+        if (j >= 0) localPending.splice(j, 1);
+        refreshBusy();
+      };
+      void host.call(backend, payload as never).then((r) => {
+        // A REFUSAL IS DATA: shown in the dialog, in the kernel's words.
+        const o = r as Dict | null;
+        if (o && typeof o["error"] === "string") {
+          const hint = typeof o["hint"] === "string" && o["hint"] ? ` — ${o["hint"]}` : "";
+          const n = addMsg("notice", `✕ ${o["error"]}${hint}`, dialogEl);
+          n.classList.add("too-small");
+          dropLocal();
+        }
+      }).catch((e: Error) => {
         addMsg("assistant", "ERROR: " + e.message, dialogEl);
         queuedBubbles.get(localKey)?.remove();
         queuedBubbles.delete(localKey);
@@ -432,6 +553,14 @@ export const aiView: ViewBundle = {
     };
 
     sendBtn.addEventListener("click", () => (inflight !== null ? interrupt() : submit()));
+    // The spot input's text is the cell's FIRST turn: sent once, then dropped
+    // from the record so a reload does not send it again.
+    const first = record?.["first_turn"] as Dict | undefined;
+    if (first && typeof first["text"] === "string" && dialogEl.childElementCount === 0) {
+      const at: [number, number] = [Math.round(Number(first["x"] ?? 0)), Math.round(Number(first["y"] ?? 0))];
+      kernel.updateMeta(selfId, { first_turn: null } as never);
+      submit(first["text"] as string, at);
+    }
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();

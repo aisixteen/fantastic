@@ -1,0 +1,20 @@
+[package]
+name = "fantastic-web-ui"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The browser View's leg (`web_ui.tools`), built OUTSIDE the kernel tree: a child of `web` that declares one websocket route, so the web_ws frame protocol runs AS this agent."
+
+[dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
+async-trait = "0.1"
+serde_json = "1"
+
+[dev-dependencies]
+fantastic-web = { path = "../../../lib/rust/crates/bundles/fantastic-web" }
+fantastic-file = { path = "../../../lib/rust/crates/bundles/fantastic-file" }
+fantastic-core = { path = "../../../lib/rust/crates/bundles/fantastic-core" }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

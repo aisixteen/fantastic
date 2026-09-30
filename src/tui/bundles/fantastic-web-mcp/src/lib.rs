@@ -1,0 +1,421 @@
+//! THE MCP LEG — a bundle written outside the kernel tree.
+//!
+//! Two things live here, and they are kept apart on purpose:
+//!
+//! - [`WebMcpBundle`] is the AGENT (`web_mcp.tools`): what answers when something
+//!   sends a verb *to* the leg. It has almost nothing to say — the leg is driven
+//!   by its carrier, not by verbs — but it is a real record, gated and walked
+//!   like any other agent.
+//! - [`McpCore`] is the PROTOCOL: one JSON-RPC message in, one reply out. Every
+//!   carrier (stdio now, HTTP later) calls it, and no carrier knows what MCP
+//!   means. It dispatches as the leg — `with_sender(leg)` — never as the
+//!   operator.
+//!
+//! The surface is deliberately two tools, `reflect` and `send`. There is no
+//! tool per agent or per verb: a client learns what exists by reflecting, the
+//! way an agent inside the kernel does, so capability keeps emerging instead of
+//! being frozen into a schema.
+//!
+//! PROTOCOL VERSION: 2025-11-25, stateful (`initialize` first). Measured, not
+//! assumed: Claude Code 2.1.280's stdio client opens with `initialize` at
+//! 2025-11-25 and sends nothing else first (2026-09-22). The 2026-07-28
+//! stateless envelope is the HTTP carrier's, later; the tool semantics below do
+//! not change between the two.
+//!
+//! THE BOUND. Every tool call runs as a kernel task owned by the leg
+//! (`Kernel::spawn_task`), so its id exists from the first instant: it shows in
+//! `ps`, and `cancel` on it kills the whole subtree. The leg waits on that task
+//! for at most `settle_bound_ms`. Past the bound the call keeps running and the
+//! reply is its task id. That is deliberately NOT the item `timeout`, which
+//! cancels the call when it expires.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use fantastic_kernel::{
+    bundle::BundleError, send::with_sender, AgentId, Bundle, Item, Kernel, Outcome, Reply, Status,
+    TaskId,
+};
+use serde_json::{json, Map, Value};
+
+/// The handler module a record names to become this leg.
+pub const HANDLER_MODULE: &str = "web_mcp.tools";
+
+/// The one protocol version the stdio carrier speaks (see the module header).
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// The record field that bounds a tool call's wait. REQUIRED: there is no
+/// default, and a record without it is refused at create and at update.
+pub const BOUND_FIELD: &str = "settle_bound_ms";
+
+// ── the agent ───────────────────────────────────────────────────────────────
+
+/// The leg as an agent. Stateless: the carrier holds the connection, the kernel
+/// holds everything else.
+#[derive(Default)]
+pub struct WebMcpBundle;
+
+#[async_trait]
+impl Bundle for WebMcpBundle {
+    fn name(&self) -> &str {
+        "web_mcp"
+    }
+
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        Ok(Some(match verb {
+            "boot" | "shutdown" => Value::Null,
+            "reflect" => json!({
+                "id": agent_id.as_str(),
+                "sentence": "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through me, with exactly my grants — never as the operator. My carrier speaks MCP; the verbs I dispatch are the kernel's own.",
+                "protocol": PROTOCOL_VERSION,
+                "tools": ["reflect", "send"],
+                "verbs": {},
+            }),
+            other => json!({
+                "error": format!("web_mcp: no verb `{other}` — this leg is driven by its carrier; reflect for what it is"),
+                "reason": "unknown_verb",
+            }),
+        }))
+    }
+
+    /// The bound is the one field this bundle cannot run without, so a record
+    /// missing it — or naming one that is not a positive integer — is refused at
+    /// create AND at update, instead of being accepted and then failing on the
+    /// first call.
+    fn validate_meta(&self, meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
+        let bound = meta.get(BOUND_FIELD).or_else(|| record.get(BOUND_FIELD));
+        match bound.and_then(Value::as_u64) {
+            Some(n) if n > 0 => None,
+            _ => Some(format!(
+                "web_mcp: `{BOUND_FIELD}` is required and must be a positive integer (milliseconds a tool call waits before it answers with its task id)"
+            )),
+        }
+    }
+}
+
+// ── the protocol ────────────────────────────────────────────────────────────
+
+/// What a cold client is told in `initialize`. It is the whole onboarding: the
+/// client is never told what agents exist, only how to ask.
+pub const INSTRUCTIONS: &str = "This server is a live Fantastic kernel: a tree of agents that all answer one verb, send. Start with `reflect` and no arguments — it returns the kernel's own primer: the agent tree, the bundles it can run, and a readme index you drill into with `reflect` + readme=<key>. Then act with `send`. Every call goes out as this connection's own agent and is refused if that agent has no grant for it; a refusal is an ordinary result, not a failure of the tool.";
+
+const REFLECT_DESC: &str = "Ask the kernel what exists. With NO arguments: the kernel's own primer — `tree` (every agent id), `bundles` (what it can run) and `readme` (an index of docs). With `target`: that agent describes itself — its sentence, its verbs and their args. Extra arguments are passed through to the reflect, e.g. readme=\"agents\" to read one doc of the index. Reflect before you send: verbs are discovered here, never guessed.";
+
+const SEND_DESC: &str = "Dispatch to agents — the kernel's one verb, batch form: send([{target, payload:{type:<verb>, ...args}, timeout?}]) -> [{pid, status: completed|failed|cancelled|timed_out, result}]. The verb goes in payload.type. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. If the whole call outlasts this connection's wait bound, the reply is {status:\"running\", pid} and the work keeps going — poll it with send [{target:\"kernel\", payload:{type:\"ps\"}}], cancel it with send [{target:\"kernel\", payload:{type:\"cancel\", task_id:<pid>}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.";
+
+/// The carrier-agnostic MCP handler for one leg.
+pub struct McpCore {
+    kernel: Arc<Kernel>,
+    leg: AgentId,
+    bound: Duration,
+    server_version: String,
+}
+
+/// A JSON-RPC reply, or nothing for a notification.
+pub type Answer = Option<Value>;
+
+impl McpCore {
+    /// `bound` is the leg's `settle_bound_ms`, read from its record by the carrier.
+    pub fn new(kernel: Arc<Kernel>, leg: AgentId, bound: Duration, server_version: &str) -> Self {
+        Self { kernel, leg, bound, server_version: server_version.to_string() }
+    }
+
+    /// One message in. `on_task` receives the task id of a tool call the moment
+    /// it exists, so the carrier can map a request to it for cancellation.
+    pub async fn handle<F>(&self, msg: &Value, on_task: F) -> Answer
+    where
+        F: FnOnce(TaskId) + Send,
+    {
+        let id = msg.get("id").cloned();
+        let method = msg.get("method").and_then(Value::as_str);
+        let params = msg.get("params").cloned().unwrap_or(json!({}));
+
+        let Some(method) = method else {
+            // A response from the client, or garbage. Neither is answered.
+            return None;
+        };
+        // Notifications get no reply, ever. Cancellation is the carrier's.
+        let Some(id) = id else {
+            return None;
+        };
+
+        let result = match method {
+            "initialize" => Ok(self.initialize()),
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/call" => Ok(self.call(&params, on_task).await),
+            other => Err((-32601, format!("Method not found: {other}"))),
+        };
+        Some(match result {
+            Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
+            Err((code, message)) => {
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+            }
+        })
+    }
+
+    /// Cancel a tool call by its task id — subtree-wide, as the operator would,
+    /// because the client that asked for it has gone.
+    pub async fn cancel(&self, task: &TaskId) -> Value {
+        let k = Arc::clone(&self.kernel);
+        let t = *task;
+        fantastic_kernel::send::with_operator(async move { k.cancel_task(&t).await }).await
+    }
+
+    fn initialize(&self) -> Value {
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": { "tools": { "listChanged": false } },
+            "serverInfo": { "name": "fantastic", "version": self.server_version },
+            "instructions": INSTRUCTIONS,
+        })
+    }
+
+    async fn call<F>(&self, params: &Value, on_task: F) -> Value
+    where
+        F: FnOnce(TaskId) + Send,
+    {
+        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        let args = params.get("arguments").cloned().unwrap_or(json!({}));
+        let items = match name {
+            "reflect" => reflect_items(&args),
+            "send" => send_items(&args),
+            other => Err(format!("unknown tool `{other}` — this server has `reflect` and `send`")),
+        };
+        let items = match items {
+            Ok(i) => i,
+            Err(e) => return tool_error(&e),
+        };
+        self.run(name, items, on_task).await
+    }
+
+    /// Run a batch as one kernel task owned by the leg, and wait on it for at most
+    /// the bound. Past the bound the task keeps going and its id is the answer.
+    async fn run<F>(&self, tool: &str, items: Vec<Item>, on_task: F) -> Value
+    where
+        F: FnOnce(TaskId) + Send,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Vec<Outcome>>();
+        let k = Arc::clone(&self.kernel);
+        let leg = self.leg.clone();
+        let task = self.kernel.spawn_task(&self.leg, tool, async move {
+            let out = with_sender(leg, async move { k.send(items).await }).await;
+            let _ = tx.send(out);
+        });
+        on_task(task);
+
+        match tokio::time::timeout(self.bound, rx).await {
+            Ok(Ok(outs)) => settled(tool, &outs),
+            Ok(Err(_)) => tool_error(&format!(
+                "task {} ended without an answer (cancelled?) — check it with ps",
+                task.get()
+            )),
+            Err(_) => {
+                let v = json!({
+                    "status": "running",
+                    "pid": task.get(),
+                    "bound_ms": self.bound.as_millis() as u64,
+                    "next": "poll: send [{target:\"kernel\", payload:{type:\"ps\"}}] · cancel: send [{target:\"kernel\", payload:{type:\"cancel\", task_id:<pid>}}]",
+                });
+                text_result(&v, false)
+            }
+        }
+    }
+}
+
+/// The two tools, in a deterministic order.
+pub fn tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "reflect",
+            "description": REFLECT_DESC,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Agent id to reflect. Omit for the kernel's own primer."},
+                    "readme": {"description": "true, or one key of the readme index to read (e.g. \"agents\", \"daemon\", \"transports\", \"orchestration\")."}
+                },
+                "additionalProperties": true
+            }
+        }),
+        json!({
+            "name": "send",
+            "description": SEND_DESC,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "description": "The batch. One item is one dispatch.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target": {"type": "string", "description": "Agent id, or `kernel` for the root."},
+                                "payload": {
+                                    "type": "object",
+                                    "description": "{type:<verb>, ...args} — verbs and args come from reflect on the target.",
+                                    "properties": {"type": {"type": "string"}},
+                                    "required": ["type"],
+                                    "additionalProperties": true
+                                },
+                                "timeout": {"type": "number", "description": "Seconds. CANCELS the item when it expires."}
+                            },
+                            "required": ["target", "payload"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }
+        }),
+    ]
+}
+
+/// `reflect` → one reflect item. No target = the root's primer: the same view
+/// the kernel's own AI agents are given.
+fn reflect_items(args: &Value) -> Result<Vec<Item>, String> {
+    let mut payload = match args {
+        Value::Object(m) => m.clone(),
+        Value::Null => Map::new(),
+        _ => return Err("reflect: arguments must be an object".into()),
+    };
+    let target = match payload.remove("target") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s),
+        Some(_) => return Err("reflect: `target` must be an agent id".into()),
+    };
+    payload.insert("type".into(), json!("reflect"));
+    let target = match target {
+        Some(t) => t,
+        None => {
+            for (k, v) in [("tree", json!("ids")), ("bundles", json!("ids")), ("readme", json!(true))] {
+                payload.entry(k).or_insert(v);
+            }
+            "kernel".to_string()
+        }
+    };
+    Ok(vec![Item::new(AgentId::from(target.as_str()), Value::Object(payload))])
+}
+
+/// `send` → the batch, item for item. Shape errors are the CLIENT's to fix, so
+/// they come back as a tool error naming the item.
+fn send_items(args: &Value) -> Result<Vec<Item>, String> {
+    let list = args
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or("send: `items` must be a list of {target, payload}")?;
+    if list.is_empty() {
+        return Err("send: `items` is empty — nothing to dispatch".into());
+    }
+    let mut out = Vec::with_capacity(list.len());
+    for (i, it) in list.iter().enumerate() {
+        let target = it
+            .get("target")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("send: item {i} has no `target`"))?;
+        let payload = it
+            .get("payload")
+            .filter(|p| p.is_object())
+            .ok_or_else(|| format!("send: item {i} has no `payload` object"))?;
+        if payload.get("type").and_then(Value::as_str).is_none() {
+            return Err(format!(
+                "send: item {i}: the verb goes in payload.type — reflect on `{target}` for its verbs"
+            ));
+        }
+        let mut item = Item::new(AgentId::from(target), payload.clone());
+        item.timeout = it.get("timeout").and_then(Value::as_f64);
+        out.push(item);
+    }
+    Ok(out)
+}
+
+/// The settled batch, as the send contract states it. `isError` only when
+/// NOTHING in the batch completed: a mixed batch is data, not a tool failure.
+fn settled(tool: &str, outs: &[Outcome]) -> Value {
+    let rows: Vec<Value> = outs
+        .iter()
+        .map(|o| json!({"pid": o.pid.map(|p| p.get()), "status": o.status.as_str(), "result": o.result}))
+        .collect();
+    let all_failed = !outs.is_empty() && outs.iter().all(|o| o.status != Status::Completed);
+    // reflect is one item: hand back its result bare, which is what a client reads.
+    let body = if tool == "reflect" && rows.len() == 1 { rows[0]["result"].clone() } else { json!(rows) };
+    text_result(&body, all_failed)
+}
+
+fn text_result(v: &Value, is_error: bool) -> Value {
+    let text = serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string());
+    let mut r = json!({"content": [{"type": "text", "text": text}], "isError": is_error});
+    if v.is_object() {
+        r["structuredContent"] = v.clone();
+    }
+    r
+}
+
+fn tool_error(msg: &str) -> Value {
+    json!({"content": [{"type": "text", "text": msg}], "isError": true})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_surface_is_exactly_reflect_then_send() {
+        let names: Vec<String> =
+            tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, vec!["reflect", "send"]);
+    }
+
+    #[test]
+    fn a_zero_arg_reflect_asks_the_root_for_its_primer() {
+        let items = reflect_items(&json!({})).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].target.as_str(), "kernel");
+        let p = &items[0].payload;
+        assert_eq!(p["type"], "reflect");
+        assert_eq!(p["tree"], "ids");
+        assert_eq!(p["bundles"], "ids");
+        assert_eq!(p["readme"], true);
+    }
+
+    #[test]
+    fn a_targeted_reflect_passes_its_extra_args_through() {
+        let items = reflect_items(&json!({"target": "files", "readme": "agents"})).unwrap();
+        assert_eq!(items[0].target.as_str(), "files");
+        assert_eq!(items[0].payload["readme"], "agents");
+        assert!(items[0].payload.get("tree").is_none(), "the primer defaults are for the root only");
+    }
+
+    #[test]
+    fn send_refuses_an_item_whose_verb_is_not_in_payload_type() {
+        let err = send_items(&json!({"items": [{"target": "files", "payload": {"verb": "read"}}]}))
+            .unwrap_err();
+        assert!(err.contains("payload.type"), "{err}");
+    }
+
+    #[test]
+    fn send_carries_the_item_timeout_through() {
+        let items =
+            send_items(&json!({"items": [{"target": "exec", "payload": {"type": "start"}, "timeout": 5}]}))
+                .unwrap();
+        assert_eq!(items[0].timeout, Some(5.0));
+    }
+
+    #[test]
+    fn a_record_without_a_bound_is_refused() {
+        let b = WebMcpBundle;
+        assert!(b.validate_meta(&Map::new(), &Map::new()).is_some());
+        let mut m = Map::new();
+        m.insert(BOUND_FIELD.into(), json!(0));
+        assert!(b.validate_meta(&m, &Map::new()).is_some(), "zero is not a bound");
+        m.insert(BOUND_FIELD.into(), json!(20000));
+        assert!(b.validate_meta(&m, &Map::new()).is_none());
+    }
+}

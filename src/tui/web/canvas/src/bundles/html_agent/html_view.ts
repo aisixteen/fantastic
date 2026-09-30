@@ -21,13 +21,14 @@ export const htmlView: ViewBundle = {
     const { kernel, mount, selfId } = ctx;
     const iframe = document.createElement("iframe");
     // null-origin sandbox: scripts run, but the ONLY way out is postMessage to us.
-    // EXCEPTION: a TRUSTED first-party panel (`meta.trusted`) renders SAME-ORIGIN, so
-    // legacy browser-local coordination — BroadcastChannel between panels, a single
-    // AudioContext-unlock gesture shared across them — works as it did before
-    // sandboxing. Untrusted html stays null-origin. (allow-same-origin + allow-scripts
-    // drops the isolation — only ever for the operator's OWN content.)
+    // EXCEPTION: a TRUSTED first-party panel (`meta.trusted`) renders UNSANDBOXED
+    // and same-origin — the operator's OWN content. A sandbox that allows both
+    // scripts and same-origin isolates nothing (the frame can lift it), and it
+    // still blocks what first-party content needs: the browser's PDF viewer is a
+    // plugin, sandboxed frames (and every frame nested in one) refuse plugins, so
+    // an embedded PDF rendered blank. Untrusted html stays null-origin.
     const trusted = kernel.get(selfId)?.meta["trusted"] === true;
-    iframe.setAttribute("sandbox", trusted ? "allow-scripts allow-same-origin" : "allow-scripts");
+    if (!trusted) iframe.setAttribute("sandbox", "allow-scripts");
     // Delegate the `autoplay` permission so a panel's AudioContext can resume on a
     // BUS message after ONE top-level user gesture (e.g. a master play) — without a
     // separate click inside every sandboxed panel. Safe: autoplay ≠ same-origin.

@@ -122,6 +122,32 @@ SCENARIO_RUNNERS = {
         "cwd": "pyroot",
         "env": {"KERNEL": "swift"},
     },
+    # THE PRODUCT BINARY'S MCP FACE. Not a kernel runtime: `fantastic mcp`
+    # hosts the rust kernel in-process and speaks MCP over stdio, and the runner
+    # is a SCRIPTED MCP client — no model anywhere. Only scenarios that name it
+    # in `runtimes:` run here (E15), and they run nowhere else.
+    "mcp": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/mcp.py")],
+        "cwd": "pyroot",
+    },
+    # THE SHELL ITSELF: `fantastic` in a pseudo-terminal, driven by a scripted
+    # keyboard through the shell's own PTY rig. Like `mcp`, not a kernel
+    # runtime, and only scenarios that name it run here (E16).
+    "tui": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/tui.py")],
+        "cwd": "pyroot",
+    },
+    # THE BROWSER VIEW: `fantastic web`, driven by a scripted page (E18).
+    "web": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/web.py")],
+        "cwd": "pyroot",
+    },
+    # THE CANVAS: the ts kernel bundle served by the rust canvas host, driven
+    # in a real headless Chrome over CDP (E19). No model.
+    "canvas": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/canvas.py")],
+        "cwd": "pyroot",
+    },
 }
 
 
@@ -145,7 +171,12 @@ def load_suite() -> list[dict]:
     ]
     for sf in sorted(E2E.glob("tests/scenario/*/scenario.yaml")):
         doc = yaml.safe_load(sf.read_text()) or {}
-        for rt in runtimes:
+        # A scenario that names its runtimes runs ONLY on those, and the
+        # model-driven scenarios never run on a runtime they did not name: the
+        # `mcp` face is not a kernel runtime, so E10–E14 must not cross into
+        # it and E15 must not cross out of it.
+        declared = doc.get("runtimes")
+        for rt in declared or [r for r in runtimes if r not in ("mcp", "tui", "web")]:
             spec = SCENARIO_RUNNERS[rt]
             # DERIVED OVERRIDE. A scenario is shared, but a runtime can need a
             # different budget for the SAME work — the compiled kernels drive
@@ -177,7 +208,8 @@ def load_suite() -> list[dict]:
                     "extra_env": spec.get("env", {}),
                     "args": args,
                     "runtime": rt,
-                    "costs": "turns",
+                    # A scripted scenario spends no turns and says so.
+                    "costs": doc.get("costs", "turns"),
                     "limits": limits,
                     "env": {**(doc.get("env") or {}), **(over.get("env") or {})},
                     "title": f"{doc.get('title', '')} [{rt}]",
@@ -468,6 +500,16 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
         print(f"  {mark}  {name:<34} {took:6.0f}s  {note or ''}", flush=True)
 
 
+class _NoBackend:
+    """The plug for a run that selects only free tests: nothing is reached."""
+
+    name = "none"
+    model = "-"
+
+    def blockers(self) -> list[str]:
+        return []
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lanes", type=int, default=int(os.environ.get("LANES", "6")))
@@ -504,7 +546,10 @@ async def main() -> int:
     )
     a = ap.parse_args()
 
-    bk = resolve_backend()
+    # A FREE-ONLY run spends no model turns, so it needs no model plug: naming
+    # a BACKEND for it would be a lie about what the run uses. Any run that can
+    # select a paid test still resolves it, and still fails loud when unset.
+    bk = _NoBackend() if a.only_free and not os.environ.get("BACKEND") else resolve_backend()
     tests = load_suite()
     if a.only_free:
         tests = [t for t in tests if t.get("costs") == "free"]

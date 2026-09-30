@@ -1,9 +1,14 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
 
-// terminal_view — inline xterm.js view-agent. Ported from
-// terminal_webapp/index.html, but rendered INLINE into a canvas frame body
-// (no iframe), talking to its terminal_backend over the bridge. xterm is the
+// terminal_view — inline xterm.js view-agent, rendered INLINE into a canvas
+// frame body (no iframe), drawing ONE PTY job of its exec_bridge backend over
+// the bridge. The canvas drives the pair alone: it creates the exec agent with
+// `shell: "login"` (the child's OWN `$SHELL -l`, found in the environment the
+// record passes down — nobody names the program), and `boot` starts nothing, so
+// attach is this view's: `status` finds a live PTY job and re-attaches (its
+// `output` ring replays), else `start {pty, args: ["-l"]}` with no command.
+// When the job ends the frame closes — view and exec agent together, as ✕ does. xterm is the
 // vendored UMD bundle (sets globalThis.Terminal / globalThis.FitAddon), lazily
 // imported only when a terminal actually mounts. Preserves VSCode-style flow
 // control (ack), binary image paste, no-reflow resize, and explicit autoscroll.
@@ -27,15 +32,31 @@ interface XTerm {
   dispose(): void;
 }
 
+interface Job {
+  job_id?: number;
+  pty?: boolean;
+  status?: string;
+}
+
 export const terminalView: ViewBundle = {
   // The frontend member IS a `terminal_view.ts` agent (carrying a `backend_id`
-  // peer ref to a host terminal_backend); this bundle renders it.
+  // peer ref to its exec_bridge agent); this bundle renders it.
   handles: ["terminal_view.ts"],
-  fronts: "terminal_backend.tools",
-  grants: (backend) => ({ [backend]: ["boot", "write", "ack", "resize", "output", "paste_image"] }),
+  fronts: "exec_bridge.tools",
+  grants: (backend) => ({
+    [backend]: ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"],
+  }),
+  // the exec agent: the project dir, the human's whole environment (its SHELL
+  // included), and exactly one line it may start — the child's `$SHELL -l`
+  backendFields: {
+    cwd: ".",
+    inherit_env: ["*"],
+    shell: "login",
+    ingress_rule: "allow_all_ingress",
+  },
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
-    const { kernel, mount, selfId, backend } = ctx;
+    const { kernel, mount, selfId, backend, close } = ctx;
     const host = new Host(kernel, selfId);
 
     // lazy-load the vendored UMD bundles. As ES modules in the browser (the
@@ -86,29 +107,43 @@ export const terminalView: ViewBundle = {
 
     // flow control: ack AFTER xterm has parsed a chunk (write callback),
     // buffered to one ack per ACK_SIZE chars — real backpressure on the PTY.
+    // THE JOB this frame draws; frames of any other job are not its own.
+    // Frames arriving before the job is known (between `start` and its reply)
+    // are held, then drawn once it is.
+    // the job's kernel task id — an INTEGER, compared as one
+    let jobId: number | undefined;
+    const early: Array<Record<string, unknown>> = [];
+
     let unsentAck = 0;
     const ackChars = (n: number): void => {
+      if (jobId === undefined) return;
       unsentAck += n;
       while (unsentAck >= ACK_SIZE) {
         unsentAck -= ACK_SIZE;
-        void host.call(backend, { type: "ack", chars: ACK_SIZE });
+        void host.call(backend, { type: "ack", job_id: jobId, chars: ACK_SIZE });
       }
     };
-
-    const offOutput = host.on(backend, "output", (e) => {
+    const draw = (e: Record<string, unknown>): void => {
+      if (e["job_id"] !== jobId) return;
       const d = typeof e["data"] === "string" ? (e["data"] as string) : "";
       term.write(d, () => ackChars(d.length));
       if (autoscroll) pendingOutput = true;
-    });
-    const offClosed = host.on(backend, "closed", () => {
-      term.write("\r\n[process closed]\r\n");
-    });
+    };
+    let done = false;
+    const ended = (e: Record<string, unknown>): void => {
+      if (e["job_id"] !== jobId || done) return;
+      done = true;
+      close();
+    };
+
+    const offOutput = host.on(backend, "output", (e) => (jobId === undefined ? early.push(e) : draw(e)));
+    const offDone = host.on(backend, "job_done", (e) => (jobId === undefined ? early.push(e) : ended(e)));
 
     term.onData((data: string) => {
-      void host.call(backend, { type: "write", data });
+      if (jobId !== undefined) void host.call(backend, { type: "write", job_id: jobId, data });
     });
     term.onResize(({ cols, rows }) => {
-      void host.call(backend, { type: "resize", cols, rows });
+      if (jobId !== undefined) void host.call(backend, { type: "resize", job_id: jobId, cols, rows });
     });
 
     // image paste → binary frame to the backend (it saves a file + types the
@@ -122,8 +157,10 @@ export const terminalView: ViewBundle = {
           if (!file) continue;
           try {
             const buf = await file.arrayBuffer();
+            if (jobId === undefined) return;
             await host.callBinary(backend, {
               type: "paste_image",
+              job_id: jobId,
               data: new Uint8Array(buf),
               mime: it.type,
             });
@@ -177,13 +214,30 @@ export const terminalView: ViewBundle = {
     });
     ro.observe(mount);
 
-    // init order: fit (cols/rows) → boot PTY → resize PTY → replay scrollback.
-    // Otherwise vim/tmux replay against the wrong dimensions and corrupt redraw.
+    // init order: fit (cols/rows) → a live job is resized to them, then its
+    // ring replays (vim/tmux must replay against the right dimensions); none
+    // → start the child's login shell AT them.
     tightFit();
-    await host.call(backend, { type: "boot" });
-    await host.call(backend, { type: "resize", cols: term.cols, rows: term.rows });
-    const replay = (await host.call(backend, { type: "output" })) as { output?: string };
-    if (replay && typeof replay.output === "string") term.write(replay.output);
+    const st = (await host.call(backend, { type: "status" })) as { jobs?: Job[]; error?: string };
+    const live = (st?.jobs ?? []).find((j) => j.pty === true && j.status === "running");
+    if (typeof live?.job_id === "number") {
+      jobId = live.job_id;
+      await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
+      const replay = (await host.call(backend, { type: "output", job_id: jobId })) as { output?: string };
+      if (replay && typeof replay.output === "string") term.write(replay.output);
+    } else {
+      const started = (await host.call(backend, {
+        type: "start",
+        args: ["-l"],
+        pty: { cols: term.cols, rows: term.rows },
+      })) as { job_id?: number; error?: string; reason?: string };
+      if (typeof started?.job_id === "number") {
+        jobId = started.job_id;
+      } else {
+        term.write(`\r\n[the login shell did not start: ${started?.error ?? JSON.stringify(started)}]\r\n`);
+      }
+    }
+    for (const e of early.splice(0)) (e["type"] === "job_done" ? ended : draw)(e);
 
     return {
       headerButtons: [
@@ -201,7 +255,7 @@ export const terminalView: ViewBundle = {
       ],
       unmount(): void {
         offOutput();
-        offClosed();
+        offDone();
         host.unwatch(backend);
         clearInterval(scrollTimer);
         clearTimeout(roTimer);

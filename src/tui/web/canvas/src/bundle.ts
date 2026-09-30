@@ -17,4 +17,6 @@ style.textContent = xtermCss;
 document.head.appendChild(style);
 
 // Lazy so the css <style> lands before the canvas (and any terminal view) mounts.
-await import("./main.ts");
+// `setup.html` marks its body `data-page="setup"`: the AI set-up page, not the canvas.
+if (document.body.dataset.page === "setup") await import("./setup_page.ts");
+else await import("./main.ts");

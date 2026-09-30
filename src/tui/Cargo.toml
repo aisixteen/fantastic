@@ -2,31 +2,109 @@
 name = "fantastic-tui"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "fantastic-tui — the ratatui terminal UI (AI / Terminal / Kernel-manager / Intro modes) over the host kernel."
+description = "Aisixteen Fantastic — the kernel as a terminal shell. Thin: no agentic logic lives here."
 
+[[bin]]
+name = "fantastic"
+path = "src/main.rs"
+
+# ── render ───────────────────────────────────────────────────────────────────
 [dependencies]
+ratatui = "0.30"
+# DIRECT crossterm: the ratatui re-export carries no `event-stream` passthrough.
+# 0.29 is what ratatui 0.30 resolves to, so feature unification yields ONE crossterm.
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = "0.3"
+unicode-width = "0.2"
+
+# ── plumbing ─────────────────────────────────────────────────────────────────
+tokio = { version = "1.40", features = [
+  "rt-multi-thread", "macros", "time", "sync", "process", "net", "io-util", "signal",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1.40", features = ["full"] }
-anyhow = "1"
-ratatui = "0.29"
-# Live emit-stream mirror from a remote folder kernel's web_ws surface (loopback
-# ws://, no TLS). Kept minimal — default features only, no TLS connector.
-tokio-tungstenite = "0.24"
-futures-util = "0.3"
-# Terminal-proxy mode render + startup billboard.
-tui-term = "0.2"
-vt100 = "0.15"
-# Native in-frame code editor for authoring custom JS connectors (design 28). Driven
-# via TextArea's EXPLICIT edit methods (not `input(Event)`), so no crossterm Event
-# crosses the tui-textarea boundary. `ratatui`-only features → it reuses ratatui
-# 0.29 with NO second crossterm pulled in (the mismatch the design warns about).
-tui-textarea = { version = "0.7", default-features = false, features = ["ratatui"] }
+regex = "1"
+serde_yaml = "0.9"
+# dup2, to get the kernel's own stdout prints off the screen the TUI draws on.
+libc = "0.2"
+tokio-util = "0.7"
 
+# ── the kernel, IN-PROCESS ───────────────────────────────────────────────────
+# This shell hosts the rust kernel directly: no child process, no port, no
+# socket. Path deps into the kernel workspace, which stays a SEPARATE workspace
+# (src/Cargo.toml excludes `lib`), so these resolve as plain non-member path
+# dependencies and the kernel's own lockfile is untouched.
+#
+# None of the five declares a cargo feature, so there is nothing to enable here:
+# the `full` / `scenario-probes` gates live in fantastic-cli's manifest, not in
+# the bundle crates.
 fantastic-kernel = { path = "../lib/rust/crates/fantastic-kernel" }
-fantastic-host = { path = "../shared/kernel" }
-fantastic-brain = { path = "../shared/ai" }
-fantastic-term = { path = "../shared/term" }
+# The ROOT's own bundle (`kernel_state.tools`). Its boot is what rehydrates the
+# ledger and installs the flusher, the message pump and the record writer —
+# without it the tree lives in RAM and nothing a session creates survives.
+fantastic-core = { path = "../lib/rust/crates/bundles/fantastic-core" }
+fantastic-web-ws = { path = "../lib/rust/crates/bundles/fantastic-web-ws" }
+fantastic-file = { path = "../lib/rust/crates/bundles/fantastic-file" }
+fantastic-exec-bridge = { path = "../lib/rust/crates/bundles/fantastic-exec-bridge" }
+fantastic-static-loader = { path = "../lib/rust/crates/bundles/fantastic-static-loader" }
+fantastic-scenario-probes = { path = "../lib/rust/crates/bundles/fantastic-scenario-probes" }
+# The MCP leg — a bundle built HERE, outside the kernel tree, against the
+# kernel's public API only. Compile-time linked; `src/lib` is not edited.
+fantastic-web-mcp = { path = "bundles/fantastic-web-mcp" }
+fantastic-sqlite-store = { path = "bundles/fantastic-sqlite-store" }
+# THE USER'S TEMPLATES: named agent blueprints in the home config dir (FANTASTIC_HOME
+# or ~/.config/fantastic), owned by this binary — see kern/templates.
+fantastic-user-home-store = { path = "bundles/fantastic-user-home-store" }
+# AI CELLS: each canvas AI cell keeps its (ephemeral) conversation in its own
+# RAM store, and gets a random id suffix (`kern/ai_cells`).
+fantastic-ram-store = { path = "../lib/rust/crates/bundles/fantastic-ram-store" }
+getrandom = "0.2"
+fantastic-canvas-page = { path = "bundles/fantastic-canvas-page" }
+# THE BROWSER VIEW: the kernel's HTTP host, and the socket leg built HERE.
+fantastic-web = { path = "../lib/rust/crates/bundles/fantastic-web" }
+fantastic-web-ui = { path = "bundles/fantastic-web-ui" }
+# The terminal pane's screen: a real vt100 emulator, so a full-screen CLI
+# (an AI coder, an editor) draws correctly instead of as a line log.
+vt100 = "0.15"
+# CRITICAL TODO(dev-llm): DEV-ONLY. The anthropic backend (the dev AI agent)
+# and the keychain reader, linked only under `--features dev-llm`, which a
+# release build refuses (`compile_error!` in kern/dev_llm.rs).
+fantastic-anthropic-backend = { path = "../lib/rust/crates/bundles/fantastic-anthropic-backend", optional = true }
+fantastic-responses-backend = { path = "../lib/rust/crates/bundles/fantastic-responses-backend", optional = true }
+# The platform backends MUST be named: with none, keyring 3 silently uses an
+# in-memory mock store and never reaches the real keychain (measured: a key in the
+# login keychain read back as "no key"). Each backend only builds on its OS.
+keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
+anyhow = "1"
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+
+[features]
+# CRITICAL TODO(dev-llm): a dev build with the dev LLM endpoint hardwired from
+# the gitignored `dev.local.yaml`. Off by default; never in a release build.
+dev-llm = ["anthropic"]
+# Links the anthropic backend and the keychain, with NO endpoint hardwired: an
+# ai agent is written on the set-up page. E17 builds this against a stub.
+anthropic = ["dep:fantastic-anthropic-backend", "dep:keyring"]
+# Links the OpenAI Responses backend (`responses_backend.tools`) and the
+# keychain: `endpoint` (the full …/v1/responses URL) and `model` are written on
+# the set-up page — no default; the key is `OPENAI_API_KEY`, from the keychain.
+responses = ["dep:fantastic-responses-backend", "dep:keyring"]
+
+[build-dependencies]
+serde_yaml = "0.9"
+serde_json = "1"
+
+# ── headful e2e: the PTY + vt100 screenshot rig (dev only; the shell itself
+# never links a PTY — the terminal PANEL renders a remote stream in step 10).
+[dev-dependencies]
+portable-pty = "0.8"
+
+[[example]]
+name = "screenshot"
+path = "e2e/screenshot.rs"

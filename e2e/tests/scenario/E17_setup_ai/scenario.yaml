@@ -1,0 +1,126 @@
+# THE SET-UP PAGE, END TO END — a scripted keyboard writes an ai agent through
+# the page, and the agent answers. No model and no network: the shell is built
+# with `--features anthropic` (the backend linked, NO endpoint hardwired) and
+# the agent's endpoint is the parity harness's scripted Anthropic stub on
+# 127.0.0.1. The key is the stub's dummy, in the environment — the backend
+# refuses to send without one; the stub ignores it.
+
+id: setup_ai
+title: fantastic — the set-up page writes an ai agent, it boots and answers
+runtimes: [tui]
+costs: free
+features: [anthropic]
+
+stub:
+  anthropic:
+    # a call-less first turn, then the turn closes
+    chain: ["stub-reply-42", '<call name="done"></call>']
+  min_requests: 1
+
+env:
+  ANTHROPIC_API_KEY: parity-stub-key
+
+screen: {rows: 40, cols: 130}
+
+runs:
+  - name: init
+    script: |
+      wait 1200
+      key space
+      wait 3500
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    after_exit:
+      exit_code: 0
+      lock_released: true
+
+  # ── the page: id, handler, model, endpoint → WRITE THE RECORD ─────────────
+  - name: write
+    script: |
+      wait 2500
+      type G
+      wait 200
+      key enter
+      wait 800
+      shot page
+      key enter
+      type docreader
+      key enter
+      key down
+      key right
+      key down
+      key enter
+      type stub-model
+      key enter
+      key down
+      key enter
+      type {stub_url}
+      key enter
+      wait 200
+      shot filled
+      key down
+      key down
+      key enter
+      wait 2000
+      shot written
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      page: {contains: ["SET UP AN AI AGENT", "‹ pick one of 1 ›"], lacks: ["no ai backend is linked"]}
+      filled: {contains: ["docreader", "‹ anthropic_backend.tools ›", "stub-model", "http://127.0.0.1:"]}
+      written:
+        contains: ["✓ written to  .fantastic/agents/set_of_agents/agents/docreader/agent.yaml", "docreader"]
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      files_exist: [.fantastic/agents/set_of_agents/agents/docreader/agent.yaml]
+
+  # ── a later run: the agent rehydrates, the human writes to it, it answers ──
+  - name: answer
+    script: |
+      wait 2500
+      type /docreader
+      key enter
+      wait 200
+      key enter
+      wait 800
+      key tab
+      type hello
+      key enter
+      wait 5000
+      shot answer
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      answer: {contains: ["stub-reply-42"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      rows_grew: true
+
+  # ── a restart: the thread comes back from the memory store, no new turn ────
+  - name: recall
+    script: |
+      wait 2500
+      type /docreader
+      key enter
+      wait 200
+      key enter
+      wait 1500
+      shot recalled
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      recalled: {contains: ["hello", "stub-reply-42"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      files_exist: [.fantastic/memory.db]

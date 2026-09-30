@@ -1,7 +1,7 @@
 // pairing_verify.ts — the PINNACLE assertion: did the readme-only builder agent
 // derive the right PAIRING CARDINALITY from reflect + readmes ALONE?
 //
-//   terminal_view ↔ terminal_backend = 1:1 EXCLUSIVE (each view binds one backend
+//   terminal_view ↔ terminal exec_bridge = 1:1 EXCLUSIVE (each view binds one backend
 //     via backend_id; no backend shared by two views; no orphan backend).
 //   ai_view ↔ AI backend = 1:1 (each view binds one AI backend via backend_id).
 //   html_agent ↔ exec_bridge = 1:N (panel has NO backend_id; its html body
@@ -46,7 +46,8 @@ const frontend = (await postJSON("web_loader", { type: "load_tree" })).records ?
 
 const isAi = (hm: string | undefined) =>
   /(anthropic|ollama|nvidia_nim|foundation_models)_backend\.tools/.test(hm ?? "");
-const termBackends = hostAgents.filter((a) => a.handler_module === "terminal_backend.tools");
+// a terminal backend = an exec_bridge a canvas spawned for a view (it carries `view_id`)
+const termBackends = hostAgents.filter((a) => a.handler_module === "exec_bridge.tools" && typeof a.view_id === "string");
 const aiBackends = hostAgents.filter((a) => isAi(a.handler_module));
 const pyRuntimes = hostAgents.filter((a) => a.handler_module === "exec_bridge.tools");
 const termViews = frontend.filter((r) => r.handler_module === "terminal_view.ts");
@@ -66,10 +67,10 @@ for (const v of termViews) {
   if (!v.backend_id) fail.push(`terminal_view ${v.id} has NO backend_id (expected 1:1)`);
   else if (!termBackendIds.has(v.backend_id)) fail.push(`terminal_view ${v.id} → missing backend ${v.backend_id}`);
 }
-if (new Set(termUsed).size !== termUsed.length) fail.push("a terminal_backend is shared by >1 view (must be exclusive 1:1)");
+if (new Set(termUsed).size !== termUsed.length) fail.push("a terminal exec_bridge is shared by >1 view (must be exclusive 1:1)");
 for (const b of termBackends) {
   const n = termViews.filter((v) => v.backend_id === b.id).length;
-  if (n !== 1) fail.push(`terminal_backend ${b.id} fronted by ${n} views (must be exactly 1 — no orphan/shared)`);
+  if (n !== 1) fail.push(`terminal exec_bridge ${b.id} fronted by ${n} views (must be exactly 1 — no orphan/shared)`);
 }
 
 // ── 1:1 ai ──
@@ -97,7 +98,7 @@ if (fail.length) {
   console.log("FAIL: the builder did not derive the pairing cardinality from readmes alone");
   process.exit(1);
 }
-console.log("  ✓ terminal_view↔terminal_backend 1:1 exclusive");
+console.log("  ✓ terminal_view↔terminal exec_bridge 1:1 exclusive");
 console.log("  ✓ ai_view↔AI backend 1:1");
 console.log(`  ✓ html_agent↔exec_bridge 1:N (${panelsWiredToExec}/${htmlPanels.length} panels wired to an exec_bridge, no backend_id)`);
 console.log("PASS: the LLM derived the kernel pairing cardinality from readmes alone");

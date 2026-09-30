@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aisixteen Fantastic</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #screen, #probe { font: 15px/1.25 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  #screen { margin: 0; padding: 0;
+            color: #e8e6ef; white-space: pre; outline: none; cursor: default; }
+  /* A row is a block of exactly one cell height, and every run fills it, so a
+     background never leaves a gap between rows. */
+  #screen div { height: 1.25em; }
+  #screen span { display: inline-block; height: 100%; vertical-align: top; }
+  #screen span.c { outline: 1px solid currentColor; }
+  #probe { position: absolute; visibility: hidden; white-space: pre; top: 0; left: 0; }
+  #note { position: fixed; right: 8px; bottom: 6px; font: 12px ui-monospace, monospace; color: #6e6a7c; }
+</style>
+</head>
+<body>
+<!-- THE BROWSER VIEW. It draws only the frames the ONE ViewModel publishes on
+     the `ui` agent, and sends only intents to it: keys, paste, its size. It
+     reads no agent itself, so it cannot differ from the terminal View. -->
+<div id="screen" tabindex="0"></div>
+<div id="note">connecting…</div>
+<script>
+"use strict";
+const screen = document.getElementById("screen"), note = document.getElementById("note");
+const ws = new WebSocket(`ws://${location.host}/web_ui/ws`);
+let rows = [], W = 0, H = 0, seq = 0, cursor = null, nextId = 0, sizedBy = null;
+
+// THE FRAME ID IS THE EXECUTION ID, and the kernel dedups a repeated one —
+// across restarts too (the tape rebuilds named executions). So every page load
+// mints its own ids: a reloaded page numbering from 1 would get the previous
+// session's replies back instead of running (measured).
+const SID = crypto.randomUUID();
+const call = (payload) => ws.send(JSON.stringify({type: "call", target: "ui", payload, id: `${SID}:${++nextId}`}));
+
+// ── colours: named, 256-indexed, #rrggbb ─────────────────────────────────────
+const NAMED = {black:"#000000", red:"#cd3131", green:"#0dbc79", yellow:"#e5e510", blue:"#2472c8", magenta:"#bc3fbc",
+  cyan:"#11a8cd", gray:"#e5e5e5", darkgray:"#666666", lightred:"#f14c4c", lightgreen:"#23d18b", lightyellow:"#f5f543",
+  lightblue:"#3b8eea", lightmagenta:"#d670d6", lightcyan:"#29b8db", white:"#ffffff"};
+const BASE16 = Object.values(NAMED).slice(0, 16);
+function indexed(i) {
+  if (i < 16) return BASE16[i];
+  if (i >= 232) { const v = 8 + (i - 232) * 10; return `rgb(${v},${v},${v})`; }
+  const n = i - 16, s = [0, 95, 135, 175, 215, 255];
+  return `rgb(${s[Math.floor(n / 36)]},${s[Math.floor(n / 6) % 6]},${s[n % 6]})`;
+}
+const col = (c) => c == null ? null : c[0] === "#" ? c : c[0] === "i" ? indexed(+c.slice(1)) : (NAMED[c] || null);
+// ratatui Modifier bits
+const BOLD = 1, DIM = 2, ITALIC = 4, UNDERLINED = 8, REVERSED = 64, CROSSED = 256;
+const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+function span(text, r, isCursor) {
+  let fg = col(r.fg), bg = col(r.bg); const m = r.m || 0;
+  if (m & REVERSED) { const t = fg || "#e8e6ef"; fg = bg || "#000"; bg = t; }
+  let st = "";
+  if (fg) st += `color:${fg};`;
+  if (bg) st += `background:${bg};`;
+  if (m & BOLD) st += "font-weight:bold;";
+  if (m & DIM) st += "opacity:.6;";
+  if (m & ITALIC) st += "font-style:italic;";
+  if (m & (UNDERLINED | CROSSED)) st += `text-decoration:${m & UNDERLINED ? "underline" : ""} ${m & CROSSED ? "line-through" : ""};`;
+  return `<span${isCursor ? ' class="c"' : ""}${st ? ` style="${st}"` : ""}>${esc(text)}</span>`;
+}
+
+function rowHtml(y) {
+  const runs = rows[y] || [];
+  let out = "", x = 0;
+  for (const r of runs) {
+    const chars = [...r.t];
+    if (cursor && cursor[1] === y && cursor[0] >= x && cursor[0] < x + chars.length) {
+      const k = cursor[0] - x;
+      out += span(chars.slice(0, k).join(""), r) + span(chars[k], r, true) + span(chars.slice(k + 1).join(""), r);
+    } else out += span(r.t, r);
+    x += chars.length;
+  }
+  return out;
+}
+const paint = () => { screen.innerHTML = Array.from({length: H}, (_, y) => `<div>${rowHtml(y) || " "}</div>`).join(""); };
+
+function apply(f, whole) {
+  if (!whole && !f.full && f.seq !== seq + 1) { call({type: "state"}); return; } // a gap: resync
+  if (f.full) rows = new Array(f.h);
+  for (const [y, r] of Object.entries(f.rows)) rows[+y] = r;
+  W = f.w; H = f.h; seq = f.seq; cursor = f.cursor;
+  note.textContent = ""; // a frame is the answer to any earlier "not yet"
+  paint();
+}
+
+// ── size: the browser sizes the ViewModel only when no terminal does ──────────
+// One character cell, measured OUTSIDE the screen, whose rows restyle every
+// span inside it.
+function probe() {
+  const p = document.createElement("span"); p.id = "probe"; p.textContent = "M".repeat(100);
+  document.body.appendChild(p); const r = p.getBoundingClientRect(); p.remove();
+  return {w: r.width / 100, h: r.height};
+}
+function cells() {
+  const c = probe();
+  return {w: Math.max(20, Math.floor(innerWidth / c.w)), h: Math.max(8, Math.floor(innerHeight / c.h))};
+}
+function resize() { if (sizedBy === "web") { const c = cells(); call({type: "resize", w: c.w, h: c.h}); } }
+addEventListener("resize", resize);
+
+// ── intents ───────────────────────────────────────────────────────────────────
+const CODES = {Enter:"Enter", Escape:"Esc", Backspace:"Backspace", ArrowUp:"Up", ArrowDown:"Down", ArrowLeft:"Left",
+  ArrowRight:"Right", Home:"Home", End:"End", PageUp:"PageUp", PageDown:"PageDown", Delete:"Delete"};
+screen.addEventListener("keydown", (e) => {
+  let k;
+  if (e.key === "Tab") k = {code: e.shiftKey ? "BackTab" : "Tab"};
+  else if (CODES[e.key]) k = {code: CODES[e.key]};
+  else if (/^F\d+$/.test(e.key)) k = {code: e.key};
+  else if ([...e.key].length === 1) k = {code: "Char", ch: e.key};
+  else return;
+  if (e.metaKey) return; // leave the browser's own shortcuts alone
+  e.preventDefault();
+  call({type: "key", ...k, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey && k.code !== "Char"});
+});
+// A click is an intent too: the cell under it, and the ViewModel focuses there.
+let cell = null;
+screen.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  cell = cell || probe();
+  const r = screen.getBoundingClientRect();
+  call({type: "click", x: Math.floor((e.clientX - r.left) / cell.w), y: Math.floor((e.clientY - r.top) / cell.h)});
+  screen.focus();
+});
+screen.addEventListener("paste", (e) => { e.preventDefault(); call({type: "paste", text: e.clipboardData.getData("text")}); });
+
+ws.onopen = () => {
+  note.textContent = "";
+  ws.send(JSON.stringify({type: "watch", src: "ui"}));
+  call({type: "reflect"});
+  screen.focus();
+};
+ws.onclose = () => { note.textContent = "disconnected — the shell has stopped"; };
+ws.onmessage = (e) => {
+  const f = JSON.parse(e.data);
+  if (f.type === "event" && f.payload && f.payload.type === "frame") return apply(f.payload, false);
+  if (f.type !== "reply" || !f.data) return;
+  const d = f.data;
+  if (d.type === "frame") return apply(d, true);
+  if (d.sized_by !== undefined) { sizedBy = d.sized_by; resize(); call({type: "state"}); return; }
+  if (d.error) note.textContent = d.error;
+};
+</script>
+</body>
+</html>

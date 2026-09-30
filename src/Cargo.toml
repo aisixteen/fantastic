@@ -3,6 +3,6 @@
 # and path-depends into the kernel crates. Rooted explicitly so Cargo never walks
 # up into a parent workspace; the kernel workspace under `lib` is excluded.
 [workspace]
-members = ["shared/kernel", "shared/ai", "shared/term", "tui", "cli"]
-exclude = ["lib"]
+members = ["tui", "tui/bundles/fantastic-web-mcp", "tui/bundles/fantastic-web-ui", "tui/bundles/fantastic-sqlite-store", "tui/bundles/fantastic-canvas-page", "tui/bundles/fantastic-user-home-store"]
+exclude = ["lib", "cli", "shared/kernel", "shared/ai", "shared/term"]
 resolver = "2"

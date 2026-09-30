@@ -32,6 +32,8 @@ e2e/dist/
 
 # local model-proxy connections (one file per model)
 e2e/backends/local/
+# CRITICAL TODO(dev-llm): the dev CLI's hardwired LLM endpoint. Never commit.
+src/tui/dev.local.yaml
 
 # Release artifacts built by scripts/build/*.sh (tarballs, zips, unpacked kernels).
 dist/

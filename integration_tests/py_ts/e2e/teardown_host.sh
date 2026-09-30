@@ -4,7 +4,6 @@
 set -uo pipefail
 PID="${1:-}"
 TMP="${2:-}"
-REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
   # TERM, wait for a real exit, escalate to KILL — a fired signal is not a dead
   # process (the daemon previously survived a bare `kill` and kept the port).
@@ -26,5 +25,4 @@ else
 fi
 # Remove the workdir only once the daemon is confirmed dead (it writes there).
 [ -n "$TMP" ] && rm -rf "$TMP" && echo "removed $TMP"
-rm -f "$REPO/src/lib/ts/dist/_e2e_canvas.html" 2>/dev/null || true
 echo "torn down"
