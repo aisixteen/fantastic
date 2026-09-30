@@ -276,7 +276,7 @@ impl App {
     fn open_recipe(&mut self, r: crate::recipe::Recipe) {
         use crate::recipe::Recipe;
         let (target, focus) = match r {
-            Recipe::Web => (self.trows.iter().position(|t| t.id == crate::kern::web::WEB_ID), Focus::Panel),
+            Recipe::Canvas => (self.trows.iter().position(|t| t.id == crate::kern::web::WEB_ID), Focus::Panel),
             Recipe::Ai => match self.trows.iter().position(|t| t.kind == PanelKind::Ai) {
                 Some(i) => (Some(i), Focus::Composer),
                 None => (self.trows.iter().position(|t| t.id == SETUP_ID), Focus::Panel),

@@ -3,21 +3,21 @@
 //! A RECIPE is a word that names agents. It ADDS them to the kernel only if they
 //! are missing — a recipe already applied adds nothing — and RUNS them. The
 //! terminal UI is the default and is always there unless `--headless`; the
-//! screen opens on the LAST recipe named (`fantastic web ai` runs both and
+//! screen opens on the LAST recipe named (`fantastic canvas ai` runs both and
 //! shows the ai).
 //!
 //! | recipe | adds (if missing)                     | shows                       |
 //! |--------|---------------------------------------|-----------------------------|
-//! | `web`  | `ui`, `web`, `web_ui`, `ui_assets`    | `web`, and serves the page  |
+//! | `canvas` | `web` (the HTTP host), the canvas (`canvas_page`, `canvas_ws` + its helpers) | `web`, and serves the canvas |
 //! | `ai`   | nothing yet (model/grants/brief: TBD) | the ai agent, composer focused; with none, the set-up page |
 //!
 //! `--headless`: no terminal UI; the kernel's message stream goes to stdout.
-//! `--port N` belongs to `web`, creation-only. `fantastic mcp` stays its own
+//! `--port N` belongs to `canvas`, creation-only. `fantastic mcp` stays its own
 //! command (stdout is its protocol).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recipe {
-    Web,
+    Canvas,
     Ai,
 }
 
@@ -29,8 +29,8 @@ pub struct Opts {
 }
 
 impl Opts {
-    pub fn web(&self) -> bool {
-        self.recipes.contains(&Recipe::Web)
+    pub fn canvas(&self) -> bool {
+        self.recipes.contains(&Recipe::Canvas)
     }
 
     /// What the screen opens on: the last recipe named.
@@ -61,17 +61,17 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
                         .ok_or_else(|| format!("--port must be 1..65535, got `{v}`"))?,
                 );
             }
-            "web" => push(&mut o.recipes, Recipe::Web),
+            "canvas" => push(&mut o.recipes, Recipe::Canvas),
             "ai" => push(&mut o.recipes, Recipe::Ai),
             other => {
                 return Err(format!(
-                    "unknown `{other}` — run `fantastic [--headless] [--port N] [web] [ai]`, or `fantastic mcp`"
+                    "unknown `{other}` — run `fantastic [--headless] [--port N] [canvas] [ai]`, or `fantastic mcp`"
                 ))
             }
         }
     }
-    if o.port.is_some() && !o.web() {
-        return Err("--port belongs to the `web` recipe".into());
+    if o.port.is_some() && !o.canvas() {
+        return Err("--port belongs to the `canvas` recipe".into());
     }
     Ok(o)
 }
@@ -92,12 +92,13 @@ mod tests {
 
     #[test]
     fn recipes_run_in_order_and_the_last_one_shows() {
-        let o = p("web ai").unwrap();
-        assert_eq!(o.recipes, vec![Recipe::Web, Recipe::Ai]);
+        let o = p("canvas ai").unwrap();
+        assert_eq!(o.recipes, vec![Recipe::Canvas, Recipe::Ai]);
         assert_eq!(o.shows(), Some(Recipe::Ai));
-        assert!(o.web() && !o.headless);
-        assert_eq!(p("ai web").unwrap().shows(), Some(Recipe::Web));
-        assert_eq!(p("web ai web").unwrap().recipes, vec![Recipe::Ai, Recipe::Web], "named twice runs once, last");
+        assert!(o.canvas() && !o.headless);
+        assert!(p("web").is_err(), "`web` is no longer a word");
+        assert_eq!(p("ai canvas").unwrap().shows(), Some(Recipe::Canvas));
+        assert_eq!(p("canvas ai canvas").unwrap().recipes, vec![Recipe::Ai, Recipe::Canvas], "named twice runs once, last");
     }
 
     #[test]
@@ -109,9 +110,9 @@ mod tests {
     }
 
     #[test]
-    fn port_belongs_to_web() {
-        assert_eq!(p("web --port 8123").unwrap().port, Some(8123));
+    fn port_belongs_to_canvas() {
+        assert_eq!(p("canvas --port 8123").unwrap().port, Some(8123));
         assert!(p("ai --port 8123").is_err());
-        assert!(p("web --port 0").is_err());
+        assert!(p("canvas --port 0").is_err());
     }
 }

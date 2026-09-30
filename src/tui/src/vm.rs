@@ -2,18 +2,16 @@
 //!
 //! It owns the `App` — nav state, keys, panels, the kernel's reads — and after
 //! every change renders the whole shell into an OFF-SCREEN buffer at the size it
-//! was last given. That buffer is the UNIVERSAL VIEW DATA: every View draws only
-//! from it, the terminal and the browser alike (owner decision, 2026-09-24), so
-//! a key in either moves both, and parity is by construction.
+//! was last given; the terminal View draws only from it. (The browser View that
+//! drew the same frames is gone: the canvas replaced it, owner 2026-09-30.)
 //!
 //! Inputs are INTENTS (`VmIn`): a key or paste event, and a resize. Nothing
 //! else reaches the App. Outputs are `Frame`s on a `watch` channel: the newest
-//! frame only; a slow View skips to the newest instead of queueing. (The wire
-//! numbers what it emits: `kern/web.rs`.)
+//! frame only; a slow View skips to the newest instead of queueing.
 //!
 //! There is no default size: nothing is drawn until a View says how big it is.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ratatui::backend::TestBackend;
@@ -60,28 +58,11 @@ pub struct Handle {
     pub frames: watch::Receiver<Option<Arc<Frame>>>,
 }
 
-/// The process's ViewModel, for the `ui` agent (a bundle cannot be handed a
-/// channel at registration). Set once, by `spawn`.
-static VM: OnceLock<Handle> = OnceLock::new();
-
-pub fn handle() -> Option<&'static Handle> {
-    VM.get()
-}
-
-/// Which View sizes the ViewModel: the terminal when there is one, else the
-/// browser. Two Views with two sizes cannot both win, and the one with a
-/// fixed physical size is the terminal.
-static SIZED_BY: OnceLock<&'static str> = OnceLock::new();
-
-pub fn sized_by() -> Option<&'static str> {
-    SIZED_BY.get().copied()
-}
-
 /// What the ViewModel does once the kernel is up.
 #[derive(Debug, Clone)]
 pub struct Boot {
-    /// Serve the browser View (the `web` recipe).
-    pub web: bool,
+    /// Serve the canvas (the `canvas` recipe).
+    pub canvas: bool,
     /// `--port`: creation-only; a later run reads it from `web`'s record.
     pub port: Option<u16>,
     /// A terminal View is attached (it sizes the ViewModel).
@@ -116,12 +97,10 @@ pub struct Vm {
 }
 
 /// Create the ViewModel and the handle every View uses.
-pub fn new(boot: &Boot) -> (Handle, Vm) {
+pub fn new() -> (Handle, Vm) {
     let (in_tx, input) = mpsc::channel(1024);
     let (frames, f_rx) = watch::channel(None);
     let h = Handle { input: in_tx, frames: f_rx };
-    let _ = VM.set(h.clone());
-    let _ = SIZED_BY.set(if boot.tui { "tui" } else { "web" });
     (h, Vm { input, frames })
 }
 
@@ -157,7 +136,7 @@ async fn run(
     let mut booting = false;
     // A SIGNAL IS A QUIT, the same quit a key makes: the kernel shuts down in
     // its own order and the lock is released. Without this, `kill` on a
-    // headless `fantastic web` left the lock file behind (measured).
+    // headless `fantastic canvas` left the lock file behind (measured).
     let mut term_sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
     let mut int_sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -236,7 +215,7 @@ async fn run(
             if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
                 app.note(format!("{e}"));
             }
-            match Host::boot(&paths, boot.web).await {
+            match Host::boot(&paths, boot.canvas).await {
                 Ok(h) => {
                     let h = Arc::new(h);
                     app.cfg = h.cfg.clone();
@@ -245,14 +224,11 @@ async fn run(
                     crate::kern::runner::spawn_row_watch(Arc::clone(&h), tx.clone()).await;
                     crate::kern::runner::subscribe_state(&h, tx.clone());
                     cmds = Some(crate::kern::runner::spawn(Arc::clone(&h), tx.clone(), paths.clone()));
-                    if boot.web {
-                        match crate::kern::web::ensure(&h, &paths, boot.port).await {
+                    if boot.canvas {
+                        match crate::kern::web::ensure(&h, boot.port).await {
                             Ok(urls) => {
-                                boot.say(&format!("fantastic: the browser View: {}", urls.view));
                                 boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
-                                app.note(format!("the browser View: {}", urls.view));
                                 app.note(format!("the canvas: {}", urls.canvas));
-                                crate::kern::web::spawn_emitter(Arc::clone(&h), frames.subscribe());
                             }
                             // No page to serve is fatal where the page is the
                             // only View; with a terminal it is a note there.

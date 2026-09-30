@@ -29,8 +29,8 @@ whose backend is gone is marked `backend_lost` and waits for ⟳.
 | `exit-closes` | a fresh terminal, `exit` typed into it: the shell ending closes the frame — view and exec agent gone together, as ✕ |
 | `restart-empty` | after another restart only the canvas comes back, with no frames and no backends under the leg |
 
-Runner: `e2e/runners/canvas.py`. Host: the product, `fantastic --headless web --port N`
-(the canvas sits beside the browser View under `web`: `canvas_page`, `canvas_ws`,
+Runner: `e2e/runners/canvas.py`. Host: the product, `fantastic --headless canvas --port N`
+(the canvas under `web`: `canvas_page`, `canvas_ws`,
 `web_loader`). Page: the canvas app `src/tui/web/canvas`, embedded in the binary.
 
     cd src/lib/python && uv run python -u ../../../e2e/runners/canvas.py canvas

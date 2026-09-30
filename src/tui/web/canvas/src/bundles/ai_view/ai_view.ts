@@ -48,6 +48,7 @@ const CHAT_CSS = `
   .chat-view .c-send.stop { background:rgba(200,80,80,0.55); }
   .chat-view .msg .spot { display:block; font-size:10px; opacity:0.6; margin-bottom:2px; font-family:ui-monospace,SFMono-Regular,monospace; }
   .chat-view .c-badge { font-size:11px; margin-left:8px; padding:1px 8px; border-radius:999px; background:rgba(255,255,255,0.08); color:rgba(220,230,245,0.75); }
+  .chat-view .msg.tool { align-self: flex-start; font: 11px ui-monospace, SFMono-Regular, monospace; color: rgba(220,230,245,0.45); background: transparent; padding: 0 4px; }
   .chat-view .c-badge.kept { background:rgba(126,226,168,0.18); color:#7ee2a8; cursor:pointer; }
   .chat-view .c-keep { margin-left:6px; font-size:11px; padding:1px 10px; border-radius:999px; border:0; cursor:pointer; background:rgba(183,140,255,0.28); color:#fff; }
   .chat-view .c-rename { font-size:11px; margin-left:8px; padding:1px 6px; border-radius:6px; border:0; background:rgba(255,255,255,0.12); color:#fff; width:140px; }
@@ -64,13 +65,27 @@ const FROM = /^\[from [^\]]*\]\s*/;
 /** The model's calls are the harness's business (tool blocks show them); the
  *  bubble shows its words. Complete `<call …>…</call>` blocks are hidden. */
 const CALLS = /<call\b[^>]*>[\s\S]*?<\/call>/g;
-const words = (t: string): string => t.replace(CALLS, "").trimEnd();
+/** A call cut off mid-way (a history digest's head, a stream in flight). */
+const OPEN_CALL = /<call\b[\s\S]*$/;
+const words = (t: string): string => t.replace(CALLS, "").replace(OPEN_CALL, "").trimEnd();
+/** The first call of a calls-only turn: its name, target and verb. */
+const CALL_HEAD = /<call name="([^"]+)">(?:[\s\S]*?<target_id>([^<]*)<\/target_id>)?(?:[\s\S]*?<type>([^<]*)<\/type>)?/;
+/** ai_core's header on a reply that comes back as the next turn. */
+const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
 
-/** What an AI cell is told about living on the canvas (per send). */
-export const SPATIAL_PROMPT =
+/** What an AI cell is told about living on the canvas (per send). `canvas` is
+ *  the canvas's address from the host — `<page guid>|<canvas id>` — or null
+ *  before the page has a guid (then it cannot be asked). */
+export const spatialPrompt = (canvas: string | null): string =>
   "You are an AI cell on a spatial 2D canvas (Aisixteen Fantastic). Each user turn ends with " +
   "[at X,Y]: where on the canvas it was typed, in canvas coordinates (x grows right, y grows down). " +
   "Words like here, next to, above and below refer to canvas geometry around that spot. " +
+  (canvas !== null
+    ? `The canvas itself is the agent "${canvas}": send it {type: "around", x, y, radius} (all numbers, ` +
+      "radius required) to see what is placed near a point — ids, kinds, titles, rects and distances, " +
+      `nearest first. The canvas's background is the agent "${canvas.split("|")[0]}|background": ` +
+      "set_bg {source} (a THREE/GLSL GL source), clear_bg, get_bg. "
+    : "") +
   "Answer in text; keep it concise.";
 
 function ensureStyle(): void {
@@ -248,6 +263,18 @@ export const aiView: ViewBundle = {
 
     const addMsg = (role: string, text: string, parent: HTMLElement): HTMLElement => {
       const div = document.createElement("div");
+      // A TOOL ROUND-TRIP is the harness's, not the dialog's: a turn that is only
+      // calls, and the reply that comes back as the next (user-role) turn, show
+      // as one quiet line each — `→ target verb` / `↳ target verb`.
+      const call = role === "assistant" && words(text) === "" ? CALL_HEAD.exec(text) : null;
+      const reply = role === "user" ? REPLY_HEAD.exec(text) : null;
+      if (call !== null || reply !== null) {
+        div.className = "msg tool";
+        div.textContent = call !== null ? `→ ${call[2] ?? call[1]} ${call[3] ?? ""}`.trim() : `↳ ${reply![1]}`;
+        parent.appendChild(div);
+        if (parent === dialogEl) dialogEl.scrollTop = dialogEl.scrollHeight;
+        return div;
+      }
       div.className = "msg " + role;
       const spot = role === "user" ? SPOT.exec(text) : null;
       if (spot !== null) {
@@ -347,7 +374,9 @@ export const aiView: ViewBundle = {
         bubble = queuedBubbles.get(sendId);
       }
       if (!bubble) {
-        bubble = addMsg("user", fallback, dialogEl);
+        // a turn with no user text of its own (a reply coming back to the model)
+        // gets no bubble — the tool line already stands for it
+        bubble = fallback ? addMsg("user", fallback, dialogEl) : document.createElement("div");
       } else {
         bubble.classList.remove("queued");
         bubble.style.maxWidth = "";
@@ -423,7 +452,10 @@ export const aiView: ViewBundle = {
     const offToken = host.on(backend, "token", (p) => {
       if (mine(p) && inflight !== null) {
         inflight.streamText += s(p, "text");
-        inflight.assistantBubble.textContent = words(inflight.streamText);
+        const said = words(inflight.streamText);
+        const call = said === "" ? CALL_HEAD.exec(inflight.streamText) : null;
+        inflight.assistantBubble.className = call !== null ? "msg tool" : "msg assistant";
+        inflight.assistantBubble.textContent = call !== null ? `→ ${call[2] ?? call[1]} ${call[3] ?? ""}`.trim() : said;
         dialogEl.scrollTop = dialogEl.scrollHeight;
       }
     });
@@ -508,7 +540,7 @@ export const aiView: ViewBundle = {
       localPending.push(localKey);
       refreshBusy();
       const payload: Dict = { type: "send", text, client_id: clientId };
-      if (isCell) payload["system_prompt"] = SPATIAL_PROMPT;
+      if (isCell) payload["system_prompt"] = spatialPrompt(kernel.guid !== null && kernel.rootId !== null ? `${kernel.guid}|${kernel.rootId}` : null);
       const dropLocal = (): void => {
         queuedBubbles.get(localKey)?.remove();
         queuedBubbles.delete(localKey);

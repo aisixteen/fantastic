@@ -85,6 +85,23 @@ export const CANVAS_CSS = `
   #chats li.kept .dot { color: #7ee2a8; } #chats li.eph { opacity: 0.7; }
   #chats li .ct { color: rgba(220,230,245,0.45); }
   #chats .chats-new { padding: 6px 14px 2px; color: #b78cff; cursor: pointer; }
+  #chats .chats-list { max-height: 28vh; }
+  #chats .act-list { max-height: 18vh; }
+  #chats .act-n { color: #ffd166; }
+  #chats li.ask .dot { color: #ffd166; }
+  #chats.collapsed .act-list { display: none; }
+  #chats .agents-tree li.agent { cursor: pointer; }
+  #chats .agents-head { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08); }
+  #chats.collapsed .agents-tree, #chats.collapsed .agents-head { display: none; }
+  #chats .agents-tree { max-height: 46vh; }
+  #chats .agents-tree li { gap: 6px; padding: 2px 10px; cursor: default; }
+  #chats .agents-tree li.kernel { color: rgba(220,230,245,0.55); padding: 6px 10px 2px; }
+  #chats .agents-tree li .tw { width: 10px; cursor: pointer; color: rgba(220,230,245,0.5); }
+  #chats .agents-tree li .gl { width: 12px; color: rgba(220,230,245,0.5); }
+  #chats .agents-tree li.agent { opacity: 0.6; }
+  #chats .agents-tree li.has-cell { opacity: 1; cursor: pointer; }
+  #chats .agents-tree li.has-cell .gl { color: #b78cff; }
+  #chats .agents-tree li.kernel:hover, #chats .agents-tree li.agent:not(.has-cell):hover { background: transparent; }
   .agent-frame.flash { box-shadow: 0 0 0 2px #b78cff, 0 0 30px rgba(183,140,255,0.6) !important; }
   .canvas-toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 1100;
     background: rgba(40, 20, 26, 0.9); color: #ffb3b3; padding: 8px 14px; border-radius: 10px;

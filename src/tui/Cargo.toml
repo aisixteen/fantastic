@@ -65,7 +65,6 @@ getrandom = "0.2"
 fantastic-canvas-page = { path = "bundles/fantastic-canvas-page" }
 # THE BROWSER VIEW: the kernel's HTTP host, and the socket leg built HERE.
 fantastic-web = { path = "../lib/rust/crates/bundles/fantastic-web" }
-fantastic-web-ui = { path = "bundles/fantastic-web-ui" }
 # The terminal pane's screen: a real vt100 emulator, so a full-screen CLI
 # (an AI coder, an editor) draws correctly instead of as a line log.
 vt100 = "0.15"
@@ -74,6 +73,7 @@ vt100 = "0.15"
 # release build refuses (`compile_error!` in kern/dev_llm.rs).
 fantastic-anthropic-backend = { path = "../lib/rust/crates/bundles/fantastic-anthropic-backend", optional = true }
 fantastic-responses-backend = { path = "../lib/rust/crates/bundles/fantastic-responses-backend", optional = true }
+fantastic-vllm-backend = { path = "../lib/rust/crates/bundles/fantastic-vllm-backend", optional = true }
 # The platform backends MUST be named: with none, keyring 3 silently uses an
 # in-memory mock store and never reaches the real keychain (measured: a key in the
 # login keychain read back as "no key"). Each backend only builds on its OS.
@@ -95,6 +95,10 @@ anthropic = ["dep:fantastic-anthropic-backend", "dep:keyring"]
 # keychain: `endpoint` (the full …/v1/responses URL) and `model` are written on
 # the set-up page — no default; the key is `OPENAI_API_KEY`, from the keychain.
 responses = ["dep:fantastic-responses-backend", "dep:keyring"]
+# Links the vLLM backend (`vllm_backend.tools`): its record — endpoint, model,
+# max_tokens, kv_slots, kv_overflow required — is written on the set-up page
+# from its schema. It takes no key.
+vllm = ["dep:fantastic-vllm-backend"]
 
 [build-dependencies]
 serde_yaml = "0.9"

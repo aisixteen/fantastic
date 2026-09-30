@@ -19,20 +19,26 @@
 //! and the leg is granted them BY NAME (two levels down is past `$children`).
 //!
 //! Verbs: `presets` (template names, their backend and model, and the default),
-//! `spawn {view_id, canvas_id, template?}` (the named template, else the owner's
-//! default — no default and no name is refused, naming how to set one).
+//! `spawn {template?, stamp?, peer_grants?}` (the named template, else the
+//! owner's default — no default and no name is refused, naming how to set one).
+//!
+//! The host knows NOTHING of the page's composition. `stamp` is the CALLER's:
+//! record fields it wants on the cell's backend root (the canvas stamps its view
+//! and canvas ids, to reconcile its own pairs), copied without being read.
+//! `peer_grants` is the AI's egress to agents on ANOTHER kernel — only
+//! `<guid>|<agent>` keys (the canvas grants `<page guid>|canvas: [around, …]`),
+//! merged into its `can_call`.
 //!
 //! KEPT DIALOGS (phase 2). `keep {id, name?}` copies the cell's rows from its RAM
 //! store into the project's SQLite memory store under the AI's own id, admits
 //! the AI there and switches its `memory_store_id` — the dialog now outlives the
 //! cell. Kept dialogs are listed on THIS agent's record (`dialogs: {id: {name,
 //! template, record}}`), named by their AI id until renamed (`rename`).
-//! `reopen {id}` binds a new cell to the dialog: the live AI when another cell
-//! has it open (ONE dialog in several cells, updating live), else a fresh AI with
-//! the same id on the SQLite store — its history is there. `release {id}` is a
-//! cell closing: the AI (its RAM store root, for an unkept one) is deleted once
-//! NO cell record names it — agents live only while viewed; dialogs persist.
-//! `dialogs` lists the kept ones.
+//! `reopen {id, stamp?, peer_grants?}` binds a new cell to the dialog: the live
+//! AI when another cell has it open (ONE dialog in several cells, updating
+//! live), else a fresh AI with the same id on the SQLite store — its history is
+//! there. `dialogs` lists the kept ones. Which cells show an AI is the PAGE's
+//! count: it deletes the backend when its last cell on it closes.
 
 use std::sync::Arc;
 
@@ -47,7 +53,7 @@ use crate::kern::host::Host;
 /// The `handler_module` this bundle answers to.
 pub const HANDLER_MODULE: &str = "ai_cells.tools";
 
-/// The agent's id (created by `fantastic web`, under the canvas's leg).
+/// The agent's id (created by `fantastic canvas`, under the canvas's leg).
 pub const AI_CELLS_ID: &str = "ai_cells";
 
 /// What the leg (so the cell's view) may call on a spawned AI.
@@ -55,8 +61,39 @@ pub const CHAT_VERBS: [&str; 5] = ["send", "history", "status", "watch", "reflec
 
 /// A template-record field the dialog snapshot never carries (identity, wiring,
 /// authority — added again when the AI is re-made).
-const NOT_SNAPSHOT: [&str; 9] =
-    ["id", "parent_id", "guid", "agents", "memory_store_id", "can_call", "callable_by", "view_id", "canvas_id"];
+const NOT_SNAPSHOT: [&str; 7] = ["id", "parent_id", "guid", "agents", "memory_store_id", "can_call", "callable_by"];
+
+/// Fields a caller's `stamp` may never set: identity, placement, authority.
+const NOT_STAMPABLE: [&str; 11] = [
+    "type", "id", "parent_id", "guid", "handler_module", "agents", "can_call", "callable_by", "operator", "admins",
+    "memory_store_id",
+];
+
+/// The caller's `stamp`: an object of plain fields, none of them identity or
+/// authority. Absent = none.
+fn stamp_of(p: &Value) -> Result<Map<String, Value>, Value> {
+    match p.get("stamp") {
+        None | Some(Value::Null) => Ok(Map::new()),
+        Some(Value::Object(m)) => match m.keys().find(|k| NOT_STAMPABLE.contains(&k.as_str())) {
+            Some(k) => Err(refuse("bad_arg", format!("stamp: `{k}` is not the caller's to set"), "stamp only fields of your own")),
+            None => Ok(m.clone()),
+        },
+        Some(_) => Err(refuse("bad_arg", "stamp: must be an object", "")),
+    }
+}
+
+/// The caller's `peer_grants`: egress to agents on ANOTHER kernel only — every
+/// key `<guid>|<agent>`. Absent = none.
+fn peer_grants_of(p: &Value) -> Result<Map<String, Value>, Value> {
+    match p.get("peer_grants") {
+        None | Some(Value::Null) => Ok(Map::new()),
+        Some(Value::Object(m)) => match m.keys().find(|k| !k.contains('|')) {
+            Some(k) => Err(refuse("bad_arg", format!("peer_grants: `{k}` is not an agent on another kernel"), "keys are `<guid>|<agent>`")),
+            None => Ok(m.clone()),
+        },
+        Some(_) => Err(refuse("bad_arg", "peer_grants: must be an object", "")),
+    }
+}
 
 /// The bundle.
 #[derive(Default)]
@@ -91,13 +128,14 @@ impl AiCellsBundle {
     }
 
     async fn spawn(host: &Host, me: &AgentId, p: &Value) -> Value {
-        let (view, canvas) = (
-            p.get("view_id").and_then(Value::as_str).unwrap_or(""),
-            p.get("canvas_id").and_then(Value::as_str).unwrap_or(""),
-        );
-        if view.is_empty() || canvas.is_empty() {
-            return refuse("missing_arg", "spawn: view_id and canvas_id are required", "the canvas names the cell it spawns for");
-        }
+        let stamp = match stamp_of(p) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let peer = match peer_grants_of(p) {
+            Ok(g) => g,
+            Err(e) => return e,
+        };
         let shelf = match crate::kern::templates::shelf(host).await {
             Ok(s) => s,
             Err(e) => return refuse("not_found", e, "the user's templates are not readable"),
@@ -126,18 +164,18 @@ impl AiCellsBundle {
             .unwrap_or_default();
         let hex = hex8();
         let (store, ai) = (format!("aimem_{hex}"), format!("ai_{hex}"));
-        // 1 · the store — the subtree's root, stamped with the cell it serves
-        let r = host
-            .operator(
-                "kernel",
-                json!({"type": "create_agent", "parent_id": leg, "id": store,
-                       "handler_module": fantastic_ram_store::HANDLER_MODULE,
-                       // the operator reads its rows back when the dialog is kept
-                       "operator": true, "admins": ["kernel"],
-                       "view_id": view, "canvas_id": canvas}),
-            )
-            .await
-            .result;
+        // 1 · the store — the subtree's root, carrying the caller's stamp
+        let mut rec = stamp;
+        rec.extend(
+            json!({"type": "create_agent", "parent_id": leg, "id": store,
+                   "handler_module": fantastic_ram_store::HANDLER_MODULE,
+                   // the operator reads its rows back when the dialog is kept
+                   "operator": true, "admins": ["kernel"]})
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
+        let r = host.operator("kernel", Value::Object(rec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return refuse("bad_arg", format!("spawn: the cell's store: {e}"), "");
         }
@@ -149,7 +187,9 @@ impl AiCellsBundle {
         spec.insert("memory_store_id".into(), json!(store));
         spec.insert("template".into(), json!(name));
         spec.insert("callable_by".into(), json!({ leg.as_str(): CHAT_VERBS }));
-        spec.insert("can_call".into(), json!({ store.as_str(): "*" }));
+        let mut cc = peer;
+        cc.insert(store.clone(), json!("*"));
+        spec.insert("can_call".into(), Value::Object(cc));
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             let _ = host.operator("kernel", json!({"type": "delete_agent", "id": store})).await;
@@ -303,6 +343,10 @@ impl AiCellsBundle {
         let Some(d) = dialogs.get(&ai) else {
             return refuse("not_found", format!("reopen: no kept dialog {ai:?}"), "");
         };
+        let (stamp, peer) = match (stamp_of(p), peer_grants_of(p)) {
+            (Ok(s), Ok(g)) => (s, g),
+            (Err(e), _) | (_, Err(e)) => return e,
+        };
         let leg = Self::leg(host, me);
         // open in another cell already: the SAME agent — one dialog, several cells
         if let Some(meta) = Self::meta_of(host, &ai) {
@@ -324,12 +368,15 @@ impl AiCellsBundle {
             return refuse("bad_arg", format!("reopen: {e}"), "");
         }
         let mut spec: Map<String, Value> = d.get("record").and_then(Value::as_object).cloned().unwrap_or_default();
+        spec.extend(stamp);
         spec.insert("type".into(), json!("create_agent"));
         spec.insert("parent_id".into(), json!(leg));
         spec.insert("id".into(), json!(ai));
         spec.insert("memory_store_id".into(), json!(to));
         spec.insert("callable_by".into(), json!({ leg.as_str(): CHAT_VERBS }));
-        spec.insert("can_call".into(), json!({ to.as_str(): "*" }));
+        let mut cc = peer;
+        cc.insert(to.clone(), json!("*"));
+        spec.insert("can_call".into(), Value::Object(cc));
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return refuse("bad_arg", format!("reopen: re-making the AI: {e}"), "");
@@ -338,48 +385,6 @@ impl AiCellsBundle {
             return refuse("bad_arg", e, "");
         }
         json!({"id": ai, "root": ai, "template": d.get("template"), "name": d.get("name"), "shared": false})
-    }
-
-    /// A cell closed: delete the AI (its RAM-store root for an unkept one) once
-    /// no cell record names it. The records are the canvas's, as its loader has
-    /// them on disk — the page flushes before it calls.
-    async fn release(host: &Host, me: &AgentId, p: &Value) -> Value {
-        let ai = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-        // the canvas's loader: the `kernel_state` beside this agent under the leg
-        let leg_id = AgentId::from(Self::leg(host, me).as_str());
-        let loader = host.kernel.agents.get(&leg_id).and_then(|l| {
-            l.value().child_ids().into_iter().find(|c| {
-                host.kernel.agents.get(c).and_then(|a| a.value().record().handler_module)
-                    == Some(fantastic_core::HANDLER_MODULE.to_string())
-            })
-        });
-        let Some(loader) = loader.map(|l| l.0) else {
-            return refuse("not_found", "release: the canvas's leg has no loader", "");
-        };
-        let tree = host.operator(&loader, json!({"type": "load_tree"})).await.result;
-        if let Some(e) = tree.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("release: reading the cells: {e}"), "");
-        }
-        let viewers = tree["records"]
-            .as_array()
-            .map(|rs| rs.iter().filter(|r| r.get("backend_id").and_then(Value::as_str) == Some(ai.as_str())).count())
-            .unwrap_or(0);
-        if viewers > 0 {
-            return json!({"id": ai, "viewers": viewers, "deleted": null});
-        }
-        let leg = Self::leg(host, me);
-        let parent = host.kernel.agents.get(&AgentId::from(ai.as_str())).and_then(|a| a.value().record().parent_id);
-        let root = match parent {
-            Some(p) if p != leg && p.starts_with("aimem_") => p,
-            _ => ai.clone(),
-        };
-        if host.kernel.agents.contains_key(&AgentId::from(root.as_str())) {
-            let r = host.operator("kernel", json!({"type": "delete_agent", "id": root})).await.result;
-            if let Some(e) = r.get("error").and_then(Value::as_str) {
-                return refuse("bad_arg", format!("release: deleting `{root}`: {e}"), "");
-            }
-        }
-        json!({"id": ai, "viewers": 0, "deleted": root})
     }
 }
 
@@ -398,12 +403,11 @@ impl Bundle for AiCellsBundle {
                 "sentence": "Spawns the canvas's AI cells from the user's templates: a RAM store and the AI under it, per cell.",
                 "verbs": {
                     "presets": "No args. {templates: [{name, handler_module, model}], preferred}.",
-                    "spawn": "args: view_id:str, canvas_id:str (req), template:str? (else the default). {id, root, template, handler_module, model}.",
+                    "spawn": "args: template:str? (else the default), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (`<guid>|<agent>` keys only — the AI's egress to another kernel). {id, root, template, handler_module, model}.",
                     "keep": "args: id:str (req — the cell's AI), name:str?. Moves the dialog to the project's SQLite memory; it outlives the cell. {kept, name, rows}.",
                     "rename": "args: id:str, name:str. {id, name}.",
                     "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, template, live}]}.",
-                    "reopen": "args: id:str (a kept dialog). The live AI if another cell has it, else a fresh one on SQLite. {id, root, template, name, shared}.",
-                    "release": "args: id:str. Deletes the AI (or its RAM-store root) once no cell record names it. {id, viewers, deleted}.",
+                    "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else a fresh one on SQLite. {id, root, template, name, shared}.",
                 },
             }))),
             _ => {
@@ -417,7 +421,6 @@ impl Bundle for AiCellsBundle {
                     "rename" => Self::rename(&host, agent_id, payload).await,
                     "dialogs" => Self::dialogs(&host, agent_id),
                     "reopen" => Self::reopen(&host, agent_id, payload).await,
-                    "release" => Self::release(&host, agent_id, payload).await,
                     _ => refuse("unhandled", format!("ai_cells: unknown type {verb:?}"), ""),
                 }))
             }

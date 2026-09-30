@@ -37,5 +37,5 @@ test("@name picks a template and the rest is the first turn", () => {
 
 test("empty lists everything available", () => {
   const labels = rows("", presets).map((x) => x.label);
-  assert.deepEqual(labels, ["new AI cell · gpt5", "terminal", "html", "@opus"]);
+  assert.deepEqual(labels, ["new AI cell · gpt5", "terminal", "html", "stream", "agent", "@opus"]);
 });

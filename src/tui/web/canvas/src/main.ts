@@ -4,6 +4,7 @@ import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
 import { registerCanvas } from "./bundles/canvas/canvas_agent.ts";
+import { registerBackground } from "./bundles/canvas/background_agent.ts";
 
 // The canvas page. The frontend kernel boots as a PEER of the host (the library's
 // `boot`): it dials the host's `web_loader` (by id) over the bridge (a host-side
@@ -25,11 +26,15 @@ const origin =
 function register(kernel: Kernel): void {
   registerGlAgent(kernel);
   registerHtmlAgent(kernel);
-  registerCanvas(kernel); // the compositor root: rendered, and owns the background (set_bg/clear_bg/get_bg)
+  registerCanvas(kernel); // the compositor root: rendered; `around`
+  registerBackground(kernel); // its singleton, delete-locked background (set_bg/clear_bg/get_bg)
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
   kernel.registerBundle("terminal_view.ts", () => null);
   kernel.registerBundle("ai_view.ts", () => null);
+  kernel.registerBundle("reflect_view.ts", () => null);
+  kernel.registerBundle("setup_view.ts", () => null);
+  kernel.registerBundle("stream_view.ts", () => null);
 
   // Each frontend bundle declares its role via reflect (readme=true): the view
   // CLIENTS name the host CAPABILITY + verb surface they front (an LLM weaves the
@@ -67,6 +72,12 @@ function seed(kernel: Kernel): void {
 }
 
 const { kernel, loader } = await boot({ origin, loader: LOADER, register, seed });
+
+// THE ROOT'S BOOT MINTS THE GUID (once; it persists with the root record) — the
+// canvas's identity as a PEER kernel: the bridge says `hello {guid}` with it, and
+// the host's agents address this canvas as `<guid>|canvas`. `boot` hydrates the
+// tree but boots no agent, so the page boots its own root.
+if (kernel.rootId !== null) await kernel.send([{ target: kernel.rootId, payload: { type: "boot" } }]);
 
 /** The socket LEG this page speaks through, in the host's own words: the
  *  parent of the loader's anchor (its own record, which `load_tree` returns

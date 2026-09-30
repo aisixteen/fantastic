@@ -181,8 +181,6 @@ runs:
       key down
       key down
       key down
-      key down
-      key down
       key enter
       wait 300
       shot refused
@@ -193,8 +191,8 @@ runs:
     frames:
       page:
         contains: ["+ add an ai agent", "SET UP AN AI AGENT", "no ai backend is linked into this build",
-                   "— none linked —", "id        — not set —", "WRITE THE RECORD"]
-      refused: {contains: ["✕ missing: id, handler, model"]}
+                   "— none linked —", "id              — not set —", "WRITE THE RECORD"]
+      refused: {contains: ["✕ missing: id, handler"]}
     after_exit:
       exit_code: 0
       lock_released: true
