@@ -403,6 +403,7 @@ dependencies = [
  "fantastic-scenario-probes",
  "fantastic-scheduler",
  "fantastic-static-loader",
+ "fantastic-vllm-backend",
  "fantastic-web",
  "fantastic-web-rest",
  "fantastic-web-ws",
@@ -626,6 +627,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "fantastic-vllm-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "fantastic-ram-store",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]

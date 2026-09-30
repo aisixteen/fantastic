@@ -151,6 +151,7 @@ Bundles that compile under either tier:
 | `fantastic-llamacpp-backend`   | local LLM via llama-server (OpenAI-compatible) |
 | `fantastic-anthropic-backend`  | Claude via the Anthropic Messages API |
 | `fantastic-responses-backend`  | the OpenAI Responses API |
+| `fantastic-vllm-backend`       | a vLLM server, directly (OpenAI chat wire) — KV-cache session table per endpoint |
 | `fantastic-cli-bundle`         | the `cli` render sink (token/done/say/error/status/context to stdout) |
 
 Full-tier-only bundles (subprocess; excluded from the embedded slice):
@@ -191,6 +192,7 @@ rust/
 │       ├── fantastic-llamacpp-backend/    llama-server LLM (thin binding over ai-core)
 │       ├── fantastic-anthropic-backend/   Claude (thin binding over ai-core)
 │       ├── fantastic-responses-backend/   OpenAI Responses API (thin binding over ai-core)
+│       ├── fantastic-vllm-backend/        vLLM, directly (thin binding over ai-core)
 │       ├── fantastic-cli-bundle/          the cli render sink
 │       ├── fantastic-exec-bridge/         command runner + PTY jobs (full-tier only)
 │       └── fantastic-scenario-probes/     e2e fixture agents (test-only feature)

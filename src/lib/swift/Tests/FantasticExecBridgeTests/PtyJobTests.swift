@@ -80,7 +80,8 @@
         return nil
     }
 
-    private func start(_ k: Kernel, _ id: String, _ py: String) async -> String {
+    /// The job's id — its kernel task id, an int on the wire.
+    private func start(_ k: Kernel, _ id: String, _ py: String) async -> JSON {
         let r = await call(
             k, id,
             [
@@ -88,7 +89,7 @@
                 "pty": ["cols": 91, "rows": 37],
             ])
         #expect(r["pty"] == true, "\(r.serialize())")
-        return r["job_id"].asString ?? ""
+        return r["job_id"]
     }
 
     @Suite("exec_bridge PTY jobs", .serialized)
@@ -102,7 +103,7 @@
             #expect(text.contains("TTY True xterm-256color"), "\(text)")
             #expect(text.contains("SIZE 91 37"), "\(text)")
             let w = await call(
-                k, "term_a", ["type": "write", "job_id": .string(jid), "data": "hello\n"])
+                k, "term_a", ["type": "write", "job_id": jid, "data": "hello\n"])
             #expect(w == .object(["written": 6]), "\(w.serialize())")
             let got = await outputUntil(inbox) { $0.contains("GOT hello") }
             #expect(got.contains("GOT hello"), "\(got)")
@@ -110,7 +111,7 @@
             #expect(
                 done
                     == .object([
-                        "type": "job_done", "job_id": .string(jid), "exit_code": 0, "ok": true,
+                        "type": "job_done", "job_id": jid, "exit_code": 0, "ok": true,
                     ]), "\(done?.serialize() ?? "nil")")
         }
 
@@ -122,19 +123,19 @@
             _ = await outputUntil(inbox) { $0.contains("SIZE") }
             // The mime is the caller's to state — never guessed.
             let (missing, _) = await k.sendWithBinary(
-                AgentId("term_p"), .object(["type": "paste_image", "job_id": .string(jid)]),
+                AgentId("term_p"), .object(["type": "paste_image", "job_id": jid]),
                 Data([0x89, 0x50]))
             #expect(
                 missing["reason"] == "missing_arg" && missing["arg"] == "mime",
                 "\(missing.serialize())")
             let (r, _) = await k.sendWithBinary(
                 AgentId("term_p"),
-                .object(["type": "paste_image", "job_id": .string(jid), "mime": "image/png"]),
+                .object(["type": "paste_image", "job_id": jid, "mime": "image/png"]),
                 Data([0x89, 0x50, 0x4E, 0x47, 0x2E, 0x2E, 0x2E, 0x2E]))
             #expect(r["bytes"] == 8, "\(r.serialize())")
             let path = r["path"].asString ?? ""
             #expect(path.hasSuffix(".png"), "\(r.serialize())")
-            _ = await call(k, "term_p", ["type": "write", "job_id": .string(jid), "data": "\n"])
+            _ = await call(k, "term_p", ["type": "write", "job_id": jid, "data": "\n"])
             let text = await outputUntil(inbox) { $0.contains("GOT") && $0.contains(".png") }
             #expect(text.contains(path), "\(text)")
         }
@@ -157,11 +158,11 @@
                         "type": "start", "command": "/bin/sh", "args": ["-i"],
                         "pty": ["cols": 80, "rows": 24],
                     ])
-                let jid = r["job_id"].asString ?? ""
+                let jid = r["job_id"]
                 _ = await call(
                     k, aid,
                     [
-                        "type": "write", "job_id": .string(jid),
+                        "type": "write", "job_id": jid,
                         "data":
                             "echo PID=$$\nsleep 300 &\nnohup sleep 301 >/dev/null 2>&1 &\nsleep 302\n",
                     ])
@@ -182,7 +183,7 @@
                 }
                 #expect(members.count >= 3, "\(end): \(members)")
                 if end == "stop" {
-                    _ = await call(k, aid, ["type": "stop", "job_id": .string(jid)])
+                    _ = await call(k, aid, ["type": "stop", "job_id": jid])
                 } else {
                     _ = await call(k, "kernel_state", ["type": "delete_agent", "id": .string(aid)])
                 }
@@ -208,7 +209,7 @@
                 let inbox = k.ensureInbox(AgentId(aid))
                 let r = await call(
                     k, aid, ["type": "start", "command": "/bin/sh", "args": ["-c", .string(line)]])
-                let jid = r["job_id"].asString ?? ""
+                let jid = r["job_id"]
                 var leader: pid_t?
                 let deadline = Date().addingTimeInterval(15)
                 while leader == nil && Date() < deadline {
@@ -232,7 +233,7 @@
                 }
                 #expect(members.count >= 3, "\(end): \(members)")
                 if end == "stop" {
-                    _ = await call(k, aid, ["type": "stop", "job_id": .string(jid)])
+                    _ = await call(k, aid, ["type": "stop", "job_id": jid])
                 } else {
                     _ = await call(k, "kernel_state", ["type": "delete_agent", "id": .string(aid)])
                 }
@@ -253,15 +254,15 @@
             let jid = await start(k, "term_r", py)
             _ = await outputUntil(inbox) { $0.contains("SIZE") }
             let r = await call(
-                k, "term_r", ["type": "resize", "job_id": .string(jid), "cols": 120, "rows": 40])
+                k, "term_r", ["type": "resize", "job_id": jid, "cols": 120, "rows": 40])
             #expect(r == .object(["resized": true, "cols": 120, "rows": 40]), "\(r.serialize())")
             let w = await outputUntil(inbox) { $0.contains("WINCH 120 40") }
             #expect(w.contains("WINCH 120 40"), "\(w)")
-            let snap = await call(k, "term_r", ["type": "status", "job_id": .string(jid)])
+            let snap = await call(k, "term_r", ["type": "status", "job_id": jid])
             let s = snap["jobs"][0]
             #expect(s["pty"] == true && s["cols"] == 120 && s["rows"] == 40, "\(snap.serialize())")
             #expect(s["stdout"].isNull, "a PTY job has no stdout/stderr split")
-            _ = await call(k, "term_r", ["type": "write", "job_id": .string(jid), "data": "x\n"])
+            _ = await call(k, "term_r", ["type": "write", "job_id": jid, "data": "x\n"])
         }
 
         @Test func outputReplaysTheRing() async {
@@ -271,17 +272,17 @@
             let jid = await start(k, "term_o", py)
             _ = await outputUntil(inbox) { $0.contains("SIZE") }
             let ring =
-                await call(k, "term_o", ["type": "output", "job_id": .string(jid)])["output"]
+                await call(k, "term_o", ["type": "output", "job_id": jid])["output"]
                 .asString ?? ""
             #expect(ring.contains("TTY True") && ring.contains("SIZE 91 37"), "\(ring)")
             let tail =
                 await call(
-                    k, "term_o", ["type": "output", "job_id": .string(jid), "max_bytes": 8])[
+                    k, "term_o", ["type": "output", "job_id": jid, "max_bytes": 8])[
                     "output"
                 ]
                 .asString ?? ""
             #expect(tail.utf8.count <= 8 && ring.hasSuffix(tail), "\(tail)")
-            _ = await call(k, "term_o", ["type": "write", "job_id": .string(jid), "data": "x\n"])
+            _ = await call(k, "term_o", ["type": "write", "job_id": jid, "data": "x\n"])
         }
 
         @Test func aPtyJobIsGatedAndItsVerbsWantAPtyJob() async {
@@ -298,7 +299,7 @@
                 k, "term_g",
                 ["type": "start", "command": .string(py), "args": ["-c", "0"], "pty": ["cols": 0]])
             #expect(bad["reason"] == "bad_arg", "\(bad.serialize())")
-            let nf = await call(k, "term_g", ["type": "write", "job_id": "nope", "data": "x"])
+            let nf = await call(k, "term_g", ["type": "write", "job_id": 999999, "data": "x"])
             #expect(nf["reason"] == "not_found", "\(nf.serialize())")
             let pipe = await call(
                 k, "term_g", ["type": "start", "command": .string(py), "args": ["-c", "input()"]])

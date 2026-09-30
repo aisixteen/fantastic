@@ -22,10 +22,6 @@ import OrderedCollections
 /// The opener a fold row's rendered content carries. Python `FOLD_TAG`.
 let FOLD_TAG = "[fold "
 
-/// Chars handed to the summarizer per fold — never a 60k reply. Python
-/// `SUMMARY_INPUT_CAP`.
-let SUMMARY_INPUT_CAP = 24_000
-
 /// A row's `id`, when it has one.
 func rowId(_ row: JSON) -> Int64? { row["id"].asInt }
 
@@ -242,7 +238,7 @@ enum AIFolds {
     /// inline rows would otherwise make the fold call itself the reply that does
     /// not fit. Python `chain_text`.
     static func chainText(_ rows: [JSON], _ chain: [Int]) -> String {
-        let per = max(400, SUMMARY_INPUT_CAP / max(1, chain.count))
+        let per = max(400, AIConstants.SUMMARY_INPUT_CAP / max(1, chain.count))
         var items: [JSON] = []
         for i in chain {
             var c = rowContent(rows[i])
@@ -269,7 +265,7 @@ enum AIFolds {
         // POINTS. A compact dump is a different byte count, which is a different
         // cut and therefore a different summarizer input.
         let s = pyJsonDumps(.array(items), ensureAscii: false)
-        return String(String.UnicodeScalarView(s.unicodeScalars.prefix(SUMMARY_INPUT_CAP)))
+        return String(String.UnicodeScalarView(s.unicodeScalars.prefix(AIConstants.SUMMARY_INPUT_CAP)))
     }
 
     /// The `· "<title>"` a rendered row carries, if any — python's

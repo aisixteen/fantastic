@@ -16,7 +16,7 @@
 # NEVER NORMALISED, because each is itself an item: key order, value types, JSON
 # spacing, the escaping of raw frames and headers, header order and presence,
 # status codes, exit codes, stdout vs stderr, close codes, and the FORMAT of
-# send_id / job_id / serial / corr / ws-client ids.
+# send_id / serial / corr / ws-client ids.
 
 version: 7
 #
@@ -92,7 +92,7 @@ version: 7
 #       the word `port`.
 #   N3/N4/N5/N6/N7 reach INTO TEXT and into an EMBEDDED json document, where the
 #       key-based pass cannot see: `guid=<hex32>` in a system prompt (664 of the
-#       1855 lines), `"job_id":"<hex8>"` and `"ts":<float>` inside a ws frame's
+#       1855 lines), `"send_id":"<b64url11>"` and `"ts":<float>` inside a ws frame's
 #       `text`, `<ids>`/`<view_ids>` blocks, `pid=<n>`, and the same documents
 #       quoted a second time inside a recorded request body.
 #   N10 says which counts are not comparable and why (a count over a text
@@ -170,7 +170,7 @@ rules:
       fold names) while dropping a number that means nothing across runtimes. The
       TYPE is kept in the placeholder because an int id and a digit-string id are
       a difference (C17, A4.20, B5.9).
-    keys: [id, ids, parent, task_id, message_id, pid, refs, expand, after, next,
+    keys: [id, ids, parent, task_id, job_id, message_id, pid, refs, expand, after, next,
            bundles_next, view_ids, killed]
     only_when: int or digit-string; never an agent-id string
     text_anchors:
@@ -257,7 +257,6 @@ rules:
                 'snd_[0-9A-F]{8} → <SEND_ID:snd_HEX8>',
                 'otherwise → <SEND_ID:len=N>']
       serial: '^[0-9a-f]{6}$ → <SERIAL:hex6>'
-      job_id: '^[0-9a-f]{8}$ → <JOB_ID:hex8>'
       schedule_id: 'sch_[0-9a-f]{6} → <SCH:hex6>'
       corr: '^<bridge_id>-(\d+)$ → <CORR:<bridge_id>-#n>'
       ws_client: '_ws_[0-9a-f]{6} → <WS_CLIENT:hex6>'
@@ -268,11 +267,11 @@ rules:
         it, and what it derives from it IS compared, one line above'
       tmpdir: 'mkdtemp suffixes under $TMPDIR → <TMPSUFFIX>'
     keep: ['relay dir_<n>']
-    #: send_id, job_id and serial are recognised inside an EMBEDDED json document
-    #: too (`{"job_id":"<hex8>"}` in a ws frame's `text`), singly or doubly
+    #: send_id and serial are recognised inside an EMBEDDED json document
+    #: too (`{"send_id":"<b64url11>"}` in a ws frame's `text`), singly or doubly
     #: quoted. Same shapes, same placeholders — a port that mints a different
     #: shape still becomes a diff line there.
-    also_embedded: [send_id, job_id, serial]
+    also_embedded: [send_id, serial]
     must_not_hide:
       - A7.27  # the correlation id FORMAT, which the shape preserves
       - C36    # a send_id carried into a row
@@ -327,9 +326,9 @@ rules:
     #:      text it measures, where that text carries `<ID#n>`, `<TS:float|int>`
     #:      or `<OSPID>` — placeholders whose ORIGINAL had no fixed width, so the
     #:      same document is a different number of bytes on two runs. The
-    #:      `content-length` of the same exchange goes with it. A guid, a
-    #:      send_id and a job_id are fixed-width, so a count over a text carrying
-    #:      only those is still compared EXACTLY.
+    #:      `content-length` of the same exchange goes with it. A guid and a
+    #:      send_id are fixed-width, so a count over a text carrying only those
+    #:      is still compared EXACTLY. (A job's id is a counter id — N4.)
     #:   2. the stub request index's `body_len` and echoed `content-length`: the
     #:      body is not in the entry at all, it is `req_<n>.bin` beside it, and
     #:      that file is compared whole.

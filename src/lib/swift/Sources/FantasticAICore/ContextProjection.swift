@@ -20,11 +20,6 @@ public enum ProjectionOutcome: Sendable {
     case failed(JSON)
 }
 
-/// THE TRIGGER: compaction fires once the calibrated prompt passes this share of
-/// the budget — early enough that the summariser itself has headroom. Python
-/// `TRIGGER`.
-public let TRIGGER = 0.8
-
 /// TOKEN CALIBRATION per agent: the prompt size the endpoint REPORTED for the last
 /// pass divided by our own estimate of what we sent. The estimate is chars/4 over
 /// the rendered messages; a real tokenizer disagrees with it, per model and per
@@ -145,13 +140,13 @@ extension AIBackend {
         let calib = AICalibration.calibration(kernel, agentKey)
         let b: Int64 =
             calib > 0
-            ? max(AIContext.budgetFloor, Int64(Double(AIContext.budget(agent)) / calib))
+            ? max(AIConstants.BUDGET_FLOOR, Int64(Double(AIContext.budget(agent)) / calib))
             : AIContext.budget(agent)
-        if AIContext.estimateTokens(messages) <= Int64(Double(b) * TRIGGER) {
+        if AIContext.estimateTokens(messages) <= Int64(Double(b) * AIConstants.TRIGGER) {
             setProjection(
                 agentKey,
                 .object([
-                    "fired": .bool(false), "trigger": .double(TRIGGER),
+                    "fired": .bool(false), "trigger": .double(AIConstants.TRIGGER),
                     "calibration": .double(round3(calib)),
                 ]))
             return .projected(messages)
@@ -168,7 +163,7 @@ extension AIBackend {
         // The live user turn AND the prepended notice envelope are both
         // non-negotiable — if there's no room for BOTH, fail loud (so the trim
         // below can never drop the live turn).
-        if bodyBudget < lastCost + AIContext.noticeEnvelopeReserve {
+        if bodyBudget < lastCost + AIConstants.NOTICE_ENVELOPE_RESERVE {
             let window = AIContext.resolveContextWindow(agent)
             let hint =
                 "the system prompt (\(sysTokens) tok) leaves no room in the \(window)-token "
@@ -267,7 +262,7 @@ extension AIBackend {
         setProjection(
             agentKey,
             .object([
-                "fired": .bool(true), "trigger": .double(TRIGGER),
+                "fired": .bool(true), "trigger": .double(AIConstants.TRIGGER),
                 "calibration": .double(round3(calib)),
                 "reported_prompt_tokens":
                     AICalibration.reportedTokens(kernel, agentKey).map { JSON.integer(Int64($0)) }
@@ -529,7 +524,7 @@ extension AIBackend {
             "context_window": .integer(AIContext.resolveContextWindow(agent)),
             "output_reserve": .integer(AIContext.outputReserve(agent)),
             "budget": .integer(AIContext.budget(agent)),
-            "trigger": .double(TRIGGER),
+            "trigger": .double(AIConstants.TRIGGER),
             "calibration": .double(round3(AICalibration.calibration(kernel, key))),
             "reported_prompt_tokens":
                 AICalibration.reportedTokens(kernel, key).map { JSON.integer(Int64($0)) } ?? .null,

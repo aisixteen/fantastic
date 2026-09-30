@@ -117,6 +117,10 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_responses_backend::HANDLER_MODULE,
         fantastic_responses_backend::ResponsesBundle,
     );
+    reg.register(
+        fantastic_vllm_backend::HANDLER_MODULE,
+        fantastic_vllm_backend::VllmBundle,
+    );
     // ── Full-tier-only bundles (subprocess / dynamic-loading / etc.).
     //
     // These spawn child processes (`std::process::Command` /

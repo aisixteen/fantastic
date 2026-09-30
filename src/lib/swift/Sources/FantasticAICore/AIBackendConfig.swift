@@ -71,7 +71,7 @@ public struct AIBackendConfig: Sendable {
     public init(
         kind: String,
         sentence: String,
-        sendTimeout: Double = AIBackend.envSendTimeout,
+        sendTimeout: Double = AIConstants.SEND_TIMEOUT,
         errorMapper: (@Sendable (Error) -> String?)? = nil,
         streamWrapper: (
             @Sendable (any AIProvider, [JSON], AIStatusEmitter) ->

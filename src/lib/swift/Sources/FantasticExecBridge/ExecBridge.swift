@@ -212,17 +212,17 @@
         /// `advertises` reads it.
         static let verbDocs: OrderedDictionary<String, JSON> = [
             "start": .string("args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
-            "status": .string("args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}."),
+            "status": .string("args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."),
             "stop": .string(
-                "args: job_id:str? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs."
+                "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs."
             ),
-            "interrupt": .string("args: job_id:str? — SIGINT one job or ALL of this agent's running jobs."),
-            "clear": .string("args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM"),
-            "write": .string("args: job_id:str (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."),
-            "resize": .string("args: job_id:str (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
-            "ack": .string("args: job_id:str (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
-            "output": .string("args: job_id:str (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."),
-            "paste_image": .string("args: job_id:str (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."),
+            "interrupt": .string("args: job_id:int? — SIGINT one job or ALL of this agent's running jobs."),
+            "clear": .string("args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"),
+            "write": .string("args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."),
+            "resize": .string("args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
+            "ack": .string("args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
+            "output": .string("args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."),
+            "paste_image": .string("args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."),
             "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
             "reflect": .string("Identity + running job count + auth posture. No args."),
             "boot": .string("No-op. Nothing auto-restarts: a command is started by a caller, not by the record."),
@@ -233,14 +233,13 @@
 
         /// One in-flight (or finished) program — the REAL resource this bundle owns.
         ///
-        /// Keyed by its public `jobId`; every verb filters by `agent` (owner), so a
-        /// job_id from another agent is still "no job". `taskId` is the row in the
-        /// kernel task table the pump holds; `onCancel` matches on it, so killing one
-        /// job never touches another running on the same agent. The invocation
+        /// Keyed by its `job_id`, which IS the kernel task id its pump runs under;
+        /// every verb filters by `agent` (owner), so a job_id from another agent is
+        /// still "no job". `onCancel` matches the KEY, so killing one job never
+        /// touches another running on the same agent. The invocation
         /// (`command`/`args`/`cwd`) is recorded so `status` can report WHAT ran.
         private struct Job {
             let agent: AgentId
-            var taskId: TaskId?
             let child: Child
             var relay: Relay?
             let command: String
@@ -261,10 +260,11 @@
 
         /// Guards `jobs`. Never held across an `await`.
         private let lock = NSLock()
-        /// Live/finished children, keyed by job id, IN START ORDER — `status` lists
-        /// them the way python's dict does. Per-INSTANCE (one bundle per kernel), so
-        /// two kernels in one process cannot see each other's children.
-        private var jobs: OrderedDictionary<String, Job> = [:]
+        /// Live/finished children, keyed by job id (the job's task id), IN START
+        /// ORDER — `status` lists them the way python's dict does. Per-INSTANCE (one
+        /// bundle per kernel), so two kernels in one process cannot see each other's
+        /// children.
+        private var jobs: OrderedDictionary<TaskId, Job> = [:]
 
         public var readme: String? { Self.readmeText }
 
@@ -351,12 +351,16 @@
                 case .failure(let r): return r.json
                 case .success: return Refusal.bad("paste_image", "data", "raw bytes")
                 }
-            case "interrupt":
-                if let gone = noSuchJob(agentId, payload) { return gone }
-                return .object(["interrupted": .integer(Int64(signalJobs(agentId, payload, SIGINT)))])
-            case "stop":
-                if let gone = noSuchJob(agentId, payload) { return gone }
-                return .object(["killed": .integer(Int64(signalJobs(agentId, payload, SIGKILL)))])
+            case "interrupt", "stop":
+                let want: TaskId?
+                switch jobArg(verb, payload, required: false) {
+                case .failure(let r): return r.json
+                case .success(let j): want = j
+                }
+                if let gone = noSuchJob(agentId, want) { return gone }
+                let sig = verb == "stop" ? SIGKILL : SIGINT
+                let key = verb == "stop" ? "killed" : "interrupted"
+                return .object([key: .integer(Int64(signalJobs(agentId, want, sig)))])
             default:
                 // ADDRESSABLE INBOX. A verb this bundle does not own is MAIL for the
                 // running program — the substrate's fanout has already delivered it,
@@ -514,10 +518,40 @@
                 return Refusal.make(
                     Refusal.transportError, "exec_bridge: spawn failed: \(error)")
             }
-            // python `secrets.token_hex(4)` — ALWAYS 8 hex digits, leading zeros kept.
-            let jobId = String(format: "%08x", UInt32.random(in: .min ... .max))
             let ctrlFd = spawned?.ctrlFd ?? ptyParts!.2
             let child = spawned?.child ?? ptyParts!.0
+            let counter = LineCounter()
+
+            // THE PUMP IS THE JOB'S TASK, and the job's id IS that task's id —
+            // minted by the kernel's one counter when the pump is forked. One
+            // number names the job everywhere: `status`/`stop`/`write` take it as
+            // `job_id`, `ps` lists it, `cancel task_id=` kills it. (It used to be a
+            // random 8-hex string, which a model's `<job_id>04203581</job_id>` or
+            // `458e5912` coerced into an int or an infinite float — 3.7% of jobs
+            // could not be addressed again.)
+            //
+            // The id exists only once the fork does, and a swift `Task` may start
+            // running on another thread before `spawnTask` even returns — so the
+            // pump waits on `ready` for its id (and, for a PTY job, the terminal
+            // built around that id) and touches nothing until the job's row is
+            // filed. A cancel that lands first ends the wait with nil: the pump
+            // then does nothing, exactly as python's `await ready` raising would.
+            let (ready, readyCont) = AsyncStream<PumpStart>.makeStream(
+                bufferingPolicy: .bufferingNewest(1))
+            let pipe = spawned
+            let jobId = kernel.spawnTask(agent: agentId, verb: "start") { [weak self] in
+                var it = ready.makeAsyncIterator()
+                guard let start = await it.next() else { return }
+                if let spawned = pipe {
+                    await self?.pump(
+                        agentId: agentId, jobId: start.jobId, spawned: spawned, counter: counter,
+                        kernel: kernel)
+                } else if let pty = start.pty {
+                    await self?.ptyPump(
+                        agentId: agentId, jobId: start.jobId, pty: pty, child: child,
+                        kernel: kernel)
+                }
+            }
             let pty = ptyParts.map {
                 PtyJob(
                     jobId: jobId, owner: agentId, child: $0.0, masterFd: $0.1,
@@ -525,52 +559,50 @@
             }
             let relay = Relay(
                 fd: ctrlFd, owner: agentId, jobId: jobId, kernel: kernel)
-            // THE RELAY IS THE JOB'S TASK TOO (py `spawn_task(id, "relay", …)`): a
-            // program's `kernel.send` must be rowed under work that is still alive,
-            // not under the `start` dispatch that settles the moment we return.
-            _ = kernel.spawnTask(agent: agentId, verb: "relay") { [relay] in
-                await relay.run(taskId: KernelTaskLocals.currentTask)
-            }
-
-            let counter = LineCounter()
-            // The job OUTLIVES this dispatch, so it needs its OWN task-table row —
-            // otherwise a subprocess nobody can reach is the orphan bug.
-            let pipe = spawned
-            let taskId = kernel.spawnTask(agent: agentId, verb: "start") { [weak self] in
-                if let spawned = pipe {
-                    await self?.pump(
-                        agentId: agentId, jobId: jobId, spawned: spawned, counter: counter,
-                        kernel: kernel)
-                } else if let pty {
-                    await self?.ptyPump(
-                        agentId: agentId, jobId: jobId, pty: pty, child: child, kernel: kernel)
-                }
-            }
             lock.withLock {
                 jobs[jobId] = Job(
-                    agent: agentId, taskId: taskId, child: child,
+                    agent: agentId, child: child,
                     relay: relay, command: command, args: args, cwd: cwd,
                     startedAt: Date().timeIntervalSince1970, counter: counter, pty: pty)
             }
+            // THE RELAY IS THE JOB'S TASK TOO (py `spawn_task(id, "relay", …)`): a
+            // program's `kernel.send` must be rowed under work that is still alive,
+            // not under the `start` dispatch that settles the moment we return.
+            // Forked AFTER the pump (so the ids read pump, relay — python's order)
+            // but BEFORE the pump is released: a program that exits at once must
+            // find a relay to stop.
+            _ = kernel.spawnTask(agent: agentId, verb: "relay") { [relay] in
+                await relay.run(taskId: KernelTaskLocals.currentTask)
+            }
+            readyCont.yield(PumpStart(jobId: jobId, pty: pty))
+            readyCont.finish()
             // The RESOLVED invocation rides the announcement: a client that let the
             // kernel pick the shell learns which one ran, and can re-issue it
             // verbatim.
             await kernel.emit(
                 agentId,
                 .object([
-                    "type": .string("job_started"), "job_id": .string(jobId),
+                    "type": .string("job_started"), "job_id": .integer(jobId.value),
                     "command": .string(command), "args": .array(args.map(JSON.string)),
                 ]))
             return .object([
-                "job_id": .string(jobId), "status": .string("running"), "pty": .bool(pty != nil),
+                "job_id": .integer(jobId.value), "status": .string("running"),
+                "pty": .bool(pty != nil),
             ])
+        }
+
+        /// What the pump waits for before it runs: its own id, known only once the
+        /// fork exists, and — for a PTY job — the terminal built around that id.
+        private struct PumpStart: Sendable {
+            let jobId: TaskId
+            let pty: PtyJob?
         }
 
         /// The job's task-table body: drain both pipes LIVE (a `progress` per line as
         /// it arrives), await exit, update the row, emit `job_done`. The row STAYS
         /// after exit so `status`/`clear` can see it (python/rust parity).
         private func pump(
-            agentId: AgentId, jobId: String, spawned: Spawn.Spawned, counter: LineCounter,
+            agentId: AgentId, jobId: TaskId, spawned: Spawn.Spawned, counter: LineCounter,
             kernel: Kernel
         ) async {
             async let outD = pumpStream(
@@ -618,7 +650,7 @@
             await kernel.emit(
                 agentId,
                 .object([
-                    "type": .string("job_done"), "job_id": .string(jobId),
+                    "type": .string("job_done"), "job_id": .integer(jobId.value),
                     "exit_code": .integer(Int64(code)), "ok": .bool(code == 0),
                     "stdout": .string(o.text), "stderr": .string(e.text),
                 ]))
@@ -628,7 +660,7 @@
         /// ordered stream carries every `output` chunk; at EOF the process is
         /// awaited, the row written, `job_done` emitted last.
         private func ptyPump(
-            agentId: AgentId, jobId: String, pty: PtyJob, child: Child, kernel: Kernel
+            agentId: AgentId, jobId: TaskId, pty: PtyJob, child: Child, kernel: Kernel
         ) async {
             let code = await pty.run(kernel: kernel)
             relayFor(jobId)?.stop()
@@ -652,7 +684,7 @@
             await kernel.emit(
                 agentId,
                 .object([
-                    "type": .string("job_done"), "job_id": .string(jobId),
+                    "type": .string("job_done"), "job_id": .integer(jobId.value),
                     "exit_code": .integer(Int64(code)), "ok": .bool(code == 0),
                 ]))
         }
@@ -661,14 +693,14 @@
         /// and stderr and lives on the PUMP, not the table — python's `_read_stream`
         /// closes over the job dict, so `clear` dropping the row leaves `n` counting.
         private func emitLine(
-            _ line: String, stream: String, agentId: AgentId, jobId: String,
+            _ line: String, stream: String, agentId: AgentId, jobId: TaskId,
             counter: LineCounter, kernel: Kernel
         ) async {
             let n = counter.bump(line)
             await kernel.emit(
                 agentId,
                 .object([
-                    "type": .string("progress"), "job_id": .string(jobId),
+                    "type": .string("progress"), "job_id": .integer(jobId.value),
                     "n": .integer(Int64(n)), "line": .string(line),
                     "stream": .string(stream),
                 ]))
@@ -681,17 +713,13 @@
 
         /// A live PTY job this agent owns, or the refusal (python `_pty_job`).
         private func ptyJob(_ verb: String, _ agentId: AgentId, _ payload: JSON) -> Result<PtyJob, RefusalJSON> {
-            guard let jid = payload["job_id"].asString, !jid.isEmpty else {
-                return .failure(RefusalJSON(json: Refusal.missing(verb, "job_id")))
+            let jid: TaskId
+            switch jobArg(verb, payload, required: true) {
+            case .failure(let r): return .failure(r)
+            case .success(let j): jid = j!  // required: absent is already refused
             }
             let found = lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
-            guard let job = found else {
-                return .failure(
-                    RefusalJSON(
-                        json: Refusal.make(
-                            Refusal.notFound, "exec_bridge: no job \(pyRepr(jid))",
-                            extra: [("job_id", .string(jid))])))
-            }
+            guard let job = found else { return .failure(RefusalJSON(json: noJob(jid))) }
             guard let pty = job.pty else {
                 return .failure(
                     RefusalJSON(json: Refusal.bad(verb, "job_id", "a PTY job (started with `pty`)")))
@@ -700,8 +728,8 @@
                 return .failure(
                     RefusalJSON(
                         json: Refusal.make(
-                            Refusal.notFound, "exec_bridge: job \(pyRepr(jid)) has ended",
-                            extra: [("job_id", .string(jid))])))
+                            Refusal.notFound, "exec_bridge: job \(jid.value) has ended",
+                            extra: [("job_id", .integer(jid.value))])))
             }
             return .success(pty)
         }
@@ -775,14 +803,13 @@
         }
 
         private func outputReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
-            let raw = payload["job_id"]
-            let found = raw.asString.flatMap { jid in
-                lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
+            let jid: TaskId
+            switch jobArg("output", payload, required: true) {
+            case .failure(let r): return r.json
+            case .success(let j): jid = j!  // required: absent is already refused
             }
-            guard let job = found else {
-                return Refusal.make(
-                    Refusal.notFound, "exec_bridge: no job \(pyRepr(raw))", extra: [("job_id", raw)])
-            }
+            let found = lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
+            guard let job = found else { return noJob(jid) }
             guard let pty = job.pty else {
                 return Refusal.bad(
                     "output", "job_id", "a PTY job (a pipe job's output is in `status`)")
@@ -802,11 +829,10 @@
                     text = String(decoding: bytes[start...], as: UTF8.self)
                 }
             }
-            let jid = raw.asString ?? ""
             return .object([
-                "job_id": .string(jid), "output": .string(text),
+                "job_id": .integer(jid.value), "output": .string(text),
                 "origin": .string(
-                    "\(agentId.value) output {job_id: \(jid)} — the ring NOW; re-send, it moves"),
+                    "\(agentId.value) output {job_id: \(jid.value)} — the ring NOW; re-send, it moves"),
             ])
         }
 
@@ -892,10 +918,9 @@
 
         // MARK: - status / clear
 
-        private func snap(_ jobId: String, _ j: Job, full: Bool) -> JSON {
+        private func snap(_ jobId: TaskId, _ j: Job, full: Bool) -> JSON {
             var o: OrderedDictionary<String, JSON> = [
-                "job_id": .string(jobId),
-                "task_id": j.taskId.map { JSON.integer($0.value) } ?? .null,
+                "job_id": .integer(jobId.value),
                 "status": .string(j.status),
                 "exit_code": j.exitCode.map { JSON.integer(Int64($0)) } ?? .null,
                 "started_at": .double(j.startedAt),
@@ -919,30 +944,48 @@
             return .object(o)
         }
 
-        /// python `payload.get("job_id")` under python truthiness: nil = "every job of
-        /// this agent". A truthy NON-string can never be a key in the table, so it is
-        /// a `not_found` echoing the raw value, not an accidental "all".
-        private func jobArg(_ payload: JSON) -> JSON? {
-            let raw = payload["job_id"]
-            // NOT a ternary: `JSON` is `ExpressibleByNilLiteral`, so `… ? raw : nil`
-            // unifies at `JSON` and hands back `.some(.null)` — every caller then
-            // reads an absent `job_id` as a named one.
-            guard pyTruthy(raw) else { return nil }
-            return raw
+        /// The `job_id` argument (python `_job_arg`): `.success(id)`,
+        /// `.success(nil)` when absent and optional, or the refusal.
+        ///
+        /// A job's id IS its kernel TASK id — an int. Anything else is refused as a
+        /// bad argument naming that, never looked up: a string like "42" is not
+        /// coerced, so a caller that stringified an id learns so here instead of
+        /// reading `no job`. A bool is not an int (python's `isinstance` check
+        /// excludes it explicitly; here `.bool` is its own case).
+        private func jobArg(_ verb: String, _ payload: JSON, required: Bool)
+            -> Result<TaskId?, RefusalJSON>
+        {
+            switch payload["job_id"] {
+            case .null:
+                return required
+                    ? .failure(RefusalJSON(json: Refusal.missing(verb, "job_id"))) : .success(nil)
+            case .integer(let n):
+                return .success(TaskId(n))
+            default:
+                return .failure(
+                    RefusalJSON(
+                        json: Refusal.bad(
+                            verb, "job_id",
+                            "an int — the job's task id (from `start`, `status` or `ps`)")))
+            }
         }
 
         /// `status` — one job (full output) or all of THIS agent's jobs (summary).
         private func statusReply(_ agentId: AgentId, payload: JSON) -> JSON {
-            lock.withLock {
-                if let want = jobArg(payload) {
-                    guard let jid = want.asString, let j = jobs[jid], j.agent == agentId
-                    else { return noJob(want) }
+            let want: TaskId?
+            switch jobArg("status", payload, required: false) {
+            case .failure(let r): return r.json
+            case .success(let j): want = j
+            }
+            return lock.withLock {
+                if let jid = want {
+                    guard let j = jobs[jid], j.agent == agentId else { return noJob(jid) }
                     return .object([
                         "jobs": .array([snap(jid, j, full: true)]),
                         // HOW TO GET THIS AGAIN — python `_status`'s `origin`.
                         "origin": .string(
-                            "\(agentId.value) status {job_id: \(jid)} — a live job; re-send for "
-                                + "its output NOW, which may differ"),
+                            "\(agentId.value) status {job_id: \(jid.value)} — a live job; re-send "
+                                + "for its output NOW, which may differ"),
                     ])
                 }
                 let rows = jobs.filter { $0.value.agent == agentId }
@@ -959,8 +1002,12 @@
         /// deciding what is finished enough to forget. No `not_found` guard (python
         /// has none): an unknown id simply clears nothing.
         private func clearReply(_ agentId: AgentId, payload: JSON) -> JSON {
-            let want = jobArg(payload)?.asString
-            let doomed: [String] = lock.withLock {
+            let want: TaskId?
+            switch jobArg("clear", payload, required: false) {
+            case .failure(let r): return r.json
+            case .success(let j): want = j
+            }
+            let doomed: [TaskId] = lock.withLock {
                 jobs.filter { (id, j) in
                     j.agent == agentId
                         && (want.map { $0 == id } ?? (j.status != "running" && j.status != "stopping"))
@@ -970,36 +1017,33 @@
             return .object(["cleared": .integer(Int64(doomed.count))])
         }
 
-        /// The `not_found` refusal for a job_id naming nothing. Spelled once; the raw
-        /// value is echoed both in python's repr and in the `job_id` field.
-        private func noJob(_ jid: JSON) -> JSON {
+        /// The `not_found` refusal for a job_id naming nothing. Spelled once; the id
+        /// is echoed both in the text (python's repr of an int is its digits) and in
+        /// the `job_id` field.
+        private func noJob(_ jid: TaskId) -> JSON {
             Refusal.make(
-                Refusal.notFound, "exec_bridge: no job \(pyRepr(jid))",
-                extra: [("job_id", jid)])
+                Refusal.notFound, "exec_bridge: no job \(jid.value)",
+                extra: [("job_id", .integer(jid.value))])
         }
 
         /// …and the guard that decides. A `job_id` naming nothing used to answer
         /// `{killed:0}` / `{interrupted:0}` — the same reply as "it had already
-        /// exited", so a typo read as success.
-        private func noSuchJob(_ agentId: AgentId, _ payload: JSON) -> JSON? {
-            guard let want = jobArg(payload) else { return nil }
-            let known = lock.withLock { want.asString.flatMap { jobs[$0] }?.agent == agentId }
-            // NOT a ternary, for the same reason `jobArg` is not one: `JSON` is
-            // `ExpressibleByNilLiteral`, so `known ? nil : noJob(want)` unifies
-            // BOTH branches at `JSON` and the "known" branch hands back
-            // `.some(.null)` — the caller's `if let gone = noSuchJob(…)` then
-            // fired for every job that DOES exist and answered `null` instead of
-            // stopping it. Measured on the wire: `stop {job_id}` replied `null`,
-            // no signal was sent, and the job ran to completion (`exit_code: 0`)
-            // where python answers `{killed: 1}` and emits `job_done` with -9.
+        /// exited", so a typo read as success. `nil` = no job named ("every job").
+        private func noSuchJob(_ agentId: AgentId, _ want: TaskId?) -> JSON? {
+            guard let want else { return nil }
+            let known = lock.withLock { jobs[want]?.agent == agentId }
+            // NOT a ternary: `JSON` is `ExpressibleByNilLiteral`, so
+            // `known ? nil : noJob(want)` unifies BOTH branches at `JSON` and the
+            // "known" branch hands back `.some(.null)` — the caller's
+            // `if let gone = noSuchJob(…)` then fired for every job that DOES exist
+            // and answered `null` instead of stopping it (measured on the wire).
             if known { return nil }
             return noJob(want)
         }
 
-        /// `interrupt` / `stop` — signal this agent's jobs, or one named `job_id`.
+        /// `interrupt` / `stop` — signal this agent's jobs, or the one named.
         /// Returns how many were actually signalled.
-        private func signalJobs(_ agentId: AgentId, _ payload: JSON, _ sig: Int32) -> Int {
-            let want = jobArg(payload)?.asString
+        private func signalJobs(_ agentId: AgentId, _ want: TaskId?, _ sig: Int32) -> Int {
             return lock.withLock {
                 var n = 0
                 for (id, var j) in jobs {
@@ -1020,7 +1064,7 @@
         // MARK: - lifecycle
 
         /// The relay serving a given job, if it is still registered.
-        private func relayFor(_ jobId: String) -> Relay? {
+        private func relayFor(_ jobId: TaskId) -> Relay? {
             lock.withLock { jobs[jobId]?.relay }
         }
 
@@ -1039,9 +1083,9 @@
         /// and the substrate awaits us BEFORE it aborts anything. TASK-scoped: a
         /// second job on the same agent is a different task and survives.
         public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
+            // A job's id IS its task id, so the table key is what matches.
             let doomed = lock.withLock {
-                jobs.filter { $0.value.agent == agentId && $0.value.taskId == taskId }
-                    .map(\.key)
+                jobs.filter { $0.value.agent == agentId && $0.key == taskId }.map(\.key)
             }
             for id in doomed { teardown(id) }
         }
@@ -1057,7 +1101,7 @@
         /// pinned); it splits on '\n' and carries the partial line, and the carry is
         /// flushed at EOF so an unterminated last line is not lost.
         private func pumpStream(
-            _ handle: FileHandle, stream: String, agentId: AgentId, jobId: String,
+            _ handle: FileHandle, stream: String, agentId: AgentId, jobId: TaskId,
             counter: LineCounter, kernel: Kernel
         ) async -> PumpOut {
             let box = DataBox()
@@ -1110,7 +1154,7 @@
         /// `failed` — the SIGKILL's non-zero status, indistinguishable from a program
         /// that failed on its own — where python and rust both report `stopped`.
         /// Idempotent; never signals a pid it no longer owns.
-        private func teardown(_ jobId: String) {
+        private func teardown(_ jobId: TaskId) {
             let job = lock.withLock { () -> Job? in
                 guard var j = jobs[jobId] else { return nil }
                 if j.exitCode == nil {
@@ -1248,7 +1292,7 @@
             is found on the CHILD's `PATH` only — pass `PATH` through `inherit_env`/`env`, or start an
             absolute path; with no `PATH` the start is refused naming it.
 
-            - `start(command, args?, pty?)` → `{job_id, status:'running', pty}` at once — non-blocking,
+            - `start(command, args?, pty?)` → `{job_id, status:'running', pty}` at once (`job_id` is an int) — non-blocking,
               many jobs in parallel. `command` is the program/binary; `args` is its argv (a list of
               strings). The FULL line (`command` + `args`, shell-joined) must fullmatch one of the
               record's `allowed` regexes or the start is refused, naming the patterns. There is no
@@ -1278,9 +1322,10 @@
               it applies to all of this agent's jobs.
             - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
-            Every running job is a row in the kernel TASK TABLE (`task_id` in each `status` snapshot,
-            listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS process is SIGKILLed
-            before the task is aborted, so nothing is orphaned. `delete_agent` tears its jobs down too.
+            Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int
+            from the kernel's one counter), listed by the universal `ps`. `cancel task_id=<job_id>` kills
+            it — the OS process is SIGKILLed before the task is aborted, so nothing is orphaned.
+            `delete_agent` tears its jobs down too.
 
             ## Sealed by default
 
@@ -1456,7 +1501,7 @@
                     "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives."
                 ),
                 "tasks": .string(
-                    "Every running job holds a row in the kernel TASK TABLE (`task_id` in each `status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned."
+                    "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned."
                 ),
                 "authoring": .string(
                     "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line."

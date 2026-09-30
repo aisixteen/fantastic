@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-vllm-backend"
+version = "0.1.0"
+description = "Fantastic vLLM backend — a context-managed LLM agent talking to a vLLM server directly, with a KV-cache session table per endpoint."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = ["httpx", "fantastic-ai-core"]
+
+[project.entry-points."fantastic.bundles"]
+vllm_backend = "vllm_backend.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vllm_backend"]

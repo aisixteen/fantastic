@@ -182,11 +182,40 @@ async def test_an_unknown_job_id_is_not_found_on_every_verb(seeded_kernel):
     for verb in ("status", "stop", "interrupt"):
         r = (
             await seeded_kernel.send(
-                [{"target": "nf", "payload": {"type": verb, "job_id": "deadbeef"}}]
+                [{"target": "nf", "payload": {"type": verb, "job_id": 999999}}]
             )
         )[0]["result"]
         assert r["reason"] == "not_found", (verb, r)
-        assert r["job_id"] == "deadbeef", (verb, r)
+        assert r["job_id"] == 999999, (verb, r)
+
+
+async def test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it(seeded_kernel):
+    """One id space: the job's id IS its kernel task id — `ps` lists it, `cancel`
+    takes it. A string (even a stringified int) is a bad argument, never looked up:
+    the old random 8-hex ids came back from a model as ints or infinite floats
+    (`04203581`, `458e5912`) and 3.7% of jobs could not be addressed again."""
+    k = seeded_kernel
+    await _mk(k, agent_id="ids", allowed=[rf"{sys.executable} .*"])
+    r = await _start(k, "ids", sys.executable, ["-c", "import time; time.sleep(30)"])
+    jid = r["job_id"]
+    assert isinstance(jid, int) and not isinstance(jid, bool), r
+    ps = (await k.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]
+    assert any(t["id"] == jid and t["agent"] == "ids" for t in ps["tasks"]), ps
+    for verb in ("status", "stop", "interrupt", "clear", "write", "output"):
+        bad_arg = (
+            await k.send(
+                [{"target": "ids", "payload": {"type": verb, "job_id": str(jid)}}]
+            )
+        )[0]["result"]
+        assert (bad_arg["reason"], bad_arg["arg"]) == ("bad_arg", "job_id"), (
+            verb,
+            bad_arg,
+        )
+    snap = (
+        await k.send([{"target": "ids", "payload": {"type": "status", "job_id": jid}}])
+    )[0]["result"]["jobs"][0]
+    assert snap["job_id"] == jid and "task_id" not in snap, snap
+    await k.send([{"target": "ids", "payload": {"type": "stop", "job_id": jid}}])
 
 
 async def test_write_time_refusal_for_broken_regex(seeded_kernel):
@@ -316,8 +345,9 @@ async def test_a_job_holds_a_task_row_and_cancel_reaps_it(seeded_kernel):
             [{"target": "runner", "payload": {"type": "status", "job_id": r["job_id"]}}]
         )
     )[0]["result"]
-    task_id = st["jobs"][0]["task_id"]
-    assert task_id
+    # the job's id IS its task id
+    task_id = st["jobs"][0]["job_id"]
+    assert isinstance(task_id, int)
     c = (
         await seeded_kernel.send(
             [{"target": "kernel", "payload": {"type": "cancel", "task_id": task_id}}]
@@ -623,7 +653,7 @@ async def test_a_cancelled_job_finalises_to_stopped_and_clear_removes_it(seeded_
         [
             {
                 "target": "kernel",
-                "payload": {"type": "cancel", "task_id": st["jobs"][0]["task_id"]},
+                "payload": {"type": "cancel", "task_id": st["jobs"][0]["job_id"]},
             }
         ]
     )

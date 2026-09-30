@@ -7,8 +7,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Headless / REPL caller default. Matches Python's `DEFAULT_CLIENT_ID`.
-pub const DEFAULT_CLIENT_ID: &str = "cli";
+pub use crate::constants::DEFAULT_CLIENT_ID;
 
 /// Read a string meta field off the agent record.
 pub fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String> {

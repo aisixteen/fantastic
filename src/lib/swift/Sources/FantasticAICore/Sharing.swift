@@ -131,7 +131,7 @@ extension AIBackend {
             + "<scope><row>\(row)</row></scope> <why>…</why>, then tell \(caller) the grant "
             + "id. To decline, tell \(caller) so."
         deliverSoon(
-            kernel: kernel, target: agent.id.value, text: text, clientId: "cli", systemPrompt: nil)
+            kernel: kernel, target: agent.id.value, text: text, clientId: AIConstants.DEFAULT_CLIENT_ID, systemPrompt: nil)
         return .object([
             "requested": .bool(true), "owner": .string(agent.id.value), "row": .integer(row),
         ])

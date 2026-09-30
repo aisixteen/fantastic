@@ -328,44 +328,55 @@ struct AIBackendTests {
         #expect(msgs[1]["content"].asString == "42")
     }
 
-    @Test func aThinkingOnlyTurnIsNotAnEmptyCompletion() async throws {
-        // The measured failure this whole mechanism exists for (gemma4:12b,
-        // 2026-08-02): the model spent its ENTIRE turn reasoning. Reading one
-        // channel made that an empty completion that silently ended the chain,
-        // indistinguishable from "the model said nothing". The reasoning text must
-        // reach the caller (and a reader's parser) even though it is never
-        // persisted as conversation.
+    @Test func aThinkingOnlyTurnStreamsItsThoughtAndIsDiscardedAsADeadTurn() async throws {
+        // The measured failure this mechanism exists for (gemma4:12b, 2026-08-02):
+        // the model spent its ENTIRE turn reasoning. Reading one channel made that
+        // an empty completion that silently ended the chain, indistinguishable
+        // from "the model said nothing" — so the reasoning text must still reach
+        // the caller (and a reader's parser) as tokens.
+        //
+        // What such a turn IS changed on 2026-09-30 (owner's decision, python
+        // `_run`): a turn with no answer once the thinking is stripped is a DEAD
+        // TURN — its empty answer discarded (the incoming row is kept), and
+        // rerolled by the no-call reminder. It used to complete with an empty assistant row, and the
+        // chain went on as if it had been answered (measured on vLLM: an 8-token
+        // thinking budget, then a clean `stop` with no answer).
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
                 .provider(MockProvider(tokens: ["<think>", "all of my turn", "</think>"]))
             })
+        // This provider thinks forever; a cap of 1 gives up at the FIRST silent
+        // turn, so the test observes exactly ONE pass (no rerolls streaming more
+        // tokens into the same inbox).
+        AISilentStreaks.setCap(kernel, 1)
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
         let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
         defer { pump.cancel() }
 
-        _ = await kernel.send([Item(id, .object([
+        let out = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"),
                 "client_id": .string("c"),
-            ]))])[0].result
-        try await waitForHistory(kernel: kernel, id: id, count: 2)
+            ]))])[0]
+        #expect(out.result["dead_turn"].asBool == true, "\(out.result)")
+        #expect(out.result["response"].asString == "<think>all of my turn</think>")
+        #expect(out.result["message_id"] == .null, "no row was minted for it")
         try await waitUntil("status(done)") { sink.statusDone() != nil }
 
-        // The reasoning REACHED the caller as tokens, even though none of it is
-        // persisted: an entire turn of thought is not an empty completion.
+        // The reasoning REACHED the caller as tokens, even though the turn was
+        // discarded.
         let streamed = sink.snapshot().filter { $0["type"].asString == "token" }
             .compactMap { $0["text"].asString }.joined()
         #expect(streamed == "<think>all of my turn</think>")
-        #expect(sink.statusDone()?["detail"]["reason"].asString == "ok")
+        #expect(sink.statusDone()?["detail"]["reason"].asString == "dead_turn")
         #expect(sink.first(type: "done") == nil)
 
-        // The conversation keeps no deliberation — the turn persists empty
-        // content, and that is the honest record of an answer-free turn.
-        let msgs =
-            conversationRows(kernel: kernel, id: id)
-        #expect(msgs.count == 2)
-        #expect(msgs[1]["role"].asString == "assistant")
-        #expect(msgs[1]["content"].asString == "")
+        // The INCOMING row is kept — only the empty answer is dropped (python
+        // `_run`: a dead turn answering a reply batch must not lose the batch).
+        let msgs = conversationRows(kernel: kernel, id: id)
+        #expect(msgs.count == 1, "\(msgs)")
+        #expect(msgs.first?["role"].asString == "user")
+        #expect(msgs.first?["content"].asString == "go")
     }
 
     @Test func anErroredStreamPersistsNEITHERHalfOfTheTurn() async throws {

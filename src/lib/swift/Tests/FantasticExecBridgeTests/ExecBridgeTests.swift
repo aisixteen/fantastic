@@ -406,7 +406,7 @@
     // child registering a callback and the frame coming back.
 
     /// The PROGRAM's end of a control socket, with a relay serving the other.
-    private func wire(_ kernel: Kernel, owner: AgentId, jobId: String) -> (Int32, Relay) {
+    private func wire(_ kernel: Kernel, owner: AgentId, jobId: TaskId) -> (Int32, Relay) {
         var fds: [Int32] = [0, 0]
         precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0, "socketpair")
         let relay = Relay(fd: fds[0], owner: owner, jobId: jobId, kernel: kernel)
@@ -496,7 +496,7 @@
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "denied_w")
             _ = await createPy(kernel, id: "secret")  // no edge from the runner
-            let (fd, relay) = wire(kernel, owner: a, jobId: "j1")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9001))
             defer {
                 relay.stop()
                 close(fd)
@@ -518,13 +518,13 @@
         @Test func stoppingAWatchingProgramReleasesItsProxies() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "relay_rel")
-            let (fd, relay) = wire(kernel, owner: a, jobId: "j2")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9002))
             defer { close(fd) }
             // `$self` is a baseline edge, so both of these are permitted.
             wireWrite(fd, .object(["op": .string("watch"), "src": .string(a.value)]))
             wireWrite(fd, .object(["op": .string("onmessage")]))
 
-            let proxies: Set<AgentId> = [AgentId("_xbw_j2_\(a.value)"), AgentId("_xbself_j2")]
+            let proxies: Set<AgentId> = [AgentId("_xbw_9002_\(a.value)"), AgentId("_xbself_9002")]
             let owner = try #require(kernel.agent(a))
             let deadline = Date().addingTimeInterval(5)
             while Date() < deadline && !proxies.isSubset(of: owner.watcherIds()) {
@@ -549,7 +549,7 @@
         @Test func anOversizedFrameClosesTheControlSocket() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "big_frame")
-            let (fd, relay) = wire(kernel, owner: a, jobId: "j3")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9003))
             defer {
                 relay.stop()
                 close(fd)
@@ -608,10 +608,10 @@
             let a = await createPy(kernel, id: "nf")
             for verb in ["status", "stop", "interrupt"] {
                 let r = await kernel.send([Item(a, .object([
-                    "type": .string(verb), "job_id": .string("deadbeef"),
+                    "type": .string(verb), "job_id": .integer(999_999),
                 ]))])[0].result
                 #expect(r["reason"].asString == "not_found", "\(verb): \(r.serialize())")
-                #expect(r["job_id"].asString == "deadbeef", "\(verb): \(r.serialize())")
+                #expect(r["job_id"] == .integer(999_999), "\(verb): \(r.serialize())")
             }
         }
 
@@ -664,7 +664,7 @@
             let a = await createPy(kernel, id: "dur_start")
             let t0 = Date()
             let r = await kernel.send([Item(a, pyStart(py, "import time; time.sleep(30)"))])[0].result
-            #expect(r["job_id"].asString != nil, "no job_id: \(r.serialize())")
+            #expect(r["job_id"].asInt != nil, "no job_id: \(r.serialize())")
             #expect(r["status"].asString == "running")
             #expect(Date().timeIntervalSince(t0) < 5, "start blocked")
             let st = await kernel.send([Item(a, .object(["type": .string("status")]))])[0].result
@@ -1043,9 +1043,10 @@
 
             let a = await createPy(kernel, id: "repr_job")
             let gone = await kernel.send([
-                Item(a, .object(["type": .string("stop"), "job_id": .string("nope")]))
+                Item(a, .object(["type": .string("stop"), "job_id": .integer(999_999)]))
             ])[0].result
-            #expect(gone["error"].asString == "exec_bridge: no job 'nope'", "\(gone.serialize())")
+            // A job's id is an int, and python's repr of an int is its digits.
+            #expect(gone["error"].asString == "exec_bridge: no job 999999", "\(gone.serialize())")
             #expect(gone["reason"].asString == "not_found", "\(gone.serialize())")
 
             // An absent `type` is python's `None`, not an empty string. The kernel
@@ -1122,27 +1123,39 @@
             #expect(commandPermitted(rec, "ls -l") != nil)
         }
 
-        // MARK: A4.8 — job_id truthiness
+        // MARK: A4.8 — the job_id argument
 
-        /// A4.8 — python reads `job_id` under TRUTHINESS: a falsy one means every
-        /// job of this agent; a truthy NON-string can never be a key, so it is
-        /// `not_found` echoing the raw value.
-        @Test func emptyJobIdMeansAllJobs() async throws {
+        /// A job's id IS its kernel task id — an int (python `_job_arg`). Absent (or
+        /// an explicit null) means every job of this agent; an int is looked up and
+        /// `not_found` echoes it; ANY other value — a string, even a stringified
+        /// int, a bool, a float, a list — is a `bad_arg` naming `job_id`, never
+        /// coerced and never read as "all".
+        @Test func theJobIdArgumentIsAnIntOrAbsent() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "jid")
-            for jid in [JSON.string(""), .null, .integer(0), .array([])] {
-                let st = await kernel.send([
-                    Item(a, .object(["type": .string("status"), "job_id": jid]))
-                ])[0].result
-                #expect(
-                    st["jobs"].asArray?.count == 0,
-                    "falsy \(jid.serialize()): \(st.serialize())")
-            }
-            let bad = await kernel.send([
-                Item(a, .object(["type": .string("status"), "job_id": .integer(5)]))
+            let all = await kernel.send([
+                Item(a, .object(["type": .string("status"), "job_id": .null]))
             ])[0].result
-            #expect(bad["error"].asString == "exec_bridge: no job 5", "\(bad.serialize())")
-            #expect(bad["job_id"] == .integer(5), "the RAW value is echoed: \(bad.serialize())")
+            #expect(all["jobs"].asArray?.count == 0, "absent is every job: \(all.serialize())")
+            for jid in [
+                JSON.string(""), .string("5"), .bool(false), .double(5.0), .array([]),
+            ] {
+                for verb in ["status", "stop", "interrupt", "clear", "write", "output"] {
+                    let r = await kernel.send([
+                        Item(a, .object(["type": .string(verb), "job_id": jid]))
+                    ])[0].result
+                    #expect(
+                        r["reason"].asString == "bad_arg" && r["arg"].asString == "job_id",
+                        "\(verb) \(jid.serialize()): \(r.serialize())")
+                }
+            }
+            for n in [Int64(0), 5] {
+                let bad = await kernel.send([
+                    Item(a, .object(["type": .string("status"), "job_id": .integer(n)]))
+                ])[0].result
+                #expect(bad["error"].asString == "exec_bridge: no job \(n)", "\(bad.serialize())")
+                #expect(bad["job_id"] == .integer(n), "the id is echoed: \(bad.serialize())")
+            }
             // `clear` has no not_found guard in python — an unknown id clears nothing.
             let cleared = await kernel.send([
                 Item(a, .object(["type": .string("clear"), "job_id": .integer(5)]))
@@ -1183,7 +1196,7 @@
                 #expect(r["arg"].asString == arg, "\(r.serialize())")
             }
             let nulls = await start(["env": .null, "cwd": .null, "args": .array([.string("x")])])
-            #expect(nulls["job_id"].asString != nil, "an explicit null is absent: \(nulls.serialize())")
+            #expect(nulls["job_id"].asInt != nil, "an explicit null is absent: \(nulls.serialize())")
             _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
 
             // `command.strip()` spans newlines and tabs.
@@ -1245,7 +1258,7 @@
                 kernel, id: "ownpath", meta: ["env": .object(["PATH": .string(bin.path)])])
             let stream = kernel.ensureInbox(b)
             let s = await start(b, "ft_only_here")
-            #expect(s["job_id"].asString != nil, "\(s.serialize())")
+            #expect(s["job_id"].asInt != nil, "\(s.serialize())")
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString
             #expect(out == "found-by-child-path\n", "\(out ?? "nil")")
@@ -1277,20 +1290,36 @@
                     + "'/nonexistent/fantastic_nope'", "\(r.serialize())")
         }
 
-        /// A4.32 — `secrets.token_hex(4)` is ALWAYS 8 hex digits; a `radix: 16`
-        /// conversion dropped the leading zeros of one job in sixteen.
-        @Test func jobIdIsEightHexChars() async throws {
+        /// One id space: the job's id IS its kernel task id — `ps` lists it,
+        /// `cancel` takes it, and the status snapshot carries no separate
+        /// `task_id`. (The old random 8-hex ids came back from a model as ints or
+        /// infinite floats — `04203581`, `458e5912` — and 3.7% of jobs could not
+        /// be addressed again.) A string, even the stringified id, is a `bad_arg`.
+        @Test func aJobIdIsTheJobsTaskIdAndNothingElseNamesIt() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
-            let a = await createPy(kernel, id: "jobid_hex")
-            for _ in 0..<8 {
-                let r = await kernel.send([Item(a, pyStart(py, "pass"))])[0].result
-                let jid = try #require(r["job_id"].asString)
-                #expect(jid.count == 8, "job_id `\(jid)` is not 8 chars")
+            let a = await createPy(kernel, id: "ids")
+            let r = await kernel.send([Item(a, pyStart(py, "import time; time.sleep(30)"))])[0].result
+            let jid = try #require(r["job_id"].asInt, "\(r.serialize())")
+            let rows = await psRows(kernel)
+            #expect(
+                rows.contains { $0["id"].asInt == jid && $0["agent"].asString == "ids" },
+                "ps lists the job under its id: \(rows)")
+            for verb in ["status", "stop", "interrupt", "clear", "write", "output"] {
+                let bad = await kernel.send([
+                    Item(a, .object(["type": .string(verb), "job_id": .string(String(jid))]))
+                ])[0].result
                 #expect(
-                    jid.allSatisfy { $0.isHexDigit && !$0.isUppercase },
-                    "job_id `\(jid)` is not hex")
+                    bad["reason"].asString == "bad_arg" && bad["arg"].asString == "job_id",
+                    "\(verb): \(bad.serialize())")
             }
+            let snap = await kernel.send([
+                Item(a, .object(["type": .string("status"), "job_id": .integer(jid)]))
+            ])[0].result["jobs"][0]
+            #expect(snap["job_id"] == .integer(jid) && snap["task_id"].isNull, "\(snap.serialize())")
+            _ = await kernel.send([
+                Item(a, .object(["type": .string("stop"), "job_id": .integer(jid)]))
+            ])
         }
 
         // MARK: A4.6 / A4.14 / A4.15 / A4.29 / A4.30 — the pump
@@ -1326,16 +1355,16 @@
             let started = await kernel.send([
                 Item(a, pyStart(py, "import time; time.sleep(60)"))
             ])[0].result
-            let jid = try #require(started["job_id"].asString)
+            let jid = try #require(started["job_id"].asInt)
             try await Task.sleep(nanoseconds: 300_000_000)
             let stopped = await kernel.send([
-                Item(a, .object(["type": .string("stop"), "job_id": .string(jid)]))
+                Item(a, .object(["type": .string("stop"), "job_id": .integer(jid)]))
             ])[0].result
             #expect(stopped["killed"].asInt == 1, "\(stopped.serialize())")
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let done = events.first { $0["type"].asString == "job_done" }
             #expect(done?["exit_code"].asInt == -9, "\(done?.serialize() ?? "no job_done")")
-            #expect(done?["job_id"].asString == jid, "\(done?.serialize() ?? "none")")
+            #expect(done?["job_id"].asInt == jid, "\(done?.serialize() ?? "none")")
         }
 
         /// A4.14 — a line past 64 KiB is read whole: python's reader limit is
@@ -1373,11 +1402,11 @@
                             + "for i in range(6):\n    print(i)\n    sys.stdout.flush()\n    time.sleep(0.3)\n"
                     ))
             ])[0].result
-            let jid = try #require(r["job_id"].asString)
+            let jid = try #require(r["job_id"].asInt)
             // FORGET the row while it still runs — a NAMED clear drops a running one.
             try await Task.sleep(nanoseconds: 500_000_000)
             let cleared = await kernel.send([
-                Item(a, .object(["type": .string("clear"), "job_id": .string(jid)]))
+                Item(a, .object(["type": .string("clear"), "job_id": .integer(jid)]))
             ])[0].result
             #expect(
                 cleared["cleared"].asInt == 1,
@@ -1436,7 +1465,7 @@
             guard let py = py3() else { return }
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "order")
-            var started: [String] = []
+            var started: [Int64] = []
             for i in 0..<5 {
                 let r = await kernel.send([
                     Item(
@@ -1450,10 +1479,10 @@
                             ]),
                         ]))
                 ])[0].result
-                started.append(try #require(r["job_id"].asString))
+                started.append(try #require(r["job_id"].asInt))
             }
             let st = await kernel.send([Item(a, .object(["type": .string("status")]))])[0].result
-            let listed = st["jobs"].asArray?.compactMap { $0["job_id"].asString } ?? []
+            let listed = st["jobs"].asArray?.compactMap { $0["job_id"].asInt } ?? []
             #expect(listed == started, "listed \(listed), started \(started)")
             _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
         }
@@ -1477,7 +1506,7 @@
                         "callable_by": .object([a.value: .string("*")]),
                     ]))
             ])[0].result
-            let (fd, relay) = wire(kernel, owner: a, jobId: "jc")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9004))
             defer {
                 relay.stop()
                 close(fd)
@@ -1527,7 +1556,7 @@
         @Test func aWatchingProgramHoldsDrainTaskRows() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "drains")
-            let (fd, relay) = wire(kernel, owner: a, jobId: "jd")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9005))
             defer {
                 relay.stop()
                 close(fd)

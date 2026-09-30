@@ -56,6 +56,7 @@ let package = Package(
             "FantasticAnthropicBackend",
             "FantasticResponsesBackend",
             "FantasticLlamaCppBackend",
+            "FantasticVllmBackend",
             "FantasticRamStore",
         ]),
         .library(name: "FantasticKernelStartup", targets: ["FantasticKernelStartup"]),
@@ -279,6 +280,15 @@ let package = Package(
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
         ),
+        // vLLM, spoken to DIRECTLY — its own knobs, its own failure shapes and a
+        // KV-cache session table per endpoint (python `vllm_backend`).
+        .target(
+            name: "FantasticVllmBackend",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
+        ),
         // ── Shared runner lifecycle (mirrors FantasticAICore) ────
         // Cross-platform dispatch skeleton (reflect/boot/shutdown/
         // start/stop) behind a `RunnerTransport` seam. The local + ssh
@@ -312,6 +322,7 @@ let package = Package(
                 "FantasticAnthropicBackend",
                 "FantasticResponsesBackend",
                 "FantasticLlamaCppBackend",
+                "FantasticVllmBackend",
                 "FantasticExecBridge",
             ]
         ),
@@ -398,7 +409,7 @@ let package = Package(
                 "FantasticAICore", "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
                 "FantasticResponsesBackend",
-            "FantasticLlamaCppBackend", "FantasticJSON",
+            "FantasticLlamaCppBackend", "FantasticVllmBackend", "FantasticJSON",
             ]
         ),
 

@@ -15,7 +15,7 @@
 // TWO RULES THAT KEEP THE KV CACHE WARM. Measured on this stack (vLLM /metrics):
 // an append after the cached prefix reuses it in full; any edit inside it reuses
 // NOTHING. So —
-//   * HYSTERESIS. Strip only past the HIGH watermark, and strip down to LOW in
+//   * HYSTERESIS. Strip only past the HIGH watermark, and strip down to AIConstants.LOW in
 //     one batch: ten stubs in one event is one cache miss, not ten.
 //   * MONOTONE, OLDEST FIRST. Once stripped, always stripped, and the stripped
 //     region is a contiguous run from the front — the stable prefix only ever
@@ -31,9 +31,6 @@ import FantasticKernel
 import Foundation
 
 public enum AIStripStrategy {
-    /// Strip down to this fraction of the budget once over it. Python `LOW`.
-    public static let LOW = 0.6
-
     /// Per-agent set of stripped pids, as the TAG writes them. In-memory,
     /// process-lifetime — the same standing as the projection cache: a strip is
     /// a VIEW decision, the durable store is untouched, so losing this on restart
@@ -158,11 +155,11 @@ public enum AIStripStrategy {
         } else {
             done = setDefault(key, try await seed(ctx, body))
         }
-        let budget = ctx.budget - AIContext.noticeEnvelopeReserve
+        let budget = ctx.budget - AIConstants.NOTICE_ENVELOPE_RESERVE
         var (rendered, n, saved) = render(body, done)
         if AIContext.estimateTokens(rendered) > budget {
-            // OVER THE HIGH WATERMARK: strip oldest-first, in ONE batch, down to LOW.
-            let target = Int64(Double(budget) * LOW)
+            // OVER THE HIGH WATERMARK: strip oldest-first, in ONE batch, down to AIConstants.LOW.
+            let target = Int64(Double(budget) * AIConstants.LOW)
             for m in body[1..<(body.count - 1)] {  // never the goal, never the live turn
                 if AIContext.estimateTokens(rendered) <= target { break }
                 if !isReply(m) { continue }

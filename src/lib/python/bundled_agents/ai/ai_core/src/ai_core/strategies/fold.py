@@ -29,8 +29,17 @@ from ai_core.folds import (
 )
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, Projection
 from ai_core.strategies.strip import LOW, strip
-
-MAX_TITLE = 140
+from ai_core.constants import (
+    MAX_TITLE,
+    SUMMARY_SHARE,
+    WINDOW_SHARE,
+    SUMMARY_FLOOR,
+    THINK_ALLOWANCE,
+    INDEX_USER_CHARS,
+    KEEP_TAIL,
+    SPAN,
+    FOLD_RUN,
+)  # noqa: F401 — re-exported seams
 
 
 def _titles_of(rows: list[dict], chain: list[int]) -> str:
@@ -43,21 +52,6 @@ def _titles_of(rows: list[dict], chain: list[int]) -> str:
             out.append(m.group(1))
     return "; ".join(dict.fromkeys(out)) or "(untitled)"
 
-
-# THE SUMMARY BUDGET — this strategy's own defaults (the per-agent strategy slot is
-# where they become configurable; not exposed now). A summary may take a fifth of
-# the span it replaces, and never more than a quarter of the body budget: a fold
-# that is itself a large fraction of the window buys nothing.
-SUMMARY_SHARE = 0.20
-WINDOW_SHARE = 0.25
-SUMMARY_FLOOR = 48  # tokens — a title and one sentence always fit
-# THE THINKING ALLOWANCE on a summary call's `max_tokens` (decided 2026-09-26). The
-# endpoint counts a reasoning model's thought against `max_tokens`; at a bare budget
-# (as small as ~93 tokens for a short span) the thought alone hit the bound, every
-# small summary was cut and refused, and the last-resort cut dropped the fold that held
-# the run's decision (measured, E81). The SUMMARY TEXT — thought stripped — must
-# still fit the budget; the allowance is for the thinking only.
-THINK_ALLOWANCE = 1024
 
 FOLD_PROMPT = (
     "FOLD this finished piece of work in AT MOST ~{budget} tokens. First line: a "
@@ -98,7 +92,6 @@ _RUNTIME = (
     "[cleared ",
     "[fork of ",
 )
-INDEX_USER_CHARS = 1200  # the user's own words, verbatim, at most this much per fold
 
 
 def mechanical_index(rows: list[dict], chain: list[int]) -> str:
@@ -200,10 +193,6 @@ async def _summarize(
     return parts[0], parts[1], False
 
 
-KEEP_TAIL = 6  # rows at the end of the view that never fold — the live tail
-SPAN = 8  # rows per fold at the watermark — small enough to summarize, large enough to matter
-
-
 async def write_fold(
     ctx: ProjectionCtx, rows: list[dict], idxs: list[int]
 ) -> dict | None:
@@ -241,21 +230,6 @@ async def write_fold(
     if ctx.client_id and ctx.kernel is not None:
         await _save_history(ctx.self_id, ctx.kernel, [fr])
     return fr
-
-
-#: Adjacent folds at the head of the view before they fold as a group.
-#:
-#: THREE, not four. A real run folds at most once per turn — each projection
-#: drops the view under the watermark and stops — so the head accumulates folds
-#: one at a time and this threshold is the whole story. At four it never fired:
-#: measured 2026-09-11, `nested_folds` and `flat_roots` both ended `levels [1]`,
-#: a head that grows one fold per span forever, which is the growth this
-#: constant exists to stop.
-#:
-#: Three still skips-then-batches, so depth grows as log₃ of the history rather
-#: than one level per cut (the 2026-09-06 measurement: twelve levels in 26 cuts,
-#: when every span began on the previous fold).
-FOLD_RUN = 3
 
 
 def next_span(

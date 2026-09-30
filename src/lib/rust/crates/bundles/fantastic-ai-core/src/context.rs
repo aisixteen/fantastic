@@ -7,31 +7,12 @@
 use fantastic_bundle::{decimal_value, py_int, py_json_dumps, py_strip};
 use serde_json::{json, Map, Value};
 
-/// ~chars per token for the estimate.
-pub const CHARS_PER_TOKEN: usize = 4;
-/// Default window when nothing is configured.
-///
-/// Was 4096, which no longer fit the kernel's OWN system block: budget =
-/// 4096 − 1024 output reserve = 3072 against a ~3174-token default prompt, so
-/// every agent created without an explicit `context_window` failfasted
-/// `too_small` before the model was ever called. The margin had reached zero
-/// and a ~100-token verb-doc addition took it negative.
-pub const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
-/// Default output headroom reserved out of the window.
-pub const DEFAULT_OUTPUT_RESERVE: i64 = 1024;
-/// Never project to a budget below this.
-pub const BUDGET_FLOOR: i64 = 256;
-/// Fixed token budget reserved at the seam for the notice WRAPPER prose
-/// (everything in the notice except the summary the strategy already
-/// pays for). Keeps ONE budget authority.
-///
-/// MEASURED, not guessed. It was 80 against a real envelope of ~132, and that
-/// 50-token shortfall was not harmless: it put the strategy's projection just
-/// over budget, which woke the seam's backstop, which trims from the FRONT —
-/// where `compact` had just pinned the goal turn. The under-reserve was
-/// therefore the mechanism that undid "PIN THE GOAL". Re-measure this if the
-/// notice text changes. Python `ai_core/strategies/base.py`.
-pub const NOTICE_ENVELOPE_RESERVE: i64 = 160;
+// The tunables live in [`crate::constants`]; re-exported here so every
+// `crate::context::…` path keeps working.
+pub use crate::constants::{
+    BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE,
+    NOTICE_ENVELOPE_RESERVE,
+};
 
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
 /// role + content + the JSON envelope all consume real context.

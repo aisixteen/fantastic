@@ -200,7 +200,7 @@ public enum AIStrategies {
         // budget authority.
         let summaryCost = AIContext.estimateOne(
             .object(["role": .string("user"), "content": .string(summary)]))
-        let avail = max(0, ctx.budget - AIContext.noticeEnvelopeReserve - summaryCost)
+        let avail = max(0, ctx.budget - AIConstants.NOTICE_ENVELOPE_RESERVE - summaryCost)
         // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it
         // is the first thing the overflow split takes. A summary is a lossy retelling;
         // the one turn that must survive verbatim is the instruction the whole run
@@ -229,7 +229,7 @@ public enum AIStrategies {
         }
         let first = body[0]
         // Reserve room for the notice the seam prepends (no summary in truncate).
-        let headCost = AIContext.estimateOne(first) + AIContext.noticeEnvelopeReserve
+        let headCost = AIContext.estimateOne(first) + AIConstants.NOTICE_ENVELOPE_RESERVE
         let tail = fitTail(Array(body[1...]), max(0, ctx.budget - headCost))
         return AIProjection(body: [first] + tail, omittedMarker: true)
     }

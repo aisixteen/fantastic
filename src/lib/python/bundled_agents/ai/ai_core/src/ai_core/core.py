@@ -40,7 +40,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import os
 import re
 import secrets
 import sys
@@ -77,6 +76,14 @@ from ai_core.tool_parse import (
     render_reply,
 )
 from kernel import current_origin, current_task, sender_context
+from ai_core.constants import (  # noqa: F401 — re-exported seams
+    DEFAULT_CLIENT_ID,
+    MAX_CALL_DEPTH,
+    MAX_SILENT_TURNS,
+    RECALL_EVERY,
+    SEND_TIMEOUT,
+    TRIGGER,
+)
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
@@ -116,7 +123,6 @@ _view_source: dict[str, str] = {}
 # Agents whose next turn must open with `context_recall` (enough folds landed).
 _recall_due: set[str] = set()
 _folds_since: dict[str, int] = {}
-RECALL_EVERY = 3  # fold rows between recalls
 # INCARNATION per agent id, bumped on every boot. A reply dispatched under one
 # incarnation must not become a live turn of the next: after a reboot the rebuilt agent
 # would be woken by answers to calls it no longer remembers making. Measured
@@ -130,17 +136,8 @@ _incarnation: dict[str, int] = {}
 # compaction is what the window really holds. 1.0 until an endpoint reports usage.
 _calib: dict[str, float] = {}
 _reported: dict[str, int] = {}
-# THE TRIGGER: compaction fires once the calibrated prompt passes this share of the
-# budget — early enough that the summariser itself has headroom.
-TRIGGER = 0.8
 
 # ─── shared constants ───────────────────────────────────────────
-
-SEND_TIMEOUT = float(
-    os.environ.get("FANTASTIC_AI_SEND_TIMEOUT", "180")
-)  # hard ceiling per-generation; releases the lock (env-overridable — slow local models need more)
-DEFAULT_CLIENT_ID = "cli"  # headless / REPL caller defaults here
-MAX_CALL_DEPTH = 8  # recursion guard: AI→AI→… chains refuse past this depth
 
 
 # ─── per-backend config (captured by the verb closures) ─────────
@@ -1496,6 +1493,21 @@ _AWAIT_REFUSED = (
     '<call name="done"></call>.'
 )
 
+# The silent streak per chain `(agent id, client id)` — see `_route_reply`.
+_silent: dict[tuple[str, str], int] = {}
+
+# What a caller is told when a chain gives up (MAX_SILENT_TURNS silent turns).
+_GAVE_UP = (
+    f"The LLM was not able to answer — {MAX_SILENT_TURNS} turns in a row produced "
+    "no call. Reiterate the inquiry."
+)
+
+# Prefixed to the reminder when the turn it answers was DEAD (only thinking).
+_DEAD_TURN_LINE = (
+    "[no answer] Your last turn produced only thinking and no answer — it was "
+    "discarded. "
+)
+
 _NO_CALL_NUDGE = (
     "[no call was dispatched] Your turn emitted no <call> element, so "
     "NOTHING ran — a call decided in thinking does not execute unless the "
@@ -1533,6 +1545,7 @@ async def _route_reply(
     incoming,
     *,
     message_id: str | None = None,
+    dead_turn: bool = False,
 ):
     """Honour where this pass's output goes. Runs DETACHED, after the lock is
     released.
@@ -1583,6 +1596,12 @@ async def _route_reply(
         )
     done_called = any(c.get("name") == "done" for c in calls)
     await_called = any(c.get("name") == "await" for c in calls)
+    # THE SILENT STREAK of this chain (one per agent + client thread): turns in a
+    # row that dispatched nothing. Any call — `done` and `await` included — ends
+    # the streak; see MAX_SILENT_TURNS.
+    chain = (self_id, client_id)
+    if calls or units:
+        _silent.pop(chain, None)
     # ONE MESSAGE, SEVERAL RECIPIENTS. A send with `to` fans out here into one item
     # per recipient — the kernel's batch is already one-to-many — and every copy
     # carries the whole list (`to`), the sending turn's id (`msg`, the same number in
@@ -1864,13 +1883,36 @@ async def _route_reply(
         # TRY AGAIN. Every turn, chained or not (user, 2026-09-09: "all is tool
         # calls"): a first turn from a person that answers in prose and emits
         # nothing is the same silence as a mid-chain one — the model ends it
-        # with `done`, waits with `await`, or acts. No streak, no cap: both
-        # exits are above this branch and both already returned.
+        # with `done`, waits with `await`, or acts. A DEAD turn (only thinking,
+        # discarded unstored) is the same silence and is rerolled the same way.
         #
         # ASKING IS A CALL, so there is no question-turn exemption. A turn that
         # asks the human DISPATCHES (`send` to the human agent) and is therefore
         # never silent; the answer arrives as that call's reply.
-        _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
+        #
+        # BOUNDED (owner, 2026-09-30): MAX_SILENT_TURNS in a row and the chain
+        # GIVES UP instead of reminding again — the caller is told, loudly, that
+        # the model could not answer. A person sees it in their view; a parent
+        # that asked for the result by `send_to` gets it as a turn; a clock's
+        # tick has nobody reading, so the status event is the record, and the
+        # next tick starts a fresh chain with a fresh count.
+        streak = _silent[chain] = _silent.get(chain, 0) + 1
+        if streak >= MAX_SILENT_TURNS:
+            _silent.pop(chain, None)
+            await _emit_status(
+                kernel,
+                self_id,
+                client_id,
+                "done",
+                reason="gave_up",
+                error=_GAVE_UP,
+                silent_turns=streak,
+            )
+            if send_to is not None:
+                _deliver_soon(kernel, send_to, _GAVE_UP, client_id, system_prompt)
+            return
+        nudge = (_DEAD_TURN_LINE + _NO_CALL_NUDGE) if dead_turn else _NO_CALL_NUDGE
+        _deliver_soon(kernel, self_id, nudge, client_id, system_prompt)
         return
     if calls:
         return  # the model routed its own work; a caller's hand-off does not apply
@@ -2445,6 +2487,35 @@ async def _run(
         _calib[self_id] = reported / max(1, estimate_tokens(model_messages))
         _reported[self_id] = reported
 
+    # A DEAD TURN — nothing left once the thinking is stripped — did not answer,
+    # whatever the provider's finish reason says. Measured 2026-09-30 on vLLM: a
+    # thinking budget of 8 tokens ended the thought, the model stopped cleanly
+    # (`finish_reason: stop`) with an empty answer, and the turn was stored as a
+    # completed, empty assistant row. The ANSWER is discarded here — never stored,
+    # never counted as an answer — and the turn is routed like any that dispatched
+    # nothing:
+    # the no-call reminder rerolls it (owner, 2026-09-30). Failing the turn
+    # outright ended a 30-pass chain on its first dead turn (E31, measured).
+    if not without_thinking(last_text).strip():
+        # The INCOMING row is kept — only the empty answer is dropped. The turn
+        # this one answered may be a reply batch carrying the results of the
+        # model's own calls; unstored, the reroll would arrive with those results
+        # gone and the model would re-ask for them (found in the swift port's
+        # review, 2026-09-30).
+        in_id, in_parent = _row_ids_for_incoming(self_id, user_text, kernel)
+        await _save_history(
+            self_id,
+            kernel,
+            [{"role": "user", "content": user_text, "id": in_id, "parent": in_parent}],
+        )
+        await _emit_status(kernel, self_id, client_id, "done", reason="dead_turn")
+        return {
+            "response": last_text,
+            "final": last_text,
+            "client_id": client_id,
+            "dead_turn": True,
+        }
+
     # `status(phase='done')` IS the completion event. There is no second `done`
     # event: two events for one transition is two truths, and a subscriber that
     # watches the wrong one drifts silently.
@@ -2515,7 +2586,7 @@ def _make_reflect(cfg: Backend):
             "cancel": CANCEL_DOC,
             "emits": {
                 "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
-                "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued.",
+                "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS turns in a row with no call; detail.error says so) for done. detail.ahead for queued.",
                 "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
             },
             "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`status` skip the lock and stay snappy.",
@@ -2821,6 +2892,7 @@ def _make_send(cfg: Backend):
                 # this was a chain turn (a delivered reply) or a chat turn.
                 text,
                 message_id=reply.get("message_id"),
+                dead_turn=bool(reply.get("dead_turn")),
             )
             kernel.ctx.spawn_task(id, "route_reply", coro)
         return reply

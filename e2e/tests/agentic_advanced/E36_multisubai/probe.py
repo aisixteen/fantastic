@@ -180,13 +180,18 @@ def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], des
         if MAX_TOKENS_FIELD:
             meta["max_tokens"] = MAX_TOKENS_FIELD
         meta["model"] = MODEL
-    else:
+    elif BACKEND == "llamacpp":
         meta["handler_module"] = "llamacpp_backend.tools"
         ep = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT")
         if not ep:
             raise SystemExit("FANTASTIC_LLAMACPP_ENDPOINT is unset — name the llama-server URL")
         meta["endpoint"] = ep
         meta["think"] = True
+    else:
+        # Every other plug describes ITSELF (e2e/backends) — see E30's `_ai_meta`.
+        # The probe's own wiring (grants, description) wins over the plug's.
+        for k, v in _resolve_backend(BACKEND).record().items():
+            meta.setdefault(k, v)
     return meta
 
 

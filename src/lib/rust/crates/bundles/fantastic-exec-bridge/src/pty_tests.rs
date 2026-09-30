@@ -101,7 +101,7 @@ async fn next_of(rx: &mut fantastic_kernel::inbox::InboxReceiver, ty: &str) -> V
     }
 }
 
-async fn start(kernel: &Arc<Kernel>, id: &str, py: &Path) -> String {
+async fn start(kernel: &Arc<Kernel>, id: &str, py: &Path) -> i64 {
     let r = call(
         kernel,
         id,
@@ -110,7 +110,7 @@ async fn start(kernel: &Arc<Kernel>, id: &str, py: &Path) -> String {
     )
     .await;
     assert_eq!(r["pty"], json!(true), "{r}");
-    r["job_id"].as_str().unwrap().to_string()
+    r["job_id"].as_i64().unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -230,7 +230,7 @@ async fn a_pty_job_is_gated_like_any_start_and_its_verbs_want_a_pty_job() {
     let r = call(
         &k,
         "term_g",
-        json!({"type": "write", "job_id": "nope", "data": "x"}),
+        json!({"type": "write", "job_id": 999_999, "data": "x"}),
     )
     .await;
     assert_eq!(r["reason"], "not_found", "{r}");
@@ -378,8 +378,11 @@ async fn every_teardown_kills_the_whole_session() {
                    "pty": {"cols": 80, "rows": 24}}),
         )
         .await;
-        let jid = r["job_id"].as_str().expect("job_id").to_string();
-        let leader = crate::jobs::jobs().get(jid.as_str()).expect("job row").pid as i32;
+        let jid = r["job_id"].as_i64().expect("job_id");
+        let leader = crate::jobs::jobs()
+            .get(&(AgentId::from(aid), fantastic_kernel::TaskId(jid)))
+            .expect("job row")
+            .pid as i32;
         call(
             &k,
             aid,
@@ -438,8 +441,11 @@ async fn stop_and_delete_kill_everything_a_job_launched() {
             json!({"type": "start", "command": "/bin/sh", "args": ["-c", line]}),
         )
         .await;
-        let jid = r["job_id"].as_str().expect("job_id").to_string();
-        let leader = crate::jobs::jobs().get(jid.as_str()).expect("job row").pid as i32;
+        let jid = r["job_id"].as_i64().expect("job_id");
+        let leader = crate::jobs::jobs()
+            .get(&(AgentId::from(aid), fantastic_kernel::TaskId(jid)))
+            .expect("job row")
+            .pid as i32;
         let mut members = Vec::new();
         for _ in 0..100 {
             members = in_session(leader);

@@ -80,33 +80,8 @@ public let CONCURRENCY_DOC: String =
 public final class AIBackend: @unchecked Sendable {
     public let config: AIBackendConfig
 
-    /// Per-`send` wall-clock ceiling. A generation that streams past this
-    /// is force-stopped with a terminal `done{error:"send: timeout …"}`.
-    /// Bounds runaway tool loops / a stuck provider. Mirrors Python
-    /// `SEND_TIMEOUT` / Rust `SEND_TIMEOUT_SECS` (default 180s; the env
-    /// override `FANTASTIC_AI_SEND_TIMEOUT` is read once at init).
-    /// Recursion guard: AI→AI→… chains refuse past this depth. Python
-    /// `MAX_CALL_DEPTH`.
-    public static let maxCallDepth = 8
-
-    public static let defaultSendTimeoutSeconds: Double = 180
-    /// The env-derived default every backend config starts from — python's
-    /// module-level `SEND_TIMEOUT = float(os.environ.get(…, "180"))`.
-    ///
-    /// FAILS LOUD ON A BAD VALUE, exactly as that import does: python raises and
-    /// the runtime does not come up. Swift used to parse with `Double(raw)` and
-    /// SILENTLY FALL BACK to 180 on anything it could not read (`"0"` included),
-    /// so a mis-set variable produced a kernel that looked configured and was not.
-    public static let envSendTimeout: Double = {
-        guard let raw = ProcessInfo.processInfo.environment["FANTASTIC_AI_SEND_TIMEOUT"] else {
-            return AIBackend.defaultSendTimeoutSeconds
-        }
-        do {
-            return try pyFloat(.string(raw))
-        } catch {
-            fatalError("FANTASTIC_AI_SEND_TIMEOUT: \(error)")
-        }
-    }()
+    /// This backend's per-`send` ceiling — `AIConstants.SEND_TIMEOUT` unless the
+    /// config names another.
     private var sendTimeoutSeconds: Double { config.sendTimeout }
 
     /// In-flight stream count (bumped around every pass).
@@ -324,7 +299,7 @@ public final class AIBackend: @unchecked Sendable {
             "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id)."
         ),
         "status": .string(
-            "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued."
+            "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS turns in a row with no call; detail.error says so) for done. detail.ahead for queued."
         ),
         "context": .string(
             "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb."
@@ -365,6 +340,10 @@ public final class AIBackend: @unchecked Sendable {
         /// The RAW completion — what routing parses — and the assistant row's id,
         /// the batch token every reply tag of this turn names (`↑<turn>`).
         case ok(String, Int64)
+        /// A DEAD TURN: the RAW completion held nothing once the thinking was
+        /// stripped. Nothing was stored; routing rerolls it with the no-call
+        /// reminder (python `_run`'s `dead_turn` reply).
+        case dead(String)
         /// Terminal failure (a MAPPED provider error). The string is the message
         /// `send` reports as `{error, client_id}`.
         case failed(String)
@@ -486,10 +465,10 @@ public final class AIBackend: @unchecked Sendable {
                 "client_id": .string(guardClientId),
             ])
         }
-        if callStack.count >= AIBackend.maxCallDepth {
+        if callStack.count >= AIConstants.MAX_CALL_DEPTH {
             return .object([
                 "error": .string(
-                    "\(config.kind): max call depth \(AIBackend.maxCallDepth) reached"),
+                    "\(config.kind): max call depth \(AIConstants.MAX_CALL_DEPTH) reached"),
                 "response": .string(""),
                 "client_id": .string(guardClientId),
             ])
@@ -711,6 +690,15 @@ public final class AIBackend: @unchecked Sendable {
                 "client_id": .string(clientId),
                 "message_id": .integer(messageId),
             ])
+        case .dead(let textOut):
+            // python's `{response, final, client_id, dead_turn: True}` — no
+            // `message_id`: no row was minted for a turn that was not stored.
+            reply = .object([
+                "response": .string(textOut),
+                "final": .string(textOut),
+                "client_id": .string(clientId),
+                "dead_turn": .bool(true),
+            ])
         case .failed(let why):
             reply = .object(["error": .string(why), "client_id": .string(clientId)])
         case .refused(let body):
@@ -721,8 +709,9 @@ public final class AIBackend: @unchecked Sendable {
             ])
         }
 
-        // ROUTE this pass's output where it was addressed — only on the ok path.
-        // A failed pass is terminal (python's `if not reply.get("error")` gate),
+        // ROUTE this pass's output where it was addressed — on the ok path, and
+        // on a DEAD turn (rerolled as a silent turn). A failed pass is terminal
+        // (python's `if not reply.get("error")` gate),
         // and a broken chain must not keep spending turns.
         //
         // DETACHED as its own task row (`verb:"route_reply"`), which is why
@@ -732,7 +721,14 @@ public final class AIBackend: @unchecked Sendable {
         // individually visible and killable. NEVER `Task.detached`: that loses
         // the task-locals and the row would land parentless, outside `cancel`'s
         // reach.
-        if case .ok(let textOut, let messageId) = produced {
+        // A DEAD turn routes too — as a silent turn, which is how it is rerolled.
+        let routed: (text: String, messageId: Int64?, dead: Bool)?
+        switch produced {
+        case .ok(let t, let m): routed = (t, m, false)
+        case .dead(let t): routed = (t, nil, true)
+        default: routed = nil
+        }
+        if let (textOut, messageId, deadTurn) = routed {
             let deadline = sendTimeoutSeconds
             // THE COORDINATION STATE, threaded through so `await` can count what
             // is actually pending for this agent — its queue and its FIFO lock.
@@ -747,7 +743,8 @@ public final class AIBackend: @unchecked Sendable {
                     // the router dispatches. The kernel defaults nothing.
                     sendTimeout: deadline,
                     runState: st,
-                    messageId: messageId)
+                    messageId: messageId,
+                    deadTurn: deadTurn)
             }
         }
         return reply
@@ -933,6 +930,37 @@ public final class AIBackend: @unchecked Sendable {
                 kernel, agentId.value, reported: reported,
                 estimate: AIContext.estimateTokens(renderForModel(messages)))
         }
+
+        // A DEAD TURN — nothing left once the thinking is stripped — did not
+        // answer, whatever the provider's finish reason says. Measured 2026-09-30
+        // on vLLM: a thinking budget of 8 tokens ended the thought, the model
+        // stopped cleanly (`finish_reason: stop`) with an empty answer, and the
+        // turn was stored as a completed, empty assistant row. The ANSWER is
+        // discarded here — never stored, never counted as an answer — and the
+        // turn is routed like any that dispatched nothing: the no-call reminder
+        // rerolls it (owner, 2026-09-30). Failing the turn outright ended a
+        // 30-pass chain on its first dead turn (E31, measured). Python `_run`.
+        if pyStrip(withoutThinking(accumulated)).isEmpty {
+            // The INCOMING row is kept — only the empty answer is dropped. The
+            // turn this one answered may be a reply batch carrying the results of
+            // the model's own calls; unstored, the reroll would arrive with those
+            // results gone and the model would re-ask for them (found in the swift
+            // port's review, 2026-09-30).
+            let (inId, inParent) = rowIdsForIncoming(userText, kernel: kernel)
+            try await saveHistory(
+                agentId.value, kernel,
+                [
+                    .object([
+                        "role": .string("user"), "content": .string(userText),
+                        "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
+                    ])
+                ])
+            await emitStatus(
+                kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+                detail: [("reason", .string("dead_turn"))])
+            return .dead(accumulated)
+        }
+
         await emitStatus(
             kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
             detail: [("reason", .string("ok"))])
@@ -1295,7 +1323,7 @@ public final class AIBackend: @unchecked Sendable {
     /// `strip` removes them.
     func safeClient(_ clientId: String) -> String {
         let stripped = pyStrip(clientId)
-        let raw = stripped.isEmpty ? "cli" : stripped
+        let raw = stripped.isEmpty ? AIConstants.DEFAULT_CLIENT_ID : stripped
         var out = String.UnicodeScalarView()
         for c in raw.unicodeScalars {
             out.append(pyIsAlnum(c) || c == "." || c == "_" || c == "-" ? c : "_")

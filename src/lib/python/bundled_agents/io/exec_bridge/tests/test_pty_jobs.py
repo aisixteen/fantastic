@@ -202,7 +202,7 @@ async def test_a_pty_job_is_gated_like_any_start(term):
 
 
 async def test_the_pty_verbs_want_a_live_pty_job(term):
-    r = await _call(term, {"type": "write", "job_id": "nope", "data": "x"})
+    r = await _call(term, {"type": "write", "job_id": 999999, "data": "x"})
     assert r["reason"] == "not_found", r
     pipe = await _call(
         term, {"type": "start", "command": PY, "args": ["-c", "input()"]}

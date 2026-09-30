@@ -679,6 +679,79 @@ struct RoutingTests {
         #expect(script.calls == 6, "done ended it; nothing reminds after")
     }
 
+    /// A turn that is ONLY thinking did not answer: it is never stored and never
+    /// counts as completed — it is rerolled by the no-call reminder, told why
+    /// (measured on vLLM 2026-09-30: an 8-token thinking budget, then a clean
+    /// `stop` with no answer; failing it outright ended a 30-pass chain). Python
+    /// `test_a_dead_turn_is_discarded_and_rerolled`.
+    @Test func aDeadTurnIsDiscardedAndRerolled() async throws {
+        let script = ProviderScript([["\(THINK_OPEN)hmm\(THINK_CLOSE)\n\n"], [doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        let out = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"),
+                "client_id": .string("c"),
+            ]))])[0]
+        #expect(out.result["dead_turn"].asBool == true, "\(out.result)")
+        #expect(await script.waitForCalls(2), "the dead turn was not rerolled")
+        let reroll = script.requestText(1)
+        #expect(
+            reroll.contains("[no answer] Your last turn produced only thinking and no answer"),
+            "\(reroll.suffix(400))")
+        #expect(reroll.contains("discarded. [no call was dispatched]"), "\(reroll.suffix(400))")
+        // the turn the dead one answered is KEPT (a reply batch must not vanish);
+        // only its empty answer is dropped — python records `seen` per pass
+        let seen = script.request(1) ?? []
+        #expect(
+            seen.contains { m in
+                let c = m["content"].asString ?? ""
+                return c == "go" || c.hasSuffix("go")
+            }, "\(seen)")
+        #expect(
+            !seen.contains { m in
+                m["role"].asString == "assistant"
+                    && pyStrip(m["content"].asString ?? "").isEmpty
+            }, "\(seen)")
+    }
+
+    /// Silent turns in a row are bounded: at MAX_SILENT_TURNS the chain stops
+    /// reminding and tells its caller the model could not answer. Python
+    /// `test_a_chain_gives_up_after_max_silent_turns` (cap lowered to 3 for THIS
+    /// kernel only — the test seam, not the constant).
+    @Test func aChainGivesUpAfterMaxSilentTurns() async throws {
+        let script = ProviderScript(Array(repeating: ["just prose"], count: 10))
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        AISilentStreaks.setCap(kernel, 3)
+        let id = ids["mock"]!
+        // a browser-style client: its events land on the agent's own inbox,
+        // where a watcher sees them (`cli` events go to the terminal instead)
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
+        defer { pump.cancel() }
+        _ = await kernel.send([Item(id, .object([
+                "type": .string("send"), "text": .string("go"),
+                "client_id": .string("tab1"),
+            ]))])[0]
+        #expect(await script.waitForCalls(3))
+        let gaveUp: () -> JSON? = {
+            sink.snapshot().last {
+                $0["type"].asString == "status" && $0["phase"].asString == "done"
+                    && $0["detail"]["reason"].asString == "gave_up"
+            }
+        }
+        try await waitUntil("status(done, gave_up)") { gaveUp() != nil }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(script.calls == 3, "no reminder after the cap")
+        let detail = try #require(gaveUp()?["detail"])
+        #expect(
+            detail["error"].asString
+                == "The LLM was not able to answer — 3 turns in a row produced no call. "
+                + "Reiterate the inquiry.")
+        #expect(detail["silent_turns"].asInt == 3)
+    }
+
     @Test func aDoneCallEndsTheChainWithoutANudge() async throws {
         let script = ProviderScript([
             [callEnvelope(target: "kernel_state", payload: cheapReflect)],

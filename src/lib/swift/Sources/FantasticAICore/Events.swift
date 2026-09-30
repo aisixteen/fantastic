@@ -35,7 +35,7 @@ func toCaller(
 ) async {
     var ev = event
     ev["client_id"] = .string(clientId)
-    if clientId == "cli" {
+    if clientId == AIConstants.DEFAULT_CLIENT_ID {
         // The outcome is not read, as in python: a missing or ungranted `cli`
         // agent refuses the send, and the stream carries on.
         _ = await kernel.send([Item(AgentId("cli"), .object(ev))])

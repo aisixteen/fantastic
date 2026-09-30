@@ -20,6 +20,7 @@ members = [
     "fantastic-responses-backend",
     "fantastic-scheduler",
     "fantastic-static-loader",
+    "fantastic-vllm-backend",
     "fantastic-web",
     "fantastic-web-rest",
     "fantastic-web-ws",
@@ -276,6 +277,7 @@ dependencies = [
     { name = "fantastic-responses-backend" },
     { name = "fantastic-scheduler" },
     { name = "fantastic-static-loader" },
+    { name = "fantastic-vllm-backend" },
     { name = "fantastic-web" },
     { name = "fantastic-web-rest" },
     { name = "fantastic-web-ws" },
@@ -309,6 +311,7 @@ requires-dist = [
     { name = "fantastic-responses-backend", editable = "bundled_agents/ai/responses/responses_backend" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
+    { name = "fantastic-vllm-backend", editable = "bundled_agents/ai/vllm/vllm_backend" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
     { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
     { name = "fantastic-web-ws", editable = "bundled_agents/io/web_ws" },
@@ -448,6 +451,21 @@ dependencies = [
 requires-dist = [
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "pyyaml", specifier = ">=6" },
+]
+
+[[package]]
+name = "fantastic-vllm-backend"
+version = "0.1.0"
+source = { editable = "bundled_agents/ai/vllm/vllm_backend" }
+dependencies = [
+    { name = "fantastic-ai-core" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "httpx" },
 ]
 
 [[package]]

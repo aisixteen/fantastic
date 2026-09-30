@@ -26,6 +26,7 @@ fantastic-bridge = { path = "../bundles/fantastic-bridge" }
 fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend" }
 fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
 fantastic-responses-backend = { path = "../bundles/fantastic-responses-backend" }
+fantastic-vllm-backend = { path = "../bundles/fantastic-vllm-backend" }
 fantastic-llamacpp-backend = { path = "../bundles/fantastic-llamacpp-backend" }
 fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
 # TEST-ONLY fixture agents the shared e2e scenarios name. OPTIONAL and

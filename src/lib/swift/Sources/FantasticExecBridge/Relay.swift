@@ -24,7 +24,9 @@
     final class Relay: @unchecked Sendable {
         private let fd: Int32
         private let owner: AgentId
-        private let jobId: String
+        /// The job this relay serves — its kernel task id. Proxy ids and the
+        /// queue label spell it in decimal, as python's f-strings do.
+        private let jobId: TaskId
         private weak var kernel: Kernel?
         /// Owns the socket, the read buffer and the subscription tables. Nothing here is
         /// touched off this queue, so none of it needs a lock.
@@ -56,25 +58,25 @@
         /// swift's concurrency checker asks about — every access below goes through it.
         private final class OwnerInboxTable: @unchecked Sendable {
             private let lock = NSLock()
-            private var map: [String: (jobId: String, proxy: AgentId, task: TaskId)] = [:]
-            func take(_ owner: String) -> (jobId: String, proxy: AgentId, task: TaskId)? {
+            private var map: [String: (jobId: TaskId, proxy: AgentId, task: TaskId)] = [:]
+            func take(_ owner: String) -> (jobId: TaskId, proxy: AgentId, task: TaskId)? {
                 lock.withLock { map.removeValue(forKey: owner) }
             }
-            func takeIfOwned(_ owner: String, by jobId: String)
-                -> (jobId: String, proxy: AgentId, task: TaskId)?
+            func takeIfOwned(_ owner: String, by jobId: TaskId)
+                -> (jobId: TaskId, proxy: AgentId, task: TaskId)?
             {
                 lock.withLock {
                     guard map[owner]?.jobId == jobId else { return nil }
                     return map.removeValue(forKey: owner)
                 }
             }
-            func put(_ owner: String, _ e: (jobId: String, proxy: AgentId, task: TaskId)) {
+            func put(_ owner: String, _ e: (jobId: TaskId, proxy: AgentId, task: TaskId)) {
                 lock.withLock { map[owner] = e }
             }
         }
         private static let ownerInbox = OwnerInboxTable()
 
-        init(fd: Int32, owner: AgentId, jobId: String, kernel: Kernel) {
+        init(fd: Int32, owner: AgentId, jobId: TaskId, kernel: Kernel) {
             self.fd = fd
             self.owner = owner
             self.jobId = jobId

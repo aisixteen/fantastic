@@ -24,13 +24,7 @@ use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-/// Fold rows between automatic recalls. Python `RECALL_EVERY`.
-pub const RECALL_EVERY: usize = 3;
-
-/// THE TRIGGER: compaction fires once the calibrated prompt passes this share of
-/// the budget — early enough that the summariser itself has headroom. Python
-/// `TRIGGER`.
-pub const TRIGGER: f64 = 0.8;
+pub use crate::constants::{RECALL_EVERY, TRIGGER};
 
 /// `round(x, 3)` — how python reports the calibration.
 #[must_use]

@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from ai_core.context import ProjectionCtx, estimate_one
+from ai_core.constants import NOTICE_ENVELOPE_RESERVE  # noqa: F401 — re-exported seams
 
 
 @dataclass
@@ -39,17 +40,6 @@ class Projection:
     # one re-summarise — the span stays in view, reported, never a degraded fold.
     fold_refused: int = 0
 
-
-# A fixed token budget reserved at the seam for the notice WRAPPER prose (everything in
-# the notice except the summary itself, which the strategy already pays for). Keeps ONE
-# budget authority — the strategy nets this out before fitting its tail.
-#
-# MEASURED, not guessed. It was 80 against a real envelope of ~132, and that
-# 50-token shortfall was not harmless: it put the strategy's projection just over
-# budget, which woke the seam's backstop, which trims from the FRONT — where
-# `compact` had just pinned the goal turn. The under-reserve was therefore the
-# mechanism that undid "PIN THE GOAL". Re-measure this if the notice text changes.
-NOTICE_ENVELOPE_RESERVE = 160
 
 # (body, system_block, rec, ctx) -> Projection (body excludes the system block)
 STRATEGY = Callable[

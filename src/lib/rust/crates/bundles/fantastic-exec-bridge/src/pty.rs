@@ -114,12 +114,16 @@ pub fn set_winsize(fd: i32, cols: u16, rows: u16) -> std::io::Result<()> {
 /// at EOF with `job_done`.
 pub async fn pump(
     owner: AgentId,
-    job_id: String,
+    ready: jobs::Ready,
     mut child: tokio::process::Child,
     pty: Arc<Pty>,
     kernel: Arc<Kernel>,
 ) {
-    let mut finalize = jobs::FinalizeRow::new(&job_id);
+    // The job's id is this task's own id, sent once `start` has filed the row.
+    let Some(job_id) = jobs::await_id(ready, &child).await else {
+        return;
+    };
+    let mut finalize = jobs::FinalizeRow::new((owner.clone(), job_id));
     let mut buf = vec![0u8; 4096];
     loop {
         let paused = {
@@ -173,7 +177,7 @@ pub async fn pump(
         kernel
             .emit(
                 &owner,
-                json!({"type": "output", "job_id": job_id, "data": text}),
+                json!({"type": "output", "job_id": job_id.get(), "data": text}),
             )
             .await;
     }
@@ -181,7 +185,7 @@ pub async fn pump(
     finalize.disarm();
     {
         let mut g = jobs::jobs();
-        if let Some(j) = g.get_mut(&job_id) {
+        if let Some(j) = g.get_mut(&(owner.clone(), job_id)) {
             j.exit_code = code;
             j.status = if j.status == "stopping" {
                 "stopped".to_string()
@@ -198,7 +202,7 @@ pub async fn pump(
     kernel
         .emit(
             &owner,
-            json!({"type": "job_done", "job_id": job_id, "exit_code": code,
+            json!({"type": "job_done", "job_id": job_id.get(), "exit_code": code,
                    "ok": code == Some(0)}),
         )
         .await;
@@ -244,15 +248,10 @@ async fn write_all(pty: &Pty, data: &[u8]) -> std::io::Result<usize> {
 /// `(pty, None)` for a live PTY job this agent owns, or the refusal (python
 /// `_pty_job`).
 fn pty_job(verb: &str, owner: &AgentId, payload: &Value) -> Result<Arc<Pty>, Value> {
-    let jid = match payload.get("job_id").and_then(Value::as_str) {
-        Some(j) if !j.is_empty() => j,
-        _ => return Err(missing(verb, "job_id")),
-    };
+    let jid = crate::require_job(verb, payload)?;
     let g = jobs::jobs();
-    let Some(job) = g.get(jid).filter(|j| &j.owner == owner) else {
-        let mut v = refusal(NOT_FOUND, format!("exec_bridge: no job {}", py_repr(jid)));
-        with(&mut v, "job_id", json!(jid));
-        return Err(v);
+    let Some(job) = jid.find(&g, owner) else {
+        return Err(crate::no_such_job(&jid));
     };
     let Some(pty) = job.pty.clone() else {
         return Err(bad(verb, "job_id", "a PTY job (started with `pty`)"));
@@ -260,9 +259,9 @@ fn pty_job(verb: &str, owner: &AgentId, payload: &Value) -> Result<Arc<Pty>, Val
     if !jobs::alive(job) || pty.lock().eof {
         let mut v = refusal(
             NOT_FOUND,
-            format!("exec_bridge: job {} has ended", py_repr(jid)),
+            format!("exec_bridge: job {} has ended", py_repr_value(&jid.raw)),
         );
-        with(&mut v, "job_id", json!(jid));
+        with(&mut v, "job_id", jid.raw);
         return Err(v);
     }
     Ok(pty)
@@ -350,19 +349,13 @@ pub fn ack_reply(owner: &AgentId, payload: &Value) -> Value {
 
 /// `output {job_id, max_bytes?}` — the ring, for a client re-attaching.
 pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
-    let jid_v = payload.get("job_id").cloned().unwrap_or(Value::Null);
+    let jid = match crate::require_job("output", payload) {
+        Ok(j) => j,
+        Err(e) => return e,
+    };
     let g = jobs::jobs();
-    let job = jid_v
-        .as_str()
-        .and_then(|j| g.get(j))
-        .filter(|j| &j.owner == owner);
-    let Some(job) = job else {
-        let mut v = refusal(
-            NOT_FOUND,
-            format!("exec_bridge: no job {}", py_repr_value(&jid_v)),
-        );
-        with(&mut v, "job_id", jid_v);
-        return v;
+    let Some(job) = jid.find(&g, owner) else {
+        return crate::no_such_job(&jid);
     };
     let Some(pty) = job.pty.clone() else {
         return bad(
@@ -387,11 +380,11 @@ pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
             text = text[start..].to_string();
         }
     }
-    let jid = py_str(&jid_v);
+    let shown = py_str(&jid.raw);
     json!({
-        "job_id": jid,
+        "job_id": jid.raw,
         "output": text,
-        "origin": format!("{owner} output {{job_id: {jid}}} — the ring NOW; re-send, it moves"),
+        "origin": format!("{owner} output {{job_id: {shown}}} — the ring NOW; re-send, it moves"),
     })
 }
 
@@ -456,7 +449,7 @@ pub async fn paste_image_reply(owner: &AgentId, header: &Value, data: &[u8]) -> 
             },
         }
     };
-    let name = format!("paste_{}.{ext}", crate::rand_job_id());
+    let name = format!("paste_{}.{ext}", crate::rand_hex8());
     // The scratch dir is a system temp dir (outside cwd by design) — written
     // through `fs`, the one disk module.
     if let Err(e) = fantastic_file::fs::write_bytes(&dir, &name, data, false) {

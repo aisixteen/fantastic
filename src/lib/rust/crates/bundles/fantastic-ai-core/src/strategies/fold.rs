@@ -32,28 +32,12 @@ use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 
-/// The longest a fold title may be, in chars.
-pub const MAX_TITLE: usize = 140;
-
-/// Rows at the end of the view that never fold — the live tail.
-pub const KEEP_TAIL: usize = 6;
-
-/// Rows per fold at the watermark — small enough to summarize, large enough to
-/// matter.
-pub const SPAN: usize = 8;
-
-/// Adjacent folds at the head of the view before they fold as a group.
-///
-/// THREE, not four. A real run folds at most once per turn — each projection
-/// drops the view under the watermark and stops — so the head accumulates folds
-/// one at a time and this threshold is the whole story. At four it never fired:
-/// measured 2026-09-11 (python), `nested_folds` and `flat_roots` both ended
-/// `levels [1]`, a head that grows one fold per span forever, which is the
-/// growth this constant exists to stop.
-///
-/// Three still skips-then-batches, so depth grows as log₃ of the history rather
-/// than one level per cut.
-pub const FOLD_RUN: usize = 3;
+// The tunables live in [`crate::constants`]; re-exported so every
+// `crate::strategies::fold::…` path keeps working.
+pub use crate::constants::{
+    FOLD_RUN, INDEX_USER_CHARS, KEEP_TAIL, MAX_TITLE, SPAN, SUMMARY_FLOOR, SUMMARY_SHARE,
+    THINK_ALLOWANCE, WINDOW_SHARE,
+};
 
 /// The joined `· "title"` marks of a span — what a degraded fold carries instead
 /// of a summary.
@@ -77,26 +61,6 @@ fn titles_of(rows: &[Value], chain: &[usize]) -> String {
 fn cut_title(t: &str) -> String {
     t.chars().take(MAX_TITLE).collect()
 }
-
-// THE SUMMARY BUDGET — this strategy's own defaults (the per-agent strategy slot
-// is where they become configurable; not exposed now). A summary may take a fifth
-// of the span it replaces, and never more than a quarter of the body budget: a
-// fold that is itself a large fraction of the window buys nothing.
-
-/// Share of the folded span a summary may take.
-pub const SUMMARY_SHARE: f64 = 0.20;
-/// Share of the body budget a summary may take.
-pub const WINDOW_SHARE: f64 = 0.25;
-/// Tokens — a title and one sentence always fit.
-pub const SUMMARY_FLOOR: i64 = 48;
-/// THE THINKING ALLOWANCE on a summary call's `max_tokens` (decided 2026-09-26).
-/// The endpoint counts a reasoning model's thought against `max_tokens`; at a bare
-/// budget (as small as ~93 tokens for a short span) the thought alone hit the
-/// bound, every small summary was cut and refused, and the last-resort cut dropped
-/// the fold that held the run's decision (measured, python E81). The SUMMARY TEXT
-/// — thought stripped — must still fit the budget; the allowance is for the
-/// thinking only.
-pub const THINK_ALLOWANCE: i64 = 1024;
 
 /// The fold ask — python `FOLD_PROMPT`, `{budget}` filled in.
 pub const FOLD_PROMPT: &str =
@@ -135,9 +99,6 @@ const RUNTIME: [&str; 8] = [
     "[cleared ",
     "[fork of ",
 ];
-
-/// The user's own words, verbatim, at most this much per fold.
-pub const INDEX_USER_CHARS: usize = 1200;
 
 fn path_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();

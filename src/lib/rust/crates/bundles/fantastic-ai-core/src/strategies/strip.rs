@@ -36,8 +36,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
-/// Strip down to this fraction of the budget once over it.
-pub const LOW: f64 = 0.6;
+pub use crate::constants::LOW;
 
 /// Per-agent set of stripped pids, as the TAG writes them. In-memory,
 /// process-lifetime — a strip is a VIEW decision and the durable store is

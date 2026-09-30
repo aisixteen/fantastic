@@ -73,7 +73,7 @@ class Norm:
 
     TIME_KEYS = {"ts", "started_at", "queued_at", "created_at", "next_run", "last_run",
                  "elapsed", "duration_ms"}
-    ID_KEYS = {"id", "ids", "parent", "task_id", "message_id", "pid", "refs", "expand",
+    ID_KEYS = {"id", "ids", "parent", "task_id", "job_id", "message_id", "pid", "refs", "expand",
                "after", "next", "bundles_next", "view_ids", "killed", "covers"}
     COUNT_KEYS = {"bytes", "size", "body_len", "content-length", "__bytes_len__"}
     OSPID_KEYS = {"pid"}
@@ -212,9 +212,6 @@ class Norm:
         for pat, rep, tag in (
             (r'(\\?"send_id\\?"\s*:\s*\\?")[A-Za-z0-9_-]{11}(\\?")',
              r"\1<SEND_ID:b64url11>\2", "N7"),
-            (r'(\\?"job_id\\?"\s*:\s*\\?")[0-9a-f]{8}(\\?")', r"\1<JOB_ID:hex8>\2", "N7"),
-            # …and in an `origin` line, where the id is written `{job_id: <hex8>}`.
-            (r"(\bjob_id: )[0-9a-f]{8}\b", r"\1<JOB_ID:hex8>", "N7"),
             (r'(\\?"serial\\?"\s*:\s*\\?")[0-9a-f]{6}(\\?")', r"\1<SERIAL:hex6>\2", "N7"),
             (r'(\\?"(?:ts|started_at|queued_at|created_at|next_run|last_run|elapsed|'
              r'duration_ms)\\?"\s*:\s*)\d+\.\d+', r"\1<TS:float>", "N6"),
@@ -306,7 +303,11 @@ class Norm:
         # N4 — a minted id inside an EMBEDDED json document (the fold prompt
         # quotes the rows it is folding as json). `pid` is left to N5: that one
         # is the operating system's.
-        out = re.sub(r'(\\?"(?:id|task_id|message_id|parent_row|row_id)\\?"\s*:\s*)(\d+)(?![\d.])',
+        out = re.sub(r'(\\?"(?:id|task_id|job_id|message_id|parent_row|row_id)\\?"\s*:\s*)(\d+)(?![\d.])',
+                     lambda m: m.group(1) + self._id_placeholder(int(m.group(2))), out)
+        # …and a job's id in an `origin` line, written `{job_id: <n>}` — a job's
+        # id IS its kernel task id, a counter value like any other here.
+        out = re.sub(r"(\bjob_id: )(\d+)\b",
                      lambda m: m.group(1) + self._id_placeholder(int(m.group(2))), out)
         # N10 — the `NNNB` of a MESSAGE DIGEST line. The digest is
         # `<id> · <role> · "<title>" · <n>B · ↑<parent>`: the count is over the
@@ -385,9 +386,6 @@ class Norm:
             if key == "serial" and re.fullmatch(r"[0-9a-f]{6}", v):
                 self.fired.add("N7")
                 return "<SERIAL:hex6>"
-            if key == "job_id" and re.fullmatch(r"[0-9a-f]{8}", v):
-                self.fired.add("N7")
-                return "<JOB_ID:hex8>"
             if key == "runtime":
                 self.fired.add("N2")
                 return "<RUNTIME>"
@@ -506,9 +504,9 @@ class Norm:
             # character, in the same object. A count whose text has no renamed id
             # in it is compared exactly — that is where C44 and A2.21 live.
             # Only the placeholders whose ORIGINAL had no fixed width count here:
-            # a renamed row id, a timestamp and an OS pid. A guid, a send_id and
-            # a job_id are always the same number of characters, so a count over
-            # a text carrying one of those is still compared exactly.
+            # a renamed row id (a job's id is one), a timestamp and an OS pid. A
+            # guid and a send_id are always the same number of characters, so a
+            # count over a text carrying one of those is still compared exactly.
             texts = [out[t] for t in ("text", "utf8", "body") if isinstance(out.get(t), str)]
             body = out.get("body")
             if isinstance(body, dict):

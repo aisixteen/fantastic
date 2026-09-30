@@ -251,7 +251,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let rows = (0..<6).map { f.row("user", String(repeating: "z", count: 50_000), "u:\($0)") }
         let txt = AIFolds.chainText(rows, Array(0..<6))
-        #expect(txt.count <= SUMMARY_INPUT_CAP)
+        #expect(txt.count <= AIConstants.SUMMARY_INPUT_CAP)
     }
 
     @Test func aFoldWrittenTwiceOverTheSameStretchIsNotWrittenTwice() async throws {
@@ -336,7 +336,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let goal = f.row("user", "GOAL", "user:goal")
         let heads = (0..<3).map { f.fold([], "fold \($0)", "body", false, parent: nil, id: 1000 + Int64($0)) }
-        let tail = (0..<(AIFoldStrategy.KEEP_TAIL + 1)).map { f.row("user", "t\($0)", "user:t\($0)") }
+        let tail = (0..<(AIConstants.KEEP_TAIL + 1)).map { f.row("user", "t\($0)", "user:t\($0)") }
         let rows = [goal] + heads + tail
         let span = AIFoldStrategy.nextSpan(rows, rows)
         // The three folds are at indices 1-3; anything else means the rule skipped

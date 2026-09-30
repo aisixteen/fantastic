@@ -61,20 +61,19 @@ allowlist fixes WHICH commands may run; it grants nothing else.
 ```bash
 XB=$($K kernel create_agent parent_id=kernel_state handler_module=exec_bridge.tools id=xb cwd=. ingress_rule=allow_all_ingress allowed="[\"$PY .*\"]" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 JOB=$($K xb start command=$PY args='["-c","import time; print(\"up\", flush=True); time.sleep(30)"]' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("job_id",""))')
-$K xb status job_id=$JOB | python3 -m json.tool | grep -E '"(status|task_id|last_line)"'
-$K kernel ps | grep -F '"verb": "start"'
+$K xb status job_id=$JOB | python3 -m json.tool | grep -E '"(status|job_id|last_line)"'
+$K kernel ps | grep -F "\"id\": $JOB,"   # the job's id IS its task id
 $K xb stop | grep -F '"killed": 1'
 ```
 
-Expect `status` → `running`, a non-null `task_id`, `last_line: "up"`; `ps` to list the
-row; `stop` to report one kill.
+Expect `status` → `running`, an integer `job_id`, `last_line: "up"`; `ps` to list a
+row whose `id` is that same `job_id`; `stop` to report one kill.
 
 ### Test 3: `cancel` reaps the real OS process
 
 ```bash
 JOB2=$($K xb start command=$PY args='["-c","import time; time.sleep(60)"]' | python3 -c 'import json,sys;print(json.load(sys.stdin)["job_id"])')
-TID=$($K xb status job_id=$JOB2 | python3 -c 'import json,sys;print(json.load(sys.stdin)["jobs"][0]["task_id"])')
-$K kernel cancel task_id=$TID
+$K kernel cancel task_id=$JOB2   # the job's id IS its task id
 $K xb status job_id=$JOB2 | grep -E '"status": "(stopped|failed)"'
 ```
 

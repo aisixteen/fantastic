@@ -30,6 +30,7 @@
 //! would trip [`fantastic_kernel::call_guard`] as a false cycle on turn 2. The
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
+use crate::constants::MAX_SILENT_TURNS;
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::REFLECT_NUDGE;
@@ -406,12 +407,34 @@ fn you_sent(args: &Map<String, Value>) -> Value {
 /// ONE TURN, ONE BATCH, ONE MESSAGE PER DESTINATION: every call the model
 /// emitted is dispatched together, and everything owed to a destination —
 /// results, parse errors, shape errors — arrives as ONE delivered turn.
-/// THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched
-/// nothing. DONE is EXPLICIT: the `{"name":"done"}` tool call ends a chain
-/// silently and is never nudged. Why once: the nudge is itself a chain turn,
-/// so a second consecutive no-call turn arrives with the nudge as its incoming
-/// text — and is NOT nudged again. Mirrors python `_NO_CALL_NUDGE` (canonical;
-/// reinstated 2026-09-01 after repo_map:swift twice stopped mid-task).
+/// THE SILENT STREAK per chain `(agent id, client id)`: turns in a row that
+/// dispatched nothing. Any call — `done` and `await` included — ends it; at
+/// [`MAX_SILENT_TURNS`] the chain gives up. Python `_silent`.
+fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
+    static SILENT: OnceLock<Mutex<HashMap<(String, String), usize>>> = OnceLock::new();
+    SILENT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// What a caller is told when a chain gives up ([`MAX_SILENT_TURNS`] silent
+/// turns). Python `_GAVE_UP`, byte for byte.
+pub fn gave_up_text() -> String {
+    format!(
+        "The LLM was not able to answer — {MAX_SILENT_TURNS} turns in a row produced \
+         no call. Reiterate the inquiry."
+    )
+}
+
+/// Prefixed to the reminder when the turn it answers was DEAD (only thinking).
+/// Python `_DEAD_TURN_LINE`.
+pub const DEAD_TURN_LINE: &str =
+    "[no answer] Your last turn produced only thinking and no answer — it was discarded. ";
+
+/// THE NO-CALL NUDGE — the runtime reminder after EVERY turn that dispatched
+/// nothing: TRY AGAIN. DONE is EXPLICIT: the `{"name":"done"}` tool call ends a
+/// chain silently and is never nudged; `await` waits. The reminder repeats until
+/// the model acts or ends the chain, bounded by [`MAX_SILENT_TURNS`] in a row.
+/// Mirrors python `_NO_CALL_NUDGE` (canonical; reinstated 2026-09-01 after
+/// repo_map:swift twice stopped mid-task).
 const NO_CALL_NUDGE: &str = "[no call was dispatched] Your turn emitted no <call> element, so \
 NOTHING ran — a call decided in thinking does not execute unless the element is \
 written out. If the task is unfinished, emit that call now. If it is finished, end \
@@ -436,6 +459,7 @@ pub async fn route_reply(
     incoming: String,
     send_timeout: f64,
     message_id: Option<i64>,
+    dead_turn: bool,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
     // detached, and a tokio spawn does NOT inherit the task-local sender
@@ -456,6 +480,7 @@ pub async fn route_reply(
             incoming,
             send_timeout,
             message_id,
+            dead_turn,
         )
         .await
     })
@@ -501,6 +526,7 @@ async fn route_reply_gated(
     incoming: String,
     send_timeout: f64,
     message_id: Option<i64>,
+    dead_turn: bool,
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
@@ -849,6 +875,14 @@ async fn route_reply_gated(
     // An inquiry turn was the OTHER legitimate silent end (emit + stop; the human's
     // answer resumes the chain) — nudging it would stomp the wait.
     let any_blocks = !blocks.is_empty();
+    // THE SILENT STREAK of this chain (one per agent + client thread): turns in a
+    // row that dispatched nothing. Any call — `done` and `await` included — ends
+    // the streak; see MAX_SILENT_TURNS. (python resets on `calls or units`; the
+    // blocks ARE the units.)
+    let chain = (self_id.as_str().to_string(), client_id.clone());
+    if any_calls || any_blocks {
+        silent().lock().expect("silent poisoned").remove(&chain);
+    }
     // EVERY CALL-LESS TURN IS NUDGED, chain or not (user, 2026-09-09: "all is
     // tool calls"). This used to fire only when the incoming text was itself a
     // reply or a nudge, so a FIRST turn of pure prose from a person ended the
@@ -903,7 +937,41 @@ async fn route_reply_gated(
         return;
     }
     if nudging {
-        deliver_soon(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp);
+        // TRY AGAIN — and a DEAD turn (only thinking, discarded unstored) is the
+        // same silence, rerolled the same way.
+        //
+        // BOUNDED (owner, 2026-09-30): MAX_SILENT_TURNS in a row and the chain
+        // GIVES UP instead of reminding again — the caller is told, loudly, that
+        // the model could not answer. A person sees it in their view; a parent
+        // that asked for the result by `send_to` gets it as a turn; a clock's tick
+        // has nobody reading, so the status event is the record, and the next
+        // tick starts a fresh chain with a fresh count.
+        let streak = {
+            let mut m = silent().lock().expect("silent poisoned");
+            let e = m.entry(chain.clone()).or_insert(0);
+            *e += 1;
+            *e
+        };
+        if streak >= MAX_SILENT_TURNS {
+            silent().lock().expect("silent poisoned").remove(&chain);
+            let gave_up = gave_up_text();
+            let st = state_for(&self_id);
+            let mut detail = Map::new();
+            detail.insert("reason".to_string(), json!("gave_up"));
+            detail.insert("error".to_string(), json!(gave_up));
+            detail.insert("silent_turns".to_string(), json!(streak));
+            emit_status(&kernel, &st, &self_id, &client_id, "done", detail).await;
+            if let Some(to) = send_to.as_deref() {
+                deliver_soon(&kernel, to, &gave_up, &client_id, sp);
+            }
+            return;
+        }
+        let nudge = if dead_turn {
+            format!("{DEAD_TURN_LINE}{NO_CALL_NUDGE}")
+        } else {
+            NO_CALL_NUDGE.to_string()
+        };
+        deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, sp);
         return;
     }
     if any_calls {

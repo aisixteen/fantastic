@@ -18,7 +18,7 @@ keys reach a child only when named). A per-call `env`/`cwd` is refused. A bare `
 is found on the CHILD's `PATH` only — pass `PATH` through `inherit_env`/`env`, or start an
 absolute path; with no `PATH` the start is refused naming it.
 
-- `start(command, args?, pty?)` → `{job_id, status:'running', pty}` at once — non-blocking,
+- `start(command, args?, pty?)` → `{job_id, status:'running', pty}` at once (`job_id` is an int) — non-blocking,
   many jobs in parallel. `command` is the program/binary; `args` is its argv (a list of
   strings). The FULL line (`command` + `args`, shell-joined) must fullmatch one of the
   record's `allowed` regexes or the start is refused, naming the patterns. There is no
@@ -48,9 +48,10 @@ absolute path; with no `PATH` the start is refused naming it.
   it applies to all of this agent's jobs.
 - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
-Every running job is a row in the kernel TASK TABLE (`task_id` in each `status` snapshot,
-listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS process is SIGKILLed
-before the task is aborted, so nothing is orphaned. `delete_agent` tears its jobs down too.
+Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int
+from the kernel's one counter), listed by the universal `ps`. `cancel task_id=<job_id>` kills
+it — the OS process is SIGKILLed before the task is aborted, so nothing is orphaned.
+`delete_agent` tears its jobs down too.
 
 ## Sealed by default
 

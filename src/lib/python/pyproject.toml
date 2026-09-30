@@ -21,6 +21,7 @@ dependencies = [
   "fantastic-nvidia-nim-backend",
   "fantastic-anthropic-backend",
   "fantastic-responses-backend",
+  "fantastic-vllm-backend",
   "fantastic-io-bridge",
   "fantastic-ws-bridge",
   "fantastic-relay-connector",
@@ -73,6 +74,7 @@ testpaths = [
   "bundled_agents/ai/nvidia/nvidia_nim_backend/tests",
   "bundled_agents/ai/anthropic/anthropic_backend/tests",
   "bundled_agents/ai/responses/responses_backend/tests",
+  "bundled_agents/ai/vllm/vllm_backend/tests",
   "bundled_agents/io/io_bridge/tests",
   "bundled_agents/io/ws_bridge/tests",
   "bundled_agents/io/relay_connector/tests",
@@ -99,6 +101,7 @@ members = [
   "bundled_agents/ai/nvidia/nvidia_nim_backend",
   "bundled_agents/ai/anthropic/anthropic_backend",
   "bundled_agents/ai/responses/responses_backend",
+  "bundled_agents/ai/vllm/vllm_backend",
   "bundled_agents/io/io_bridge",
   "bundled_agents/io/ws_bridge",
   "bundled_agents/io/relay_connector",
@@ -121,6 +124,7 @@ fantastic-llamacpp-backend = { workspace = true }
 fantastic-nvidia-nim-backend = { workspace = true }
 fantastic-anthropic-backend = { workspace = true }
 fantastic-responses-backend = { workspace = true }
+fantastic-vllm-backend = { workspace = true }
 fantastic-io-bridge = { workspace = true }
 fantastic-ws-bridge = { workspace = true }
 fantastic-relay-connector = { workspace = true }

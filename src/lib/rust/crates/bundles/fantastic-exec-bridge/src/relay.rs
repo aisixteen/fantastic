@@ -40,7 +40,7 @@ const MAX_FRAME: u32 = 16 * 1024 * 1024;
 /// Exactly ONE job per owner receives the owner's inbox. A re-started durable tool
 /// whose predecessor lingers would otherwise handle every inbound `send` twice.
 struct OwnerInbox {
-    job_id: String,
+    job_id: TaskId,
     proxy: AgentId,
     drain: TaskId,
 }
@@ -162,7 +162,7 @@ pub async fn serve(
     rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
     owner: AgentId,
-    job_id: String,
+    job_id: TaskId,
     kernel: Arc<Kernel>,
     stop: Arc<tokio::sync::Notify>,
 ) {
@@ -252,7 +252,7 @@ pub async fn serve(
                 if subs.contains_key(&src) {
                     continue; // idempotent per src
                 }
-                let proxy = AgentId::from(format!("_xbw_{job_id}_{src}").as_str());
+                let proxy = AgentId::from(format!("_xbw_{}_{src}", job_id.get()).as_str());
                 // THE READER REGISTERS FIRST: `watch` refuses a watcher with no
                 // inbox, and the drain task below is what reads this one.
                 let mut rx = kernel.ensure_inbox(&proxy);
@@ -303,7 +303,7 @@ pub async fn serve(
                     kernel.remove_inbox(&prev.proxy);
                     kernel.cancel_task(&prev.drain).await;
                 }
-                let proxy = AgentId::from(format!("_xbself_{job_id}").as_str());
+                let proxy = AgentId::from(format!("_xbself_{}", job_id.get()).as_str());
                 // THE READER REGISTERS FIRST — see `watch` above.
                 let mut rx = kernel.ensure_inbox(&proxy);
                 if let Some(denial) = kernel.watch(&owner, proxy.clone()).await {
@@ -331,7 +331,7 @@ pub async fn serve(
                 owner_inbox().lock().expect("OWNER_INBOX").insert(
                     owner.clone(),
                     OwnerInbox {
-                        job_id: job_id.clone(),
+                        job_id,
                         proxy: proxy.clone(),
                         drain,
                     },
@@ -340,7 +340,7 @@ pub async fn serve(
             }
             Some("offmessage") => {
                 self_sub = None;
-                release_owner_inbox(&kernel, &owner, &job_id).await;
+                release_owner_inbox(&kernel, &owner, job_id).await;
             }
             _ => {}
         }
@@ -351,13 +351,13 @@ pub async fn serve(
         drop_proxy(&kernel, &src, sub).await;
     }
     if self_sub.take().is_some() {
-        release_owner_inbox(&kernel, &owner, &job_id).await;
+        release_owner_inbox(&kernel, &owner, job_id).await;
     }
 }
 
 /// Give up the owner's inbox — but ONLY if it still names this job. A predecessor
 /// tearing down after being superseded must not unhook its replacement.
-async fn release_owner_inbox(kernel: &Arc<Kernel>, owner: &AgentId, job_id: &str) {
+async fn release_owner_inbox(kernel: &Arc<Kernel>, owner: &AgentId, job_id: TaskId) {
     let mine = {
         let mut g = owner_inbox().lock().expect("OWNER_INBOX");
         match g.get(owner) {
