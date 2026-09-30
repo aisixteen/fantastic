@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: remember
+group: canvas
+title: "a kept dialog remembers across a closed cell and a host restart"
+runner: probe.py
+costs: turns
+limits:
+  total_seconds: 600
+  quiet_seconds: 25
+env: {}

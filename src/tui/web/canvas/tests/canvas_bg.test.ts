@@ -83,7 +83,7 @@ test("set_bg refuses an empty or missing source, naming the arg", async () => {
   for (const payload of [{ type: "set_bg" }, { type: "set_bg", source: "  " }, { type: "set_bg", source: 3 }]) {
     const r = (await k.send([{ target: "background", payload: payload as unknown as Payload }]))[0]!.result as Payload;
     assert.equal(r["reason"], "bad_arg");
-    assert.equal(r["arg"], "source");
+    assert.equal(r["arg"], "bytes", "the body is `bytes`, verbatim");
   }
   assert.equal(k.get("background")?.meta["bg_source"], undefined, "nothing was written");
 });
@@ -98,4 +98,12 @@ test("the background cannot be deleted — nor the canvas above it — until its
   assert.equal(up["blocked_by"], "background");
   assert.ok(k.get("panel"), "nothing removed — no partial cascade");
   assert.equal((k.remove("panel") as unknown as Payload)["deleted"], true, "an unlocked sibling goes");
+});
+
+test("set_bg refuses a source that does not compile — CSS is not a GL source", async () => {
+  const { k } = page();
+  const r = (await k.send([{ target: "background", payload: { type: "set_bg", bytes: "@keyframes x { 0% { color: red } }" } }]))[0]!.result as Payload;
+  assert.equal(r["reason"], "bad_arg");
+  assert.match(String(r["error"]), /does not compile/);
+  assert.equal(k.get("background")?.meta["bg_source"], undefined, "nothing stored");
 });

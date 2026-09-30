@@ -1,4 +1,5 @@
 import { str } from "../../lib.ts";
+import { bodyText } from "../body_text.ts";
 import type { Handler, Json } from "../../lib.ts";
 
 // html_agent — a JS view-agent holding MUTABLE HTML content. Ported from the
@@ -21,7 +22,13 @@ export const htmlAgent: Handler = (id, payload, kernel): Json => {
     case "render_html":
       return { id, html: body() };
     case "set_html": {
-      const html = str(payload, "html");
+      // the body is `bytes` (ai_core's convention: a body of text is VERBATIM
+      // under `bytes`); `html` is its name here too. A parsed object is not html.
+      const raw = bodyText(payload["bytes"] ?? payload["html"]);
+      if (raw === null) {
+        return { error: "html_agent: set_html needs the html as a string", reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
+      }
+      const html = raw;
       kernel.updateMeta(id, { html }); // → updated event → persist
       kernel.emit(id, { type: "reload_html" }); // universal view reload
       return { ok: true, bytes: html.length };

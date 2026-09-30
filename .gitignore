@@ -37,3 +37,7 @@ src/tui/dev.local.yaml
 
 # Release artifacts built by scripts/build/*.sh (tarballs, zips, unpacked kernels).
 dist/
+
+# the canvas e2e artifacts (host logs, project dirs, page DOMs) — wipe: src/tui/e2e/wipe.sh
+src/tui/e2e/runs/
+src/tui/e2e/tests/**/__pycache__/

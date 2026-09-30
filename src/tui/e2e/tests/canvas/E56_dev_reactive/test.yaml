@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Scripted: no model.
+id: dev_reactive
+group: canvas
+title: "a reference dev surface reacts to real build / run / stop / edit events"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

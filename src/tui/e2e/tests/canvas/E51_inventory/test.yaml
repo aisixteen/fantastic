@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: inventory
+group: canvas
+title: "an AI inventories a large canvas by kind, without looping"
+runner: probe.py
+costs: turns
+limits:
+  total_seconds: 900
+  quiet_seconds: 30
+  max_page_calls: 120
+env: {}

@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Scripted: no model.
+id: hydrate_scale
+group: canvas
+title: "a 300-cell canvas loads within the bound"
+runner: probe.py
+costs: free
+limits:
+  render_seconds: 40
+env: {}
