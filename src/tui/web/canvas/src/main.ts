@@ -3,16 +3,17 @@ import type { Kernel } from "./lib.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
+import { registerCanvas } from "./bundles/canvas/canvas_agent.ts";
 
 // The canvas page. The frontend kernel boots as a PEER of the host (the library's
-// `boot`): it dials the host's `web_loader` alias over the bridge (a host-side
+// `boot`): it dials the host's `web_loader` (by id) over the bridge (a host-side
 // `kernel_state` rooted at `.fantastic/web/`, which the operator created — no
 // automation), hydrates its OWN agent tree from there (`load_tree`), and
 // persists every local change back (`proxy_loader`). The canvas renders the
 // LOCAL member tree; host backends are weak peers referenced by id. One shared
-// frontend tree, addressed by alias — no per-session id.
+// frontend tree, addressed by the loader's id — no per-session id.
 
-const LOADER = "web_loader"; // the host-side web/kernel_state alias
+const LOADER = "web_loader"; // the host-side web/kernel_state, by id
 const origin =
   (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 
@@ -24,7 +25,7 @@ const origin =
 function register(kernel: Kernel): void {
   registerGlAgent(kernel);
   registerHtmlAgent(kernel);
-  kernel.registerBundle("canvas.ts", () => null); // the compositor root (rendered, not a verb agent)
+  registerCanvas(kernel); // the compositor root: rendered, and owns the background (set_bg/clear_bg/get_bg)
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
   kernel.registerBundle("terminal_view.ts", () => null);
@@ -35,10 +36,6 @@ function register(kernel: Kernel): void {
   // pairing from this + the host's capability readme — no hardcoded pairing);
   // content agents say what they hold. Direction is frontend→host: the JS knows
   // it fronts a host capability; the host stays ignorant of the frontend.
-  kernel.setBundleReadme(
-    "canvas.ts",
-    "Canvas compositor (frontend root). Renders the frontend's own member tree; mounts each member inline via its view bundle, or as an iframe for external content. Not a host client.",
-  );
   kernel.setBundleReadme(
     "html_agent.ts",
     "Frontend HTML content agent. Holds a mutable `html` body in its record, rendered in a sandboxed frame; the injected connector relays send/emit/watch/onMessage to the kernel. Content, not a host client.",
@@ -78,7 +75,7 @@ async function legOf(): Promise<string | undefined> {
   const reply = (await kernel.send([{ target: LOADER, payload: { type: "load_tree" } }]))[0]!.result as {
     records?: Array<Record<string, unknown>>;
   };
-  const anchor = (reply.records ?? []).find((r) => r["id"] === LOADER || r["alias"] === LOADER);
+  const anchor = (reply.records ?? []).find((r) => r["id"] === LOADER);
   const leg = anchor?.["parent_id"];
   return typeof leg === "string" && leg !== "" ? leg : undefined;
 }

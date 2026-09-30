@@ -1,77 +1,67 @@
-// Part-3 lifecycle: the canvas dblclick spawns a terminal by DISCOVERING a
-// PTY-capable bundle from the host catalog (no hardcoded handler_module) and
-// pairing a terminal_view to it; closing the frame removes BOTH — the frontend
-// view AND the host backend it owns (cascade over the bridge).
+// The canvas pair lifecycle against a python host: a double click spawns the
+// backend the terminal view DECLARES it fronts (`exec_bridge.tools`, looked
+// up by that exact name in the host catalog) as a CHILD OF THE SOCKET LEG,
+// carrying its view's and canvas's ids; the view is bound to it and granted
+// exactly it. Closing the frame removes BOTH — the view and the backend.
 //
-// Proof points:
-//   create: dblclick -> a terminal frame renders  +  a terminal_backend agent
-//           appears on the HOST's on-disk tree (.fantastic/agents/**).
-//   delete: close (×)  -> the frame disappears     +  that host backend dir is GONE.
+// Proof points, on the page AND on the host's disk:
+//   create: dblclick -> a terminal frame renders  +  an exec_bridge terminal record
+//           appears under the leg (`…/<web_ws>/agents/<id>/agent.yaml`) with
+//           `view_id` + `canvas_id`, and the view's folder under the canvas.
+//   delete: close (×)  -> the frame disappears     +  both folders are GONE.
 //
-// Run: (cd ts && npm run build) then:
-//   cd integration_tests/py_ts && node --test --test-force-exit canvas_terminal.browser.itest.ts
+// Run: cd integration_tests/py_ts && node --test --test-force-exit canvas_terminal.browser.itest.ts
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, DIST_DIR, writeServedDist } from "./_host.ts";
+import { bootHost, teardownHost, writeRecord, recordField } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
-const MOUNT_HTML = `<!doctype html><html><head><meta charset="utf-8">
-<title>fantastic · canvas terminal test</title>
-<link rel="stylesheet" href="/ts_dist/file/vendor/xterm.css">
-<script type="importmap">{ "imports": {
-  "three": "/ts_dist/file/vendor/three.module.js",
-  "@xterm/xterm": "/ts_dist/file/vendor/xterm.js",
-  "@xterm/addon-fit": "/ts_dist/file/vendor/addon-fit.js"
-}}</script>
-</head><body>
-<script type="module" src="/ts_dist/file/main.js"></script></body></html>`;
-const MOUNT_FILE = join(DIST_DIR, "_canvas_term.html");
-
 function seedCanvas(tmp: string): void {
-  const canvasDir = join(tmp, ".fantastic", "web", "agents", "canvas");
-  mkdirSync(canvasDir, { recursive: true });
-  writeFileSync(
-    join(canvasDir, "agent.json"),
-    JSON.stringify({ id: "canvas", handler_module: "canvas.ts", display_name: "canvas" }),
-  );
+  writeRecord(join(tmp, ".fantastic", "web", "agents", "canvas"), {
+    id: "canvas", handler_module: "canvas.ts", display_name: "canvas",
+  });
 }
 
-// Walk the host's on-disk agent tree for a terminal_backend record.
-function hostHasTerminalBackend(tmp: string): boolean {
-  const root = join(tmp, ".fantastic", "agents");
-  const stack = [root];
+/** Every `agent.yaml` under `dir`, recursively. */
+function records(dir: string): string[] {
+  const out: string[] = [];
+  const stack = [dir];
   while (stack.length) {
-    const dir = stack.pop()!;
+    const d = stack.pop()!;
     let entries: string[] = [];
     try {
-      entries = readdirSync(dir);
+      entries = readdirSync(d);
     } catch {
       continue;
     }
-    if (entries.includes("agent.json")) {
-      try {
-        const rec = JSON.parse(readFileSync(join(dir, "agent.json"), "utf8")) as {
-          handler_module?: string;
-        };
-        if (rec.handler_module === "terminal_backend.tools") return true;
-      } catch {
-        /* skip */
-      }
-    }
     for (const e of entries) {
-      const p = join(dir, e);
-      try {
-        if (readdirSync(p)) stack.push(p);
-      } catch {
-        /* not a dir */
-      }
+      const p = join(d, e);
+      if (e === "agent.yaml") out.push(p);
+      else stack.push(p);
     }
   }
-  return false;
+  return out;
+}
+
+/** The host's terminal backends: `{file, parent dir name, view_id, canvas_id}`. */
+function backends(tmp: string) {
+  return records(join(tmp, ".fantastic", "agents"))
+    .filter((f) => recordField(f, "handler_module") === "exec_bridge.tools")
+    .map((f) => ({
+      file: f,
+      under: f.split("/").slice(-4, -3)[0],
+      view: recordField(f, "view_id"),
+      canvas: recordField(f, "canvas_id"),
+    }));
+}
+
+function views(tmp: string): string[] {
+  const d = join(tmp, ".fantastic", "web", "agents", "canvas", "agents");
+  return existsSync(d) ? readdirSync(d) : [];
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -84,17 +74,15 @@ async function until(cond: () => boolean, ms: number): Promise<boolean> {
   return cond();
 }
 
-test("canvas dblclick spawns a terminal (discovered) + close removes both", async (t) => {
+test("canvas dblclick spawns a paired terminal under the leg + close removes both", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   let host: Host | null = null;
   let browser: Browser | null = null;
   try {
     host = await bootHost(8933, { webLoader: true, serveDist: true });
     seedCanvas(host.tmp);
-    writeServedDist(host, "_canvas_term.html", MOUNT_HTML); // into the dir actually served (local: the workdir copy)
     browser = await Browser.launch();
-    await browser.goto(`${host.httpOrigin}/ts_dist/file/_canvas_term.html`);
+    await browser.goto(host.pageUrl!);
     await browser.waitFor("!!document.getElementById('canvas')", 20000);
     await sleep(800); // bridge + tree settle
 
@@ -102,21 +90,29 @@ test("canvas dblclick spawns a terminal (discovered) + close removes both", asyn
     await browser.evaluate(
       "(() => { const c = document.getElementById('canvas'); c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: 420, clientY: 300 })); return true; })()",
     );
-    await browser.waitFor("document.querySelectorAll('.agent-frame').length >= 1", 20000);
-    assert.ok(
-      await until(() => hostHasTerminalBackend(host!.tmp), 15000),
-      "a terminal_backend was created on the host (discovered from the catalog, not hardcoded)",
+    // the double click opens the SPOT INPUT: pick `terminal` in it
+    await browser.waitFor("!!document.querySelector('.spot-input input')", 10000);
+    await browser.evaluate(
+      "(() => { const i = document.querySelector('.spot-input input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
     );
+    await browser.waitFor("!!document.querySelector('.agent-frame .xterm')", 20000);
+    assert.ok(await until(() => backends(host!.tmp).length === 1, 15000), "one exec_bridge terminal on the host");
+    const [b] = backends(host.tmp);
+    assert.equal(b!.under, host.webWsId, "the backend is a CHILD OF THE LEG");
+    assert.equal(b!.canvas, "canvas", "it carries its canvas's id");
+    assert.ok(await until(() => views(host!.tmp).length === 1, 10000), "the view is a folder under the canvas");
+    assert.equal(b!.view, views(host.tmp)[0], "the backend carries its view's id");
+    const view = join(host.tmp, ".fantastic", "web", "agents", "canvas", "agents", views(host.tmp)[0]!, "agent.yaml");
+    const backendId = b!.file.split("/").slice(-2, -1)[0]!;
+    assert.equal(recordField(view, "backend_id"), backendId, "the view is bound to that backend");
 
     // ── DELETE: click the frame's close (×) ──
     await browser.evaluate(
       "(() => { const x = document.querySelector('.agent-frame .close'); if (!x) return false; x.click(); return true; })()",
     );
     await browser.waitFor("document.querySelectorAll('.agent-frame').length === 0", 20000);
-    assert.ok(
-      await until(() => !hostHasTerminalBackend(host!.tmp), 15000),
-      "closing the owned terminal cascade-deleted the host backend (removes BOTH)",
-    );
+    assert.ok(await until(() => backends(host!.tmp).length === 0, 15000), "the owned backend is deleted with its view");
+    assert.ok(await until(() => views(host!.tmp).length === 0, 10000), "the view folder is gone");
 
     assert.deepEqual(
       browser.pageErrors.filter((e) => !/WebGL|GL context/i.test(e)),
@@ -126,10 +122,5 @@ test("canvas dblclick spawns a terminal (discovered) + close removes both", asyn
   } finally {
     if (browser !== null) browser.close();
     if (host !== null) teardownHost(host);
-    try {
-      rmSync(MOUNT_FILE, { force: true });
-    } catch {
-      /* best effort */
-    }
   }
 });

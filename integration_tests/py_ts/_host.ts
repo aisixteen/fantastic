@@ -9,7 +9,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import {
-  cpSync,
+  readdirSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -29,8 +29,8 @@ const FANTASTIC = join(repoRoot, "src", "lib", "python", ".venv", "bin", "fantas
 // runtime). The SAME tests run either way: seeding one-shots run INSIDE the
 // container (a rootless container's uid can't write a host-seeded .fantastic/),
 // the daemon publishes -p 127.0.0.1:port:port (its `/` is the dynamic agent
-// index), and the frontend dist is bind-mounted in so the `ts_dist` file_bridge
-// agent can serve it.
+// index), and the canvas page is extracted into the (bind-mounted) workdir so
+// the `canvas_page` file_bridge agent can serve it.
 // e2e is host/browser → container only (no container↔container), so -p suffices.
 const TARGET = (process.env.FANTASTIC_TARGET ?? "local").trim().toLowerCase();
 const IMAGE = process.env.FANTASTIC_IMAGE ?? "fantastic:latest";
@@ -42,9 +42,6 @@ const PY_INTERP =
   TARGET === "container"
     ? "/opt/fantastic/venv/bin/python"
     : join(repoRoot, "src", "lib", "python", ".venv", "bin", "python");
-// where ts/dist is mounted in container mode — INSIDE the workdir (/work), because
-// file_bridge clamps every root to the dir the kernel runs in (the running-dir law).
-const CONTAINER_DIST = "/work/dist";
 
 function resolveEngine(): string {
   for (const e of ["podman", "docker"]) {
@@ -56,7 +53,7 @@ const ENGINE = TARGET === "container" ? resolveEngine() : "";
 
 /** Daemon `run` args for container mode — shared by bootHost + restartHost so a
  *  restart re-creates an identical container (same name, port, mounts). */
-function containerRunArgs(name: string, port: number, tmp: string, serveDist: boolean): string[] {
+function containerRunArgs(name: string, port: number, tmp: string): string[] {
   const args = [
     "run",
     "-d",
@@ -71,7 +68,6 @@ function containerRunArgs(name: string, port: number, tmp: string, serveDist: bo
     "-e",
     `FANTASTIC_PORT=${port}`,
   ];
-  if (serveDist) args.push("-v", `${DIST_DIR}:${CONTAINER_DIST}:ro`);
   // Forward LLM keys for the (opt-in, paid) live-LLM tests.
   const env = envFromDotenv();
   // Forward ONLY the selected backend's secret (no anthropic key into an ollama
@@ -79,7 +75,7 @@ function containerRunArgs(name: string, port: number, tmp: string, serveDist: bo
   const forward =
     LLM_BACKEND === "ollama"
       ? ["OLLAMA_HOST"]
-      : ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY", "OLLAMA_HOST"];
+      : ["ANTHROPIC_API_KEY", "OLLAMA_HOST"];
   for (const k of forward) {
     if (env[k]) args.push("-e", `${k}=${env[k]}`);
   }
@@ -88,7 +84,7 @@ function containerRunArgs(name: string, port: number, tmp: string, serveDist: bo
 }
 
 /** Parse the repo `.env` into a {KEY: value} map (so the spawned daemon — which
- *  runs in a tmp cwd and can't see the repo `.env` — gets e.g. ANTHROPIC_KEY in
+ *  runs in a tmp cwd and can't see the repo `.env` — gets e.g. ANTHROPIC_API_KEY in
  *  its environment). Stdlib-only, mirrors the python `_load_dotenv` rules. */
 function envFromDotenv(): Record<string, string> {
   const out: Record<string, string> = {};
@@ -111,7 +107,7 @@ function envFromDotenv(): Record<string, string> {
 }
 
 /** Read one key from the repo `.env` (or process env) — test-side gating for
- *  live-LLM tests, e.g. `dotenvKey("ANTHROPIC_KEY")`. */
+ *  live-LLM tests, e.g. `dotenvKey("ANTHROPIC_API_KEY")`. */
 export function dotenvKey(name: string): string | undefined {
   return process.env[name] ?? envFromDotenv()[name];
 }
@@ -119,13 +115,18 @@ export function dotenvKey(name: string): string | undefined {
 export interface Host {
   origin: string;
   port: number;
-  /** http origin (same port as the WS) — serves the static frontend when
-   *  `serveDist` was set: open `${httpOrigin}/ts_dist/file/<path>`. */
+  /** http origin (same port as the WS). */
   httpOrigin: string;
+  /** The canvas page, when `serveDist` was set: its one-tag mount page, served
+   *  by the `canvas_page` file_bridge from the workdir. */
+  pageUrl?: string;
+  /** The interpreter the exec_bridge leg is allowed to run (`<it> -c <code>`),
+   *  when `execBridge` (or `llm`) was set. */
+  python?: string;
   webId: string;
   webWsId: string;
   /** id of the `web_loader` (the frontend store), if `bootHost` was asked to
-   *  create one — reach it over WS by its `web_loader` alias. */
+   *  create one — reach it over WS by its id, `web_loader`. */
   webLoaderId?: string;
   /** id of an `exec_bridge` script-executor agent, if `execBridge` was set. */
   pyId?: string;
@@ -138,18 +139,17 @@ export interface Host {
   proc?: ChildProcess;
   /** the container name (container target) — undefined in local mode. */
   container?: string;
-  /** whether the frontend dist was mounted/served (needed to re-create the
-   *  container identically on restart). */
-  serveDist?: boolean;
 }
 
 export interface BootOptions {
-  /** Also create a `web_loader` (an kernel_state rooted at .fantastic/web, alias
+  /** Also create a `web_loader` (a kernel_state rooted at .fantastic/web, id
    *  `web_loader`) under the web agent — the frontend's persistence store. */
   webLoader?: boolean;
-  /** Also serve the built frontend (copied into the workdir) via a `file_bridge` agent (id
-   *  `ts_dist`) under web — its ESM mounts at `/ts_dist/file/<path>`, on the
-   *  same port as the WS. Requires `npm run build` to have run. */
+  /** Also serve the CANVAS PAGE: the canvas app is packed
+   *  (`src/tui/web/canvas/scripts/pack.sh` → `dist/canvas.zip`), its
+   *  `bundle.min.js` extracted into the workdir beside a one-tag `index.html`,
+   *  and served by a `file_bridge` agent (id `canvas_page`) under web —
+   *  `host.pageUrl`. */
   serveDist?: boolean;
   /** Also create an `exec_bridge` agent (the background-script runner). */
   execBridge?: boolean;
@@ -157,24 +157,108 @@ export interface BootOptions {
    *  picks the backend (default `ollama_backend.tools`; e.g.
    *  `anthropic_backend.tools` for Claude). `model`/`endpoint` are passed only
    *  when set (each bundle defaults its own). The repo `.env` is injected into
-   *  the daemon env, so a key like ANTHROPIC_KEY reaches the backend. */
-  llm?: { bundle?: string; model?: string; endpoint?: string; num_ctx?: number };
-  /** Also create a `scheduler` agent (+ a `file_bridge` agent `sched_files` for its
-   *  schedules) — fire a chosen payload to a target after N seconds. */
+   *  the daemon env, so a key like ANTHROPIC_API_KEY reaches the backend. */
+  llm?: {
+    bundle?: string;
+    model?: string;
+    endpoint?: string;
+    num_ctx?: number;
+    /** More reach for the AI: host id → verbs (`"*"` or a list). Written on
+     *  BOTH halves — the AI's `can_call`, and each target's `callable_by`
+     *  (the root included: `kernel_state`). */
+    reach?: Record<string, unknown>;
+  };
+  /** Also create a `scheduler` agent (it persists its schedules through the
+   *  root loader) — fire a chosen payload to a target after N seconds. */
   scheduler?: boolean;
 }
 
-/** Absolute path to the built frontend (`ts/dist`) — served when `serveDist`. */
-export const DIST_DIR = join(repoRoot, "src", "lib", "ts", "dist");
+/** The canvas app and its pack output. */
+export const CANVAS_APP = join(repoRoot, "src", "tui", "web", "canvas");
+export const CANVAS_ZIP = join(CANVAS_APP, "dist", "canvas.zip");
 
-/** Write a mount/fixture file into the dir ACTUALLY served at
- *  `/ts_dist/file/<name>` for THIS host. local: the workdir copy
- *  (`ts_dist_src` — file_bridge clamps roots to the running dir, so bootHost
- *  copies the dist in; post-boot writes to the repo `ts/dist` are invisible);
- *  container: the live bind-mounted `ts/dist` at /work/dist. */
+/** The canvas's one-tag mount page: the bundle inlines three, xterm and its CSS. */
+export const CANVAS_INDEX =
+  '<!doctype html><html><head><meta charset="utf-8"><title>fantastic · canvas</title></head>\n' +
+  '<body><script type="module" src="/canvas_page/file/bundle.min.js"></script></body></html>\n';
+
+/** A literal as a regex (the exec leg's `allowed` names one interpreter path). */
+function escapeRegex(lit: string): string {
+  return lit.replace(/[.*+?^$()|[\]\\{}]/g, (c) => `\\${c}`);
+}
+
+/** The newest mtime under `dir` (files only). */
+function newest(dir: string): number {
+  let t = 0;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    t = Math.max(t, e.isDirectory() ? newest(p) : statSync(p).mtimeMs);
+  }
+  return t;
+}
+
+/** Pack the canvas app (the vendored esbuild; no npm). `node --test` runs test
+ *  FILES CONCURRENTLY and every one packs into the same `dist/canvas.zip`, so a
+ *  cross-process LOCK (an atomic mkdir) serialises it, and a zip newer than every
+ *  source it is built from is reused rather than rebuilt under another reader. */
+let packed = false;
+export function packCanvas(): void {
+  if (packed) return;
+  const lock = join(CANVAS_APP, "dist", ".pack.lock");
+  mkdirSync(join(CANVAS_APP, "dist"), { recursive: true });
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      if (Date.now() > deadline) throw new Error(`canvas pack: ${lock} held for 120 s`);
+      spawnSync("sleep", ["0.2"]);
+    }
+  }
+  try {
+    const sources = Math.max(
+      newest(join(CANVAS_APP, "src")),
+      newest(join(CANVAS_APP, "scripts")),
+      newest(join(repoRoot, "src", "lib", "ts", "src")),
+    );
+    let fresh = false;
+    try {
+      fresh = statSync(CANVAS_ZIP).mtimeMs > sources;
+    } catch {
+      /* no zip yet */
+    }
+    if (!fresh) {
+      const r = spawnSync("sh", ["scripts/pack.sh"], { cwd: CANVAS_APP, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`canvas pack failed: ${r.stderr || r.stdout}`);
+    }
+    packed = true;
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/** Write a fixture file beside the canvas page — served at
+ *  `/canvas_page/file/<name>` for THIS host (the workdir copy, in both targets:
+ *  a container's /work is the same dir). */
 export function writeServedDist(host: Host, name: string, content: string): void {
-  const dir = host.container ? DIST_DIR : join(host.tmp, "ts_dist_src");
-  writeFileSync(join(dir, name), content);
+  writeFileSync(join(host.tmp, "canvas_page", name), content);
+}
+
+/** A record the page's loader holds: `agent.yaml` under `.fantastic/web/…`.
+ *  JSON is YAML, so a fixture writes it as JSON; the kernels read either. */
+export function writeRecord(dir: string, rec: Record<string, unknown>): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "agent.yaml"), JSON.stringify(rec));
+}
+
+/** One top-level scalar of a kernel-written `agent.yaml` (block YAML), or
+ *  undefined — enough for a test's field checks, with no YAML dependency. */
+export function recordField(file: string, key: string): string | undefined {
+  const m = readFileSync(file, "utf8").match(new RegExp(`^${key}:\\s*(.*)$`, "m"));
+  if (m === null) return undefined;
+  const v = (m[1] as string).trim();
+  return v.replace(/^(['"])(.*)\1$/, "$2");
 }
 
 // ─── LLM backend selection — ONE env switch (`LLM_BACKEND`) so every live-LLM
@@ -220,7 +304,7 @@ export async function llmReachable(): Promise<boolean> {
       return false;
     }
   }
-  if (!dotenvKey("ANTHROPIC_KEY") && !dotenvKey("ANTHROPIC_API_KEY")) return false;
+  if (!dotenvKey("ANTHROPIC_API_KEY")) return false;
   try {
     await fetch("https://api.anthropic.com/", { signal: AbortSignal.timeout(3000) });
     return true;
@@ -231,12 +315,11 @@ export async function llmReachable(): Promise<boolean> {
 
 /** The daemon's env: process env + repo `.env`, but with the NON-selected
  *  backend's secret STRIPPED. An `LLM_BACKEND=ollama` run therefore carries NO
- *  ANTHROPIC_KEY — Claude cannot run, and any stray `anthropic_backend` agent
+ *  ANTHROPIC_API_KEY — Claude cannot run, and any stray `anthropic_backend` agent
  *  fails loudly instead of silently "leaking" Claude into the ollama comparison. */
 function daemonEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...envFromDotenv() };
   if (LLM_BACKEND === "ollama") {
-    delete env.ANTHROPIC_KEY;
     delete env.ANTHROPIC_API_KEY;
   }
   return env;
@@ -281,7 +364,7 @@ async function waitForPort(port: number, ms: number): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < ms) {
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/`);
+      const res = await fetch(`http://127.0.0.1:${port}/_assets/favicon.png`);
       if (res.ok) return;
     } catch {
       // not up yet
@@ -318,6 +401,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     "handler_module=file_bridge.tools",
     "id=store",
     "root=.fantastic",
+    'allow=["."]',
     "ingress_rule=allow_all_ingress",
   ]);
   // THE MEMORY STORE: a started kernel (the daemon) refuses to run without one —
@@ -353,30 +437,12 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     "ingress_rule=allow_all_ingress",
   ]);
   const webWsId = extractId(wsOut, "web_ws");
-  // THE LEG'S RIGHTS, both halves (deny-all everywhere): every ws frame is
-  // dispatched AS this leg, so the driver reaches the root only if the leg may
-  // (its `can_call`; privileged verbs named — never under `*`) and the root
-  // accepts it (`callable_by`). Mirrors the e2e driver's seed.
-  const BASE = { $self: "*", $parent: "*", $children: "*" };
-  const ROOT_VERBS = ["*", "create_agent", "update_agent", "delete_agent"];
-  runCli(tmp, [
-    "kernel",
-    "update_agent",
-    `id=${webWsId}`,
-    `can_call=${JSON.stringify({ ...BASE, kernel_state: ROOT_VERBS, [webId]: "*", memory: "*" })}`,
-  ]);
-  runCli(tmp, [
-    "kernel",
-    "update_agent",
-    "id=kernel_state",
-    `callable_by=${JSON.stringify({ ...BASE, [webWsId]: "*" })}`,
-  ]);
-
   // optional frontend store: a SECOND kernel_state rooted at .fantastic/web,
-  // reachable over WS by its `web_loader` alias. Created BEFORE spawn (the
+  // reachable over WS by its id, `web_loader`. Created BEFORE spawn (the
   // one-shot CLI is locked out once the daemon owns the dir). A CHILD OF THE WS
   // LEG: the page's record verbs arrive as the leg, and the record-owner guard
-  // admits only records inside the caller's own subtree.
+  // admits only records inside the caller's own subtree. The page learns its
+  // leg from this record's parent.
   let webLoaderId: string | undefined;
   if (opts.webLoader === true) {
     const wlOut = runCli(tmp, [
@@ -384,109 +450,167 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       "create_agent",
       `parent_id=${webWsId}`,
       "handler_module=kernel_state.tools",
+      "id=web_loader",
       "root=.fantastic/web",
       "watch=false",
-      "alias=web_loader",
     ]);
-    webLoaderId = extractId(wlOut, "kernel_state");
+    if (!/"id":\s*"web_loader"/.test(wlOut)) throw new Error(`web_loader create failed: ${wlOut}`);
+    webLoaderId = "web_loader";
   }
 
-  // optional static frontend: a `file` agent (fixed id `ts_dist`) rooted at the
-  // build output. Its route mounts under web → `/ts_dist/file/<path>` serves
-  // every ESM module on the SAME port as the WS surface.
+  // optional canvas page: packed, its bundle extracted into the workdir
+  // (file_bridge clamps every root to the running dir; a container's /work is
+  // this same dir) beside the one-tag page, served under web.
+  let pageUrl: string | undefined;
   if (opts.serveDist === true) {
-    // file_bridge clamps every root inside the running dir, so the dist must
-    // live IN the workdir. container: the bind-mount lands at /work/dist →
-    // relative root `dist`. local: copy the build output into the workdir and
-    // root it relatively. The fs edge seals by default → open it (allow_all).
-    let distRoot: string;
-    if (TARGET === "container") {
-      distRoot = "dist";
-    } else {
-      cpSync(DIST_DIR, join(tmp, "ts_dist_src"), { recursive: true });
-      distRoot = "ts_dist_src";
-    }
+    packCanvas();
+    const page = join(tmp, "canvas_page");
+    mkdirSync(page, { recursive: true });
+    const unz = spawnSync("unzip", ["-o", "-q", CANVAS_ZIP, "bundle.min.js", "-d", page], { encoding: "utf8" });
+    if (unz.status !== 0) throw new Error(`unzip ${CANVAS_ZIP}: ${unz.stderr || unz.stdout}`);
+    writeFileSync(join(page, "index.html"), CANVAS_INDEX);
     runCli(tmp, [
       "kernel",
       "create_agent",
       `parent_id=${webId}`,
       "handler_module=file_bridge.tools",
-      "id=ts_dist",
-      `root=${distRoot}`,
-      "ingress_rule=allow_all_ingress",
+      "id=canvas_page",
+      "root=canvas_page",
+      'allow=["."]',
+      "readonly=true",
+      "ingress_rule=allow_all_ingress", // the fs edge seals by default
     ]);
+    pageUrl = `http://127.0.0.1:${port}/canvas_page/file/index.html`;
   }
 
-  // optional background-script runner (a HOST peer, not under web).
+  // THE HOST AGENTS the page reaches. Every ws frame is dispatched AS the leg,
+  // so each one is granted on BOTH halves: the leg's `can_call` names it, and
+  // its `callable_by` names the leg (deny-all everywhere; no defaults).
+  const reach: Record<string, unknown> = {};
+  // who, besides the leg, the ROOT accepts (an AI given kernel reach)
+  const rootCallers: string[] = [];
+
+  // optional command runner: sealed, and gated by its `allowed` regexes — here
+  // exactly `<the venv python> -c <code>`.
   let pyId: string | undefined;
+  let python: string | undefined;
   if (opts.execBridge === true || opts.llm !== undefined) {
-    const pyOut = runCli(tmp, [
-      "kernel",
-      "create_agent",
-      "parent_id=kernel_state",
-      "handler_module=exec_bridge.tools",
-      // sealed + no-default-interpreter: both must be named to run anything.
-      `interpreters=["${PY_INTERP}"]`,
-      "shim=python",
-      "ingress_rule=allow_all_ingress",
-    ]);
-    pyId = extractId(pyOut, "exec_bridge");
-  }
-
-  // optional LLM agent: a `file` agent for its chat-history sidecar + the
-  // chosen backend bundle. model/endpoint passed only when set (each bundle
-  // defaults its own).
-  let ollamaId: string | undefined;
-  if (opts.llm !== undefined) {
-    const bundle = opts.llm.bundle ?? "ollama_backend.tools";
+    python = PY_INTERP;
+    const line = `${escapeRegex(python)} -c .*`;
     runCli(tmp, [
       "kernel",
       "create_agent",
       "parent_id=kernel_state",
-      "handler_module=file_bridge.tools",
-      "id=llm_files",
-      "root=.fantastic",
-      "ingress_rule=allow_all_ingress", // the fs edge seals by default — open the backing
+      "handler_module=exec_bridge.tools",
+      "id=exec",
+      `allowed=${JSON.stringify([line])}`,
+      // where a command runs is the record's; the host's own tmp dir
+      `cwd=${tmp}`,
+      "ingress_rule=allow_all_ingress",
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*" })}`,
     ]);
+    pyId = "exec";
+    reach[pyId] = "*";
+  }
+
+  // optional LLM agent: its conversation lives in the kernel's memory store,
+  // gated both ways (the agent may call the store, the store admits it).
+  let ollamaId: string | undefined;
+  if (opts.llm !== undefined) {
+    const bundle = opts.llm.bundle ?? "ollama_backend.tools";
+    const more = opts.llm.reach ?? {};
     const args = [
       "kernel",
       "create_agent",
       "parent_id=kernel_state",
       `handler_module=${bundle}`,
-      "file_bridge_id=llm_files",
+      "id=llm",
+      "memory_store_id=memory",
+      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", memory: "*", ...(pyId ? { [pyId]: "*" } : {}), ...more })}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*" })}`,
     ];
     if (opts.llm.model) args.push(`model=${opts.llm.model}`);
     if (opts.llm.endpoint) args.push(`endpoint=${opts.llm.endpoint}`);
     if (opts.llm.num_ctx) args.push(`num_ctx=${opts.llm.num_ctx}`);
-    const out = runCli(tmp, args);
-    ollamaId = extractId(out, bundle.replace(/\.tools$/, ""));
+    runCli(tmp, args);
+    runCli(tmp, [
+      "kernel",
+      "update_agent",
+      "id=memory",
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", llm: "*" })}`,
+    ]);
+    ollamaId = "llm";
+    reach[ollamaId] = "*";
+    for (const target of Object.keys(more)) {
+      if (target === "kernel_state") {
+        rootCallers.push("llm");
+        continue;
+      }
+      if (target === pyId) continue; // the exec leg's callable_by is written below
+      runCli(tmp, [
+        "kernel",
+        "update_agent",
+        `id=${target}`,
+        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*", llm: "*" })}`,
+      ]);
+    }
   }
 
-  // optional scheduler: a `file` agent for its schedules + the scheduler agent.
+  // optional scheduler: it persists its schedules THROUGH the root loader (no
+  // storage leg of its own) and fires a chosen payload to a target.
   let schedulerId: string | undefined;
   if (opts.scheduler === true) {
     runCli(tmp, [
       "kernel",
       "create_agent",
       "parent_id=kernel_state",
-      "handler_module=file_bridge.tools",
-      "id=sched_files",
-      "root=.fantastic",
-      "ingress_rule=allow_all_ingress", // the fs edge seals by default — open the backing
-    ]);
-    const schedOut = runCli(tmp, [
-      "kernel",
-      "create_agent",
-      "parent_id=kernel_state",
       "handler_module=scheduler.tools",
-      "file_bridge_id=sched_files",
+      "id=scheduler",
+      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", ...(pyId ? { [pyId]: "*" } : {}) })}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*" })}`,
     ]);
-    schedulerId = extractId(schedOut, "scheduler");
+    schedulerId = "scheduler";
+    reach[schedulerId] = "*";
+    if (pyId) {
+      runCli(tmp, [
+        "kernel",
+        "update_agent",
+        `id=${pyId}`,
+        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*", scheduler: "*", ...(ollamaId ? { llm: "*" } : {}) })}`,
+      ]);
+    }
+  } else if (pyId && ollamaId) {
+    runCli(tmp, [
+      "kernel",
+      "update_agent",
+      `id=${pyId}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*", llm: "*" })}`,
+    ]);
   }
+
+  // THE LEG'S RIGHTS, both halves: it reaches the root (privileged verbs named
+  // — never under `*`), web, the memory store and every optional agent above;
+  // the root accepts it.
+  const BASE = { $self: "*", $parent: "*", $children: "*" };
+  const ROOT_VERBS = ["*", "create_agent", "update_agent", "delete_agent"];
+  runCli(tmp, [
+    "kernel",
+    "update_agent",
+    `id=${webWsId}`,
+    // its loader BY NAME: `load_tree`/`persist_record` are privileged, and the
+    // structural `$children` never covers a privileged verb on egress
+    `can_call=${JSON.stringify({ ...BASE, kernel_state: ROOT_VERBS, [webId]: "*", memory: "*", ...(webLoaderId ? { [webLoaderId]: "*" } : {}), ...reach })}`,
+  ]);
+  runCli(tmp, [
+    "kernel",
+    "update_agent",
+    "id=kernel_state",
+    `callable_by=${JSON.stringify({ ...BASE, [webWsId]: "*", ...Object.fromEntries(rootCallers.map((c) => [c, "*"])) })}`,
+  ]);
 
   // Spawn the daemon. container: `podman/docker run -d` (publishes the port,
   // mounts the workdir + dist). local: the venv binary, with the repo `.env`
-  // (e.g. ANTHROPIC_KEY) injected — it runs in `tmp`, so the cwd-relative
+  // (e.g. ANTHROPIC_API_KEY) injected — it runs in `tmp`, so the cwd-relative
   // `_load_dotenv` wouldn't find it otherwise.
   let proc: ChildProcess | undefined;
   let container: string | undefined;
@@ -495,7 +619,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     spawnSync(ENGINE, ["rm", "-f", container], { stdio: "ignore" });
     const r = spawnSync(
       ENGINE,
-      containerRunArgs(container, port, tmp, opts.serveDist === true),
+      containerRunArgs(container, port, tmp),
       { encoding: "utf8" },
     );
     if (r.status !== 0) {
@@ -522,7 +646,8 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     tmp,
     proc,
     container,
-    serveDist: opts.serveDist === true,
+    pageUrl,
+    python,
   };
   try {
     await waitForPort(port, 30000);
@@ -580,7 +705,7 @@ export async function restartHost(host: Host): Promise<void> {
     // the host persists, so the kernel rehydrates from disk exactly as local.
     const r = spawnSync(
       ENGINE,
-      containerRunArgs(host.container, host.port, host.tmp, host.serveDist === true),
+      containerRunArgs(host.container, host.port, host.tmp),
       { encoding: "utf8" },
     );
     if (r.status !== 0) {

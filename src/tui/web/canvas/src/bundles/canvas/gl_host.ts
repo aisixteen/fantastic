@@ -1,4 +1,5 @@
 import { Host } from "../../lib.ts";
+import type { Kernel, Payload } from "../../lib.ts";
 
 // The canvas WebGL host — ported from canvas_webapp/index.html's GL scaffolding.
 // A shared THREE renderer/scene/camera (locked to the canvas pan/zoom) hosting
@@ -8,6 +9,12 @@ import { Host } from "../../lib.ts";
 // recompiled in place without touching siblings. The source `t` is a shim over
 // the bridge (call/emit/subscribeState) so backend GL sources (telemetry_pane,
 // operator gl_agents) run unchanged. three is vendored + lazily imported.
+//
+// Each view's `t` is ITS OWN, like an html panel's connector: `t.agent_id` is
+// the view's id, `t.emit(target, payload)` goes out AS THE VIEW (a local agent
+// gets it through the page kernel, gated by the view's `can_call` and the
+// target's `callable_by`; anything else crosses the bridge), and
+// `t.onMessage(cb)` receives what is emitted TO the view.
 
 export interface GlView {
   source: string;
@@ -37,10 +44,12 @@ export async function createGlHost(opts: {
   bg: HTMLCanvasElement;
   view: { z: number; ox: number; oy: number };
   host: Host;
+  /** the page kernel: each view emits as itself and hears its own inbox */
+  kernel: Kernel;
   selfId: string;
   fetchSource: (agentId: string) => Promise<GlView | null>;
 }): Promise<GlHost> {
-  const { bg, view, host, selfId, fetchSource } = opts;
+  const { bg, view, host, kernel, selfId, fetchSource } = opts;
   const THREE = (await import("three")) as Record<string, unknown> & {
     WebGLRenderer: new (o: unknown) => any;
     Scene: new () => any;
@@ -131,7 +140,21 @@ export async function createGlHost(opts: {
         onFrame: (cb: (time: number) => void) => void,
         cleanupArr: Array<() => void>,
       ) => void;
-      fn(THREE, group, sourceT, (cb) => cbs.add(cb), cleanup);
+      const asView = kernel.scopedFor(agentId, null);
+      const t = {
+        ...sourceT,
+        agent_id: agentId,
+        emit: (target: string, payload: Record<string, unknown>): void => {
+          if (kernel.get(target) !== undefined) asView.emit(target, payload as Payload);
+          else asView.emitRemote(target, payload as Payload);
+        },
+        onMessage: (cb: (payload: Payload) => void): (() => void) => {
+          const off = kernel.onInbox(agentId, cb);
+          cleanup.push(off);
+          return off;
+        },
+      };
+      fn(THREE, group, t, (cb) => cbs.add(cb), cleanup);
       const entry: ViewEntry = { group, cleanup };
       views.set(agentId, entry);
       return entry;

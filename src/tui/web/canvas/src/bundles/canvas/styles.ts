@@ -70,5 +70,26 @@ export const CANVAS_CSS = `
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.10), 0 0 0 1px rgba(255,255,255,0.10), 0 12px 32px -8px rgba(0,0,0,0.55);
     color: rgba(220,230,245,0.85); font: 500 12px ui-monospace, SFMono-Regular, monospace; z-index: 100;
   }
+  #chats { position: fixed; top: 56px; left: 12px; width: 220px; z-index: 90; padding: 8px 0 6px;
+    background: rgba(20, 22, 36, 0.55); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border-radius: 12px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.10), 0 0 0 1px rgba(255,255,255,0.10);
+    color: rgba(220,230,245,0.85); font: 12px ui-monospace, SFMono-Regular, monospace; }
+  #chats .chats-head { display: flex; justify-content: space-between; align-items: center; padding: 0 10px 6px 14px; color: rgba(220,230,245,0.55); }
+  #chats .chats-toggle { background: transparent; border: 0; color: inherit; cursor: pointer; font: inherit; }
+  #chats.collapsed { width: auto; } #chats.collapsed .chats-list, #chats.collapsed .chats-new { display: none; }
+  #chats.collapsed .chats-head span { display: none; }
+  #chats ul { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+  #chats li { display: flex; gap: 8px; padding: 4px 14px; cursor: pointer; }
+  #chats li:hover { background: rgba(183,140,255,0.16); }
+  #chats li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #chats li.kept .dot { color: #7ee2a8; } #chats li.eph { opacity: 0.7; }
+  #chats li .ct { color: rgba(220,230,245,0.45); }
+  #chats .chats-new { padding: 6px 14px 2px; color: #b78cff; cursor: pointer; }
+  .agent-frame.flash { box-shadow: 0 0 0 2px #b78cff, 0 0 30px rgba(183,140,255,0.6) !important; }
+  .canvas-toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 1100;
+    background: rgba(40, 20, 26, 0.9); color: #ffb3b3; padding: 8px 14px; border-radius: 10px;
+    font: 13px ui-monospace, SFMono-Regular, monospace; box-shadow: 0 0 0 1px rgba(255,120,120,0.3); }
+  #toolbar .setup-link { margin-left: 12px; color: #b78cff; text-decoration: none; }
+  #toolbar .setup-link:hover { text-decoration: underline; }
   #toolbar code { color: #cde; background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px; }
 `;

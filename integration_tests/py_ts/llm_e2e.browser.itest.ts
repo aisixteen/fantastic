@@ -6,14 +6,17 @@
 // best-effort browser check, and writes a findings report. Answers: (1) is the
 // readme enough? (2) can the LLM do the wiring? (3) do the primitives work?
 //
-// Run: npm run build && npm run test:integration  (skips without Chrome / .venv /
-// a reachable gpt-oss:120b-cloud).
+// PAID when run: it spends real tokens on the active backend (`LLM_BACKEND`).
+// Run: cd integration_tests/py_ts && node --test --test-force-exit llm_e2e.browser.itest.ts
+// (skips without Chrome / .venv / a reachable backend; the harness packs the
+// canvas app itself). The report lands in py_ts/tmp/llm_diag.out.md.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR, writeServedDist } from "./_host.ts";
+import { fileURLToPath } from "node:url";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, writeRecord } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -21,7 +24,8 @@ let host: Host | null = null;
 let browser: Browser | null = null;
 let skipReason = "";
 
-const REPORT_FILE = join(DIST_DIR, "..", "tests", "llm_diag.out.md");
+const REPORT_DIR = fileURLToPath(new URL("./tmp/", import.meta.url));
+const REPORT_FILE = join(REPORT_DIR, "llm_diag.out.md");
 const PROMPT = [
   "You're connected to a Fantastic kernel as an agent that can call other agents",
   "by sending them messages. FIRST, read the kernel's own documentation — there is",
@@ -56,10 +60,12 @@ interface LlmRun {
   events: Record<string, unknown>[];
 }
 
-/** Drive the ollama agent's `send` over WS, collecting its emitted events
- *  (status/token — they emit on the agent inbox for a non-"cli" client_id). */
+/** Drive the AI agent's `send` over WS, collecting its emitted events
+ *  (status/token — they emit on the agent inbox for a non-"cli" client_id).
+ *  One control socket and an EXPLICIT, gated `watch` of the agent. */
 async function runLLM(origin: string, ollamaId: string, text: string, ms: number): Promise<LlmRun> {
-  const ws = await openWs(`${origin}/${ollamaId}/ws`);
+  const ws = await openWs(`${origin}/kernel/ws`);
+  ws.send(JSON.stringify({ type: "watch", src: ollamaId, id: "w-1" }));
   const events: Record<string, unknown>[] = [];
   let resolveDone: (v: Record<string, unknown> | null) => void = () => {};
   let rejectDone: (e: Error) => void = () => {};
@@ -98,7 +104,7 @@ async function runLLM(origin: string, ollamaId: string, text: string, ms: number
 
 /** One-shot WS call (for querying trees after the run). */
 async function wsCall(origin: string, target: string, payload: Record<string, unknown>, ms = 20000): Promise<unknown> {
-  const ws = await openWs(`${origin}/${target}/ws`);
+  const ws = await openWs(`${origin}/kernel/ws`);
   try {
     return await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("wsCall timeout")), ms);
@@ -123,40 +129,25 @@ async function wsCall(origin: string, target: string, payload: Record<string, un
 
 before(async () => {
   if (!chromeAvailable()) return void (skipReason = "system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return void (skipReason = "ts/dist not built");
   if (!(await llmReachable()))
     return void (skipReason = `${LLM_BACKEND} backend unreachable (key/server/model)`);
   try {
+    // The AI builds the demo itself, so it gets the reach the task needs —
+    // written on both halves by the harness: the kernel (reflect + records),
+    // the frontend store and the command runner (execBridge comes with llm).
     host = await bootHost(8916, {
       webLoader: true,
       serveDist: true,
-      llm: ACTIVE_LLM,
+      llm: { ...ACTIVE_LLM, reach: { kernel_state: "*", web_loader: "*" } },
     });
     // seed the canvas ROOT in the web_loader store (the operator step from the
-    // readme web-setup recipe). Panels parent to it; without a `canvas/agent.json`
+    // readme web-setup recipe). Panels parent to it; without a `canvas/agent.yaml`
     // the loader can't walk its children → orphaned. The LLM only ADDS panels.
-    const canvasDir = join(host.tmp, ".fantastic", "web", "agents", "canvas");
-    mkdirSync(canvasDir, { recursive: true });
-    writeFileSync(
-      join(canvasDir, "agent.json"),
-      JSON.stringify({
-        id: "canvas",
-        handler_module: "canvas.ts",
-        sentence: "Canvas compositor — renders the frontend's own member tree.",
-      }),
-    );
-    // write the canvas mount page used by the browser check
-    writeServedDist(
-      host,
-      "_test_canvas.html",
-      `<!doctype html><html><head><meta charset="utf-8"><title>fantastic·canvas</title>
-<link rel="stylesheet" href="/ts_dist/file/vendor/xterm.css">
-<script type="importmap">{ "imports": {
-  "three": "/ts_dist/file/vendor/three.module.js",
-  "@xterm/xterm": "/ts_dist/file/vendor/xterm.js",
-  "@xterm/addon-fit": "/ts_dist/file/vendor/addon-fit.js" }}</script>
-</head><body><script type="module" src="/ts_dist/file/main.js"></script></body></html>`,
-    );
+    writeRecord(join(host.tmp, ".fantastic", "web", "agents", "canvas"), {
+      id: "canvas",
+      handler_module: "canvas.ts",
+      sentence: "Canvas compositor — renders the frontend's own member tree.",
+    });
     browser = await Browser.launch();
   } catch (e) {
     skipReason = `llm host unavailable: ${(e as Error).message}`;
@@ -276,7 +267,7 @@ test("DIAGNOSTIC: can the active LLM wire the panel demo from the readme alone?"
   let litPanels = 0;
   const NUM = "(() => { const t=document.body.innerText||''; return /[0-9]{2,}/.test(t) ? t.trim().slice(0,60) : null; })()";
   try {
-    await browser.goto(`${h.httpOrigin}/ts_dist/file/_test_canvas.html`);
+    await browser.goto(h.pageUrl!);
     const framed = await browser.evalInAnyIframe<boolean>(
       "(() => document.querySelector('button') ? true : null)()",
       12000,
@@ -306,6 +297,7 @@ test("DIAGNOSTIC: can the active LLM wire the panel demo from the readme alone?"
   }
 
   const report = lines.join("\n");
+  mkdirSync(REPORT_DIR, { recursive: true });
   writeFileSync(REPORT_FILE, report);
   // eslint-disable-next-line no-console
   console.log(`\n${"=".repeat(70)}\n${report}\n${"=".repeat(70)}\n(report written to ${REPORT_FILE})`);

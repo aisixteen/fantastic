@@ -27,7 +27,7 @@ both gaps:
    self-description is sufficient for capability to *emerge* (the north-star).
 3. **Pairing cardinality (Phase 2.5 — the pinnacle)** — a readme-only agent derives the
    *cardinality* of the four unit kinds from self-description alone, never told a number:
-   **terminal_view ↔ terminal_backend = 1:1** (bound by `backend_id` to an exclusive
+   **terminal_view ↔ terminal exec_bridge = 1:1** (bound by `backend_id` to an exclusive
    PTY), **ai_view ↔ AI backend = 1:1** (bound by `backend_id` to shared compute), and
    **html_agent panel ↔ exec_bridge = 1:N** (a content agent, no binding — its JS
    send/watches a many-jobs runtime by id). `pairing_verify.ts` asserts it structurally;
@@ -35,12 +35,12 @@ both gaps:
 
 ## Prerequisites
 
-- `cd python && uv sync` (the `fantastic` venv).
-- `cd ts && npm run build` (the `ts/dist` frontend the browser loads).
-- `cd ts && sh scripts/pack.sh` (→ `ts/dist/js_kernel.zip`) — required
-  for zip-revive checks (`revive_verify.ts`).
+- `cd src/lib/python && uv sync` (the `fantastic` venv).
+- The canvas page: `boot_bare_host.sh` packs the canvas app itself
+  (`src/tui/web/canvas/scripts/pack.sh` → `dist/canvas.zip`) and serves its
+  `bundle.min.js` at `/canvas_page/file/index.html`.
 - System **Chrome** (headless) — see `../_chrome.ts`.
-- **`ANTHROPIC_KEY`** (or `ANTHROPIC_API_KEY`) in the repo `.env`.
+- **`ANTHROPIC_API_KEY`** in the repo `.env`.
 
 If any are missing the runner reports it and skips the affected phase — it never
 hangs or silently "passes".
@@ -61,17 +61,17 @@ spawns the builder agent with the prompt in `RUN.md`, verifies the result with
 - `RUN.md` — the runbook the agent follows (phases, the exact builder prompt,
   acceptance criteria, results table).
 - `boot_bare_host.sh` — boots a BARE substrate daemon (web + web_ws + web_rest +
-  web_loader + a seeded `canvas` + the served frontend; **no** workflow agents).
+  a memory store + web_loader under the ws leg + a seeded `canvas` + the canvas
+  page; **no** workflow agents).
 - `verify_panel.ts` — headless-Chrome check that a canvas panel shows the answer.
 - `pairing_verify.ts` — the Phase 2.5 pinnacle assertion: checks the builder *derived*
   the pairing cardinality (terminal_view/ai_view each 1:1 via `backend_id`; html_agent
   panels 1:N with no binding) from readmes alone.
 - `revive_verify.ts` — headless-Chrome verifier that, against an ALREADY-RUNNING
   daemon, checks a readme-revived system is live: canvas mounts, inlined
-  xterm.css injected, a terminal renders, a `terminal_backend` appears on the
+  xterm.css injected, a terminal renders, a terminal `exec_bridge` appears on the
   host's `<WORKDIR>/.fantastic` disk, no page errors. Usage:
-  `node e2e/revive_verify.ts <CANVAS_URL> <WORKDIR>`. Requires
-  `sh scripts/pack.sh` (→ `ts/dist/js_kernel.zip`) before the builder runs.
+  `node e2e/revive_verify.ts <CANVAS_URL> <WORKDIR>`.
 - `dawee_verify.ts` — headless-Chrome check of the dawee port: panels render and the
   `dawee-mixer` BroadcastChannel bus crosses sandboxed iframes through the host
   `mixerbus` agent.

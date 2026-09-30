@@ -13,56 +13,49 @@
 // (the recursion-deadlock guard itself is covered deterministically in the ollama
 // backend unit tests, test_tool_call_to_self_does_not_deadlock).
 //
-// Run: (cd ts && npm run build) then: cd integration_tests/py_ts &&
-//      node --test --test-force-exit scheduler_ai_html.browser.itest.ts
+// Every panel SENDS AS ITSELF: its record's `can_call` names each host agent and
+// verb it calls or watches (the page's egress gate), and each host agent admits
+// the socket leg (the harness). An agent a panel creates at runtime is created
+// with its gates written by the panel — the creator writes every gate.
+//
+// The exec leg runs commands, not code: `start {command: <python>, args: ["-c", …]}`,
+// gated by its `allowed` regexes.
+//
+// Run: cd integration_tests/py_ts && node --test --test-force-exit scheduler_ai_html.browser.itest.ts
+// (the harness packs the canvas app itself).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR, writeServedDist } from "./_host.ts";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, writeRecord } from "./_host.ts";
 import type { BootOptions, Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
-
-const MOUNT_HTML = `<!doctype html><html><head><meta charset="utf-8">
-<title>fantastic · canvas · scheduler/ai test</title>
-<link rel="stylesheet" href="/ts_dist/file/vendor/xterm.css">
-<script type="importmap">{ "imports": {
-  "three": "/ts_dist/file/vendor/three.module.js",
-  "@xterm/xterm": "/ts_dist/file/vendor/xterm.js",
-  "@xterm/addon-fit": "/ts_dist/file/vendor/addon-fit.js"
-}}</script>
-</head><body>
-<script type="module" src="/ts_dist/file/main.js"></script>
-</body></html>`;
 
 interface Panel {
   id: string;
   html: string;
+  /** The panel's OWN reach: host agent → the verbs it calls (and `watch`). */
+  can_call: Record<string, string[]>;
 }
 
 // Seed the frontend store: a canvas root + N html_agent panels under it.
 function seedCanvas(tmp: string, panels: Panel[]): void {
   const canvasDir = join(tmp, ".fantastic", "web", "agents", "canvas");
-  mkdirSync(canvasDir, { recursive: true });
-  writeFileSync(
-    join(canvasDir, "agent.json"),
-    JSON.stringify({ id: "canvas", handler_module: "canvas.ts", display_name: "canvas" }),
-  );
+  writeRecord(canvasDir, { id: "canvas", handler_module: "canvas.ts", display_name: "canvas" });
   for (const p of panels) {
-    const d = join(canvasDir, "agents", p.id);
-    mkdirSync(d, { recursive: true });
-    writeFileSync(
-      join(d, "agent.json"),
-      JSON.stringify({
-        id: p.id,
-        handler_module: "html_agent.ts",
-        display_name: p.id,
-        html: p.html,
-      }),
-    );
+    writeRecord(join(canvasDir, "agents", p.id), {
+      id: p.id,
+      handler_module: "html_agent.ts",
+      display_name: p.id,
+      html: p.html,
+      can_call: p.can_call,
+    });
   }
 }
+
+/** `start` for the exec leg: run `code` with the leg's allowed interpreter. */
+const PYSTART = (host: Host, code: string): string =>
+  JSON.stringify({ type: "start", command: host.python, args: ["-c", code] });
 
 // Boot a host, seed the tree (with the live ids), open the canvas, run the body.
 async function scenario(
@@ -76,9 +69,8 @@ async function scenario(
   try {
     host = await bootHost(port, opts);
     seed(host.tmp, host);
-    writeServedDist(host, "_test_canvas.html", MOUNT_HTML); // into the dir actually served (local: the workdir copy)
     browser = await Browser.launch();
-    await browser.goto(`${host.httpOrigin}/ts_dist/file/_test_canvas.html`);
+    await browser.goto(host.pageUrl!);
     await browser.waitFor(
       "!!document.getElementById('canvas') && document.querySelectorAll('.agent-frame').length >= 1",
       20000,
@@ -105,7 +97,6 @@ const W = (ms: number): number => Math.round(ms * Number(process.env.LLM_WAIT_X 
 
 test("A: scheduler → exec_bridge → 3rd html panel (deterministic chain)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   await scenario(
     8920,
     { webLoader: true, serveDist: true, execBridge: true, scheduler: true },
@@ -122,9 +113,9 @@ fantastic.watch(${J(py)}, (ev) => {                       // watch the host comp
   }
 });
 fantastic.send(${J(sch)}, { type: "schedule", target: ${J(py)}, interval_seconds: 1,
-  payload: { type: "start", code: "print('SCHED-OK-' + str(6*7))" } }).then((r) => { sid = r && r.schedule_id; });
+  payload: ${PYSTART(host, "print('SCHED-OK-' + str(6*7))")} }).then((r) => { sid = r && r.schedule_id; });
 </script>`;
-      seedCanvas(tmp, [{ id: "panel3", html }]);
+      seedCanvas(tmp, [{ id: "panel3", html, can_call: { [py]: ["watch"], [sch]: ["schedule", "unschedule"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, 20000);
@@ -138,7 +129,6 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(py)}, interval_seconds
 
 test("B: scheduler → anthropic ai_agent → 3rd html panel (apples or bananas)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8921,
@@ -162,7 +152,7 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(ai)}, interval_seconds
     text: "Reply with exactly one word, either apples or bananas. Output only that word." } })
   .then((r) => { sid = r && r.schedule_id; });
 </script>`;
-      seedCanvas(tmp, [{ id: "panel3", html }]);
+      seedCanvas(tmp, [{ id: "panel3", html, can_call: { [ai]: ["watch"], [sch]: ["schedule", "unschedule"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(45000));
@@ -175,7 +165,6 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(ai)}, interval_seconds
 
 test("C: AI tool-call → 3rd html panel (AI drives the UI by id)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8922,
@@ -189,7 +178,13 @@ test("C: AI tool-call → 3rd html panel (AI drives the UI by id)", async (t) =>
       const html = `<pre id="out">—</pre><script>
 const out = () => document.getElementById("out");
 (async () => {
-  await fantastic.send("kernel_state", { type: "create_agent", handler_module: "yaml_state.tools", id: "bus" });
+  // the creator writes every gate: the AI may send to the bus, the bus admits
+  // the AI and the leg; the panel then grants the AI its reach onto the bus
+  await fantastic.send("kernel_state", { type: "create_agent", parent_id: "kernel_state",
+    handler_module: "yaml_state.tools", id: "bus",
+    callable_by: { $self: "*", $parent: "*", $children: "*", [${J(ai)}]: "*", [${J(host.webWsId)}]: "*" } });
+  await fantastic.send("kernel_state", { type: "update_agent", id: ${J(ai)},
+    can_call: { $self: "*", $parent: "*", $children: "*", memory: "*", bus: "*" } });
   fantastic.watch("bus", (ev) => {
     if (ev && ev.type === "set" && ev.key === "display") out().textContent = String(ev.value);
   });
@@ -199,7 +194,8 @@ const out = () => document.getElementById("out");
           'Then reply with that one word.' });
 })();
 </script>`;
-      seedCanvas(tmp, [{ id: "panel3", html }]);
+      seedCanvas(tmp, [{ id: "panel3", html, can_call: {
+        kernel_state: ["create_agent", "update_agent"], bus: ["watch"], [ai]: ["send"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(45000));
@@ -212,7 +208,6 @@ const out = () => document.getElementById("out");
 
 test("D: AI tool-call → exec_bridge (AI spawns a compute job)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8923,
@@ -229,10 +224,10 @@ fantastic.watch(${J(py)}, (ev) => {
     out().textContent = ev.line;
 });
 fantastic.send(${J(ai)}, { type: "send", client_id: "d",
-  text: 'Compute six times seven using the python runtime agent ${py}: call the send tool with ' +
-        'target_id "${py}" and payload {"type":"start","code":"print(6*7)"}. Then reply done.' });
+  text: 'Compute six times seven using the command runner agent ${py}: call the send tool with ' +
+        'target_id "${py}" and payload ' + ${J(PYSTART(host, "print(6*7)"))} + '. Then reply done.' });
 </script>`;
-      seedCanvas(tmp, [{ id: "panel3", html }]);
+      seedCanvas(tmp, [{ id: "panel3", html, can_call: { [py]: ["watch"], [ai]: ["send"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(45000));
@@ -245,14 +240,14 @@ fantastic.send(${J(ai)}, { type: "send", client_id: "d",
 
 test("E: AI tool-call → another AI leaf (AI→AI, no recursion)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8924,
     { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
-      // The panel spins up a SECOND, leaf AI (shares the llm_files history agent),
+      // The panel spins up a SECOND, leaf AI (its conversation in the same memory
+      // store, every gate written at create),
       // watches the driver A's stream, then asks A to delegate to B. B only answers
       // (never calls back) → A→B is a 2-node chain, safe by construction; the
       // _call_stack guard would refuse any cycle before it could deadlock.
@@ -260,8 +255,15 @@ test("E: AI tool-call → another AI leaf (AI→AI, no recursion)", async (t) =>
 let buf = "";
 const out = () => document.getElementById("out");
 (async () => {
-  await fantastic.send("kernel_state", { type: "create_agent",
-    handler_module: "anthropic_backend.tools", file_bridge_id: "llm_files", id: "aileaf" });
+  const base = { $self: "*", $parent: "*", $children: "*" };
+  await fantastic.send("kernel_state", { type: "update_agent", id: "memory",
+    callable_by: { ...base, [${J(ai)}]: "*", aileaf: "*" } });
+  await fantastic.send("kernel_state", { type: "create_agent", parent_id: "kernel_state",
+    handler_module: ${J(ACTIVE_LLM.bundle ?? "")}, id: "aileaf", memory_store_id: "memory",
+    ${ACTIVE_LLM.model ? `model: ${J(ACTIVE_LLM.model)},` : ""}
+    can_call: { ...base, memory: "*" }, callable_by: { ...base, [${J(ai)}]: "*" } });
+  await fantastic.send("kernel_state", { type: "update_agent", id: ${J(ai)},
+    can_call: { ...base, memory: "*", aileaf: "*" } });
   fantastic.watch(${J(ai)}, (ev) => {
     if (!ev || ev.client_id !== "main") return;
     if (ev.type === "token") buf += (ev.text || "");
@@ -273,7 +275,8 @@ const out = () => document.getElementById("out");
           'Then reply with exactly the one word aileaf returned.' });
 })();
 </script>`;
-      seedCanvas(tmp, [{ id: "panel3", html }]);
+      seedCanvas(tmp, [{ id: "panel3", html, can_call: {
+        kernel_state: ["create_agent", "update_agent"], [ai]: ["watch", "send"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(60000));
@@ -286,7 +289,6 @@ const out = () => document.getElementById("out");
 
 test("F: python job uses its kernel connector to call an AI → result on a panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8925,
@@ -308,9 +310,9 @@ const out = () => document.getElementById("out");
 fantastic.watch(${J(py)}, (ev) => {
   if (ev && ev.type === "progress" && ev.stream === "stdout" && /ANS=/.test(ev.line || "")) out().textContent = ev.line;
 });
-fantastic.send(${J(py)}, { type: "start", code: ${JSON.stringify(JOB)} });
+fantastic.send(${J(py)}, ${PYSTART(host, JOB)});
 </script>`;
-      seedCanvas(tmp, [{ id: "panel3", html }]);
+      seedCanvas(tmp, [{ id: "panel3", html, can_call: { [py]: ["watch", "start"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(50000));
@@ -326,29 +328,23 @@ fantastic.send(${J(py)}, { type: "start", code: ${JSON.stringify(JOB)} });
 
 test("G: ai_view renders inline fronting an AI backend", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   await scenario(
     8926,
     { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const canvasDir = join(tmp, ".fantastic", "web", "agents", "canvas");
-      mkdirSync(join(canvasDir, "agents", "chat"), { recursive: true });
-      writeFileSync(
-        join(canvasDir, "agent.json"),
-        JSON.stringify({ id: "canvas", handler_module: "canvas.ts", display_name: "canvas" }),
-      );
-      // an ai_view member (chat mode) fronting the host AI backend purely by id
-      writeFileSync(
-        join(canvasDir, "agents", "chat", "agent.json"),
-        JSON.stringify({
-          id: "chat",
-          handler_module: "ai_view.ts",
-          display_name: "AI",
-          backend_id: ai,
-          mode: "chat",
-        }),
-      );
+      writeRecord(canvasDir, { id: "canvas", handler_module: "canvas.ts", display_name: "canvas" });
+      // an ai_view member (chat mode) fronting the host AI backend purely by id;
+      // the view sends AS ITSELF, so its record grants what ai_view calls
+      writeRecord(join(canvasDir, "agents", "chat"), {
+        id: "chat",
+        handler_module: "ai_view.ts",
+        display_name: "AI",
+        backend_id: ai,
+        mode: "chat",
+        can_call: { [ai]: ["watch", "reflect", "history", "status", "send"], kernel: ["ps", "cancel"] },
+      });
     },
     async (_host, b) => {
       // ai_view renders INLINE into the canvas frame body (not an iframe); on mount
@@ -373,7 +369,6 @@ test("G: ai_view renders inline fronting an AI backend", async (t) => {
 
 test("H: AI tool-calls scheduler to compose a schedule → it fires python → panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8927,
@@ -387,7 +382,7 @@ test("H: AI tool-calls scheduler to compose a schedule → it fires python → p
         "You have ONE tool: send(target_id, payload). Call it EXACTLY once with " +
         `target_id="${sched}" and payload=` +
         `{"type":"schedule","target":"${py}","interval_seconds":2,` +
-        `"payload":{"type":"start","code":"print('SCHED-BY-AI')"}}. ` +
+        `"payload":${PYSTART(host, "print('SCHED-BY-AI')")}}. ` +
         "After the tool result, reply with the single word: scheduled.";
       const drive = `<script>
 fantastic.send(${J(ai)}, { type: "send", client_id: "h", system_prompt: ${JSON.stringify(SP_H)}, text: "Schedule it now." });
@@ -398,7 +393,10 @@ fantastic.watch(${J(py)}, (ev) => {
   if (ev && ev.type === "progress" && ev.stream === "stdout" && /SCHED-BY-AI/.test(ev.line || "")) o().textContent = ev.line;
 });
 </script>`;
-      seedCanvas(tmp, [{ id: "drive", html: drive }, { id: "out", html: out }]);
+      seedCanvas(tmp, [
+        { id: "drive", html: drive, can_call: { [ai]: ["send"] } },
+        { id: "out", html: out, can_call: { [py]: ["watch"] } },
+      ]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(60000));
@@ -411,7 +409,6 @@ fantastic.watch(${J(py)}, (ev) => {
 
 test("I: scheduler fires a python job that calls an AI via its connector → panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8928,
@@ -431,9 +428,9 @@ fantastic.watch(${J(py)}, (ev) => {
   if (ev && ev.type === "progress" && ev.stream === "stdout" && /DEEP=/.test(ev.line || "")) o().textContent = ev.line;
 });
 fantastic.send(${J(sched)}, { type: "schedule", target: ${J(py)}, interval_seconds: 2,
-  payload: { type: "start", code: ${JSON.stringify(JOB_I)} } });
+  payload: ${PYSTART(host, JOB_I)} });
 </script>`;
-      seedCanvas(tmp, [{ id: "out", html: out }]);
+      seedCanvas(tmp, [{ id: "out", html: out, can_call: { [py]: ["watch"], [sched]: ["schedule"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(75000));
@@ -449,7 +446,6 @@ fantastic.send(${J(sched)}, { type: "schedule", target: ${J(py)}, interval_secon
 
 test("J: scheduler tick drives a panel that calls the AI", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8929,
@@ -469,7 +465,7 @@ fantastic.watch(${J(sched)}, (ev) => {                       // scheduler emits 
 });
 fantastic.send(${J(sched)}, { type: "schedule", target: ${J(sched)}, interval_seconds: 2, payload: { type: "list" } });
 </script>`;
-      seedCanvas(tmp, [{ id: "out", html: out }]);
+      seedCanvas(tmp, [{ id: "out", html: out, can_call: { [sched]: ["watch", "schedule"], [ai]: ["send"] } }]);
     },
     async (_host, b) => {
       const out = await b.evalInAnyIframe<string>(READ_OUT, W(60000));

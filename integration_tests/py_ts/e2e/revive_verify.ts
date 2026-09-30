@@ -8,10 +8,11 @@
 //     WORKDIR    — the daemon's cwd, so we can read its on-disk .fantastic tree
 //
 // PASS iff: canvas mounts · inlined xterm.css injected · dblclick spawns a live
-// .xterm · a terminal_backend appears on the HOST disk · no uncaught page errors.
-import { readdirSync, readFileSync } from "node:fs";
+// .xterm · a terminal exec_bridge appears on the HOST disk · no uncaught page errors.
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Browser, chromeAvailable } from "../_chrome.ts";
+import { recordField } from "../_host.ts";
 
 const canvasUrl = process.argv[2];
 const workdir = process.argv[3];
@@ -34,22 +35,13 @@ function hostHasTerminalBackend(tmp: string): boolean {
     } catch {
       continue;
     }
-    if (entries.includes("agent.json")) {
-      try {
-        const rec = JSON.parse(readFileSync(join(dir, "agent.json"), "utf8")) as {
-          handler_module?: string;
-        };
-        if (rec.handler_module === "terminal_backend.tools") return true;
-      } catch {
-        /* skip */
-      }
-    }
     for (const e of entries) {
-      try {
-        if (readdirSync(join(dir, e))) stack.push(join(dir, e));
-      } catch {
-        /* not a dir */
+      const p = join(dir, e);
+      if (e !== "agent.yaml") {
+        stack.push(p);
+        continue;
       }
+      if (recordField(p, "handler_module") === "exec_bridge.tools" && recordField(p, "view_id") !== undefined) return true;
     }
   }
   return false;
@@ -82,6 +74,11 @@ try {
   await b.evaluate(
     "(() => { const c = document.getElementById('canvas'); c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: 420, clientY: 300 })); return true; })()",
   );
+  // the double click opens the SPOT INPUT: pick `terminal` in it
+  await b.waitFor("!!document.querySelector('.spot-input input')", 10000);
+  await b.evaluate(
+    "(() => { const i = document.querySelector('.spot-input input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
+  );
   await b.waitFor("document.querySelectorAll('.agent-frame').length >= 1", 20000);
   const xtermRendered = await b
     .waitFor("document.querySelectorAll('.xterm').length >= 1", 20000)
@@ -90,7 +87,7 @@ try {
   checks.push(["inlined xterm.js rendered a live .xterm", xtermRendered]);
 
   const backendOnDisk = await until(() => hostHasTerminalBackend(workdir), 15000);
-  checks.push(["host created a terminal_backend over the bridge", backendOnDisk]);
+  checks.push(["host created a terminal exec_bridge over the bridge", backendOnDisk]);
 
   const realErrors = b.pageErrors.filter((e) => !/WebGL|GL context/i.test(e));
   checks.push(["no uncaught page errors", realErrors.length === 0]);

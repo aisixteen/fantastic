@@ -6,12 +6,11 @@
 
 ## Phase 0 — preflight
 
-- `ls python/.venv/bin/fantastic` exists (`uv sync` if not).
-- `ls ts/dist/main.js` exists (`cd ts && npm run build` if not).
-- `ls ts/dist/js_kernel.zip` exists (`cd ts && sh scripts/pack.sh` if not) —
-  required for zip-revive checks; `revive_verify.ts` skips cleanly when absent.
+- `ls src/lib/python/.venv/bin/fantastic_kernel` exists (`uv sync` if not).
+- The canvas page is packed by `boot_bare_host.sh` itself
+  (`src/tui/web/canvas/scripts/pack.sh` → `dist/canvas.zip`).
 - `chromeAvailable()` (system Chrome) — else Phase 1/2c skip.
-- `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in repo `.env` — else Phase 1 (B–E) and
+- `ANTHROPIC_API_KEY` in repo `.env` — else Phase 1 (B–E) and
   Phase 2 skip (the deterministic Phase-1 A still runs).
 
 ## Phase 1 — live integration (scripted)
@@ -94,11 +93,11 @@ Opens `CANVAS_URL`, waits for the panels to hydrate, and dumps what each shows.
 Acceptance: at least one panel displays the live workflow output (e.g. matches
 `/apples|bananas/i` or a computed number), no uncaught page errors.
 
-For **zip-revive** checks (when the builder assembled the system from the zip
-readme and is serving `bundle.min.js` rather than the dev `main.js`), use
+For **zip-revive** checks (when the builder assembled the system from the
+`canvas.zip` readme alone), use
 `revive_verify.ts` instead — it checks the same liveness criteria PLUS that
 the inlined xterm.css was injected and the single-bundle revive left a
-`terminal_backend` on disk:
+terminal `exec_bridge` on disk:
 
 ```bash
 node integration_tests/py_ts/e2e/revive_verify.ts <CANVAS_URL> <WORKDIR>
@@ -115,7 +114,7 @@ bash integration_tests/py_ts/e2e/teardown_host.sh <PID> <TMP>
 
 The point: prove an LLM derives the **pairing CARDINALITY** of the four unit kinds
 from self-description ALONE — never told a number:
-- **terminal_view ↔ terminal_backend = 1:1** (a view *bound by `backend_id`* to an
+- **terminal_view ↔ terminal exec_bridge = 1:1** (a view *bound by `backend_id`* to an
   *exclusive PTY session*);
 - **ai_view ↔ AI backend = 1:1** (a view *bound by `backend_id`* to *shared compute*);
 - **html_agent panel ↔ exec_bridge = 1:N** (a *content* agent, no binding — its JS

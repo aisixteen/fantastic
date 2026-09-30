@@ -110,7 +110,7 @@ shasum -a 256 bundle.min.js
 # expected: __BUNDLE_SHA256__
 ```
 
-> In the source tree `__BUNDLE_SHA256__` is a literal placeholder. The pack
+> In the source tree the digest above is a placeholder token. The pack
 > substitutes the real digest into the `readme.md` copy it places **inside**
 > `canvas.zip`, so the artifact carries its own integrity check.
 

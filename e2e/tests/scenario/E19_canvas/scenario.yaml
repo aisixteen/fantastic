@@ -1,0 +1,129 @@
+# THE CANVAS, a thin web UI, end to end. No model. The runner builds the product
+# (whose build packs the canvas and embeds `canvas.zip`), runs
+# `fantastic --headless web --port N` over a fresh dir, and drives a REAL
+# headless Chrome over CDP against the page it announces: a double click opens the spot input, `terminal` there spawns one,
+# keystrokes run in it, a drag moves it, a restart rehydrates it, the close
+# button removes it. Every step is checked ON DISK too: the canvas's thin agents
+# are folders under the canvas in the ws loader's store (`.fantastic/web`).
+#
+# The owner's design: the page holds no store and no AI; its thin agents are
+# records the ws loader (`web_loader`, under the socket leg `canvas_ws`) pumps to
+# folders under `agents/canvas/agents/`, and rehydrates on boot.
+
+id: canvas
+title: the canvas — thin agents saved through the ws loader, rehydrated on boot
+runtimes: [canvas]
+costs: free
+
+port_base: 18830
+window: {width: 1280, height: 800}
+
+runs:
+  - name: first-load
+    # the page seeds its root and the loader writes it under its own anchor
+    expect:
+      page_contains: ["canvas canvas"]
+      files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml]
+      canvas_members: 0
+      group_size: 0
+
+  # ── the pair: a double click spawns a backend (a child of the leg) + its view
+  - name: spawn-terminal
+    dblclick: {x: 500, y: 350}
+    type: "echo hi-$((6*7))"
+    expect:
+      xterm_contains: ["hi-42"]
+      canvas_members: 1
+      member: {handler_module: terminal_view.ts, owns_backend: true}
+      # a thin agent lives ONLY under the canvas — never a top-level loader record
+      not_top_level: true
+      backend_in_group: true
+      view_bound: true
+      group_size: 1
+
+  # ── the leg lives its own life: the page leaving and coming back never
+  #    touches the backend behind it — the shell keeps its state
+  - name: page-reload
+    type: "export FC_MARK=7; echo set-$FC_MARK"
+    # leave only once the shell has taken the line (keys in flight at unload are the page's to lose)
+    before_reload_xterm: "set-7"
+    reload_page: true
+    type_after: "echo mark-$FC_MARK$FC_MARK"
+    expect:
+      canvas_members: 1
+      backend_kept: true
+      group_size: 1
+      xterm_contains: ["mark-77"]
+
+  - name: move
+    drag: {dx: 120, dy: 80}
+    expect:
+      canvas_members: 1
+      moved: true
+
+  - name: restart
+    restart: true
+    type: "echo again-$((7*6))"
+    expect:
+      lock_released_between: true
+      load_tree: {canvas: null, member_parent: canvas}
+      canvas_members: 1
+      xterm_contains: ["again-42"]
+      kept_position: true
+      group_size: 1
+
+  # ── the binding holds by rule: a lost backend is SAID, never respawned silently
+  - name: lost-backend
+    restart: {offline: remove_backend}
+    expect:
+      canvas_members: 1
+      member: {backend_lost: true}
+      group_size: 0
+      page_contains: ["is gone"]
+
+  - name: respawn
+    click: ".agent-frame .reload"
+    type: "echo back-$((6*7))"
+    expect:
+      canvas_members: 1
+      member: {backend_lost: false}
+      backend_changed: true
+      backend_in_group: true
+      group_size: 1
+      xterm_contains: ["back-42"]
+      view_bound: true
+
+  - name: close
+    close: true
+    expect:
+      canvas_members: 0
+      backend_record: false
+      group_size: 0
+      files_exist: [.fantastic/web/agents/canvas/agent.yaml]
+
+  # ── an orphan (the view vanished while the host was down) is deleted on load
+  - name: orphan
+    dblclick: {x: 500, y: 350}
+    then_restart: {offline: remove_member}
+    expect:
+      canvas_members: 0
+      group_size: 0
+      page_frames: 0
+
+  # ── the shell ending IS the close: `exit` removes the frame, the view and
+  #    its exec agent together, exactly as ✕ does
+  - name: exit-closes
+    dblclick: {x: 500, y: 350}
+    type: "exit"
+    expect:
+      canvas_members: 0
+      group_size: 0
+      page_frames: 0
+
+  - name: restart-empty
+    restart: true
+    expect:
+      load_tree: {canvas: null}
+      canvas_members: 0
+      group_size: 0
+      page_frames: 0

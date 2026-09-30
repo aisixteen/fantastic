@@ -1,0 +1,489 @@
+//! BOOTING AND DRIVING THE KERNEL IN THIS PROCESS.
+//!
+//! `bootstrap` is synchronous and takes the bundle registry by value, so the
+//! registry is built first and completely. What comes back is an `Arc<Kernel>`;
+//! from there every operation is a direct call.
+//!
+//! THE START IS THE KERNEL'S: `Kernel::start` (the `kernel_start` verb) boots the
+//! root — which mints the guid and installs the record writer — then the MEMORY
+//! STORE the root names in `memory_store_id`, probes that it serves the operator,
+//! and starts flushing execution rows into it. Without a store it refuses, loud.
+//! Everyone else is booted by this shell afterwards, in registration order, so a
+//! persisted `web` host is booted only by a mode that serves the browser.
+//!
+//! THE KERNEL KEEPS NO CONVERSATION. An AI agent's rows live in the memory store
+//! under its own key; the kernel's execution rows (call / settle / task) live
+//! there under the operator's key once flushed, and in RAM until then. Reading
+//! an agent's rows is therefore a `read` on the store, made as the operator — the
+//! store's admin.
+//!
+//! And one trap that costs a whole session if missed: an act goes out under
+//! `with_sender("user")`, and the gate resolves that id against LIVE AGENTS. If no
+//! `user` agent exists, the grant map is empty and every verb is refused on
+//! egress. The human's own agent is not decoration; it is the shell's authority.
+
+use std::sync::Arc;
+
+use fantastic_kernel::{
+    bootstrap::{self, BootstrapOptions},
+    send::with_sender,
+    AgentId, BundleRegistry, Item, Kernel, Outcome,
+};
+use serde_json::{json, Value};
+
+use crate::env::{ClientCfg, Paths};
+use crate::kern::model::{AgentId as MyId, KernelErr, Record, Row, Task, TreeNode};
+
+/// The kernel, plus who this terminal is when it speaks.
+pub struct Host {
+    pub kernel: Arc<Kernel>,
+    pub cfg: ClientCfg,
+    /// The root's id as the kernel reports it — `core` on rust, and DISCOVERED
+    /// rather than assumed, because the same shell should not lie on a runtime
+    /// whose root is named something else.
+    pub root: MyId,
+}
+
+/// Every bundle this shell's roster can name. Deliberately short: the set of
+/// agents is the user's to grow, and registering a bundle nobody declared only
+/// widens what a stray record could become.
+fn registry() -> BundleRegistry {
+    let mut reg = BundleRegistry::new();
+    // THE ROOT. Its handler is the durable-state loader; see the module header.
+    reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+    // The one disk surface. Clamped to its declared root; a path outside is
+    // refused rather than normalised.
+    reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
+    // THE MEMORY STORE: the kernel's execution rows and every AI agent's
+    // conversation, in one SQLite file that survives the process.
+    reg.register(
+        fantastic_sqlite_store::HANDLER_MODULE,
+        fantastic_sqlite_store::SqliteStoreBundle::default(),
+    );
+    // The shell. `allowed` is a list of regexes fullmatched against the joined
+    // command line.
+    reg.register(
+        fantastic_exec_bridge::HANDLER_MODULE,
+        fantastic_exec_bridge::ExecBridgeBundle,
+    );
+    // The loader that reads `.fantastic/kernel.yaml`.
+    reg.register(
+        fantastic_static_loader::HANDLER_MODULE,
+        fantastic_static_loader::StaticLoaderBundle,
+    );
+    // THE HUMAN, as an agent. This is the id the terminal acts as, so every act
+    // carries a ledger row naming a person instead of an operator injection.
+    reg.register(
+        fantastic_scenario_probes::USER_MODULE,
+        fantastic_scenario_probes::UserProbe::default(),
+    );
+    // THE MCP LEG — a bundle from outside the kernel tree. Registered so a
+    // persisted `mcp` record hydrates into a live agent on every run; the
+    // record itself is only ever created by `fantastic mcp`, never by the
+    // blueprint.
+    reg.register(fantastic_web_mcp::HANDLER_MODULE, fantastic_web_mcp::WebMcpBundle);
+    // THE USER'S TEMPLATES. Its directory and the ONE caller it serves (the
+    // human) are fixed here, by the binary — never by a record (`kern/templates`).
+    reg.register(
+        fantastic_user_home_store::HANDLER_MODULE,
+        fantastic_user_home_store::UserHomeStore::new(
+            fantastic_user_home_store::home_dir_from_env(),
+            vec![crate::env::HUMAN.to_string()],
+        ),
+    );
+    // THE BROWSER VIEW: the HTTP host, its socket leg, and the ViewModel's face.
+    // Only ever created by `fantastic web`; registered so they rehydrate.
+    reg.register(fantastic_web::HANDLER_MODULE, fantastic_web::WebBundle);
+    reg.register(fantastic_web_ui::HANDLER_MODULE, fantastic_web_ui::WebUiBundle);
+    // THE CANVAS, beside the View: its embedded page and its socket leg. Only
+    // ever created by `fantastic web`; registered so they rehydrate.
+    reg.register(fantastic_canvas_page::HANDLER_MODULE, fantastic_canvas_page::CanvasPageBundle);
+    reg.register(fantastic_web_ws::HANDLER_MODULE, fantastic_web_ws::WebWsBundle);
+    reg.register(crate::kern::ui_agent::HANDLER_MODULE, crate::kern::ui_agent::UiBundle);
+    // THE BROWSER'S SET-UP PAGE, host side. Registered so the page can create
+    // it; it exists only while that page is open (`kern/setup_agent`).
+    reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
+    // AI CELLS: the canvas's AI cells — each a RAM store with the AI under it,
+    // spawned from the user's templates by `ai_cells` (`kern/ai_cells`).
+    reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
+    reg.register(crate::kern::ai_cells::HANDLER_MODULE, crate::kern::ai_cells::AiCellsBundle);
+    // The anthropic backend: linked by `--features anthropic` (and by dev-llm).
+    #[cfg(feature = "anthropic")]
+    reg.register(
+        fantastic_anthropic_backend::HANDLER_MODULE,
+        fantastic_anthropic_backend::AnthropicBundle,
+    );
+    // The OpenAI Responses backend: linked by `--features responses`.
+    #[cfg(feature = "responses")]
+    reg.register(
+        fantastic_responses_backend::HANDLER_MODULE,
+        fantastic_responses_backend::ResponsesBundle,
+    );
+    reg
+}
+
+impl Host {
+    /// Boot over `paths.cwd`. Acquires the directory lock, so a second shell in
+    /// the same directory fails here rather than corrupting the store.
+    ///
+    /// `serve_web`: whether a persisted `web` host starts listening. Only a mode
+    /// that serves the browser View opens the port; `fantastic` and `fantastic
+    /// mcp` leave a `web` record on disk untouched (not booted).
+    pub async fn boot(paths: &Paths, serve_web: bool) -> Result<Self, KernelErr> {
+        let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&paths.cwd))
+            .map_err(|e| KernelErr::Boot(format!("{e}")))?;
+        let kernel = Arc::clone(&booted.kernel);
+        let root = kernel
+            .root()
+            .map(|r| r.id.0.clone())
+            .ok_or_else(|| KernelErr::Boot("the kernel booted with no root".into()))?;
+
+        // The blueprint's root fields, each only while the root lacks it.
+        let mut patch = serde_json::Map::new();
+        {
+            let r = kernel.root().expect("root checked above");
+            let meta = r.meta.read().expect("root meta poisoned");
+            for (k, v) in crate::boot::seed::root_fields().map_err(KernelErr::Boot)? {
+                if !meta.contains_key(&k) {
+                    patch.insert(k, v);
+                }
+            }
+        }
+        if !patch.is_empty() {
+            let mut p = json!({"type": "update_agent", "id": root});
+            for (k, v) in patch {
+                p[k] = v;
+            }
+            let r = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(AgentId::from("kernel"), p)]))
+                .await
+                .remove(0)
+                .result;
+            if let Some(e) = r.get("error").and_then(Value::as_str) {
+                return Err(KernelErr::Boot(format!("could not set the root's fields: {e}")));
+            }
+        }
+
+        // THE KERNEL'S START: root, then its memory store, then the flusher.
+        let started = kernel.start(false).await;
+        if started.get("started") != Some(&json!(true)) {
+            let why = started.get("error").and_then(Value::as_str).unwrap_or("kernel_start refused");
+            let hint = started.get("hint").and_then(Value::as_str).map(|h| format!(" — {h}")).unwrap_or_default();
+            return Err(KernelErr::Boot(format!("{why}{hint}")));
+        }
+        let done: Vec<String> = serde_json::from_value(started["booted"].clone()).unwrap_or_default();
+
+        // Everyone else, in registration order. A failure is logged and
+        // skipped: one bundle refusing must not take the shell down with it.
+        let mut notes = Vec::new();
+        for id in kernel.agent_ids() {
+            if done.contains(&id.0) {
+                continue;
+            }
+            let is_web = kernel.agents.get(&id).is_some_and(|a| {
+                a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE)
+            });
+            if is_web && !serve_web {
+                continue;
+            }
+            let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(id.clone(), json!({"type": "boot"}))]))
+                .await
+                .remove(0)
+                .result;
+            if let Some(err) = reply.get("error").and_then(Value::as_str) {
+                notes.push(format!("{id}: boot failed: {err}"));
+            }
+        }
+
+        let host = Self {
+            kernel,
+            cfg: ClientCfg::here(),
+            root,
+        };
+        // The template store's agent, and the human's grant onto it — re-set on
+        // every boot, whatever a record on disk says.
+        if let Err(e) = crate::kern::templates::ensure(&host).await {
+            notes.push(e);
+        }
+        // A browser set-up agent lives only while its page is open: never hydrated.
+        crate::kern::setup_agent::sweep(&host).await;
+        for n in notes {
+            tracing::warn!("{n}");
+        }
+        // CRITICAL TODO(dev-llm): a dev build gives the store its `ai` agent once.
+        #[cfg(feature = "dev-llm")]
+        crate::kern::dev_llm::ensure_ai(&host).await.map_err(KernelErr::Boot)?;
+        Ok(host)
+    }
+
+    /// The memory store the root names — THE store every AI agent this shell
+    /// creates keeps its conversation in.
+    pub fn memory_store(&self) -> Result<String, String> {
+        self.kernel
+            .root()
+            .and_then(|r| r.meta.read().ok()?.get("memory_store_id")?.as_str().map(str::to_string))
+            .ok_or_else(|| "the root names no `memory_store_id`".to_string())
+    }
+
+    /// The AI agents in the tree: every non-root agent whose record names a
+    /// memory store (`memory_store_id`) — the field that makes one.
+    pub fn ai_agents(&self) -> Vec<String> {
+        let root = self.kernel.root().map(|r| r.id.clone());
+        self.kernel
+            .agents
+            .iter()
+            .filter(|e| Some(e.key()) != root.as_ref())
+            .filter(|e| e.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some())
+            .map(|e| e.key().0.clone())
+            .collect()
+    }
+
+    /// Admit AI agent `ai` to the memory store — the store's side of the gate,
+    /// merged into its `callable_by` — and return the store's id, for the AI's
+    /// own record to name in `memory_store_id` and grant in `can_call`. Done
+    /// BEFORE the AI is created: its first boot checks the store it names.
+    pub async fn admit_to_memory(&self, ai: &str) -> Result<String, String> {
+        let store = self.memory_store()?;
+        let mut cb = self
+            .kernel
+            .agents
+            .get(&AgentId::from(store.as_str()))
+            .and_then(|a| a.value().record().meta.get("callable_by").and_then(Value::as_object).cloned())
+            .ok_or_else(|| format!("the memory store `{store}` is not in the tree"))?;
+        cb.insert(ai.into(), json!("*"));
+        let r = self
+            .operator("kernel", json!({"type": "update_agent", "id": store, "callable_by": cb}))
+            .await
+            .result;
+        match r.get("error").and_then(Value::as_str) {
+            Some(e) => Err(format!("could not admit `{ai}` to `{store}`: {e}")),
+            None => Ok(store),
+        }
+    }
+
+    /// Shut down IN THE KERNEL'S ORDER, on the runtime that booted it:
+    /// `Kernel::shutdown` first (drain, each agent's `shutdown` verb, cancel what
+    /// remains, the last execution rows flushed into the memory store, the
+    /// records written, the teardown walk), and only then the lock release.
+    /// Releasing the lock first used to lose the last execution.
+    pub async fn shutdown(&self, paths: &Paths) {
+        // The kernel lands every record and every message itself
+        // (`flush_pending`) before its teardown walk; the lock goes last.
+        self.kernel.shutdown().await;
+        if let Err(e) = bootstrap::shutdown(&paths.cwd) {
+            tracing::warn!("shutdown: {e}");
+        }
+    }
+
+    // ── acting ───────────────────────────────────────────────────────────
+
+    /// Dispatch AS THE HUMAN. The scope holds across await points because it is a
+    /// task-local scope over the whole future, which is exactly what the gate
+    /// needs to see a `user -> <target>` call.
+    pub async fn act(&self, target: &str, payload: Value) -> Outcome {
+        let k = Arc::clone(&self.kernel);
+        let user = AgentId::from(self.cfg.user.as_str());
+        let item = Item::new(AgentId::from(target), payload);
+        with_sender(user, async move { k.send(vec![item]).await })
+            .await
+            .remove(0)
+    }
+
+    /// Dispatch with no sender, which the kernel reads as OPERATOR and does not
+    /// gate. Used for exactly one thing: booting the roster, which is the shell's
+    /// own housekeeping and not an act by the human.
+    pub async fn operator(&self, target: &str, payload: Value) -> Outcome {
+        let k = Arc::clone(&self.kernel);
+        let item = Item::new(AgentId::from(target), payload);
+        fantastic_kernel::send::with_operator(async move { k.send(vec![item]).await })
+            .await
+            .remove(0)
+    }
+
+    /// An outcome as this shell reads it: the reply, or the refusal as data.
+    pub fn read(out: Outcome) -> Result<Value, KernelErr> {
+        if let Some(obj) = out.result.as_object() {
+            if obj.get("error").and_then(Value::as_str).is_some() {
+                let r = serde_json::from_value(out.result.clone())
+                    .map_err(|e| KernelErr::Decode(e.to_string()))?;
+                return Err(KernelErr::Refused(Box::new(r)));
+            }
+        }
+        Ok(out.result)
+    }
+
+    // ── reading, straight off the store ──────────────────────────────────
+
+    /// One agent's rows, oldest id first: what the memory store holds under its
+    /// own key (an AI agent's conversation, its folds and views), then the
+    /// kernel's execution rows ABOUT it — flushed ones read back from the store
+    /// under the operator's key, the rest still in RAM.
+    ///
+    /// Read AS THE OPERATOR, the store's admin: the shell renders every agent's
+    /// rows, so it is the one reader that may name any owner.
+    /// `after`: only rows with a larger id (the caller's cursor); `None` = all.
+    pub async fn rows(&self, agent: &str, after: Option<i64>) -> Vec<Row> {
+        let Ok(store) = self.memory_store() else {
+            return Vec::new();
+        };
+        let mut by: std::collections::BTreeMap<i64, Value> = std::collections::BTreeMap::new();
+        let mut q = json!({"type": "read", "owner": agent});
+        if let Some(a) = after {
+            q["after"] = json!(a);
+        }
+        let own = self.operator(&store, q).await.result;
+        for mut r in own["rows"].as_array().cloned().unwrap_or_default() {
+            if r.get("agent").is_none() {
+                r["agent"] = json!(agent);
+            }
+            if let Some(id) = r.get("id").and_then(Value::as_i64) {
+                by.insert(id, r);
+            }
+        }
+        let mut q = json!({"type": "read", "owner": "kernel", "match": {"agent": agent}});
+        if let Some(a) = after {
+            q["after"] = json!(a);
+        }
+        let exec = self.operator(&store, q).await.result;
+        let ram = self.kernel.rows.all().into_iter().map(Value::Object);
+        for r in exec["rows"].as_array().cloned().unwrap_or_default().into_iter().chain(ram) {
+            if r.get("agent").and_then(Value::as_str) != Some(agent) {
+                continue;
+            }
+            if let Some(id) = r.get("id").and_then(Value::as_i64) {
+                if after.is_some_and(|a| id <= a) {
+                    continue;
+                }
+                by.insert(id, r);
+            }
+        }
+        by.into_values().filter_map(|v| serde_json::from_value(v).ok()).collect()
+    }
+
+    /// What is running right now.
+    pub fn tasks(&self) -> Vec<Task> {
+        self.kernel
+            .tasks
+            .rows()
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect()
+    }
+
+    /// The whole tree, built from the kernel's own agent index. `handler_module`
+    /// is what selects a panel, and it is right here on the record — there is no
+    /// reflect round-trip to make.
+    pub fn tree(&self) -> Option<TreeNode> {
+        let root = self.kernel.root()?;
+        Some(self.node(&root))
+    }
+
+    fn node(&self, agent: &Arc<fantastic_kernel::Agent>) -> TreeNode {
+        let mut children: Vec<TreeNode> = agent
+            .child_ids()
+            .into_iter()
+            .filter_map(|id| self.kernel.agents.get(&id).map(|e| self.node(e.value())))
+            .collect();
+        // Deterministic order, so the tree pane never reshuffles under the cursor.
+        children.sort_by(|a, b| a.id.cmp(&b.id));
+        TreeNode {
+            id: agent.id.0.clone(),
+            parent_id: agent.parent_id.as_ref().map(|p| p.0.clone()),
+            handler_module: agent.handler_module.clone(),
+            display_name: None,
+            description: None,
+            children,
+        }
+    }
+
+    /// Every agent's record, for the grant maps a pane shows.
+    pub fn records(&self) -> Vec<Record> {
+        let mut out: Vec<Record> = self
+            .kernel
+            .agents
+            .iter()
+            .filter_map(|e| {
+                let a = e.value();
+                let mut m = a.record().meta.clone();
+                m.insert("id".into(), json!(a.id.0));
+                if let Some(h) = &a.handler_module {
+                    m.insert("handler_module".into(), json!(h));
+                }
+                if let Some(p) = &a.parent_id {
+                    m.insert("parent_id".into(), json!(p.0));
+                }
+                serde_json::from_value(Value::Object(m)).ok()
+            })
+            .collect();
+        out.sort_by(|a: &Record, b: &Record| a.id.cmp(&b.id));
+        out
+    }
+
+    /// TRUE when the records have nowhere durable to go. `find_store` looks for
+    /// a file surface rooted at `.fantastic`; without one every record stays in
+    /// RAM, and the statusline must say so rather than implying the tree survives
+    /// a restart.
+    pub fn volatile(&self) -> bool {
+        fantastic_kernel::persistence::find_store(&self.kernel).is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_registry_holds_exactly_the_declared_set() {
+        let reg = registry();
+        for m in [
+            "kernel_state.tools",
+            "file_bridge.tools",
+            "sqlite_store.tools",
+            "user_home_store.tools",
+            "setup.tools",
+            "ram_store.tools",
+            "ai_cells.tools",
+            "exec_bridge.tools",
+            "static_loader.tools",
+            "user_probe.tools",
+            "web_mcp.tools",
+            "web.tools",
+            "web_ui.tools",
+            "ui.tools",
+            "canvas_page.tools",
+            "web_ws.tools",
+        ] {
+            assert!(reg.get(m).is_some(), "{m} must be registered");
+        }
+        // Nothing that was never asked for. A bundle registered here is a bundle a
+        // stray record could become.
+        for m in [
+            "web_rest.tools",
+        ] {
+            assert!(reg.get(m).is_none(), "{m} was never asked for");
+        }
+    }
+
+    #[test]
+    fn a_refusal_reads_back_as_a_refusal_not_a_reply() {
+        let out = Outcome::refused(json!({
+            "error": "user -> exec: not permitted",
+            "reason": "unauthorized",
+            "side": "egress",
+            "hint": "name exec in user.can_call",
+        }));
+        match Host::read(out) {
+            Err(KernelErr::Refused(r)) => {
+                assert_eq!(r.side.as_deref(), Some("egress"));
+                assert!(r.line().contains("name exec in user.can_call"));
+            }
+            other => panic!("a refusal must not read as a reply: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_reply_reads_through_verbatim() {
+        let mut out = Outcome::refused(json!({"lines": [], "total": 0}));
+        out.result = json!({"lines": [], "total": 0});
+        assert_eq!(Host::read(out).unwrap(), json!({"lines": [], "total": 0}));
+    }
+}

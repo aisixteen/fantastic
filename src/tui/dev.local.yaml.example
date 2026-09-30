@@ -1,0 +1,12 @@
+# CRITICAL TODO(dev-llm): dev-only. Copy to `dev.local.yaml` (gitignored) and
+# fill in. Plan: tmp/cli_dev_and_mcp.md, Part A. The KEY is not here: put it in
+# the keychain once —
+#   security add-generic-password -s aisixteen.fantastic-tui -a anthropic -w
+endpoint: "<the proxy's /llm/cc/v1/messages URL, from e2e/backends/connection.local.env ENDPOINT>"
+model: "<the model id, e.g. from FANTASTIC_AI_MODEL>"
+max_tokens: 65536
+context_window: 32000        # your call; the harness's squeeze setting is 32000
+sampling:                    # the proven fix for the CoT repetition loop
+  no_repeat_ngram_size: 3
+  repetition_penalty: 1.05
+  thinking_token_budget: 8000

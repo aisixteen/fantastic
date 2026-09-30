@@ -18,7 +18,10 @@ export interface ViewContext {
   backend: string;
   /** this view-agent's own record — read fields like `mode` (multi-mode views) */
   record?: Record<string, unknown>;
+  /** remove this view — and the backend it owns — exactly as its ✕ does */
+  close(): void;
 }
+
 
 /** A frame-chrome chip a view exposes. Wired locally (no browser bus — the
  *  view and the canvas share one page now). For toggles, onClick returns the
@@ -42,7 +45,7 @@ export interface ViewBundle {
   /** the frontend handler_modules this renders inline, e.g. "terminal_view.ts" */
   readonly handles: readonly string[];
   /** The EXACT host handler_module this view SPAWNS a backend of and fronts
-   *  (e.g. "terminal_backend.tools") — declared, never matched by name.
+   *  (e.g. "exec_bridge.tools") — declared, never matched by name.
    *  Absent: the view fronts a backend someone else made; it never spawns. */
   readonly fronts?: string;
   /** This view's OWN egress grant — the host targets and verbs it calls — for
@@ -50,5 +53,8 @@ export interface ViewBundle {
    *  binds the backend: a view SENDS AS ITSELF, so it reaches its own backend
    *  and nothing else the socket leg reaches. */
   grants(backend: string): Record<string, readonly string[]>;
+  /** The record fields the spawned backend is created with — the view's own
+   *  declaration, never read from the host. Absent: none. */
+  readonly backendFields?: Readonly<Record<string, unknown>>;
   mount(ctx: ViewContext): Promise<ViewHandle> | ViewHandle;
 }
