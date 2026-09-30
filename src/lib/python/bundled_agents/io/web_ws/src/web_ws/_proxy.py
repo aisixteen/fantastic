@@ -35,7 +35,8 @@ import logging
 import secrets
 
 from kernel import sender_context
-from kernel._refusal import UNKNOWN_AGENT, bad, refusal
+from kernel._kernel import PeerRoute
+from kernel._refusal import TRANSPORT_ERROR, UNKNOWN_AGENT, bad, refusal
 
 from io_bridge import (
     decode_frame,
@@ -327,6 +328,90 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     # cheap, awaited inline.
     pending: set[asyncio.Task] = set()
 
+    # ─── the PEER half: calls the host makes INTO the page ──────────
+    # A page's kernel says who it is (`hello {guid}`); from then on the host
+    # kernel can address its agents as `<guid>|<agent>` (kernel `peers`), and
+    # every such call rides THIS socket as an outbound `call` frame, answered by
+    # an inbound `reply`/`error` with the same id. This leg only carries the
+    # frames — the host kernel routes and gates, the page kernel gates its own
+    # agents. One guid per connection, pinned by the first hello.
+    peer: dict = {"guid": None, "route": None, "closed": False}
+    out_calls: dict[str, asyncio.Future] = {}
+    out_seq = [0]
+
+    async def _call_page(agent_id: str, payload: dict, caller: str) -> dict:
+        # A call that resolved this route just as the socket closed must not wait
+        # on a future the teardown has already swept — it settles now, the same
+        # way the teardown settles the ones already waiting.
+        if peer["closed"] or ws.application_state != WebSocketState.CONNECTED:
+            return refusal(
+                TRANSPORT_ERROR,
+                f"the page {peer['guid']} disconnected before answering",
+            )
+        out_seq[0] += 1
+        fid = f"h{out_seq[0]}"
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        out_calls[fid] = fut
+        try:
+            await _send_envelope(
+                {
+                    "type": "call",
+                    "id": fid,
+                    "target": agent_id,
+                    "payload": payload,
+                    "caller": caller,
+                }
+            )
+            return await fut
+        finally:
+            out_calls.pop(fid, None)
+
+    async def _on_hello(frame):
+        guid = frame.get("guid")
+        if not isinstance(guid, str) or not guid or "|" in guid:
+            await _send_envelope(
+                {
+                    "type": "error",
+                    "id": frame.get("id", ""),
+                    **bad(
+                        "hello",
+                        "guid",
+                        "the page kernel's guid, a non-empty id without `|`",
+                    ),
+                }
+            )
+            return
+        if not _gate("hello", frame).allowed:
+            return  # a sealed leg carries no peer either; the calls it refuses teach
+        if peer["guid"] is not None:
+            if peer["guid"] != guid:
+                await _send_envelope(
+                    {
+                        "type": "error",
+                        "id": frame.get("id", ""),
+                        **bad(
+                            "hello",
+                            "guid",
+                            f"{peer['guid']} (pinned by this connection's first hello)",
+                        ),
+                    }
+                )
+            return
+        route = PeerRoute(via=web_agent_id, call=_call_page)
+        taken = kernel.ctx.register_peer(guid, route)
+        if taken is not None:
+            await _send_envelope({"type": "error", "id": frame.get("id", ""), **taken})
+            return
+        peer["guid"], peer["route"] = guid, route
+
+    def _on_answer(frame):
+        """An inbound `reply`/`error` answers one of OUR outbound calls — its
+        data is that call's outcome (a page-side refusal included)."""
+        fut = out_calls.get(frame.get("id", ""))
+        if fut is not None and not fut.done():
+            data = frame.get("data")
+            fut.set_result(data if isinstance(data, dict) else {"result": data})
+
     FRAME_HANDLERS_INLINE = {
         "emit": _on_emit,
         "watch": _on_watch,
@@ -386,12 +471,29 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 ]["_task"]
                 pending.add(t)
                 t.add_done_callback(pending.discard)
+            elif ftype == "hello":
+                await _on_hello(frame)
+            elif ftype in ("reply", "error"):
+                _on_answer(frame)
             else:
                 inline = FRAME_HANDLERS_INLINE.get(ftype)
                 if inline is not None:
                     await inline(frame)
             # Unknown frame types are silently dropped (forward-compat).
     finally:
+        # The page is gone: it is no longer an address, and every call still
+        # waiting on it settles NOW with the reason — never a hang, never a retry.
+        peer["closed"] = True
+        if peer["route"] is not None:
+            kernel.ctx.unregister_peer(peer["guid"], peer["route"])
+        for fut in list(out_calls.values()):
+            if not fut.done():
+                fut.set_result(
+                    refusal(
+                        TRANSPORT_ERROR,
+                        f"the page {peer['guid']} disconnected before answering",
+                    )
+                )
         drain_task.cancel()
         # Cancel any in-flight `call` handlers so the underlying
         # kernel.send tasks unwind (ollama_backend honors

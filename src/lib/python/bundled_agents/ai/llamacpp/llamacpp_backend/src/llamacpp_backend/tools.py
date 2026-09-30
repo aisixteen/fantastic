@@ -27,6 +27,7 @@ TASK, killed with the universal `ps` → `cancel` system verbs.
 from __future__ import annotations
 
 from ai_core import build, required_meta
+from ai_core.schema import field, schema, validate
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -39,6 +40,36 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
     on_cancel,
 )
 
+from llamacpp_backend.provider import DEFAULT_TEMPERATURE
+
+NAME = "llamacpp_backend"
+
+#: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+#: no agent existing (`reflect bundles=all`), from the constants the provider runs
+#: on. `validate_meta` enforces it at the write, so the page and the kernel cannot
+#: disagree about what a record needs.
+RECORD_SCHEMA = schema(
+    [
+        field("endpoint", "str", "the llama-server /v1 URL", required=True),
+        field("model", "str", "a label only — the model is whatever the server loaded"),
+        field(
+            "api_key", "str", "the server's --api-key, only if it was started with one"
+        ),
+        field(
+            "temperature", "float", "sampling temperature", default=DEFAULT_TEMPERATURE
+        ),
+        field("num_predict", "int", "a turn's output budget (tokens)"),
+        field("think", "bool", "the chat template's enable_thinking (off unless set)"),
+    ],
+    key_var=None,
+)
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    value outside its set — every missing field named at once, from the schema."""
+    return validate(RECORD_SCHEMA, NAME, meta, record)
+
 
 def make_provider(id, kernel):
     """Build a LlamaCppProvider from the agent record
@@ -50,7 +81,7 @@ def make_provider(id, kernel):
     num_predict = rec.get("num_predict")
     think = rec.get("think")
     return LlamaCppProvider(
-        endpoint=required_meta(rec, "endpoint", "llamacpp_backend"),
+        endpoint=required_meta(rec, "endpoint", NAME),
         model=rec.get("model"),
         api_key=rec.get("api_key"),
         temperature=float(temperature) if temperature is not None else None,
@@ -68,7 +99,7 @@ async def _reflect_extra(id, kernel):
     rec = kernel.get(id) or {}
     t = rec.get("temperature")
     return {
-        "temperature": float(t) if t is not None else 0.3,
+        "temperature": float(t) if t is not None else DEFAULT_TEMPERATURE,
         "num_predict": int(rec["num_predict"]) if rec.get("num_predict") else None,
         "think": bool(rec["think"]) if rec.get("think") is not None else None,
         "has_api_key": bool(rec.get("api_key")),
@@ -80,7 +111,7 @@ def _build():
     return build(
         sentence="llama.cpp-backed local LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
-        name="llamacpp_backend",
+        name=NAME,
         module_name=__name__,
         reflect_extra=_reflect_extra,
     )

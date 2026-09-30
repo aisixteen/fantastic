@@ -642,7 +642,19 @@ pub async fn send(
         send_id: send_id.clone(),
         queued_at,
     };
-    state.queue.lock().expect("queue poisoned").push_back(entry);
+    // WHO IS AHEAD, counted in the SAME critical section as the push. python's
+    // enqueue → `lock.locked()` → acquire runs without yielding, so "the lock is
+    // held" there also covers everyone already queued; on a multi-threaded
+    // runtime two sends can both push and both see the lock free before either
+    // takes it, and neither said `queued` (measured, parity 2026-09-30: the
+    // `cycle` case lost its `status queued` event, and every later event ordinal
+    // shifted with it).
+    let prior = {
+        let mut q = state.queue.lock().expect("queue poisoned");
+        let prior = q.len();
+        q.push_back(entry);
+        prior
+    };
     // ARMED FROM HERE UNTIL THE LOCK IS OURS. A `cancel` (or an item `timeout`)
     // that lands while this dispatch WAITS on the FIFO drops the future at the
     // await below — the queue row would survive it forever, so `status` reported a
@@ -659,7 +671,7 @@ pub async fn send(
     // a bare `{type:'queued'}` rode ahead of it on rust/swift until 2026-09-02,
     // an undocumented extra type python never sends, which broke any per-submission
     // event count and every cross-runtime event-stream diff.
-    let contested = state.lock.try_lock().is_err();
+    let contested = prior > 0 || state.lock.try_lock().is_err();
     if contested {
         let ahead = state
             .queue

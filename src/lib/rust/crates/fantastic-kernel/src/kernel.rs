@@ -172,6 +172,12 @@ pub struct Kernel {
     /// `ctx._ai_memory` attribute: two kernels in one process (tests, a
     /// multi-kernel host) never share it. See [`Self::extension`].
     extensions: DashMap<&'static str, Arc<dyn std::any::Any + Send + Sync>>,
+    /// CONNECTED PEER KERNELS — guid → the route to it (owner, 2026-09-30). An
+    /// agent on another kernel is addressed `<guid>|<agent id>`; when that guid is
+    /// here, `send` hands the call to its route and the reply is the call's
+    /// ordinary outcome. A TRANSPORT registers the peer it is connected to and
+    /// unregisters it when the connection ends. See [`crate::peers`].
+    pub(crate) peers: crate::peers::PeerTable,
 }
 
 /// One bound for every agent's `shutdown` dispatch. Python
@@ -235,6 +241,7 @@ impl Kernel {
             rows: crate::rows::RowStore::new(),
             exec: crate::executions::ExecState::default(),
             extensions: DashMap::new(),
+            peers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -417,17 +424,27 @@ impl Kernel {
                     self.shutdown_walk(&child).await;
                 }
             }
-            if let Some(bundle) = agent
-                .handler_module
-                .as_deref()
-                .and_then(|hm| self.bundles.get(hm))
-            {
-                // C87: python's exact text is "hook raised", not "on_shutdown
-                // raised" (`print(f"  [shutdown] {self.id} hook raised: {e}",
-                // file=sys.stderr)`).
-                if let Err(e) = bundle.on_shutdown(&agent.id, self).await {
-                    eprintln!("  [shutdown] {} hook raised: {e}", agent.id.0);
-                }
+            let Some(hm) = agent.handler_module.as_deref() else {
+                return;
+            };
+            let Some(bundle) = self.bundles.get(hm) else {
+                // python imports the module to find its hook and SAYS when it
+                // cannot (`print(f"  [shutdown] {self.id} import {hm!r} raised:
+                // {e}", file=sys.stderr)`) — an agent whose bundle this runtime
+                // lacks is named in the log, not skipped silently.
+                eprintln!(
+                    "  [shutdown] {} import {} raised: {}",
+                    agent.id.0,
+                    fantastic_bundle::py_repr(hm),
+                    crate::send::no_module_named(hm)
+                );
+                return;
+            };
+            // C87: python's exact text is "hook raised", not "on_shutdown
+            // raised" (`print(f"  [shutdown] {self.id} hook raised: {e}",
+            // file=sys.stderr)`).
+            if let Err(e) = bundle.on_shutdown(&agent.id, self).await {
+                eprintln!("  [shutdown] {} hook raised: {e}", agent.id.0);
             }
         })
     }

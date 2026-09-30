@@ -143,6 +143,16 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
                 Self.jsonResponse(400, .object(["error": .string("web_rest: missing target")])), nil
             )
         }
+        // `null` = the host could not decode the bytes as text: python's
+        // `json.loads` raises `UnicodeDecodeError` there, caught with the
+        // `JSONDecodeError` — the same 400.
+        if request["body"] == .null, request.asObject?["body"] != nil {
+            return (
+                Self.jsonResponse(
+                    400, .object(["error": .string("web_rest: request body is not valid JSON")])),
+                nil
+            )
+        }
         let body = request["body"].asString ?? ""
         let payload: JSON
         if body.isEmpty {
@@ -303,7 +313,7 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         "boot": .string(
             "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app."
         ),
-        "get_routes": .string("Declares this surface's HTTP routes. Returns"),
+        "get_routes": .string("Declares this surface's HTTP routes. No args. Returns"),
     ]
 
     /// python `PB/io/web_rest/src/web_rest/readme.md`, byte for byte.

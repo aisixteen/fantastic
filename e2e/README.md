@@ -76,6 +76,25 @@ ANTHROPIC_API_KEY=<whatever the proxy accepts> \
 uv run python ../../../e2e/run.py --lanes 6
 ```
 
+Against a vLLM server DIRECTLY (no proxy), `BACKEND=vllm` names the server and the
+KV-cache table's policy — all required, nothing guessed:
+
+```sh
+cd src/lib/python && \
+BACKEND=vllm \
+VLLM_ENDPOINT=http://127.0.0.1:18000/v1 \
+FANTASTIC_AI_MODEL=qwen3.8-27b \
+VLLM_KV_SLOTS=7 VLLM_KV_OVERFLOW=evict \
+uv run python ../../../e2e/run.py --lanes 1
+```
+
+It sends the same repetition knobs as the anthropic plug (`sampling.default.json`) and
+leaves the thinking budget to the backend's own per-call rule. A door in front of the
+server that wants a key gets it from `VLLM_API_KEY` (sent as a Bearer header only when
+set). For the shared GPU the URL is the dataroom deployment's HTTPS door, with its
+own key (recipe: `tmp/vllm_backend.md`); keep lanes at 1–2 there — its run slots are
+shared with production.
+
 | flag | effect |
 |---|---|
 | `--lanes N` | how many run at once |

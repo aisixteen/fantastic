@@ -54,6 +54,15 @@ const { kernel } = await boot({
 An app imports from `src/index.ts`, never from the modules behind it (the canvas
 keeps that to one file, its `src/lib.ts`).
 
+**Deleting a page agent.** Tree CRUD verbs (`create_agent`/`update_agent`/
+`delete_agent`) belong to the host root, so a page deletes its own agents with
+`kernel.remove(id)` — and `delete_lock` is enforced there, as the host kernels'
+`delete_agent` enforces it: if the agent OR any descendant carries a truthy
+`delete_lock`, nothing is removed and the answer is
+`{error, reason:"locked", blocked_by, id, hint}`. Clear it with
+`kernel.updateMeta(id, {delete_lock: false})`, then remove again. Success is
+`{deleted: true, id}`; an unknown id is `unknown_agent`.
+
 ## Packing an app's page
 
 The library has no page, so `scripts/pack.sh` has no default: the app names its
@@ -86,8 +95,24 @@ by `tests/contract_corpus.test.ts` and `tests/c21_conformance.test.ts`.
 - Every agent answers `{type:"reflect"}` — the universal discovery verb.
 - This kernel federates to a host **loader** (by id) over the WS bridge and persists
   every local change back through it. No per-page session id.
-- Direction is **this kernel → host**: the host never references it. Same rule as
-  `ws_bridge` — addressed by URL + id only, no shared types.
+- The host never references it by TYPE — addressed by URL + id only, no shared
+  types, the same rule as `ws_bridge`. It can CALL it once the page has said hello
+  (see below): by guid and agent id, learned through reflect.
+
+## Called from the host (cross-kernel addressing)
+
+The host can call this kernel's agents directly: it addresses one as
+`<this kernel's guid>|<agent id>` with an ordinary `send` (and learns what is here
+by `reflect` to `<guid>|kernel`). The bridge's control socket makes that possible:
+it says `{type:"hello", guid}` on every (re)connect and again when the root first
+mints the guid, and answers each inbound `{type:"call", id, target, payload,
+caller}` with `{type:"reply", id, data}` — the call's outcome, a refusal included.
+
+Such a call runs under a FOREIGN origin (`caller`, the host agent's
+`<host guid>|<agent>`): the target's `callable_by` is the whole check here — name
+the caller, or `<host guid>|*` for every agent of that host — and only this
+kernel's own agents are reachable. A caller claiming this kernel's own guid is
+refused.
 
 ---
 

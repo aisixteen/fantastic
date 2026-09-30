@@ -11,7 +11,9 @@ comes back empty).
 ## The record
 
 REQUIRED — nothing is guessed, and a record missing any of them is refused at the
-write, naming every missing field:
+write, naming every missing field (the whole field list, with defaults and hints, is
+this kind's `schema` in `reflect bundles=all`; `memory_store_id` is required too, as
+on every AI agent):
 - `endpoint` — the server's `/v1` base, e.g. `http://127.0.0.1:18000/v1`
 - `model` — the served model name, e.g. `qwen3.8-27b`
 - `max_tokens` — the output budget of a turn (unbounded, a runaway turn decodes for a long time)
@@ -56,9 +58,17 @@ fold summary) gets `min(budget, its max_tokens // 2)`; below 256 no budget is se
 — a few tokens of thinking is no thinking, and a model starved of it stops with an
 empty answer. The value sent is `last_thinking_budget` in reflect.
 
+## The key
+
+A door in front of vLLM may want one (`Authorization: Bearer <key>`). It is read from
+`VLLM_API_KEY` in the environment at call time — never from the record — and sent
+only when set: unset, no header goes out, so a vLLM started without `--api-key`
+works as it is.
+
 ## Failures, in words
 
 - connection refused → vLLM is not listening yet (it loads for ~75 s after boot), or the tunnel is down
 - no answer within `connect_timeout` → the instance is stopped, or the tunnel/port is wrong
+- HTTP 401/403 → the door wants a key: set `VLLM_API_KEY`
 - the stream drops, or ends without a `finish_reason` → vLLM died mid-answer; the turn is not complete
 - `finish_reason: length` → a cut (`last_stop_reason: max_tokens`), so the caller can continue

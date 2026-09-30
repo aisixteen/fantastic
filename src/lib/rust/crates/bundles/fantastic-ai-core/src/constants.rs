@@ -34,6 +34,12 @@ pub const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
 pub const DEFAULT_OUTPUT_RESERVE: i64 = 1024;
 /// Never project to a budget below this.
 pub const BUDGET_FLOOR: i64 = 256;
+/// How many of the most recent turns a compaction keeps verbatim when the
+/// record names no `recent_n` (clamped to [`RECENT_N_RANGE`] either way).
+/// Python `RECENT_N`.
+pub const RECENT_N: i64 = 6;
+/// The clamp on `recent_n`. Python `RECENT_N_RANGE`.
+pub const RECENT_N_RANGE: (i64, i64) = (1, 50);
 
 // ─── the turn loop (python core.py) ─────────────────────────────────────────
 

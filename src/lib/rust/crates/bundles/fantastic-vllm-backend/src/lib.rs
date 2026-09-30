@@ -32,6 +32,7 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
 };
+use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_float, py_int, py_repr_value, py_str, py_truthy};
@@ -110,6 +111,21 @@ pub const PASSTHROUGH: [&str; 7] = [
 /// Both are the dataroom's values; each is a record field.
 pub const CONNECT_TIMEOUT: f64 = 5.0;
 pub const READ_TIMEOUT: f64 = 900.0;
+
+/// THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front
+/// of the shared GPU takes `Authorization: Bearer <key>`). Read from this
+/// environment variable at CALL time, never from the record; set ⇒ sent as a
+/// Bearer header, unset ⇒ no header at all, so a vLLM started without
+/// `--api-key` keeps working. A 401/403 names the variable. Python `KEY_VAR`.
+pub const KEY_VAR: &str = "VLLM_API_KEY";
+
+/// The key, read per call — `None` when unset or blank.
+fn api_key() -> Option<String> {
+    std::env::var(KEY_VAR)
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
 
 // ─── the KV-cache session table ─────────────────────────────────────────────
 
@@ -510,18 +526,24 @@ impl Provider for VllmProvider {
             .read_timeout(Duration::from_secs_f64(self.read_timeout))
             .build()
             .map_err(|e| ProviderError::raised(format!("{NAME}: http client: {e}")))?;
-        let resp = client
+        let mut req = client
             .post(format!("{}/chat/completions", self.endpoint))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| self.connection_error(&e))?;
+            .json(&body);
+        if let Some(key) = api_key() {
+            req = req.bearer_auth(key);
+        }
+        let resp = req.send().await.map_err(|e| self.connection_error(&e))?;
         let status = resp.status();
         if status.as_u16() >= 400 {
             let detail = resp.text().await.unwrap_or_default();
             let detail: String = detail.chars().take(500).collect();
+            let why = if matches!(status.as_u16(), 401 | 403) {
+                format!(" — the door wants a key: set {KEY_VAR}")
+            } else {
+                String::new()
+            };
             return Err(ProviderError::raised(format!(
-                "{NAME}: {} answered HTTP {}: {detail}",
+                "{NAME}: {} answered HTTP {}{why}: {detail}",
                 self.endpoint,
                 status.as_u16()
             )));
@@ -966,37 +988,93 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     // write accepted but no turn could use failed only later, on every turn,
     // far from the create that caused it (measured: E37 multisubai_build — the
     // solvers carried endpoint/model/max_tokens but no kv_slots/kv_overflow).
-    // Named ALL at once, so one retry fixes the record.
-    let missing: Vec<&str> = REQUIRED
-        .into_iter()
-        .filter(|k| !present(&merged, k))
-        .collect();
-    if !missing.is_empty() {
-        return Some(format!(
-            "{NAME}: required on the record and missing: {} — nothing is guessed. \
-             endpoint = the server's /v1 URL, model = the served name, max_tokens = a \
-             turn's output budget, kv_slots = how many conversations may be live on the \
-             endpoint, kv_overflow = evict (the least-recently-used rotates out) or \
-             reject (the newcomer is refused)",
-            missing.join(", ")
-        ));
-    }
-    None
+    // Named ALL at once, from the schema, so one retry fixes the record.
+    schema::validate(record_schema(), NAME, meta, record)
 }
 
-/// The fields a turn cannot run without — refused at the write when absent.
-pub const REQUIRED: [&str; 5] = ["endpoint", "model", "max_tokens", "kv_slots", "kv_overflow"];
+/// The sampling default for `key` — the one table the provider fills from.
+fn sampling_default(key: &str) -> Value {
+    sampling_defaults()
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map_or(Value::Null, |(_, v)| v)
+}
 
-/// Whether the record NAMES `key` in a usable shape (the shape itself is
-/// judged by the checks above) — python `_present`.
-fn present(rec: &Map<String, Value>, key: &str) -> bool {
-    let v = rec.get(key);
-    if matches!(key, "endpoint" | "model") {
-        return v
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty());
-    }
-    v.is_some_and(|v| !v.is_null())
+/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+/// no agent existing (`reflect bundles=all`). Built from the constants the
+/// provider runs on, and enforced by [`validate`], so the page, the write check
+/// and the turn cannot disagree. The five required fields have NO default:
+/// nothing is guessed about a server. Python `RECORD_SCHEMA`, field for field.
+#[must_use]
+pub fn record_schema() -> &'static Value {
+    static SCHEMA: OnceLock<Value> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        schema::schema(
+            vec![
+                Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
+                Field::new("model", "str", "the served model name").required(),
+                Field::new("max_tokens", "int", "a turn's output budget (tokens)").required(),
+                Field::new(
+                    "kv_slots",
+                    "int",
+                    "how many conversations may be live on the endpoint",
+                )
+                .required(),
+                Field::new(
+                    "kv_overflow",
+                    "enum",
+                    "all slots live: evict (the least-recently-used rotates out) or reject \
+                     (the newcomer is refused)",
+                )
+                .required()
+                .one_of(&KV_OVERFLOWS),
+                Field::new("temperature", "float", "sampling temperature")
+                    .default(sampling_default("temperature")),
+                Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
+                Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
+                Field::new(
+                    "reasoning_effort",
+                    "enum",
+                    "how much the model wants to think (xhigh needs a thinking_token_budget)",
+                )
+                .one_of(&REASONING_EFFORTS)
+                .default(sampling_default("reasoning_effort")),
+                Field::new(
+                    "thinking_token_budget",
+                    "int",
+                    "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
+                     min(default, max_tokens/2)",
+                )
+                .default(sampling_default("thinking_token_budget")),
+                Field::new("min_p", "float", "min-p sampling; sent only when set"),
+                Field::new("presence_penalty", "float", "sent only when set"),
+                Field::new("frequency_penalty", "float", "sent only when set"),
+                Field::new("repetition_penalty", "float", "sent only when set"),
+                Field::new("no_repeat_ngram_size", "int", "sent only when set"),
+                Field::new("seed", "int", "sent only when set"),
+                Field::new("stop", "list", "stop sequences; sent only when set"),
+                Field::new(
+                    "kv_ttl",
+                    "float",
+                    "seconds an idle conversation keeps its slot",
+                )
+                .default(json!(KV_TTL)),
+                Field::new("connect_timeout", "float", "seconds to reach the server")
+                    .default(json!(CONNECT_TIMEOUT)),
+                Field::new("read_timeout", "float", "seconds to wait on a generation")
+                    .default(json!(READ_TIMEOUT)),
+            ],
+            // the door's key, when it wants one — sent as a Bearer header only when set
+            Some(KEY_VAR),
+        )
+    })
+}
+
+/// The fields a turn cannot run without — refused at the write when absent. The
+/// schema's required fields, not a second list (python `REQUIRED`).
+#[must_use]
+pub fn required() -> Vec<String> {
+    schema::required_names(record_schema())
 }
 
 // ─── bundle impl ────────────────────────────────────────────────────────────
@@ -1020,6 +1098,10 @@ impl Bundle for VllmBundle {
         record: &Map<String, Value>,
     ) -> Option<String> {
         validate(meta, record)
+    }
+
+    fn record_schema(&self) -> Option<Value> {
+        Some(record_schema().clone())
     }
 
     async fn handle(

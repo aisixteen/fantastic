@@ -111,15 +111,36 @@
                 throw Failure(code: errno, path: command)
             }
             // The parent's keepers never cross the exec; the child's three are dup'd
-            // onto 3/1/2 (which clears CLOEXEC on the target) and their originals are
-            // closed by an explicit file action when they are not already in place.
+            // onto 3/1/2 (which clears CLOEXEC on the target) and their sources are
+            // closed by an explicit file action.
             for fd in [parentFd, outFds[0], errFds[0]] { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
 
+            // MOVE THE CHILD'S ENDS ABOVE THE TARGETS FIRST. A descriptor is just the
+            // lowest free number, and under concurrency that can be 1, 2 or 3 itself
+            // (another thread frees 3 between the kernel's two allocations of one
+            // socketpair/pipe). Planned in place, that broke two ways: a source that
+            // IS its target skipped its dup2 — and `POSIX_SPAWN_CLOEXEC_DEFAULT` then
+            // closed it as unnamed — and a later source equal to an earlier target
+            // was clobbered by that earlier dup2. Measured: the child's fd 3 was
+            // EBADF (`os.fstat(3)`), 1 run in ~45; the connector then never saw its
+            // socket and a parked child never self-reaped. Above 3, every source is
+            // distinct from every target, so every dup2 lands.
+            var ends: [(Int32, Int32)] = []
+            var liftFailure: Int32 = 0
+            for (fd, to) in [(childFd, Int32(3)), (outFds[1], Int32(1)), (errFds[1], Int32(2))] {
+                let hi = fcntl(fd, F_DUPFD, 4)
+                let e = errno
+                close(fd)
+                if hi >= 0 { ends.append((hi, to)) } else { liftFailure = e }
+            }
+            if liftFailure != 0 {
+                for fd in [parentFd, outFds[0], errFds[0]] + ends.map(\.0) { close(fd) }
+                throw Failure(code: liftFailure, path: command)
+            }
             var actions: posix_spawn_file_actions_t?
             posix_spawn_file_actions_init(&actions)
             defer { posix_spawn_file_actions_destroy(&actions) }
-            for (from, to) in [(childFd, Int32(3)), (outFds[1], Int32(1)), (errFds[1], Int32(2))]
-            where from != to {
+            for (from, to) in ends {
                 posix_spawn_file_actions_adddup2(&actions, from, to)
                 posix_spawn_file_actions_addclose(&actions, from)
             }
@@ -171,9 +192,7 @@
             // The child's ends are ours to drop on every path — keep the write ends and
             // the pipes never reach EOF; keep the socket's child end and the connector's
             // reader never returns, so the program never learns the kernel died.
-            close(childFd)
-            close(outFds[1])
-            close(errFds[1])
+            for (from, _) in ends { close(from) }
             guard rc == 0 else {
                 close(parentFd)
                 close(outFds[0])

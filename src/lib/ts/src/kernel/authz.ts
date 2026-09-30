@@ -125,6 +125,10 @@ export function authorizeCall(
       const x = key.slice(SUBTREE_PREFIX.length);
       matched = x !== "" && !otherId.includes("|") && ctx.inSubtree !== undefined && ctx.inSubtree(otherId, x);
     } else if (key.startsWith("$")) matched = false; // unknown token matches nothing
+    // every agent of ONE other kernel: `<guid>|*` (python `authorize_call`). A
+    // local id never carries `|`, so this only ever matches a caller or target
+    // on that kernel.
+    else if (key.endsWith("|*")) matched = otherId.startsWith(key.slice(0, -1));
     else matched = key === otherId;
     // A privileged verb loses only a STRUCTURAL key's wildcard (python
     // `privileged and key in STRUCTURAL_TOKENS`); a NAMED id's `*` is the

@@ -1247,3 +1247,70 @@ async fn root_with_handler_reflects_identity() {
         json!("Fantastic kernel. Everything is reachable by sending messages to agents.")
     );
 }
+
+/// A bundle that publishes its KIND's record schema (lib request #3).
+struct Schemaed;
+
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for Schemaed {
+    fn name(&self) -> &str {
+        "schemaed"
+    }
+    async fn handle(
+        &self,
+        _agent_id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        Ok(None)
+    }
+    fn record_schema(&self) -> Option<Value> {
+        Some(
+            json!({"fields": [{"name": "endpoint", "type": "str", "required": true,
+                                "hint": "the URL"}],
+                    "key_var": null}),
+        )
+    }
+}
+
+/// Python `_available_bundles(schemas=True)`: `bundles=all` carries a bundle's
+/// `schema` when it publishes one — after `name`/`handler_module`, and only
+/// there; a bundle that publishes none has no key, and the cheap `bundles=ids`
+/// listing stays names.
+#[tokio::test]
+async fn bundles_all_carries_a_published_record_schema() {
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    reg.register("alpha.tools", Named("alpha"));
+    reg.register("schemaed.tools", Schemaed);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = mk_agent("kernel_state", None);
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let all = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "tree": "none", "bundles": "all"}),
+    )
+    .await
+    .result;
+    assert_eq!(
+        all["bundles"],
+        json!([
+            {"name": "alpha", "handler_module": "alpha.tools"},
+            {"name": "schemaed", "handler_module": "schemaed.tools",
+             "schema": {"fields": [{"name": "endpoint", "type": "str", "required": true,
+                                    "hint": "the URL"}],
+                        "key_var": null}},
+        ])
+    );
+    let keys: Vec<&String> = all["bundles"][1].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["name", "handler_module", "schema"]);
+    let ids = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "tree": "none", "bundles": "ids"}),
+    )
+    .await
+    .result;
+    assert_eq!(ids["bundles"], json!(["alpha", "schemaed"]));
+}

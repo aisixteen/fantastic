@@ -88,6 +88,24 @@ public enum KernelTaskLocals {
     /// Python `current_remote_caller()`.
     @TaskLocal public static var currentRemote: String? = nil
 
+    /// Called once a batch item's dispatch has FANNED OUT (its `send` reached the
+    /// target's watchers) — the turnstile `send` uses to start the items of one
+    /// batch in INPUT ORDER. Python creates the dispatch tasks in order and each
+    /// runs its prologue (in-flight count, fanout) before the next one starts;
+    /// a task group starts its children in any order, so two items to one agent
+    /// reached its watchers swapped (measured: parity `ctx/ws_events.json`, a
+    /// `recall` + `context_status` batch, and `ai_paths` cycle). Cleared for the
+    /// handler, so its own sends never touch the caller's turnstile.
+    @TaskLocal static var onFanout: (@Sendable () -> Void)? = nil
+
+    /// Called once a batch has LAUNCHED — every item has fanned out (or settled
+    /// without a dispatch) — while the items still settle. A caller that must
+    /// not proceed before its batch reached its targets sets it around that one
+    /// `send` (ai_core's routing: python's event loop runs the route task up to
+    /// its dispatches before the `send` that spawned it hands its reply back).
+    /// Cleared for every handler, like `onFanout`.
+    @TaskLocal public static var onBatchLaunched: (@Sendable () -> Void)? = nil
+
     /// Mark the enclosed sends as `leg` relaying `address`'s call. Python
     /// `remote_caller_context(leg_id, address)`.
     public static func withRemoteCaller<T>(
@@ -256,6 +274,16 @@ public final class Kernel: @unchecked Sendable {
     /// instance value so a test can tighten it, exactly as python's test sets
     /// `k.QUIET_TIMEOUT`; the constant is `Kernel.QUIET_TIMEOUT`.
     var quietTimeout: Double = Kernel.QUIET_TIMEOUT
+
+    /// CONNECTED PEER KERNELS — guid → the route to it (owner, 2026-09-30). An
+    /// agent on another kernel is addressed `<guid>|<agent id>`; when that guid is
+    /// here, `send` hands the call to its route and the reply is the call's
+    /// ordinary outcome. A TRANSPORT registers the peer it is connected to (the web
+    /// ws leg when a page says `hello`) and unregisters it when the connection ends
+    /// — the transport only carries frames; addressing is the kernel's. A guid that
+    /// is not here is an unknown target like any other. See `Peers.swift`.
+    let peersLock = NSLock()
+    var _peers: [String: PeerRoute] = [:]
 
     public init(
         storage: StorageMode = .inMemory,

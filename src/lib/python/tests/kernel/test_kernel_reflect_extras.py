@@ -130,8 +130,82 @@ async def test_reflect_bundles_all(seeded_kernel):
     assert "cli" in names and "file_bridge" in names
     assert names == sorted(names)
     for b in bundles:
-        assert set(b.keys()) == {"name", "handler_module"}
+        # `schema` only where the bundle publishes a RECORD_SCHEMA (lib request #3)
+        assert set(b.keys()) <= {"name", "handler_module", "schema"}
         assert b["handler_module"].endswith(".tools")
+
+
+async def test_the_catalog_carries_each_backend_kinds_record_schema(seeded_kernel):
+    """A set-up page reads what a KIND's record takes before any agent of it
+    exists: every field with required/type/enum/default/hint, and the key var."""
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "bundles": "all"}}]
+        )
+    )[0]["result"]
+    by = {b["name"]: b for b in r["bundles"]}
+    vllm = by["vllm_backend"]["schema"]
+    fields = {f["name"]: f for f in vllm["fields"]}
+    required = [f["name"] for f in vllm["fields"] if f["required"]]
+    assert required == [
+        "endpoint",
+        "model",
+        "max_tokens",
+        "kv_slots",
+        "kv_overflow",
+        "memory_store_id",
+    ], required
+    # a required field has no default — nothing is guessed about a server
+    assert all("default" not in fields[n] for n in required)
+    # the defaulted fields carry THE BACKEND'S OWN values
+    assert fields["temperature"]["default"] == 0.2
+    assert fields["thinking_token_budget"]["default"] == 16000
+    assert fields["kv_overflow"]["enum"] == ["evict", "reject"]
+    assert fields["reasoning_effort"]["enum"] == ["low", "medium", "xhigh"]
+    assert vllm["key_var"] == "VLLM_API_KEY"  # sent only when set
+    assert by["responses_backend"]["schema"]["key_var"] == "OPENAI_API_KEY"
+    assert by["anthropic_backend"]["schema"]["key_var"] == "ANTHROPIC_API_KEY"
+    # a bundle that is not a backend publishes none
+    assert "schema" not in by["file_bridge"]
+
+
+async def test_the_schema_is_what_the_write_enforces(seeded_kernel):
+    """ONE TRUTH: a create missing the schema's required fields is refused at the
+    write, every one named; an enum value outside its set is refused too."""
+    k = seeded_kernel
+
+    async def create(**meta):
+        return (
+            await k.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": k.id,
+                            "handler_module": "anthropic_backend.tools",
+                            **meta,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+
+    r = await create(id="a1")
+    assert r.get("reason") == "invalid_meta", r
+    assert "missing: endpoint, model, memory_store_id" in r["error"], r
+    r = await create(
+        id="a2",
+        endpoint="http://127.0.0.1:9/stub",
+        model="m",
+        memory_store_id="memory",
+        context_strategy="bogus",
+    )
+    assert r.get("reason") == "invalid_meta" and "context_strategy" in r["error"], r
+    r = await create(
+        id="a3", endpoint="http://127.0.0.1:9/stub", model="m", memory_store_id="memory"
+    )
+    assert r.get("id") == "a3", r
 
 
 async def test_reflect_bundles_ids(seeded_kernel):

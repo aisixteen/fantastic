@@ -200,6 +200,51 @@ impl Kernel {
         let sender = self.agents.get(sender_id).map(|e| Arc::clone(&e));
         let (s_can, s_parent, s_kids) = grant_facts(sender.as_deref(), "can_call");
 
+        // A target on ANOTHER KERNEL: egress is the whole check here — the
+        // sender's `can_call` must name `<guid>|<agent>` or `<guid>|*`. Whether
+        // that agent accepts the call is its OWN kernel's decision (its
+        // `callable_by`, against the qualified `<this guid>|<sender>`), made where
+        // the agent lives.
+        //
+        // FIRST, before the placement branch below: a `create_agent` sent to
+        // `<guid>|kernel` places its child on the PEER, so a `parent_id` in the
+        // payload names nothing here — resolving it locally would judge the wrong
+        // operand, and a sender placing under its own subtree would pass without
+        // any grant on the peer at all.
+        if let Some(remote) = target.remote.as_ref() {
+            let d = crate::authz::authorize_call(
+                &s_can,
+                verb,
+                target.id.as_str(),
+                sender_id.as_str(),
+                s_parent.as_deref(),
+                &s_kids,
+                loader_id.as_deref(),
+                true,
+                None,
+            );
+            if d.allowed || self.heritable_egress(sender_id.as_str(), verb, target.id.as_str()) {
+                return None;
+            }
+            return Some(json!({
+                "error": format!(
+                    "{sender_id} may not call {} on {}",
+                    fantastic_bundle::py_repr(verb),
+                    target.id
+                ),
+                "reason": "unauthorized",
+                "hint": format!(
+                    "{} is an agent on the connected kernel {}: name it in can_call — \
+                     {{{}: [...]}} or {{'{}|*': [...]}}",
+                    target.id,
+                    remote.guid,
+                    fantastic_bundle::py_repr(target.id.as_str()),
+                    remote.guid
+                ),
+                "side": "egress",
+            }));
+        }
+
         // PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
         // the agent it ACTS UPON is the parent named in `parent_id` — so that is
         // what the gate asks about, on both sides. Gating the root instead made

@@ -449,6 +449,9 @@ pub async fn apply_reflect_flags(
     // version) across all four runtimes.
     if target.parent_id.is_none() {
         obj.insert("runtime".to_string(), json!("rust"));
+        // The kernels this one is CONNECTED to — each agent there is reachable
+        // as `<guid>|<agent id>` (reflect `<guid>|kernel` for its tree).
+        obj.insert("peers".to_string(), kernel.peer_rows());
         obj.insert(
             "env".to_string(),
             json!(std::env::var("FANTASTIC_ENV").unwrap_or_else(|_| "host".to_string())),
@@ -500,7 +503,7 @@ pub async fn apply_reflect_flags(
     // its cursor `bundles_next` only when a further page exists.
     match payload.get("bundles") {
         Some(Value::String(b)) if b == "all" => {
-            let (cat, next) = crate::paging::page(available_bundles(kernel), payload, |b| {
+            let (cat, next) = crate::paging::page(available_bundles(kernel, true), payload, |b| {
                 b.get("name")
                     .and_then(Value::as_str)
                     .unwrap_or("")
@@ -512,7 +515,7 @@ pub async fn apply_reflect_flags(
             }
         }
         Some(Value::String(b)) if b == "ids" => {
-            let names: Vec<String> = available_bundles(kernel)
+            let names: Vec<String> = available_bundles(kernel, false)
                 .iter()
                 .filter_map(|b| b.get("name").and_then(Value::as_str).map(str::to_string))
                 .collect();
@@ -645,15 +648,26 @@ pub fn descendant_ids(target: &Agent) -> Vec<String> {
 /// The INSTALLABLE-bundle catalog as `{name, handler_module}`, sorted by
 /// name (python's entry-point scan) — unlisted fixtures are not in it. The
 /// `bundles=all` tier (`bundles=ids` maps to just the names).
-fn available_bundles(kernel: &Arc<Kernel>) -> Vec<Value> {
+///
+/// With `schemas`, an entry also carries `schema` when its bundle publishes a
+/// [`crate::bundle::Bundle::record_schema`] — what that KIND's record takes,
+/// readable before any agent of it exists (lib request #3). Python
+/// `_available_bundles(schemas=True)`; the cheap `bundles=ids` listing never asks.
+fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
     let mut out: Vec<Value> = kernel
         .bundles
         .catalog()
         .map(|(handler_module, b)| {
-            json!({
+            let mut entry = json!({
                 "name": b.name(),
                 "handler_module": handler_module,
-            })
+            });
+            if schemas {
+                if let Some(sch) = b.record_schema() {
+                    entry["schema"] = sch;
+                }
+            }
+            entry
         })
         .collect();
     out.sort_by(|a, b| {

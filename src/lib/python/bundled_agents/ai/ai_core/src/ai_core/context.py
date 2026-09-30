@@ -39,7 +39,12 @@ def _as_pos_int(v: Any) -> int | None:
         return v
     if isinstance(v, float) and v > 0:
         return int(v)
-    if isinstance(v, str) and v.strip().isdigit() and int(v) > 0:
+    if (
+        isinstance(v, str)
+        and v.strip().isascii()
+        and v.strip().isdigit()
+        and int(v) > 0
+    ):
         return int(v)
     return None
 
@@ -60,7 +65,7 @@ def output_reserve(rec: dict) -> int:
     v = rec.get("output_reserve")
     if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
         return v
-    if isinstance(v, str) and v.strip().isdigit():
+    if isinstance(v, str) and v.strip().isascii() and v.strip().isdigit():
         return int(v)
     return DEFAULT_OUTPUT_RESERVE
 

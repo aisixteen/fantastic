@@ -363,31 +363,35 @@ async fn a_missing_key_raises_inside_chat_after_status_thinking() {
     );
 }
 
-/// The RECORD is checked before the key: with neither a model nor a key, the
-/// caller reads the model refusal (python's `required_meta` runs at the
-/// provider build; the key is read in `chat`).
+/// The RECORD is checked before the key — now AT THE WRITE (the kind's schema,
+/// lib request #3): with no key in the environment, blanking the model is
+/// refused naming the model and what it is, and the record keeps its value.
+/// The key is read only at `chat`, so it never gets a say.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_model_is_named_before_a_missing_key() {
     let _key = KeyEnv::set(None).await;
     let tmp = tempfile::TempDir::new().unwrap();
-    let mut extra = Map::new();
-    extra.insert("model".to_string(), json!(""));
-    let (kernel, ant, _fid) = mk_kernel_with(&tmp, None, extra).await;
+    let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
     let r = kernel
         .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "send", "text": "hi", "client_id": "test"}),
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": ant.as_str(), "model": ""}),
         )])
         .await
         .remove(0)
         .result;
+    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
     assert_eq!(
         r["error"],
         json!(
-            "ValueError: anthropic_backend: `model` is required on the agent record — \
-             nothing is guessed (update_agent <id> model=…)"
+            "anthropic_backend: required on the record and missing: model — nothing is \
+             guessed. model = the model name"
         )
     );
+    let model = kernel
+        .resolve_target(ant.as_str())
+        .and_then(|a| a.record().meta.get("model").cloned());
+    assert_ne!(model, Some(json!("")), "the refused write changed nothing");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

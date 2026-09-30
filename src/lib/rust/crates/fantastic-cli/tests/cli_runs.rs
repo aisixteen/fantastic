@@ -1250,3 +1250,132 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
         "the lock must be released"
     );
 }
+
+/// Run one one-shot call in `dir` and parse its stdout — the reply JSON, alone.
+fn one_shot_json(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let out = Command::new(fantastic_bin())
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("one-shot");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not json ({e}): {stdout}"))
+}
+
+/// Lib request #3 — python `test_the_catalog_carries_each_backend_kinds_record_schema`:
+/// a set-up page reads what a KIND's record takes before any agent of it exists —
+/// every field with required/type/enum/default/hint, and the key var — from the
+/// REAL catalog of this binary.
+#[test]
+fn the_catalog_carries_each_backend_kinds_record_schema() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let r = one_shot_json(
+        tmp.path(),
+        &["kernel", "reflect", "bundles=all", "tree=none"],
+    );
+    let by: std::collections::HashMap<&str, &serde_json::Value> = r["bundles"]
+        .as_array()
+        .expect("bundles")
+        .iter()
+        .map(|b| (b["name"].as_str().unwrap(), b))
+        .collect();
+    let vllm = &by["vllm_backend"]["schema"];
+    let fields: std::collections::HashMap<&str, &serde_json::Value> = vllm["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["name"].as_str().unwrap(), f))
+        .collect();
+    let required: Vec<&str> = vllm["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["required"] == serde_json::json!(true))
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        required,
+        [
+            "endpoint",
+            "model",
+            "max_tokens",
+            "kv_slots",
+            "kv_overflow",
+            "memory_store_id"
+        ]
+    );
+    // a required field has no default — nothing is guessed about a server
+    assert!(required.iter().all(|n| fields[n].get("default").is_none()));
+    // the defaulted fields carry THE BACKEND'S OWN values
+    assert_eq!(fields["temperature"]["default"], serde_json::json!(0.2));
+    assert_eq!(
+        fields["thinking_token_budget"]["default"],
+        serde_json::json!(16000)
+    );
+    assert_eq!(
+        fields["kv_overflow"]["enum"],
+        serde_json::json!(["evict", "reject"])
+    );
+    assert_eq!(
+        fields["reasoning_effort"]["enum"],
+        serde_json::json!(["low", "medium", "xhigh"])
+    );
+    assert_eq!(vllm["key_var"], serde_json::json!("VLLM_API_KEY")); // sent only when set
+    assert_eq!(
+        by["responses_backend"]["schema"]["key_var"],
+        "OPENAI_API_KEY"
+    );
+    assert_eq!(
+        by["anthropic_backend"]["schema"]["key_var"],
+        "ANTHROPIC_API_KEY"
+    );
+    // a bundle that is not a backend publishes none
+    assert!(by["file_bridge"].get("schema").is_none());
+}
+
+/// Lib request #3 — python `test_the_schema_is_what_the_write_enforces`: ONE
+/// TRUTH. A create missing the schema's required fields is refused at the write,
+/// every one named; an enum value outside its set is refused too.
+#[test]
+fn the_schema_is_what_the_write_enforces() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_store(tmp.path());
+    let create = |extra: &[&str]| {
+        let mut args = vec![
+            "kernel_state",
+            "create_agent",
+            "parent_id=kernel",
+            "handler_module=anthropic_backend.tools",
+        ];
+        args.extend_from_slice(extra);
+        one_shot_json(tmp.path(), &args)
+    };
+    let r = create(&["id=a1"]);
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing: endpoint, model, memory_store_id"),
+        "{r}"
+    );
+    let r = create(&[
+        "id=a2",
+        "endpoint=http://127.0.0.1:9/stub",
+        "model=m",
+        "memory_store_id=memory",
+        "context_strategy=bogus",
+    ]);
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert!(
+        r["error"].as_str().unwrap().contains("context_strategy"),
+        "{r}"
+    );
+    let r = create(&[
+        "id=a3",
+        "endpoint=http://127.0.0.1:9/stub",
+        "model=m",
+        "memory_store_id=memory",
+    ]);
+    assert_eq!(r["id"], "a3", "{r}");
+}

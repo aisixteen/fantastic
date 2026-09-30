@@ -25,6 +25,7 @@ a kernel TASK, killed with the universal `ps` → `cancel` system verbs.
 from __future__ import annotations
 
 from ai_core import build, required_meta
+from ai_core.schema import field, schema, validate
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -36,6 +37,34 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
     _queue,
     on_cancel,
 )
+
+from ollama_backend.provider import DEFAULT_TEMPERATURE
+
+NAME = "ollama_backend"
+
+#: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+#: no agent existing (`reflect bundles=all`), from the constants the provider runs
+#: on. `validate_meta` enforces it at the write, so the page and the kernel cannot
+#: disagree about what a record needs.
+RECORD_SCHEMA = schema(
+    [
+        field("endpoint", "str", "the ollama server URL", required=True),
+        field("model", "str", "the model name", required=True),
+        field("num_ctx", "int", "the context window ollama loads the model with"),
+        field(
+            "temperature", "float", "sampling temperature", default=DEFAULT_TEMPERATURE
+        ),
+        field("num_predict", "int", "a turn's output budget (tokens)"),
+        field("think", "bool", "turn the model's thinking channel on or off"),
+    ],
+    key_var=None,
+)
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    value outside its set — every missing field named at once, from the schema."""
+    return validate(RECORD_SCHEMA, NAME, meta, record)
 
 
 def make_provider(id, kernel):
@@ -51,8 +80,8 @@ def make_provider(id, kernel):
     num_predict = rec.get("num_predict")
     think = rec.get("think")
     return OllamaProvider(
-        endpoint=required_meta(rec, "endpoint", "ollama_backend"),
-        model=required_meta(rec, "model", "ollama_backend"),
+        endpoint=required_meta(rec, "endpoint", NAME),
+        model=required_meta(rec, "model", NAME),
         num_ctx=int(num_ctx) if num_ctx else None,
         temperature=float(temperature) if temperature is not None else None,
         num_predict=int(num_predict) if num_predict else None,
@@ -68,7 +97,7 @@ async def _reflect_extra(id, kernel):
     rec = kernel.get(id) or {}
     t = rec.get("temperature")
     return {
-        "temperature": float(t) if t is not None else 0.3,
+        "temperature": float(t) if t is not None else DEFAULT_TEMPERATURE,
         "num_ctx": int(rec["num_ctx"]) if rec.get("num_ctx") else None,
         "num_predict": int(rec["num_predict"]) if rec.get("num_predict") else None,
         "think": bool(rec["think"]) if rec.get("think") is not None else None,
@@ -80,7 +109,7 @@ def _build():
     return build(
         sentence="Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
-        name="ollama_backend",
+        name=NAME,
         module_name=__name__,
         reflect_extra=_reflect_extra,
     )

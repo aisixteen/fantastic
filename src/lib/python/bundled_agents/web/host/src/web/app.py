@@ -120,7 +120,12 @@ class _OriginGuard:
 
 
 def make_app(web_agent_id: str, kernel) -> FastAPI:
-    app = FastAPI()
+    # NO GENERATED SURFACES. FastAPI mounts `/docs`, `/redoc` and `/openapi.json`
+    # by default — routes nobody declared, answering on every web agent and
+    # describing its whole route table to anyone who asks (parity 2026-09-30: the
+    # rust/swift web serve nothing they were not told to). A web agent serves only
+    # what its legs declare.
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     _favicon_bytes = (resources.files("web") / "favicon.png").read_bytes()
 

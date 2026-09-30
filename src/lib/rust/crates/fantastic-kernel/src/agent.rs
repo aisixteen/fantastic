@@ -106,6 +106,12 @@ pub struct Agent {
     /// the `backlog` every state event and the state snapshot report. Queue
     /// depth is a different number and was never what python answered.
     in_flight: std::sync::atomic::AtomicI64,
+    /// `Some` for an agent on a CONNECTED PEER KERNEL (python's `RemoteTarget`):
+    /// built by one send for `<guid>|<agent id>`, never registered in this tree,
+    /// and dispatched through the peer's route instead of a handler here. Its
+    /// `parent_id` is `None` like python's `parent = None`, so every path that
+    /// reads "no parent" as "the root" must ask [`Agent::is_remote`] first.
+    pub(crate) remote: Option<crate::peers::RemoteRef>,
 }
 
 /// Keys a RECORD may never carry: they name substrate wiring, not agent meta.
@@ -158,7 +164,33 @@ impl Agent {
             root_path,
             ephemeral,
             in_flight: std::sync::atomic::AtomicI64::new(0),
+            remote: None,
         })
+    }
+
+    /// The target ONE send resolved `<guid>|<agent id>` to on a connected peer.
+    /// No structural baseline: it is nobody's parent or child here, and its
+    /// `callable_by` is python's empty map — whether it accepts a call is decided
+    /// on its own kernel.
+    pub(crate) fn remote(qualified: AgentId, remote: crate::peers::RemoteRef) -> Arc<Self> {
+        Arc::new(Self {
+            id: qualified,
+            handler_module: None,
+            parent_id: None,
+            meta: std::sync::RwLock::new(crate::peers::remote_meta()),
+            children: std::sync::RwLock::new(Vec::new()),
+            watcher_ids: RwLock::new(HashSet::new()),
+            root_path: PathBuf::new(),
+            ephemeral: true,
+            in_flight: std::sync::atomic::AtomicI64::new(0),
+            remote: Some(remote),
+        })
+    }
+
+    /// Is this an agent on a connected peer kernel (see [`Agent::remote`])?
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
     }
 
     /// Dispatches currently running on this agent — the `backlog` of every state

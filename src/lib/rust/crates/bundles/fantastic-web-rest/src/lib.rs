@@ -126,7 +126,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         json!({
             "reflect": "Identity + URL patterns + curl examples + this leg's auth posture",
             "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app.",
-            "get_routes": "Declares this surface's HTTP routes. Returns",
+            "get_routes": "Declares this surface's HTTP routes. No args. Returns",
         }),
     );
     Value::Object(out)

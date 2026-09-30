@@ -734,6 +734,16 @@ public final class AIBackend: @unchecked Sendable {
             // is actually pending for this agent — its queue and its FIFO lock.
             let st = runState(kernel, agentId.value)
             let incoming = text
+            // THE ROUTED CALLS REACH THEIR TARGETS BEFORE THIS REPLY GOES BACK.
+            // Python spawns the route task inside this handler and its event loop
+            // runs that task up to its dispatch before the caller of this `send`
+            // resumes — so a model's own call (`send ai …`) lands before the reply
+            // its caller then delivers. A detached swift task could lose that race
+            // (measured: parity `ai_paths` cycle, the two turns to `ai` swapped).
+            // Released at launch, not at completion: the calls still SETTLE on
+            // their own, and a self-addressed call fans out before it needs the
+            // lock, so this never waits on this agent.
+            let launched = StartSignal()
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
                     selfId: agentId, kernel: kernel, text: textOut,
@@ -744,8 +754,10 @@ public final class AIBackend: @unchecked Sendable {
                     sendTimeout: deadline,
                     runState: st,
                     messageId: messageId,
-                    deadTurn: deadTurn)
+                    deadTurn: deadTurn,
+                    launched: launched)
             }
+            await launched.wait()
         }
         return reply
     }

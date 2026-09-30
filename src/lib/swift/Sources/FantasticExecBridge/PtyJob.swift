@@ -21,8 +21,15 @@
     let PTY_LOW_WATERMARK = 5_000
     let MAX_PASTE_IMAGE = 5 * 1024 * 1024
 
-    /// An `errno` a PTY write failed with.
-    struct PtyErrno: Error { let code: Int32 }
+    /// Why a PTY write or resize did not happen.
+    enum PtyFailure: Error, Equatable {
+        /// The job ended first: its terminal is closed and no descriptor was
+        /// touched — the caller answers the same "job has ended" refusal it gives
+        /// a job that was already gone.
+        case ended
+        /// The OS refused it, with this `errno`.
+        case os(Int32)
+    }
     let PTY_IMAGE_EXT: [(String, String)] = [
         ("image/png", "png"), ("image/jpeg", "jpg"), ("image/gif", "gif"), ("image/webp", "webp"),
     ]
@@ -87,6 +94,12 @@
             // that never heard a resize.
             var noSignals = sigset_t()
             sigemptyset(&noSignals)
+            // EVERY VALUE THE CHILD USES, computed BEFORE the fork (see the child).
+            let sigDefault = SIG_DFL
+            let sigCount = NSIG
+            let setMask = SIG_SETMASK
+            let maxFd = Int32(min(getdtablesize(), 65536))
+            let failLen = strlen(failMsg!)
             var master: Int32 = 0
             forkLock.lock()
             let pid = forkpty(&master, nil, nil, &ws)
@@ -102,19 +115,37 @@
                 // Child: stdin/out/err are the slave; the control socket goes to 3;
                 // EVERY OTHER fd of the kernel process is closed (python's fds are
                 // non-inheritable). Only async-signal-safe calls from here on.
-                for sig in 1..<NSIG { _ = signal(sig, SIG_DFL) }
-                _ = sigprocmask(SIG_SETMASK, &noSignals, nil)
+                //
+                // AND NO SWIFT RUNTIME: only C calls on values computed before the
+                // fork, and `while` loops over plain `Int32`. A `for … in a..<b` loop
+                // instantiates generic metadata (`IndexingIterator<Range<Int32>>`),
+                // which takes the runtime's metadata lock — and a fork of a threaded
+                // process copies that lock in whatever state ANOTHER thread held it,
+                // owned by a thread that does not exist in the child. Measured: the
+                // child aborted in `_os_unfair_lock_corruption_abort` under
+                // `IndexingIterator.next()` in this very function (EXC_BREAKPOINT,
+                // reported as SIGKILL), before `execve` — a terminal job that died
+                // with -9 having printed nothing (4 crash reports on 2026-09-30).
+                var sig: Int32 = 1
+                while sig < sigCount {
+                    _ = signal(sig, sigDefault)
+                    sig &+= 1
+                }
+                _ = sigprocmask(setMask, &noSignals, nil)
                 if childFd != 3 {
                     _ = dup2(childFd, 3)
                 }
-                let maxFd = Int32(min(getdtablesize(), 65536))
-                if maxFd > 4 { for fd in 4..<maxFd { _ = close(fd) } }
+                var fd: Int32 = 4
+                while fd < maxFd {
+                    _ = close(fd)
+                    fd &+= 1
+                }
                 if chdir(cwdC) != 0 {
-                    _ = Darwin.write(2, failMsg, strlen(failMsg!))
+                    _ = Darwin.write(2, failMsg, failLen)
                     _exit(127)
                 }
                 execve(programC, argvC, envC)
-                _ = Darwin.write(2, failMsg, strlen(failMsg!))
+                _ = Darwin.write(2, failMsg, failLen)
                 _exit(127)
             }
             close(childFd)
@@ -131,7 +162,17 @@
         let jobId: TaskId
         private let owner: AgentId
         private let child: Child
+        /// The master end — guarded by `fdLock`, never by `state`.
         private var masterFd: Int32
+        /// Guards the master fd's LIFETIME. A write or a resize holds it for the
+        /// WHOLE use of the descriptor, and the read loop clears `masterFd` under
+        /// it BEFORE closing. So a write or resize racing the job's end either
+        /// finishes first (the close waits for it) or sees -1 and answers `.ended`
+        /// — it can never reach a descriptor number the process has since reused
+        /// for some other file. (Reading the fd under a lock and using it after
+        /// the unlock left exactly that window.) Lock order: `fdLock` before
+        /// `state`; nothing takes `fdLock` while holding `state`.
+        private let fdLock = NSLock()
         private let readQueue = DispatchQueue(label: "exec.pty.read")
         /// Writes never interleave (a bracketed paste split by another write
         /// leaves the shell stuck in paste mode).
@@ -173,10 +214,12 @@
 
         private func readLoop() {
             var buffer = [UInt8](repeating: 0, count: 4096)
+            // The read loop is the fd's only closer, so its own copy stays valid
+            // until the close below.
+            let fd = fdLock.withLock { masterFd }
             while true {
                 state.lock()
                 while paused && !eof { state.wait() }
-                let fd = masterFd
                 let done = eof
                 state.unlock()
                 if done || fd < 0 { break }
@@ -211,12 +254,19 @@
             }
             state.lock()
             eof = true
-            let fd = masterFd
-            masterFd = -1
             let dir = pasteDir
             pasteDir = nil
             state.unlock()
-            if fd >= 0 { close(fd) }
+            // CLEAR, THEN CLOSE: once `masterFd` is -1 under the lock, no write or
+            // resize can pick the number up again, and one in flight has already
+            // finished (it held the lock). A writer waiting out a full tty queue
+            // sees `eof` above and lets go.
+            let closing = fdLock.withLock { () -> Int32 in
+                let f = masterFd
+                masterFd = -1
+                return f
+            }
+            if closing >= 0 { close(closing) }
             if let dir { try? fsRemove(dir, "", recursive: true, base: "/") }
             events.finish()
         }
@@ -246,10 +296,12 @@
         }
 
         var isLive: Bool {
-            state.lock()
-            defer { state.unlock() }
-            return !eof && masterFd >= 0
+            let done = state.withLock { eof }
+            return !done && fdLock.withLock { masterFd >= 0 }
         }
+
+        /// Whether the read loop has reached the end (the fd is about to close).
+        private var ended: Bool { state.withLock { eof } }
 
         /// `ack` — flow control.
         func ack(_ chars: Int) -> (Int, Bool) {
@@ -271,46 +323,61 @@
             return ring.joined()
         }
 
-        /// `resize` — the tty sends SIGWINCH to the program.
-        func resize(cols: Int, rows: Int) -> Int32 {
-            state.lock()
-            self.cols = cols
-            self.rows = rows
-            let fd = masterFd
-            state.unlock()
+        /// `resize` — the tty sends SIGWINCH to the program. Done holding `fdLock`,
+        /// so the descriptor cannot close (and be reused) under the `ioctl`.
+        func resize(cols: Int, rows: Int) -> Result<Void, PtyFailure> {
+            fdLock.lock()
+            defer { fdLock.unlock() }
+            guard masterFd >= 0 else { return .failure(.ended) }
             var ws = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
-            return ioctl(fd, TIOCSWINSZ, &ws) == 0 ? 0 : errno
+            guard ioctl(masterFd, TIOCSWINSZ, &ws) == 0 else { return .failure(.os(errno)) }
+            state.withLock {
+                self.cols = cols
+                self.rows = rows
+            }
+            return .success(())
         }
 
         /// Write the FULL buffer, serialized per job; a full tty queue is waited out.
-        func writeAll(_ data: Data) async -> Result<Int, PtyErrno> {
-            await withCheckedContinuation { (c: CheckedContinuation<Result<Int, PtyErrno>, Never>) in
-                writeQueue.async { [self] in
-                    state.lock()
-                    let fd = masterFd
-                    state.unlock()
-                    guard fd >= 0 else { return c.resume(returning: .failure(PtyErrno(code: EBADF))) }
-                    var written = 0
-                    var failure: Int32 = 0
-                    data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-                        guard let base = raw.baseAddress else { return }
-                        while written < data.count {
-                            let n = Darwin.write(fd, base + written, data.count - written)
-                            if n > 0 {
-                                written += n
-                            } else if n < 0 && (errno == EAGAIN || errno == EINTR) {
-                                var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                                _ = poll(&pfd, 1, 50)
-                            } else {
-                                failure = errno
-                                return
-                            }
+        func writeAll(_ data: Data) async -> Result<Int, PtyFailure> {
+            await withCheckedContinuation { (c: CheckedContinuation<Result<Int, PtyFailure>, Never>) in
+                writeQueue.async { [self] in c.resume(returning: writeHoldingFd(data)) }
+            }
+        }
+
+        /// The write itself, holding `fdLock` for the whole use of the descriptor.
+        /// Waiting out a full tty queue still lets the job end: the read loop sets
+        /// `eof` before it takes `fdLock`, and this loop checks it between polls —
+        /// so a writer can never hold the close back on a program that is gone.
+        private func writeHoldingFd(_ data: Data) -> Result<Int, PtyFailure> {
+            fdLock.lock()
+            defer { fdLock.unlock() }
+            let fd = masterFd
+            guard fd >= 0 else { return .failure(.ended) }
+            var written = 0
+            var failure: PtyFailure?
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else { return }
+                while written < data.count {
+                    let n = Darwin.write(fd, base + written, data.count - written)
+                    let e = errno
+                    if n > 0 {
+                        written += n
+                    } else if n < 0 && (e == EAGAIN || e == EINTR) {
+                        if ended {
+                            failure = .ended
+                            return
                         }
+                        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                        _ = poll(&pfd, 1, 50)
+                    } else {
+                        failure = .os(e)
+                        return
                     }
-                    c.resume(
-                        returning: failure == 0 ? .success(written) : .failure(PtyErrno(code: failure)))
                 }
             }
+            if let failure { return .failure(failure) }
+            return .success(written)
         }
 
         /// A per-job scratch dir for pasted images, created on first use.

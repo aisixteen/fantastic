@@ -352,8 +352,9 @@ async def test_unknown_verb_errors(seeded_kernel, store_agent):
 # A probe target: `hit` records when it ran (and what the scheduler had
 # persisted at that moment), optionally blocking for `block` seconds.
 _probe = types.ModuleType("sched_probe.tools")
-_probe.hits = {}  # agent id -> {"at": float, "doc": list|None}
+_probe.hits = {}  # agent id -> {"at": float, "doc": list|None, "overlapped": bool}
 _probe.capture_path = None
+_probe.started = {}  # agent id -> asyncio.Event, set the moment its hit begins
 
 
 async def _probe_handler(id, payload, kernel):
@@ -368,7 +369,18 @@ async def _probe_handler(id, payload, kernel):
         if p is not None and p.exists():
             doc = yaml.safe_load(p.read_text())
         _probe.hits[id] = {"at": time.time(), "doc": doc}
-        if payload.get("block"):
+        _probe.started.setdefault(id, asyncio.Event()).set()
+        if other := payload.get("wait_for"):
+            # CONCURRENCY, observed rather than timed: this hit holds until the
+            # other one has STARTED. Two hits of one batch overlap, so it arrives;
+            # fired one after the other, it cannot, and the hit gives up.
+            ev = _probe.started.setdefault(other, asyncio.Event())
+            try:
+                await asyncio.wait_for(ev.wait(), float(payload.get("block", 3.0)))
+                _probe.hits[id]["overlapped"] = True
+            except asyncio.TimeoutError:
+                _probe.hits[id]["overlapped"] = False
+        elif payload.get("block"):
             await asyncio.sleep(float(payload["block"]))
         return {"hit": id}
     return {"error": f"unknown verb {verb!r}"}
@@ -452,18 +464,25 @@ async def _wait_for(pred, seconds: float):
 
 
 async def test_due_schedules_fire_as_one_concurrent_batch(seeded_kernel, store_agent):
-    # Two due schedules; the FIRST one blocks 0.3s. Sequential firing would
-    # start the second ≥0.3s after the first; one batch starts both together.
+    # Two due schedules; the FIRST one holds until the second has STARTED.
+    # Sequential firing cannot get there (the second starts only after the
+    # first returns); one batch starts both together. Observed, not timed — a
+    # wall-clock gap failed under a loaded test run with the batch intact.
     sid = await _make_probed_scheduler(seeded_kernel, "sch_batch", ["p_slow", "p_fast"])
-    r1 = await _schedule(seeded_kernel, sid, "p_slow", hit={"block": 0.3})
+    _probe.started.clear()
+    r1 = await _schedule(
+        seeded_kernel, sid, "p_slow", hit={"wait_for": "p_fast", "block": 3.0}
+    )
     r2 = await _schedule(seeded_kernel, sid, "p_fast")
     assert "schedule_id" in r1 and "schedule_id" in r2
     (await seeded_kernel.send([{"target": sid, "payload": {"type": "boot"}}]))[0]
     assert await _wait_for(lambda: {"p_slow", "p_fast"} <= set(_probe.hits), 3.0), (
         _probe.hits
     )
-    gap = _probe.hits["p_fast"]["at"] - _probe.hits["p_slow"]["at"]
-    assert abs(gap) < 0.25, f"not one batch: fast started {gap:.3f}s after slow"
+    assert await _wait_for(lambda: "overlapped" in _probe.hits["p_slow"], 5.0)
+    assert _probe.hits["p_slow"]["overlapped"], (
+        "not one batch: the hits never overlapped"
+    )
     (await seeded_kernel.send([{"target": sid, "payload": {"type": "pause"}}]))[0]
     listed = (await seeded_kernel.send([{"target": sid, "payload": {"type": "list"}}]))[
         0

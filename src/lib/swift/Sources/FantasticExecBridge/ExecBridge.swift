@@ -258,6 +258,23 @@
             var pty: PtyJob? = nil
         }
 
+        /// Jobs whose TASK is being cancelled, marked by `onCancel` BEFORE it kills.
+        /// The kernel aborts the Swift `Task` only after the hook returns, and the
+        /// pump runs on its own thread: between the SIGKILL and the abort it can see
+        /// the pipes close and the child exit while `Task.isCancelled` is still
+        /// false — and announce a normal `job_done` for a job the kernel killed
+        /// (measured: 1 full run in 15). This mark is set before the kill, so any
+        /// exit the kill caused finds it. Python cannot interleave there: its cancel
+        /// lands in the same event-loop turn as the hook. Guarded by `lock`; a set of
+        /// its own, not a row field, because `clear` may drop the row mid-pump.
+        private var cancelling: Set<TaskId> = []
+
+        /// Whether `jobId`'s exit was its task's cancellation — and forget the mark.
+        private func takeCancelled(_ jobId: TaskId) -> Bool {
+            let marked = lock.withLock { cancelling.remove(jobId) != nil }
+            return marked || Task.isCancelled
+        }
+
         /// Guards `jobs`. Never held across an `await`.
         private let lock = NSLock()
         /// Live/finished children, keyed by job id (the job's task id), IN START
@@ -626,7 +643,7 @@
             // CANCELLED: python's pump re-raises `CancelledError` after labelling the
             // row `stopped` — it emits NO `job_done`, so a killed job never looks like
             // a program that finished on its own.
-            if Task.isCancelled {
+            if takeCancelled(jobId) {
                 lock.withLock {
                     if var j = jobs[jobId] {
                         j.status = "stopped"
@@ -664,7 +681,7 @@
         ) async {
             let code = await pty.run(kernel: kernel)
             relayFor(jobId)?.stop()
-            if Task.isCancelled {
+            if takeCancelled(jobId) {
                 lock.withLock {
                     if var j = jobs[jobId] {
                         j.status = "stopped"
@@ -725,13 +742,18 @@
                     RefusalJSON(json: Refusal.bad(verb, "job_id", "a PTY job (started with `pty`)")))
             }
             guard job.child.isAlive, pty.isLive else {
-                return .failure(
-                    RefusalJSON(
-                        json: Refusal.make(
-                            Refusal.notFound, "exec_bridge: job \(jid.value) has ended",
-                            extra: [("job_id", .integer(jid.value))])))
+                return .failure(RefusalJSON(json: jobEnded(jid)))
             }
             return .success(pty)
+        }
+
+        /// The job ended — whether before the verb arrived or while it ran (a write
+        /// or resize that lost the race to the terminal's close answers this too,
+        /// never an errno from a descriptor it may no longer own).
+        private func jobEnded(_ jid: TaskId) -> JSON {
+            Refusal.make(
+                Refusal.notFound, "exec_bridge: job \(jid.value) has ended",
+                extra: [("job_id", .integer(jid.value))])
         }
 
         /// A positive int (python `_dims`: an int >= 1, a bool is not one).
@@ -762,9 +784,10 @@
             }
             switch await pty.writeAll(Data(data.utf8)) {
             case .success(let n): return .object(["written": .integer(Int64(n))])
-            case .failure(let e):
+            case .failure(.ended): return jobEnded(pty.jobId)
+            case .failure(.os(let e)):
                 return Refusal.make(
-                    Refusal.transportError, "exec_bridge: write failed: \(osErrorStr(e.code))")
+                    Refusal.transportError, "exec_bridge: write failed: \(osErrorStr(e))")
             }
         }
 
@@ -777,8 +800,10 @@
             switch dims("resize", payload) {
             case .failure(let r): return r.json
             case .success(let (cols, rows)):
-                let e = pty.resize(cols: cols, rows: rows)
-                if e != 0 {
+                switch pty.resize(cols: cols, rows: rows) {
+                case .success: break
+                case .failure(.ended): return jobEnded(pty.jobId)
+                case .failure(.os(let e)):
                     return Refusal.make(
                         Refusal.transportError, "exec_bridge: resize failed: \(osErrorStr(e))")
                 }
@@ -869,9 +894,12 @@
             let path = (dir as NSString).appendingPathComponent(name)
             // the path at the cursor with a trailing space, no newline — pasting
             // must not submit
-            if case .failure(let e) = await pty.writeAll(Data("\(path) ".utf8)) {
+            switch await pty.writeAll(Data("\(path) ".utf8)) {
+            case .success: break
+            case .failure(.ended): return jobEnded(pty.jobId)
+            case .failure(.os(let e)):
                 return Refusal.make(
-                    Refusal.transportError, "exec_bridge: paste_image failed: \(osErrorStr(e.code))")
+                    Refusal.transportError, "exec_bridge: paste_image failed: \(osErrorStr(e))")
             }
             return .object(["path": .string(path), "bytes": .integer(Int64(data.count))])
         }
@@ -1084,8 +1112,13 @@
         /// second job on the same agent is a different task and survives.
         public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
             // A job's id IS its task id, so the table key is what matches.
-            let doomed = lock.withLock {
-                jobs.filter { $0.value.agent == agentId && $0.key == taskId }.map(\.key)
+            // Marked BEFORE the kill (see `cancelling`), in the same critical section
+            // that finds them.
+            let doomed = lock.withLock { () -> [TaskId] in
+                let ids = jobs.filter { $0.value.agent == agentId && $0.key == taskId }.map(\.key)
+                // a pump that already finished takes no mark (nothing would clear it)
+                cancelling.formUnion(ids.filter { jobs[$0]?.exitCode == nil })
+                return ids
             }
             for id in doomed { teardown(id) }
         }

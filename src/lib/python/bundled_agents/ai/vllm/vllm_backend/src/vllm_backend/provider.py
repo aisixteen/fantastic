@@ -24,6 +24,11 @@ What is vLLM-specific here, and why each piece exists (measured by the
   ~16k prompt); past the server's KV capacity it preempts and a preempted
   conversation re-prefills from scratch. The table keeps the number of LIVE
   conversations under that ceiling and rotates the least-recently-used one out.
+- THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front of
+  the shared GPU takes `Authorization: Bearer <key>`). Read from `VLLM_API_KEY`
+  at CALL time, never from the record; set ⇒ sent as a Bearer header, unset ⇒ no
+  header at all, so a local vLLM started without `--api-key` keeps working. A 401
+  or 403 names the variable.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
@@ -78,6 +84,9 @@ PASSTHROUGH = (
 
 # ─── connection ──────────────────────────────────────────────────────────────
 #
+# The environment variable the key is read from, at call time. Unset = keyless.
+KEY_VAR = "VLLM_API_KEY"
+#
 # TWO timeouts on purpose. A stopped instance drops SYNs silently, so one long
 # timeout would hang a caller for the whole read deadline; connect fails fast.
 # Read is long because a max-length generation decodes for many minutes (a
@@ -96,6 +105,13 @@ KV_OVERFLOWS = ("evict", "reject")
 
 class KvSlotsFull(RuntimeError):
     """`kv_overflow: reject` and every slot on the endpoint is live."""
+
+
+def _auth_headers() -> dict:
+    """`Authorization: Bearer <key>` when `KEY_VAR` is set, nothing when it is
+    not — read per call, so a key set after the agent was built is used."""
+    key = (os.environ.get(KEY_VAR) or "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 class SessionTable:
@@ -322,12 +338,19 @@ class VllmProvider:
         saw_finish = False
         client = self._get_client()
         try:
-            async with client.stream("POST", "/chat/completions", json=body) as resp:
+            async with client.stream(
+                "POST", "/chat/completions", json=body, headers=_auth_headers()
+            ) as resp:
                 if resp.status_code >= 400:
                     detail = (await resp.aread()).decode("utf-8", "replace")[:500]
+                    why = (
+                        f" — the door wants a key: set {KEY_VAR}"
+                        if resp.status_code in (401, 403)
+                        else ""
+                    )
                     raise RuntimeError(
                         f"vllm_backend: {self._endpoint} answered HTTP "
-                        f"{resp.status_code}: {detail}"
+                        f"{resp.status_code}{why}: {detail}"
                     )
                 async for line in resp.aiter_lines():
                     # `aiter_lines` reassembles lines a read split mid-JSON;

@@ -379,6 +379,13 @@ impl Bundle for FileBundle {
                 // belong — `missing("write_stream", "bytes (one raw chunk)")`,
                 // whatever it holds. An ABSENT key leaves the blob as the
                 // chunk (empty blob ⇒ `written: 0`).
+                //
+                // PYTHON'S ORDER: readonly FIRST (`_readonly_or_none` precedes the
+                // chunk check), so a readonly leg answers `readonly` whatever the
+                // header holds — the text channel already does this.
+                if readonly {
+                    return Ok((Some(readonly_refusal()), None));
+                }
                 if header.get("bytes").is_some() {
                     return Ok((
                         Some(rf::missing("write_stream", "bytes (one raw chunk)")),

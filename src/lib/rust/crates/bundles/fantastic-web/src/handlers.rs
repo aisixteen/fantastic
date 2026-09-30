@@ -317,18 +317,14 @@ async fn rest_post(
         // CPython `json.loads(bytes)` DETECTS THE ENCODING first (A13.11), so a
         // UTF-8 BOM, a UTF-16 or a UTF-32 body all parse; `serde_json` reads
         // UTF-8 only and answered 400 for each. A body that will not decode at
-        // all raises `UnicodeDecodeError` OUT of python's handler — an uncaught
-        // 500, mirrored here rather than quietly turned into a 400.
-        let text = match decode_json_bytes(&body) {
-            Some(t) => t,
-            None => {
-                return routes::respond(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &[],
-                    Some("text/plain; charset=utf-8"),
-                    b"Internal Server Error".to_vec(),
-                )
-            }
+        // all is a MALFORMED BODY — python catches its `UnicodeDecodeError`
+        // beside `JSONDecodeError` and answers the same 400 (it used to raise an
+        // uncaught 500, which this branch mirrored until parity 2026-09-30).
+        let Some(text) = decode_json_bytes(&body) else {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "web_rest: request body is not valid JSON",
+            );
         };
         match serde_json::from_str(&text) {
             Ok(v) => v,

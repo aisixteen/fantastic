@@ -77,6 +77,9 @@ async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None)
     can_call = {"cli": "*", store: "*"}
     meta = {
         "handler_module": "nvidia_nim_backend.tools",
+        # required at the write (the schema); the provider is faked, never dialled
+        "endpoint": "http://127.0.0.1:9/stub",
+        "model": "stub",
         "context_window": 32768,
         "can_call": can_call,
         "memory_store_id": store,

@@ -80,7 +80,7 @@ export async function boot(opts: BootOptions): Promise<Booted> {
   const kernel = new Kernel();
   registerRamStore(kernel);
   opts.register(kernel);
-  new WsBridge(kernel, {
+  const bridge = new WsBridge(kernel, {
     origin: opts.origin,
     controlEndpoint: opts.loader,
     ...(opts.makeSocket !== undefined ? { makeSocket: opts.makeSocket } : {}),
@@ -93,6 +93,13 @@ export async function boot(opts: BootOptions): Promise<Booted> {
   const records = await loader.loadTree();
   if (records.length > 0) kernel.load(records);
   else opts.seed?.(kernel);
+  // THE TREE IS KNOWN NOW — say who this kernel is. A HYDRATED root arrives with
+  // its guid already set (no `updated` event carries it, and a root-only tree
+  // publishes nothing at all), so without this a reopened page never said hello
+  // and the host could not address it after a restart (CLI E47, 2026-09-30). A
+  // guid the root mints LATER, at its first boot, is announced by the bridge's
+  // own `updated` hook; with no guid yet this is a no-op.
+  bridge.announce();
   // Watch the local tree → persist / forget over the bridge; the first write is
   // the whole current tree (a fresh seed included).
   loader.start();

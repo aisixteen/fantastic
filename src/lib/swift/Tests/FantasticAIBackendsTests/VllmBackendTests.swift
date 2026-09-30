@@ -52,14 +52,16 @@ private func provider(
     kvOverflow: String = "evict",
     sampling: OrderedDictionary<String, JSON> = SAMPLING_DEFAULTS,
     explicitBudget: Bool = false,
-    agentKey: String = UUID().uuidString
+    agentKey: String = UUID().uuidString,
+    apiKey: String? = nil
 ) -> VllmProvider {
     VllmProvider(
         endpoint: endpoint, model: "qwen3.8-27b", maxTokens: maxTokens,
         kvSlots: kvSlots, kvOverflow: kvOverflow, kvTtl: KV_TTL,
         sampling: sampling, explicitBudget: explicitBudget,
         connectTimeout: CONNECT_TIMEOUT, readTimeout: READ_TIMEOUT,
-        agentKey: agentKey, clock: { ProcessInfo.processInfo.systemUptime })
+        agentKey: agentKey, clock: { ProcessInfo.processInfo.systemUptime },
+        apiKey: { apiKey })
 }
 
 private let oneUser: [JSON] = [.object(["role": "user", "content": "hi"])]
@@ -147,6 +149,44 @@ struct VllmBackendTests {
         #expect(
             error
                 == #"RuntimeError: vllm_backend: \#(ep) answered HTTP 400: {"error":"bad effort"}"#)
+    }
+
+    // MARK: the key (an HTTPS door in front of the GPU)
+
+    /// Header only when set: unset, NO `Authorization` at all (a keyless local
+    /// vLLM); set, a Bearer header. Python/rust twin: the env var itself; here
+    /// the provider's key source is handed in (no `setenv` in a threaded test).
+    @Test func theKeyRidesAsABearerHeaderOnlyWhenSet() async {
+        let ok = sse([delta(["content": "ok"]), delta(finish: "stop")])
+        let bare = StubHTTP([ok])
+        defer { bare.stop() }
+        #expect(await drain(provider(endpoint(port: bare.port))).0 == "ok")
+        let keyed = StubHTTP([ok])
+        defer { keyed.stop() }
+        #expect(await drain(provider(endpoint(port: keyed.port), apiKey: "k-123")).0 == "ok")
+        let auth = { (raw: String) in
+            raw.split(separator: "\r\n").first { $0.lowercased().hasPrefix("authorization:") }
+                .map(String.init)
+        }
+        #expect(auth(bare.requests[0]) == nil, "\(bare.requests[0])")
+        #expect(auth(keyed.requests[0]) == "Authorization: Bearer k-123", "\(keyed.requests[0])")
+    }
+
+    @Test func aRefusedKeyNamesTheVariable() async {
+        let stub = StubHTTP([.init(status: 401, body: "unauthorized")])
+        defer { stub.stop() }
+        let ep = endpoint(port: stub.port)
+        let (_, error) = await drain(provider(ep))
+        #expect(
+            error
+                == "RuntimeError: vllm_backend: \(ep) answered HTTP 401 — the door wants a key: "
+                + "set VLLM_API_KEY: unauthorized", "\(error ?? "nil")")
+    }
+
+    /// The variable the key is read from, named once — and in the schema.
+    @Test func theKeyIsReadFromTheEnvironmentByName() {
+        #expect(KEY_VAR == "VLLM_API_KEY")
+        #expect(VllmBundle.RECORD_SCHEMA["key_var"] == "VLLM_API_KEY")
     }
 
     @Test func aRefusedConnectionSaysVLLMIsNotListeningYet() async {
@@ -343,11 +383,14 @@ struct VllmBackendTests {
             "max_tokens": 65536,
         ]
         let err = VllmBundle().validateMeta(meta, record: [:]) ?? ""
-        #expect(err.contains("missing: kv_slots, kv_overflow"), "\(err)")
+        #expect(err.contains("missing: kv_slots, kv_overflow, memory_store_id"), "\(err)")
+        // each missing field is named WITH its hint, from the schema
+        #expect(err.contains("kv_overflow = all slots live: evict"), "\(err)")
         // an update to a complete record is judged on the MERGED state
         var full = meta
         full["kv_slots"] = 7
         full["kv_overflow"] = "evict"
+        full["memory_store_id"] = "memory"
         #expect(VllmBundle().validateMeta(["seed": 3], record: full) == nil)
     }
 
@@ -355,7 +398,7 @@ struct VllmBackendTests {
         let meta: OrderedDictionary<String, JSON> = [
             "endpoint": "http://vllm.test/v1", "model": "qwen3.8-27b", "max_tokens": 8000,
             "kv_slots": 6, "kv_overflow": "evict", "thinking_token_budget": 4000,
-            "reasoning_effort": "xhigh",
+            "reasoning_effort": "xhigh", "memory_store_id": "memory",
         ]
         #expect(VllmBundle().validateMeta(meta, record: [:]) == nil)
     }
@@ -423,7 +466,7 @@ struct VllmBackendTests {
                 "id": "v1",
                 "endpoint": .string("http://vllm.test/\(UUID().uuidString.prefix(8))/v1"),
                 "model": "qwen3.8-27b", "max_tokens": 8000, "kv_slots": 7, "kv_overflow": "evict",
-                "seed": 3,
+                "memory_store_id": "memory", "seed": 3,
             ])
         #expect(r["id"] == "v1", "\(r)")
         let out = await k.send([Item(AgentId("v1"), ["type": "reflect"])])[0].result

@@ -381,3 +381,78 @@ test("the operator forwards ungated; callHost and forwardBinary are host-bound s
   assert.equal(frames().length, 2, "the refused agent calls never reached the bridge");
   bridge.close();
 });
+
+// ─── the PEER role: the host calling THIS kernel's agents ───────────────────
+// (cross-kernel addressing, owner 2026-09-30: the host addresses a page agent as
+// `<page guid>|<agent>`; the page kernel answers `call` frames on the conn that
+// said `hello`, gated by the target's `callable_by` against the qualified caller)
+
+function pageKernel(guid: string | null): Kernel {
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state", meta: guid === null ? {} : { guid } }));
+  k.register(
+    new Agent({
+      id: "canvas",
+      parentId: "kernel_state",
+      meta: { callable_by: { "h0|*": ["around"] } },
+      handler: (_id, payload) =>
+        payload["type"] === "around" ? { cells: ["a", "b"], radius: payload["radius"] ?? null } : { error: "no" },
+    }),
+  );
+  k.register(new Agent({ id: "secret", parentId: "kernel_state", handler: () => ({ ok: true }) }));
+  return k;
+}
+
+function repliesTo(sock: FakeSocket, id: string): Envelope | undefined {
+  return sock.sent.find((f) => f["type"] === "reply" && f["id"] === id);
+}
+
+test("the control socket says hello with the kernel's guid — on open, and when the guid first appears", async () => {
+  const fk = fakeFactory();
+  const k = pageKernel(null);
+  const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
+  bridge.announce();
+  await until(() => fk.forEndpoint("kernel_state").length === 1);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  await new Promise((r) => setTimeout(r, 5)); // opened, but no guid yet → no hello
+  assert.equal(sock.sent.filter((f) => f["type"] === "hello").length, 0);
+  k.updateMeta("kernel_state", { guid: "p1" }); // what the root's boot does
+  await until(() => sock.sent.some((f) => f["type"] === "hello"));
+  assert.deepEqual(sock.sent.find((f) => f["type"] === "hello"), { type: "hello", guid: "p1" });
+  bridge.close();
+});
+
+test("a host call is answered by the page kernel, gated by the target's callable_by", async () => {
+  const fk = fakeFactory();
+  const k = pageKernel("p1");
+  const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
+  bridge.announce();
+  await until(() => fk.forEndpoint("kernel_state")[0]?.sent.some((f) => f["type"] === "hello") ?? false);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+
+  // accepted: `h0|*` on canvas's callable_by names every agent of kernel h0
+  sock.deliver({ type: "call", id: "h1", target: "canvas", payload: { type: "around", radius: 3 }, caller: "h0|cell_7" });
+  await until(() => repliesTo(sock, "h1") !== undefined);
+  assert.deepEqual(repliesTo(sock, "h1")!["data"], { cells: ["a", "b"], radius: 3 });
+
+  // a verb canvas does not accept from h0, and an agent that accepts nobody there
+  sock.deliver({ type: "call", id: "h2", target: "canvas", payload: { type: "clear" }, caller: "h0|cell_7" });
+  sock.deliver({ type: "call", id: "h3", target: "secret", payload: { type: "read" }, caller: "h0|cell_7" });
+  await until(() => repliesTo(sock, "h2") !== undefined && repliesTo(sock, "h3") !== undefined);
+  for (const id of ["h2", "h3"]) {
+    const d = repliesTo(sock, id)!["data"] as Payload;
+    assert.equal(d["reason"], "unauthorized", id);
+    assert.equal(d["side"], "ingress", id);
+  }
+
+  // only THIS kernel's agents are reachable — never through to the host again
+  sock.deliver({ type: "call", id: "h4", target: "file_x", payload: { type: "list" }, caller: "h0|cell_7" });
+  await until(() => repliesTo(sock, "h4") !== undefined);
+  assert.equal((repliesTo(sock, "h4")!["data"] as Payload)["reason"], "unknown_agent");
+
+  // a caller claiming THIS kernel's own guid would borrow a local agent's grants
+  sock.deliver({ type: "call", id: "h5", target: "canvas", payload: { type: "around" }, caller: "p1|canvas" });
+  await until(() => repliesTo(sock, "h5") !== undefined);
+  assert.equal((repliesTo(sock, "h5")!["data"] as Payload)["reason"], "bad_arg");
+  bridge.close();
+});

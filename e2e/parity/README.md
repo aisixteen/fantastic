@@ -24,7 +24,7 @@ directory, and no capture reaches a real provider. Run it at every landing point
 | `diff.py` | `self` \| `port` \| `status` \| `check-proofs` \| `rulecheck` |
 | `stubs/` | `anthropic_sse.py`, `openai_chat.py` (nim + llamacpp), `ollama_chat.py`, `ws_peer.py`, `relay.py` |
 | `families/` | `tree`, `store`, `wire`, `cli`, `ctx`, `bundle_verbs`, `kernel_verbs`, `bridges`, `ai_paths`, `providers` |
-| `rules.yaml` | the normalisation rules N1–N19, each with a `why` and the items it must not hide. `diff.py rulecheck` is their own test — 35 cases, and it must stay all-green |
+| `rules.yaml` | the normalisation rules N1–N19, each with a `why` and the items it must not hide. `diff.py rulecheck` is their own test — 50 cases, and it must stay all-green |
 | `residuals.yaml` | known differences, each with an owner decision and a state |
 | `proofs.yaml` | plan item id → the selector or unit twin that proves it |
 | `landed.yaml` | which items have landed per runtime — an entry makes a diff line a REGRESSION |
@@ -43,26 +43,28 @@ $PY $R/e2e/parity/run.py preflight --runtimes python,rust,swift
 # 2. only after a fix lands (this is the ONLY thing that builds)
 $PY $R/e2e/parity/run.py stage --runtime rust      # or swift
 
-# 3. the python baseline, twice — only when e2e/parity/** or src/lib/python changed.
+# 3. the captures. `--slot` (exactly two alphanumerics) names each capture's own
+#    work root, `runs/parity/w/<slot>/` — captures with different slots run SIDE BY
+#    SIDE, each with its own log. The slot is always two characters, so every path
+#    an answer embeds has the same length on every runtime.
 #    ONE run directory holds every capture of one acceptance run:
 #    <stamp>/{python,python_b,rust,swift}, and the diffs land in <stamp>/diff.
-$PY $R/e2e/parity/run.py capture --runtime python --families all \
-    --out $R/e2e/runs/parity/<stamp>/python
-$PY $R/e2e/parity/run.py capture --runtime python --families all \
-    --out $R/e2e/runs/parity/<stamp>/python_b
+#    The python baseline runs twice — only when e2e/parity/** or src/lib/python changed.
+S=$R/e2e/runs/parity/<stamp>
+$PY $R/e2e/parity/run.py capture --runtime python --families all --slot p1 --out $S/python   > $S/python.log 2>&1 &
+$PY $R/e2e/parity/run.py capture --runtime python --families all --slot p2 --out $S/python_b > $S/python_b.log 2>&1 &
+$PY $R/e2e/parity/run.py capture --runtime rust   --families all --slot r1 --out $S/rust     > $S/rust.log 2>&1 &
+$PY $R/e2e/parity/run.py capture --runtime swift  --families all --slot s1 --out $S/swift    > $S/swift.log 2>&1 &
+wait
 
-# 4. the ports, one at a time
-$PY $R/e2e/parity/run.py capture --runtime rust  --families all --out $R/e2e/runs/parity/<stamp>/rust
-$PY $R/e2e/parity/run.py capture --runtime swift --families all --out $R/e2e/runs/parity/<stamp>/swift
-
-# 5. the harness's own test: two python runs must agree exactly
+# 4. the harness's own test: two python runs must agree exactly
 $PY $R/e2e/parity/diff.py self --a <stamp>/python --b <stamp>/python_b
 
-# 6. the ports against python
+# 5. the ports against python
 $PY $R/e2e/parity/diff.py port --base <stamp>/python --other <stamp>/rust
 $PY $R/e2e/parity/diff.py port --base <stamp>/python --other <stamp>/swift
 
-# 7. the status line
+# 6. the status line
 $PY $R/e2e/parity/diff.py status --diff <stamp>/diff   # diff.py writes there itself
 $PY $R/e2e/parity/diff.py check-proofs
 ```

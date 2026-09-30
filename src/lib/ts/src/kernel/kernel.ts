@@ -11,7 +11,7 @@ import { TaskTable } from "./tasks.ts";
 import { KernelStore } from "./kernel_store.ts";
 import { runBatch } from "./batch.ts";
 import type { Item, Outcome } from "./outcome.ts";
-import { UNHANDLED, refusal } from "./refusal.ts";
+import { LOCKED, UNHANDLED, UNKNOWN_AGENT, refusal } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
 import { authorizeCall, authorizeHeritable, denial } from "./authz.ts";
 
@@ -173,17 +173,56 @@ export class Kernel {
   }
 
   /** Cascade-remove a local agent + its subtree from the tree (deepest first)
-   *  and publish a `removed` event per node (a loader rmtrees each). */
-  remove(id: string): boolean {
+   *  and publish a `removed` event per node (a loader rmtrees each).
+   *
+   *  THIS kernel's delete: tree CRUD verbs belong to the host root, so a page
+   *  removes its own agents here — and `delete_lock` is enforced here, exactly
+   *  as the host kernels' `delete_agent` enforces it (owner, 2026-09-30: the
+   *  canvas background is a page agent with `delete_lock: true`). If the target
+   *  OR any descendant carries a truthy `delete_lock`, NOTHING is removed (no
+   *  partial cascade) and the answer is the `locked` refusal naming the lock;
+   *  clear it with `updateMeta(id, {delete_lock: false})`. An unknown id is the
+   *  generic `unknown_agent`. Success is `{deleted: true, id}` — the host's
+   *  `delete_agent` reply. */
+  remove(id: string): Payload {
     const a = this.agents.get(id);
-    if (a === undefined) return false;
-    for (const cid of [...a.children.keys()]) this.remove(cid);
+    if (a === undefined) {
+      return refusal(UNKNOWN_AGENT, `remove: no agent '${id}'`, {
+        extra: { agents: [...this.agents.keys()].sort() },
+      });
+    }
+    const blockedBy = this.findLockedDescendant(a);
+    if (blockedBy !== null) {
+      return refusal(
+        LOCKED,
+        `remove: '${id}' blocked by delete_lock on '${blockedBy}'; clear it via updateMeta before deleting`,
+        { hint: "clear the lock with updateMeta(id, {delete_lock: false}), then remove again", extra: { blocked_by: blockedBy, id } },
+      );
+    }
+    this.cascadeRemove(a);
+    return { deleted: true, id };
+  }
+
+  /** The first agent in `a`'s subtree (itself included, depth-first) whose
+   *  `delete_lock` is truthy — python truthiness, as the host kernels read it. */
+  private findLockedDescendant(a: Agent): string | null {
+    if (pyTruthy(a.meta["delete_lock"])) return a.id;
+    for (const c of a.children.values()) {
+      const hit = this.findLockedDescendant(c);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+
+  /** Remove `a` and its subtree, deepest first — only after the lock check. */
+  private cascadeRemove(a: Agent): void {
+    const id = a.id;
+    for (const c of [...a.children.values()]) this.cascadeRemove(c);
     this.agents.delete(id);
     this.inboxes.delete(id);
     this.watchers.delete(id);
     if (a.parentId !== null) this.agents.get(a.parentId)?.children.delete(id);
     this.publishState({ agent_id: id, kind: "removed", name: a.displayName });
-    return true;
   }
 
   get(id: string): Agent | undefined {
@@ -292,6 +331,21 @@ export class Kernel {
     return view;
   }
 
+  /** A caller on ANOTHER KERNEL — `<guid>|<agent>` — as the origin of sends:
+   *  gated at INGRESS only (see `ingressGate`), and the target sees it as its
+   *  `currentCaller`. */
+  isForeign(origin: string | null): boolean {
+    if (origin === null || !origin.includes("|")) return false;
+    const own = this.guid;
+    return own === null || !origin.startsWith(`${own}|`);
+  }
+
+  /** The view a call from another kernel runs under (the web ws bridge answering
+   *  a host's `call` frame). */
+  foreignView(caller: string): Kernel {
+    return this.scopedFor(caller, null);
+  }
+
   /** The kernel's own traffic: operator sends that pass the drain. */
   kernelView(): Kernel {
     const view = Object.create(this.base) as Kernel;
@@ -349,6 +403,18 @@ export class Kernel {
     // the whole check: an agent granted `<root>:[ps, cancel]` can watch and kill
     // ANY task — the per-victim granularity is gone, knowingly.
     if (target !== undefined && target.parentId === null && isKernelVerb(verb)) return null;
+    return this.ingressGate(senderId, verb, targetId);
+  }
+
+  /**
+   * The INGRESS half alone — does `targetId` accept `senderId` for `verb`? Its
+   * `callable_by`, tokens relative to the target. It is the WHOLE local check
+   * for a call that arrived from ANOTHER KERNEL (`senderId` is the qualified
+   * `<guid>|<agent>`): that kernel already judged whether its agent may send
+   * (its `can_call`), and the caller has no record here to hold a grant.
+   */
+  ingressGate(senderId: string, verb: string, targetId: string): Payload | null {
+    const target = this.agents.get(targetId);
     if (target !== undefined) {
       const ok = authorizeCall(
         target.meta["callable_by"] as Payload | undefined,
@@ -705,4 +771,13 @@ function mintGuid(): string {
   const b = new Uint8Array(16);
   c.getRandomValues(b);
   return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/** Python truthiness — how the host kernels read a flag like `delete_lock`:
+ *  null, false, 0, "", [] and {} are false; everything else is true. */
+function pyTruthy(v: Json | undefined): boolean {
+  if (v === undefined || v === null || v === false || v === 0 || v === "") return false;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === "object") return Object.keys(v).length > 0;
+  return true;
 }

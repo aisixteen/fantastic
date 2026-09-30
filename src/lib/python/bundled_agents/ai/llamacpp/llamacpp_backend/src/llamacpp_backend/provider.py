@@ -27,6 +27,11 @@ from ai_core.core import THINK_CLOSE, THINK_OPEN
 DEFAULT_MODEL = "(server-loaded)"
 
 
+#: Sampling temperature when the record names none — LOW, because an agentic
+#: backend must emit exact calls, not improvise.
+DEFAULT_TEMPERATURE = 0.3
+
+
 class LlamaCppProvider:
     #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
     #: ai_core calibrates its own token estimate with it.
@@ -52,7 +57,9 @@ class LlamaCppProvider:
         # Sampling temperature. An agentic backend must emit EXACT tool-call JSON,
         # not improvise, so we default LOW — same reasoning and same value as the
         # ollama backend; `temperature` on the record overrides.
-        self._temperature = 0.3 if temperature is None else float(temperature)
+        self._temperature = (
+            DEFAULT_TEMPERATURE if temperature is None else float(temperature)
+        )
         # Generation cap (`max_tokens`). Unbounded, a weak model can ramble for
         # thousands of tokens instead of emitting one tool-call and blow the send
         # timeout. None = the server's own default.

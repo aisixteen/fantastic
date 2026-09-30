@@ -115,6 +115,64 @@
                     ]), "\(done?.serialize() ?? "nil")")
         }
 
+        /// A write or resize that comes after the job's terminal closed answers
+        /// `.ended` and never touches a descriptor — the number the master held is
+        /// free to be REUSED by the process, and a write through it would land in
+        /// whatever file got it. Measured here by opening a file right after the
+        /// close (the lowest free number — the master's own) and proving it stays
+        /// empty. The race the lock closes is the same step taken mid-write: the
+        /// read loop now clears the fd under `fdLock` before closing, and a write
+        /// or resize holds `fdLock` for its whole use of the fd.
+        @Test func aWriteOrResizeAfterTheJobEndsTouchesNoDescriptor() async throws {
+            let k = await kernelWith("term_end")
+            let (child, master, parentFd) = try Spawn.pty(
+                argv: ["/bin/sh", "-c", "exit 0"], selfId: "term_end",
+                env: ["PATH": "/usr/bin:/bin"], cwd: "/", cols: 80, rows: 24)
+            close(parentFd)
+            let job = PtyJob(
+                jobId: TaskId(1), owner: AgentId("term_end"), child: child, masterFd: master,
+                cols: 80, rows: 24)
+            _ = await job.run(kernel: k)  // the terminal reached EOF and closed
+            #expect(!job.isLive)
+            let path = NSTemporaryDirectory() + "pty_reuse_\(UUID().uuidString)"
+            let reused = open(path, O_CREAT | O_RDWR, 0o600)
+            #expect(reused >= 0)
+            defer {
+                close(reused)
+                unlink(path)
+            }
+            let w = await job.writeAll(Data("must not land\n".utf8))
+            #expect(w == .failure(.ended), "\(w)")
+            let r = job.resize(cols: 100, rows: 30)
+            if case .failure(let f) = r { #expect(f == .ended) } else { Issue.record("resized a closed terminal") }
+            #expect((job.cols, job.rows) == (80, 24), "a refused resize changes nothing")
+            var st = stat()
+            #expect(fstat(reused, &st) == 0 && st.st_size == 0, "the reused fd was written to")
+        }
+
+        /// Through the verb: the same end answers the job-ended refusal, not an errno.
+        @Test func theVerbsAnswerJobEndedAfterTheTerminalCloses() async {
+            let k = await kernelWith("term_end2", ["env": ["PATH": "/usr/bin:/bin"]])
+            let inbox = k.ensureInbox(AgentId("term_end2"))
+            let r = await call(
+                k, "term_end2",
+                [
+                    "type": "start", "command": "/bin/sh", "args": ["-c", "exit 0"],
+                    "pty": ["cols": 80, "rows": 24],
+                ])
+            let jid = r["job_id"]
+            #expect(await nextOf(inbox, "job_done") != nil)
+            for p: OrderedDictionary<String, JSON> in [
+                ["type": "write", "job_id": jid, "data": "x"],
+                ["type": "resize", "job_id": jid, "cols": 100, "rows": 30],
+            ] {
+                let out = await call(k, "term_end2", p)
+                #expect(out["reason"] == "not_found", "\(out.serialize())")
+                #expect(
+                    out["error"].asString?.hasSuffix("has ended") ?? false, "\(out.serialize())")
+            }
+        }
+
         @Test func pasteImageWantsAMimeAndTypesASavedPath() async {
             guard let py = py3() else { return }
             let k = await kernelWith("term_p")

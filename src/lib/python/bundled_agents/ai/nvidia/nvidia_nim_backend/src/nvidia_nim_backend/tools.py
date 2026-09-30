@@ -35,6 +35,7 @@ import os
 import httpx
 
 from ai_core import build, required_meta
+from ai_core.schema import field, schema, validate
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -74,6 +75,25 @@ def _parse_retry_after(resp: "httpx.Response") -> int:
 #: The variable carrying the key. Named in the failure text so an unwired
 #: connector says exactly what to set.
 KEY_VAR = "NVIDIA_API_KEY"
+NAME = "nvidia_nim_backend"
+
+#: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+#: no agent existing (`reflect bundles=all`), from the constants the provider runs
+#: on. `validate_meta` enforces it at the write, so the page and the kernel cannot
+#: disagree about what a record needs.
+RECORD_SCHEMA = schema(
+    [
+        field("endpoint", "str", "the NIM OpenAI-compatible URL", required=True),
+        field("model", "str", "the model name", required=True),
+    ],
+    key_var=KEY_VAR,
+)
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    value outside its set — every missing field named at once, from the schema."""
+    return validate(RECORD_SCHEMA, NAME, meta, record)
 
 
 def _read_api_key() -> str | None:
@@ -99,8 +119,8 @@ async def make_provider(id, kernel):
     rec = kernel.get(id) or {}
     return NvidiaNimProvider(
         api_key=key,
-        endpoint=required_meta(rec, "endpoint", "nvidia_nim_backend"),
-        model=required_meta(rec, "model", "nvidia_nim_backend"),
+        endpoint=required_meta(rec, "endpoint", NAME),
+        model=required_meta(rec, "model", NAME),
     )
 
 
@@ -169,7 +189,7 @@ def _build():
     return build(
         sentence="NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
-        name="nvidia_nim_backend",
+        name=NAME,
         module_name=__name__,
         reflect_extra=_reflect_extra,
         stream_wrapper=_stream_with_rate_limit_retry,

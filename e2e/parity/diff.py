@@ -74,7 +74,11 @@ class Norm:
     TIME_KEYS = {"ts", "started_at", "queued_at", "created_at", "next_run", "last_run",
                  "elapsed", "duration_ms"}
     ID_KEYS = {"id", "ids", "parent", "task_id", "job_id", "message_id", "pid", "refs", "expand",
-               "after", "next", "bundles_next", "view_ids", "killed", "covers"}
+               "after", "next", "bundles_next", "view_ids", "killed", "covers",
+               # an AI status event's `msg` — the id of the message it is about.
+               # Measured 2026-09-30 on the python self-diff: `ai_paths` events
+               # `msg` 1177 against 1180, every relationship the same.
+               "msg"}
     COUNT_KEYS = {"bytes", "size", "body_len", "content-length", "__bytes_len__"}
     OSPID_KEYS = {"pid"}
     GUID_KEYS = {"guid", "owner_guid", "partner_guid"}
@@ -274,12 +278,28 @@ class Norm:
                     r"· msg (\d+)\]",
                     r"<task_id>(\d+)</task_id>", r"<message_id>(\d+)</message_id>", r"\[fold (\d+) ·", r"\[recall (\d+) ·",
                     r"msg (\d+) · re (\d+)", r"joined execution (\d+)", r"(?m)^(\d+) · ",
+                    # the dedup note a settled reply carries — `[identical to the
+                    # reply in row 718 — the same 6205 bytes …]`. Measured
+                    # 2026-09-30 on the python self-diff (718 against 721).
+                    r"reply in row (\d+)",
                     # The same digest line, reached as the RAW request body the
                     # stub recorded: there the newline is still `\` `n` inside a
                     # json string, so `^` never sees it.
                     r"\\n(\d+) · "):
             out = re.sub(pat, lambda m: m.group(0).replace(
                 m.group(1), self._id_placeholder(int(m.group(1)))), out)
+        # N4 — the id counter's RESERVATION MARK, as the root record renders it
+        # into a system prompt (`next_id=1001`). The kernel reserves ids in
+        # blocks and persists the block's end, so the mark says how many ids the
+        # run had consumed when it was rendered — and the loader's debounced
+        # persistence consumes a different number on every run. Measured
+        # 2026-09-30 on the python self-diff: `next_id=2001` against `1001` in
+        # `store/stub/req_003.bin`, the rest of the prompt identical. Its
+        # PRESENCE and place stay compared.
+        new = re.sub(r"(\bnext_id=)\d+\b", r"\1<NEXT_ID>", out)
+        if new != out:
+            self.fired.add("N4")
+        out = new
         # N4 — an id LIST in text. Two forms, both kernel-minted row ids:
         #   `<ids><item>1828</item></ids>` (the grep hint the kernel writes into a
         #   settled reply) and `"expand": [2606]` / `"view_ids": [8084, …]` inside
@@ -303,7 +323,10 @@ class Norm:
         # N4 — a minted id inside an EMBEDDED json document (the fold prompt
         # quotes the rows it is folding as json). `pid` is left to N5: that one
         # is the operating system's.
-        out = re.sub(r'(\\?"(?:id|task_id|job_id|message_id|parent_row|row_id)\\?"\s*:\s*)(\d+)(?![\d.])',
+        # `msg` too: an origin line quotes the `{to, msg}` it was sent with
+        # (`origin: readings reflect {"to": […], "msg": 1414}`) — measured
+        # 2026-09-30 on the python self-diff, 1414 against 1408.
+        out = re.sub(r'(\\?"(?:id|task_id|job_id|message_id|parent_row|row_id|msg)\\?"\s*:\s*)(\d+)(?![\d.])',
                      lambda m: m.group(1) + self._id_placeholder(int(m.group(2))), out)
         # …and a job's id in an `origin` line, written `{job_id: <n>}` — a job's
         # id IS its kernel task id, a counter value like any other here.
@@ -484,6 +507,19 @@ class Norm:
                              for ck in ("bytes", "system_chars")
                              if isinstance(x.get(ck), int)
                              and not isinstance(x.get(ck), bool) and x[ck] > 0}}
+            # N10 — a ledger EXECUTION's outcome `bytes`: the size of the reply
+            # that settled it. That reply is recorded WHOLE in its own file by
+            # the family that made the call and compared there, and it carries
+            # row ids N4 renames, so the same reply is a different number of
+            # bytes on two runs. Measured 2026-09-30 on the python self-diff:
+            # `tree/kernel_ledger_after.json` 450 against 452 and 19970 against
+            # 19972. A ZERO IS KEPT AS ZERO (an outcome with no body is a
+            # different thing), and `status`/`attempts` beside it stay exact.
+            if {"pid", "status", "bytes", "attempts"} <= set(x) \
+                    and isinstance(x.get("bytes"), int) and not isinstance(x["bytes"], bool) \
+                    and x["bytes"] > 0:
+                self.fired.add("N10")
+                x = {**x, "bytes": "<LEN:reply>"}
             out = {}
             for k, v in x.items():
                 # N14 — everything the harness owns, dropped by SCHEMA: the
@@ -507,6 +543,21 @@ class Norm:
             # a renamed row id (a job's id is one), a timestamp and an OS pid. A
             # guid and a send_id are always the same number of characters, so a
             # count over a text carrying one of those is still compared exactly.
+            # N10 — a memory-store ROW: `bytes` counts its content and `head` is
+            # that content cut at a fixed width. When the head carries a renamed
+            # id, the content does too, so the count goes; and the cut lands
+            # where the raw digit widths put it, so the head is compared on the
+            # prefix BOTH sides show — `compare_json` trims it, and only when the
+            # two raw heads are the same length (the kernel's cap), recorded
+            # here as `HEAD_RAW_LEN`. Measured 2026-09-30 on the python
+            # self-diff: `store/s4/history_final.json` bytes 127 against 126,
+            # head ending `</v` against `</ve`.
+            if isinstance(out.get("head"), str) and isinstance(x.get("head"), str) \
+                    and isinstance(out.get("bytes"), int) and not isinstance(out["bytes"], bool) \
+                    and any(m in out["head"] for m in ("<ID#", "<TS:float>", "<TS:int>", "<OSPID>")):
+                self.fired.add("N10")
+                out["bytes"] = "<LEN:renamed-ids>"
+                out[HEAD_RAW_LEN] = len(x["head"])
             texts = [out[t] for t in ("text", "utf8", "body") if isinstance(out.get(t), str)]
             body = out.get("body")
             if isinstance(body, dict):
@@ -1200,9 +1251,47 @@ def _apply_map(x, mapping: dict):
     return _sub_ph(x, mapping) if isinstance(x, str) else x
 
 
+#: N10 — the raw length of a store row's `head`, stashed by `Norm.walk` for the
+#: pairwise trim in `trim_heads` and removed before anything is compared.
+HEAD_RAW_LEN = "__head_raw_len__"
+
+
+def trim_heads(a, b, fired: set):
+    """N10, both sides at once: a row `head` cut at the SAME raw width on both
+    sides, where one normalised head is a prefix of the other, is compared on the
+    prefix both show. Different raw widths, or a shared prefix that differs, stay
+    a difference. Every `HEAD_RAW_LEN` mark is removed on the way out."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        la, lb = a.pop(HEAD_RAW_LEN, None), b.pop(HEAD_RAW_LEN, None)
+        ha, hb = a.get("head"), b.get("head")
+        if la is not None and la == lb and isinstance(ha, str) and isinstance(hb, str) \
+                and ha != hb and (ha.startswith(hb) or hb.startswith(ha)):
+            fired.add("N10")
+            a["head"] = b["head"] = min(ha, hb, key=len)
+        for k in set(a) & set(b):
+            trim_heads(a[k], b[k], fired)
+    elif isinstance(a, list) and isinstance(b, list):
+        for x, y in zip(a, b):
+            trim_heads(x, y, fired)
+    drop_head_marks(a)
+    drop_head_marks(b)
+
+
+def drop_head_marks(x):
+    if isinstance(x, dict):
+        x.pop(HEAD_RAW_LEN, None)
+        for v in x.values():
+            drop_head_marks(v)
+    elif isinstance(x, list):
+        for v in x:
+            drop_head_marks(v)
+    return x
+
+
 def compare_json(path: str, a, b, na: Norm, nb: Norm) -> list:
     keys = unordered_keys(path)
     wa, wb = pair_row_ids(na.walk(a), nb.walk(b))
+    trim_heads(wa, wb, na.fired)
     if keys:
         wa, wb = bagify(wa, keys, top=True), bagify(wb, keys, top=True)
     fa, fb = flatten(wa), flatten(wb)
@@ -1370,8 +1459,8 @@ def file_lines(rel: str, pa: Path, pb: Path, ports_a, ports_b, root_alias, rt_b)
                 # whoever reads the normalised document.
                 extra_a["__tail__"] = extra_b["__tail__"] = \
                     "<N18: un-flushed tail cut, strict prefix>"
-        sa = {**extra_a, "__shape__": shape_of(na.walk(a))}
-        sb = {**extra_b, "__shape__": shape_of(nb.walk(b))}
+        sa = {**extra_a, "__shape__": shape_of(drop_head_marks(na.walk(a)))}
+        sb = {**extra_b, "__shape__": shape_of(drop_head_marks(nb.walk(b)))}
         if sa != sb:
             return compare_json(rel, sa, sb, Norm({}, None, "python"), Norm({}, None, rt_b))
         return []
@@ -1935,6 +2024,78 @@ def cmd_rulecheck() -> int:
         bad += 0 if ok else 1
         total += 1
         print(f"  {'ok  ' if ok else 'FAIL'} N10 — {name}: {len(lines)} line(s), "
+              f"expected {'>0' if want else '0'}")
+
+    # ── The 2026-09-30 python self-diff: counter ids a run consumed. ────────
+    # The loader's debounced persistence takes a different number of ids on
+    # every run, so every id after it shifts and some cross a digit width. Each
+    # rule both ways: the shift is forgiven, a changed RELATIONSHIP or a changed
+    # word beside it is not.
+    def outcome(bytes_, status="completed"):
+        return {"executions": [{"id": 342, "target": "kernel_state", "status": status,
+                                "outcome": {"pid": 342, "status": status,
+                                            "bytes": bytes_, "attempts": 1}}]}
+
+    def row(rid, parent, reply, tail, bytes_, word="write"):
+        return {"rows": [{"id": rid, "parent": parent, "kind": "user", "role": "user",
+                          "head": f"[reply to {reply} · totals {word} · ↑{parent}] "
+                                  f"<version>73475cb40a568e8d{tail}",
+                          "bytes": bytes_}]}
+
+    SAME = "[identical to the reply in row {r} — the same {n} bytes, not repeated]"
+    ids = [
+        ("N4 — an event's `msg` shifted by the run",
+         [{"msg": 1177}, {"msg": 1243}], [{"msg": 1180}, {"msg": 1246}], False,
+         "t/ai_paths/events.json"),
+        ("N4 — a `msg` naming a DIFFERENT message is still a difference",
+         [{"msg": 10}, {"msg": 10}], [{"msg": 10}, {"msg": 11}], True,
+         "t/ai_paths/events.json"),
+        ("N4 — `reply in row <n>` shifted by the run",
+         {"content": SAME.format(r=718, n=6205)}, {"content": SAME.format(r=721, n=6205)},
+         False, "t/ai_paths/cases/x.json"),
+        ("N4 — the byte count beside it is still compared",
+         {"content": SAME.format(r=718, n=6205)}, {"content": SAME.format(r=721, n=6206)},
+         True, "t/ai_paths/cases/x.json"),
+        ("N4 — a `msg` quoted in an origin line",
+         {"content": 'origin: readings reflect {\\"to\\": [\\"readings\\"], \\"msg\\": 1414}'},
+         {"content": 'origin: readings reflect {\\"to\\": [\\"readings\\"], \\"msg\\": 1408}'},
+         False, "t/store/x.json"),
+        ("N4 — the recipients beside it are still compared",
+         {"content": 'origin: readings reflect {\\"to\\": [\\"readings\\"], \\"msg\\": 1414}'},
+         {"content": 'origin: readings reflect {\\"to\\": [\\"totals\\"], \\"msg\\": 1408}'},
+         True, "t/store/x.json"),
+        ("N4 — the reservation mark `next_id=`",
+         {"content": "guid=x  next_id=2001  kernel_verbs"},
+         {"content": "guid=x  next_id=1001  kernel_verbs"}, False, "t/store/x.json"),
+        ("N4 — a prompt WITHOUT the mark is still a difference",
+         {"content": "guid=x  next_id=2001  kernel_verbs"},
+         {"content": "guid=x  kernel_verbs"}, True, "t/store/x.json"),
+        ("N10 — a ledger outcome's reply size",
+         outcome(450), outcome(452), False, "t/tree/kernel_ledger_after.json"),
+        ("N10 — its status is still compared",
+         outcome(450), outcome(452, status="failed"), True, "t/tree/kernel_ledger_after.json"),
+        ("N10 — an outcome with NO body is still a difference",
+         outcome(450), outcome(0), True, "t/tree/kernel_ledger_after.json"),
+        ("N10 — a row head cut at the same raw width",
+         row(1010, 997, 1001, "</v", 127), row(1004, 991, 995, "</ve", 126), False,
+         "t/store/s4/history_final.json"),
+        ("N10 — a head whose shared prefix differs is still a difference",
+         row(1010, 997, 1001, "</v", 127), row(1004, 991, 995, "</ve", 126, word="read"),
+         True, "t/store/s4/history_final.json"),
+        ("N10 — heads of different raw widths are still a difference",
+         row(1010, 997, 1001, "</v", 127), row(1004, 991, 995, "</ver", 126), True,
+         "t/store/s4/history_final.json"),
+        ("N10 — a row whose head names no id keeps its count",
+         {"rows": [{"id": "a", "head": "plain", "bytes": 10}]},
+         {"rows": [{"id": "a", "head": "plain", "bytes": 11}]}, True,
+         "t/store/s4/history_final.json"),
+    ]
+    for name, la, lb, want, rel in ids:
+        lines = cj(la, lb, rel)
+        ok = bool(lines) == want
+        bad += 0 if ok else 1
+        total += 1
+        print(f"  {'ok  ' if ok else 'FAIL'} {name}: {len(lines)} line(s), "
               f"expected {'>0' if want else '0'}")
 
     # ── N3's qualified-caller form: the minted guid goes, the agent stays. ───

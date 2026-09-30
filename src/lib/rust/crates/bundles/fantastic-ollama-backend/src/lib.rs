@@ -27,15 +27,16 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
 };
+use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_float, py_int, py_repr_value, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "ollama_backend.tools";
@@ -166,10 +167,22 @@ impl Provider for OllamaProvider {
             .await
             .map_err(|e| ProviderError::raised(format!("ollama: request failed: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::raised(format!(
-                "ollama: HTTP {}",
-                resp.status()
-            )));
+            // PYTHON'S TEXT: the ollama SDK raises `ResponseError(body,
+            // status)`, which reads the body's `error` field (the raw body when
+            // it is not JSON or has none) and renders `<error> (status code:
+            // <n>)` — measured, parity 2026-09-30: `ResponseError: stub blew up
+            // (status code: 500)` where this said `ollama: HTTP 500 …`.
+            let code = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let error = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or(text);
+            return Err(ProviderError {
+                message: format!("{error} (status code: {code})"),
+                mapped: false,
+                kind: "ResponseError",
+            });
         }
 
         Ok(consume_ndjson(resp, std::sync::Arc::clone(&self.report)))
@@ -335,6 +348,38 @@ fn decode_chunk_into(
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
+/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+/// with no agent existing (`reflect bundles=all`), from the constants the
+/// provider runs on. `validate_meta` enforces it at the write, so the page and
+/// the kernel cannot disagree about what a record needs. Python
+/// `RECORD_SCHEMA`, field for field.
+#[must_use]
+pub fn record_schema() -> &'static Value {
+    static SCHEMA: OnceLock<Value> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        schema::schema(
+            vec![
+                Field::new("endpoint", "str", "the ollama server URL").required(),
+                Field::new("model", "str", "the model name").required(),
+                Field::new(
+                    "num_ctx",
+                    "int",
+                    "the context window ollama loads the model with",
+                ),
+                Field::new("temperature", "float", "sampling temperature")
+                    .default(json!(DEFAULT_TEMPERATURE)),
+                Field::new("num_predict", "int", "a turn's output budget (tokens)"),
+                Field::new(
+                    "think",
+                    "bool",
+                    "turn the model's thinking channel on or off",
+                ),
+            ],
+            None,
+        )
+    })
+}
+
 /// The ollama backend bundle.
 pub struct OllamaBackendBundle;
 
@@ -346,6 +391,20 @@ impl Bundle for OllamaBackendBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    /// value outside its set — every missing field named at once, from the schema.
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        record: &Map<String, Value>,
+    ) -> Option<String> {
+        schema::validate(record_schema(), "ollama_backend", meta, record)
+    }
+
+    fn record_schema(&self) -> Option<Value> {
+        Some(record_schema().clone())
     }
 
     async fn handle(

@@ -657,19 +657,31 @@ async fn a_mapped_rate_limit_is_an_answer_not_a_raise() {
     );
 }
 
-/// UNMAPPED, same backend: a missing-model refusal is not an HTTP status, so
-/// python's mapper returns None and the raise goes through.
+/// UNMAPPED, same backend: a transport failure (the server refused the
+/// connection) is not an HTTP status, so python's mapper returns None and the
+/// raise goes through. A blanked `model` used to be this test's probe; it is
+/// refused AT THE WRITE now (the kind's schema), so it never reaches a turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unmapped_nim_failure_still_raises() {
     let tmp = TempDir::new().unwrap();
     let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
     let _key = KeyEnv::set(Some("nvapi-x")).await;
-    let _ = kernel
+    let blanked = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": nim.as_str(), "model": ""}),
         )])
-        .await;
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(blanked["reason"], json!("invalid_meta"), "{blanked}");
+    assert_eq!(
+        blanked["error"],
+        json!(
+            "nvidia_nim_backend: required on the record and missing: model — nothing is \
+             guessed. model = the model name"
+        )
+    );
     let r = kernel
         .send(vec![Item::new(
             nim.clone(),
@@ -678,12 +690,12 @@ async fn an_unmapped_nim_failure_still_raises() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["raised"], json!(true));
+    assert_eq!(r["raised"], json!(true), "{r:#?}");
     assert!(
         r["error"]
             .as_str()
             .unwrap_or_default()
-            .starts_with("ValueError: nvidia_nim_backend: `model` is required"),
+            .starts_with("RuntimeError: http: error sending request"),
         "{r:#?}"
     );
 }

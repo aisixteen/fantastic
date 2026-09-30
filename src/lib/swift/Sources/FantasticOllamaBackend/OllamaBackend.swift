@@ -18,6 +18,10 @@ import NIOCore
 
 public let HANDLER_MODULE = "ollama_backend.tools"
 
+/// Sampling temperature when the record names none — LOW, because an agentic
+/// backend must emit exact calls, not improvise. Python `DEFAULT_TEMPERATURE`.
+public let DEFAULT_TEMPERATURE = 0.3
+
 public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     public let name = "ollama_backend"
     public var verbs: [String] { AIBackend.verbNames }
@@ -56,6 +60,35 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     }
 
     public var readme: String? { Self.readmeText }
+
+    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    /// value outside its set — every missing field named at once, from the schema.
+    /// Python `validate_meta`.
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        RecordSchema.validate(Self.RECORD_SCHEMA, backend: name, meta: meta, record: record)
+    }
+
+    public var recordSchema: JSON? { Self.RECORD_SCHEMA }
+
+    /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+    /// no agent existing (`reflect bundles=all`), from the constants the provider
+    /// runs on. `validateMeta` enforces it at the write, so the page and the kernel
+    /// cannot disagree about what a record needs. Python `RECORD_SCHEMA`.
+    static let RECORD_SCHEMA: JSON = RecordSchema.schema(
+        [
+            RecordSchema.field("endpoint", "str", "the ollama server URL", required: true),
+            RecordSchema.field("model", "str", "the model name", required: true),
+            RecordSchema.field(
+                "num_ctx", "int", "the context window ollama loads the model with"),
+            RecordSchema.field(
+                "temperature", "float", "sampling temperature",
+                default: .double(DEFAULT_TEMPERATURE)),
+            RecordSchema.field("num_predict", "int", "a turn's output budget (tokens)"),
+            RecordSchema.field("think", "bool", "turn the model's thinking channel on or off"),
+        ],
+        keyVar: nil)
 
     /// THE PYTHON FILE, BYTE FOR BYTE (`ollama_backend/readme.md`). Persisted as
     /// `agents/<id>/readme.md` and served by `reflect readme=true`, so a swift
@@ -134,7 +167,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     // defaults (temperature 0.8, num_ctx 4096) are wrong for an agentic backend;
     // temperature defaults LOW (0.3), the rest pass through only when set.
     fileprivate static func temperature(agent: Agent) -> Double {
-        agent.metaValue(forKey: "temperature")?.asDouble ?? 0.3
+        agent.metaValue(forKey: "temperature")?.asDouble ?? DEFAULT_TEMPERATURE
     }
     fileprivate static func numCtx(agent: Agent) -> Int64? {
         agent.metaValue(forKey: "num_ctx")?.asInt

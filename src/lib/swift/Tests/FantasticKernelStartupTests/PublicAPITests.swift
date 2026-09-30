@@ -22,12 +22,26 @@ struct StartKernelInMemoryTests {
         for hm in ["file_bridge.tools", "cli.tools", "ollama_backend.tools"]
         {
             let id = "probe_\(hm.replacingOccurrences(of: ".", with: "_"))"
-            let r = await kernel.send([Item(AgentId("kernel_state"), .object([
+            // An AI backend's required record fields are refused at the write when
+            // absent (its schema); stub values — nothing here dials the provider.
+            let payload: JSON =
+                hm == "ollama_backend.tools"
+                ? .object([
                     "type": .string("create_agent"),
                     "parent_id": .string("kernel_state"),
                     "handler_module": .string(hm),
                     "id": .string(id),
-                ]))])[0].result
+                    "endpoint": .string("http://127.0.0.1:9/stub"),
+                    "model": .string("stub"),
+                    "memory_store_id": .string("memory"),
+                ])
+                : .object([
+                    "type": .string("create_agent"),
+                    "parent_id": .string("kernel_state"),
+                    "handler_module": .string(hm),
+                    "id": .string(id),
+                ])
+            let r = await kernel.send([Item(AgentId("kernel_state"), payload)])[0].result
             #expect(r["id"].asString == id, "failed to create agent for \(hm): \(r)")
         }
     }

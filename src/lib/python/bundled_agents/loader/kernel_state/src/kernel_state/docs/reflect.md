@@ -4,9 +4,10 @@
 
 `reflect` is the one discovery verb. It returns the ADDRESSED agent
 uniformly — `{id, sentence, display_name, description?, verbs?, ...state}`.
-Two things are root-only: the deployment fields (`runtime`/`env`/`version`)
-and the ANSWERING of `kernel_verbs` (advertised everywhere, answered by the
-root alone). Otherwise the root is not special. Compose the reply with three
+Three things are root-only: the deployment fields (`runtime`/`env`/`version`),
+`peers` — the kernels this one is connected to, `[{guid, via}]`, each agent there
+reachable as `<guid>|<agent id>` (reflect `<guid>|kernel` for its tree) — and the
+ANSWERING of `kernel_verbs` (advertised everywhere, answered by the root alone). Otherwise the root is not special. Compose the reply with three
 flags:
 
 - `tree=all|ids|none` (default `all`)
@@ -15,7 +16,14 @@ flags:
   - `ids`  — a flat list of descendant ids. Cheap. Use it to scan.
   - `none` — just the agent, no subtree.
 - `bundles=all|ids|none` (default `none`)
-  - `all`  — every installable bundle as `{name, handler_module}`.
+  - `all`  — every installable bundle as `{name, handler_module}`, plus `schema`
+    where the bundle publishes one: what that KIND's record takes, readable before
+    any agent of it exists — `{fields:[{name, type, required, enum?, default?, hint}],
+    key_var}` (`type` is `str|int|float|bool|enum|list|map`; `default` is the
+    bundle's own value and never present on a required field; `key_var` is the
+    environment variable the key is read from, `null` if none). The same schema is
+    what `create_agent`/`update_agent` enforce: a required field missing is refused
+    at the write, every one named with its hint.
   - `ids`  — just the bundle names.
   - `none` — omit (the usual case).
 - `readme=true|index|<key>` (default `false`) — the manual, one agent at a

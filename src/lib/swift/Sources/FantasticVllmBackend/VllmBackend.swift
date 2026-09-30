@@ -83,6 +83,20 @@ public let PASSTHROUGH = [
 public let CONNECT_TIMEOUT = 5.0
 public let READ_TIMEOUT = 900.0
 
+/// THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front
+/// of the shared GPU takes `Authorization: Bearer <key>`). Read from this
+/// environment variable at CALL time, never from the record; set ⇒ sent as a
+/// Bearer header, unset ⇒ no header at all, so a vLLM started without
+/// `--api-key` keeps working. A 401/403 names the variable. Python `KEY_VAR`.
+public let KEY_VAR = "VLLM_API_KEY"
+
+/// The key, read per call — nil when unset or blank. Python `_auth_headers`.
+func vllmApiKey() -> String? {
+    guard let raw = ProcessInfo.processInfo.environment[KEY_VAR] else { return nil }
+    let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return key.isEmpty ? nil : key
+}
+
 // MARK: - the KV-cache session table
 
 /// Seconds a conversation may sit idle before its slot frees itself (dataroom's
@@ -347,6 +361,11 @@ struct VllmProvider: AIProvider {
     let agentKey: String
     /// Seconds on a monotonic clock — the table's TTL arithmetic.
     let clock: @Sendable () -> Double
+    /// Where the key comes from, asked on EVERY call: the environment
+    /// (`vllmApiKey`). A parameter so a test can hand one in without `setenv` —
+    /// which races every concurrent `Process.run` in the test process (measured:
+    /// "Bad address", 2026-09-30).
+    var apiKey: @Sendable () -> String? = { vllmApiKey() }
     /// What the endpoint REPORTED for the last pass — the prompt size (ai_core
     /// calibrates with it) and the stop reason.
     let usage: AIUsage? = AIUsage()
@@ -435,6 +454,9 @@ struct VllmProvider: AIProvider {
         req.method = .POST
         req.headers.add(name: "Content-Type", value: "application/json")
         req.headers.add(name: "Accept", value: "text/event-stream")
+        if let key = apiKey() {
+            req.headers.add(name: "Authorization", value: "Bearer \(key)")
+        }
         req.body = .bytes(ByteBuffer(string: payload))
 
         let client = VllmHTTP.client(connect: connectTimeout, read: readTimeout)
@@ -451,8 +473,10 @@ struct VllmProvider: AIProvider {
             let collected = try? await response.body.collect(upTo: 1 << 20)
             // python `.decode("utf-8", "replace")[:500]` — 500 CHARACTERS
             let detail = String((collected.map { String(buffer: $0) } ?? "").prefix(500))
+            let why = code == 401 || code == 403 ? " — the door wants a key: set \(KEY_VAR)" : ""
             throw PyError(
-                "RuntimeError", "vllm_backend: \(endpoint) answered HTTP \(code): \(detail)")
+                "RuntimeError",
+                "vllm_backend: \(endpoint) answered HTTP \(code)\(why): \(detail)")
         }
 
         var wrap = ThinkingWrap()
@@ -735,36 +759,73 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
         // and a record the write accepted but no turn could use failed only
         // later, on every turn, far from the create that caused it (measured:
         // E37 multisubai_build — the solvers carried endpoint/model/max_tokens
-        // but no kv_slots/kv_overflow). Named ALL at once, so one retry fixes
-        // the record. Checked LAST, so a field that is present but malformed
-        // gets its own, more specific refusal above.
-        let missing = Self.REQUIRED.filter { !Self.present(merged, $0) }
-        if !missing.isEmpty {
-            return "\(NAME): required on the record and missing: "
-                + missing.joined(separator: ", ") + " — nothing is guessed. endpoint = the "
-                + "server's /v1 URL, model = the served name, max_tokens = a turn's output "
-                + "budget, kv_slots = how many conversations may be live on the endpoint, "
-                + "kv_overflow = evict (the least-recently-used rotates out) or reject (the "
-                + "newcomer is refused)"
-        }
-        return nil
+        // but no kv_slots/kv_overflow). Named ALL at once, from the schema, so
+        // one retry fixes the record. Checked LAST, so a field that is present
+        // but malformed gets its own, more specific refusal above.
+        return RecordSchema.validate(Self.RECORD_SCHEMA, backend: NAME, meta: meta, record: record)
     }
+
+    public var recordSchema: JSON? { Self.RECORD_SCHEMA }
+
+    /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+    /// with no agent existing (`reflect bundles=all`). Built from the constants
+    /// the provider runs on, and enforced by `validateMeta` above, so the page,
+    /// the write check and the turn cannot disagree. The five required fields have
+    /// NO default: nothing is guessed about a server. Python `RECORD_SCHEMA`.
+    static let RECORD_SCHEMA: JSON = RecordSchema.schema(
+        [
+            RecordSchema.field("endpoint", "str", "the vLLM server's /v1 URL", required: true),
+            RecordSchema.field("model", "str", "the served model name", required: true),
+            RecordSchema.field(
+                "max_tokens", "int", "a turn's output budget (tokens)", required: true),
+            RecordSchema.field(
+                "kv_slots", "int", "how many conversations may be live on the endpoint",
+                required: true),
+            RecordSchema.field(
+                "kv_overflow", "enum",
+                "all slots live: evict (the least-recently-used rotates out) or reject "
+                    + "(the newcomer is refused)",
+                required: true, enumValues: KV_OVERFLOWS),
+            RecordSchema.field(
+                "temperature", "float", "sampling temperature",
+                default: SAMPLING_DEFAULTS["temperature"]),
+            RecordSchema.field(
+                "top_p", "float", "nucleus sampling", default: SAMPLING_DEFAULTS["top_p"]),
+            RecordSchema.field(
+                "top_k", "int", "top-k sampling", default: SAMPLING_DEFAULTS["top_k"]),
+            RecordSchema.field(
+                "reasoning_effort", "enum",
+                "how much the model wants to think (xhigh needs a thinking_token_budget)",
+                default: SAMPLING_DEFAULTS["reasoning_effort"], enumValues: REASONING_EFFORTS),
+            RecordSchema.field(
+                "thinking_token_budget", "int",
+                "the hard cap on thinking tokens, below max_tokens; unset, a turn sends "
+                    + "min(default, max_tokens/2)",
+                default: SAMPLING_DEFAULTS["thinking_token_budget"]),
+            RecordSchema.field("min_p", "float", "min-p sampling; sent only when set"),
+            RecordSchema.field("presence_penalty", "float", "sent only when set"),
+            RecordSchema.field("frequency_penalty", "float", "sent only when set"),
+            RecordSchema.field("repetition_penalty", "float", "sent only when set"),
+            RecordSchema.field("no_repeat_ngram_size", "int", "sent only when set"),
+            RecordSchema.field("seed", "int", "sent only when set"),
+            RecordSchema.field("stop", "list", "stop sequences; sent only when set"),
+            RecordSchema.field(
+                "kv_ttl", "float", "seconds an idle conversation keeps its slot",
+                default: .double(KV_TTL)),
+            RecordSchema.field(
+                "connect_timeout", "float", "seconds to reach the server",
+                default: .double(CONNECT_TIMEOUT)),
+            RecordSchema.field(
+                "read_timeout", "float", "seconds to wait on a generation",
+                default: .double(READ_TIMEOUT)),
+        ],
+        // the door's key, when it wants one — sent as a Bearer header only when set
+        keyVar: KEY_VAR)
 
     /// The fields a turn cannot run without — refused at the write when absent.
-    /// Python `REQUIRED`, its order.
-    static let REQUIRED = ["endpoint", "model", "max_tokens", "kv_slots", "kv_overflow"]
-
-    /// Whether the record NAMES `key` in a usable shape (the shape itself is
-    /// judged by the checks above). Python `_present`: `endpoint`/`model` must
-    /// be a non-blank string; any other field only has to be there, not null.
-    static func present(_ rec: OrderedDictionary<String, JSON>, _ key: String) -> Bool {
-        guard let v = rec[key], v != .null else { return false }
-        if key == "endpoint" || key == "model" {
-            guard case .string(let s) = v else { return false }
-            return !pyStrip(s).isEmpty
-        }
-        return true
-    }
+    /// The schema's required fields, not a second list. Python `REQUIRED`.
+    static let REQUIRED: [String] = (RECORD_SCHEMA["fields"].asArray ?? [])
+        .filter { $0["required"].asBool == true }.compactMap { $0["name"].asString }
 }
 
 extension VllmBundle {
@@ -785,7 +846,9 @@ extension VllmBundle {
         ## The record
 
         REQUIRED — nothing is guessed, and a record missing any of them is refused at the
-        write, naming every missing field:
+        write, naming every missing field (the whole field list, with defaults and hints, is
+        this kind's `schema` in `reflect bundles=all`; `memory_store_id` is required too, as
+        on every AI agent):
         - `endpoint` — the server's `/v1` base, e.g. `http://127.0.0.1:18000/v1`
         - `model` — the served model name, e.g. `qwen3.8-27b`
         - `max_tokens` — the output budget of a turn (unbounded, a runaway turn decodes for a long time)
@@ -830,10 +893,18 @@ extension VllmBundle {
         — a few tokens of thinking is no thinking, and a model starved of it stops with an
         empty answer. The value sent is `last_thinking_budget` in reflect.
 
+        ## The key
+
+        A door in front of vLLM may want one (`Authorization: Bearer <key>`). It is read from
+        `VLLM_API_KEY` in the environment at call time — never from the record — and sent
+        only when set: unset, no header goes out, so a vLLM started without `--api-key`
+        works as it is.
+
         ## Failures, in words
 
         - connection refused → vLLM is not listening yet (it loads for ~75 s after boot), or the tunnel is down
         - no answer within `connect_timeout` → the instance is stopped, or the tunnel/port is wrong
+        - HTTP 401/403 → the door wants a key: set `VLLM_API_KEY`
         - the stream drops, or ends without a `finish_reason` → vLLM died mid-answer; the turn is not complete
         - `finish_reason: length` → a cut (`last_stop_reason: max_tokens`), so the caller can continue
 

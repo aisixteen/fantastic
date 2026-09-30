@@ -52,6 +52,9 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
         "parent_id": "kernel",
         "handler_module": HANDLER_MODULE,
         "id": id,
+        // required at the write (the schema); a test that dials a server
+        // points it at its own mock with `update_agent`
+        "endpoint": "http://127.0.0.1:9/stub",
     });
     for (k, v) in memory {
         create[k] = v;

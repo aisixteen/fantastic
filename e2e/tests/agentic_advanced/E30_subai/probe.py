@@ -814,6 +814,16 @@ async def run(
     # the store's half of each memory wire
     for who in ("brain", aid):
         await memory.open_ingress(root, memory.MEMORY, who)
+    # FORENSICS: pin the moment any grant on the store changes (rust E30,
+    # 2026-09-30 — `rest` vanished from memory's callable_by mid-run).
+    _grants_watch = asyncio.create_task(memory.watch_store_grants(root))
+    # …and WHO wrote it: every `update_agent` naming the store, with its sender,
+    # off the state stream (a spawned kernel only — in process there is no ws face).
+    _writers_watch = (
+        asyncio.create_task(memory.watch_store_writers(root.k.port, root.id))
+        if hasattr(root, "k")
+        else None
+    )
 
     transcript: list[str] = []
 

@@ -127,15 +127,16 @@ public enum AIContext {
     }
 
     /// The agent's configured `recent_n` (verbatim recent turns), clamped to
-    /// [1, 50]; default 6.
+    /// `AIConstants.RECENT_N_RANGE`; default `AIConstants.RECENT_N`.
     ///
     /// Python is `int(rec.get("recent_n"))` inside a `TypeError/ValueError`
     /// guard, so `true` is 1, `7.9` is 7, `' 7 '` is 7 and `1000.0` clamps to
     /// 50 — none of which swift's int-or-string read produced.
     public static func recentN(_ agent: Agent) -> Int {
-        var n: Int64 = 6
+        var n = AIConstants.RECENT_N
         if let v = agent.metaValue(forKey: "recent_n"), let i = try? pyInt(v) { n = Int64(i) }
-        return Int(min(max(n, 1), 50))
+        let (lo, hi) = AIConstants.RECENT_N_RANGE
+        return Int(min(max(n, lo), hi))
     }
 
     /// The agent's configured strategy, RAW — only an ABSENT key means

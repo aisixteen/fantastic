@@ -42,6 +42,13 @@ class _Kernel:
     def get(self, _id):
         return {}
 
+    def spawn_task(self, _agent_id, _verb, coro):
+        """Deliveries are FORKED through the kernel (ai_core has one path, no
+        unregistered fallback) — run the work as a task, like the kernel does."""
+        self._tasks = getattr(self, "_tasks", [])
+        self._tasks.append(asyncio.get_running_loop().create_task(coro))
+        return len(self._tasks)
+
     async def send(self, items):
         outs = []
         if any(i["payload"].get("type") != "send" for i in items):

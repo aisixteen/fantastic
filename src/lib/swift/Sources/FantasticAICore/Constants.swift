@@ -37,6 +37,10 @@ public enum AIConstants {
     public static let DEFAULT_OUTPUT_RESERVE: Int64 = 1024
     /// Never project to a budget below this.
     public static let BUDGET_FLOOR: Int64 = 256
+    /// How many of the most recent turns a compaction keeps verbatim when the
+    /// record names no `recent_n` (clamped to RECENT_N_RANGE either way).
+    public static let RECENT_N: Int64 = 6
+    public static let RECENT_N_RANGE: (Int64, Int64) = (1, 50)
 
     // ─── the turn loop (AIBackend.swift, ContextRecall.swift) ───────────────
 

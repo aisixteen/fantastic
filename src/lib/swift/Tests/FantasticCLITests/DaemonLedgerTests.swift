@@ -23,18 +23,26 @@
         import Darwin
     #endif
 
-    /// Foundation's `Process.run()` is NOT safe to call from two threads at
-    /// once: the suites around this one launch in parallel and posix_spawn came
-    /// back `EFAULT` (measured once in six full runs). Every launch in this file
-    /// goes through this one PROCESS-WIDE lock — swift-testing builds a fresh
-    /// suite instance per test, so a stored property would be a lock per test.
-    private let spawnLock = NSLock()
+    /// The WHOLE environment every launched binary gets — fixed, never inherited.
+    ///
+    /// An inherited environment makes `posix_spawn` walk the process-global
+    /// `environ` while suites running in parallel `setenv`/`unsetenv` their own
+    /// keys (the password rules, dotenv, the shell tests): a walk racing a
+    /// reallocation reads freed memory and the spawn fails `EFAULT` — "Bad
+    /// address" (measured standalone: 2 of 12,000 inherited-env spawns failed
+    /// with a mutating thread beside them, 0 of 12,000 with an explicit
+    /// environment). It was first read as "`Process.run()` is not thread-safe"
+    /// and papered over with a per-file lock, which could not reach the other
+    /// suites' `setenv`. The binary needs nothing from the environment; a fixed
+    /// one is also hermetic — no developer key or config leaks into the daemon.
+    private let launchEnvironment: [String: String] = [
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": NSHomeDirectory(),
+    ]
 
-    /// `proc.run()`, serialised. Sync on purpose: `NSLock` is refused inside an
-    /// async frame.
+    /// `proc.run()` with the fixed environment above.
     private func launch(_ proc: Process) throws {
-        spawnLock.lock()
-        defer { spawnLock.unlock() }
+        proc.environment = launchEnvironment
         try proc.run()
     }
 

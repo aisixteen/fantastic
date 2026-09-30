@@ -273,6 +273,44 @@ class _Dispatched:
     name: str | None = None
 
 
+class RemoteTarget:
+    """An agent on a CONNECTED PEER KERNEL, as ONE send sees it (owner,
+    2026-09-30): addressed `<guid>|<agent id>`, never registered in this tree.
+    The send pipeline treats it like any target — a ledger row, a task-table
+    row, a settled outcome — except that its dispatch hands the call to the
+    peer's route instead of a handler here, carrying the caller as
+    `<this guid>|<sender>` so the peer's gate can judge it. The transport that
+    route rides only carries frames.
+    """
+
+    parent = None
+
+    def __init__(self, qualified: str, guid: str, agent_id: str, route, via_agent):
+        self.id = qualified
+        self.guid = guid
+        self.agent_id = agent_id
+        self.route = route
+        self._via = via_agent  # the local agent whose kernel holds the route
+        self._children: dict = {}
+        self._meta: dict = {"callable_by": {}}
+        self.handler_module = None
+
+    async def _dispatch_task(self, task_id, payload: dict, origin: str | None = None):
+        _current_task.set(task_id)
+        own = self._via._root()._meta.get("guid")
+        if not own:
+            # The peer judges the caller by `<guid>|<agent>`; with no guid of our
+            # own there is nothing honest to put on the frame.
+            return refusal(
+                UNHANDLED,
+                f"send: this kernel has no guid yet (its root has not booted), so a "
+                f"call to {self.id} cannot say who is calling",
+            )
+        return await self.route.call(
+            self.agent_id, payload, f"{own}|{origin if origin else 'kernel'}"
+        )
+
+
 class Agent:
     """One node in the kernel tree. Recursive: any agent may have
     children, regardless of bundle.
@@ -751,7 +789,7 @@ class Agent:
         if target_id == "kernel":
             target = self._root()
         else:
-            target = self.ctx.agents.get(target_id)
+            target = self.ctx.agents.get(target_id) or self._qualified_target(target_id)
         if target is None:
             return outcome(None, FAILED, self.ctx.unknown_agent(target_id))
         # ── CALL GATE — fully-gated, two-sided, from-above ──────────────
@@ -1078,7 +1116,10 @@ class Agent:
             reply = await d.task  # instant when already done
             if d.pid is None:  # fast path already ran _apply_reflect_flags
                 return outcome(None, COMPLETED, reply)
-            if not d.flags_done:
+            # A PEER's reply is that kernel's own answer, decorated THERE — a
+            # reflect of `<guid>|kernel` is its tree, not something to re-render
+            # here (and there is no local agent to render it from).
+            if not d.flags_done and not isinstance(d.target, RemoteTarget):
                 reply = await self._apply_reflect_flags(d.target, d.payload, reply)
             # FAILURE IS A STATUS. A handler that RAN and said no — a missing
             # path, a patch that did not match, a refusal it composed itself —
@@ -1298,6 +1339,20 @@ class Agent:
             )
         return None
 
+    def _qualified_target(self, target_id: str) -> "Agent | RemoteTarget | None":
+        """`<guid>|<agent id>`: this kernel's own guid names a LOCAL agent; the
+        guid of a CONNECTED PEER names an agent there (a `RemoteTarget` the send
+        hands to that peer's route); anything else names nothing."""
+        guid, bar, agent_id = target_id.partition("|")
+        if not bar or not guid or not agent_id or "|" in agent_id:
+            return None
+        if guid == self._root()._meta.get("guid"):
+            return (
+                self._root() if agent_id == "kernel" else self.ctx.agents.get(agent_id)
+            )
+        route = self.ctx.peers.get(guid)
+        return RemoteTarget(target_id, guid, agent_id, route, self) if route else None
+
     def _gate(self, sender_id: str, verb: str, target: "Agent", payload: dict):
         """The two-sided call gate. Returns an error dict if the send is refused,
         else None. Checks egress (sender's `can_call`) then ingress (target's
@@ -1309,6 +1364,35 @@ class Agent:
         s_can = sender_rec.get("can_call") or {}
         s_parent = sender_rec.get("parent_id")
         s_kids = frozenset(sender._children) if sender is not None else frozenset()
+        # A target on ANOTHER KERNEL — FIRST, before anything below reads the
+        # payload as an operand of THIS tree (a `create_agent` sent to
+        # `<guid>|kernel` places nothing here). Egress is the whole check here — the sender's
+        # `can_call` must name `<guid>|<agent>` or `<guid>|*`. Whether that agent
+        # accepts the call is its OWN kernel's decision (its `callable_by`, against
+        # the qualified `<this guid>|<sender>`), made where the agent lives.
+        if isinstance(target, RemoteTarget):
+            d = authorize_call(
+                s_can,
+                verb,
+                target.id,
+                enforce_privileged=True,
+                holder_id=sender_id,
+                holder_parent=s_parent,
+                holder_children=s_kids,
+                loader_id=root_id,
+            )
+            if d.allowed or self._heritable_egress(sender_id, verb, target.id):
+                return None
+            return refusal(
+                UNAUTHORIZED,
+                f"{sender_id} may not call {verb!r} on {target.id}",
+                hint=(
+                    f"{target.id} is an agent on the connected kernel {target.guid}: "
+                    f"name it in can_call — {{{target.id!r}: [...]}} or "
+                    f"{{'{target.guid}|*': [...]}}"
+                ),
+                side="egress",
+            )
         # PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
         # the agent it ACTS UPON is the parent named in `parent_id` — so that is
         # what the gate asks about, on both sides. Gating the root instead made
@@ -1794,6 +1878,9 @@ class Agent:
         }
         if target.parent is None:
             reply["runtime"] = "python"
+            # The kernels this one is CONNECTED to — each agent there is reachable
+            # as `<guid>|<agent id>` (reflect `<guid>|kernel` for its tree).
+            reply["peers"] = self.ctx.peer_rows()
             reply["env"] = os.environ.get("FANTASTIC_ENV", "host")
             reply["version"] = os.environ.get("FANTASTIC_VERSION")
             # The KERNEL's own verbs — answered by the root alone, so they appear
@@ -1841,7 +1928,9 @@ class Agent:
         bundles = payload.get("bundles", "none")
         if bundles == "all":
             cat, nxt = page(
-                target._available_bundles(), payload, key=lambda b: b["name"]
+                target._available_bundles(schemas=True),
+                payload,
+                key=lambda b: b["name"],
             )
             reply["bundles"] = cat
             if nxt is not None:
@@ -1871,17 +1960,26 @@ class Agent:
         return list(self._children.keys())
 
     @staticmethod
-    def _available_bundles() -> list[dict]:
+    def _available_bundles(schemas: bool = False) -> list[dict]:
         """Entry-point-discovered installable bundles, sorted by name.
         Recomputed live, so a freshly installed bundle shows up on the
-        next reflect."""
-        return sorted(
-            (
-                {"name": ep.name, "handler_module": ep.value}
-                for ep in entry_points(group=BUNDLE_ENTRY_GROUP)
-            ),
-            key=lambda b: b["name"],
-        )
+        next reflect.
+
+        With `schemas`, an entry also carries `schema` when its handler module
+        publishes `RECORD_SCHEMA` — what that KIND's record takes (`fields`,
+        `key_var`), readable before any agent of it exists (lib request #3,
+        2026-09-30). Duck-typed like `validate_meta`, which enforces the same
+        schema at the write. Importing the module is the cost of asking, so the
+        cheap `bundles=ids` listing never does it."""
+        out = []
+        for ep in entry_points(group=BUNDLE_ENTRY_GROUP):
+            entry = {"name": ep.name, "handler_module": ep.value}
+            if schemas:
+                sch = getattr(importlib.import_module(ep.value), "RECORD_SCHEMA", None)
+                if sch is not None:
+                    entry["schema"] = sch
+            out.append(entry)
+        return sorted(out, key=lambda b: b["name"])
 
     async def emit(self, target_id: str, payload: dict) -> None:
         """Drop a payload into target_id's inbox + tell watchers.

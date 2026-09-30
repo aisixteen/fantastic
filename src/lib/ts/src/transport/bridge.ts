@@ -83,6 +83,11 @@ class Conn {
   private wantsState = false;
   private onState: ((frame: Envelope) => void) | null = null;
   private readonly pending = new Map<string, Pending>();
+  // THE PEER ROLE (cross-kernel addressing, owner 2026-09-30): the conn that says
+  // `hello {guid}` becomes this kernel's address on the host — the host's calls to
+  // `<guid>|<agent>` arrive on it as `call` frames and are answered by `reply`.
+  private peerGuid: (() => string | null) | null = null;
+  private onCall: ((frame: Envelope) => void) | null = null;
   private ready!: Promise<void>;
   private resolveReady: (() => void) | null = null;
 
@@ -119,6 +124,8 @@ class Conn {
       // `/<endpoint>/ws` auto-watches `endpoint`; replay the state stream
       // subscription so a reconnect resyncs (a fresh snapshot follows).
       if (this.wantsState) this.sendFrame({ type: "state_subscribe" });
+      // a reconnect is a new connection: the host forgot this address with it
+      this.announce();
       const r = this.resolveReady;
       this.resolveReady = null;
       if (r !== null) r();
@@ -168,6 +175,9 @@ class Conn {
       this.pending.delete(String(msg["id"]));
       if (type === "error") p.reject(new Error(String(msg["error"] ?? "error")));
       else p.resolve((msg["data"] ?? null) as Json);
+    } else if (type === "call") {
+      // a HOST calling one of THIS kernel's agents (only on the peer conn)
+      this.onCall?.(msg);
     } else if (type === "event") {
       const payload = msg["payload"];
       if (payload !== null && typeof payload === "object") {
@@ -221,6 +231,26 @@ class Conn {
     } catch {
       return false;
     }
+  }
+
+  /** Make this conn the kernel's peer address: say `hello` whenever there is a
+   *  guid to say, and hand inbound `call` frames to `onCall`. */
+  asPeer(guid: () => string | null, onCall: (frame: Envelope) => void): void {
+    this.peerGuid = guid;
+    this.onCall = onCall;
+    this.announce();
+  }
+
+  /** Say who this kernel is, if it knows yet (its root mints the guid at boot).
+   *  Sent on every (re)connect and when the guid first appears. */
+  announce(): void {
+    const g = this.peerGuid?.() ?? null;
+    if (g !== null) this.sendFrame({ type: "hello", guid: g });
+  }
+
+  /** Answer one host call: its outcome's result, whatever it was (a refusal too). */
+  answer(id: string, data: Json): void {
+    this.sendFrame({ type: "reply", id, data });
   }
 
   /** Fire-and-forget emit; dropped if not connected (no buffering of emits). */
@@ -295,6 +325,14 @@ export class WsBridge implements Bridge {
     this.maxDelay = opts.maxReconnectDelay ?? 16000;
     this.make = opts.makeSocket ?? defaultSocketFactory();
     kernel.bridge = this;
+    // The guid appears when the root boots — possibly after the control socket
+    // is open. Say hello then, on the conn that already exists.
+    kernel.addStateSubscriber((e) => {
+      const changed = (e as { changed?: unknown }).changed;
+      if (e.kind === "updated" && Array.isArray(changed) && changed.includes("guid")) {
+        this.conns.get(this.controlEndpoint)?.announce();
+      }
+    });
   }
 
   private connFor(endpoint: string): Conn {
@@ -308,8 +346,58 @@ export class WsBridge implements Bridge {
         (src, payload) => this.kernel.emit(src, payload),
       );
       this.conns.set(endpoint, c);
+      if (endpoint === this.controlEndpoint) {
+        const conn = c;
+        conn.asPeer(
+          () => this.kernel.guid,
+          (frame) => void this.answerCall(conn, frame),
+        );
+      }
     }
     return c;
+  }
+
+  /**
+   * A HOST calling `frame.target` on THIS kernel as `frame.caller`
+   * (`<host guid>|<agent>`). Dispatched through the ordinary send pipeline under
+   * a FOREIGN origin: the target's `callable_by` is the whole local check (the
+   * host already judged its sender's `can_call`), and only this kernel's own
+   * agents are reachable. The outcome's result — a refusal included — goes back
+   * as the `reply`.
+   */
+  private async answerCall(conn: Conn, frame: Envelope): Promise<void> {
+    const id = String(frame["id"] ?? "");
+    const caller = frame["caller"];
+    const target = frame["target"];
+    const payload = frame["payload"];
+    if (
+      typeof caller !== "string" ||
+      !this.kernel.isForeign(caller) ||
+      typeof target !== "string" ||
+      payload === null ||
+      typeof payload !== "object" ||
+      Array.isArray(payload)
+    ) {
+      // A caller claiming THIS kernel's own guid would borrow a local agent's
+      // grants; a call must name who is calling, from where.
+      conn.answer(id, {
+        error:
+          "call: needs caller `<guid>|<agent>` of ANOTHER kernel, a target id and an object payload",
+        reason: "bad_arg",
+        arg: "caller",
+      });
+      return;
+    }
+    const [out] = await this.kernel
+      .foreignView(caller)
+      .send([{ target, payload: payload as Payload }]);
+    conn.answer(id, (out?.result ?? null) as Json);
+  }
+
+  /** Make this kernel addressable from the host now: open the control socket
+   *  (the peer conn) — a page that only listens would otherwise never say hello. */
+  announce(): void {
+    this.connFor(this.controlEndpoint).announce();
   }
 
   /** Forward a call to `target`: its own socket if watched, else the control one. */

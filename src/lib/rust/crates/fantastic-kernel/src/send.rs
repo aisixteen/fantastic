@@ -261,22 +261,28 @@ fn no_handler_module_refusal(id: &str, verb: &str) -> Value {
     r
 }
 
+/// python's `ModuleNotFoundError` text for a handler module no bundle here
+/// answers: `No module named '<package>'`. Importing `a.tools` when no `a`
+/// package exists fails at `a` — the TOP-LEVEL name, which is what an absent
+/// bundle is (measured, parity 2026-09-30: `No module named 'absent_bundle'`
+/// for `absent_bundle.tools`, stable across python runs).
+pub(crate) fn no_module_named(hm: &str) -> String {
+    let top = hm.split('.').next().unwrap_or(hm);
+    format!("No module named {}", fantastic_bundle::py_repr(top))
+}
+
 /// `agent <id!r>: handler_module <hm!r> cannot be imported in this runtime:
-/// <ExceptionClass>: <message>` — SHARED by the text and binary dispatch
-/// paths (C34/C24). PYTHON'S PREFIX, verbatim; the TAIL is not stable across
-/// python's own runs (measured: "No module named 'yaml_state'" one round,
-/// "No module named 'yaml_state.tools'" the next), so it names the closest
-/// static equivalent of the dynamic import failure rather than pinning
-/// python's exact wording.
+/// ModuleNotFoundError: <message>` — SHARED by the text and binary dispatch
+/// paths (C34/C24), python's text verbatim.
 fn not_installed_refusal(id: &str, hm: &str, verb: &str) -> Value {
     let mut r = crate::refusal::refusal(
         crate::refusal::UNHANDLED,
         format!(
             "agent {}: handler_module {} cannot be imported in this runtime: \
-             ModuleNotFoundError: No module named {}",
+             ModuleNotFoundError: {}",
             fantastic_bundle::py_repr(id),
             fantastic_bundle::py_repr(hm),
-            fantastic_bundle::py_repr(hm),
+            no_module_named(hm),
         ),
     );
     crate::refusal::with(&mut r, "verb", json!(verb));
@@ -622,8 +628,13 @@ impl Kernel {
             }
         }
 
-        // 9. resolve — `"kernel"` names the root, else a literal id.
-        let Some(target) = self.resolve_target(item.target.as_str()) else {
+        // 9. resolve — `"kernel"` names the root, else a literal id, else a
+        // QUALIFIED `<guid>|<agent id>`: this kernel's own guid names a local
+        // agent, a connected peer's guid an agent there (cross-kernel addressing).
+        let Some(target) = self
+            .resolve_target(item.target.as_str())
+            .or_else(|| self.qualified_target(item.target.as_str()))
+        else {
             return Launched::Settled(Outcome::refused(crate::refusal::unknown_agent(
                 item.target.as_str(),
                 self.agents.iter().map(|e| e.key().0.clone()).collect(),
@@ -843,7 +854,10 @@ impl Kernel {
             // reflect reply with the tree/bundles/readme/more flags. A roster
             // node whose own reflect RAISED fails this whole reflect, exactly as
             // the exception propagating out of python's `_roster` does.
-            if verb == "reflect" && status == Status::Completed {
+            //
+            // NOT for a remote target: its kernel already composed the reflect
+            // with ITS flags over ITS tree; this kernel has nothing to add to it.
+            if verb == "reflect" && status == Status::Completed && !target.is_remote() {
                 if let Err(raised) =
                     crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply).await
                 {
@@ -1094,21 +1108,28 @@ impl Kernel {
         // below re-points it at the target, so a fanout inside it would attribute
         // every event to its own recipient. The guard publishes the matching
         // `drain` on every exit path, timeout included.
-        let _in_flight = InFlightGuard::enter(self, target);
-        let item = match binary.clone() {
-            // The BINARY channel carries the payload's bytes at `bytes` — the key
-            // python's own payload dict holds them under — so a watcher receives
-            // the body, not a header with a hole where it was.
-            Some(blob) => {
-                let mut head = payload.clone();
-                if let Some(m) = head.as_object_mut() {
-                    m.insert("bytes".to_string(), Value::Null);
+        //
+        // A REMOTE TARGET is not an agent of this tree: nobody here can watch it
+        // and it has no backlog to report, so neither the in-flight count nor
+        // the fanout applies (python's `RemoteTarget` has neither). It keeps
+        // everything else — the task row above, the deadline, the settle.
+        let _in_flight = (!target.is_remote()).then(|| InFlightGuard::enter(self, target));
+        if !target.is_remote() {
+            let item = match binary.clone() {
+                // The BINARY channel carries the payload's bytes at `bytes` — the
+                // key python's own payload dict holds them under — so a watcher
+                // receives the body, not a header with a hole where it was.
+                Some(blob) => {
+                    let mut head = payload.clone();
+                    if let Some(m) = head.as_object_mut() {
+                        m.insert("bytes".to_string(), Value::Null);
+                    }
+                    crate::inbox::InboxItem::binary(head, "bytes", blob)
                 }
-                crate::inbox::InboxItem::binary(head, "bytes", blob)
-            }
-            None => crate::inbox::InboxItem::text(payload.clone()),
-        };
-        self.fanout(target, "send", &item).await;
+                None => crate::inbox::InboxItem::text(payload.clone()),
+            };
+            self.fanout(target, "send", &item).await;
+        }
 
         let join = {
             let kernel = Arc::clone(self);
@@ -1152,6 +1173,15 @@ impl Kernel {
                                         // its chunk the way python's reply dict
                                         // holds one.
                                         v = async {
+                                            // ANOTHER KERNEL'S AGENT: the call
+                                            // goes to its peer's route, bytes
+                                            // and all; no handler runs here.
+                                            if let Some(remote) = tgt.remote.as_ref() {
+                                                return crate::peers::call_peer(
+                                                    &kernel, remote, &tgt.id, payload, binary,
+                                                )
+                                                .await;
+                                            }
                                             match binary {
                                                 Some(b) => {
                                                     dispatch_binary(Arc::clone(&kernel), tgt, payload, b).await

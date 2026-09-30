@@ -294,9 +294,11 @@ def test_a_record_missing_required_fields_is_refused_at_the_write_naming_all():
     # what a model spawning a sub-AI wrote (E37): the fields it could see
     meta = {"endpoint": ENDPOINT, "model": "qwen3.8-27b", "max_tokens": 65536}
     err = validate_meta(meta, {})
-    assert err and "missing: kv_slots, kv_overflow" in err, err
+    assert err and "missing: kv_slots, kv_overflow, memory_store_id" in err, err
+    # each missing field is named WITH its hint, from the schema
+    assert "kv_overflow = all slots live: evict" in err, err
     # an update to a complete record is judged on the MERGED state
-    full = {**meta, "kv_slots": 7, "kv_overflow": "evict"}
+    full = {**meta, "kv_slots": 7, "kv_overflow": "evict", "memory_store_id": "memory"}
     assert validate_meta({"seed": 3}, full) is None
 
 
@@ -309,6 +311,7 @@ def test_a_consistent_write_passes():
         "kv_overflow": "evict",
         "thinking_token_budget": 4000,
         "reasoning_effort": "xhigh",
+        "memory_store_id": "memory",
     }
     assert validate_meta(meta, {}) is None
 
@@ -344,6 +347,7 @@ async def test_reflect_shows_the_effective_posture_and_the_shared_table(seeded_k
         max_tokens=8000,
         kv_slots=7,
         kv_overflow="evict",
+        memory_store_id="memory",
         seed=3,
     )
     assert r.get("id") == "v1", r
@@ -362,3 +366,45 @@ async def test_reflect_shows_the_effective_posture_and_the_shared_table(seeded_k
         "evicted": 0,
         "rejected": 0,
     }, out["kv"]
+
+
+# ─── the key (an HTTPS door in front of the GPU) ─────────────────────────────
+
+
+def _recording(seen: list, status: int = 200):
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.headers.get("authorization"))
+        if status != 200:
+            return httpx.Response(status, text="unauthorized")
+        return httpx.Response(
+            200,
+            text=_sse(
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    return httpx.MockTransport(handler)
+
+
+async def test_the_key_rides_as_a_bearer_header_only_when_set(monkeypatch):
+    seen: list = []
+    monkeypatch.delenv(vp.KEY_VAR, raising=False)
+    assert await _drain(_provider(_recording(seen))) == "ok"
+    monkeypatch.setenv(vp.KEY_VAR, "k-123")
+    assert await _drain(_provider(_recording(seen))) == "ok"
+    # unset: NO header at all (a keyless local vLLM); set: Bearer, read per call
+    assert seen == [None, "Bearer k-123"], seen
+
+
+async def test_a_refused_key_names_the_variable(monkeypatch):
+    monkeypatch.delenv(vp.KEY_VAR, raising=False)
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider(_recording([], status=401)))
+    assert "HTTP 401" in str(e.value) and f"set {vp.KEY_VAR}" in str(e.value), e.value
+
+
+def test_the_schema_names_the_key_var():
+    from vllm_backend.tools import RECORD_SCHEMA
+
+    assert RECORD_SCHEMA["key_var"] == "VLLM_API_KEY"

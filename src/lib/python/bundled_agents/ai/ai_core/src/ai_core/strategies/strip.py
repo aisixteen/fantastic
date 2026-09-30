@@ -54,7 +54,7 @@ def _pid_of(pm) -> int | str:
     """The pid on a tag as the STORE keys it: an int when it is one (the kernel's
     counter), the raw token otherwise (a `-`, a foreign tag)."""
     tok = pm.group(1)
-    return int(tok) if tok.isdigit() else tok
+    return int(tok) if tok.isascii() and tok.isdigit() else tok
 
 
 def _blocks(content: str) -> list[str]:

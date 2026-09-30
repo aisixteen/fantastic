@@ -59,6 +59,17 @@ extension Kernel {
     /// same `_dispatch` resolution the text channel does.
     func dispatchBinary(target: Agent, header: JSON, blob: Data) async -> (JSON?, Data?) {
         let verb = header["type"].asString ?? ""
+        // THE BYTES DO NOT CHANGE WHO ANSWERS. In python a payload carrying
+        // `bytes` is an ordinary payload: `_dispatch` answers the kernel verbs,
+        // the root's `reflect` (the substrate identity) and a bare agent exactly
+        // as it does without them. Only a bundle's own verb reads the blob.
+        // (Measured: an octet POST of `reflect` to the root answered the loader
+        // bundle's reflect — its sentence and `root` — instead of the kernel's.)
+        if Kernel.isSystemVerb(verb) || target.handlerModule == nil
+            || (verb == "reflect" && target.parentId == nil)
+        {
+            return (await dispatch(target: target, payload: header), nil)
+        }
         guard let hm = target.handlerModule else {
             return (noHandlerModuleRefusal(target.id.value, verb), nil)
         }
@@ -199,6 +210,10 @@ extension Kernel {
         // order (runtime → env → version) across all four runtimes.
         if target.parentId == nil {
             obj["runtime"] = .string("swift")
+            // The kernels this one is CONNECTED to — each agent there is
+            // reachable as `<guid>|<agent id>` (reflect `<guid>|kernel` for its
+            // tree).
+            obj["peers"] = peerRows()
             obj["env"] = .string(ProcessInfo.processInfo.environment["FANTASTIC_ENV"] ?? "host")
             obj["version"] =
                 ProcessInfo.processInfo.environment["FANTASTIC_VERSION"].map { JSON.string($0) }
@@ -266,10 +281,16 @@ extension Kernel {
             let (cat, next) = page(availableBundles(), payload) { $0.name }
             obj["bundles"] = .array(
                 cat.map {
-                    .object([
+                    var entry: OrderedDictionary<String, JSON> = [
                         "name": .string($0.name),
                         "handler_module": .string($0.handlerModule),
-                    ])
+                    ]
+                    // The kind's record schema, where the bundle publishes one —
+                    // on the full catalog only; `bundles=ids` stays names.
+                    if let sch = bundles.get($0.handlerModule)?.recordSchema {
+                        entry["schema"] = sch
+                    }
+                    return .object(entry)
                 })
             if let next { obj["bundles_next"] = .string(next) }
         case .some(.string("ids")):
@@ -727,14 +748,27 @@ extension Kernel {
         // below re-points it at the target, so a fanout inside it would attribute
         // every event to its own recipient. The `defer` publishes the matching
         // `drain` on every exit path, timeout included.
-        target.inFlightEnter()
+        //
+        // A REMOTE TARGET is not an agent of this tree: nobody here can watch it
+        // and it has no backlog to report, so neither the in-flight count nor the
+        // fanout applies (python's `RemoteTarget` has neither). It keeps
+        // everything else — the task row above, the deadline, the settle.
+        let local = !target.isRemote
+        if local { target.inFlightEnter() }
         defer {
-            target.inFlightLeave()
-            publishState(Kernel.drainEvent(target.id, target.inFlight))
+            if local {
+                target.inFlightLeave()
+                publishState(Kernel.drainEvent(target.id, target.inFlight))
+            }
         }
-        fanout(
-            target, "send",
-            binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
+        if local {
+            fanout(
+                target, "send",
+                binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
+        }
+        // The prologue is done (a remote target has none): the next item of the
+        // caller's batch may start.
+        KernelTaskLocals.onFanout?()
 
         // A BRIDGE LEG RELAYING A REMOTE CALLER marked its send; the address
         // belongs to THIS dispatch only when the leg itself is its caller.
@@ -746,7 +780,9 @@ extension Kernel {
         let box = DispatchBox()
         let bodyBox = BodyBox()
         let work = Task {
-            let reply = await KernelTaskLocals.$remoteCaller.withValue(nil) {
+            let reply = await KernelTaskLocals.$onBatchLaunched.withValue(nil) {
+                await KernelTaskLocals.$onFanout.withValue(nil) {
+                await KernelTaskLocals.$remoteCaller.withValue(nil) {
                 await KernelTaskLocals.$currentRemote.withValue(remote) {
             await KernelTaskLocals.$currentOrigin.withValue(origin) {
                 await KernelTaskLocals.$currentSender.withValue(target.id) {
@@ -761,6 +797,16 @@ extension Kernel {
                             // onto `sendWithBinary`, which minted no task row,
                             // no ledger id and no timeout.
                             await {
+                                // ANOTHER KERNEL'S AGENT: the call goes to its
+                                // peer's route, bytes and all; no handler runs
+                                // here.
+                                if let r = target.remote {
+                                    let (reply, b) = await self.callPeer(
+                                        r, qualified: target.id, payload: payload,
+                                        origin: origin, body: binary)
+                                    bodyBox.value = b
+                                    return reply
+                                }
                                 if let blob = binary {
                                     let (r, b) = await self.dispatchBinary(
                                         target: target, header: payload, blob: blob)
@@ -775,6 +821,8 @@ extension Kernel {
                 }
             }
                 }
+            }
+            }
             }
             box.resolve(reply)
         }
@@ -1074,6 +1122,35 @@ extension Kernel {
         let sCan = senderAgent?.metaValue(forKey: "can_call") ?? .null
         let sParent = senderAgent?.parentId?.value
         let sKids = Set(senderAgent?.childIds().map { $0.value } ?? [])
+
+        // A target on ANOTHER KERNEL — FIRST, before anything below reads the
+        // payload as an operand of THIS tree (a `create_agent` sent to
+        // `<guid>|kernel` places nothing here; resolving its `parent_id` locally
+        // would judge the wrong operand, and a sender placing under its own
+        // subtree would pass with no grant on the peer at all). Egress is the
+        // whole check here — the sender's `can_call` must name `<guid>|<agent>` or
+        // `<guid>|*`. Whether that agent accepts the call is its OWN kernel's
+        // decision (its `callable_by`, against the qualified `<this
+        // guid>|<sender>`), made where the agent lives.
+        if let remote = target.remote {
+            let d = authorizeCall(
+                grant: sCan, verb: verb, otherId: target.id.value,
+                holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
+                enforcePrivileged: true)
+            if d.allowed || heritableEgress(sender: sender, verb: verb, targetId: target.id.value) {
+                return nil
+            }
+            return .object([
+                "error": .string(
+                    "\(sender.value) may not call \(pyRepr(verb)) on \(target.id.value)"),
+                "reason": .string("unauthorized"),
+                "hint": .string(
+                    "\(target.id.value) is an agent on the connected kernel \(remote.guid): "
+                        + "name it in can_call — {\(pyRepr(target.id.value)): [...]} or "
+                        + "{'\(remote.guid)|*': [...]}"),
+                "side": .string("egress"),
+            ])
+        }
 
         // PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
         // the agent it ACTS UPON is the parent named in `parent_id` — so that is
