@@ -38,6 +38,8 @@ from helpers.verdict import MARKER  # noqa: E402
 from helpers.host.driver import ensure_runtime  # noqa: E402
 
 E2E = Path(__file__).resolve().parent
+#: The CLI's own live tests (`src/tui/e2e/tests/<group>/<id>/test.yaml`).
+CLI_TESTS = E2E.parent / "src" / "tui" / "e2e" / "tests"
 REPO = E2E.parent
 PYROOT = REPO / "src" / "lib" / "python"
 
@@ -211,7 +213,9 @@ def load_suite() -> list[dict]:
                 }
             )
 
-    for f in sorted(E2E.glob("tests/*/*/test.yaml")):
+    # Two roots: the kernel suite's own, and the CLI's (`src/tui/e2e/tests` —
+    # tests of the product, driven by the same launcher and the same plug).
+    for f in sorted([*E2E.glob("tests/*/*/test.yaml"), *CLI_TESTS.glob("*/*/test.yaml")]):
         doc = yaml.safe_load(f.read_text()) or {}
         d = f.parent
         # A probe that declares `runtimes:` is run ONCE PER RUNTIME, the same

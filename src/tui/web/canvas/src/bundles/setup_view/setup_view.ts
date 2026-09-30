@@ -259,10 +259,9 @@ export const setupView: ViewBundle = {
       });
       const e = errOf(r);
       if (e) return say(false, e);
-      say(true, `written to ${String((r as Rec)["written"])}`);
+      say(true, `written to ${String((r as Rec)["written"])} — the backend and its fields stay, to save as a template or write another`);
       id.value = "";
       mayCall.value = "";
-      renderFields();
     };
 
     let chosenMode: string | null = null;

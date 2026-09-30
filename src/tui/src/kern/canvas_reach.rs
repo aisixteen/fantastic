@@ -6,9 +6,13 @@
 //! operator (ungated); the leg is not, so THIS CLI — the in-proc operator —
 //! writes BOTH edges for every agent:
 //!
-//! - the agent's `callable_by` names `canvas_ws` with [`VERBS`];
-//! - `canvas_ws`'s `can_call` names the agent with the same list (no `*` id key
-//!   exists by design: each target, by id, `kernel` included).
+//! - the agent's `callable_by` accepts `$subtree:canvas_ws` with [`VERBS`] — the
+//!   leg AND everything under it;
+//! - the leg's `can_call` names the agent with the same list, and so does every
+//!   AI CELL under the leg's (the canvas's control plane, owner 2026-09-30) — a
+//!   heritable entry cannot serve both the leg and its descendants, so each
+//!   holder carries its own (no `*` id key exists by design: each target, by id,
+//!   `kernel` included).
 //!
 //! `*` never covers a PRIVILEGED verb, so each one is named. Done for every agent
 //! at boot, and again for each agent the state stream reports `added` (made by
@@ -53,37 +57,76 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Grant the leg every verb on `ids` — both edges. The leg's side is one write.
+/// Who ACCEPTS the canvas side on a target: the leg and everything under it (the
+/// AI cells — the canvas's control plane — live there).
+fn accepts() -> String {
+    format!("{}{LEG}", SUBTREE)
+}
+const SUBTREE: &str = "$subtree:";
+
+/// The HOLDERS of the reach: the leg, and every AI agent under it (an agent that
+/// names a memory store — `ai_cells` spawns them as the leg's descendants).
+fn holders(h: &Host) -> Vec<String> {
+    let under_leg = |id: &str| -> bool {
+        let mut cur = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).and_then(|a| a.value().record().parent_id);
+        while let Some(p) = cur {
+            if p == LEG {
+                return true;
+            }
+            cur = h.kernel.agents.get(&fantastic_kernel::AgentId::from(p.as_str())).and_then(|a| a.value().record().parent_id);
+        }
+        false
+    };
+    let mut v = vec![LEG.to_string()];
+    v.extend(
+        h.kernel
+            .agents
+            .iter()
+            .filter(|e| e.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some())
+            .map(|e| e.key().0.clone())
+            .filter(|id| under_leg(id)),
+    );
+    v
+}
+
+/// Grant every holder every verb on `ids` — both edges: each target's
+/// `callable_by` accepts `$subtree:canvas_ws`, and each holder's `can_call`
+/// names the target (and `kernel`). One write per changed record.
 pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
     let all = json!(VERBS);
-    let mut cc = field(h, LEG, "can_call");
-    let mut leg_changed = false;
+    let sub = accepts();
     for id in ids {
-        if id == LEG || !h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id.as_str())) {
+        if !h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id.as_str())) {
             continue;
         }
         let mut cb = field(h, id, "callable_by");
-        if cb.get(LEG) != Some(&all) {
-            cb.insert(LEG.into(), all.clone());
+        // the bare leg key is covered by the subtree (and was the old form)
+        let stale = cb.remove(LEG).is_some();
+        if stale || cb.get(&sub) != Some(&all) {
+            cb.insert(sub.clone(), all.clone());
             let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "callable_by": cb})).await.result;
             if let Some(e) = r.get("error").and_then(Value::as_str) {
                 return Err(format!("canvas reach: `{id}`.callable_by: {e}"));
             }
         }
-        if cc.get(id.as_str()) != Some(&all) {
-            cc.insert(id.clone(), all.clone());
-            leg_changed = true;
+    }
+    for holder in holders(h) {
+        let mut cc = field(h, &holder, "can_call");
+        let mut changed = false;
+        for id in ids.iter().map(String::as_str).chain(["kernel"]) {
+            if id == holder || (id != "kernel" && !h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))) {
+                continue;
+            }
+            if cc.get(id) != Some(&all) {
+                cc.insert(id.to_string(), all.clone());
+                changed = true;
+            }
         }
-    }
-    // the kernel's own verbs, sent to the reserved `kernel` address
-    if cc.get("kernel") != Some(&all) {
-        cc.insert("kernel".into(), all.clone());
-        leg_changed = true;
-    }
-    if leg_changed {
-        let r = h.operator("kernel", json!({"type": "update_agent", "id": LEG, "can_call": cc})).await.result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return Err(format!("canvas reach: `{LEG}`.can_call: {e}"));
+        if changed {
+            let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "can_call": cc})).await.result;
+            if let Some(e) = r.get("error").and_then(Value::as_str) {
+                return Err(format!("canvas reach: `{holder}`.can_call: {e}"));
+            }
         }
     }
     Ok(())
@@ -109,6 +152,13 @@ pub async fn start(h: &Host) -> Result<(), String> {
             while let Ok(more) = rx.try_recv() {
                 batch.push(more);
             }
+            // a new AI cell is a new HOLDER: it reaches every agent, not just the batch
+            let holders_now = holders(&host);
+            let batch = if batch.iter().any(|b| holders_now.contains(b)) {
+                host.kernel.agents.iter().map(|e| e.key().0.clone()).collect()
+            } else {
+                batch
+            };
             if let Err(e) = grant(&host, &batch).await {
                 tracing::warn!("{e}");
             }

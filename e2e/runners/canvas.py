@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import os
 import secrets
 import shutil
@@ -251,6 +252,14 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
             shutil.rmtree(cwd / ".fantastic/web/agents/canvas/agents" / ms[0]["_dir"])
     elif offline is not None:
         raise SystemExit(f"unknown offline edit {offline!r}")
+    # `--port` is CREATION-ONLY: a different one against the recorded `web` is
+    # refused, exit 2, naming update_agent — and changes nothing on disk.
+    if isinstance(spec, dict) and spec.get("wrong_port"):
+        r = subprocess.run([str(host.binary), "--headless", "canvas", "--port", str(host.port + 1)],
+                           cwd=cwd, capture_output=True, text=True, timeout=60)
+        said = r.stdout + r.stderr
+        if r.returncode != 2 or "creation-only" not in said or "update_agent" not in said:
+            bad.append(f"a different --port was not refused: exit {r.returncode}: {said[-300:]!r}")
     host.start()
     tree = await host_call(host.port, "web_loader", {"type": "load_tree"})
     state["tree"] = [(r.get("id"), r.get("parent_id")) for r in tree.get("records", [])]
@@ -390,6 +399,15 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         state["moved"] = (m.get("x"), m.get("y"))
     if exp.get("kept_position") and m is not None and (m.get("x"), m.get("y")) != state.get("moved"):
         bad.append(f"position after restart {(m.get('x'), m.get('y'))} != {state.get('moved')}")
+    # `--headless`: the kernel's message stream is the host's stdout, one line
+    # per row (`[<id>] <agent> <kind|role> <verb>? · <first line>`), no escapes.
+    if exp.get("stream"):
+        run = host.log.read_text().split("=== start")[-1]
+        lines = [l for l in run.splitlines() if re.match(r"^\[\d+\] \S+ \S+", l)]
+        if not lines:
+            bad.append("the headless stream printed no `[<id>] <agent> <kind>` line")
+        if "\x1b[" in run:
+            bad.append("the headless stream carries escape codes")
     if "load_tree" in exp:
         tree = dict(state.get("tree", []))
         want = exp["load_tree"]

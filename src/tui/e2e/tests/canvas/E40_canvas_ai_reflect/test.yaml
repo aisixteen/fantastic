@@ -1,0 +1,13 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key or a
+# backend name — the plug (`e2e/backends`, `BACKEND=…`) names those.
+id: canvas_ai_reflect
+group: canvas
+title: "an AI cell finds the canvas it lives on — nobody tells it where — and reflects it"
+runner: probe.py
+costs: turns
+limits:
+  # the whole dialog: the first turn and every tool round-trip the model takes
+  total_seconds: 600
+  # the dialog is over once it has answered in words and gone quiet this long
+  quiet_seconds: 30
+env: {}

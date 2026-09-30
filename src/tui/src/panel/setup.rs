@@ -192,11 +192,10 @@ impl SetupPanel {
 
     pub fn set_result(&mut self, r: Result<String, String>) {
         if r.is_ok() && self.key.is_none() && self.result_is_write(&r) {
-            // Written: the page starts over for the next agent.
+            // Written: the id and who it may call start over for the next agent;
+            // the backend and its fields STAY, to save as a template right away.
             self.id.clear();
-            self.values.clear();
             self.may_call.clear();
-            self.handler = None;
             self.at = 0;
         }
         self.result = Some(r);
@@ -776,7 +775,9 @@ mod tests {
             other => panic!("{other:?}"),
         }
         p.set_result(Ok("written to  x".into()));
-        assert!(p.id.is_empty(), "a written record clears the page for the next one");
+        assert!(p.id.is_empty(), "a written record clears the id for the next one");
+        assert_eq!(p.handler_name(), Some("llamacpp_backend.tools"), "the backend stays, to save as a template");
+        assert_eq!(p.values["model"], "m-1", "and so do its fields");
     }
 
     #[test]

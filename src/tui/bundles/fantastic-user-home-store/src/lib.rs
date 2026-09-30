@@ -241,12 +241,42 @@ impl UserHomeStore {
         let Some(bundle) = kernel.bundles.get(hm) else {
             return Err(refusal(INVALID_META, format!("persist_record: no bundle {hm:?} is linked into this build")));
         };
-        let mut meta = rec.clone();
-        meta.remove("handler_module");
-        let mut target = Map::new();
-        target.insert("handler_module".into(), json!(hm));
-        if let Some(why) = bundle.validate_meta(&meta, &target) {
-            return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this template: {why}")));
+        // A template is checked against the backend's RECORD SCHEMA (the same
+        // constants its create validates with) — minus what the CREATOR adds
+        // (`NOT_IN_A_TEMPLATE`: the memory store, id, grants…). A full
+        // `validate_meta` would demand exactly those, which a template must never
+        // carry. A bundle with no schema is checked by its own `validate_meta`.
+        let schema = bundle.record_schema();
+        if schema.is_none() {
+            let mut meta = rec.clone();
+            meta.remove("handler_module");
+            let mut target = Map::new();
+            target.insert("handler_module".into(), json!(hm));
+            if let Some(why) = bundle.validate_meta(&meta, &target) {
+                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this template: {why}")));
+            }
+        }
+        if let Some(schema) = schema {
+            let fields = schema["fields"].as_array().cloned().unwrap_or_default();
+            let mut missing_f: Vec<String> = Vec::new();
+            for f in &fields {
+                let name = f["name"].as_str().unwrap_or("");
+                if NOT_IN_A_TEMPLATE.contains(&name) {
+                    continue;
+                }
+                let given = rec.get(name).filter(|v| !v.is_null());
+                if f["required"].as_bool() == Some(true) && given.is_none() {
+                    missing_f.push(format!("{name} = {}", f["hint"].as_str().unwrap_or("")));
+                }
+                if let (Some(v), Some(choices)) = (given, f["enum"].as_array()) {
+                    if !choices.contains(v) {
+                        return Err(refusal(INVALID_META, format!("persist_record: {hm} — {name} must be one of {}", Value::Array(choices.clone()))));
+                    }
+                }
+            }
+            if !missing_f.is_empty() {
+                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this template — required and missing: {}", missing_f.join("; "))));
+            }
         }
         let path = self.templates()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));

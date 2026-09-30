@@ -1,0 +1,62 @@
+"""E53 panel_types — html, GL, terminal, stream, set-up: render + survive reloads."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
+
+def main() -> bool:
+    rig = Rig(__file__, live=False)
+    rig.build()
+    rig.make_home(None)
+    rig.init(cells=[html_cell("h1", "Panel", 700, 60, "<p id='x'>html-53</p>"),
+                    {"id": "g1", "handler_module": "gl_agent.ts", "display_name": "Scene", "x": 1100, "y": 60, "width": 280,
+                     "height": 200, "gl_source": "scene.add(new THREE.Mesh(new THREE.PlaneGeometry(1,1)));"}])
+
+    async def drive():
+        async with rig.page(1800, 1000) as pg:
+            await spot(pg, 700, 450, "terminal")
+            await pg.until("!!document.querySelector('.agent-frame .xterm')", 20)
+            await asyncio.sleep(2)
+            await pg.js("document.querySelector('.agent-frame .xterm textarea')?.focus()")
+            await pg.cdp("Input.insertText", text="echo MARK-53")
+            await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+            await asyncio.sleep(1.5)
+            await spot(pg, 1250, 450, "stream")
+            await asyncio.sleep(1)
+            await spot(pg, 250, 700, "agent")
+            await pg.until("!!document.querySelector('.setup-view select')", 20)
+            await asyncio.sleep(2)  # the loader's flush lands before any reload
+            ids = lambda: pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id).sort()")
+            before = await ids()
+            seen = []
+            for _ in range(2):
+                await pg.open(rig.url)
+                await pg.until(f"document.querySelectorAll('.agent-frame').length >= {len(before)}", rig.limits["seconds"])
+                await asyncio.sleep(3)
+                seen.append({
+                    "ids": await ids(),
+                    "term": await pg.js("[...document.querySelectorAll('.agent-frame .xterm-rows')].map(r=>r.innerText).join(' ').includes('MARK-53')"),
+                    "html": await pg.js("[...document.querySelectorAll('.agent-frame iframe')].some(f=>{try{return f.contentDocument.body.innerText.includes('html-53')}catch(e){return false}})"),
+                    "setup": await pg.js("!!document.querySelector('.setup-view select')"),
+                    "stream": await pg.js("!!document.querySelector('.stream-view')"),
+                })
+            errors = [e for e in pg.logs if "WebGL" not in e and "EXC" in e]
+            return before, seen, errors
+    try:
+        before, seen, errors = asyncio.run(drive())
+    finally:
+        rig.stop()
+    rig.summary.update({"before": before, "after": seen, "errors": errors})
+    print(f"frames {before} · after reloads {seen} · errors {errors[:3]}")
+    ok = all(s["ids"] == before and s["term"] and s["html"] and s["setup"] and s["stream"] for s in seen) and not errors
+    return verdict(*rig.finish(ok, f"{len(before)} kinds of cell, same after 2 reloads, terminal replay + html + set-up + stream intact: {ok}"))
+
+
+if __name__ == "__main__":
+    sys.exit(0 if main() else 1)

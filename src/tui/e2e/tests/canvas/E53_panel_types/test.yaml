@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Scripted: no model.
+id: panel_types
+group: canvas
+title: "every cell kind renders and survives two reloads"
+runner: probe.py
+costs: free
+limits:
+  seconds: 30
+env: {}

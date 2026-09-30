@@ -8,9 +8,12 @@ import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
 import { openSpot } from "./spot_input.ts";
-import { setGeometry } from "./canvas_agent.ts";
+import { CANVAS_VERBS, setGeometry } from "./canvas_agent.ts";
 import { BACKGROUND, BACKGROUND_ID } from "./background_agent.ts";
 
+/** What a host agent (a cell's AI) may ask ANY cell: look at it, read and
+ *  write a panel's html, emit to it. */
+const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 /** What a cell's AI may ask the background. */
 const BG_VERBS = ["set_bg", "clear_bg", "get_bg", "reflect"] as const;
 import type { Placed } from "./canvas_agent.ts";
@@ -186,13 +189,29 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       return;
     }
     const me = kernel.get(selfId);
-    const cb = { ...((me?.meta["callable_by"] as Rec | undefined) ?? {}), [`${g}|*`]: ["around", "reflect"] };
+    const cb = { ...((me?.meta["callable_by"] as Rec | undefined) ?? {}), [`${g}|*`]: [...CANVAS_VERBS] };
     kernel.updateMeta(selfId, { callable_by: cb } as unknown as Payload);
     const bgAgent = kernel.get(BACKGROUND_ID);
     if (bgAgent !== undefined) {
       const bcb = { ...((bgAgent.meta["callable_by"] as Rec | undefined) ?? {}), [`${g}|*`]: [...BG_VERBS] };
       kernel.updateMeta(BACKGROUND_ID, { callable_by: bcb } as unknown as Payload);
     }
+    // EVERY CELL may be REFLECTED by the host's agents (a cell's AI looks at
+    // what `around` found) — now and as cells are added.
+    hostGuid = g;
+    const root = kernel.rootId !== null ? kernel.get(kernel.rootId) : undefined;
+    for (const a of root ? [...root.children.values()] : []) admitReflect(a.id);
+  };
+  let hostGuid: string | null = null;
+  const admitReflect = (id: string): void => {
+    const a = kernel.get(id);
+    if (hostGuid === null || a === undefined || id === BACKGROUND_ID) return;
+    const cb: Record<string, unknown> = (a.meta["callable_by"] as Record<string, unknown> | undefined) ?? {};
+    const key = `${hostGuid}|*`;
+    const had = cb[key];
+    if (Array.isArray(had) && CELL_VERBS.every((v) => (had as string[]).includes(v))) return;
+    const verbs = [...new Set([...(Array.isArray(had) ? (had as string[]) : []), ...CELL_VERBS])];
+    kernel.updateMeta(id, { callable_by: { ...cb, [key]: verbs } } as unknown as Payload);
   };
 
   // RECONCILE THIS CANVAS'S PAIRS, once, before the first render. Nothing on
@@ -454,6 +473,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   ): { el: HTMLElement; body: HTMLElement; actions: HTMLElement } => {
     const el = document.createElement("div");
     el.className = "agent-frame";
+    el.dataset.id = rec.id; // the cell's agent id, for anyone addressing the DOM
     el.style.left = `${rect.x}px`;
     el.style.top = `${rect.y}px`;
     el.style.width = `${rect.w}px`;
@@ -553,7 +573,15 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // `<page guid>|<canvas id>` — `around` and `reflect`, nothing else.
   const peerGrants = (): Record<string, string[]> =>
     kernel.guid !== null
-      ? { [`${kernel.guid}|${selfId}`]: ["around", "reflect"], [`${kernel.guid}|${BACKGROUND_ID}`]: [...BG_VERBS] }
+      ? {
+          // the canvas's control plane over its cells
+          [`${kernel.guid}|${selfId}`]: [...CANVAS_VERBS],
+          [`${kernel.guid}|${BACKGROUND_ID}`]: [...BG_VERBS],
+          // any cell on this canvas — and the canvas verbs, since the cells are
+          // their OPERANDS (`move {id}`, `wire {sender, receiver}`): the host's egress
+          // gate checks the agents a call names, not only its target
+          [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...CANVAS_VERBS])],
+        }
       : {};
   const spawnAi = async (viewId: string, template: string | null): Promise<Rec | null> => {
     const r = (await host.callHost(AI_CELLS, {
@@ -1032,6 +1060,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   });
 
   kernel.addStateSubscriber(renderSoon);
+  // a cell added later is admitted for reflect too
+  kernel.addStateSubscriber((e) => {
+    const ev = e as unknown as Rec;
+    if (ev["kind"] === "added" && typeof ev["agent_id"] === "string") admitReflect(ev["agent_id"] as string);
+  });
   ensureBackground();
   setGeometry((): Placed[] =>
     [...frames.entries()].map(([id, f]) => {

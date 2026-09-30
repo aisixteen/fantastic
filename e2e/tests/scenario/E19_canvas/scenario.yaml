@@ -62,9 +62,13 @@ runs:
       moved: true
 
   - name: restart
-    restart: true
+    # rehydrate WITHOUT --port (read from `web`'s record); a DIFFERENT --port
+    # first is refused (creation-only, exit 2, names update_agent)
+    restart: {wrong_port: true}
     type: "echo again-$((7*6))"
     expect:
+      # the headless stdout is the kernel's message stream, no escapes
+      stream: true
       lock_released_between: true
       load_tree: {canvas: null, member_parent: canvas}
       canvas_members: 1

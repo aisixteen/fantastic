@@ -48,6 +48,8 @@ const CHAT_CSS = `
   .chat-view .c-send.stop { background:rgba(200,80,80,0.55); }
   .chat-view .msg .spot { display:block; font-size:10px; opacity:0.6; margin-bottom:2px; font-family:ui-monospace,SFMono-Regular,monospace; }
   .chat-view .c-badge { font-size:11px; margin-left:8px; padding:1px 8px; border-radius:999px; background:rgba(255,255,255,0.08); color:rgba(220,230,245,0.75); }
+  .chat-view .msg.thinking { color: #b78cff; font-style: italic; animation: c-think 1.1s ease-in-out infinite; }
+  @keyframes c-think { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
   .chat-view .msg.tool { align-self: flex-start; font: 11px ui-monospace, SFMono-Regular, monospace; color: rgba(220,230,245,0.45); background: transparent; padding: 0 4px; }
   .chat-view .c-badge.kept { background:rgba(126,226,168,0.18); color:#7ee2a8; cursor:pointer; }
   .chat-view .c-keep { margin-left:6px; font-size:11px; padding:1px 10px; border-radius:999px; border:0; cursor:pointer; background:rgba(183,140,255,0.28); color:#fff; }
@@ -67,26 +69,32 @@ const FROM = /^\[from [^\]]*\]\s*/;
 const CALLS = /<call\b[^>]*>[\s\S]*?<\/call>/g;
 /** A call cut off mid-way (a history digest's head, a stream in flight). */
 const OPEN_CALL = /<call\b[\s\S]*$/;
-const words = (t: string): string => t.replace(CALLS, "").replace(OPEN_CALL, "").trimEnd();
+/** A model's reasoning, when it arrives inline (`<think>…</think>`, or cut off). */
+const THINK = /<think>[\s\S]*?(?:<\/think>|$)/g;
+const words = (t: string): string => t.replace(THINK, "").replace(CALLS, "").replace(OPEN_CALL, "").trim();
 /** The first call of a calls-only turn: its name, target and verb. */
 const CALL_HEAD = /<call name="([^"]+)">(?:[\s\S]*?<target_id>([^<]*)<\/target_id>)?(?:[\s\S]*?<type>([^<]*)<\/type>)?/;
 /** ai_core's header on a reply that comes back as the next turn. */
 const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
 
-/** What an AI cell is told about living on the canvas (per send). `canvas` is
- *  the canvas's address from the host — `<page guid>|<canvas id>` — or null
- *  before the page has a guid (then it cannot be asked). */
-export const spatialPrompt = (canvas: string | null): string =>
-  "You are an AI cell on a spatial 2D canvas (Aisixteen Fantastic). Each user turn ends with " +
-  "[at X,Y]: where on the canvas it was typed, in canvas coordinates (x grows right, y grows down). " +
-  "Words like here, next to, above and below refer to canvas geometry around that spot. " +
-  (canvas !== null
-    ? `The canvas itself is the agent "${canvas}": send it {type: "around", x, y, radius} (all numbers, ` +
-      "radius required) to see what is placed near a point — ids, kinds, titles, rects and distances, " +
-      `nearest first. The canvas's background is the agent "${canvas.split("|")[0]}|background": ` +
-      "set_bg {source} (a THREE/GLSL GL source), clear_bg, get_bg. "
-    : "") +
-  "Answer in text; keep it concise.";
+/** THE SETUP, told once — on a cell's FIRST turn, inside the turn itself
+ *  (after the typed words, before `[at X,Y]`), never as `system_prompt`: that
+ *  field REPLACES ai_core's default system block (the call grammar, the verbs,
+ *  the agent's identity), which a cell must keep. It explains the two levels
+ *  and the two kernels and says how to learn them — by reflecting each — but
+ *  names NO address beyond the host's reserved `kernel`: finding the page is
+ *  the AI's own work. */
+export const CANVAS_SETUP =
+  "[canvas setup] You are an AI agent on the HOST kernel (the backend): your record, your memory and " +
+  "every call you make live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND " +
+  "kernel (the frontend), connected to the host as a peer. So there are two kernels: the host, addressed " +
+  "as `kernel`, and the canvas page, whose agents are addressed `<page guid>|<agent id>` (its own kernel " +
+  "is `<page guid>|kernel`). To learn your environment, reflect each kernel: the host first — its reflect " +
+  "lists the connected peers — then the page. The canvas is a 2D surface: every user turn ends with " +
+  "[at X,Y], where it was typed, in canvas coordinates (x grows right, y grows down); here, next to, " +
+  "above and below mean canvas geometry around that spot.";
+/** The setup as the TRANSCRIPT carries it — hidden from the bubble. */
+const SETUP_BLOCK = /\n\[canvas setup\][\s\S]*$/;
 
 function ensureStyle(): void {
   if (document.getElementById("fantastic-chat-style")) return;
@@ -281,7 +289,7 @@ export const aiView: ViewBundle = {
         const tag = document.createElement("span");
         tag.className = "spot";
         tag.textContent = `you · at ${spot[1]},${spot[2]}`;
-        div.append(tag, text.slice(0, spot.index).replace(FROM, ""));
+        div.append(tag, text.slice(0, spot.index).replace(SETUP_BLOCK, "").replace(FROM, ""));
       } else {
         div.textContent = role === "assistant" ? words(text) : text;
       }
@@ -296,6 +304,19 @@ export const aiView: ViewBundle = {
     let inflight: Inflight | null = null;
 
     const refreshBusy = (): void => {
+      // the queue map mirrors the QUEUED bubbles only: an entry whose bubble
+      // already moved into the dialog (promoted) is not a pending turn — left
+      // behind, it kept the button on "stop" after the answer, so the next Send
+      // interrupted instead (measured, E45)
+      for (const [k, b] of [...queuedBubbles]) {
+        if (b.parentElement !== queuedEl) {
+          queuedBubbles.delete(k);
+          const i = queuedOrder.indexOf(k);
+          if (i >= 0) queuedOrder.splice(i, 1);
+          const j = localPending.indexOf(k);
+          if (j >= 0) localPending.splice(j, 1);
+        }
+      }
       const on = inflight !== null || queuedBubbles.size > 0;
       sendBtn.textContent = on ? "stop" : "send";
       sendBtn.classList.toggle("stop", on);
@@ -441,11 +462,24 @@ export const aiView: ViewBundle = {
         setPhase("queued", typeof detail["ahead"] === "number" ? `${detail["ahead"]} ahead` : "");
       } else if (phase === "thinking" || phase === "streaming") {
         if (inflight === null || inflight.send_id !== sendId) promoteToInflight(sendId, "");
+        // reasoning on its own channel: the empty bubble flashes until words come
+        if (phase === "thinking" && inflight !== null && inflight.streamText === "") {
+          inflight.assistantBubble.className = "msg assistant thinking";
+          inflight.assistantBubble.textContent = "thinking";
+        }
         setPhase(phase, "press stop or esc to interrupt");
       } else if (phase === "tool_calling") {
         handleToolCall(obj(detail, "tool"));
         setPhase("tool_calling", "press stop or esc to interrupt");
       } else if (phase === "done") {
+        // the turn is over: nothing is in flight any more (the `done` event is
+        // not always delivered to this client — measured: the button stayed on
+        // "stop" after the answer)
+        if (inflight !== null && (!sendId || inflight.send_id === sendId)) {
+          if (inflight.assistantBubble.classList.contains("thinking")) inflight.assistantBubble.remove();
+          inflight = null;
+        }
+        refreshBusy();
         setPhase("idle", s(detail, "reason") && s(detail, "reason") !== "ok" ? s(detail, "reason") : "");
       }
     });
@@ -454,13 +488,18 @@ export const aiView: ViewBundle = {
         inflight.streamText += s(p, "text");
         const said = words(inflight.streamText);
         const call = said === "" ? CALL_HEAD.exec(inflight.streamText) : null;
-        inflight.assistantBubble.className = call !== null ? "msg tool" : "msg assistant";
-        inflight.assistantBubble.textContent = call !== null ? `→ ${call[2] ?? call[1]} ${call[3] ?? ""}`.trim() : said;
+        // REASONING in flight (an open `<think>`, nothing said yet): masked under
+        // a flashing word, as the terminal does
+        const thinking = said === "" && call === null && /<think>(?![\s\S]*<\/think>)/.test(inflight.streamText);
+        inflight.assistantBubble.className = call !== null ? "msg tool" : thinking ? "msg assistant thinking" : "msg assistant";
+        inflight.assistantBubble.textContent = call !== null ? `→ ${call[2] ?? call[1]} ${call[3] ?? ""}`.trim() : thinking ? "thinking" : said;
         dialogEl.scrollTop = dialogEl.scrollHeight;
       }
     });
     const offDone = host.on(backend, "done", (p) => {
       if (mine(p)) {
+        // a turn that ended in reasoning alone leaves nothing to show
+        if (inflight !== null && inflight.assistantBubble.classList.contains("thinking")) inflight.assistantBubble.remove();
         inflight = null;
         refreshBusy();
       }
@@ -531,7 +570,9 @@ export const aiView: ViewBundle = {
       if (!typed) return;
       if (override === undefined) inputEl.value = "";
       const [sx, sy] = at ?? cellSpot();
-      const text = isCell ? `${typed}\n[at ${sx},${sy}]` : typed;
+      // the setup rides the dialog's FIRST turn only (the transcript keeps it)
+      const first = isCell && !dialogEl.querySelector(".msg.user") && queuedOrder.length === 0;
+      const text = isCell ? `${typed}${first ? `\n${CANVAS_SETUP}` : ""}\n[at ${sx},${sy}]` : typed;
       const localKey = "local_" + Math.random().toString(36).slice(2, 10);
       const bubble = addMsg("user", text, queuedEl);
       bubble.classList.add("queued");
@@ -540,7 +581,6 @@ export const aiView: ViewBundle = {
       localPending.push(localKey);
       refreshBusy();
       const payload: Dict = { type: "send", text, client_id: clientId };
-      if (isCell) payload["system_prompt"] = spatialPrompt(kernel.guid !== null && kernel.rootId !== null ? `${kernel.guid}|${kernel.rootId}` : null);
       const dropLocal = (): void => {
         queuedBubbles.get(localKey)?.remove();
         queuedBubbles.delete(localKey);

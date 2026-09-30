@@ -27,6 +27,7 @@ whose backend is gone is marked `backend_lost` and waits for ⟳.
 | `close` | the close button removes the member's folder and the backend it owns; the canvas stays |
 | `orphan` | a spawned view's folder is removed while the host is down: on load the orphan backend is deleted |
 | `exit-closes` | a fresh terminal, `exit` typed into it: the shell ending closes the frame — view and exec agent gone together, as ✕ |
+| `restart` (also) | a different `--port` is refused first (creation-only, exit 2, names `update_agent`); rehydrate reads the port from `web`'s record; the headless stdout is the message stream (`[<id>] <agent> <kind>` lines, no escapes) — what E18 checked |
 | `restart-empty` | after another restart only the canvas comes back, with no frames and no backends under the leg |
 
 Runner: `e2e/runners/canvas.py`. Host: the product, `fantastic --headless canvas --port N`
