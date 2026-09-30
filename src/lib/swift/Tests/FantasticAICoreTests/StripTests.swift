@@ -74,7 +74,7 @@ struct StripTests {
         #expect(proj.stripped > 0)
         let out = AIContext.estimateTokens(proj.body)
         // HYSTERESIS: went well below the line, not just under it.
-        #expect(Double(out) <= Double(bud) * AIStripStrategy.LOW + 200, "\(out) vs \(bud)")
+        #expect(Double(out) <= Double(bud) * AIConstants.LOW + 200, "\(out) vs \(bud)")
         // OLDEST FIRST, CONTIGUOUS: stripped pids are a prefix of the reply order.
         let stubbed = (0..<8).filter { (proj.body[2 + 3 * $0]["content"].asString ?? "").contains("(stripped:") }
         #expect(stubbed == Array(0..<stubbed.count), "\(stubbed)")

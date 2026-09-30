@@ -1,0 +1,231 @@
+"""vllm bundle — a context-managed LLM completion agent talking DIRECTLY to vLLM.
+
+A THIN binding over `ai_core`, like every backend: this module supplies the
+`VllmProvider` builder, the write-time checks and the backend's identity, and
+`ai_core.build()` returns the `(VERBS, handler)` bound to it. There is NO
+agentic loop — one provider pass per send.
+
+Kept SEPARATE from `llamacpp_backend`/`nvidia_nim_backend` although all three
+speak the OpenAI chat wire: reflect must describe the real server, and vLLM has
+its own knobs (`top_k`, `reasoning_effort`, `thinking_token_budget`,
+`no_repeat_ngram_size`), its own failure shapes and — the reason this bundle
+exists — a KV-cache session table (`kv_slots` + `kv_overflow`) shared per
+endpoint. See `provider.py` for what each is and why.
+
+The ai_core state dicts and seams are RE-EXPORTED here so the monkeypatch seams
+the other backends' tests use work identically, and `on_cancel` is re-exported
+because that module-level name IS the bundle's cancel hook.
+"""
+
+from __future__ import annotations
+
+from ai_core import build, required_meta
+from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
+    DEFAULT_CLIENT_ID,
+    MAX_CALL_DEPTH,
+    SEND_TIMEOUT,
+    _assemble,
+    _current,
+    _locks,
+    _providers,
+    _queue,
+    on_cancel,
+)
+
+from vllm_backend.provider import (
+    CONNECT_TIMEOUT,
+    KV_OVERFLOWS,
+    KV_TTL,
+    PASSTHROUGH,
+    READ_TIMEOUT,
+    REASONING_EFFORTS,
+    SAMPLING_DEFAULTS,
+    table_for,
+)
+
+NAME = "vllm_backend"
+
+
+def _required_int(rec: dict, key: str) -> int:
+    """A count the record MUST name — never guessed, fails the turn loud."""
+    v = rec.get(key)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise ValueError(
+            f"{NAME}: `{key}` is required on the agent record, a positive int — "
+            f"nothing is guessed (update_agent <id> {key}=…)"
+        )
+    return v
+
+
+def _sampling(rec: dict) -> tuple[dict, bool]:
+    """The effective sampling — the record's values over the defaults — and
+    whether `thinking_token_budget` was set on the RECORD (explicit: sent as
+    is) or defaulted (ours to adapt per call)."""
+    eff = {
+        k: rec[k] if rec.get(k) is not None else v for k, v in SAMPLING_DEFAULTS.items()
+    }
+    for k in PASSTHROUGH:
+        if rec.get(k) is not None:
+            eff[k] = rec[k]
+    return eff, rec.get("thinking_token_budget") is not None
+
+
+def make_provider(id, kernel):
+    """Build a VllmProvider from the agent record. `endpoint`, `model`,
+    `max_tokens`, `kv_slots` and `kv_overflow` are REQUIRED."""
+    from vllm_backend.provider import VllmProvider
+
+    rec = kernel.get(id) or {}
+    sampling, explicit = _sampling(rec)
+    overflow = rec.get("kv_overflow")
+    if overflow not in KV_OVERFLOWS:
+        raise ValueError(
+            f"{NAME}: `kv_overflow` is required on the agent record — "
+            "evict (the least-recently-used conversation rotates out) or reject "
+            "(refuse the newcomer) (update_agent <id> kv_overflow=…)"
+        )
+    return VllmProvider(
+        endpoint=required_meta(rec, "endpoint", NAME),
+        model=required_meta(rec, "model", NAME),
+        max_tokens=_required_int(rec, "max_tokens"),
+        kv_slots=_required_int(rec, "kv_slots"),
+        kv_overflow=overflow,
+        kv_ttl=float(rec.get("kv_ttl") or KV_TTL),
+        sampling=sampling,
+        explicit_budget=explicit,
+        connect_timeout=float(rec.get("connect_timeout") or CONNECT_TIMEOUT),
+        read_timeout=float(rec.get("read_timeout") or READ_TIMEOUT),
+    )
+
+
+async def _reflect_extra(id, kernel):
+    """Merged into reflect: the EFFECTIVE sampling (defaults filled in), the
+    timeouts, and the endpoint's shared KV session table — so one reflect shows
+    what the next request will send and how many conversations are live."""
+    rec = kernel.get(id) or {}
+    sampling, explicit = _sampling(rec)
+    endpoint = rec.get("endpoint")
+    provider = _providers.get(id)
+    return {
+        "sampling": sampling,
+        "thinking_token_budget_source": "record" if explicit else "default",
+        # what the last pass actually SENT (the default adapts to small calls)
+        "last_thinking_budget": getattr(provider, "last_thinking_budget", None),
+        "max_tokens": rec.get("max_tokens"),
+        "timeouts": {
+            "connect": float(rec.get("connect_timeout") or CONNECT_TIMEOUT),
+            "read": float(rec.get("read_timeout") or READ_TIMEOUT),
+        },
+        "kv": {
+            "slots": rec.get("kv_slots"),
+            "overflow": rec.get("kv_overflow"),
+            "ttl": float(rec.get("kv_ttl") or KV_TTL),
+            # shared by every vllm_backend agent on the same endpoint
+            **(table_for(endpoint).view() if isinstance(endpoint, str) else {}),
+        },
+    }
+
+
+#: The fields a turn cannot run without — refused at the write when absent.
+REQUIRED = ("endpoint", "model", "max_tokens", "kv_slots", "kv_overflow")
+
+
+def _present(rec: dict, key: str) -> bool:
+    """Whether the record NAMES `key` in a usable shape (the shape itself is
+    judged by the checks above)."""
+    v = rec.get(key)
+    if key in ("endpoint", "model"):
+        return isinstance(v, str) and bool(v.strip())
+    return v is not None
+
+
+def _positive(v, *, integer: bool) -> bool:
+    if isinstance(v, bool):
+        return False
+    if integer:
+        return isinstance(v, int) and v >= 1
+    return isinstance(v, (int, float)) and v > 0
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Refuse a write this backend cannot honour, AT THE WRITE, naming the legal
+    set. Checks the MERGED state, because `thinking_token_budget` and
+    `max_tokens` are only wrong together."""
+    merged = {**record, **meta}
+    for key in ("max_tokens", "kv_slots"):
+        if (
+            key in meta
+            and meta[key] is not None
+            and not _positive(meta[key], integer=True)
+        ):
+            return f"{key} must be a positive int"
+    for key in ("kv_ttl", "connect_timeout", "read_timeout"):
+        if (
+            key in meta
+            and meta[key] is not None
+            and not _positive(meta[key], integer=False)
+        ):
+            return f"{key} must be a positive number of seconds"
+    if meta.get("kv_overflow") is not None and meta["kv_overflow"] not in KV_OVERFLOWS:
+        return (
+            f"kv_overflow={meta['kv_overflow']!r} is not a rotation policy — legal "
+            "values: evict (the least-recently-used conversation rotates out), "
+            "reject (refuse the newcomer)"
+        )
+    if (
+        meta.get("reasoning_effort") is not None
+        and meta["reasoning_effort"] not in REASONING_EFFORTS
+    ):
+        return (
+            f"reasoning_effort={meta['reasoning_effort']!r} is not one vLLM accepts "
+            '— legal values: low, medium, xhigh ("high" answers 400; xhigh needs '
+            "a thinking_token_budget or it can think without answering)"
+        )
+    budget = merged.get("thinking_token_budget")
+    if "thinking_token_budget" in meta and budget is not None:
+        if not _positive(budget, integer=True):
+            return "thinking_token_budget must be a positive int"
+    mx = merged.get("max_tokens")
+    if (
+        budget is not None
+        and _positive(budget, integer=True)
+        and _positive(mx, integer=True)
+        and budget >= mx
+    ):
+        return (
+            f"thinking_token_budget={budget} is not below max_tokens={mx} — it could "
+            "never fire, and a turn would end mid-thought with no answer; keep it "
+            "below max_tokens (half is a good start)"
+        )
+    # EVERY required field, checked at the WRITE (owner's decision, 2026-09-30):
+    # a model spawning a sub-AI copies the fields it can see, and a record the
+    # write accepted but no turn could use failed only later, on every turn,
+    # far from the create that caused it (measured: E37 multisubai_build — the
+    # solvers carried endpoint/model/max_tokens but no kv_slots/kv_overflow).
+    # Named ALL at once, so one retry fixes the record.
+    missing = [k for k in REQUIRED if not _present(merged, k)]
+    if missing:
+        return (
+            f"{NAME}: required on the record and missing: {', '.join(missing)} — "
+            "nothing is guessed. endpoint = the server's /v1 URL, model = the "
+            "served name, max_tokens = a turn's output budget, kv_slots = how many "
+            "conversations may be live on the endpoint, kv_overflow = evict (the "
+            "least-recently-used rotates out) or reject (the newcomer is refused)"
+        )
+    return None
+
+
+def _build():
+    return build(
+        sentence=(
+            "vLLM-backed LLM agent, talking to the vLLM server directly "
+            "(raw prompt-and-parse tool-calling; a KV-cache session table per endpoint)."
+        ),
+        make_provider=make_provider,
+        name=NAME,
+        module_name=__name__,
+        reflect_extra=_reflect_extra,
+    )
+
+
+VERBS, handler = _build()

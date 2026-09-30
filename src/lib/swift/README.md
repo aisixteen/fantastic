@@ -84,6 +84,7 @@ kernel modules.
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM (thin over `FantasticAICore`) |
 | nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, OpenAI-compatible, bearer auth + 429 retry (thin over `FantasticAICore`) |
 | llamacpp_backend | `FantasticLlamaCppBackend` | both | local LLM via llama-server, OpenAI-compatible (thin over `FantasticAICore`) |
+| vllm_backend | `FantasticVllmBackend` | both | LLM on a vLLM server, spoken to directly; a KV-cache session table per endpoint (thin over `FantasticAICore`) |
 | anthropic_backend | `FantasticAnthropicBackend` | both | Claude via the Anthropic Messages API (thin over `FantasticAICore`) |
 | exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the process edge: a general-purpose command runner gated by a regex allowlist (`allowed`), sealed by default; jobs are kernel tasks; a terminal is a PTY job (`forkpty`) |
 | scenario probes | `FantasticScenarioProbes` | test | fixture agents the shared e2e scenarios name |
@@ -127,7 +128,7 @@ swift/
     FantasticRamStore/                 the memory store (in RAM)
     FantasticAICore/                   shared LLM machinery (memory-store conversation,
                                        tag grammar, folds, grants); AI backends are thin over this
-    Fantastic{Ollama,NvidiaNim,LlamaCpp,Anthropic,Responses}Backend/
+    Fantastic{Ollama,NvidiaNim,LlamaCpp,Anthropic,Responses,Vllm}Backend/
                                        the AI backends
     Fantastic{File,Scheduler,StaticLoader,
               CliBundle,IoBridge,KernelBridge,WebWS,WebRest}/

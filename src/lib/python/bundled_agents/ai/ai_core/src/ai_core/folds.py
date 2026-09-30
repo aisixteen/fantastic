@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 
 from ai_core.tool_parse import extract_tool_calls
+from ai_core.constants import SUMMARY_INPUT_CAP  # noqa: F401 — re-exported seams
 
 FOLD_TAG = "[fold "
 
@@ -180,11 +181,6 @@ def level(rows: list[dict], fold_row: dict) -> int:
         if r is not None and is_fold(r):
             best = max(best, level(rows, r))
     return best + 1
-
-
-SUMMARY_INPUT_CAP = (
-    24_000  # chars handed to the summarizer per fold — never a 60k reply
-)
 
 
 def chain_text(rows: list[dict], chain: list[int]) -> str:

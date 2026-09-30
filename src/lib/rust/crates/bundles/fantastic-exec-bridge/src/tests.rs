@@ -292,14 +292,90 @@ async fn an_unknown_job_id_is_not_found_on_every_verb() {
         let r = kernel
             .send(vec![Item::new(
                 a.clone(),
-                json!({"type": verb, "job_id": "deadbeef"}),
+                json!({"type": verb, "job_id": 999_999}),
             )])
             .await
             .remove(0)
             .result;
         assert_eq!(r["reason"], "not_found", "{verb}: {r}");
-        assert_eq!(r["job_id"], "deadbeef", "{verb}: {r}");
+        assert_eq!(r["job_id"], 999_999, "{verb}: {r}");
     }
+}
+
+/// One id space: the job's id IS its kernel task id — `ps` lists it, `cancel`
+/// takes it. A string (even a stringified int) is a bad argument, never looked up:
+/// the old random 8-hex ids came back from a model as ints or infinite floats
+/// (`04203581`, `458e5912`) and 3.7% of jobs could not be addressed again
+/// (python `test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(30)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = r["job_id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("an int job_id: {r}"));
+    let ps = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ps"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        ps["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .any(|t| t["id"] == json!(jid) && t["agent"] == json!(a.as_str())),
+        "the job's id must be a row of `ps`: {ps}"
+    );
+    for verb in ["status", "stop", "interrupt", "clear", "write", "output"] {
+        let bad_arg = kernel
+            .send(vec![Item::new(
+                a.clone(),
+                json!({"type": verb, "job_id": jid.to_string()}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(
+            (&bad_arg["reason"], &bad_arg["arg"]),
+            (&json!("bad_arg"), &json!("job_id")),
+            "{verb}: {bad_arg}"
+        );
+    }
+    let snap = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": jid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let snap = &snap["jobs"][0];
+    assert_eq!(snap["job_id"], json!(jid), "{snap}");
+    assert!(
+        snap.get("task_id").is_none(),
+        "no second copy of the id: {snap}"
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "stop", "job_id": jid}),
+        )])
+        .await;
 }
 
 /// A command that matches no `allowed` pattern is refused, naming the patterns, and
@@ -388,7 +464,7 @@ time.sleep(30)
         .await
         .remove(0)
         .result;
-    assert!(r["job_id"].is_string(), "start failed: {r}");
+    assert!(r["job_id"].is_i64(), "start failed: {r}");
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     let n = kernel
@@ -427,7 +503,7 @@ async fn stop_sigkills_the_job() {
         .await
         .remove(0)
         .result;
-    assert!(r["job_id"].is_string(), "start failed: {r}");
+    assert!(r["job_id"].is_i64(), "start failed: {r}");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let n = kernel
@@ -640,7 +716,7 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
         .await
         .remove(0)
         .result;
-    assert!(r["job_id"].is_string(), "{r}");
+    assert!(r["job_id"].is_i64(), "{r}");
     let done = until(&mut rx, |p| p["type"] == "job_done", 10)
         .await
         .expect("job_done");
@@ -676,7 +752,7 @@ async fn start_returns_a_job_id_immediately_and_records_the_invocation() {
         .await
         .remove(0)
         .result;
-    assert!(r["job_id"].is_string(), "no job_id: {r}");
+    assert!(r["job_id"].is_i64(), "no job_id: {r}");
     assert_eq!(r["status"], "running");
     assert!(t0.elapsed() < Duration::from_secs(5), "start blocked");
     let st = kernel
@@ -1021,7 +1097,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
 fn wire(
     kernel: &Arc<Kernel>,
     owner: &AgentId,
-    job_id: &str,
+    job_id: i64,
 ) -> (
     tokio::net::UnixStream,
     Arc<tokio::sync::Notify>,
@@ -1036,7 +1112,7 @@ fn wire(
             rd,
             wr,
             owner.clone(),
-            job_id.to_string(),
+            TaskId(job_id),
             Arc::clone(kernel),
             Arc::clone(&stop),
         ),
@@ -1081,7 +1157,7 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
         )])
         .await;
 
-    let (mut child, stop, relay) = wire(&kernel, &a, "j1");
+    let (mut child, stop, relay) = wire(&kernel, &a, 9001);
     wire_write(&mut child, &json!({"op": "watch", "src": "secret"})).await;
     let ev = wire_read(&mut child).await;
     assert_eq!(ev["op"], "event", "{ev}");
@@ -1091,7 +1167,7 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     // …and NOTHING was registered. No proxy inbox row — and no WATCHER row on the
     // source either, which an emit proves from outside the crate: register the
     // proxy's inbox ourselves, and a leaked watcher fans the payload into it.
-    let proxy = AgentId::from("_xbw_j1_secret");
+    let proxy = AgentId::from("_xbw_9001_secret");
     assert!(!kernel.inboxes.contains_key(&proxy), "proxy inbox leaked");
     let mut spy = inbox(&kernel, &proxy);
     kernel
@@ -1115,14 +1191,14 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
 async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let (mut child, stop, relay) = wire(&kernel, &a, "j2");
+    let (mut child, stop, relay) = wire(&kernel, &a, 9002);
     // `$self` is a baseline edge, so both of these are permitted.
     wire_write(&mut child, &json!({"op": "watch", "src": a.as_str()})).await;
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
 
     let proxies = [
-        AgentId::from(format!("_xbw_j2_{a}").as_str()),
-        AgentId::from("_xbself_j2"),
+        AgentId::from(format!("_xbw_9002_{a}").as_str()),
+        AgentId::from("_xbself_9002"),
     ];
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline
@@ -1159,7 +1235,7 @@ async fn an_oversized_frame_closes_the_control_socket() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let (mut child, _stop, relay) = wire(&kernel, &a, "j3");
+    let (mut child, _stop, relay) = wire(&kernel, &a, 9003);
     child
         .write_all(&(16 * 1024 * 1024u32 + 1).to_be_bytes())
         .await
@@ -1193,11 +1269,9 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
         .await
         .remove(0)
         .result;
-    let job_id = r["job_id"].as_str().expect("job_id").to_string();
-    let task_id = {
-        let g = jobs::jobs();
-        g.get(&job_id).expect("row").task.to_string()
-    };
+    // The job's id IS its task id: `cancel` takes it as it is.
+    let job_id = TaskId(r["job_id"].as_i64().expect("job_id"));
+    let task_id = job_id.get();
     let c = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -1211,7 +1285,7 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let done = jobs::jobs()
-            .get(&job_id)
+            .get(&(a.clone(), job_id))
             .is_some_and(|j| j.status == "stopped");
         if done || tokio::time::Instant::now() > deadline {
             assert!(done, "the cancelled row never left `stopping`");
@@ -1279,7 +1353,7 @@ async fn stop_releases_the_proxies_a_real_job_held() {
         .await
         .remove(0)
         .result;
-    let job_id = r["job_id"].as_str().expect("job_id").to_string();
+    let job_id = r["job_id"].as_i64().expect("job_id");
     let proxies = [
         AgentId::from(format!("_xbw_{job_id}_{a}").as_str()),
         AgentId::from(format!("_xbself_{job_id}").as_str()),
@@ -1425,7 +1499,7 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["clear"],
-        "args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM"
+        "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"
     );
     assert_eq!(
         verbs["boot"],
@@ -1503,12 +1577,12 @@ async fn refusal_texts_use_python_repr() {
     let r = kernel
         .send(vec![Item::new(
             a.clone(),
-            json!({"type": "status", "job_id": "gone"}),
+            json!({"type": "status", "job_id": 424_242}),
         )])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["error"], "exec_bridge: no job 'gone'");
+    assert_eq!(r["error"], "exec_bridge: no job 424242");
     assert_eq!(r["reason"], "not_found");
     // `command not allowed: {line!r} — this leg permits: {pats}` — the line repr'd,
     // the pattern list printed as python prints a `list[str]`.
@@ -1602,23 +1676,61 @@ fn allowed_accepts_python_regex_syntax() {
     assert!(command_permitted(&backref, "go stop").is_some());
 }
 
-/// A4.8 — `job_id` is read under python TRUTHINESS: a falsy one means ALL of this
-/// agent's jobs, and a truthy non-string is not found, echoed raw.
+/// `job_id` is an INT or absent (python `_job_arg`): an absent key or `null` means
+/// ALL of this agent's jobs; any other non-int — `""`, `[]`, a string, a float — is
+/// a bad argument, never a silent "all"; an int that names nothing is not found,
+/// echoed raw. (It used to be read under python truthiness, when ids were strings.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_job_id_means_all_jobs() {
+async fn job_id_is_an_int_or_absent() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    for falsy in [json!(""), json!(null), json!(0), json!([])] {
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": null}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["jobs"], json!([]), "null job_id means ALL: {r}");
+    for not_int in [json!(""), json!([]), json!("7"), json!(7.5), json!(true)] {
         let r = kernel
             .send(vec![Item::new(
                 a.clone(),
-                json!({"type": "status", "job_id": falsy}),
+                json!({"type": "status", "job_id": not_int}),
             )])
             .await
             .remove(0)
             .result;
-        assert_eq!(r["jobs"], json!([]), "falsy job_id must mean ALL: {r}");
+        assert_eq!(
+            (&r["reason"], &r["arg"]),
+            (&json!("bad_arg"), &json!("job_id")),
+            "{not_int}: {r}"
+        );
     }
+    // A non-finite float — the kernel's `Infinity` token, what a model's
+    // `<job_id>458e5912</job_id>` becomes — is not an int either.
+    let mut inf = Map::new();
+    inf.insert("type".to_string(), json!("status"));
+    inf.insert(
+        "job_id".to_string(),
+        fantastic_kernel::coerce_scalar("458e5912"),
+    );
+    let r = kernel
+        .send(vec![Item::new(a.clone(), Value::Object(inf))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": 0}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "not_found", "0 is an id, not ALL: {r}");
     let r = kernel
         .send(vec![Item::new(
             a.clone(),
@@ -1669,12 +1781,12 @@ async fn start_coerces_args_env_and_cwd_like_python() {
     let r = call(json!({"type": "start", "command": py.to_string_lossy(),
                         "args": ["-c", "pass"], "env": null, "cwd": null}))
     .await;
-    assert!(r["job_id"].is_string(), "an explicit null is absent: {r}");
+    assert!(r["job_id"].is_i64(), "an explicit null is absent: {r}");
     // Bools are ints in python, so they are legal argv items — as `True`/`False`.
     let r = call(json!({"type": "start", "command": py.to_string_lossy(),
                         "args": ["-c", "import sys; print(sys.argv[1:])", true, 2, 1.5]}))
     .await;
-    assert!(r["job_id"].is_string(), "{r}");
+    assert!(r["job_id"].is_i64(), "{r}");
     let st = call(json!({"type": "status", "job_id": r["job_id"].clone()})).await;
     assert_eq!(
         st["jobs"][0]["args"],
@@ -1682,8 +1794,8 @@ async fn start_coerces_args_env_and_cwd_like_python() {
     );
 }
 
-/// A4.12 + A4.20 — `status` lists this agent's jobs in START order (python's dict is
-/// insertion-ordered), and each `task_id` is the kernel's INT.
+/// A4.12 — `status` lists this agent's jobs in START order (python's dict is
+/// insertion-ordered).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_lists_jobs_in_start_order() {
     let Some(py) = find_real_python() else {
@@ -1701,18 +1813,18 @@ async fn status_lists_jobs_in_start_order() {
             .await
             .remove(0)
             .result;
-        started.push(r["job_id"].as_str().expect("job_id").to_string());
+        started.push(r["job_id"].as_i64().expect("job_id"));
     }
     let st = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
-    let listed: Vec<String> = st["jobs"]
+    let listed: Vec<i64> = st["jobs"]
         .as_array()
         .expect("jobs")
         .iter()
-        .map(|j| j["job_id"].as_str().unwrap_or("").to_string())
+        .filter_map(|j| j["job_id"].as_i64())
         .collect();
     assert_eq!(listed, started, "status must list jobs in start order");
     let _ = kernel
@@ -1722,10 +1834,10 @@ async fn status_lists_jobs_in_start_order() {
         .result;
 }
 
-/// A4.20 — the task id in a `status` snapshot is an INT, the number `cancel
-/// task_id=<id>` takes, not a quoted copy of it.
+/// A4.20 — the id in a `status` snapshot is an INT — the job's task id, the
+/// number `cancel task_id=<id>` takes, not a quoted copy of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_task_id_is_an_integer() {
+async fn status_job_id_is_the_integer_task_id() {
     let Some(py) = find_real_python() else {
         return;
     };
@@ -1745,8 +1857,8 @@ async fn status_task_id_is_an_integer() {
         .remove(0)
         .result;
     assert!(
-        st["jobs"][0]["task_id"].is_i64(),
-        "task_id must be an int: {st}"
+        st["jobs"][0]["job_id"].is_i64(),
+        "job_id must be an int: {st}"
     );
     let _ = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
@@ -2082,7 +2194,7 @@ async fn relay_coerces_falsy_payload_and_target() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut owner_rx = inbox(&kernel, &a);
-    let (mut child, stop, relay) = wire(&kernel, &a, "jc");
+    let (mut child, stop, relay) = wire(&kernel, &a, 9004);
     // A null payload is dispatched as `{}`, not as null.
     wire_write(
         &mut child,
@@ -2130,7 +2242,7 @@ async fn relay_coerces_falsy_payload_and_target() {
 async fn a_watching_program_holds_drain_task_rows() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let (mut child, stop, relay) = wire(&kernel, &a, "jd");
+    let (mut child, stop, relay) = wire(&kernel, &a, 9005);
     wire_write(&mut child, &json!({"op": "watch", "src": a.as_str()})).await;
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
 
@@ -2192,11 +2304,10 @@ async fn a_watching_program_holds_drain_task_rows() {
 }
 
 /// python `secrets.token_hex(4)` — 8 lowercase hex characters from the OS
-/// CSPRNG. Rust minted `counter ^ pid` and the capture read the SEQUENTIAL
-/// `76fa189x` family.
+/// CSPRNG, naming a pasted image's scratch file (a JOB's id is its task id).
 #[test]
-fn job_ids_are_pythons_token_hex_4_and_random() {
-    let ids: Vec<String> = (0..64).map(|_| crate::rand_job_id()).collect();
+fn paste_names_are_pythons_token_hex_4_and_random() {
+    let ids: Vec<String> = (0..64).map(|_| crate::rand_hex8()).collect();
     for id in &ids {
         assert_eq!(id.len(), 8, "{id}");
         assert!(

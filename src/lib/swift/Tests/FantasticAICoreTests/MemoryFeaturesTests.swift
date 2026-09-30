@@ -212,7 +212,7 @@ struct MemoryFeaturesTests {
         let out = try #require(await AIFoldStrategy.summarize(c, rows, Array(1...5)))
         #expect(out.1 == "whole summary" && s.calls.count == 2)
         let want = AIFoldStrategy.summaryBudget(c, rows, Array(1...5))
-        let bound = Int(want + AIFoldStrategy.THINK_ALLOWANCE)  // the thought counts against max_tokens
+        let bound = Int(want + AIConstants.THINK_ALLOWANCE)  // the thought counts against max_tokens
         #expect(s.calls == [bound, bound], "the call is bounded by budget + thinking")
     }
 

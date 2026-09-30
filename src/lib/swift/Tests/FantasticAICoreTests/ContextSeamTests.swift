@@ -100,7 +100,7 @@ struct ContextSeamTests {
     @Test func windowPrecedence() {
         #expect(AIContext.resolveContextWindow(rec(["context_window": .integer(8000), "num_ctx": .integer(2000)])) == 8000)
         #expect(AIContext.resolveContextWindow(rec(["num_ctx": .integer(2000)])) == 2000)
-        #expect(AIContext.resolveContextWindow(rec([:])) == AIContext.defaultContextWindow)
+        #expect(AIContext.resolveContextWindow(rec([:])) == AIConstants.DEFAULT_CONTEXT_WINDOW)
     }
 
     @Test func budgetFloor() {

@@ -23,8 +23,7 @@ use std::collections::{HashMap, HashSet};
 /// The opener a fold row's rendered content carries.
 pub const FOLD_TAG: &str = "[fold ";
 
-/// Chars handed to the summarizer per fold — never a 60k reply.
-pub const SUMMARY_INPUT_CAP: usize = 24_000;
+pub use crate::constants::SUMMARY_INPUT_CAP;
 
 /// A row's `id`, when it has one.
 #[must_use]

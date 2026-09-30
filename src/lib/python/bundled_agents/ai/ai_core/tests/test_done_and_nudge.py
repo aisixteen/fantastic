@@ -19,11 +19,13 @@ class _Script:
         self.turns = list(turns)
         self.calls = 0
         self.incoming: list[str] = []
+        self.seen: list[list[dict]] = []  # every pass's whole message list
         self.delay = delay  # a slow first turn, so a second send can queue behind it
 
     async def chat(self, messages, max_tokens=None):
         self.calls += 1
         self.incoming.append(messages[-1]["content"])
+        self.seen.append(list(messages))
         if self.calls == 1 and self.delay:
             await asyncio.sleep(self.delay)
         out = self.turns.pop(0) if self.turns else "…nothing left…"
@@ -207,5 +209,90 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
         assert not any("[await refused]" in m for m in fp.incoming)
         assert not any("[no call was dispatched]" in m for m in fp.incoming)
         assert fp.incoming[-1].endswith("two")
+    finally:
+        core._providers.pop(aid, None)
+
+
+async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel):
+    """A turn that is ONLY thinking did not answer: it is never stored and never
+    counts as completed — it is rerolled by the no-call reminder, told why
+    (measured on vLLM 2026-09-30: an 8-token thinking budget, then a clean
+    `stop` with no answer; failing it outright ended a 30-pass chain)."""
+    fp = _Script([f"{core.THINK_OPEN}hmm{core.THINK_CLOSE}\n\n", DONE])
+    aid = "dead_think"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    core._providers[aid] = fp
+    try:
+        out = (
+            await seeded_kernel.send(
+                [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
+        assert out.get("dead_turn") is True, out
+        await _settle(fp, 2)
+        assert fp.incoming[1].startswith("[no answer]"), fp.incoming
+        assert "[no call was dispatched]" in fp.incoming[1], fp.incoming
+        # the turn the dead one answered is KEPT (a reply batch must not vanish);
+        # only its empty answer is dropped
+        seen = [m.get("content") for m in fp.seen[1]]
+        assert any(
+            "go" == c or (isinstance(c, str) and c.endswith("go")) for c in seen
+        ), seen
+        assert not any(
+            m.get("role") == "assistant" and not (m.get("content") or "").strip()
+            for m in fp.seen[1]
+        ), fp.seen[1]
+    finally:
+        core._providers.pop(aid, None)
+
+
+async def test_a_chain_gives_up_after_max_silent_turns(seeded_kernel, monkeypatch):
+    """Silent turns in a row are bounded: at MAX_SILENT_TURNS the chain stops
+    reminding and tells its caller the model could not answer."""
+    monkeypatch.setattr(core, "MAX_SILENT_TURNS", 3)
+    monkeypatch.setattr(
+        core,
+        "_GAVE_UP",
+        "The LLM was not able to answer — 3 turns in a row "
+        "produced no call. Reiterate the inquiry.",
+    )
+    fp = _Script(["just prose"] * 10)
+    aid = "gives_up"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    seeded_kernel.ctx.ensure_inbox("watch_gu")
+    seeded_kernel.watch(aid, "watch_gu")
+    core._providers[aid] = fp
+    try:
+        # a browser-style client: its events land on the agent's own inbox,
+        # where a watcher sees them (`cli` events go to the terminal instead)
+        await seeded_kernel.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "send", "text": "go", "client_id": "tab1"},
+                }
+            ]
+        )
+        await _settle(fp, 3)
+        await asyncio.sleep(0.5)
+        assert fp.calls == 3, f"no reminder after the cap; incoming={fp.incoming}"
+        q = seeded_kernel.ctx.inboxes["watch_gu"]
+        reasons = []
+        while not q.empty():
+            ev = q.get_nowait()
+            if ev.get("type") == "status" and ev.get("phase") == "done":
+                reasons.append(((ev.get("detail") or {}).get("reason"), ev))
+        assert reasons and reasons[-1][0] == "gave_up", reasons
+        assert "Reiterate the inquiry" in reasons[-1][1]["detail"]["error"], reasons
     finally:
         core._providers.pop(aid, None)

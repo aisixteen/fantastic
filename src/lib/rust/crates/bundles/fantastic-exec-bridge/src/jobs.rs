@@ -21,15 +21,17 @@ const LINE_LIMIT: usize = 16 * 1024 * 1024; // python raised asyncio's 64 KiB de
 const LINE_LIMIT_ERROR: &str = "Separator is not found, and chunk exceed the limit";
 
 /// One in-flight (or finished) program.
+///
+/// Keyed in [`jobs`] by its id — which IS the kernel TASK id of its pump, minted
+/// by the one counter when `start` forks it (python `_start`). The row carries no
+/// second copy of that number: the key is the job's id in `status`, its row in
+/// `ps`, and what `cancel task_id=` names.
 pub struct Job {
     /// The agent that owns it. Every verb filters on this, so a known job_id from
     /// another agent is still "no job".
     pub owner: AgentId,
     /// OS pid — `stop`/`interrupt` signal it directly.
     pub pid: u32,
-    /// The PUMP's row in the kernel task table. Liveness is derived from this and
-    /// nothing else, so there is no second flag to drift.
-    pub task: TaskId,
     /// The relay task serving this job's control socket — its row in the kernel
     /// task table, like the pump above. It is real work (a send per frame the
     /// program writes), so it is visible to `ps` and reachable by `cancel`.
@@ -67,7 +69,17 @@ pub struct Job {
     pub pty: Option<Arc<crate::pty::Pty>>,
 }
 
-static JOBS: OnceLock<Mutex<IndexMap<String, Job>>> = OnceLock::new();
+/// A job's key: its OWNER and its id (the pump's kernel task id).
+///
+/// Within one kernel the task id alone is unique — python keys `_jobs` by it — but
+/// this table is process-global, and a process that hosts several kernels (the
+/// test binary does, in parallel) has several counters minting the same small
+/// numbers. Every verb already looks a job up for ONE owner, so the owner is part
+/// of the key: a job of another agent — or of another kernel's agent — is simply
+/// not found, exactly as before.
+pub type JobKey = (AgentId, TaskId);
+
+static JOBS: OnceLock<Mutex<IndexMap<JobKey, Job>>> = OnceLock::new();
 
 /// The job table. Module-global, shared across every exec_bridge agent in the
 /// process; every operation filters by `owner`.
@@ -75,7 +87,7 @@ static JOBS: OnceLock<Mutex<IndexMap<String, Job>>> = OnceLock::new();
 /// INSERTION-ORDERED, because python's is a `dict`: `status` with no `job_id`
 /// answers this agent's jobs in START order (A4.12), and `clear` removes with
 /// `shift_remove` so the survivors keep it.
-pub fn jobs() -> MutexGuard<'static, IndexMap<String, Job>> {
+pub fn jobs() -> MutexGuard<'static, IndexMap<JobKey, Job>> {
     JOBS.get_or_init(|| Mutex::new(IndexMap::new()))
         .lock()
         .expect("JOBS poisoned")
@@ -98,12 +110,12 @@ pub fn has_running_job(owner: &AgentId) -> bool {
 }
 
 /// A `status` snapshot. `full` adds the collected output.
-pub fn snap(job_id: &str, j: &Job, full: bool) -> Value {
+///
+/// `job_id` is the job's kernel TASK id, an INT — `cancel task_id=<job_id>` takes
+/// the same number — so there is no separate `task_id` field to disagree with it.
+pub fn snap(job_id: TaskId, j: &Job, full: bool) -> Value {
     let mut v = json!({
-        "job_id": job_id,
-        // The kernel task id is an INT, as python's `spawn_task` mints (A4.20) —
-        // `cancel task_id=<id>` takes the number, not a quoted copy of it.
-        "task_id": j.task.0,
+        "job_id": job_id.get(),
         "status": j.status,
         "exit_code": j.exit_code,
         "started_at": j.started_at,
@@ -167,7 +179,7 @@ struct Counter {
 async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     reader: R,
     owner: AgentId,
-    job_id: String,
+    job_id: TaskId,
     stream: &'static str,
     kernel: Arc<Kernel>,
     counter: Arc<Mutex<Counter>>,
@@ -220,7 +232,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
         // `start` that is still holding the lock while spawn_task begins running us.
         {
             let mut g = jobs();
-            if let Some(j) = g.get_mut(&job_id) {
+            if let Some(j) = g.get_mut(&(owner.clone(), job_id)) {
                 j.lines = n;
                 j.last_line = line.clone();
             }
@@ -228,7 +240,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
         kernel
             .emit(
                 &owner,
-                json!({"type": "progress", "job_id": job_id, "n": n, "line": line, "stream": stream}),
+                json!({"type": "progress", "job_id": job_id.get(), "n": n, "line": line, "stream": stream}),
             )
             .await;
         if eof {
@@ -248,17 +260,14 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
 /// catches `CancelledError` and finalises to `stopped`; this guard is the same
 /// guarantee, spelled as a `Drop`.
 pub(crate) struct FinalizeRow {
-    job_id: String,
+    key: JobKey,
     armed: bool,
 }
 
 impl FinalizeRow {
     /// Armed until the pump writes the real outcome itself.
-    pub(crate) fn new(job_id: &str) -> Self {
-        Self {
-            job_id: job_id.to_string(),
-            armed: true,
-        }
+    pub(crate) fn new(key: JobKey) -> Self {
+        Self { key, armed: true }
     }
 
     /// The pump reached the end and wrote the REAL outcome itself.
@@ -273,7 +282,7 @@ impl Drop for FinalizeRow {
             return;
         }
         let mut g = jobs();
-        if let Some(j) = g.get_mut(&self.job_id) {
+        if let Some(j) = g.get_mut(&self.key) {
             if j.exit_code.is_none() {
                 // `on_cancel` SIGKILLed the child before the abort; say so, and
                 // leave a label `clear` accepts.
@@ -284,17 +293,40 @@ impl Drop for FinalizeRow {
     }
 }
 
+/// The job's id, handed to its pump once the row exists (python's `ready`).
+///
+/// The id IS the pump's own task id, so it exists only after `spawn_task` has
+/// forked the pump — and a forked task may already be running on another worker
+/// by then. `start` files the row FIRST and only then sends the id, so the pump
+/// never looks for a row that is not there yet.
+pub type Ready = tokio::sync::oneshot::Receiver<TaskId>;
+
+/// Wait for the job's id. `None` only if `start` dropped the sender without
+/// filing the row — it has no refusal path after the fork, so that means the
+/// dispatch itself died. There is then no row to report into and nobody who can
+/// reach the process, so it is killed here rather than left running unowned
+/// (a child is spawned with `kill_on_drop(false)`).
+pub(crate) async fn await_id(ready: Ready, child: &tokio::process::Child) -> Option<TaskId> {
+    let id = ready.await.ok();
+    if id.is_none() {
+        if let Some(pid) = child.id() {
+            crate::spawn::kill_session(pid as i32);
+        }
+    }
+    id
+}
+
 /// The job's task-table body: drain both pipes, await exit, emit `job_done`.
 pub async fn pump(
     owner: AgentId,
-    job_id: String,
+    ready: Ready,
     mut child: tokio::process::Child,
     kernel: Arc<Kernel>,
 ) {
-    let mut finalize = FinalizeRow {
-        job_id: job_id.clone(),
-        armed: true,
+    let Some(job_id) = await_id(ready, &child).await else {
+        return;
     };
+    let mut finalize = FinalizeRow::new((owner.clone(), job_id));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // ONE counter across both pipes, held by the PUMP: `n` is a single monotonic
@@ -307,7 +339,7 @@ pub async fn pump(
                     read_stream(
                         s,
                         owner.clone(),
-                        job_id.clone(),
+                        job_id,
                         "stdout",
                         Arc::clone(&kernel),
                         Arc::clone(&counter),
@@ -323,7 +355,7 @@ pub async fn pump(
                     read_stream(
                         s,
                         owner.clone(),
-                        job_id.clone(),
+                        job_id,
                         "stderr",
                         Arc::clone(&kernel),
                         Arc::clone(&counter),
@@ -346,7 +378,7 @@ pub async fn pump(
     finalize.disarm();
     {
         let mut g = jobs();
-        if let Some(j) = g.get_mut(&job_id) {
+        if let Some(j) = g.get_mut(&(owner.clone(), job_id)) {
             j.exit_code = code;
             j.stdout = o.clone();
             j.stderr = e.clone();
@@ -362,7 +394,7 @@ pub async fn pump(
     kernel
         .emit(
             &owner,
-            json!({"type": "job_done", "job_id": job_id, "exit_code": code,
+            json!({"type": "job_done", "job_id": job_id.get(), "exit_code": code,
                    "ok": code == Some(0), "stdout": o, "stderr": e}),
         )
         .await;

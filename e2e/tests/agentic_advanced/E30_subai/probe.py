@@ -290,7 +290,7 @@ def _ai_meta(
         if MAX_TOKENS_FIELD:
             meta["max_tokens"] = MAX_TOKENS_FIELD
         meta["model"] = MODEL
-    else:
+    elif backend == "llamacpp":
         meta["handler_module"] = "llamacpp_backend.tools"
         if not LLAMACPP_ENDPOINT:
             raise SystemExit(
@@ -298,6 +298,14 @@ def _ai_meta(
             )
         meta["endpoint"] = LLAMACPP_ENDPOINT
         meta["think"] = think
+    else:
+        # Every other plug describes ITSELF (e2e/backends): its handler, model,
+        # endpoint and required fields come from the plug, never from a branch
+        # here — the branch above used to send every non-anthropic backend to
+        # llama.cpp (a vllm run died on FANTASTIC_LLAMACPP_ENDPOINT, 2026-09-30).
+        # The probe's own wiring (grants, description) wins over the plug's.
+        for k, v in _resolve_backend(backend).record().items():
+            meta.setdefault(k, v)
     return meta
 
 
@@ -949,10 +957,10 @@ async def run(
 
         _errtask = asyncio.create_task(_wire_errspy())
     else:
-        if BACKEND == "anthropic":
-            import anthropic_backend.tools as bt
-        else:
-            import llamacpp_backend.tools as bt
+        import importlib
+
+        # the plug names its own bundle — no per-backend import branch
+        bt = importlib.import_module(_resolve_backend(BACKEND).handler_module)
         spy_obj = Spy(bt.make_provider(aid, root))
         core._providers[aid] = spy_obj
 

@@ -199,17 +199,89 @@ func deliverSoon(
 /// guard is released. Mirrors python's `_route_reply` step for step — the ORDER
 /// below is load-bearing throughout.
 
-// THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched
-// nothing. DONE is EXPLICIT: the `{"name":"done"}` tool call ends a chain
-// silently and is never nudged. Why once: the nudge is itself a chain turn, so
-// a second consecutive no-call turn arrives with the nudge as its incoming
-// text — and is NOT nudged again. Mirrors python `_NO_CALL_NUDGE` (canonical;
-// reinstated 2026-09-01 after repo_map:swift twice stopped mid-task).
+// THE NO-CALL NUDGE — a turn that dispatched nothing is TRY AGAIN. DONE is
+// EXPLICIT: the `<call name="done">` control call ends a chain silently and is
+// never nudged; `await` waits. Every silent turn is reminded, up to
+// `AIConstants.MAX_SILENT_TURNS` in a row (see `AISilentStreaks`). Mirrors
+// python `_NO_CALL_NUDGE` (canonical; reinstated 2026-09-01 after
+// repo_map:swift twice stopped mid-task).
 let noCallNudge =
     "[no call was dispatched] Your turn emitted no <call> element, so "
     + "NOTHING ran — a call decided in thinking does not execute unless the "
     + "element is written out. If the task is unfinished, emit that call now. "
     + "If it is finished, end the chain explicitly: <call name=\"done\"></call>"
+
+/// What a caller is told when a chain gives up (`n` silent turns in a row).
+/// Python `_GAVE_UP`, which renders the module's `MAX_SILENT_TURNS`; `n` is the
+/// cap in effect, so a test that lowers the cap reads its own number.
+func gaveUp(_ n: Int) -> String {
+    "The LLM was not able to answer — \(n) turns in a row produced "
+        + "no call. Reiterate the inquiry."
+}
+
+/// Prefixed to the reminder when the turn it answers was DEAD (only thinking).
+/// Python `_DEAD_TURN_LINE`.
+let deadTurnLine =
+    "[no answer] Your last turn produced only thinking and no answer — it was "
+    + "discarded. "
+
+/// THE SILENT STREAK per chain — `(agent id, client id)` — turns in a row that
+/// dispatched nothing. Python `_silent`.
+///
+/// KEYED BY KERNEL, like `AIRunStates`: python's `_silent` is a module dict in a
+/// one-kernel-per-process runtime, while swift hosts many kernels at once (every
+/// test does), and a flat map would let one kernel's quiet agent count against
+/// another's.
+enum AISilentStreaks {
+    private struct Chain: Hashable {
+        let agent: String
+        let client: String
+    }
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var table: [UInt64: [Chain: Int]] = [:]
+    nonisolated(unsafe) private static var caps: [UInt64: Int] = [:]
+
+    /// One more silent turn on this chain; the new length of the streak.
+    static func bump(_ kernel: Kernel, _ agent: String, _ client: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = Chain(agent: agent, client: client)
+        let n = (table[kernel.serial]?[key] ?? 0) + 1
+        table[kernel.serial, default: [:]][key] = n
+        return n
+    }
+
+    /// The chain dispatched something (or gave up): its streak is over.
+    static func reset(_ kernel: Kernel, _ agent: String, _ client: String) {
+        lock.lock()
+        table[kernel.serial]?.removeValue(forKey: Chain(agent: agent, client: client))
+        lock.unlock()
+    }
+
+    /// The cap in effect for this kernel — `AIConstants.MAX_SILENT_TURNS`
+    /// unless a test lowered it for its own kernel.
+    static func cap(_ kernel: Kernel) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return caps[kernel.serial] ?? AIConstants.MAX_SILENT_TURNS
+    }
+
+    /// TEST SEAM — python's `monkeypatch.setattr(core, "MAX_SILENT_TURNS", 3)`,
+    /// scoped to ONE kernel so tests running in parallel keep the real cap.
+    static func setCap(_ kernel: Kernel, _ n: Int) {
+        lock.lock()
+        caps[kernel.serial] = n
+        lock.unlock()
+    }
+
+    /// Drop a dead kernel's rows — see `AISideTables`.
+    static func forget(_ kernel: Kernel) {
+        lock.lock()
+        table.removeValue(forKey: kernel.serial)
+        caps.removeValue(forKey: kernel.serial)
+        lock.unlock()
+    }
+}
 
 /// What `await` is told when there is nothing to wait for. DELIVERED TO SELF, as
 /// a fresh turn: it must WAKE the model, not sit in a return value nobody reads.
@@ -351,7 +423,8 @@ func routeReply(
     incoming: String,
     sendTimeout: Double,
     runState: AIAgentRunState? = nil,
-    messageId: Int64? = nil
+    messageId: Int64? = nil,
+    deadTurn: Bool = false
 ) async {
     let calls = fanOut(extractToolCalls(text), messageId: messageId)
     let doneCalled = calls.contains { $0.name == "done" }
@@ -372,6 +445,13 @@ func routeReply(
     for bad in malformedCalls(text) {
         units.append(
             RouteUnit(dest: selfId.value, target: "-", verb: "-", idx: nil, body: bad.body))
+    }
+    // THE SILENT STREAK of this chain (one per agent + client thread): turns in
+    // a row that dispatched nothing. Any call — `done` and `await` included —
+    // ends the streak; see `AIConstants.MAX_SILENT_TURNS`. Python resets at the
+    // same point, on `calls or units` (the malformed units are all there is yet).
+    if anyCalls || !units.isEmpty {
+        AISilentStreaks.reset(kernel, selfId.value, clientId)
     }
 
     for call in calls {
@@ -711,15 +791,37 @@ func routeReply(
         return
     }
     if nudging {
-        // NO STREAK AND NO CAP. A call-less turn is not a fact about how many
-        // times the model has been quiet; it means "you emitted no call, try
-        // again", and it means that every time. The chain ends where the MODEL
-        // says it ends — `done` or `await`, both handled above. A counter that
-        // gave up mid-task ended the work silently, which is the exact failure
-        // the nudge exists to prevent; spend is bounded outside, by whoever owns
-        // the budget.
+        // TRY AGAIN. A call-less turn means "you emitted no call, try again". A
+        // DEAD turn (only thinking, discarded unstored) is the same silence and
+        // is rerolled the same way, told why.
+        //
+        // BOUNDED (owner, 2026-09-30): MAX_SILENT_TURNS in a row and the chain
+        // GIVES UP instead of reminding again — the caller is told, loudly, that
+        // the model could not answer. A person sees it in their view; a parent
+        // that asked for the result by `send_to` gets it as a turn; a clock's
+        // tick has nobody reading, so the status event is the record, and the
+        // next tick starts a fresh chain with a fresh count.
+        let streak = AISilentStreaks.bump(kernel, selfId.value, clientId)
+        let cap = AISilentStreaks.cap(kernel)
+        if streak >= cap {
+            AISilentStreaks.reset(kernel, selfId.value, clientId)
+            let text = gaveUp(cap)
+            await emitStatus(
+                kernel: kernel, agentId: selfId, clientId: clientId, phase: "done",
+                detail: [
+                    ("reason", .string("gave_up")), ("error", .string(text)),
+                    ("silent_turns", .integer(Int64(streak))),
+                ])
+            if let sendTo = sendTo {
+                deliverSoon(
+                    kernel: kernel, target: sendTo, text: text,
+                    clientId: clientId, systemPrompt: systemPrompt)
+            }
+            return
+        }
         deliverSoon(
-            kernel: kernel, target: selfId.value, text: noCallNudge,
+            kernel: kernel, target: selfId.value,
+            text: deadTurn ? deadTurnLine + noCallNudge : noCallNudge,
             clientId: clientId, systemPrompt: systemPrompt)
         return
     }

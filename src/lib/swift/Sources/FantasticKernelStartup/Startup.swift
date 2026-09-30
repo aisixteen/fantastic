@@ -21,6 +21,7 @@ import FantasticKernelBridge
 import FantasticAnthropicBackend
 import FantasticResponsesBackend
 import FantasticLlamaCppBackend
+import FantasticVllmBackend
 import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
 import FantasticRamStore
@@ -86,6 +87,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("anthropic_backend.tools", AnthropicBundle())
     r.register("responses_backend.tools", ResponsesBundle())
     r.register("llamacpp_backend.tools", LlamaCppBundle())
+    r.register("vllm_backend.tools", VllmBundle())
     #if os(macOS)
         r.register("exec_bridge.tools", ExecBridgeBundle())
     #endif

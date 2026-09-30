@@ -634,20 +634,25 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
     );
 }
 
-/// A turn spent ENTIRELY reasoning is not an empty completion: the caller still
-/// gets the raw text (so a mid-thought tool call dispatches), while durable
-/// history holds nothing but the empty conclusion.
-#[tokio::test]
-async fn a_thinking_only_turn_is_not_an_empty_completion() {
+/// A turn spent ENTIRELY reasoning is a DEAD TURN (owner, 2026-09-30): it is
+/// DISCARDED — durable history holds nothing of it, no empty assistant row a
+/// later turn would read as an answer — and REROLLED by the no-call reminder,
+/// which says why. (It used to settle as a completed, empty turn; then, briefly,
+/// it failed the turn and ended the chain.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thinking_only_turn_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "thonly").await;
-    script(
+    let s = script(
         &backend,
-        vec![vec![
-            ScriptEvent::Token(crate::think::THINK_OPEN.into()),
-            ScriptEvent::Token("all 578 tokens went here".into()),
-            ScriptEvent::Token(crate::think::THINK_CLOSE.into()),
-        ]],
+        vec![
+            vec![
+                ScriptEvent::Token(crate::think::THINK_OPEN.into()),
+                ScriptEvent::Token("all 578 tokens went here".into()),
+                ScriptEvent::Token(crate::think::THINK_CLOSE.into()),
+            ],
+            pass(r#"<call name="done"></call>"#),
+        ],
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
@@ -659,11 +664,16 @@ async fn a_thinking_only_turn_is_not_an_empty_completion() {
         .await
         .remove(0)
         .result;
-    let raw = reply["response"].as_str().expect("response text");
+    assert_eq!(reply["dead_turn"], json!(true), "{reply:#?}");
+    assert!(reply.get("raised").is_none(), "{reply:#?}");
+    assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
     assert!(
-        raw.contains("all 578 tokens went here"),
-        "the reasoning must reach the caller verbatim: {raw:?}"
+        s.request(1)
+            .contains("[no answer] Your last turn produced only thinking"),
+        "the reroll says why: {}",
+        s.request(1)
     );
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let h = kernel
         .send(vec![Item::new(
             backend.clone(),
@@ -672,12 +682,15 @@ async fn a_thinking_only_turn_is_not_an_empty_completion() {
         .await
         .remove(0)
         .result;
-    // `history` is the DIGEST (python's `{rows, next, total}`) — the assistant
-    // turn's body stripped of its thinking is an EMPTY head, 0 bytes.
     let rows = h["rows"].as_array().expect("rows array");
-    assert_eq!(rows.last().unwrap()["head"], "");
-    assert_eq!(rows.last().unwrap()["bytes"], 0);
-    assert!(h.get("messages").is_none(), "python sends no `messages`");
+    assert!(
+        // history rows are digests: the row's text is its `head`
+        !rows.iter().any(|r| {
+            let c = r["head"].as_str().unwrap_or("");
+            c.contains("all 578 tokens") || (r["role"] == json!("assistant") && c.trim().is_empty())
+        }),
+        "a dead turn stores nothing: {rows:#?}"
+    );
 }
 
 // ── Context Protocol: budget primitives + strategies (no kernel) ─────
@@ -2280,6 +2293,112 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
     assert_eq!(s.passes_served(), 5, "done ended it; nothing reminds after");
 }
 
+/// A turn that is ONLY thinking did not answer: it is never stored and never
+/// counts as completed — it is rerolled by the no-call reminder, told why
+/// (measured on vLLM 2026-09-30: an 8-token thinking budget, then a clean `stop`
+/// with no answer; failing it outright ended a 30-pass chain). python
+/// `test_a_dead_turn_is_discarded_and_rerolled`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_turn_is_discarded_and_rerolled() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "dead_think").await;
+    let s = script(
+        &backend,
+        vec![
+            pass("<think>hmm</think>\n\n"),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["dead_turn"], json!(true), "{r:#?}");
+    assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
+    let incoming = s.request_messages(1);
+    let last = incoming
+        .last()
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("")
+        .to_string();
+    assert!(last.starts_with("[no answer]"), "{last}");
+    assert!(last.contains("[no call was dispatched]"), "{last}");
+    // the turn the dead one answered is KEPT (a reply batch must not vanish);
+    // only its empty answer is dropped
+    assert!(
+        incoming.iter().any(|m| {
+            let c = m["content"].as_str().unwrap_or("");
+            c == "go" || c.ends_with("go")
+        }),
+        "the incoming \"go\" was lost: {incoming:#?}"
+    );
+    assert!(
+        !incoming.iter().any(|m| {
+            m["role"] == json!("assistant") && m["content"].as_str().unwrap_or("").trim().is_empty()
+        }),
+        "an empty assistant row reached the model: {incoming:#?}"
+    );
+}
+
+/// Silent turns in a row are bounded: at MAX_SILENT_TURNS the chain stops
+/// reminding and tells its caller the model could not answer. python
+/// `test_a_chain_gives_up_after_max_silent_turns` (which patches the cap to 3; a
+/// rust const is not patchable, so this runs the real cap).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chain_gives_up_after_max_silent_turns() {
+    let cap = crate::constants::MAX_SILENT_TURNS;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "gives_up").await;
+    let s = script(
+        &backend,
+        (0..cap + 5).map(|_| pass("just prose")).collect(),
+        Duration::ZERO,
+    );
+    // a browser-style client: its events land on the agent's own inbox, where
+    // they can be read (`cli` events go to the terminal instead)
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "tab1"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        until_passes(&s, cap).await,
+        "the chain stalled before the cap"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(s.passes_served(), cap, "no reminder after the cap");
+    let mut dones = Vec::new();
+    while let Some(v) = rx.try_recv() {
+        let p = v.payload;
+        if p["type"] == json!("status") && p["phase"] == json!("done") {
+            dones.push(p);
+        }
+    }
+    let last = dones.last().expect("a done status");
+    assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
+    assert_eq!(
+        last["detail"]["error"],
+        json!(crate::route::gave_up_text()),
+        "{last:#?}"
+    );
+    assert_eq!(last["detail"]["silent_turns"], json!(cap), "{last:#?}");
+    assert_eq!(
+        crate::route::gave_up_text(),
+        "The LLM was not able to answer — 10 turns in a row produced no call. \
+         Reiterate the inquiry.",
+        "python `_GAVE_UP`, byte for byte"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_done_call_ends_the_chain_without_a_nudge() {
     let tmp = TempDir::new().unwrap();
@@ -2374,6 +2493,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         String::new(),
         0.2,
         None,
+        false,
     )
     .await;
     assert!(
@@ -2428,6 +2548,7 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
         String::new(),
         0.2,
         None,
+        false,
     )
     .await;
     assert!(
@@ -3001,6 +3122,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         "[reply to x · y z]".to_string(),
         30.0,
         None,
+        false,
     )
     .await;
     assert!(
@@ -3968,7 +4090,7 @@ fn reflect_emits_and_concurrency_are_python_verbatim() {
     assert!(o["status"]
         .as_str()
         .unwrap()
-        .contains("detail.reason='ok'|'cancelled'|'timeout'|'error' for done."));
+        .contains("detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS turns in a row with no call; detail.error says so) for done."));
     assert!(o["context"]
         .as_str()
         .unwrap()

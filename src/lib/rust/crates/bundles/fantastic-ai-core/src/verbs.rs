@@ -3,7 +3,8 @@
 //! provider build, then calls these. The provider is the per-backend seam,
 //! constructed by the backend and passed in per `send`.
 
-use crate::agent_loop::{run_generation, BackendConfig, GenFailure};
+use crate::agent_loop::{run_generation, BackendConfig, GenFailure, Generation};
+use crate::constants::MAX_CALL_DEPTH;
 use crate::context::{budget as agent_budget, output_reserve, resolve_context_window};
 use crate::events::emit_status;
 use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client, DEFAULT_CLIENT_ID};
@@ -12,11 +13,10 @@ use crate::projection::{derive_reaction, round3, TRIGGER};
 use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
 use fantastic_bundle::{
-    py_float, py_float_repr, py_int_or, py_json_dumps, py_repr, py_repr_value, py_str, py_strip,
-    py_truthy,
+    py_float_repr, py_int_or, py_json_dumps, py_repr, py_repr_value, py_str, py_strip, py_truthy,
 };
 use fantastic_kernel::bundle::BundleError;
-use fantastic_kernel::call_guard::{check_call_stack, CallStackRefusal, MAX_CALL_DEPTH};
+use fantastic_kernel::call_guard::{check_call_stack, CallStackRefusal};
 use fantastic_kernel::{current_task, AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -65,7 +65,7 @@ pub fn reflect_verbs() -> Value {
 pub fn reflect_emits() -> Value {
     json!({
         "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
-        "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued.",
+        "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS turns in a row with no call; detail.error says so) for done. detail.ahead for queued.",
         "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
     })
 }
@@ -438,30 +438,7 @@ pub async fn context_status(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResu
     }))
 }
 
-/// Default per-`send` ceiling, in seconds — overridable via the
-/// `FANTASTIC_AI_SEND_TIMEOUT` env (see [`send_timeout_secs`]). Mirrors the
-/// python/swift default; a slow LOCAL model can raise it via the env.
-pub const SEND_TIMEOUT_SECS: f64 = 180.0;
-
-/// The effective per-`send` ceiling: `FANTASTIC_AI_SEND_TIMEOUT` if set, else
-/// [`SEND_TIMEOUT_SECS`]. python `SEND_TIMEOUT = float(os.environ.get(
-/// "FANTASTIC_AI_SEND_TIMEOUT", "180"))`.
-///
-/// A FLOAT, and PARSED LIKE PYTHON'S. `0.05` used to parse as `u64` and fail,
-/// silently falling back to 180 — so a test that set a sub-second ceiling waited
-/// three minutes, and the ceiling printed in the refusal (`180s`) was not the
-/// one python prints (`180.0s`). A value python's `float()` rejects is a
-/// MISCONFIGURATION and fails loud NAMING the variable, exactly as python's
-/// import-time `float()` raises; there is no fallback to the default.
-pub fn send_timeout_secs() -> f64 {
-    let Ok(raw) = std::env::var("FANTASTIC_AI_SEND_TIMEOUT") else {
-        return SEND_TIMEOUT_SECS;
-    };
-    match py_float(&json!(raw)) {
-        Ok(v) => v,
-        Err(e) => panic!("FANTASTIC_AI_SEND_TIMEOUT is not a number: {e}"),
-    }
-}
+pub use crate::constants::{send_timeout_secs, SEND_TIMEOUT_SECS};
 
 /// The queue row for one submission, removed when this guard is DROPPED while
 /// still armed — i.e. when the dispatch went away before it ever became the
@@ -744,12 +721,29 @@ pub async fn send(
     .await;
 
     let mut message_id: Option<i64> = None;
+    // A DEAD turn (only thinking) is discarded unstored and routed as a silent
+    // turn — the reminder rerolls it, told why.
+    let mut dead_turn = false;
     // A provider failure python does NOT map propagates out of the handler. The
     // raise is deferred to after the cleanup below (python does it from an
     // `except` whose `finally` clears the current entry and releases the lock).
     let mut raise: Option<(&'static str, String)> = None;
     let reply = match outcome {
-        Ok(Ok((final_text, tid))) => {
+        Ok(Ok(Generation::Dead { text: final_text })) => {
+            dead_turn = true;
+            // python `_run`'s dead-turn reply: no `message_id` — nothing was
+            // stored, so there is no row to name.
+            json!({
+                "response": final_text,
+                "final": final_text,
+                "client_id": client_id,
+                "dead_turn": true,
+            })
+        }
+        Ok(Ok(Generation::Answered {
+            text: final_text,
+            message_id: tid,
+        })) => {
             message_id = Some(tid);
             // `message_id` IS PART OF THE REPLY — python `_run`'s last statement.
             // Rust computed it (routing needs it to parent the next turn) and
@@ -868,6 +862,7 @@ pub async fn send(
                 // router dispatches. The kernel defaults nothing.
                 timeout_secs,
                 message_id,
+                dead_turn,
             )
             .await;
         });

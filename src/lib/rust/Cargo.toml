@@ -24,6 +24,7 @@ members = [
     "crates/bundles/fantastic-nvidia-nim-backend",
     "crates/bundles/fantastic-anthropic-backend",
     "crates/bundles/fantastic-responses-backend",
+    "crates/bundles/fantastic-vllm-backend",
     "crates/bundles/fantastic-llamacpp-backend",
     "crates/bundles/fantastic-cli-bundle",
     "crates/bundles/fantastic-scenario-probes",

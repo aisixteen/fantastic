@@ -52,6 +52,26 @@ pub enum GenFailure {
     Store(MemoryStoreError),
 }
 
+/// What one generation produced.
+pub enum Generation {
+    /// An ANSWER, stored as this turn's assistant row `message_id`. `text` is
+    /// RAW — thinking markers intact — because routing parses it.
+    Answered {
+        /// The raw completion text.
+        text: String,
+        /// The assistant row this turn was stored as.
+        message_id: i64,
+    },
+    /// A DEAD turn: nothing left once the thinking is stripped. DISCARDED —
+    /// never stored, never an answer — and routed like any turn that dispatched
+    /// nothing, so the no-call reminder rerolls it (python `_run`'s
+    /// `dead_turn` reply).
+    Dead {
+        /// The raw completion text (thinking only, or nothing).
+        text: String,
+    },
+}
+
 impl From<MemoryStoreError> for GenFailure {
     fn from(e: MemoryStoreError) -> Self {
         Self::Store(e)
@@ -94,7 +114,7 @@ pub async fn run_generation(
     client_id: &str,
     cfg: BackendConfig,
     system_prompt: Option<String>,
-) -> Result<(String, i64), GenFailure> {
+) -> Result<Generation, GenFailure> {
     // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
     // turn is assembled over the head the recall chose — python `_recall_due`.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
@@ -172,6 +192,38 @@ pub async fn run_generation(
         *state.reported.lock().expect("reported poisoned") = Some(reported);
     }
 
+    // A DEAD TURN — nothing left once the thinking is stripped — did not answer,
+    // whatever the provider's finish reason says. Measured 2026-09-30 on vLLM: a
+    // thinking budget of 8 tokens ended the thought, the model stopped cleanly
+    // (`finish_reason: stop`) with an empty answer, and the turn was stored as a
+    // completed, empty assistant row. The ANSWER is discarded here — never stored,
+    // never counted as an answer — and the turn is routed like any that
+    // dispatched nothing: the no-call reminder rerolls it (owner, 2026-09-30;
+    // python `_run`). Failing the turn outright ended a 30-pass chain on its first
+    // dead turn (E31, measured).
+    if without_thinking(&last_text).trim().is_empty() {
+        // The INCOMING row is kept — only the empty answer is dropped. The turn
+        // this one answered may be a reply batch carrying the results of the
+        // model's own calls; unstored, the reroll would arrive with those results
+        // gone and the model would re-ask for them (found in the swift port's
+        // review, 2026-09-30).
+        let in_id = kernel.mint_id();
+        let in_parent = incoming_parent(user_text);
+        save_history(
+            self_id,
+            kernel,
+            &[json!({"role": "user", "content": user_text, "id": in_id, "parent": in_parent})],
+        )
+        .await?;
+        emit_status(kernel, state, self_id, client_id, "done", {
+            let mut m = Map::new();
+            m.insert("reason".to_string(), json!("dead_turn"));
+            m
+        })
+        .await;
+        return Ok(Generation::Dead { text: last_text });
+    }
+
     emit_status(kernel, state, self_id, client_id, "done", {
         let mut m = Map::new();
         m.insert("reason".to_string(), json!("ok"));
@@ -204,7 +256,10 @@ pub async fn run_generation(
         json!({"role": "assistant", "content": without_thinking(&last_text), "id": message_id, "parent": in_id}),
     ];
     save_history(self_id, kernel, &new_turns).await?;
-    Ok((last_text, message_id))
+    Ok(Generation::Answered {
+        text: last_text,
+        message_id,
+    })
 }
 
 /// The turn a delivered reply answers: `↑N` on the FIRST tag of the incoming

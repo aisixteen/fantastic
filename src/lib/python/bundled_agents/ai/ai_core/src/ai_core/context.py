@@ -13,23 +13,12 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
-
-CHARS_PER_TOKEN = 4
-# 4096 until 2026-08-24, and by then it did not fit the kernel's OWN system block.
-# Measured: budget = 4096 - 1024 output reserve = 3072, against a default system
-# prompt of ~3174 tok (identity + tree + bundle catalog + the send and context
-# howtos). Every agent created without an explicit `context_window` failfasted with
-# `too_small` before the model was ever called — the margin had quietly reached zero,
-# and a ~100-token addition to a verb doc was enough to take it negative.
-#
-# 128k is not a guess about any particular model: it is the window a caller gets when
-# they say NOTHING, and the honest default is one that fits this kernel's own prompt
-# with room to work. A model with a smaller real window is named on the record
-# (`context_window`, or ollama's `num_ctx`) — the explicit lever always wins, and the
-# compaction path is exercised by whatever value is set, not by this constant.
-DEFAULT_CONTEXT_WINDOW = 131072
-DEFAULT_OUTPUT_RESERVE = 1024
-BUDGET_FLOOR = 256  # never project to a budget below this
+from ai_core.constants import (
+    CHARS_PER_TOKEN,
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_OUTPUT_RESERVE,
+    BUDGET_FLOOR,
+)  # noqa: F401 — re-exported seams
 
 
 def estimate_one(message: dict) -> int:

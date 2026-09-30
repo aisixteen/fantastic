@@ -32,8 +32,7 @@ from ai_core.strategies.base import (
     Projection,
     fit_tail,
 )
-
-LOW = 0.6  # strip down to this fraction of the budget once over it
+from ai_core.constants import LOW  # noqa: F401 — re-exported seams
 
 
 def _halve(body: list[dict]) -> list[dict]:

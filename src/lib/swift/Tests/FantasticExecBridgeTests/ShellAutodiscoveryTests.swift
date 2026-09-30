@@ -93,7 +93,7 @@
             let inbox = k.ensureInbox(AgentId("sh"))
             let r = await call(k, "sh", ["type": "start", "pty": PTY])
             #expect(r["status"] == "running" && r["pty"] == true, "\(r.serialize())")
-            let jid = r["job_id"].asString ?? ""
+            let jid = r["job_id"]
             let (text, events) = await eventsUntil(inbox) { $0.contains("SHELL_UP") }
             #expect(text.contains("SHELL_UP"), "\(text)")
             // The announcement names the RESOLVED shell, so a client that let the
@@ -102,14 +102,14 @@
             #expect(
                 started
                     == .object([
-                        "type": "job_started", "job_id": .string(jid), "command": .string(fake),
+                        "type": "job_started", "job_id": jid, "command": .string(fake),
                         "args": [],
                     ]), "\(started?.serialize() ?? "nil")")
-            let snap = await call(k, "sh", ["type": "status", "job_id": .string(jid)])["jobs"][0]
+            let snap = await call(k, "sh", ["type": "status", "job_id": jid])["jobs"][0]
             #expect(snap["command"].asString == fake, "\(snap.serialize())")
             #expect(snap["args"] == [] && snap["pty"] == true, "\(snap.serialize())")
             // It is a real terminal job: a typed line reaches the shell.
-            _ = await call(k, "sh", ["type": "write", "job_id": .string(jid), "data": "hi\n"])
+            _ = await call(k, "sh", ["type": "write", "job_id": jid, "data": "hi\n"])
             let (got, _) = await eventsUntil(inbox) { $0.contains("GOT hi") }
             #expect(got.contains("GOT hi"), "\(got)")
             _ = await call(k, "sh", ["type": "stop"])

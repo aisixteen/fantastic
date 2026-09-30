@@ -127,7 +127,8 @@
 
     /// One PTY job's terminal — the master end and its mutable state.
     final class PtyJob: @unchecked Sendable {
-        let jobId: String
+        /// The job's id — its kernel task id, an int on the wire.
+        let jobId: TaskId
         private let owner: AgentId
         private let child: Child
         private var masterFd: Int32
@@ -151,7 +152,7 @@
         private let events: AsyncStream<JSON>.Continuation
         private let stream: AsyncStream<JSON>
 
-        init(jobId: String, owner: AgentId, child: Child, masterFd: Int32, cols: Int, rows: Int) {
+        init(jobId: TaskId, owner: AgentId, child: Child, masterFd: Int32, cols: Int, rows: Int) {
             self.jobId = jobId
             self.owner = owner
             self.child = child
@@ -205,7 +206,7 @@
                 state.unlock()
                 events.yield(
                     .object([
-                        "type": .string("output"), "job_id": .string(jobId), "data": .string(text),
+                        "type": .string("output"), "job_id": .integer(jobId.value), "data": .string(text),
                     ]))
             }
             state.lock()

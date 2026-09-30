@@ -133,6 +133,13 @@ class _Responses(Backend):
         return rt.make_provider(agent_id, root)
 
 
+class _Vllm(Backend):
+    async def provider(self, agent_id: str, root):
+        import vllm_backend.tools as vt
+
+        return vt.make_provider(agent_id, root)
+
+
 def _model_or_die(name: str) -> str:
     m = os.environ.get("FANTASTIC_AI_MODEL")
     if not m:
@@ -272,12 +279,55 @@ def _responses() -> Backend:
     )
 
 
+def _vllm() -> Backend:
+    # A vLLM server reached DIRECTLY (no proxy) — its `/v1` URL, the served
+    # model, and the KV-cache session table's size and rotation policy are all
+    # the operator's to name: the backend requires every one of them, and so
+    # does this plug. For the shared production GPU the URL is an SSM tunnel on
+    # 127.0.0.1 (recipe: tmp/vllm_backend.md) — keep lanes at 1–2 there, the
+    # server's running slots are shared with production.
+    extra: dict[str, Any] = {"max_tokens": int(os.environ.get("MAX_TOKENS") or THINK_BUDGET)}
+    if ep := os.environ.get("VLLM_ENDPOINT"):
+        extra["endpoint"] = ep
+    if slots := os.environ.get("VLLM_KV_SLOTS"):
+        extra["kv_slots"] = int(slots)
+    if overflow := os.environ.get("VLLM_KV_OVERFLOW"):
+        extra["kv_overflow"] = overflow
+    # The runner knobs from the JSON beside this file — the SAME ones the
+    # anthropic plug sends through the proxy, so a vllm run is comparable with
+    # an anthropic run on the same GPU: `no_repeat_ngram_size` and
+    # `repetition_penalty` are the measured fix for the CoT-repetition loop
+    # (verbatim-repeat rate 48x -> 0). vllm_backend takes them as RECORD fields.
+    #
+    # `thinking_token_budget` is left to the backend's own default ON PURPOSE:
+    # on the record it is EXPLICIT, and an explicit budget refuses any call it
+    # could not fire on — every fold summary is bounded at its budget + 1024
+    # tokens, below 8000, so all folds would be refused. The default adapts per
+    # call instead (min(16000, max_tokens // 2)).
+    runner = _runner_params()
+    for knob in ("no_repeat_ngram_size", "repetition_penalty"):
+        if knob in runner:
+            extra[knob] = runner[knob]
+    return _Vllm(
+        name="vllm",
+        handler_module="vllm_backend.tools",
+        model=_model_or_die("vllm"),
+        extra=extra,
+        requires=(
+            ("VLLM_ENDPOINT", "the vLLM /v1 URL; no host is guessed"),
+            ("VLLM_KV_SLOTS", "how many conversations may be live on the endpoint"),
+            ("VLLM_KV_OVERFLOW", "evict (rotate the LRU out) or reject (refuse the newcomer)"),
+        ),
+    )
+
+
 REGISTRY = {
     "anthropic": _anthropic,
     "nvidia": _nvidia,
     "ollama": _ollama,
     "llamacpp": _llamacpp,
     "responses": _responses,
+    "vllm": _vllm,
 }
 
 

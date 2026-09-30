@@ -4,7 +4,7 @@
 // Runs on boot, after a fold batch, or on request.
 //
 // Plus the pieces of RAM that gate it: the fold-count debounce
-// (`RECALL_EVERY`) and the per-agent INCARNATION a late reply is checked
+// (`AIConstants.RECALL_EVERY`) and the per-agent INCARNATION a late reply is checked
 // against. Python `ai_core/core.py` (`_context_recall`, `_RECALL_PROMPT`,
 // `_first_json`, `_recall_due`, `_folds_since`, `_incarnation`, `_make_boot`);
 // rust `retrieval.rs`.
@@ -13,9 +13,6 @@ import FantasticJSON
 import FantasticKernel
 import Foundation
 import OrderedCollections
-
-/// Fold rows between automatic recalls. Python `RECALL_EVERY`.
-let RECALL_EVERY = 3
 
 /// Python `_RECALL_PROMPT`, verbatim; `{budget}`, `{used}`, `{done}` and
 /// `{lines}` are filled in by `contextRecall`.
@@ -99,6 +96,7 @@ enum AISideTables {
             AIRunStates.forget(kernel)
             AIMemory.forget(kernel)
             AICalibration.forget(kernel)
+            AISilentStreaks.forget(kernel)
         }
     }
 }
@@ -152,12 +150,12 @@ extension AIBackend {
         return recallDue.contains(key)
     }
 
-    /// `_folds_since[id] += n`; every `RECALL_EVERY`-th batch marks a recall due.
+    /// `_folds_since[id] += n`; every `AIConstants.RECALL_EVERY`-th batch marks a recall due.
     func countFolds(_ key: String, _ n: Int) {
         projectionLock.lock()
         defer { projectionLock.unlock() }
         let since = (foldsSince[key] ?? 0) + n
-        if since >= RECALL_EVERY {
+        if since >= AIConstants.RECALL_EVERY {
             foldsSince[key] = 0
             recallDue.insert(key)
         } else {
@@ -253,7 +251,7 @@ extension AIBackend {
     /// a refusal (no api_key, model unavailable) is `nil`: the recall then stays
     /// at the mechanical fit, exactly as python's `_get_provider` failure does.
     func sideProvider(agent: Agent, kernel: Kernel) async -> (any AIProvider)? {
-        switch try? await config.makeProvider(agent, "cli", kernel) {
+        switch try? await config.makeProvider(agent, AIConstants.DEFAULT_CLIENT_ID, kernel) {
         case .provider(let p): return p
         case .refused, nil: return nil
         }
@@ -285,8 +283,8 @@ extension AIBackend {
                     await assembleSystemPrompt(agent: agent, systemPrompt: nil, kernel: kernel)),
             ]))
         let bodyBudget = max(
-            AIContext.budgetFloor, AIContext.budget(agent) - sysTokens - AIContext.noticeEnvelopeReserve)
-        let target = Int64(Double(bodyBudget) * AIStripStrategy.LOW)
+            AIConstants.BUDGET_FLOOR, AIContext.budget(agent) - sysTokens - AIConstants.NOTICE_ENVELOPE_RESERVE)
+        let target = Int64(Double(bodyBudget) * AIConstants.LOW)
         let view = AIFolds.render(rows).filter { rowId($0).map { $0 != 0 } ?? false }
         if view.isEmpty {
             return .object([

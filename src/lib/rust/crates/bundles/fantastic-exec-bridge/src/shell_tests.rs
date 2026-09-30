@@ -132,7 +132,7 @@ async fn a_pty_start_without_command_runs_the_childs_shell() {
         (&json!("running"), &json!(true)),
         "{r}"
     );
-    let jid = r["job_id"].as_str().unwrap().to_string();
+    let jid = r["job_id"].as_i64().unwrap();
     let (_, events) = events_until(&mut rx, |t| t.contains("SHELL_UP")).await;
     // The announcement names the RESOLVED shell, so a client that let the kernel
     // pick it can show it and re-issue it.

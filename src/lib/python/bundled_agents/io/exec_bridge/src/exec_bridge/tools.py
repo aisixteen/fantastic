@@ -75,11 +75,11 @@ from kernel._refusal import (
 # relay closes the socket, and the connector refuses to write such a frame at all.
 MAX_FRAME = 16 * 1024 * 1024
 
-# job_id -> {owner, proc, status, started_at, exit_code, lines, last_line, stdout,
-#            stderr, task, task_id, ctrl_sock, ctrl_task}.
+# job_id (the job's kernel TASK id, an int) -> {owner, proc, status, started_at,
+#            exit_code, lines, last_line, stdout, stderr, task, ctrl_sock, ctrl_task}.
 # status: running|stopping|done|failed|stopped. Module-global (shared across
 # exec_bridge agents); every op filters by owner.
-_jobs: dict[str, dict] = {}
+_jobs: dict[int, dict] = {}
 
 # The single job currently subscribed to each OWNER agent's inbox (on_message).
 # owner_id -> {"job_id", "proxy", "task"}. Many jobs can run in parallel on one agent,
@@ -130,13 +130,15 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
     return "".join(parts)
 
 
-async def _pump(owner, job_id, process, kernel):
+async def _pump(owner, ready, process, kernel):
     """Drain stdout+stderr concurrently, then await exit + emit job_done.
 
     THE PUMP IS THE JOB'S TASK — registered in the kernel task table by `_start`, so `ps`
     lists the job and `cancel` can abort it. Aborted (the SIGKILL half of cancel, after
     `on_cancel` has already killed the OS process), it finalizes the RAM row to `stopped`
-    on its way out — no row is left stuck `running`."""
+    on its way out — no row is left stuck `running`. `ready` resolves to the job's id
+    (this task's own id) once `_start` has filed the row."""
+    job_id = await ready
     job = _jobs.get(job_id)
     if job is None:
         return
@@ -431,7 +433,7 @@ def _ring_add(pt: dict, text: str) -> None:
         pt["ring_bytes"] -= len(old.encode("utf-8", errors="replace"))
 
 
-def _pty_readable(owner: str, job_id: str, kernel) -> None:
+def _pty_readable(owner: str, job_id: int, kernel) -> None:
     """The master fd is readable: one chunk out as an `output` event. EOF (or EIO —
     the slave closed with the child) wakes the pump; a backlog past HIGH_WATERMARK
     detaches the reader so the tty fills and the program throttles."""
@@ -464,10 +466,12 @@ def _pty_readable(owner: str, job_id: str, kernel) -> None:
         pt["wake"].set()
 
 
-async def _pty_pump(owner, job_id, process, kernel):
+async def _pty_pump(owner, ready, process, kernel):
     """THE JOB'S TASK for a PTY job. It owns the reader — attaching it HERE, never in
     a verb's dispatch, keeps every `output` emit in the job's own context — re-attaches
-    it when an `ack` drains the backlog, and ends at EOF with `job_done`."""
+    it when an `ack` drains the backlog, and ends at EOF with `job_done`. `ready`
+    resolves to the job's id (this task's own id) once `_start` has filed the row."""
+    job_id = await ready
     job = _jobs.get(job_id)
     if job is None:
         return
@@ -531,11 +535,30 @@ async def _write_all(fd: int, buf: bytes) -> int:
     return written
 
 
+def _job_arg(verb: str, payload: dict, *, required: bool):
+    """The `job_id` argument: `(id, None)`, `(None, None)` when absent and optional,
+    or `(None, refusal)`.
+
+    A job's id IS its kernel TASK id — an int. Anything else is refused as a bad
+    argument naming that, never looked up: a string like "42" is not coerced, so a
+    caller that stringified an id learns so here instead of reading `no job`."""
+    jid = payload.get("job_id")
+    if jid is None:
+        return None, (missing(verb, "job_id") if required else None)
+    if isinstance(jid, bool) or not isinstance(jid, int):
+        return None, bad(
+            verb,
+            "job_id",
+            "an int — the job's task id (from `start`, `status` or `ps`)",
+        )
+    return jid, None
+
+
 def _pty_job(verb: str, id: str, payload: dict):
     """`(job, None)` for a live PTY job this agent owns, or `(None, refusal)`."""
-    jid = payload.get("job_id")
-    if not isinstance(jid, str) or not jid:
-        return None, missing(verb, "job_id")
+    jid, err = _job_arg(verb, payload, required=True)
+    if err:
+        return None, err
     job = _jobs.get(jid)
     if job is None or job.get("owner") != id:
         return None, refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
@@ -761,7 +784,6 @@ async def _start(id, payload, kernel):
             arg="cwd",
         )
 
-    job_id = secrets.token_hex(4)
     parent_sock, child_sock = socket.socketpair()
     env["FANTASTIC_CTRL_FD"] = str(child_sock.fileno())
     # The OWNER AGENT id (the tool's public id), NOT the ephemeral job id — so a
@@ -806,7 +828,7 @@ async def _start(id, payload, kernel):
         if slave is not None:
             os.close(slave)
 
-    _jobs[job_id] = {
+    job = {
         "owner": id,
         "proc": process,
         # The exact invocation, so `status` can report WHAT ran — a caller that
@@ -823,7 +845,6 @@ async def _start(id, payload, kernel):
         "stdout": "",
         "stderr": "",
         "task": None,
-        "task_id": None,
         "ctrl_sock": parent_sock,
         "ctrl_task": None,
         "pty": None
@@ -843,20 +864,29 @@ async def _start(id, payload, kernel):
             "paste_dir": None,
         },
     }
-    # THE PUMP IS THE JOB'S TASK. Its id is minted here and installed inside
-    # the fork, so everything the job does — including a program's sends over
-    # the control fd — is parented to work that is still alive.
+    # THE PUMP IS THE JOB'S TASK, and the job's id IS that task's id — minted
+    # by the kernel's one counter when the pump is forked. One number names the
+    # job everywhere: `status`/`stop`/`write` take it as `job_id`, `ps` lists it,
+    # `cancel task_id=` kills it. (It used to be a random 8-hex string, which a
+    # model's `<job_id>04203581</job_id>` or `458e5912` coerced into an int or
+    # an infinite float — 3.7% of jobs could not be addressed again.)
+    #
+    # The id exists only once the fork does, so the pump learns it through
+    # `ready`, resolved the moment the job's row is in `_jobs` — never assuming
+    # the fork has not started yet.
+    ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
     pump = (
-        _pump(id, job_id, process, kernel)
+        _pump(id, ready, process, kernel)
         if dims is None
-        else _pty_pump(id, job_id, process, kernel)
+        else _pty_pump(id, ready, process, kernel)
     )
-    tid = kernel.ctx.spawn_task(id, "start", pump)
-    _jobs[job_id]["task_id"] = tid
-    _jobs[job_id]["task"] = kernel.ctx.tasks[tid]["_task"]
+    job_id = kernel.ctx.spawn_task(id, "start", pump)
+    job["task"] = kernel.ctx.tasks[job_id]["_task"]
+    _jobs[job_id] = job
+    ready.set_result(job_id)
     # The relay is the job's too: a program's `kernel.send` must be rowed under
     # the job, not under the `start` dispatch that settles the moment we return.
-    _jobs[job_id]["ctrl_task"] = kernel.ctx.tasks[
+    job["ctrl_task"] = kernel.ctx.tasks[
         kernel.ctx.spawn_task(id, "relay", _serve_ctrl(parent_sock, id, job_id, kernel))
     ]["_task"]
     # The RESOLVED invocation rides the announcement: a client that let the
@@ -873,13 +903,10 @@ async def _start(id, payload, kernel):
     return {"job_id": job_id, "status": "running", "pty": dims is not None}
 
 
-def _snap(job_id: str, full: bool = False) -> dict:
+def _snap(job_id: int, full: bool = False) -> dict:
     j = _jobs[job_id]
     s = {
         "job_id": job_id,
-        # The job's row in the kernel TASK TABLE — `cancel task_id=…` kills it (and
-        # reaps the OS process); `ps` lists it.
-        "task_id": j["task_id"],
         "status": j["status"],
         "exit_code": j["exit_code"],
         "started_at": j["started_at"],
@@ -901,9 +928,11 @@ def _snap(job_id: str, full: bool = False) -> dict:
 
 
 async def _status(id, payload, kernel):
-    """args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}."""
-    jid = payload.get("job_id")
-    if jid:
+    """args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."""
+    jid, err = _job_arg("status", payload, required=False)
+    if err:
+        return err
+    if jid is not None:
         j = _jobs.get(jid)
         if j is None or j.get("owner") != id:
             return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
@@ -922,20 +951,22 @@ def _no_job(id: str, jid) -> dict | None:
 
     A job_id naming nothing used to answer `{killed:0}` / `{interrupted:0}` — the
     same reply as "it had already exited", so a typo read as success."""
-    if jid and (jid not in _jobs or _jobs[jid].get("owner") != id):
+    if jid is not None and (jid not in _jobs or _jobs[jid].get("owner") != id):
         return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
     return None
 
 
 async def _stop(id, payload, kernel):
-    """args: job_id:str? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.
+    """args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.
     Returns {killed:int}."""
-    jid = payload.get("job_id")
+    jid, err = _job_arg("stop", payload, required=False)
+    if err:
+        return err
     if gone := _no_job(id, jid):
         return gone
     n = 0
     for k, v in _jobs.items():
-        if v.get("owner") != id or (jid and k != jid):
+        if v.get("owner") != id or (jid is not None and k != jid):
             continue
         if _alive(v):
             v["status"] = "stopping"
@@ -945,14 +976,16 @@ async def _stop(id, payload, kernel):
 
 
 async def _interrupt(id, payload, kernel):
-    """args: job_id:str? — SIGINT one job or ALL of this agent's running jobs.
+    """args: job_id:int? — SIGINT one job or ALL of this agent's running jobs.
     Returns {interrupted:int}."""
-    jid = payload.get("job_id")
+    jid, err = _job_arg("interrupt", payload, required=False)
+    if err:
+        return err
     if gone := _no_job(id, jid):
         return gone
     n = 0
     for k, v in _jobs.items():
-        if v.get("owner") != id or (jid and k != jid):
+        if v.get("owner") != id or (jid is not None and k != jid):
             continue
         if _alive(v):
             try:
@@ -964,16 +997,20 @@ async def _interrupt(id, payload, kernel):
 
 
 async def _clear(id, payload, kernel):
-    """args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM
+    """args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM
     table. Returns {cleared:int}."""
-    jid = payload.get("job_id")
+    jid, err = _job_arg("clear", payload, required=False)
+    if err:
+        return err
     # The one caller that WANTS the status label, not process liveness: it is deciding
     # what is finished enough to forget.
     targets = [
         k
         for k, v in _jobs.items()
         if v.get("owner") == id
-        and (k == jid if jid else v["status"] not in ("running", "stopping"))
+        and (
+            k == jid if jid is not None else v["status"] not in ("running", "stopping")
+        )
     ]
     for k in targets:
         _jobs.pop(k, None)
@@ -981,7 +1018,7 @@ async def _clear(id, payload, kernel):
 
 
 async def _write(id, payload, kernel):
-    """args: job_id:str (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."""
+    """args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."""
     job, err = _pty_job("write", id, payload)
     if err:
         return err
@@ -998,7 +1035,7 @@ async def _write(id, payload, kernel):
 
 
 async def _resize(id, payload, kernel):
-    """args: job_id:str (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."""
+    """args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."""
     job, err = _pty_job("resize", id, payload)
     if err:
         return err
@@ -1015,7 +1052,7 @@ async def _resize(id, payload, kernel):
 
 
 async def _ack(id, payload, kernel):
-    """args: job_id:str (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."""
+    """args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."""
     job, err = _pty_job("ack", id, payload)
     if err:
         return err
@@ -1031,9 +1068,11 @@ async def _ack(id, payload, kernel):
 
 
 async def _output(id, payload, kernel):
-    """args: job_id:str (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."""
-    jid = payload.get("job_id")
-    job = _jobs.get(jid) if isinstance(jid, str) else None
+    """args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."""
+    jid, err = _job_arg("output", payload, required=True)
+    if err:
+        return err
+    job = _jobs.get(jid)
     if job is None or job.get("owner") != id:
         return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
     if job.get("pty") is None:
@@ -1057,7 +1096,7 @@ async def _output(id, payload, kernel):
 
 
 async def _paste_image(id, payload, kernel):
-    """args: job_id:str (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."""
+    """args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."""
     job, err = _pty_job("paste_image", id, payload)
     if err:
         return err
@@ -1140,8 +1179,8 @@ async def _reflect(id, payload, kernel):
             "arrives."
         ),
         "tasks": (
-            "Every running job holds a row in the kernel TASK TABLE (`task_id` in each "
-            "`status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` "
+            "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that "
+            "row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` "
             "kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` "
             "hook before the kernel aborts the task, so nothing is orphaned."
         ),
@@ -1342,8 +1381,9 @@ async def on_cancel(id, task_id, kernel) -> None:
 
     This is the whole reason `cancel` has a hook. Aborting the pump's asyncio.Task only
     unwinds coroutines; the child would keep running, unreachable and unowned."""
-    for v in _jobs.values():
-        if v.get("owner") == id and v.get("task_id") == task_id:
+    for k, v in _jobs.items():
+        # A job's id IS its task id.
+        if v.get("owner") == id and k == task_id:
             _teardown(v)
 
 

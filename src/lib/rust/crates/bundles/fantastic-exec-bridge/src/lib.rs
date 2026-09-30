@@ -40,10 +40,10 @@
 //! |------------|-----------------------------------------------------------------|------------------------------------------------|
 //! | `reflect`  | _none_ (UNGATED — discovery works on a sealed leg)              | identity + allowlist + posture                 |
 //! | `start`    | `command:str` (req; PTY: absent = child `$SHELL`), `args?`, `pty?` | `{job_id, status:"running", pty}` at once   |
-//! | `status`   | `job_id:str?`                                                   | one job with its output, or all of this agent's |
-//! | `clear`    | `job_id:str?`                                                   | drops finished rows of this agent              |
-//! | `interrupt`| `job_id:str?`                                                   | `{interrupted: int}` (SIGINT to in-flight)     |
-//! | `stop`     | `job_id:str?`                                                   | `{killed: int}` (SIGKILL to in-flight)         |
+//! | `status`   | `job_id:int?`                                                   | one job with its output, or all of this agent's |
+//! | `clear`    | `job_id:int?`                                                   | drops finished rows of this agent              |
+//! | `interrupt`| `job_id:int?`                                                   | `{interrupted: int}` (SIGINT to in-flight)     |
+//! | `stop`     | `job_id:int?`                                                   | `{killed: int}` (SIGKILL to in-flight)         |
 //! | `boot`     | _none_                                                          | no-op → `null`                                 |
 //!
 //! Anything else is MAIL for the running program: `{queued:true}` when a job is
@@ -520,10 +520,8 @@ impl Bundle for ExecBridgeBundle {
         _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         let mut g = jobs::jobs();
-        for j in g
-            .values_mut()
-            .filter(|j| &j.owner == agent_id && &j.task == task_id)
-        {
+        // A job's id IS its pump's task id, so the key names the job to kill.
+        if let Some(j) = g.get_mut(&(agent_id.clone(), *task_id)) {
             jobs::teardown(j);
         }
         drop(g);
@@ -618,15 +616,15 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // truncated mid-sentence; that is the python text, not an abbreviation.
         "verbs": {
             "start": "args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
-            "status": "args: job_id:str? — one job (with full stdout/stderr), or all of this agent's jobs (summary). Returns {jobs:[…]}.",
-            "stop": "args: job_id:str? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.",
-            "interrupt": "args: job_id:str? — SIGINT one job or ALL of this agent's running jobs.",
-            "clear": "args: job_id:str? — drop finished jobs (one, or all non-running) from the RAM",
-            "write": "args: job_id:str (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}.",
-            "resize": "args: job_id:str (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
-            "ack": "args: job_id:str (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}.",
-            "output": "args: job_id:str (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}.",
-            "paste_image": "args: job_id:str (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}.",
+            "status": "args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
+            "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.",
+            "interrupt": "args: job_id:int? — SIGINT one job or ALL of this agent's running jobs.",
+            "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
+            "write": "args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}.",
+            "resize": "args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
+            "ack": "args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}.",
+            "output": "args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}.",
+            "paste_image": "args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}.",
             "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
             "reflect": "Identity + running job count + auth posture. No args.",
             "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the record.",
@@ -639,7 +637,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         },
         "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
         "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
-        "tasks": "Every running job holds a row in the kernel TASK TABLE (`task_id` in each `status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
+        "tasks": "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
         "authoring": "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",
     });
     // The auth POSTURE, python's `describe(rec)` — `**_describe(rec)` is the last
@@ -671,12 +669,11 @@ mod tests;
 ///
 /// Both now address the JOB TABLE. There is exactly one registry: a private pid set
 /// alongside it would be a second truth, and `start`'s jobs would be invisible to it.
-fn signal_jobs(agent_id: &AgentId, payload: &Value, sig: nix::sys::signal::Signal) -> u64 {
-    let want = job_id(payload).and_then(Value::as_str);
+fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: nix::sys::signal::Signal) -> u64 {
     let mut g = jobs::jobs();
     let mut n = 0u64;
-    for (id, j) in g.iter_mut() {
-        if &j.owner != agent_id || want.is_some_and(|w| w != id.as_str()) {
+    for ((_, id), j) in g.iter_mut() {
+        if &j.owner != agent_id || want.is_some_and(|w| w.id != Some(*id)) {
             continue;
         }
         if !jobs::alive(j) {
@@ -702,43 +699,108 @@ fn signal_jobs(agent_id: &AgentId, payload: &Value, sig: nix::sys::signal::Signa
 /// answered a bare `{error}` with no code at all, and a caller branching on
 /// `reason == "not_found"` (what the corpus and the e2e scenarios pin) never
 /// matched on this runtime.
-fn no_job(agent_id: &AgentId, payload: &Value) -> Option<Value> {
-    let jid = job_id(payload)?;
-    // python indexes `_jobs` with the RAW value: only a string can ever name a row,
-    // so a truthy non-string is simply not found — and the refusal echoes it as sent.
-    let known = jid
-        .as_str()
-        .is_some_and(|s| jobs::jobs().get(s).is_some_and(|j| &j.owner == agent_id));
-    if known {
+fn no_job(agent_id: &AgentId, want: Option<&JobRef>) -> Option<Value> {
+    let jid = want?;
+    if jid.find(&jobs::jobs(), agent_id).is_some() {
         return None;
     }
-    let mut v = refusal(
-        NOT_FOUND,
-        format!("exec_bridge: no job {}", py_repr_value(jid)),
-    );
-    with(&mut v, "job_id", jid.clone());
-    Some(v)
+    Some(no_such_job(jid))
 }
 
-/// `payload["job_id"]` under PYTHON TRUTHINESS (A4.8).
+/// A job named by a caller (python `_job_arg`'s result): the value AS SENT — every
+/// refusal echoes it — and the task id it names.
+pub(crate) struct JobRef {
+    /// `payload["job_id"]`, verbatim.
+    pub(crate) raw: Value,
+    /// The kernel task id it names; `None` for an integer too wide to be one.
+    /// python's `int` is unbounded: such a value passes the type check and then
+    /// simply names no job — it is not a bad argument.
+    pub(crate) id: Option<TaskId>,
+}
+
+impl JobRef {
+    /// This agent's row for the named job, when there is one. A job of ANOTHER
+    /// agent is not found, exactly like a job that never existed.
+    pub(crate) fn find<'a>(
+        &self,
+        g: &'a indexmap::IndexMap<jobs::JobKey, jobs::Job>,
+        owner: &AgentId,
+    ) -> Option<&'a jobs::Job> {
+        self.id.and_then(|id| g.get(&(owner.clone(), id)))
+    }
+}
+
+/// The `not_found` refusal naming `jid` as it was sent (python
+/// `refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)`).
+pub(crate) fn no_such_job(jid: &JobRef) -> Value {
+    let mut v = refusal(
+        NOT_FOUND,
+        format!("exec_bridge: no job {}", py_repr_value(&jid.raw)),
+    );
+    with(&mut v, "job_id", jid.raw.clone());
+    v
+}
+
+/// The `job_id` argument (python `_job_arg`): `Ok(None)` when absent (or `null`)
+/// and optional, `Ok(Some)` for an int, or the refusal.
 ///
-/// `None` = every job of this agent — python writes `if jid:`, so an absent key,
-/// `null`, `""`, `0`, `[]` and `{}` all mean ALL, and only a truthy value names one
-/// job. The raw `Value` is returned because every refusal echoes it verbatim.
-fn job_id(payload: &Value) -> Option<&Value> {
-    payload.get("job_id").filter(|v| py_truthy(v))
+/// A job's id IS its kernel TASK id — an int. Anything else is a bad argument
+/// naming that, never looked up: a string like `"42"` is not coerced, so a caller
+/// that stringified an id learns so here instead of reading `no job`. (The ids
+/// were random 8-hex strings; a model's `<job_id>04203581</job_id>` came back an
+/// int and `458e5912` an infinite float, so 3.7% of jobs were unaddressable.)
+pub(crate) fn job_arg(
+    verb: &str,
+    payload: &Value,
+    required: bool,
+) -> Result<Option<JobRef>, Value> {
+    match payload.get("job_id") {
+        None | Some(Value::Null) if required => Err(missing(verb, "job_id")),
+        None | Some(Value::Null) => Ok(None),
+        Some(v @ Value::Number(n)) if is_int(n) => Ok(Some(JobRef {
+            raw: v.clone(),
+            id: n.as_i64().map(TaskId),
+        })),
+        Some(_) => Err(bad(
+            verb,
+            "job_id",
+            "an int — the job's task id (from `start`, `status` or `ps`)",
+        )),
+    }
+}
+
+/// [`job_arg`] for a verb that needs one job.
+pub(crate) fn require_job(verb: &str, payload: &Value) -> Result<JobRef, Value> {
+    job_arg(verb, payload, true)?.ok_or_else(|| missing(verb, "job_id"))
+}
+
+/// python `isinstance(v, int)` for a JSON number: digits with an optional sign —
+/// no fraction, no exponent, and not the `Infinity`/`NaN` token the kernel keeps
+/// for a non-finite float (a model's `458e5912` is one).
+fn is_int(n: &serde_json::Number) -> bool {
+    let s = n.to_string();
+    let digits = s.strip_prefix('-').unwrap_or(&s);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn interrupt_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    no_job(agent_id, payload).unwrap_or_else(
-        || json!({"interrupted": signal_jobs(agent_id, payload, nix::sys::signal::Signal::SIGINT)}),
-    )
+    let want = match job_arg("interrupt", payload, false) {
+        Ok(w) => w,
+        Err(e) => return e,
+    };
+    no_job(agent_id, want.as_ref()).unwrap_or_else(|| {
+        json!({"interrupted": signal_jobs(agent_id, want.as_ref(), nix::sys::signal::Signal::SIGINT)})
+    })
 }
 
 fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    no_job(agent_id, payload).unwrap_or_else(
-        || json!({"killed": signal_jobs(agent_id, payload, nix::sys::signal::Signal::SIGKILL)}),
-    )
+    let want = match job_arg("stop", payload, false) {
+        Ok(w) => w,
+        Err(e) => return e,
+    };
+    no_job(agent_id, want.as_ref()).unwrap_or_else(|| {
+        json!({"killed": signal_jobs(agent_id, want.as_ref(), nix::sys::signal::Signal::SIGKILL)})
+    })
 }
 
 /// `start` — spawn the COMMAND in the BACKGROUND and return at once.
@@ -939,8 +1001,6 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             "exec_bridge: child exited before it could be tracked",
         );
     };
-    let job_id = rand_job_id();
-
     let (rd, wr) = ctrl.into_split();
     // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS — carried by `spawn_task` now,
     // not re-entered by hand here. A `tokio::spawn` inherits no task-local, so
@@ -952,9 +1012,36 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     // aborting this task, so the relay leaves by its own read loop and the proxy
     // release after that loop actually runs.
     let stop = Arc::new(tokio::sync::Notify::new());
+
+    // THE PUMP IS THE JOB'S TASK, and the job's id IS that task's id — minted by
+    // the kernel's one counter when the pump is forked (python `_start`). One number
+    // names the job everywhere: `status`/`stop`/`write` take it as `job_id`, `ps`
+    // lists it, `cancel task_id=` kills it. (It used to be a random 8-hex string,
+    // which a model's `<job_id>04203581</job_id>` or `458e5912` coerced into an int
+    // or an infinite float — 3.7% of jobs could not be addressed again.)
+    //
+    // The id exists only once the fork does, and a forked task may already be
+    // running on another worker, so the pump learns its id through `ready` — sent
+    // only after the row is filed below. The pump takes everything else BY VALUE:
+    // it never reads its own row before it is told the row exists.
+    let (ready_tx, ready) = tokio::sync::oneshot::channel();
+    let owner = agent_id.clone();
+    let k = Arc::clone(kernel);
+    let job_id = match &pty_state {
+        None => kernel.spawn_task(agent_id, "start", async move {
+            jobs::pump(owner, ready, child, k).await;
+        }),
+        Some(p) => {
+            let p = Arc::clone(p);
+            kernel.spawn_task(agent_id, "start", async move {
+                pty::pump(owner, ready, child, p, k).await;
+            })
+        }
+    };
     // REGISTERED: the relay outlives this `start` dispatch and issues a send per
     // frame the program writes, so it belongs in `ps` and within reach of
-    // `cancel` like the pump below.
+    // `cancel` like the pump above. Forked AFTER the pump, as python does, so the
+    // job's id is the lower of the two.
     let ctrl_task = kernel.spawn_task(
         agent_id,
         "relay",
@@ -962,35 +1049,16 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             rd,
             wr,
             agent_id.clone(),
-            job_id.clone(),
+            job_id,
             Arc::clone(kernel),
             Arc::clone(&stop),
         ),
     );
-
-    // spawn_task + row insert in ONE critical section, so no window exists in which a
-    // live pid has no row. The task body takes its inputs BY VALUE — reading our own
-    // row from inside the pump would race this very lock.
-    let owner = agent_id.clone();
-    let jid = job_id.clone();
-    let k = Arc::clone(kernel);
-    let task = match &pty_state {
-        None => kernel.spawn_task(agent_id, "start", async move {
-            jobs::pump(owner, jid, child, k).await;
-        }),
-        Some(p) => {
-            let p = Arc::clone(p);
-            kernel.spawn_task(agent_id, "start", async move {
-                pty::pump(owner, jid, child, p, k).await;
-            })
-        }
-    };
     jobs::jobs().insert(
-        job_id.clone(),
+        (agent_id.clone(), job_id),
         jobs::Job {
             owner: agent_id.clone(),
             pid,
-            task,
             ctrl: ctrl_task,
             stop,
             // WHAT ran — so a caller can re-issue this job verbatim.
@@ -1007,15 +1075,18 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             pty: pty_state.clone(),
         },
     );
+    // The row exists: the pump may look for it now. It cannot have gone away —
+    // nothing drops a pump before it has received its id.
+    let _ = ready_tx.send(job_id);
     // The RESOLVED invocation rides the announcement: a client that let the
     // kernel pick the shell learns which one ran, and can re-issue it verbatim.
     kernel
         .emit(
             agent_id,
-            json!({"type": "job_started", "job_id": job_id, "command": command, "args": args}),
+            json!({"type": "job_started", "job_id": job_id.get(), "command": command, "args": args}),
         )
         .await;
-    json!({"job_id": job_id, "status": "running", "pty": pty_state.is_some()})
+    json!({"job_id": job_id.get(), "status": "running", "pty": pty_state.is_some()})
 }
 
 /// The child's WHOLE environment, from the record (python `_child_env`): the
@@ -1072,26 +1143,27 @@ async fn boot_reply(_agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Value {
 
 /// `status` — one job (full output) or all of THIS agent's jobs.
 fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    if let Some(gone) = no_job(agent_id, payload) {
-        return gone;
-    }
+    let want = match job_arg("status", payload, false) {
+        Ok(w) => w,
+        Err(e) => return e,
+    };
     let g = jobs::jobs();
-    match job_id(payload).and_then(Value::as_str) {
-        // `no_job` above has already established that the row exists and is ours.
-        Some(jid) => match g.get(jid).filter(|j| &j.owner == agent_id) {
-            Some(j) => json!({
-                "jobs": [jobs::snap(jid, j, true)],
+    match want {
+        Some(jid) => match (jid.id, jid.find(&g, agent_id)) {
+            (Some(id), Some(j)) => json!({
+                "jobs": [jobs::snap(id, j, true)],
                 "origin": format!(
-                    "{agent_id} status {{job_id: {jid}}} — a live job; re-send for its \
-                     output NOW, which may differ"
+                    "{agent_id} status {{job_id: {}}} — a live job; re-send for its \
+                     output NOW, which may differ",
+                    id.get()
                 ),
             }),
-            None => json!({"jobs": []}),
+            _ => no_such_job(&jid),
         },
         None => json!({
             "jobs": g.iter()
                 .filter(|(_, j)| &j.owner == agent_id)
-                .map(|(id, j)| jobs::snap(id, j, false))
+                .map(|((_, id), j)| jobs::snap(*id, j, false))
                 .collect::<Vec<_>>(),
             "origin": format!("{agent_id} status — the job table NOW; re-send, it changes"),
         }),
@@ -1106,18 +1178,21 @@ fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
 /// caller that wants the label rather than process liveness — it is deciding what is
 /// finished enough to forget.
 fn clear_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    let want = job_id(payload);
+    let want = match job_arg("clear", payload, false) {
+        Ok(w) => w,
+        Err(e) => return e,
+    };
     let mut g = jobs::jobs();
-    let doomed: Vec<String> = g
+    let doomed: Vec<jobs::JobKey> = g
         .iter()
-        .filter(|(id, j)| {
+        .filter(|((_, id), j)| {
             &j.owner == agent_id
-                && match want {
-                    Some(w) => w.as_str() == Some(id.as_str()),
+                && match &want {
+                    Some(w) => w.id == Some(*id),
                     None => j.status != "running" && j.status != "stopping",
                 }
         })
-        .map(|(id, _)| id.clone())
+        .map(|(key, _)| key.clone())
         .collect();
     let n = doomed.len();
     for id in doomed {
@@ -1134,11 +1209,10 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// python `secrets.token_hex(4)` — 4 bytes of OS CSPRNG as 8 hex characters.
-/// The counter^pid this replaced minted the SEQUENTIAL `76fa189x` family the
-/// capture read where python had unrelated ids. A failure is FATAL — there is
-/// no second source.
-pub(crate) fn rand_job_id() -> String {
+/// python `secrets.token_hex(4)` — 4 bytes of OS CSPRNG as 8 hex characters. It
+/// names a pasted image's scratch file; a JOB's id is its kernel task id, never
+/// this. A failure is FATAL — there is no second source.
+pub(crate) fn rand_hex8() -> String {
     let mut buf = [0u8; 4];
     // SAFETY: `buf` is a valid writable buffer of exactly 4 bytes.
     let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };

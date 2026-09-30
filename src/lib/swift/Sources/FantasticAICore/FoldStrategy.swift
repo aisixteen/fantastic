@@ -24,27 +24,6 @@ import FantasticKernel
 import Foundation
 
 public enum AIFoldStrategy {
-    /// The longest a fold title may be, in chars. Python `MAX_TITLE`.
-    public static let MAX_TITLE = 140
-    /// Rows at the end of the view that never fold — the live tail. Python `KEEP_TAIL`.
-    public static let KEEP_TAIL = 6
-    /// Rows per fold at the watermark — small enough to summarize, large enough
-    /// to matter. Python `SPAN`.
-    public static let SPAN = 8
-    /// Adjacent folds at the head of the view before they fold as a group.
-    ///
-    /// THREE, not four. A real run folds at most once per turn — each projection
-    /// drops the view under the watermark and stops — so the head accumulates
-    /// folds one at a time and this threshold is the whole story. At four it
-    /// never fired: measured 2026-09-11 (python), `nested_folds` and `flat_roots`
-    /// both ended `levels [1]`, a head that grows one fold per span forever,
-    /// which is the growth this constant exists to stop.
-    ///
-    /// Three still skips-then-batches, so depth grows as log₃ of the history
-    /// rather than one level per cut (the 2026-09-06 measurement: twelve levels
-    /// in 26 cuts, when every span began on the previous fold). Python `FOLD_RUN`.
-    public static let FOLD_RUN = 3
-
     /// The joined `· "title"` marks of a span — what a degraded fold carries
     /// instead of a summary. Python `_titles_of`.
     static func titlesOf(_ rows: [JSON], _ chain: [Int]) -> String {
@@ -58,25 +37,9 @@ public enum AIFoldStrategy {
     }
 
     private static func cutTitle(_ t: String) -> String {
-        String(String.UnicodeScalarView(t.unicodeScalars.prefix(MAX_TITLE)))
+        String(String.UnicodeScalarView(t.unicodeScalars.prefix(AIConstants.MAX_TITLE)))
     }
 
-    // THE SUMMARY BUDGET — this strategy's own defaults (the per-agent strategy
-    // slot is where they become configurable; not exposed now). A summary may take
-    // a fifth of the span it replaces, and never more than a quarter of the body
-    // budget: a fold that is itself a large fraction of the window buys nothing.
-    public static let SUMMARY_SHARE = 0.20
-    public static let WINDOW_SHARE = 0.25
-    /// Tokens — a title and one sentence always fit.
-    public static let SUMMARY_FLOOR: Int64 = 48
-    /// THE THINKING ALLOWANCE on a summary call's `maxTokens` (decided
-    /// 2026-09-26). The endpoint counts a reasoning model's thought against
-    /// `max_tokens`; at a bare budget (as small as ~93 tokens for a short span)
-    /// the thought alone hit the bound, every small summary was cut and refused,
-    /// and the last-resort cut dropped the fold that held the run's decision
-    /// (measured, E81). The SUMMARY TEXT — thought stripped — must still fit the
-    /// budget; the allowance is for the thinking only. Python `THINK_ALLOWANCE`.
-    public static let THINK_ALLOWANCE: Int64 = 1024
 
     /// Python `FOLD_PROMPT`; `{budget}` is filled in.
     static func foldPrompt(_ budget: Int64) -> String {
@@ -115,9 +78,6 @@ public enum AIFoldStrategy {
         "[reply to ", "[no call", "[context-notice", "[fold ", "[recall", "[late reply",
         "[cleared ", "[fork of ",
     ]
-    /// The user's own words, verbatim, at most this much per fold. Python
-    /// `INDEX_USER_CHARS`.
-    static let INDEX_USER_CHARS = 1200
 
     private static func findAll(_ rx: NSRegularExpression, _ text: String) -> [String] {
         let ns = text as NSString
@@ -150,13 +110,13 @@ public enum AIFoldStrategy {
                 continue
             }
             c = pySplitWhitespace(c).joined(separator: " ")
-            if used + c.unicodeScalars.count > INDEX_USER_CHARS {
-                c = String(String.UnicodeScalarView(c.unicodeScalars.prefix(max(0, INDEX_USER_CHARS - used))))
+            if used + c.unicodeScalars.count > AIConstants.INDEX_USER_CHARS {
+                c = String(String.UnicodeScalarView(c.unicodeScalars.prefix(max(0, AIConstants.INDEX_USER_CHARS - used))))
                     + " …"
             }
             said.insert(c, at: 0)
             used += c.unicodeScalars.count
-            if used >= INDEX_USER_CHARS { break }
+            if used >= AIConstants.INDEX_USER_CHARS { break }
         }
         var lines: [String] = []
         if !files.isEmpty { lines.append("files: " + files.joined(separator: ", ")) }
@@ -169,8 +129,8 @@ public enum AIFoldStrategy {
     public static func summaryBudget(_ ctx: ProjectionCtx, _ rows: [JSON], _ chain: [Int]) -> Int64 {
         let span = AIContext.estimateTokens(chain.map { rows[$0] })
         return max(
-            SUMMARY_FLOOR,
-            min(Int64(Double(span) * SUMMARY_SHARE), Int64(Double(ctx.budget) * WINDOW_SHARE)))
+            AIConstants.SUMMARY_FLOOR,
+            min(Int64(Double(span) * AIConstants.SUMMARY_SHARE), Int64(Double(ctx.budget) * AIConstants.WINDOW_SHARE)))
     }
 
     /// (title, body) out of a summary, or `nil` when it is not one. Python
@@ -185,7 +145,7 @@ public enum AIFoldStrategy {
         guard let firstLine = lines.first, !firstLine.hasPrefix("<think") else { return nil }
         let title = pyStrip(pyTrim(pyTrim(firstLine, "\""), "*#"))
         let body = pyStrip(lines.dropFirst().joined(separator: "\n"))
-        // `title[:MAX_TITLE] or "(untitled)"`, and the body falls back to the
+        // `title[:AIConstants.MAX_TITLE] or "(untitled)"`, and the body falls back to the
         // UNCUT title — python's `body or title`.
         let cut = cutTitle(title)
         return (cut.isEmpty ? "(untitled)" : cut, body.isEmpty ? title : body)
@@ -196,7 +156,7 @@ public enum AIFoldStrategy {
     /// stays in view; loud in `context_status`), never a truncated summary.
     ///
     /// The budget is stated in the prompt; the call's `maxTokens` is the budget
-    /// plus `THINK_ALLOWANCE` (a reasoning model's thought counts against it);
+    /// plus `AIConstants.THINK_ALLOWANCE` (a reasoning model's thought counts against it);
     /// `reserve` is what the fold row spends on its mechanical index, so summary +
     /// index fit. A provider that stopped at `maxTokens` says so (`cut`) — a
     /// cut-off summary is treated like an oversized one, never kept. Python
@@ -209,12 +169,12 @@ public enum AIFoldStrategy {
             return (cutTitle(t), t, true)
         }
         guard let summarize = ctx.summarize else { return degraded() }
-        let budget = max(SUMMARY_FLOOR, summaryBudget(ctx, rows, chain) - reserve)
+        let budget = max(AIConstants.SUMMARY_FLOOR, summaryBudget(ctx, rows, chain) - reserve)
         func ask(_ content: String) async -> (String, Bool) {
             do {
                 let (text, cut) = try await summarize(
                     [.object(["role": .string("user"), "content": .string(content)])],
-                    Int(budget + THINK_ALLOWANCE))
+                    Int(budget + AIConstants.THINK_ALLOWANCE))
                 return (pyStrip(text), cut)
             } catch {
                 return ("", false)
@@ -277,11 +237,11 @@ public enum AIFoldStrategy {
     /// that every time builds a linked list of summaries-of-summaries (measured
     /// 2026-09-06, python: twelve levels deep in 26 cuts, the model lost in it
     /// for 50 turns). So: skip the folds at the head and take the oldest
-    /// NON-fold rows; only when `FOLD_RUN` folds sit adjacent at the head do
+    /// NON-fold rows; only when `AIConstants.FOLD_RUN` folds sit adjacent at the head do
     /// they become the span themselves. Depth then grows with the log of the
     /// history, not its length.
     static func nextSpan(
-        _ rows: [JSON], _ view: [JSON], keepTail: Int = KEEP_TAIL, size: Int = SPAN
+        _ rows: [JSON], _ view: [JSON], keepTail: Int = AIConstants.KEEP_TAIL, size: Int = AIConstants.SPAN
     ) -> [Int] {
         var byId: [Int64: Int] = [:]
         for (i, r) in rows.enumerated() {
@@ -294,7 +254,7 @@ public enum AIFoldStrategy {
         var lead = 0
         while lead < head.count && isFold(head[lead]) { lead += 1 }
         var take: [JSON]
-        if lead >= FOLD_RUN {
+        if lead >= AIConstants.FOLD_RUN {
             take = Array(head[..<lead])  // fold the folds — same operation, same summarizer
         } else {
             take = Array(head[lead..<min(head.count, lead + size)])
@@ -310,11 +270,11 @@ public enum AIFoldStrategy {
     ) async throws -> AIProjection {
         var rows = body
         var view = AIFolds.render(rows)
-        let budget = ctx.budget - AIContext.noticeEnvelopeReserve
+        let budget = ctx.budget - AIConstants.NOTICE_ENVELOPE_RESERVE
         var folded = 0
         var refused = 0
         if AIContext.estimateTokens(view) > budget && rows.count > 2 {
-            let target = Int64(Double(budget) * AIStripStrategy.LOW)
+            let target = Int64(Double(budget) * AIConstants.LOW)
             // ONE MOVE, REPEATED: fold the oldest stretch of the view — rows, folds,
             // or a mix — until under the low watermark or nothing foldable is left.
             while AIContext.estimateTokens(view) > target {
@@ -333,12 +293,12 @@ public enum AIFoldStrategy {
         // the view was OVER the watermark, so a projection that dropped under it
         // left its adjacent folds standing — and they stayed standing, because the
         // next projection folds ordinary rows first and only revisits the head
-        // when it is over budget with `FOLD_RUN` folds already there. A session
+        // when it is over budget with `AIConstants.FOLD_RUN` folds already there. A session
         // therefore grew one fold per span at the head, forever.
         //
-        // Terminates: each pass replaces `FOLD_RUN` adjacent folds with ONE, so
-        // the run shrinks by `FOLD_RUN - 1` every time and `nextSpan` stops
-        // selecting once fewer than `FOLD_RUN` remain.
+        // Terminates: each pass replaces `AIConstants.FOLD_RUN` adjacent folds with ONE, so
+        // the run shrinks by `AIConstants.FOLD_RUN - 1` every time and `nextSpan` stops
+        // selecting once fewer than `AIConstants.FOLD_RUN` remain.
         while refused == 0 {
             let span = nextSpan(rows, view)
             if span.isEmpty || !span.allSatisfy({ isFold(rows[$0]) }) { break }

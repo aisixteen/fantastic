@@ -9,33 +9,6 @@ import FantasticKernel
 import Foundation
 
 public enum AIContext {
-    /// ~chars per token for the estimate.
-    public static let charsPerToken = 4
-    /// Conservative default window when nothing is configured.
-    /// Default window when nothing is configured.
-    ///
-    /// Was 4096, which no longer fit the kernel's OWN system block: budget =
-    /// 4096 − 1024 output reserve = 3072 against a ~3174-token default prompt,
-    /// so every agent created without an explicit `context_window` failfasted
-    /// `too_small` before the model was ever called. The margin had reached zero
-    /// and a ~100-token verb-doc addition took it negative.
-    public static let defaultContextWindow: Int64 = 131_072
-    /// Default output headroom reserved out of the window.
-    public static let defaultOutputReserve: Int64 = 1024
-    /// Never project to a budget below this.
-    public static let budgetFloor: Int64 = 256
-    /// A fixed token budget reserved at the seam for the notice WRAPPER prose
-    /// (everything in the notice except the summary itself, which the strategy
-    /// already pays for). Keeps ONE budget authority — the strategy nets this out
-    /// before fitting its tail.
-    ///
-    /// MEASURED, not guessed. It was 80 against a real envelope of ~132, and that
-    /// 50-token shortfall was not harmless: it put the strategy's projection just
-    /// over budget, which woke the seam's backstop, which trimmed from the FRONT —
-    /// where `compact` had just pinned the goal turn. The under-reserve was
-    /// therefore the mechanism that undid "PIN THE GOAL". Re-measure this if the
-    /// notice text changes. Python `NOTICE_ENVELOPE_RESERVE`.
-    public static let noticeEnvelopeReserve: Int64 = 160
 
     /// Rough token estimate for ONE message — counts the SERIALIZED form,
     /// because role + content + the JSON envelope all consume real context.
@@ -46,7 +19,7 @@ public enum AIContext {
     /// estimate on this path smaller than python's, which is a different budget.
     public static func estimateOne(_ message: JSON) -> Int64 {
         let n = pyJsonDumps(message).unicodeScalars.count
-        return Int64((n + charsPerToken - 1) / charsPerToken)
+        return Int64((n + AIConstants.CHARS_PER_TOKEN - 1) / AIConstants.CHARS_PER_TOKEN)
     }
 
     /// Sum of `estimateOne` across a message slice.
@@ -92,7 +65,7 @@ public enum AIContext {
     public static func resolveContextWindow(_ agent: Agent) -> Int64 {
         if let v = metaPosInt(agent, "context_window") { return v }
         if let v = metaPosInt(agent, "num_ctx") { return v }
-        return defaultContextWindow
+        return AIConstants.DEFAULT_CONTEXT_WINDOW
     }
 
     /// Output headroom reserved out of the window (default 1024).
@@ -102,20 +75,20 @@ public enum AIContext {
     /// `"-5"` all read 1024. Swift accepted a negative string and a float, and a
     /// reserve of `-5` widens the budget past the window.
     public static func outputReserve(_ agent: Agent) -> Int64 {
-        guard let v = agent.metaValue(forKey: "output_reserve") else { return defaultOutputReserve }
+        guard let v = agent.metaValue(forKey: "output_reserve") else { return AIConstants.DEFAULT_OUTPUT_RESERVE }
         switch v {
-        case .integer(let i): return i >= 0 ? i : defaultOutputReserve
+        case .integer(let i): return i >= 0 ? i : AIConstants.DEFAULT_OUTPUT_RESERVE
         case .string(let s):
             let t = pyStrip(s)
-            guard pyDigits(t), let i = try? pyInt(.string(t)) else { return defaultOutputReserve }
+            guard pyDigits(t), let i = try? pyInt(.string(t)) else { return AIConstants.DEFAULT_OUTPUT_RESERVE }
             return Int64(i)
-        default: return defaultOutputReserve
+        default: return AIConstants.DEFAULT_OUTPUT_RESERVE
         }
     }
 
     /// Token budget for the INPUT (window minus output headroom), floored.
     public static func budget(_ agent: Agent) -> Int64 {
-        max(resolveContextWindow(agent) - outputReserve(agent), budgetFloor)
+        max(resolveContextWindow(agent) - outputReserve(agent), AIConstants.BUDGET_FLOOR)
     }
 
     /// Tokens a reply may occupy INLINE in the model's next turn. Above this it
@@ -123,7 +96,7 @@ public enum AIContext {
     /// inlines ~1.4k tokens (a reflect, an error, a short read) and digests a
     /// 6.8KB file body. Python `_inline_cap`.
     public static func inlineCap(_ agent: Agent) -> Int64 {
-        max(budgetFloor, budget(agent) / 8)
+        max(AIConstants.BUDGET_FLOOR, budget(agent) / 8)
     }
 
     /// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER
