@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "The canvas page (`canvas_page.tools`): the canvas app's `canvas.zip`, embedded in the binary at build time, served read-only through the `web` host's `/file/` route — the sibling of `web_ui` under `web`."
+description = "The canvas page (`canvas_page.tools`): the canvas app's `canvas.zip`, embedded in the binary at build time, served read-only through the `web` host's `/file/` route."
 build = "build.rs"
 
 [dependencies]

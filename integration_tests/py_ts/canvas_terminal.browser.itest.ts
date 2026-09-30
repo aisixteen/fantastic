@@ -59,9 +59,10 @@ function backends(tmp: string) {
     }));
 }
 
+/** The canvas's cells — every child folder but its singleton `background`. */
 function views(tmp: string): string[] {
   const d = join(tmp, ".fantastic", "web", "agents", "canvas", "agents");
-  return existsSync(d) ? readdirSync(d) : [];
+  return existsSync(d) ? readdirSync(d).filter((n) => n !== "background") : [];
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

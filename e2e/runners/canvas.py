@@ -6,8 +6,8 @@ agents are records the host's ws loader (`web_loader`, under the socket leg
 back on boot. This runner:
 
 1. builds the product (`fantastic`, whose build packs the canvas app and embeds
-   `canvas.zip` — the `canvas_page` agent serves it beside the browser View);
-2. runs `fantastic --headless web --port N` over a fresh directory (it inits
+   `canvas.zip` — the `canvas_page` agent serves it);
+2. runs `fantastic --headless canvas --port N` over a fresh directory (it inits
    from the blueprint and creates the canvas's page, leg and loader);
 3. drives the page in headless Chrome (dblclick, typing, drag, close) and
    restarts the host between runs;
@@ -87,7 +87,7 @@ class Host:
         # The port is creation-only: named on the first run, read from `web`'s
         # record after that.
         first = not (self.cwd / ".fantastic").exists()
-        args = ["--headless", "web", *(["--port", str(self.port)] if first else [])]
+        args = ["--headless", "canvas", *(["--port", str(self.port)] if first else [])]
         with open(self.log, "a") as f:
             f.write("\n=== start\n")
         f = open(self.log, "a")
@@ -190,8 +190,10 @@ def yaml_of(p: Path) -> dict:
 
 
 def members(cwd: Path) -> list[dict]:
+    """The canvas's cells — every child but its singleton background."""
     d = cwd / ".fantastic/web/agents/canvas/agents"
-    return [dict(yaml_of(f), _dir=f.parent.name) for f in sorted(d.glob("*/agent.yaml"))] if d.is_dir() else []
+    every = [dict(yaml_of(f), _dir=f.parent.name) for f in sorted(d.glob("*/agent.yaml"))] if d.is_dir() else []
+    return [m for m in every if m.get("handler_module") != "background.ts"]
 
 
 LEG = ".fantastic/agents/web/agents/canvas_ws"
@@ -393,7 +395,9 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         want = exp["load_tree"]
         if "canvas" in want and "canvas" not in tree:
             bad.append(f"load_tree has no canvas: {state.get('tree')}")
-        others = [i for i in tree if i not in ("canvas", "web_loader")]
+        if "canvas" in want and tree.get("background") != "canvas":
+            bad.append(f"load_tree has no background singleton under the canvas: {state.get('tree')}")
+        others = [i for i in tree if i not in ("canvas", "web_loader", "background")]
         if "member_parent" in want:
             if len(others) != 1 or tree[others[0]] != want["member_parent"]:
                 bad.append(f"load_tree members {[(i, tree[i]) for i in others]}, want one under {want['member_parent']}")

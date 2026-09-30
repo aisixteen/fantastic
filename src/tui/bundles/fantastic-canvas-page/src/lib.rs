@@ -1,6 +1,6 @@
 //! THE CANVAS PAGE, as an ordinary bundle built outside the kernel tree.
 //!
-//! A `canvas_page` agent is a child of a `web` host — the sibling of `web_ui`.
+//! A `canvas_page` agent is a child of a `web` host.
 //! It serves the canvas app from the binary itself: `canvas.zip` (packed by
 //! `build.rs`, embedded byte-for-byte) plus a one-tag `index.html` that loads the
 //! zip's `bundle.min.js`. The host's generic `GET /<id>/file/<path>` route pipes
@@ -31,10 +31,6 @@ pub static CANVAS_ZIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/canvas.
 /// agent was given.
 pub const INDEX_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Aisixteen Fantastic · canvas</title></head>\n<body><script type=\"module\" src=\"bundle.min.js\"></script></body></html>\n";
 
-/// The browser's AI set-up page: the same bundle, told by its body which page
-/// it is (`setup_page.ts`).
-pub const SETUP_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Aisixteen Fantastic · AI set-up</title></head>\n<body data-page=\"setup\"><script type=\"module\" src=\"bundle.min.js\"></script></body></html>\n";
-
 /// What `read_stream` declares on the record, so the host serves it.
 pub const READ_STREAM_DOC: &str = "args: path:str (req), offset:int?, length:int?. A file of the embedded canvas page as a BINARY reply — the bytes as the body, {path, offset, next_offset, eof, size} as the head.";
 
@@ -54,7 +50,6 @@ fn files() -> &'static BTreeMap<String, Vec<u8>> {
             out.insert(entry.name().to_string(), bytes);
         }
         out.insert("index.html".into(), INDEX_HTML.as_bytes().to_vec());
-        out.insert("setup.html".into(), SETUP_HTML.as_bytes().to_vec());
         out
     })
 }

@@ -1,10 +1,11 @@
 //! SET UP AN AI AGENT — one page, not a wizard.
 //!
-//! An agent is five fields, and this page shows all five at once: the id, the
-//! handler (a backend this build links, from the kernel's own catalog), the
-//! model (as that backend names it), its endpoint, and who it may call.
-//! None has a default;
-//! a missing one is called out in place. `enter` on WRITE THE RECORD writes it
+//! One page shows the whole record at once: the id, the handler (a backend this
+//! build links, from the kernel's own catalog), then THAT BACKEND'S OWN FIELDS
+//! as its record schema declares them (`kern/setup::Backend`) — its REQUIRED
+//! ones first (empty; nothing is guessed; a missing one is called out in
+//! place), who it may call, WRITE THE RECORD, and below it the backend's
+//! OPTIONAL fields, each starting at the backend's own default. `enter` on WRITE THE RECORD writes it
 //! (`kern/setup`), and the answer, a path or the kernel's refusal, shows right
 //! there.
 //!
@@ -18,7 +19,7 @@
 //! keychain item). ← → picks, enter applies (moving any stored keys); there is
 //! no default, and `k` is refused until one is chosen. The line says where.
 //!
-//! TEMPLATES (`kern/templates`): the backend, model and endpoint can be SAVED
+//! TEMPLATES (`kern/templates`): the backend and its set fields can be SAVED
 //! under a name the human types (never derived) in the user's home config dir,
 //! and LOADED back into the page later, in any project. `d` on a saved template
 //! makes it the default for new AI agents — nothing is a default until then.
@@ -35,7 +36,7 @@ use ratatui::Frame;
 use serde_json::Value;
 
 use crate::ev::Cmd;
-use crate::kern::setup::Record;
+use crate::kern::setup::{Backend, Field, Record};
 use crate::panel::{Cx, Handled, Needs, Panel, PanelKind};
 use crate::theme;
 
@@ -46,8 +47,8 @@ pub const SETUP_ID: &str = "#setup";
 pub enum Line_ {
     Id,
     Handler,
-    Model,
-    Endpoint,
+    /// The picked backend's field, by its index in the schema.
+    Field(usize),
     MayCall,
     Write,
     KeyMode,
@@ -56,26 +57,13 @@ pub enum Line_ {
     TplPick,
 }
 
-const LINES: [Line_; 10] = [
-    Line_::Id,
-    Line_::Handler,
-    Line_::Model,
-    Line_::Endpoint,
-    Line_::MayCall,
-    Line_::Write,
-    Line_::KeyMode,
-    Line_::TplName,
-    Line_::TplSave,
-    Line_::TplPick,
-];
-
 pub struct SetupPanel {
-    /// `None` until the kernel said which backends it links.
-    backends: Option<Vec<String>>,
+    /// `None` until the kernel said which backends it links (with schemas).
+    backends: Option<Vec<Backend>>,
     handler: Option<usize>,
     id: String,
-    model: String,
-    endpoint: String,
+    /// The picked backend's fields as typed, by name (a default starts here).
+    values: std::collections::BTreeMap<String, String>,
     may_call: String,
     at: usize,
     /// The text being edited, and for which line.
@@ -102,8 +90,7 @@ impl SetupPanel {
             backends: None,
             handler: None,
             id: String::new(),
-            model: String::new(),
-            endpoint: String::new(),
+            values: std::collections::BTreeMap::new(),
             may_call: String::new(),
             at: 0,
             editing: None,
@@ -145,29 +132,69 @@ impl SetupPanel {
             self.result = Some(Err("no saved template to load".into()));
             return;
         };
-        let at = self.backends.as_ref().and_then(|b| b.iter().position(|h| *h == t.handler()));
+        let at = self.backends.as_ref().and_then(|b| b.iter().position(|h| h.module == t.handler()));
         let Some(i) = at else {
             self.result = Some(Err(format!("template `{}` needs {}, which this build does not link", t.name, t.handler())));
             return;
         };
-        self.handler = Some(i);
-        self.model = t.model();
-        self.endpoint = t.endpoint();
+        self.pick_handler(i);
+        for f in self.fields().to_vec() {
+            if let Some(v) = t.record.get(&f.name) {
+                self.values.insert(f.name.clone(), crate::kern::setup::text_of(v));
+            }
+        }
+        // the page grew by the backend's fields: the cursor stays on LOAD
+        self.at = self.lines().iter().position(|l| *l == Line_::TplPick).unwrap_or(0);
         self.result = Some(Ok(format!("loaded template `{}` — give it an id, then WRITE THE RECORD", t.name)));
     }
 
-    pub fn set_backends(&mut self, b: Vec<String>) {
+    pub fn set_backends(&mut self, b: Vec<Backend>) {
         // One backend is still a choice the human makes, so none is pre-picked.
         self.handler = self.handler.filter(|i| *i < b.len());
         self.backends = Some(b);
+    }
+
+    /// Pick backend `i`: its fields start at the BACKEND's defaults (a required
+    /// one starts empty).
+    fn pick_handler(&mut self, i: usize) {
+        self.handler = Some(i);
+        self.values = self
+            .fields()
+            .iter()
+            .map(|f| (f.name.clone(), f.default.as_ref().map(crate::kern::setup::text_of).unwrap_or_default()))
+            .collect();
+    }
+
+    /// The picked backend's schema fields.
+    fn fields(&self) -> &[Field] {
+        match (&self.backends, self.handler) {
+            (Some(b), Some(i)) => b.get(i).map_or(&[], |b| b.fields.as_slice()),
+            _ => &[],
+        }
+    }
+
+    /// The page's lines, in order: the record (required fields), WRITE, the
+    /// optional fields, keys, templates.
+    fn lines(&self) -> Vec<Line_> {
+        let f = self.fields();
+        let mut v = vec![Line_::Id, Line_::Handler];
+        v.extend((0..f.len()).filter(|i| f[*i].required).map(Line_::Field));
+        v.extend([Line_::MayCall, Line_::Write]);
+        v.extend((0..f.len()).filter(|i| !f[*i].required).map(Line_::Field));
+        v.extend([Line_::KeyMode, Line_::TplName, Line_::TplSave, Line_::TplPick]);
+        v
+    }
+
+    fn line_at(&self) -> Line_ {
+        let l = self.lines();
+        l[self.at.min(l.len() - 1)]
     }
 
     pub fn set_result(&mut self, r: Result<String, String>) {
         if r.is_ok() && self.key.is_none() && self.result_is_write(&r) {
             // Written: the page starts over for the next agent.
             self.id.clear();
-            self.model.clear();
-            self.endpoint.clear();
+            self.values.clear();
             self.may_call.clear();
             self.handler = None;
             self.at = 0;
@@ -181,25 +208,56 @@ impl SetupPanel {
 
     fn handler_name(&self) -> Option<&str> {
         let b = self.backends.as_ref()?;
-        self.handler.and_then(|i| b.get(i)).map(String::as_str)
+        self.handler.and_then(|i| b.get(i)).map(|b| b.module.as_str())
     }
 
-    /// The record as it stands.
-    pub fn record(&self) -> Record {
-        Record {
+    /// The record as it stands, each field typed by the schema — or the first
+    /// field whose text is not of its type.
+    pub fn record(&self) -> Result<Record, String> {
+        let mut fields = serde_json::Map::new();
+        for f in self.fields() {
+            let text = self.values.get(&f.name).map_or("", String::as_str);
+            // an untouched default stays the BACKEND's to apply — not written
+            if f.default.as_ref().is_some_and(|d| crate::kern::setup::text_of(d) == text.trim()) {
+                continue;
+            }
+            if let Some(v) = crate::kern::setup::coerce(f, text)? {
+                fields.insert(f.name.clone(), v);
+            }
+        }
+        Ok(Record {
             id: self.id.trim().to_string(),
             handler: self.handler_name().unwrap_or("").to_string(),
-            model: self.model.trim().to_string(),
-            endpoint: self.endpoint.trim().to_string(),
+            fields,
             may_call: self.may_call.split_whitespace().map(str::to_string).collect(),
+        })
+    }
+
+    /// The page's own missing list: the id, the handler, and each REQUIRED field
+    /// left empty (the backend refuses them too, with its hints).
+    fn missing(&self) -> Vec<String> {
+        let mut m: Vec<String> = Vec::new();
+        if self.id.trim().is_empty() {
+            m.push("id".into());
         }
+        if self.handler.is_none() {
+            m.push("handler".into());
+        }
+        for f in self.fields().iter().filter(|f| f.required) {
+            if self.values.get(&f.name).is_none_or(|v| v.trim().is_empty()) {
+                m.push(f.name.clone());
+            }
+        }
+        m
     }
 
     fn field(&mut self, l: Line_) -> Option<&mut String> {
         match l {
             Line_::Id => Some(&mut self.id),
-            Line_::Model => Some(&mut self.model),
-            Line_::Endpoint => Some(&mut self.endpoint),
+            Line_::Field(i) => {
+                let name = self.fields().get(i)?.name.clone();
+                Some(self.values.entry(name).or_default())
+            }
             Line_::MayCall => Some(&mut self.may_call),
             Line_::TplName => Some(&mut self.tpl_name),
             Line_::Handler | Line_::Write | Line_::KeyMode | Line_::TplSave | Line_::TplPick => None,
@@ -264,19 +322,35 @@ impl Panel for SetupPanel {
             }
             return Handled::Yes;
         }
-        let line = LINES[self.at];
+        let line = self.line_at();
         match k.code {
             KeyCode::Up => self.at = self.at.saturating_sub(1),
-            KeyCode::Down => self.at = (self.at + 1).min(LINES.len() - 1),
+            KeyCode::Down => self.at = (self.at + 1).min(self.lines().len() - 1),
             KeyCode::Left | KeyCode::Right if line == Line_::Handler => {
                 let n = self.backends.as_ref().map_or(0, Vec::len);
                 if n > 0 {
-                    self.handler = Some(match (self.handler, k.code) {
+                    let i = match (self.handler, k.code) {
                         (None, KeyCode::Left) => n - 1,
                         (None, _) => 0,
                         (Some(i), KeyCode::Left) => (i + n - 1) % n,
                         (Some(i), _) => (i + 1) % n,
-                    });
+                    };
+                    self.pick_handler(i);
+                }
+            }
+            // an ENUM field: ← → steps through its values
+            KeyCode::Left | KeyCode::Right if matches!(line, Line_::Field(i) if !self.fields()[i].one_of.is_empty()) => {
+                if let Line_::Field(i) = line {
+                    let f = self.fields()[i].clone();
+                    let now = self.values.get(&f.name).and_then(|v| f.one_of.iter().position(|o| o == v));
+                    let n = f.one_of.len();
+                    let next = match (now, k.code) {
+                        (None, KeyCode::Left) => n - 1,
+                        (None, _) => 0,
+                        (Some(j), KeyCode::Left) => (j + n - 1) % n,
+                        (Some(j), _) => (j + 1) % n,
+                    };
+                    self.values.insert(f.name, f.one_of[next].clone());
                 }
             }
             KeyCode::Left | KeyCode::Right if line == Line_::KeyMode => {
@@ -306,23 +380,20 @@ impl Panel for SetupPanel {
                 }
             }
             KeyCode::Enter if line == Line_::TplSave => {
-                let rec = self.record();
-                let mut miss: Vec<&str> = Vec::new();
+                let mut miss: Vec<String> = Vec::new();
                 if self.tpl_name.trim().is_empty() {
-                    miss.push("template name");
+                    miss.push("template name".into());
                 }
-                miss.extend(rec.missing().into_iter().filter(|m| *m != "id"));
-                if miss.is_empty() {
-                    out.push(Cmd::SaveTemplate {
-                        name: self.tpl_name.trim().to_string(),
-                        record: serde_json::json!({
-                            "handler_module": rec.handler,
-                            "model": rec.model,
-                            "endpoint": rec.endpoint,
-                        }),
-                    });
-                } else {
-                    self.result = Some(Err(format!("missing: {}", miss.join(", "))));
+                miss.extend(self.missing().into_iter().filter(|m| m != "id"));
+                match self.record() {
+                    Err(e) => self.result = Some(Err(e)),
+                    Ok(_) if !miss.is_empty() => self.result = Some(Err(format!("missing: {}", miss.join(", ")))),
+                    Ok(rec) => {
+                        // the backend and every field set — never the id, the key or grants
+                        let mut record = rec.fields;
+                        record.insert("handler_module".into(), serde_json::json!(rec.handler));
+                        out.push(Cmd::SaveTemplate { name: self.tpl_name.trim().to_string(), record: Value::Object(record) });
+                    }
                 }
             }
             KeyCode::Enter if line == Line_::TplPick => self.load_picked(),
@@ -333,14 +404,11 @@ impl Panel for SetupPanel {
                     out.push(Cmd::PreferTemplate { name: (!is_default).then(|| t.name.clone()) });
                 }
             }
-            KeyCode::Enter if line == Line_::Write => {
-                let rec = self.record();
-                if rec.missing().is_empty() {
-                    out.push(Cmd::WriteAi(rec));
-                } else {
-                    self.result = Some(Err(format!("missing: {}", rec.missing().join(", "))));
-                }
-            }
+            KeyCode::Enter if line == Line_::Write => match (self.missing(), self.record()) {
+                (_, Err(e)) => self.result = Some(Err(e)),
+                (m, Ok(rec)) if m.is_empty() => out.push(Cmd::WriteAi(rec)),
+                (m, Ok(_)) => self.result = Some(Err(format!("missing: {}", m.join(", ")))),
+            },
             KeyCode::Enter => {
                 if let Some(f) = self.field(line) {
                     let text = f.clone();
@@ -393,7 +461,7 @@ impl Panel for SetupPanel {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "  An ai agent is four fields. Nothing is filled in for you, and nothing is written",
+                "  The backend's schema names its fields. Nothing required is filled in for you, and nothing is written",
                 Style::default().fg(theme::MUTED),
             )),
             Line::from(Span::styled(
@@ -410,28 +478,23 @@ impl Panel for SetupPanel {
             (Some(_), Some(h)) => format!("‹ {h} ›"),
             (Some(b), None) => format!("‹ pick one of {} ›", b.len()),
         };
-        let rows: [(Line_, &str, String, &str); 5] = [
-            (Line_::Id, "id", self.id.clone(), "a new agent id"),
-            (Line_::Handler, "handler", handler_text, "what makes it a conversation — ← → to pick"),
-            (Line_::Model, "model", self.model.clone(), "as the backend names it"),
-            (Line_::Endpoint, "endpoint", self.endpoint.clone(), "the URL it serves on — required"),
-            (Line_::MayCall, "may call", self.may_call.clone(), "agent ids, space-separated — optional"),
-        ];
-        for (i, (line, label, value, note)) in rows.into_iter().enumerate() {
-            let cur = i == self.at && self.key.is_none();
+        let at = self.line_at();
+        // one row: label, value (or the edit in progress), and a note
+        let row = |line: Line_, label: String, value: String, note: String, required: bool| -> Line<'static> {
+            let cur = line == at && self.key.is_none();
             let (shown, missing) = match &self.editing {
                 Some((l, buf)) if *l == line => (format!("{buf}▌"), false),
                 _ if value.is_empty() || (line == Line_::Handler && self.handler.is_none()) => {
                     let empty = if value.is_empty() { "— not set —".to_string() } else { value };
-                    (empty, !matches!(line, Line_::MayCall | Line_::Endpoint))
+                    (empty, required)
                 }
                 _ => (value, false),
             };
-            lines.push(Line::from(vec![
+            Line::from(vec![
                 Span::styled(if cur { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI)),
-                Span::styled(format!("{label:<10}"), Style::default().fg(theme::MUTED)),
+                Span::styled(format!("{label:<16}"), Style::default().fg(theme::MUTED)),
                 Span::styled(
-                    shown.clone(),
+                    shown,
                     if missing {
                         warn
                     } else if cur {
@@ -442,11 +505,30 @@ impl Panel for SetupPanel {
                 ),
                 Span::styled(if missing { "  ⚠" } else { "" }, warn),
                 Span::styled(format!("   {note}"), dim),
-            ]));
+            ])
+        };
+        let field_row = |i: usize| {
+            let f = &self.fields()[i];
+            let value = self.values.get(&f.name).cloned().unwrap_or_default();
+            let mut note = f.hint.clone();
+            if !f.one_of.is_empty() {
+                note = format!("{note} — ← → {}", f.one_of.join(" | "));
+            }
+            if let Some(d) = &f.default {
+                note = format!("{note} (backend default {})", crate::kern::setup::text_of(d));
+            }
+            row(Line_::Field(i), f.name.clone(), value, note, f.required)
+        };
+        lines.push(row(Line_::Id, "id".into(), self.id.clone(), "a new agent id".into(), true));
+        lines.push(row(Line_::Handler, "handler".into(), handler_text, "what makes it a conversation — ← → to pick".into(), true));
+        let fields = self.fields();
+        for i in (0..fields.len()).filter(|i| fields[*i].required) {
+            lines.push(field_row(i));
         }
+        lines.push(row(Line_::MayCall, "may call".into(), self.may_call.clone(), "agent ids, space-separated — optional".into(), false));
         lines.push(Line::from(""));
-        let can = self.record().missing().is_empty();
-        let cur = LINES[self.at] == Line_::Write && self.key.is_none();
+        let can = self.missing().is_empty();
+        let cur = at == Line_::Write && self.key.is_none();
         lines.push(Line::from(vec![
             Span::styled(if cur { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI)),
             Span::styled(
@@ -460,9 +542,16 @@ impl Panel for SetupPanel {
                 },
             ),
         ]));
+        if fields.iter().any(|f| !f.required) {
+            lines.push(Line::from(""));
+            lines.push(rule("OPTIONAL — EACH STARTS AT THE BACKEND'S OWN DEFAULT"));
+            for i in (0..fields.len()).filter(|i| !fields[*i].required) {
+                lines.push(field_row(i));
+            }
+        }
         // ── where keys are kept ─────────────────────────────────────────
         lines.push(Line::from(""));
-        let km_cur = LINES[self.at] == Line_::KeyMode && self.key.is_none();
+        let km_cur = at == Line_::KeyMode && self.key.is_none();
         let (mode_text, where_text) = match &self.key_mode {
             None => ("reading…".to_string(), String::new()),
             Some(Err(e)) => (format!("unavailable: {e}"), String::new()),
@@ -534,7 +623,7 @@ impl Panel for SetupPanel {
         lines.push(Line::from(""));
         lines.push(rule("TEMPLATES — REUSE IT IN ANY PROJECT"));
         lines.push(Line::from(""));
-        let row_cur = |l: Line_| LINES[self.at] == l && self.key.is_none();
+        let row_cur = |l: Line_| at == l && self.key.is_none();
         let arrow = |c: bool| Span::styled(if c { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI));
         let name_shown = match &self.editing {
             Some((Line_::TplName, buf)) => format!("{buf}▌"),
@@ -550,7 +639,7 @@ impl Panel for SetupPanel {
         lines.push(Line::from(vec![
             arrow(row_cur(Line_::TplSave)),
             Span::styled(" SAVE AS TEMPLATE ", if row_cur(Line_::TplSave) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
-            Span::styled("   handler + model + endpoint, never the key, the id or grants", dim),
+            Span::styled("   the backend + every field set — never the key, the id or grants", dim),
         ]));
         let (pick_text, pick_note) = match &self.shelf {
             None => ("reading your templates…".to_string(), String::new()),
@@ -562,7 +651,7 @@ impl Panel for SetupPanel {
                 let star = if s.preferred.as_deref() == Some(name.as_str()) { " ★ default" } else { "" };
                 (
                     format!("‹ {name} ›{star}"),
-                    t.map_or(String::new(), |t| format!("   {} · {} · {}", t.handler(), t.model(), t.endpoint())),
+                    t.map_or(String::new(), |t| format!("   {} · {}", t.handler(), t.model())),
                 )
             }
         };
@@ -623,40 +712,67 @@ mod tests {
         v
     }
 
-    #[test]
-    fn nothing_is_written_until_every_required_field_is_set() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec!["anthropic_backend.tools".into()]);
-        assert_eq!(p.handler_name(), None, "one backend is still not a default");
-        let out = drive(&mut p, &[KeyCode::Down; 5].into_iter().chain([KeyCode::Enter]).collect::<Vec<_>>());
-        assert!(out.is_empty());
-        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: id, handler, model, endpoint"));
+    /// A backend with a small schema: two required fields, one with the
+    /// backend's default, one enum.
+    fn be(module: &str) -> Backend {
+        Backend::from_schema(
+            module,
+            &serde_json::json!({"key_var": null, "fields": [
+                {"name": "endpoint", "type": "str", "required": true, "hint": "its URL"},
+                {"name": "model", "type": "str", "required": true, "hint": "the model"},
+                {"name": "max_tokens", "type": "int", "required": false, "default": 4096, "hint": "a turn's budget"},
+                {"name": "kv_overflow", "type": "enum", "required": false, "enum": ["evict", "reject"], "hint": "who gives way"},
+                {"name": "memory_store_id", "type": "str", "required": true, "hint": "the store"},
+            ]}),
+        )
     }
 
     #[test]
-    fn the_five_fields_make_the_record_and_enter_writes_it() {
+    fn nothing_is_written_until_every_required_field_is_set() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec!["anthropic_backend.tools".into(), "llamacpp_backend.tools".into()]);
+        p.set_backends(vec![be("anthropic_backend.tools")]);
+        assert_eq!(p.handler_name(), None, "one backend is still not a default");
+        // id, handler, may call, WRITE — no backend picked, so no fields yet
+        let out = drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        assert!(out.is_empty());
+        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: id, handler"), "{:?}", p.result);
+        // pick the backend: its REQUIRED fields join the missing list; the
+        // write-owned memory_store_id is never asked for
+        drive(&mut p, &[KeyCode::Up, KeyCode::Up, KeyCode::Right]);
+        let names: Vec<&str> = p.fields().iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["endpoint", "model", "max_tokens", "kv_overflow"]);
+        assert_eq!(p.missing(), ["id", "endpoint", "model"]);
+        assert_eq!(p.values["max_tokens"], "4096", "a defaulted field starts at the BACKEND's value");
+    }
+
+    #[test]
+    fn the_schema_fields_make_the_record_typed_and_enter_writes_it() {
+        let mut p = SetupPanel::new();
+        p.set_backends(vec![be("anthropic_backend.tools"), be("llamacpp_backend.tools")]);
         let mut keys = typed("docreader");
-        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Right, KeyCode::Down]);
+        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Right, KeyCode::Down]); // llamacpp → endpoint
+        keys.extend(typed("http://127.0.0.1:9/v1"));
+        keys.push(KeyCode::Down);
         keys.extend(typed("m-1"));
         keys.push(KeyCode::Down);
-        keys.extend(typed("http://127.0.0.1:9/v1/messages"));
-        keys.push(KeyCode::Down);
         keys.extend(typed("files exec"));
-        keys.extend([KeyCode::Down, KeyCode::Enter]);
+        keys.extend([KeyCode::Down, KeyCode::Down]); // past WRITE → max_tokens
+        keys.extend([KeyCode::Enter, KeyCode::Backspace, KeyCode::Backspace, KeyCode::Backspace, KeyCode::Backspace]);
+        keys.extend("512".chars().map(KeyCode::Char));
+        keys.push(KeyCode::Enter);
+        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Right]); // kv_overflow: evict → reject
+        keys.extend([KeyCode::Up, KeyCode::Up, KeyCode::Enter]); // WRITE
         let out = drive(&mut p, &keys);
         match &out[..] {
-            [Cmd::WriteAi(r)] => assert_eq!(
-                r,
-                &Record {
-                    id: "docreader".into(),
-                    handler: "llamacpp_backend.tools".into(),
-                    model: "m-1".into(),
-                    endpoint: "http://127.0.0.1:9/v1/messages".into(),
-                    may_call: vec!["files".into(), "exec".into()],
-                }
-            ),
+            [Cmd::WriteAi(r)] => {
+                assert_eq!((r.id.as_str(), r.handler.as_str()), ("docreader", "llamacpp_backend.tools"));
+                assert_eq!(
+                    serde_json::Value::Object(r.fields.clone()),
+                    serde_json::json!({"endpoint": "http://127.0.0.1:9/v1", "model": "m-1", "max_tokens": 512, "kv_overflow": "reject"}),
+                    "each field typed by the schema"
+                );
+                assert_eq!(r.may_call, ["files", "exec"]);
+            }
             other => panic!("{other:?}"),
         }
         p.set_result(Ok("written to  x".into()));
@@ -664,9 +780,26 @@ mod tests {
     }
 
     #[test]
+    fn a_field_of_the_wrong_type_is_refused_in_place() {
+        let mut p = SetupPanel::new();
+        p.set_backends(vec![be("x_backend.tools")]);
+        let mut keys = typed("a");
+        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Down]);
+        keys.extend(typed("http://e"));
+        keys.push(KeyCode::Down);
+        keys.extend(typed("m"));
+        keys.extend([KeyCode::Down, KeyCode::Down, KeyCode::Down]); // max_tokens
+        keys.extend([KeyCode::Enter, KeyCode::Char('x'), KeyCode::Enter]);
+        keys.extend([KeyCode::Up, KeyCode::Enter]); // WRITE
+        let out = drive(&mut p, &keys);
+        assert!(out.is_empty());
+        assert!(matches!(&p.result, Some(Err(e)) if e.contains("max_tokens") && e.contains("integer")), "{:?}", p.result);
+    }
+
+    #[test]
     fn esc_drops_an_edit_and_a_build_with_no_keyed_backend_offers_no_k() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec!["llamacpp_backend.tools".into()]);
+        p.set_backends(vec![be("llamacpp_backend.tools")]);
         drive(&mut p, &[KeyCode::Enter, KeyCode::Char('x'), KeyCode::Esc]);
         assert!(p.id.is_empty());
         drive(&mut p, &[KeyCode::Down, KeyCode::Right]);
@@ -696,16 +829,17 @@ mod tests {
     #[test]
     fn a_template_is_saved_under_a_typed_name_without_id_or_grants() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec!["anthropic_backend.tools".into()]);
-        // backend, model, endpoint — and an id and grants, which a template never takes
+        p.set_backends(vec![be("anthropic_backend.tools")]);
         let mut keys = typed("docreader");
         keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Down]);
-        keys.extend(typed("m-1"));
-        keys.push(KeyCode::Down);
         keys.extend(typed("http://e"));
         keys.push(KeyCode::Down);
+        keys.extend(typed("m-1"));
+        keys.push(KeyCode::Down);
         keys.extend(typed("files"));
-        keys.extend([KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]); // SAVE with no name
+        // may call → WRITE, max_tokens, kv_overflow, keys, name, SAVE
+        keys.extend([KeyCode::Down; 6]);
+        keys.push(KeyCode::Enter); // SAVE with no name
         let out = drive(&mut p, &keys);
         assert!(out.is_empty());
         assert!(matches!(&p.result, Some(Err(e)) if e == "missing: template name"), "{:?}", p.result);
@@ -717,7 +851,8 @@ mod tests {
                 assert_eq!(name, "opus");
                 assert_eq!(
                     record,
-                    &serde_json::json!({"handler_module": "anthropic_backend.tools", "model": "m-1", "endpoint": "http://e"})
+                    &serde_json::json!({"handler_module": "anthropic_backend.tools", "endpoint": "http://e", "model": "m-1"}),
+                    "the backend + every field set (an untouched default is the backend's); never the id or grants"
                 );
             }
             other => panic!("{other:?}"),
@@ -727,14 +862,16 @@ mod tests {
     #[test]
     fn a_saved_template_loads_into_the_page_and_d_toggles_the_default() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec!["anthropic_backend.tools".into(), "responses_backend.tools".into()]);
+        p.set_backends(vec![be("anthropic_backend.tools"), be("responses_backend.tools")]);
         p.set_shelf(Ok(shelf(&[("opus", "anthropic_backend.tools"), ("gpt", "responses_backend.tools")], Some("gpt"))));
-        let mut keys = vec![KeyCode::Down; 9]; // LOAD TEMPLATE
+        // no backend picked yet: id, handler, may call, WRITE, keys, name, save, LOAD
+        let mut keys = vec![KeyCode::Down; 7];
         keys.extend([KeyCode::Right, KeyCode::Enter]); // ‹ gpt › — loads it
         drive(&mut p, &keys);
         assert_eq!(p.handler_name(), Some("responses_backend.tools"));
-        assert_eq!((p.model.as_str(), p.endpoint.as_str()), ("gpt-m", "http://gpt"));
+        assert_eq!((p.values["model"].as_str(), p.values["endpoint"].as_str()), ("gpt-m", "http://gpt"));
         assert!(p.id.is_empty(), "the id stays the human's");
+        assert_eq!(p.line_at(), Line_::TplPick, "the cursor stays on LOAD as the page grows");
         match &drive(&mut p, &[KeyCode::Char('d')])[..] {
             [Cmd::PreferTemplate { name: None }] => {}
             other => panic!("d on the default clears it: {other:?}"),
@@ -749,22 +886,23 @@ mod tests {
     #[test]
     fn a_template_for_a_backend_this_build_lacks_is_said_not_half_loaded() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec!["anthropic_backend.tools".into()]);
+        p.set_backends(vec![be("anthropic_backend.tools")]);
         p.set_shelf(Ok(shelf(&[("q", "vllm_backend.tools")], None)));
-        let mut keys = vec![KeyCode::Down; 9];
+        let mut keys = vec![KeyCode::Down; 7];
         keys.push(KeyCode::Enter);
         drive(&mut p, &keys);
         assert!(matches!(&p.result, Some(Err(e)) if e.contains("does not link")), "{:?}", p.result);
-        assert!(p.model.is_empty() && p.handler.is_none());
+        assert!(p.values.is_empty() && p.handler.is_none());
     }
 
     #[test]
     fn keys_wait_for_an_explicit_mode_and_plain_is_warned() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec!["x_backend.tools".into()]);
+        p.set_backends(vec![be("x_backend.tools")]);
         p.set_key_mode(Ok((None, "not chosen — …".into())));
-        // go to `keys kept`, → offers secure, enter applies it
-        let mut keys = vec![KeyCode::Down; 6];
+        // no backend picked: id, handler, may call, WRITE, then `keys kept`;
+        // → offers secure, enter applies it
+        let mut keys = vec![KeyCode::Down; 4];
         keys.extend([KeyCode::Right, KeyCode::Enter]);
         match &drive(&mut p, &keys)[..] {
             [Cmd::SetKeyMode { mode }] => assert_eq!(mode, "secure"),

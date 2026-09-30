@@ -2,8 +2,7 @@
 //!
 //! Every key becomes an intent to the ViewModel (`vm`), every frame the
 //! ViewModel publishes is painted cell for cell, and the terminal's size is an
-//! intent too. It never touches the `App`: the browser View draws from the very
-//! same frames, which is what makes the two identical.
+//! intent too. It never touches the `App`.
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -36,8 +35,8 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
             <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(out)
         }));
         crate::tty::redirect_std_to(&paths.cli.join("kernel.log"))?;
-        let boot = vm::Boot { web: opts.web(), port: opts.port, tui: false, announce };
-        let (_h, model) = vm::new(&boot);
+        let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, tui: false, announce };
+        let (_h, model) = vm::new();
         let _ = model.run(app, paths, boot).await;
         if vm::FAILED.load(std::sync::atomic::Ordering::SeqCst) {
             std::process::exit(2);
@@ -53,8 +52,8 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
         paths.cli.join("kernel.log")
     };
     let screen = crate::tty::open(&log)?;
-    let boot = vm::Boot { web: opts.web(), port: opts.port, tui: true, announce: None };
-    let (h, model) = vm::new(&boot);
+    let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, tui: true, announce: None };
+    let (h, model) = vm::new();
     let view = tokio::spawn(paint(screen.term, h));
     let app = model.run(app, paths, boot).await;
     let res = view.await?;

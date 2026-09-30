@@ -36,7 +36,7 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── the page: id, handler, model, endpoint → WRITE THE RECORD ─────────────
+  # ── the page: id, handler, the schema's required fields (endpoint, model) → WRITE ─────────────
   - name: write
     script: |
       wait 2500
@@ -52,11 +52,11 @@ runs:
       key right
       key down
       key enter
-      type stub-model
+      type {stub_url}
       key enter
       key down
       key enter
-      type {stub_url}
+      type stub-model
       key enter
       wait 200
       shot filled

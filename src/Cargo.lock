@@ -875,9 +875,9 @@ dependencies = [
  "fantastic-sqlite-store",
  "fantastic-static-loader",
  "fantastic-user-home-store",
+ "fantastic-vllm-backend",
  "fantastic-web",
  "fantastic-web-mcp",
- "fantastic-web-ui",
  "fantastic-web-ws",
  "futures-util",
  "getrandom 0.2.17",
@@ -913,6 +913,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-vllm-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fantastic-web"
 version = "0.1.0"
 dependencies = [
@@ -937,21 +953,6 @@ dependencies = [
  "fantastic-kernel",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "fantastic-web-ui"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-core",
- "fantastic-file",
- "fantastic-kernel",
- "fantastic-web",
- "futures-util",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]

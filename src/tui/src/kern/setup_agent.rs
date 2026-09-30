@@ -1,18 +1,18 @@
-//! THE BROWSER'S SET-UP PAGE, host side: the `setup` agent.
+//! THE CANVAS'S SET-UP CELL, host side: the `setup` agent.
 //!
-//! The canvas bundle's `setup.html` does everything the terminal's set-up page
-//! does — list the backends, write an AI agent's record, choose where keys are
-//! kept and store a backend's key there, save / load / forget templates, set the
-//! default — through
-//! the canvas's existing socket leg (`canvas_ws`), with its OWN state (it does
-//! not drive the terminal's screen).
+//! The canvas's set-up cell (`setup_view.ts`) does everything the terminal's
+//! set-up page does — list the backends, write an AI agent's record, choose
+//! where keys are kept and store a backend's key there, save / load / forget
+//! templates, set the default — through the canvas's existing socket leg
+//! (`canvas_ws`), with its OWN state (it does not drive the terminal's screen).
 //!
-//! NOT RUN BY DEFAULT. The page creates this agent as a child of the leg when it
-//! opens and deletes it when it closes; `Host::boot` deletes any left behind, so
-//! it is never hydrated. While it exists it does, AS THE HUMAN, exactly what the
-//! terminal's page does (`kern/setup`, `kern/keys`, `kern/templates`) — the
-//! template store serves only the human, and the page reaches it through this
-//! agent, never directly.
+//! NOT RUN BY DEFAULT. The canvas spawns this agent under the leg as the cell's
+//! backend (the view/backend pair) and deletes it with the cell; `Host::boot`
+//! deletes any left behind, so it is never hydrated (the cell then shows its
+//! backend lost; ⟳ respawns it). While it exists it does, AS THE HUMAN, exactly
+//! what the terminal's page does (`kern/setup`, `kern/keys`, `kern/templates`)
+//! — the template store serves only the human, and the cell reaches it through
+//! this agent, never directly.
 
 use std::sync::Arc;
 
@@ -62,13 +62,24 @@ impl SetupBundle {
 
     async fn run(host: &Host, verb: &str, p: &Value) -> Value {
         match verb {
-            "backends" => json!({"backends": crate::kern::setup::backends(host)}),
+            "backends" => json!({"backends": crate::kern::setup::backends(host).iter().map(|b| json!({
+                "module": b.module,
+                "key_var": b.key_var,
+                "fields": b.fields.iter().map(|f| json!({
+                    "name": f.name, "type": f.ty, "required": f.required, "enum": f.one_of,
+                    "default": f.default, "hint": f.hint,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>()}),
             "write_ai" => {
+                let handler = s(p, "handler");
+                let fields = match typed_fields(host, &handler, p) {
+                    Ok(f) => f,
+                    Err(e) => return fail(format!("write_ai: {e}")),
+                };
                 let rec = crate::kern::setup::Record {
                     id: s(p, "id"),
-                    handler: s(p, "handler"),
-                    model: s(p, "model"),
-                    endpoint: s(p, "endpoint"),
+                    handler,
+                    fields,
                     may_call: p
                         .get("may_call")
                         .and_then(Value::as_array)
@@ -111,7 +122,14 @@ impl SetupBundle {
             },
             "save_template" => {
                 let name = s(p, "name");
-                let record = p.get("record").cloned().unwrap_or(Value::Null);
+                let handler = s(p, "handler");
+                let mut record = match typed_fields(host, &handler, p) {
+                    Ok(f) => f,
+                    Err(e) => return fail(format!("save_template: {e}")),
+                };
+                // the backend + every field set — never an id, a key or grants
+                record.insert("handler_module".into(), json!(handler));
+                let record = Value::Object(record);
                 match crate::kern::templates::save(host, &name, record).await {
                     Ok(path) => json!({"saved": name, "path": path}),
                     Err(e) => fail(e),
@@ -154,7 +172,7 @@ impl Bundle for SetupBundle {
         if verb == "reflect" {
             return Ok(Some(json!({
                 "handler_module": HANDLER_MODULE,
-                "sentence": "The browser's AI set-up page, host side: what the terminal's set-up page does, as the human. Exists only while the page is open.",
+                "sentence": "The canvas's AI set-up cell, host side: what the terminal's set-up page does, as the human. Exists only while the cell is open.",
                 "verbs": VERBS,
             })));
         }
@@ -163,6 +181,24 @@ impl Bundle for SetupBundle {
         };
         Ok(Some(Self::run(&host, verb, payload).await))
     }
+}
+
+/// The page's field TEXTS (`fields: {name: text}`), typed by `handler`'s
+/// record schema — the one typing path for a write and a template save.
+fn typed_fields(host: &Host, handler: &str, p: &Value) -> Result<serde_json::Map<String, Value>, String> {
+    let backend = crate::kern::setup::backends(host)
+        .into_iter()
+        .find(|b| b.module == handler)
+        .ok_or_else(|| format!("this build links no backend {handler:?}"))?;
+    let texts = p.get("fields").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut fields = serde_json::Map::new();
+    for f in &backend.fields {
+        let t = texts.get(&f.name).and_then(Value::as_str).unwrap_or("");
+        if let Some(v) = crate::kern::setup::coerce(f, t)? {
+            fields.insert(f.name.clone(), v);
+        }
+    }
+    Ok(fields)
 }
 
 /// Delete every `setup` agent a previous run left behind: it lives only while a

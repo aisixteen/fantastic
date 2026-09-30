@@ -1,7 +1,8 @@
 // THE SPOT INPUT — one text field, opened WHERE you want something (a double
 // click on empty canvas, or ⌘K / Ctrl-K at the pointer), macOS-Spotlight style.
 //
-// Typing a known kind (`terminal`, `html`) creates it at that spot; `@name`
+// Typing a known kind (`terminal`, `html`, `stream` — the host's message
+// stream, `agent` — the set-up cell, to add an AI agent) creates it at that spot; `@name`
 // picks one of the user's AI templates; anything else becomes the FIRST TURN
 // of a new AI cell there, on the default template. With no default template the
 // top row offers the set-up page instead — nothing is guessed. The field never
@@ -11,6 +12,7 @@ export type Pick =
   | { kind: "ai"; template: string | null; text: string }
   | { kind: "terminal" }
   | { kind: "html" }
+  | { kind: "stream" }
   | { kind: "setup" };
 
 export interface Presets {
@@ -58,6 +60,8 @@ export function rows(typed: string, presets: Presets | null): Row[] {
   const kinds: Array<[string, Pick, string]> = [
     ["terminal", { kind: "terminal" }, "⌨"],
     ["html", { kind: "html" }, "◻"],
+    ["stream", { kind: "stream" }, "≡"],
+    ["agent", { kind: "setup" }, "⚙"],
   ];
   const at = /^@(\S*)\s*([\s\S]*)$/.exec(t);
   if (at !== null && presets !== null) {

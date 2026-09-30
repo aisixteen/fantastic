@@ -137,11 +137,6 @@ SCENARIO_RUNNERS = {
         "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/tui.py")],
         "cwd": "pyroot",
     },
-    # THE BROWSER VIEW: `fantastic web`, driven by a scripted page (E18).
-    "web": {
-        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/web.py")],
-        "cwd": "pyroot",
-    },
     # THE CANVAS: the ts kernel bundle served by the rust canvas host, driven
     # in a real headless Chrome over CDP (E19). No model.
     "canvas": {
@@ -176,7 +171,7 @@ def load_suite() -> list[dict]:
         # `mcp` face is not a kernel runtime, so E10–E14 must not cross into
         # it and E15 must not cross out of it.
         declared = doc.get("runtimes")
-        for rt in declared or [r for r in runtimes if r not in ("mcp", "tui", "web")]:
+        for rt in declared or [r for r in runtimes if r not in ("mcp", "tui")]:
             spec = SCENARIO_RUNNERS[rt]
             # DERIVED OVERRIDE. A scenario is shared, but a runtime can need a
             # different budget for the SAME work — the compiled kernels drive

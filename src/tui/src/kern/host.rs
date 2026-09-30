@@ -91,15 +91,11 @@ fn registry() -> BundleRegistry {
             vec![crate::env::HUMAN.to_string()],
         ),
     );
-    // THE BROWSER VIEW: the HTTP host, its socket leg, and the ViewModel's face.
-    // Only ever created by `fantastic web`; registered so they rehydrate.
+    // THE CANVAS: the HTTP host, its embedded page and its socket leg. Only ever
+    // created by `fantastic canvas`; registered so they rehydrate.
     reg.register(fantastic_web::HANDLER_MODULE, fantastic_web::WebBundle);
-    reg.register(fantastic_web_ui::HANDLER_MODULE, fantastic_web_ui::WebUiBundle);
-    // THE CANVAS, beside the View: its embedded page and its socket leg. Only
-    // ever created by `fantastic web`; registered so they rehydrate.
     reg.register(fantastic_canvas_page::HANDLER_MODULE, fantastic_canvas_page::CanvasPageBundle);
     reg.register(fantastic_web_ws::HANDLER_MODULE, fantastic_web_ws::WebWsBundle);
-    reg.register(crate::kern::ui_agent::HANDLER_MODULE, crate::kern::ui_agent::UiBundle);
     // THE BROWSER'S SET-UP PAGE, host side. Registered so the page can create
     // it; it exists only while that page is open (`kern/setup_agent`).
     reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
@@ -107,12 +103,18 @@ fn registry() -> BundleRegistry {
     // spawned from the user's templates by `ai_cells` (`kern/ai_cells`).
     reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
     reg.register(crate::kern::ai_cells::HANDLER_MODULE, crate::kern::ai_cells::AiCellsBundle);
+    // THE CANVAS'S ACTIVITY: open questions to the human, read as the operator
+    // (`kern/activity`) — the page never reads a memory store.
+    reg.register(crate::kern::activity::HANDLER_MODULE, crate::kern::activity::ActivityBundle);
     // The anthropic backend: linked by `--features anthropic` (and by dev-llm).
     #[cfg(feature = "anthropic")]
     reg.register(
         fantastic_anthropic_backend::HANDLER_MODULE,
         fantastic_anthropic_backend::AnthropicBundle,
     );
+    // The vLLM backend: linked by `--features vllm`.
+    #[cfg(feature = "vllm")]
+    reg.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
     // The OpenAI Responses backend: linked by `--features responses`.
     #[cfg(feature = "responses")]
     reg.register(
@@ -127,7 +129,7 @@ impl Host {
     /// the same directory fails here rather than corrupting the store.
     ///
     /// `serve_web`: whether a persisted `web` host starts listening. Only a mode
-    /// that serves the browser View opens the port; `fantastic` and `fantastic
+    /// that serves the canvas opens the port; `fantastic` and `fantastic
     /// mcp` leave a `web` record on disk untouched (not booted).
     pub async fn boot(paths: &Paths, serve_web: bool) -> Result<Self, KernelErr> {
         let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&paths.cwd))
@@ -442,13 +444,12 @@ mod tests {
             "setup.tools",
             "ram_store.tools",
             "ai_cells.tools",
+            "activity.tools",
             "exec_bridge.tools",
             "static_loader.tools",
             "user_probe.tools",
             "web_mcp.tools",
             "web.tools",
-            "web_ui.tools",
-            "ui.tools",
             "canvas_page.tools",
             "web_ws.tools",
         ] {
@@ -458,6 +459,8 @@ mod tests {
         // stray record could become.
         for m in [
             "web_rest.tools",
+            "web_ui.tools",
+            "ui.tools",
         ] {
             assert!(reg.get(m).is_none(), "{m} was never asked for");
         }

@@ -103,7 +103,7 @@ pub enum Got {
         reapplied: Vec<String>,
     },
     /// The backends this build links.
-    Backends(Vec<String>),
+    Backends(Vec<crate::kern::setup::Backend>),
     /// Where provider keys are kept: the mode (`None` until chosen) and where
     /// that is, in words — or why it cannot be read.
     KeyMode(Result<(Option<String>, String), String>),
