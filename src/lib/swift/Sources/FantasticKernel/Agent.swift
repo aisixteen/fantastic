@@ -41,6 +41,16 @@ public final class Agent: @unchecked Sendable {
     private let inFlightLock = NSLock()
     private var _inFlight: Int = 0
 
+    /// Set for an agent on a CONNECTED PEER KERNEL (python's `RemoteTarget`):
+    /// built by one send for `<guid>|<agent id>`, never registered in this tree,
+    /// and dispatched through the peer's route instead of a handler here. Its
+    /// `parentId` is `nil` like python's `parent = None`, so every path that reads
+    /// "no parent" as "the root" must ask `isRemote` first.
+    let remote: RemoteRef?
+
+    /// Is this an agent on a connected peer kernel (see `init(remote:_:)`)?
+    public var isRemote: Bool { remote != nil }
+
     public init(
         id: AgentId,
         handlerModule: String?,
@@ -72,6 +82,21 @@ public final class Agent: @unchecked Sendable {
         self._meta = stamped
         self.rootPath = rootPath
         self.ephemeral = ephemeral
+        self.remote = nil
+    }
+
+    /// The target ONE send resolved `<guid>|<agent id>` to on a connected peer.
+    /// No structural baseline: it is nobody's parent or child here, and its
+    /// `callable_by` is python's empty map — whether it accepts a call is decided
+    /// on its own kernel.
+    init(remote qualified: AgentId, _ ref: RemoteRef) {
+        self.id = qualified
+        self.handlerModule = nil
+        self.parentId = nil
+        self._meta = ["callable_by": .object([:])]
+        self.rootPath = URL(fileURLWithPath: "")
+        self.ephemeral = true
+        self.remote = ref
     }
 
     // ── meta access ─────────────────────────────────────────────

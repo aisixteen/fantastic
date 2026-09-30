@@ -90,6 +90,14 @@ def client(seeded_kernel):
         yield c, seeded_kernel
 
 
+def test_no_generated_docs_routes(client):
+    """FastAPI's `/docs`, `/redoc` and `/openapi.json` are routes nobody declared —
+    and the last describes the whole route table. A web agent serves none of them."""
+    c, _ = client
+    for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+        assert c.get(path).status_code == 404, path
+
+
 def test_root_is_not_a_page(client):
     """The host renders nothing of its own: `/` is undeclared, so it is a 404 —
     no tree index, nothing about the kernel leaks to an anonymous client."""

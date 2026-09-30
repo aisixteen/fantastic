@@ -111,13 +111,21 @@ enum REPLMode {
     /// abandons its input thread. The caller tells the two `nil`s apart by
     /// `Task.isCancelled` — a real Ctrl-D is not cancelled and still prints
     /// python's EOF blank line.
-    static func readLineAsync() async -> String? {
+    ///
+    /// `read` is the blocking read itself — stdin's `readLine()` everywhere but a
+    /// test, which needs a read that REALLY blocks: under `swift test` stdin is
+    /// at EOF, so `readLine()` returns at once and a test of the abandonable leg
+    /// raced it instead of waiting on it (measured: 1 run in ~60 saw the REPL
+    /// leg finish first).
+    static func readLineAsync(
+        _ read: @escaping @Sendable () -> String? = { readLine() }
+    ) async -> String? {
         let slot = LineSlot()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
                 slot.store(cont)
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let line = readLine()
+                    let line = read()
                     slot.take()?.resume(returning: line)
                 }
                 // Cancelled before the continuation was stored: honour it now.

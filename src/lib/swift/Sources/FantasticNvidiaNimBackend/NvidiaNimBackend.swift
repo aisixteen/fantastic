@@ -99,6 +99,29 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
 
     public var readme: String? { Self.readmeText }
 
+    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    /// value outside its set — every missing field named at once, from the schema.
+    /// Python `validate_meta`.
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        RecordSchema.validate(Self.RECORD_SCHEMA, backend: name, meta: meta, record: record)
+    }
+
+    public var recordSchema: JSON? { Self.RECORD_SCHEMA }
+
+    /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+    /// no agent existing (`reflect bundles=all`), from the constants the provider
+    /// runs on. `validateMeta` enforces it at the write, so the page and the kernel
+    /// cannot disagree about what a record needs. Python `RECORD_SCHEMA`.
+    static let RECORD_SCHEMA: JSON = RecordSchema.schema(
+        [
+            RecordSchema.field(
+                "endpoint", "str", "the NIM OpenAI-compatible URL", required: true),
+            RecordSchema.field("model", "str", "the model name", required: true),
+        ],
+        keyVar: KEY_VAR)
+
     /// THE PYTHON FILE, BYTE FOR BYTE (`nvidia_nim_backend/readme.md`). Persisted as
     /// `agents/<id>/readme.md` and served by `reflect readme=true`, so a swift
     /// kernel and a python one hand a reader the same document. A swift-written

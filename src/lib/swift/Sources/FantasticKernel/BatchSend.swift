@@ -63,11 +63,35 @@ extension Kernel {
         // Concurrent settle. Swift's structured child tasks INHERIT the enclosing
         // task-locals, so `currentSender`/`currentTask`/`currentOrigin` survive
         // the fan-out untouched — the property tokio does not have.
+        //
+        // STARTED IN INPUT ORDER. A group starts its children in any order, and a
+        // child's first act is its dispatch prologue — the fanout that puts the
+        // item in its target's inbox and its watchers' streams. Python creates the
+        // dispatch tasks in order and each runs that prologue before the next one
+        // starts, so a batch of two items to one agent reaches it in the order it
+        // was written. Here each child is started only once the one before it has
+        // fanned out (`onFanout`); they still SETTLE concurrently. An item with no
+        // dispatch (settled at launch, or joining another execution) lets the next
+        // one go at once — a join must never hold the rest of the batch.
         var out = [Outcome?](repeating: nil, count: launched.count)
         await withTaskGroup(of: (Int, Outcome).self) { group in
             for (i, l) in launched.enumerated() {
-                group.addTask { (i, await self.settle(l)) }
+                let started = StartSignal()
+                group.addTask {
+                    guard case .dispatch = l else {
+                        started.fire()
+                        return (i, await self.settle(l))
+                    }
+                    let o = await KernelTaskLocals.$onFanout.withValue({ started.fire() }) {
+                        await self.settle(l)
+                    }
+                    started.fire()  // a dispatch that ended before its prologue
+                    return (i, o)
+                }
+                await started.wait()
             }
+            // Every item has reached its target: the batch is LAUNCHED.
+            KernelTaskLocals.onBatchLaunched?()
             for await (i, o) in group { out[i] = o }
         }
         return out.map { $0 ?? Outcome.refused(.object([:])) }
@@ -157,8 +181,13 @@ extension Kernel {
             }
         }
 
-        // 9. resolve — `"kernel"` names the root, else a literal id.
-        guard let target = resolveAgent(item.target.value) else {
+        // 9. resolve — `"kernel"` names the root, else a literal id, else a
+        // QUALIFIED `<guid>|<agent id>`: this kernel's own guid names a local
+        // agent, a connected peer's guid an agent there (cross-kernel addressing).
+        guard
+            let target = resolveAgent(item.target.value)
+                ?? qualifiedTarget(item.target.value)
+        else {
             return .settled(
                 Outcome.refused(
                     Refusal.unknown(item.target.value, live: allAgents().map { $0.id.value })))
@@ -404,7 +433,10 @@ extension Kernel {
                 nextPid = d.taskId
             }
 
-            if d.verb == "reflect" && status == .completed {
+            // NOT for a remote target: its kernel already composed the reflect
+            // with ITS flags over ITS tree — a reflect of `<guid>|kernel` is that
+            // tree, and there is no local agent to render it from.
+            if d.verb == "reflect" && status == .completed && !d.target.isRemote {
                 // A ROSTER NODE THAT RAISED FAILS THE WHOLE REFLECT: python's
                 // exception propagates out of `_roster` into the item's own
                 // settle, so the reflect answers that body with `failed`.
@@ -569,4 +601,36 @@ struct Dispatch {
     let taskId: TaskId
     /// A RAW request body: present ⇒ dispatch through the BINARY channel.
     let binary: Data?
+}
+
+/// One-shot "this item has started": the batch turnstile's signal. `fire` is
+/// idempotent (a retry fans out again; only the first counts) and `wait`
+/// returns at once when it already fired.
+public final class StartSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    public init() {}
+
+    public func fire() {
+        let w: CheckedContinuation<Void, Never>? = lock.withLock {
+            guard !fired else { return nil }
+            fired = true
+            defer { waiter = nil }
+            return waiter
+        }
+        w?.resume()
+    }
+
+    public func wait() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let now: Bool = lock.withLock {
+                if fired { return true }
+                waiter = c
+                return false
+            }
+            if now { c.resume() }
+        }
+    }
 }

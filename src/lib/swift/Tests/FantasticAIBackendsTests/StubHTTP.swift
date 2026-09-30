@@ -39,6 +39,9 @@ final class StubHTTP: @unchecked Sendable {
 
     let port: Int
     private let listenFD: Int32
+    /// The pipe `stop()` writes to wake the accept thread. See `stop()`.
+    private let wakeRead: Int32
+    private let wakeWrite: Int32
     private let lock = NSLock()
     private var pending: [Reply]
     private var seen: [String] = []
@@ -70,12 +73,44 @@ final class StubHTTP: @unchecked Sendable {
             }
         }
         port = Int(UInt16(bigEndian: boundAddr.sin_port))
+        var wake: [Int32] = [0, 0]
+        precondition(pipe(&wake) == 0, "pipe() failed")
+        wakeRead = wake[0]
+        wakeWrite = wake[1]
 
+        // THE ACCEPT THREAD OWNS `fd` (and the wake pipe's read end): it is the
+        // only one that uses it and the only one that closes it, AFTER its last
+        // `accept`. `stop()` used to `close(listenFD)` from the test's thread while
+        // this loop was still accepting on that NUMBER: the OS handed the number
+        // to the next test's `socket()`, this stale loop accepted THAT stub's
+        // connection, saw itself stopped and closed it — the other test's
+        // provider read a closed connection as "refused" (measured: the vLLM
+        // suite failed 11 of 25 runs, a different test each time).
+        let wr = wakeRead
         Thread.detachNewThread { [weak self] in
+            defer {
+                close(fd)
+                close(wr)
+            }
+            var fds = [
+                pollfd(fd: fd, events: Int16(POLLIN), revents: 0),
+                pollfd(fd: wr, events: Int16(POLLIN), revents: 0),
+            ]
             while true {
+                fds[0].revents = 0
+                fds[1].revents = 0
+                if poll(&fds, 2, -1) < 0 {
+                    if errno == EINTR { continue }
+                    return
+                }
+                if fds[1].revents != 0 { return }  // stop() asked
+                guard fds[0].revents & Int16(POLLIN) != 0 else { continue }
                 let client = accept(fd, nil, nil)
-                if client < 0 { return }
-                guard let self, !self.isStopped else {
+                if client < 0 {
+                    if errno == EINTR || errno == ECONNABORTED { continue }
+                    return
+                }
+                guard let self else {
                     close(client)
                     return
                 }
@@ -84,6 +119,8 @@ final class StubHTTP: @unchecked Sendable {
         }
     }
 
+    deinit { stop() }
+
     /// Every request line + headers this stub received, in order.
     var requests: [String] {
         lock.lock()
@@ -91,18 +128,15 @@ final class StubHTTP: @unchecked Sendable {
         return seen
     }
 
+    /// Wake the accept thread and let IT close the listening socket — never
+    /// close an fd another thread may still be using (see `init`). Closing the
+    /// pipe's write end makes the read end readable; only `stop()` touches it.
     func stop() {
         lock.lock()
         let already = stopped
         stopped = true
         lock.unlock()
-        if !already { close(listenFD) }
-    }
-
-    private var isStopped: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return stopped
+        if !already { close(wakeWrite) }
     }
 
     private func serve(_ client: Int32) {

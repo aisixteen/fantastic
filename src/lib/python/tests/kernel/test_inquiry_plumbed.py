@@ -192,6 +192,9 @@ async def _wire(kernel, script: _Script, *, answer: str, ai_id: str = "asker"):
                         "type": "create_agent",
                         "parent_id": kernel.id,
                         "handler_module": "ollama_backend.tools",
+                        # required at the write (the schema); the provider is faked, never dialled
+                        "endpoint": "http://127.0.0.1:9/stub",
+                        "model": "stub",
                         "id": ai_id,
                         "context_window": 32768,
                         **memory_meta(kernel, ai_id, {"user": "*", "cli": "*"}),
@@ -338,6 +341,9 @@ async def test_the_gate_stands_between_a_model_and_a_person(seeded_kernel):
                         "type": "create_agent",
                         "parent_id": seeded_kernel.id,
                         "handler_module": "ollama_backend.tools",
+                        # required at the write (the schema); the provider is faked, never dialled
+                        "endpoint": "http://127.0.0.1:9/stub",
+                        "model": "stub",
                         "id": "stranger",
                         "context_window": 32768,
                         **memory_meta(seeded_kernel, "stranger", {"cli": "*"}),

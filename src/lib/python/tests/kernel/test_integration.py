@@ -30,6 +30,9 @@ async def test_persistence_routing_through_the_memory_store(seeded_kernel):
                             "type": "create_agent",
                             "parent_id": "kernel_state",
                             "handler_module": "ollama_backend.tools",
+                            # required at the write (the schema); the provider is faked, never dialled
+                            "endpoint": "http://127.0.0.1:9/stub",
+                            "model": "stub",
                             "id": "chatter",
                             # The conversation lives in the agent's MEMORY STORE —
                             # wired and granted explicitly, both ends.

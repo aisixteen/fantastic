@@ -49,6 +49,26 @@ async def _store(root: Any, payload: dict) -> dict:
     return r if isinstance(r, dict) else {}
 
 
+async def _grant_forensics(root: Any) -> str:
+    """What the store's gate looked like when a read was refused, and every call
+    THIS driver made that touched the store — so a grant that vanished mid-run
+    (rust E30, 2026-09-30: `rest` gone from `memory`'s callable_by, the model
+    never having touched it) leaves evidence instead of a bare refusal."""
+    lines = []
+    r = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
+    rec = next(
+        (a for a in ((r.get("result") or {}).get("agents") or []) if a.get("id") == MEMORY),
+        None,
+    )
+    lines.append(f"  memory record now: callable_by={(rec or {}).get('callable_by')!r} "
+                 f"admins={(rec or {}).get('admins')!r}")
+    led = (await root.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
+    for e in ((led.get("result") or {}).get("executions") or []):
+        if MEMORY in repr(e.get("outcome")) or e.get("target") == MEMORY and e.get("status") != "completed":
+            lines.append(f"  ledger: {e!r}"[:400])
+    return "\n".join(lines)
+
+
 async def rows_of(root: Any, aid: str, *, conversation_only: bool = False) -> list[dict]:
     """Every row of `aid`'s conversation, oldest first (all pages)."""
     rows: list[dict] = []
@@ -59,7 +79,9 @@ async def rows_of(root: Any, aid: str, *, conversation_only: bool = False) -> li
             q["after"] = after
         r = await _store(root, q)
         if r.get("error"):
-            raise AssertionError(f"memory read({aid}) refused: {r}")
+            raise AssertionError(
+                f"memory read({aid}) refused: {r}\n" + await _grant_forensics(root)
+            )
         rows.extend(r.get("rows") or [])
         after = r.get("next")
         if after is None:
@@ -149,3 +171,65 @@ async def wire_in_process(root: Any) -> None:
     out = await ctx.start(boot_all=False)
     if not out.get("started"):
         raise SystemExit(f"kernel_start refused: {out}")
+
+
+async def watch_store_writers(port: int, root_id: str) -> None:
+    """Print WHO rewrites `memory`'s grants, and to what — every `update_agent`
+    naming the store, read off the kernel's state stream with its `sender` (the
+    poll in `watch_store_grants` says WHEN a grant changed, not by whom; E30 lost
+    `rest` from the store twice with no writer in the builder's transcript,
+    2026-09-30). Run as a background task; cancel to stop."""
+    import time
+
+    from helpers.host.ws import StateWatcher
+
+    t0 = time.monotonic()
+    w = StateWatcher(port, root_id)
+    try:
+        await w.connect()
+        async for ev in w.state_events():
+            p = ev.get("payload") or {}
+            if (
+                ev.get("kind") == "send"
+                and isinstance(p, dict)
+                and p.get("type") == "update_agent"
+                and p.get("id") == MEMORY
+            ):
+                cb = p.get("callable_by")
+                keys = sorted(cb) if isinstance(cb, dict) else cb
+                print(
+                    f"  [grants] t={time.monotonic() - t0:6.1f}s update_agent memory "
+                    f"from sender={ev.get('sender')!r} via {ev.get('agent_id')!r}: "
+                    f"fields={sorted(k for k in p if k not in ('type', 'id'))} "
+                    f"callable_by={keys}",
+                    flush=True,
+                )
+    except Exception as e:  # noqa: BLE001 — a forensic probe must not kill the run
+        print(f"  [grants] writer watch unavailable: {e}", flush=True)
+    finally:
+        await w.close()
+
+
+async def watch_store_grants(root: Any, *, every: float = 5.0) -> None:
+    """Print `memory`'s callable_by every time it CHANGES, with the elapsed time —
+    run as a background task for the length of a run, so a grant that disappears
+    is pinned to the moment (and the transcript turn) it went. Cancel to stop."""
+    import asyncio
+    import time
+
+    t0 = time.monotonic()
+    last = None
+    while True:
+        try:
+            r = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
+            rec = next(
+                (a for a in ((r.get("result") or {}).get("agents") or []) if a.get("id") == MEMORY),
+                None,
+            )
+            cb = sorted(((rec or {}).get("callable_by") or {}).keys())
+            if cb != last:
+                print(f"  [grants] t={time.monotonic() - t0:6.1f}s memory.callable_by = {cb}", flush=True)
+                last = cb
+        except Exception as e:  # noqa: BLE001 — a forensic probe must not kill the run
+            print(f"  [grants] watch error: {e}", flush=True)
+        await asyncio.sleep(every)

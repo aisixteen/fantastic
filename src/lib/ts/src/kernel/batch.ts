@@ -157,7 +157,15 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // half here, before the bridge sees it; the target's half is the host's, on
   // the call as it arrives there.
   const origin = k.currentOrigin;
-  if (origin !== null) {
+  if (origin !== null && k.isForeign(origin)) {
+    // A CALL FROM ANOTHER KERNEL reaches THIS kernel's agents only — never
+    // through to the host again — and only the target's half is judged here.
+    if (target === undefined) {
+      return { index, settled: refused(unknown(resolvedId, [...k.agents.keys()])) };
+    }
+    const d = k.ingressGate(origin, verb, resolvedId);
+    if (d !== null) return { index, settled: refused(d) };
+  } else if (origin !== null) {
     const d = target !== undefined ? k.gate(origin, verb, resolvedId) : k.egressGate(origin, verb, resolvedId);
     if (d !== null) return { index, settled: refused(d) };
   }

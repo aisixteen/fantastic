@@ -238,7 +238,9 @@ class HostKernel:
 
         (w / "agents/web/agents/rest").mkdir(parents=True, exist_ok=True)
         root = yaml.safe_load((w / "agent.yaml").read_text())
-        root["callable_by"] = {**BASE, "rest": "*"}
+        # `ws` may read the STATE STREAM — the grant forensics (the other half
+        # of this edge is on the ws leg's own `can_call`, below).
+        root["callable_by"] = {**BASE, "rest": "*", "ws": ["state_subscribe"]}
         root["can_call"] = {**BASE, "rest": "*"}
         # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one. One
         # ram_store for the kernel's own rows AND every AI agent's conversation; the
@@ -280,7 +282,10 @@ class HostKernel:
         (w / "agents/web/agents/ws/agent.yaml").write_text(_dump(
             {"id": "ws", "handler_module": "web_ws.tools", "parent_id": "web",
              "ingress_rule": "allow_all_ingress",
-             "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
+             # `state_subscribe` is privileged (never under `*`): the grant
+             # forensics (`memory.watch_store_writers`) read the state stream here.
+             "can_call": {**BASE, self.root_id: [*ROOT_VERBS, "state_subscribe"],
+                          "kernel": "*",
                           memory.MEMORY: "*",
                           **{t: "*" for t in self.reach if t != self.root_id}}}))
         (w / "agents/web/agents/rest/agent.yaml").write_text(_dump(

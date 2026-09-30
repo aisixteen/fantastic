@@ -2796,11 +2796,15 @@ async fn json_body_decodes_like_cpython_json_loads() {
     let r = post(u32le).await.expect("post");
     assert_eq!(r.status().as_u16(), 200, "a UTF-32-LE body was refused");
 
-    // `ff fe 7b` reads as a truncated UTF-16 body: python's decode RAISES out of
-    // the handler, which uvicorn answers 500 text/plain.
+    // `ff fe 7b` reads as a truncated UTF-16 body: it will not decode, and a
+    // body that will not decode is a malformed body — python's 400, with its
+    // text (python catches the `UnicodeDecodeError` beside `JSONDecodeError`).
     let r = post(vec![0xFF, 0xFE, 0x7B]).await.expect("post");
-    assert_eq!(r.status().as_u16(), 500);
-    assert_eq!(r.text().await.unwrap(), "Internal Server Error");
+    assert_eq!(r.status().as_u16(), 400);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"],
+        "web_rest: request body is not valid JSON"
+    );
 
     // Still-malformed JSON is still a 400 with python's text.
     let r = post(b"{not json".to_vec()).await.expect("post");
@@ -3035,3 +3039,8 @@ mod watch_path;
 /// Literal routes before patterns (python `test_mount.py`).
 #[path = "tests_route_order.rs"]
 mod route_order;
+
+/// The ws leg as the transport of cross-kernel addressing (python
+/// `web_ws/tests/test_peer_calls.py`).
+#[path = "tests_peer_calls.rs"]
+mod peer_calls;

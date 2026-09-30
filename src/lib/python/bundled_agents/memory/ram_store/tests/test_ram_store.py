@@ -331,3 +331,13 @@ async def test_remote_caller_is_keyed_by_its_qualified_address(kernel, store):
         for r in (await _call(kernel, "mem", {"type": "dump"}))["tables"]["rows"]
     )
     assert owners == ["g1|leg", "g2|scout"]
+
+
+async def test_a_superscript_digit_is_no_id_and_raises_nothing(kernel, store):
+    """`'²'.isdigit()` is True and `int('²')` raises: a `read` naming it used to
+    fail the whole call as a raised handler. It names no row, like any non-id
+    (parity 2026-09-30 — rust/swift accept ASCII digits only)."""
+    await _append(kernel, "alice", [{"id": 101, "role": "user", "content": "hi"}])
+    out = await _call(kernel, "mem", {"type": "read", "ids": ["²", "101"]}, as_="alice")
+    assert "error" not in out, out
+    assert [r["id"] for r in out["rows"]] == [101], out

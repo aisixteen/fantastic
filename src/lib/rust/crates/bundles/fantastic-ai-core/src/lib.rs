@@ -92,6 +92,7 @@ pub mod projection;
 pub mod provider;
 pub mod retrieval;
 pub mod route;
+pub mod schema;
 pub mod state;
 pub mod strategies;
 pub mod think;

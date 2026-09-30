@@ -153,8 +153,10 @@ flight (a reply that has not come, a peer who has not answered), emit
 the honest alternative to re-issuing a call: this is an ASYNC system, and a reply you
 have not seen is on its way, not lost. `await` with nothing of yours in flight and
 nothing queued is refused — then act, or call `done`. A turn with NO call ends
-nothing: the runtime reminds you once (a call decided in thinking does not execute
-unless the envelope is written out), so never leave a turn unsignalled — call, `await`,
+nothing: the runtime reminds you, every time (a call decided in thinking does not
+execute unless the envelope is written out; a turn of thinking alone is discarded and
+rerolled) — and if turn after turn emits nothing, it gives up on the chain and tells
+your caller you could not answer. So never leave a turn unsignalled — call, `await`,
 or `done`.
 
 AN INQUIRY IS A CALL, and whoever receives it is AN AGENT LIKE ANY OTHER. When

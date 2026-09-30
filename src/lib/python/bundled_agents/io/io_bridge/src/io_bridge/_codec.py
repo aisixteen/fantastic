@@ -78,6 +78,25 @@ def encode_frame(envelope: dict) -> tuple[bytes, bool]:
     return struct.pack(">I", len(head_bytes)) + head_bytes + body, True
 
 
+def _no_constant(name: str):
+    raise ValueError(f"{name} is not JSON")
+
+
+def loads(text: str | bytes):
+    """JSON off the wire, STRICTLY: `NaN`, `Infinity` and `-Infinity` are not JSON
+    (RFC 8259), and python's `json.loads` alone accepts them — a peer could plant a
+    value no other runtime can even represent (parity 2026-09-30: python took a
+    `NaN` REST body that rust and swift refuse). Refused as a `JSONDecodeError`, so
+    every caller's existing "not valid JSON" path answers it."""
+    try:
+        return json.loads(text, parse_constant=_no_constant)
+    except ValueError as e:
+        if isinstance(e, json.JSONDecodeError):
+            raise
+        doc = text if isinstance(text, str) else ""
+        raise json.JSONDecodeError(str(e), doc, 0) from None
+
+
 def decode_frame(data: bytes | str) -> dict:
     """Parse a wire frame back into an envelope. `str` ⇒ a text (JSON) frame; `bytes`
     ⇒ a binary frame with the raw body restored at `_binary_path`.
@@ -89,7 +108,7 @@ def decode_frame(data: bytes | str) -> dict:
     `ValueError` — so a caller can catch one thing and keep its socket."""
     if isinstance(data, str):
         try:
-            return json.loads(data)
+            return loads(data)
         except Exception as e:
             raise ValueError(f"bad text frame: {e}") from e
     if len(data) < 4:
@@ -101,7 +120,7 @@ def decode_frame(data: bytes | str) -> dict:
             f"{len(data) - 4}B follow the length prefix"
         )
     try:
-        head = json.loads(data[4 : 4 + head_len].decode("utf-8"))
+        head = loads(data[4 : 4 + head_len].decode("utf-8"))
     except Exception as e:
         raise ValueError(f"bad binary frame header: {e}") from e
     body = data[4 + head_len :]

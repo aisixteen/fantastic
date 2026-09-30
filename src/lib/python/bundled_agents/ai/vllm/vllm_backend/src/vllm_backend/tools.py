@@ -20,6 +20,7 @@ because that module-level name IS the bundle's cancel hook.
 from __future__ import annotations
 
 from ai_core import build, required_meta
+from ai_core.schema import field, schema, validate
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -34,6 +35,7 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
 
 from vllm_backend.provider import (
     CONNECT_TIMEOUT,
+    KEY_VAR,
     KV_OVERFLOWS,
     KV_TTL,
     PASSTHROUGH,
@@ -126,17 +128,85 @@ async def _reflect_extra(id, kernel):
     }
 
 
-#: The fields a turn cannot run without — refused at the write when absent.
-REQUIRED = ("endpoint", "model", "max_tokens", "kv_slots", "kv_overflow")
+#: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+#: no agent existing (`reflect bundles=all`). Built from the constants the provider
+#: runs on, and enforced by `validate_meta` below, so the page, the write check and
+#: the turn cannot disagree. The five required fields have NO default: nothing is
+#: guessed about a server.
+RECORD_SCHEMA = schema(
+    [
+        field("endpoint", "str", "the vLLM server's /v1 URL", required=True),
+        field("model", "str", "the served model name", required=True),
+        field("max_tokens", "int", "a turn's output budget (tokens)", required=True),
+        field(
+            "kv_slots",
+            "int",
+            "how many conversations may be live on the endpoint",
+            required=True,
+        ),
+        field(
+            "kv_overflow",
+            "enum",
+            "all slots live: evict (the least-recently-used rotates out) or reject "
+            "(the newcomer is refused)",
+            required=True,
+            enum=KV_OVERFLOWS,
+        ),
+        field(
+            "temperature",
+            "float",
+            "sampling temperature",
+            default=SAMPLING_DEFAULTS["temperature"],
+        ),
+        field("top_p", "float", "nucleus sampling", default=SAMPLING_DEFAULTS["top_p"]),
+        field("top_k", "int", "top-k sampling", default=SAMPLING_DEFAULTS["top_k"]),
+        field(
+            "reasoning_effort",
+            "enum",
+            "how much the model wants to think (xhigh needs a thinking_token_budget)",
+            enum=REASONING_EFFORTS,
+            default=SAMPLING_DEFAULTS["reasoning_effort"],
+        ),
+        field(
+            "thinking_token_budget",
+            "int",
+            "the hard cap on thinking tokens, below max_tokens; unset, a turn sends "
+            "min(default, max_tokens/2)",
+            default=SAMPLING_DEFAULTS["thinking_token_budget"],
+        ),
+        field("min_p", "float", "min-p sampling; sent only when set"),
+        field("presence_penalty", "float", "sent only when set"),
+        field("frequency_penalty", "float", "sent only when set"),
+        field("repetition_penalty", "float", "sent only when set"),
+        field("no_repeat_ngram_size", "int", "sent only when set"),
+        field("seed", "int", "sent only when set"),
+        field("stop", "list", "stop sequences; sent only when set"),
+        field(
+            "kv_ttl",
+            "float",
+            "seconds an idle conversation keeps its slot",
+            default=KV_TTL,
+        ),
+        field(
+            "connect_timeout",
+            "float",
+            "seconds to reach the server",
+            default=CONNECT_TIMEOUT,
+        ),
+        field(
+            "read_timeout",
+            "float",
+            "seconds to wait on a generation",
+            default=READ_TIMEOUT,
+        ),
+    ],
+    # the door's key, when it wants one — sent as a Bearer header only when set
+    key_var=KEY_VAR,
+)
 
-
-def _present(rec: dict, key: str) -> bool:
-    """Whether the record NAMES `key` in a usable shape (the shape itself is
-    judged by the checks above)."""
-    v = rec.get(key)
-    if key in ("endpoint", "model"):
-        return isinstance(v, str) and bool(v.strip())
-    return v is not None
+#: The fields a turn cannot run without — refused at the write when absent. The
+#: schema's required fields, not a second list.
+REQUIRED = tuple(f["name"] for f in RECORD_SCHEMA["fields"] if f["required"])
 
 
 def _positive(v, *, integer: bool) -> bool:
@@ -202,17 +272,8 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     # write accepted but no turn could use failed only later, on every turn,
     # far from the create that caused it (measured: E37 multisubai_build — the
     # solvers carried endpoint/model/max_tokens but no kv_slots/kv_overflow).
-    # Named ALL at once, so one retry fixes the record.
-    missing = [k for k in REQUIRED if not _present(merged, k)]
-    if missing:
-        return (
-            f"{NAME}: required on the record and missing: {', '.join(missing)} — "
-            "nothing is guessed. endpoint = the server's /v1 URL, model = the "
-            "served name, max_tokens = a turn's output budget, kv_slots = how many "
-            "conversations may be live on the endpoint, kv_overflow = evict (the "
-            "least-recently-used rotates out) or reject (the newcomer is refused)"
-        )
-    return None
+    # Named ALL at once, from the schema, so one retry fixes the record.
+    return validate(RECORD_SCHEMA, NAME, meta, record)
 
 
 def _build():

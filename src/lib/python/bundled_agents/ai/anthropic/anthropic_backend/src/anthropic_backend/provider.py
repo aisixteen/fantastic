@@ -43,6 +43,8 @@ BACKOFF = 1.5
 # content, no tool call. Its own turns ran median ~2.3k / p90 ~5.9k tokens.
 # The endpoint's ceiling is `max_tokens + prompt <= the model's context`.
 MAX_TOKENS = 8192
+#: The environment variable the key is read from, at call time — never the record.
+KEY_VAR = "ANTHROPIC_API_KEY"
 
 
 def _to_anthropic(messages: list[dict]) -> tuple[str | None, list[dict]]:
@@ -109,9 +111,9 @@ class AnthropicProvider:
 
         import httpx
 
-        key = os.environ.get("ANTHROPIC_API_KEY")
+        key = os.environ.get(KEY_VAR)
         if not key:
-            raise RuntimeError("ANTHROPIC_API_KEY not set in environment (.env)")
+            raise RuntimeError(f"{KEY_VAR} not set in environment (.env)")
         if not self._model:
             raise RuntimeError(
                 "anthropic_backend: no `model` set — this connector does not guess "

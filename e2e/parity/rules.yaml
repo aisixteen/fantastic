@@ -171,7 +171,7 @@ rules:
       TYPE is kept in the placeholder because an int id and a digit-string id are
       a difference (C17, A4.20, B5.9).
     keys: [id, ids, parent, task_id, job_id, message_id, pid, refs, expand, after, next,
-           bundles_next, view_ids, killed]
+           bundles_next, view_ids, killed, covers, msg]
     only_when: int or digit-string; never an agent-id string
     text_anchors:
       - '\[reply to (\d+)'
@@ -184,6 +184,8 @@ rules:
       - '\[recall (\d+) ·'
       - 'msg (\d+) · re (\d+)'
       - 'joined execution (\d+)'
+      # the dedup note of a settled reply (measured 2026-09-30, python self-diff)
+      - 'reply in row (\d+)'
       - '^(\d+) · '
       # The same digest line reached as the RAW request body the stub recorded,
       # where the newline is still `\` `n` inside a json string and `^` never
@@ -197,7 +199,15 @@ rules:
       - '"(expand|ids|refs|view_ids)": [N, …]'
       # A row quoted as json inside a prompt (the fold prompt does this), reached
       # both singly and doubly quoted.
-      - '\\?"(id|task_id|message_id|parent_row|row_id)\\?": N'
+      - '\\?"(id|task_id|message_id|parent_row|row_id|msg)\\?": N'
+    reservation_mark: >
+      `next_id=<n>` in text → `next_id=<NEXT_ID>`. The id counter's RESERVATION
+      MARK as the root record renders it into a system prompt: the kernel reserves
+      ids in blocks and persists the block's end, so the mark says how many ids a
+      run had consumed — and the loader's debounced persistence consumes a
+      different number on every run (measured 2026-09-30, python self-diff:
+      `next_id=2001` against `1001`, the prompt otherwise identical). Its presence
+      and place stay compared.
     replacement: <ID#n:int> / <ID#n:str>
     never_rename:
       # Harness-chosen ids are deterministic: renaming them would hide a runtime
@@ -355,8 +365,23 @@ rules:
     #:      in the agent record, and the SAME budget recorded as a FIELD
     #:      (`$.rows[n].budget`) is left alone — it is a diff line, owned by
     #:      residual R-N2-1.
+    #:   6. (2026-09-30) a ledger EXECUTION's outcome `bytes` — the size of the
+    #:      reply that settled it, a reply the family that made the call records
+    #:      WHOLE in its own file and compares there. Case 2's argument again.
+    #:      Measured on the python self-diff: 450 vs 452, 19970 vs 19972 in
+    #:      `tree/kernel_ledger_after.json`. A zero stays a zero; `status` and
+    #:      `attempts` beside it stay exact.
+    #:   7. (2026-09-30) a memory-store ROW's `bytes` where its `head` carries a
+    #:      renamed id — the head is the content cut at a fixed width, so the
+    #:      content carries the id too (case 1 with the text truncated). The
+    #:      HEAD is then compared on the prefix both sides show, and only when
+    #:      both raw heads have the same length (the kernel's cap): the cut
+    #:      lands where the raw digit widths put it. Measured on the python
+    #:      self-diff: `store/s4/history_final.json` 127 vs 126, `…</v` vs
+    #:      `…</ve`.
     self_check: diff.py rulecheck — 6 cases (census both ways, recall header
-      both ways)
+      both ways), plus 7 for cases 6 and 7 (the size forgiven; status, a zero,
+      a differing prefix, a different raw width and an id-free head still lines)
     must_not_hide:
       - A2.21  # a symlinked file's SIZE, where the text is not in the reply
       - C44    # the 64 KiB record read, which is about a LENGTH

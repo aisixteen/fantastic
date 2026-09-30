@@ -6,11 +6,23 @@
 //! C→S {type:"emit",  target, payload}         → kernel.emit (no reply)
 //! C→S {type:"watch"|"unwatch", src}           → (un)register a watcher
 //! C→S {type:"state_subscribe"|"state_unsubscribe"}
+//! C→S {type:"hello", guid}                    → the page kernel becomes the
+//!                                               host's peer `<guid>|<agent>`
 //! S→C {type:"reply", id, data} | {type:"error", id, …}
 //! S→C {type:"event", src, payload}            → an event from a watched agent
 //!                                               (`src` = the name the client watched)
 //! S→C {type:"event", payload}                 → an event emitted to THIS connection
+//! S→C {type:"call", id:"h<n>", target, payload, caller}
+//!                                             → the host calling a page agent
+//! C→S {type:"reply"|"error", id:"h<n>", data} → that call's outcome
 //! ```
+//!
+//! **CROSS-KERNEL ADDRESSING (owner, 2026-09-30).** After `hello`, the host
+//! kernel reaches the page's agents as `<guid>|<agent>` with an ordinary `send`;
+//! the call rides this socket as an outbound `call` frame and the page's answer
+//! is its outcome. This leg only carries the frames and registers the peer with
+//! the kernel ([`fantastic_kernel::PeerRoute`]) — the host kernel routes and gates
+//! egress, the page kernel judges its own agents' ingress. See [`peer`].
 //!
 //! Every server→client TEXT frame leaves through
 //! [`fantastic_io_bridge::codec::encode_frame`] — python's
@@ -46,6 +58,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
+
+#[path = "ws_peer.rs"]
+mod peer;
 
 /// uvicorn's `ws_ping_interval` (`config.py:191`) — the server pings an idle
 /// socket every 20 s.
@@ -166,12 +181,15 @@ fn frame_error() -> Value {
 }
 
 /// A decoded inbound frame: the envelope, plus the raw body when the frame
-/// carried one at [`INBOUND_BINARY_PATH`].
+/// carried one at [`INBOUND_BINARY_PATH`] or [`REPLY_BINARY_PATH`].
 struct Inbound {
     envelope: Value,
     /// `Some` only when `_binary_path` named the payload's own `bytes` field —
     /// the one path this runtime's carrier (`Item::with_binary`) can place.
     body: Option<Vec<u8>>,
+    /// `Some` only when `_binary_path` named `data.bytes` — a page ANSWERING one
+    /// of the host's calls with a chunk; the body is that call's reply body.
+    answer_body: Option<Vec<u8>>,
 }
 
 /// python `decode_inbound` + `isinstance(frame, dict)`: parse a text frame as
@@ -200,6 +218,7 @@ fn decode_inbound(msg: InboundRaw) -> Result<Inbound, ()> {
         return Ok(Inbound {
             envelope,
             body: None,
+            answer_body: None,
         });
     };
     // A non-string path raises out of python's `path.split(".")`.
@@ -213,12 +232,20 @@ fn decode_inbound(msg: InboundRaw) -> Result<Inbound, ()> {
     if set_path(&mut envelope, path, Value::Null).is_err() {
         return Err(());
     }
+    // Only the payload's own `bytes` field reaches a handler here: that is the
+    // slot `Item::with_binary` fills. An answer's `data.bytes` is the reply body
+    // of a host call into the page. Any other placeable path keeps its `null`
+    // and the body is dropped.
+    let body = body.unwrap_or_default();
+    let (body, answer_body) = match path {
+        INBOUND_BINARY_PATH => (Some(body), None),
+        REPLY_BINARY_PATH => (None, Some(body)),
+        _ => (None, None),
+    };
     Ok(Inbound {
         envelope,
-        // Only the payload's own `bytes` field reaches a handler here: that is
-        // the slot `Item::with_binary` fills. Any other placeable path keeps its
-        // `null` and the body is dropped.
-        body: (path == INBOUND_BINARY_PATH).then(|| body.unwrap_or_default()),
+        body,
+        answer_body,
     })
 }
 
@@ -429,6 +456,9 @@ pub(crate) async fn ws_loop(
         .await;
     }
 
+    // THE PEER HALF — the page kernel's address on the host, once it says hello.
+    let mut peer = peer::PeerLink::default();
+
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping.tick().await; // the first tick completes immediately; skip it
@@ -580,6 +610,10 @@ pub(crate) async fn ws_loop(
                 });
                 track_call(&state.kernel, &pending_calls, handle);
             }
+            "hello" => peer.hello(&kernel, &leg, &out, &frame, &fid).await,
+            // An answer to one of the host's calls INTO the page — never gated:
+            // it only settles a call this leg itself sent.
+            "reply" | "error" => peer.answer(&frame, inbound.answer_body),
             "emit" => {
                 if !matches!(gate_leg(&kernel, &leg, "emit", &frame), Decision::Allow) {
                     continue;
@@ -720,6 +754,9 @@ pub(crate) async fn ws_loop(
     }
 
     // ─── Cleanup on disconnect (python's `finally` block) ──────────
+    // 0. The page is gone: drop its address and settle every host call still
+    //    waiting on it (python does this first, before anything is cancelled).
+    peer.close(&state.kernel);
     // 1. Cancel any in-flight `call` handlers so kernel.send tasks unwind.
     {
         let ids: Vec<_> = {

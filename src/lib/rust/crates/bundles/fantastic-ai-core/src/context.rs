@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 // `crate::context::…` path keeps working.
 pub use crate::constants::{
     BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE,
-    NOTICE_ENVELOPE_RESERVE,
+    NOTICE_ENVELOPE_RESERVE, RECENT_N, RECENT_N_RANGE,
 };
 
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
@@ -104,10 +104,11 @@ pub fn budget(meta: &Map<String, Value>) -> i64 {
 /// TypeError/ValueError `int()` raises. `True` is 1, `7.9` is 7, `" 7 "` is 7.
 pub fn recent_n(meta: &Map<String, Value>) -> usize {
     let n = match meta.get("recent_n") {
-        Some(v) => py_int(v).unwrap_or(6),
-        None => 6,
+        Some(v) => py_int(v).unwrap_or(RECENT_N),
+        None => RECENT_N,
     };
-    n.clamp(1, 50) as usize
+    let (lo, hi) = RECENT_N_RANGE;
+    n.clamp(lo, hi) as usize
 }
 
 /// Tokens a reply may occupy INLINE in the model's next turn. Above this it is

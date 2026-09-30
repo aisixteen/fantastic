@@ -96,6 +96,20 @@ pub trait Bundle: Send + Sync {
         None
     }
 
+    /// What this bundle KIND's record takes — `{fields:[{name, type, required,
+    /// enum?, default?, hint}], key_var}` — readable before any agent of it
+    /// exists (lib request #3, 2026-09-30). The substrate attaches it to this
+    /// bundle's entry in the `reflect bundles=all` catalog, and nowhere else.
+    /// Python's duck-typed module-level `RECORD_SCHEMA`.
+    ///
+    /// ONE TRUTH: a bundle that publishes a schema enforces the same one in
+    /// [`Self::validate_meta`] (the AI backends build both from
+    /// `fantastic_ai_core::schema`). Default: none — most bundles publish no
+    /// record contract.
+    fn record_schema(&self) -> Option<Value> {
+        None
+    }
+
     /// Dispatch a binary-framed verb. The binary channel is **symmetric**:
     /// a request carries `(header, blob)` and the reply carries
     /// `(Reply, body)` — raw bytes flow in BOTH directions, never base64

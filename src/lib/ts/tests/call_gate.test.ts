@@ -390,3 +390,12 @@ test("a NAMED id's `*` covers a privileged verb; a structural token's `*` does n
   assert.equal(authorizeCall({ files: ["*"] }, "disallow", "files", ctx), true);
   assert.equal(authorizeCall({ $parent: "*" }, "allow", "p", ctx), false);
 });
+
+test("`<guid>|*` names every agent of ONE other kernel — never a local id, never another kernel", () => {
+  const ctx = { holderId: "canvas", holderParent: "root", holderChildren: new Set<string>(), enforcePrivileged: false };
+  const grant = { "h0|*": ["around"] };
+  assert.equal(authorizeCall(grant, "around", "h0|cell_7", ctx), true);
+  assert.equal(authorizeCall(grant, "around", "h1|cell_7", ctx), false);
+  assert.equal(authorizeCall(grant, "around", "cell_7", ctx), false);
+  assert.equal(authorizeCall(grant, "clear", "h0|cell_7", ctx), false);
+});

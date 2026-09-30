@@ -529,12 +529,14 @@ extension KernelBridgeBundle {
         if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
         // Stamp this leg's EGRESS credential on the ENVELOPE (never the payload).
         if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
+        let slot = expect(st: st, corr: corr)
         do {
             try await transport.send(frame)
         } catch {
+            _ = st.take(corr)
             return .object(["error": .string("bridge.forward: send failed: \(error)")])
         }
-        switch await awaitPending(st: st, corr: corr, timeout: timeout) {
+        switch await awaitPending(st: st, corr: corr, slot: slot, timeout: timeout) {
         case .data(let data, _): return data
         case .closed(let reason):
             return .object(["error": .string("bridge.forward: \(reason)")])
@@ -575,12 +577,14 @@ extension KernelBridgeBundle {
         ])
         if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
         if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
+        let slot = expect(st: st, corr: corr)
         do {
             try await transport.sendBinary(header: frame, body: blob)
         } catch {
+            _ = st.take(corr)
             return (.object(["error": .string("bridge.forward: send failed: \(error)")]), Data())
         }
-        switch await awaitPending(st: st, corr: corr, timeout: timeout) {
+        switch await awaitPending(st: st, corr: corr, slot: slot, timeout: timeout) {
         case .data(let data, let body): return (data, body)
         case .closed(let reason):
             return (.object(["error": .string("bridge.forward: \(reason)")]), Data())
@@ -593,20 +597,30 @@ extension KernelBridgeBundle {
         }
     }
 
+    /// Register `corr`'s waiter BEFORE its frame is sent — python creates the
+    /// future and files it in `pending` first. A reply can beat the send's return
+    /// (a loopback `read_stream` answers in microseconds), and a reply that finds
+    /// no waiter is dropped: the caller then waited out the whole timeout and got
+    /// no body (measured: `wsBinaryForwardStreamsRawBytesOverWire`, 30 s and 0
+    /// bytes, 1 run in 80). The slot holds an outcome that lands before anyone
+    /// awaits it.
+    private func expect(st: BridgeState, corr: String) -> PendingSlot {
+        let slot = PendingSlot()
+        st.park(corr) { slot.finish($0) }
+        return slot
+    }
+
     /// `asyncio.wait_for(fut, timeout)`: the outcome, or nil on timeout. The
     /// pending entry is REMOVED by exactly one of {reply, failAll, timeout}, so
-    /// the continuation resumes once.
-    private func awaitPending(st: BridgeState, corr: String, timeout: Double) async
-        -> PendingOutcome?
-    {
-        await withCheckedContinuation { (c: CheckedContinuation<PendingOutcome?, Never>) in
-            let waiter = Waiter(c)
-            st.park(corr) { waiter.finish($0) }
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
-                if let resume = st.take(corr) { resume(nil) }
-            }
+    /// the slot is finished once.
+    private func awaitPending(
+        st: BridgeState, corr: String, slot: PendingSlot, timeout: Double
+    ) async -> PendingOutcome? {
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+            if let resume = st.take(corr) { resume(nil) }
         }
+        return await slot.value()
     }
 
     /// Python `_watch_remote` / `_unwatch_remote` — one shape, two frames.
@@ -645,8 +659,35 @@ private final class LoopWaiter: @unchecked Sendable {
 /// Carries one `CheckedContinuation` across the `pending` table. The table's
 /// removal is what makes a resume exclusive; this only gives the closure
 /// something Sendable to hold.
-private final class Waiter: @unchecked Sendable {
-    private let continuation: CheckedContinuation<PendingOutcome?, Never>
-    init(_ c: CheckedContinuation<PendingOutcome?, Never>) { continuation = c }
-    func finish(_ outcome: PendingOutcome?) { continuation.resume(returning: outcome) }
+/// One call's outcome slot, registered before the send: `finish` may run before
+/// or after `value()` starts waiting, and either order delivers exactly once.
+private final class PendingSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcome: PendingOutcome??
+    private var continuation: CheckedContinuation<PendingOutcome?, Never>?
+
+    func finish(_ o: PendingOutcome?) {
+        lock.lock()
+        if let c = continuation {
+            continuation = nil
+            lock.unlock()
+            c.resume(returning: o)
+            return
+        }
+        outcome = .some(o)
+        lock.unlock()
+    }
+
+    func value() async -> PendingOutcome? {
+        await withCheckedContinuation { (c: CheckedContinuation<PendingOutcome?, Never>) in
+            lock.lock()
+            if let o = outcome {
+                lock.unlock()
+                c.resume(returning: o)
+                return
+            }
+            continuation = c
+            lock.unlock()
+        }
+    }
 }

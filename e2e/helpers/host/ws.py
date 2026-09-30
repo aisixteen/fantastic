@@ -122,3 +122,41 @@ class WSWatcher:
                 await self._w.wait_closed()
             except Exception:
                 pass
+
+
+class StateWatcher(WSWatcher):
+    """The kernel's STATE STREAM over the same ws face: every send's `sender`,
+    target (`agent_id`) and full `payload`. Forensics only — it needs the leg's
+    explicit `state_subscribe` edge on the root."""
+
+    async def connect(self) -> None:
+        self._r, self._w = await asyncio.open_connection("127.0.0.1", self.port)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self._w.write(
+            f"GET /{self.web_id}/ws HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            .encode())
+        await self._w.drain()
+        head = await self._r.readuntil(b"\r\n\r\n")
+        if b" 101 " not in head.split(b"\r\n")[0]:
+            raise ConnectionError(f"ws upgrade refused: {head[:120]!r}")
+        await self._send(json.dumps({"type": "state_subscribe", "id": "state"}))
+
+    async def state_events(self):
+        """Yield each `state_event` frame; a refusal (`error`) is raised."""
+        while True:
+            raw = await self._frame()
+            if raw is None:
+                return
+            if not raw:
+                continue
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError:
+                frame = None  # not a json frame — nothing to report
+            if isinstance(frame, dict) and frame.get("type") == "error":
+                raise ConnectionError(f"state_subscribe refused: {frame}")
+            if isinstance(frame, dict) and frame.get("type") == "state_event":
+                yield frame

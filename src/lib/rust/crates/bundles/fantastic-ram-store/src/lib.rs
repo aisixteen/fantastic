@@ -1364,8 +1364,10 @@ impl RamStoreBundle {
 
 #[async_trait]
 impl Bundle for RamStoreBundle {
+    /// The CATALOG name — python's entry-point name, not the handler module
+    /// (`ram_store.tools` leaked into every `bundles=` line of a system prompt).
     fn name(&self) -> &str {
-        HANDLER_MODULE
+        "ram_store"
     }
 
     fn readme(&self) -> Option<&'static str> {

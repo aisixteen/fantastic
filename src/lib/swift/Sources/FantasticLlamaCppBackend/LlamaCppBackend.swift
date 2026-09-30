@@ -31,6 +31,10 @@ public let HANDLER_MODULE = "llamacpp_backend.tools"
 /// `llamacpp_backend.provider.DEFAULT_MODEL`.)
 public let DEFAULT_MODEL = "(server-loaded)"
 
+/// Sampling temperature when the record names none — LOW, because an agentic
+/// backend must emit exact calls, not improvise. Python `DEFAULT_TEMPERATURE`.
+public let DEFAULT_TEMPERATURE = 0.3
+
 public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
     public let name = "llamacpp_backend"
     public var verbs: [String] { AIBackend.verbNames }
@@ -51,7 +55,8 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
                 reflectExtra: { agent in
                     [
                         "temperature": .double(
-                            agent.metaValue(forKey: "temperature")?.asDouble ?? 0.3),
+                            agent.metaValue(forKey: "temperature")?.asDouble
+                                ?? DEFAULT_TEMPERATURE),
                         "num_predict": Self.posInt(agent, "num_predict").map(JSON.integer) ?? .null,
                         "think": agent.metaValue(forKey: "think")?.asBool.map(JSON.bool) ?? .null,
                         "has_api_key": .bool(
@@ -68,13 +73,45 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
                             // `0.3 if temperature is None else float(temperature)`
                             // — the DEFAULT lives here, and the field is always
                             // sent (see the body below).
-                            temperature: agent.metaValue(forKey: "temperature")?.asDouble ?? 0.3,
+                            temperature: agent.metaValue(forKey: "temperature")?.asDouble
+                                ?? DEFAULT_TEMPERATURE,
                             think: agent.metaValue(forKey: "think")?.asBool))
                 }
             ))
     }
 
     public var readme: String? { Self.readmeText }
+
+    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    /// value outside its set — every missing field named at once, from the schema.
+    /// Python `validate_meta`.
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        RecordSchema.validate(Self.RECORD_SCHEMA, backend: name, meta: meta, record: record)
+    }
+
+    public var recordSchema: JSON? { Self.RECORD_SCHEMA }
+
+    /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+    /// no agent existing (`reflect bundles=all`), from the constants the provider
+    /// runs on. `validateMeta` enforces it at the write, so the page and the kernel
+    /// cannot disagree about what a record needs. Python `RECORD_SCHEMA`.
+    static let RECORD_SCHEMA: JSON = RecordSchema.schema(
+        [
+            RecordSchema.field("endpoint", "str", "the llama-server /v1 URL", required: true),
+            RecordSchema.field(
+                "model", "str", "a label only — the model is whatever the server loaded"),
+            RecordSchema.field(
+                "api_key", "str", "the server's --api-key, only if it was started with one"),
+            RecordSchema.field(
+                "temperature", "float", "sampling temperature",
+                default: .double(DEFAULT_TEMPERATURE)),
+            RecordSchema.field("num_predict", "int", "a turn's output budget (tokens)"),
+            RecordSchema.field(
+                "think", "bool", "the chat template's enable_thinking (off unless set)"),
+        ],
+        keyVar: nil)
 
     /// THE PYTHON FILE, BYTE FOR BYTE (`llamacpp_backend/readme.md`). Persisted as
     /// `agents/<id>/readme.md` and served by `reflect readme=true`, so a swift

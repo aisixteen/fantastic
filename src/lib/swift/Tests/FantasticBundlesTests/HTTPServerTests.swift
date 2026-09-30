@@ -644,8 +644,9 @@ struct HTTPServerTests {
     /// A13.11 (D13) — the JSON body decodes like CPython `json.loads(bytes)`:
     /// the encoding comes from the BOM or from the null-byte pattern of the
     /// first four bytes, so a UTF-8-BOM / UTF-16 / UTF-32 body is ordinary JSON.
-    /// Bytes that will not decode raise out of the endpoint and starlette
-    /// answers 500 text/plain.
+    /// Bytes that will not decode are web_rest's own 400 — python catches the
+    /// `UnicodeDecodeError` with the `JSONDecodeError` (it answered starlette's
+    /// 500 text/plain until the leg caught it; parity 2026-10-01).
     ///
     /// RESIDUAL (D13): `NaN`/`Infinity` and lone-surrogate escapes still answer
     /// 400 — `FantasticJSON` can represent neither, so python's 204 for those
@@ -682,11 +683,11 @@ struct HTTPServerTests {
         #expect(
             try await post(doc.data(using: .utf32LittleEndian)!).statusCode == 204, "utf-32-le")
         // Bytes that decode as nothing: `ff fe` names UTF-16-LE and one odd
-        // trailing byte is a decode error → 500 text/plain.
+        // trailing byte is a decode error → the leg's 400, as for bad JSON.
         let bad = try await post(Data([0xFF, 0xFE, 0x7B]))
-        #expect(bad.statusCode == 500, "\(bad)")
+        #expect(bad.statusCode == 400, "\(bad)")
         #expect(
-            bad.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("text/plain") == true,
+            bad.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("application/json") == true,
             "\(bad.allHeaderFields)")
         // The pure table, without a socket.
         #expect(WebServer.decodeJSONBody(Data()) == "")

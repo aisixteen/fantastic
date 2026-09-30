@@ -40,6 +40,20 @@ class FakeCtx:
         self._alias: dict[str, int] = {}
 
     # ── the Kernel surface a bundle uses ─────────────────────────────────
+    def spawn_task(self, agent_id: str, verb: str, coro) -> int:
+        """Fork background work the way the kernel does — a registered task with
+        an id from the one counter (ai_core delivers replies this way; there is no
+        second, unregistered path for a fake to fall into)."""
+        import asyncio
+
+        tid = self.mint_id()
+        self.tasks[tid] = {
+            "agent": agent_id,
+            "verb": verb,
+            "_task": asyncio.get_running_loop().create_task(coro),
+        }
+        return tid
+
     def mint_id(self) -> int:
         n = self.next_id
         self.next_id = n + 1

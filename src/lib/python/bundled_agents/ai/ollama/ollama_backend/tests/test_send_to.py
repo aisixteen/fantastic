@@ -67,6 +67,9 @@ async def _make_ollama(kernel, grants=None):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ollama_backend.tools",
+                        # required at the write (the schema); the provider is faked, never dialled
+                        "endpoint": "http://127.0.0.1:9/stub",
+                        "model": "stub",
                         "context_window": 32768,
                         "can_call": can_call,
                         "memory_store_id": store,

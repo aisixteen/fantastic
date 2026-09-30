@@ -20,6 +20,18 @@
 //                     `src` = the name the client watched)
 //                     {"type":"event",  "payload":{...}}   (emitted to this connection)
 //   server → client : {"type":"state_snapshot"|"state_event", ...}
+//   client → server : {"type":"hello",  "guid":"<page kernel guid>"}   (the page as a peer)
+//   server → client : {"type":"call",   "id":"h<n>", "target", "payload", "caller"}
+//   client → server : {"type":"reply"|"error", "id":"h<n>", "data":{...}}
+//
+// **THE PAGE AS A PEER KERNEL** (owner, 2026-09-30). A client that is itself a
+// kernel says `hello {guid}`; this leg then registers that guid with the host
+// kernel, which routes `send`s to `<guid>|<agent>` over this socket as outbound
+// `call` frames answered by inbound `reply`/`error` frames with the same id. One
+// guid per connection (pinned by the first hello). When the socket closes the
+// guid stops being an address and every call still waiting on it settles as a
+// `transport_error`. This leg only carries the frames — the host kernel routes and
+// gates the sender, the page kernel gates its own agents.
 //
 // Each connection auto-watches the URL-path agent (`hostId`) onto a synthetic
 // `_ws_<6 hex>` inbox, and honors explicit watch/unwatch onto the SAME inbox
@@ -121,6 +133,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     static let pongTimeoutSeconds: Int64 = 20
     private var keepalive: RepeatedTask?
     private var awaitingPong = false
+    /// THE PEER HALF: the guid the first accepted `hello` pinned and the route
+    /// registered for it. Mutated ONLY on the event loop (hello + teardown).
+    private var pinned: (guid: String, route: PeerRoute)?
+    /// The calls the host made INTO the page, waiting for their answers —
+    /// shared with the route, which runs on kernel tasks, hence its own lock.
+    private let peerCalls = PeerCalls()
 
     init(hostId: String, legId: AgentId, kernel: Kernel, bootParent: TaskId?) {
         self.hostId = hostId
@@ -208,6 +226,15 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     private func teardown() {
         keepalive?.cancel()
         keepalive = nil
+        // The page is gone: it is no longer an address, and every call still
+        // waiting on it settles NOW with the reason — never a hang, never a retry.
+        // Idempotent: `channelInactive` and `handlerRemoved` both land here.
+        let guid = pinned?.guid
+        if let p = pinned {
+            kernel.unregisterPeer(p.guid, p.route)
+            pinned = nil
+        }
+        peerCalls.close(guid: guid)
         // python's `finally`, in its order: cancel the in-flight calls, unwatch
         // every src, drop the state subscriptions, then the drain.
         //
@@ -282,12 +309,16 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         /// field — the one path this runtime's carrier (`Item.binary`) can
         /// place.
         let body: Data?
+        /// `.some` only when `_binary_path` named an ANSWER's `data.bytes` — a
+        /// page replying to one of the host's calls with raw bytes, which is
+        /// where python's `find_bytes_path` puts a reply's chunk.
+        var replyBody: Data? = nil
     }
 
     /// The path an inbound binary frame must name for its body to reach the
     /// target: the payload's own `bytes` field, which is where python's
     /// `set_path` puts it before `kernel.send`.
-    private static let inboundBinaryPath = "payload.bytes"
+    static let inboundBinaryPath = "payload.bytes"
 
     /// Where a binary reply's chunk sits in the reply ENVELOPE — python's
     /// `find_bytes_path` walks `{type:reply, id, data:{…bytes…}}` and finds
@@ -343,10 +374,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             return nil
         }
         // Only the payload's own `bytes` field reaches a handler here: that is
-        // the slot `Item.binary` fills. Any other placeable path keeps its
+        // the slot `Item.binary` fills. An answer's `data.bytes` is the body of
+        // a reply to the host's own call. Any other placeable path keeps its
         // `null` and the body is dropped.
         return Inbound(
-            envelope: envelope, body: path == inboundBinaryPath ? (body ?? Data()) : nil)
+            envelope: envelope, body: path == inboundBinaryPath ? (body ?? Data()) : nil,
+            replyBody: path == replyBinaryPath ? (body ?? Data()) : nil)
     }
 
     /// python `bad("frame", "frame", "a well-formed call/emit/watch envelope")`
@@ -681,8 +714,66 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             let tokens = stateTokens
             stateTokens.removeAll()
             for t in tokens { kernel.unsubscribe(t) }
+        case "hello":
+            hello(frame, frameId: fid, token: token, addr: addr, channel: channel)
+        case "reply", "error":
+            peerCalls.answer(frame, body: inbound.replyBody)
         default:
             break  // unknown frame types are silently dropped (forward-compat)
+        }
+    }
+
+    // MARK: - the peer half: calls the host makes INTO the page
+
+    /// `hello {guid}` — make this connection the page kernel's address. Python
+    /// `_on_hello`: the guid is checked first (a malformed one is answered even on
+    /// a sealed leg), then the leg's gate (a sealed leg carries no peer, and says
+    /// nothing — the calls it refuses teach), then the pin, then the kernel's own
+    /// one-route-per-guid rule. Runs on the event loop.
+    private func hello(
+        _ frame: JSON, frameId: JSON, token: String?, addr: String, channel: Channel
+    ) {
+        guard let guid = frame["guid"].asString, !guid.isEmpty, !guid.contains("|") else {
+            answerError(
+                Refusal.bad("hello", "guid", "the page kernel's guid, a non-empty id without `|`"),
+                frameId: frameId, channel: channel)
+            return
+        }
+        if gateWebLeg(
+            kernel: kernel, legId: legId, kind: "hello", target: addr, verb: "hello",
+            token: token) != nil
+        {
+            return
+        }
+        if let pinned {
+            if pinned.guid != guid {
+                answerError(
+                    Refusal.bad(
+                        "hello", "guid", "\(pinned.guid) (pinned by this connection's first hello)"),
+                    frameId: frameId, channel: channel)
+            }
+            return
+        }
+        let calls = peerCalls
+        let outLock = self.outLock
+        let route = PeerRoute(via: legId.value) { agentId, payload, caller, body in
+            await calls.call(
+                guid: guid, agentId: agentId, payload: payload, caller: caller, body: body,
+                channel: channel, outLock: outLock)
+        }
+        if let taken = kernel.registerPeer(guid, route) {
+            answerError(taken, frameId: frameId, channel: channel)
+            return
+        }
+        pinned = (guid, route)
+    }
+
+    /// python `{"type": "error", "id": frame.get("id", ""), **refusal}`.
+    private func answerError(_ refusal: JSON, frameId: JSON, channel: Channel) {
+        outLock.sync {
+            Self.writeText(
+                channel: channel,
+                text: Codec.encodeText(Self.errorFrame(id: frameId, denial: refusal)))
         }
     }
 
@@ -733,7 +824,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// is a binary frame whose head keeps `bytes: null` in its python position
     /// and names it in `_binary_path`. Testing the body's LENGTH instead served
     /// an empty file as JSON.
-    private static func sendEnvelope(
+    static func sendEnvelope(
         channel: Channel, envelope: JSON, body: Data?, path: String
     ) {
         guard let body else {
@@ -807,5 +898,115 @@ final class ReaderSet: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return items
+    }
+}
+
+/// The outbound calls of ONE connection — python `_call_page` / `_on_answer` and
+/// the disconnect settle in `run`'s `finally`. The route calls in from kernel
+/// tasks while the event loop answers and tears down, hence the lock.
+final class PeerCalls: @unchecked Sendable {
+    private let lock = NSLock()
+    /// The last frame id handed out — ids are `h1`, `h2`, … per connection.
+    private var seq = 0
+    /// Frame id → the waiting call.
+    private var waiting: [String: CheckedContinuation<(JSON, Data?), Never>] = [:]
+    /// Ids whose caller gave up (its timeout or `cancel`) before the call was
+    /// parked — the park then settles at once instead of waiting forever.
+    private var abandoned: Set<String> = []
+    /// Set once the socket is gone: a call that reaches the route after that
+    /// settles at once instead of waiting on a page that can no longer answer.
+    private var gone = false
+
+    /// The one ending for a call the page will never answer.
+    static func disconnected(_ guid: String?) -> JSON {
+        Refusal.make(
+            Refusal.transportError,
+            "the page \(guid ?? "None") disconnected before answering")
+    }
+
+    /// ONE call into the page: an outbound `{type:"call", id, target, payload,
+    /// caller}` frame, resolved by the inbound answer carrying the same id. A body
+    /// rides the binary channel at `payload.bytes` — where python's payload dict
+    /// holds it and where the page's decoder puts it back.
+    func call(
+        guid: String, agentId: String, payload: JSON, caller: String, body: Data?,
+        channel: Channel, outLock: OutboundLock
+    ) async -> (JSON, Data?) {
+        let fid: String? = lock.withLock {
+            // A call that resolved this route just as the socket closed must not
+            // wait on an answer the teardown has already swept — it settles now,
+            // the same way the teardown settles the ones already waiting.
+            if gone || !channel.isActive { return nil }
+            seq += 1
+            return "h\(seq)"
+        }
+        guard let fid else { return (Self.disconnected(guid), nil) }
+        var p = payload
+        if body != nil, case .object(var o) = p {
+            o["bytes"] = .null
+            p = .object(o)
+        }
+        let envelope: JSON = .object([
+            "type": .string("call"), "id": .string(fid), "target": .string(agentId),
+            "payload": p, "caller": .string(caller),
+        ])
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<(JSON, Data?), Never>) in
+                let settled: (JSON, Data?)? = lock.withLock {
+                    if gone { return (Self.disconnected(guid), nil) }
+                    if abandoned.remove(fid) != nil {
+                        return (.object(["cancelled": .bool(true)]), nil)
+                    }
+                    waiting[fid] = cont
+                    return nil
+                }
+                if let settled {
+                    cont.resume(returning: settled)
+                    return
+                }
+                outLock.sync {
+                    WebSocketProxyHandler.sendEnvelope(
+                        channel: channel, envelope: envelope, body: body,
+                        path: WebSocketProxyHandler.inboundBinaryPath)
+                }
+            }
+        } onCancel: {
+            // The caller gave up (its deadline, a `cancel`): take the entry back
+            // out — python's `finally: out_calls.pop(fid, None)`.
+            let cont: CheckedContinuation<(JSON, Data?), Never>? = lock.withLock {
+                if let c = waiting.removeValue(forKey: fid) { return c }
+                abandoned.insert(fid)
+                return nil
+            }
+            cont?.resume(returning: (.object(["cancelled": .bool(true)]), nil))
+        }
+    }
+
+    /// An inbound `reply`/`error` answers one of OUR outbound calls — its `data`
+    /// is that call's outcome (a page-side refusal included), a non-object
+    /// wrapped as `{result}`. An id we are not waiting on is ignored. Python
+    /// `_on_answer`.
+    func answer(_ frame: JSON, body: Data?) {
+        guard let fid = frame.asObject?["id"]?.asString else { return }
+        guard let cont = lock.withLock({ waiting.removeValue(forKey: fid) }) else { return }
+        let data: JSON
+        switch frame.asObject?["data"] {
+        case .some(.object(let o)): data = .object(o)
+        case .some(let other): data = .object(["result": other])
+        case .none: data = .object(["result": .null])
+        }
+        cont.resume(returning: (data, body))
+    }
+
+    /// The socket is gone: every call still waiting settles with the reason, and
+    /// every later call settles at once. Idempotent.
+    func close(guid: String?) {
+        let pending: [CheckedContinuation<(JSON, Data?), Never>] = lock.withLock {
+            gone = true
+            let all = Array(waiting.values)
+            waiting.removeAll()
+            return all
+        }
+        for c in pending { c.resume(returning: (Self.disconnected(guid), nil)) }
     }
 }

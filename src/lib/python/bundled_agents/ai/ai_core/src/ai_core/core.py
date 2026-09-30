@@ -81,6 +81,8 @@ from ai_core.constants import (  # noqa: F401 — re-exported seams
     MAX_CALL_DEPTH,
     MAX_SILENT_TURNS,
     RECALL_EVERY,
+    RECENT_N,
+    RECENT_N_RANGE,
     SEND_TIMEOUT,
     TRIGGER,
 )
@@ -361,7 +363,8 @@ def _as_id(x) -> int | None:
         return None
     if isinstance(x, int):
         return x if x > 0 else None
-    if isinstance(x, str) and x.strip().isdigit():
+    # ASCII digits only — `'²'.isdigit()` is True and `int('²')` raises.
+    if isinstance(x, str) and x.strip().isascii() and x.strip().isdigit():
         return int(x.strip())
     return None
 
@@ -371,7 +374,11 @@ def _as_id(x) -> int | None:
 # responds to); a thread is the parent chain, derived when needed. `reply_to` on a send
 # is DELIVERY and is left alone. Measured 2026-09-06: the model attributed rows 5/5
 # through 64 interleaved chains from `parent` alone.
-_TAG_LINKS = re.compile(r"^\[reply to \S+ · [^\]]*?↑(\S+)[^\]]*\]")
+# `↑<id>` stops at whitespace OR the tag's closing `]`: a tag that ENDS on its
+# `↑` segment (`[reply to - · 5 reflect · ↑360]`, no batch suffix) used to capture
+# `360]`, which is no id, so the reply row lost its parent (parity 2026-09-30:
+# ~100 `ai_paths` rows `parent: null` where rust/swift link the previous row).
+_TAG_LINKS = re.compile(r"^\[reply to \S+ · [^\]]*?↑([^\s\]]+)[^\]]*\]")
 
 
 def _row_ids_for_incoming(self_id: str, text: str, kernel) -> tuple[int, int | None]:
@@ -1011,8 +1018,10 @@ flight (a reply that has not come, a peer who has not answered), emit
 the honest alternative to re-issuing a call: this is an ASYNC system, and a reply you
 have not seen is on its way, not lost. `await` with nothing of yours in flight and
 nothing queued is refused — then act, or call `done`. A turn with NO call ends
-nothing: the runtime reminds you once (a call decided in thinking does not execute
-unless the envelope is written out), so never leave a turn unsignalled — call, `await`,
+nothing: the runtime reminds you, every time (a call decided in thinking does not
+execute unless the envelope is written out; a turn of thinking alone is discarded and
+rerolled) — and if turn after turn emits nothing, it gives up on the chain and tells
+your caller you could not answer. So never leave a turn unsignalled — call, `await`,
 or `done`.
 
 AN INQUIRY IS A CALL, and whoever receives it is AN AGENT LIKE ANY OTHER. When
@@ -1122,18 +1131,12 @@ def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
     the same contract `exec_bridge` uses for a forked job. Fire-and-forget without
     that is the orphan bug.
     """
+    # ONE PATH (owner, 2026-09-30): there used to be a `try … except: create_task`
+    # here "for a stub kernel in tests" — a fallback in product code, which would
+    # also have turned a REAL spawn failure into an unregistered orphan. A test
+    # fake that delivers now answers `spawn_task` like the kernel does.
     coro = _deliver(kernel, target, text, client_id, system_prompt, born=born)
-    try:
-        kernel.ctx.spawn_task(target, "deliver_reply", coro)
-    except Exception:  # noqa: BLE001 — a stub kernel in tests has no ctx
-        task = asyncio.create_task(coro)
-        _ORPHAN_DELIVERIES.add(task)
-        task.add_done_callback(_ORPHAN_DELIVERIES.discard)
-
-
-# Strong refs for deliveries the kernel could not register, so the event loop does
-# not garbage-collect a pending task mid-flight.
-_ORPHAN_DELIVERIES: set = set()
+    _ctx(kernel).spawn_task(target, "deliver_reply", coro)
 
 
 async def _deliver(
@@ -1474,14 +1477,13 @@ def without_thinking(text: str) -> str:
 # interactively a human says "continue" — an unattended chain has nobody, so
 # the runtime says it.
 #
-# THERE IS NO STREAK AND NO CAP. A call-less turn is not a fact about how many
-# times the model has been quiet; it means "you emitted no call, try again",
-# and it means that every time. The chain ends where the model says it ends:
-# `done` (finished) or `await` (waiting on what is in flight). Those two are
-# the ONLY exits — nothing else counts turns on the model's behalf, because a
-# counter that gives up mid-task ends the work silently, which is the exact
-# failure the nudge exists to prevent. Spend is bounded OUTSIDE, by whoever
-# owns the budget (the harness's max_turns).
+# A call-less turn means "you emitted no call, try again", and it means that every
+# time. The chain ends where the model says it ends — `done` (finished) or
+# `await` (waiting on what is in flight) — with ONE bound on top (owner,
+# 2026-09-30; it replaces the earlier "no streak, no cap" rule): MAX_SILENT_TURNS
+# silent turns IN A ROW and the chain gives up, LOUDLY — `status done
+# reason=gave_up` to the caller, `_GAVE_UP` to a `send_to` — never silently. Any
+# call resets the count. A dead turn (only thinking, discarded) is a silent turn.
 # WHAT AN AGENT HAS IN FLIGHT: the number of its own routing turns whose batch is
 # still settling (the calls it made, not yet answered). Per agent id. Read by
 # `await` — the one control call that asks "is anything of mine still coming?".
@@ -2098,8 +2100,9 @@ def _recent_n(rec: dict) -> int:
     try:
         n = int(rec.get("recent_n"))
     except (TypeError, ValueError):
-        n = 6
-    return max(1, min(n, 50))
+        n = RECENT_N
+    lo, hi = RECENT_N_RANGE
+    return max(lo, min(n, hi))
 
 
 class _Summarizer:

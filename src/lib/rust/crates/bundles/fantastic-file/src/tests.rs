@@ -1429,3 +1429,33 @@ async fn an_exposed_linked_dir_lists_what_it_serves() {
     assert_eq!(paths, vec![json!("docs/shared/c.txt")], "{listed}");
     assert_eq!(read(&k, "docs/shared/c.txt").await["size"], json!(2));
 }
+
+#[tokio::test]
+async fn a_readonly_leg_refuses_a_binary_write_before_judging_the_chunk() {
+    // PYTHON'S ORDER on the binary channel too: `readonly` first, whatever the
+    // header holds — a header carrying a JSON `bytes` answered `missing_arg`
+    // here while python said `agent is readonly` (parity bundle_verbs,
+    // readonly_write, 2026-09-30).
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = served(&tmp);
+    let kernel = mk_kernel_with(
+        &tmp,
+        json!({"ingress_rule": "allow_all_ingress", "allow": ["."], "readonly": true}),
+    )
+    .await;
+    for header in [
+        json!({"type": "write_stream", "path": "a.txt", "bytes": "x"}),
+        json!({"type": "write_stream", "path": "a.txt"}),
+    ] {
+        let out = kernel
+            .send(vec![
+                Item::new(AgentId::from("fb"), header.clone()).with_binary(b"data".to_vec())
+            ])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(out["error"], "agent is readonly", "{header} → {out}");
+        assert_eq!(out["reason"], "unauthorized", "{header} → {out}");
+    }
+    assert!(!dir.join("a.txt").exists());
+}

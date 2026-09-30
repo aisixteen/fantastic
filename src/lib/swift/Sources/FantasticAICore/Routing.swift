@@ -424,8 +424,11 @@ func routeReply(
     sendTimeout: Double,
     runState: AIAgentRunState? = nil,
     messageId: Int64? = nil,
-    deadTurn: Bool = false
+    deadTurn: Bool = false,
+    launched: StartSignal? = nil
 ) async {
+    // However this route ends, the `send` waiting on its launch is released.
+    defer { launched?.fire() }
     let calls = fanOut(extractToolCalls(text), messageId: messageId)
     let doneCalled = calls.contains { $0.name == "done" }
     let awaitCalled = calls.contains { $0.name == "await" }
@@ -638,7 +641,14 @@ func routeReply(
     // the call, which only lengthens the queue that delays it.
     let hadItems = !items.isEmpty
     if hadItems { await inFlightTurns.bump(selfId.value, 1) }
-    let outcomes = items.isEmpty ? [] : await kernel.send(items)
+    // LAUNCHED = every routed call has reached its target; the `send` that
+    // spawned this route returns only then (see `AIBackend.send`).
+    let outcomes =
+        items.isEmpty
+        ? []
+        : await KernelTaskLocals.$onBatchLaunched.withValue({ launched?.fire() }) {
+            await kernel.send(items)
+        }
     if hadItems { await inFlightTurns.bump(selfId.value, -1) }
     // THE GRANTS CACHE IS WRITE-THROUGH: a share/unshare this turn made on its
     // own store changes who may read row bodies — reload before the next row

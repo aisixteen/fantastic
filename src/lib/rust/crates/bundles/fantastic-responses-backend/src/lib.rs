@@ -27,6 +27,7 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
 };
+use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
@@ -614,6 +615,37 @@ fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> Pr
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
+/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+/// with no agent existing (`reflect bundles=all`), from the constants the
+/// provider runs on. `validate_meta` enforces it at the write, so the page and
+/// the kernel cannot disagree about what a record needs. Python
+/// `RECORD_SCHEMA`, field for field.
+#[must_use]
+pub fn record_schema() -> &'static Value {
+    static SCHEMA: OnceLock<Value> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        schema::schema(
+            vec![
+                Field::new(
+                    "endpoint",
+                    "str",
+                    "the full Responses API URL (…/v1/responses)",
+                )
+                .required(),
+                Field::new("model", "str", "the model name").required(),
+                Field::new("max_tokens", "int", "a turn's output budget (tokens)")
+                    .default(json!(DEFAULT_MAX_TOKENS)),
+                Field::new(
+                    "sampling",
+                    "map",
+                    "runner params merged verbatim into the request body",
+                ),
+            ],
+            Some(KEY_VAR),
+        )
+    })
+}
+
 /// The OpenAI Responses-API backend bundle.
 pub struct ResponsesBundle;
 
@@ -625,6 +657,20 @@ impl Bundle for ResponsesBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    /// value outside its set — every missing field named at once, from the schema.
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        record: &Map<String, Value>,
+    ) -> Option<String> {
+        schema::validate(record_schema(), "responses_backend", meta, record)
+    }
+
+    fn record_schema(&self) -> Option<Value> {
+        Some(record_schema().clone())
     }
 
     async fn handle(

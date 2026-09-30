@@ -26,15 +26,16 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
 };
+use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::{py_float, py_int, py_repr_value, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// The handler module id a record names to select this bundle.
 pub const HANDLER_MODULE: &str = "llamacpp_backend.tools";
@@ -361,6 +362,42 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
+/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+/// with no agent existing (`reflect bundles=all`), from the constants the
+/// provider runs on. `validate_meta` enforces it at the write, so the page and
+/// the kernel cannot disagree about what a record needs. Python
+/// `RECORD_SCHEMA`, field for field.
+#[must_use]
+pub fn record_schema() -> &'static Value {
+    static SCHEMA: OnceLock<Value> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        schema::schema(
+            vec![
+                Field::new("endpoint", "str", "the llama-server /v1 URL").required(),
+                Field::new(
+                    "model",
+                    "str",
+                    "a label only — the model is whatever the server loaded",
+                ),
+                Field::new(
+                    "api_key",
+                    "str",
+                    "the server's --api-key, only if it was started with one",
+                ),
+                Field::new("temperature", "float", "sampling temperature")
+                    .default(json!(DEFAULT_TEMPERATURE)),
+                Field::new("num_predict", "int", "a turn's output budget (tokens)"),
+                Field::new(
+                    "think",
+                    "bool",
+                    "the chat template's enable_thinking (off unless set)",
+                ),
+            ],
+            None,
+        )
+    })
+}
+
 /// The llama.cpp backend bundle.
 pub struct LlamaCppBundle;
 
@@ -372,6 +409,20 @@ impl Bundle for LlamaCppBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    /// value outside its set — every missing field named at once, from the schema.
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        record: &Map<String, Value>,
+    ) -> Option<String> {
+        schema::validate(record_schema(), "llamacpp_backend", meta, record)
+    }
+
+    fn record_schema(&self) -> Option<Value> {
+        Some(record_schema().clone())
     }
 
     async fn handle(

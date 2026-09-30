@@ -11,6 +11,11 @@ from typing import AsyncIterator
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 
 
+#: Sampling temperature when the record names none — LOW, because an agentic
+#: backend must emit exact calls, not improvise.
+DEFAULT_TEMPERATURE = 0.3
+
+
 class OllamaProvider:
     #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
     #: ai_core calibrates its own token estimate with it.
@@ -37,7 +42,9 @@ class OllamaProvider:
         # JSON + (for view-authoring) precise connector code, not improvise. We
         # default LOW (0.3 — precise, with a touch of variety); `temperature`
         # on the record overrides.
-        self._temperature = 0.3 if temperature is None else float(temperature)
+        self._temperature = (
+            DEFAULT_TEMPERATURE if temperature is None else float(temperature)
+        )
         # Generation cap. Unbounded, a weak model can ramble for thousands of
         # tokens instead of emitting one tool-call, blowing the send timeout;
         # the record's `num_predict` bounds it. None = ollama's default.

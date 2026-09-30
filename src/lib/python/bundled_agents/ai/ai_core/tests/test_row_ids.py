@@ -23,6 +23,17 @@ def test_a_delivered_reply_turn_names_its_parent_from_the_tag():
     assert parent == 17 and rid != parent
 
 
+def test_a_tag_that_ends_on_its_parent_segment_still_names_the_parent():
+    """`[reply to - · 5 reflect · ↑360]` — no batch suffix, so `↑360` is followed by
+    the closing `]`, which must not become part of the id (parity 2026-09-30)."""
+    for text, want in (
+        # a LATER `]` in the body is what let the greedy capture keep `360]`
+        ("[reply to - · 5 reflect · ↑360]\n<error>no agent '5'</error> [ids: 1]", 360),
+        ('[reply to 12 · totals write · "store the total" · ↑997]\nok', 997),
+    ):
+        assert _row_ids_for_incoming("ai", text, FakeCtx())[1] == want, text
+
+
 def test_the_reply_tag_carries_every_segment_in_order_and_still_parses():
     tag = _reply_tag(40, "notes", "read", "read the spec", 17, 2, 3, 17)
     assert tag == (

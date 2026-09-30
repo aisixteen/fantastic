@@ -30,6 +30,10 @@ CHARS_PER_TOKEN = 4
 DEFAULT_CONTEXT_WINDOW = 131072
 DEFAULT_OUTPUT_RESERVE = 1024
 BUDGET_FLOOR = 256  # never project to a budget below this
+# How many of the most recent turns a compaction keeps verbatim when the record
+# names no `recent_n` (clamped to RECENT_N_RANGE either way).
+RECENT_N = 6
+RECENT_N_RANGE = (1, 50)
 
 # ─── the turn loop (core.py) ───────────────────────────────────────────────
 

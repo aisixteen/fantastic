@@ -452,11 +452,17 @@ fn a_record_missing_required_fields_is_refused_at_the_write_naming_all() {
         "max_tokens": 65536,
     });
     let err = validate(&obj(meta.clone()), &Map::new()).expect("refused");
-    assert!(err.contains("missing: kv_slots, kv_overflow"), "{err}");
+    assert!(
+        err.contains("missing: kv_slots, kv_overflow, memory_store_id"),
+        "{err}"
+    );
+    // each missing field is named WITH its hint, from the schema
+    assert!(err.contains("kv_overflow = all slots live: evict"), "{err}");
     // an update to a complete record is judged on the MERGED state
     let mut full = obj(meta);
     full.insert("kv_slots".into(), json!(7));
     full.insert("kv_overflow".into(), json!("evict"));
+    full.insert("memory_store_id".into(), json!("memory"));
     assert_eq!(validate(&obj(json!({"seed": 3})), &full), None);
 }
 
@@ -470,6 +476,7 @@ fn a_consistent_write_passes() {
         "kv_overflow": "evict",
         "thinking_token_budget": 4000,
         "reasoning_effort": "xhigh",
+        "memory_store_id": "memory",
     });
     assert_eq!(validate(&obj(meta), &Map::new()), None);
 }
@@ -553,7 +560,7 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
         &kernel,
         json!({
             "id": id, "endpoint": endpoint, "model": "qwen3.8-27b", "max_tokens": 8000,
-            "kv_slots": 7, "kv_overflow": "evict", "seed": 3,
+            "kv_slots": 7, "kv_overflow": "evict", "memory_store_id": "memory", "seed": 3,
         }),
     )
     .await;
@@ -593,4 +600,52 @@ fn readme_is_python_verbatim() {
         .expect("repo's src/lib above the crate")
         .join("python/bundled_agents/ai/vllm/vllm_backend/src/vllm_backend/readme.md");
     assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
+}
+
+// ─── the key (an HTTPS door in front of the GPU) ────────────────────────────
+
+/// One test owns the variable: the others never set it, and a mock server
+/// ignores a header it did not ask for, so a concurrent test is unaffected.
+#[tokio::test]
+async fn the_key_rides_as_a_bearer_header_only_when_set() {
+    let ok = sse(&[delta(Some("stop"), json!({"content": "ok"}))], true);
+    std::env::remove_var(KEY_VAR);
+    let (s1, ep1) = server_with(ok.clone(), 200).await;
+    assert_eq!(drain(&provider(&ep1), &hi(), None).await.unwrap(), "ok");
+    std::env::set_var(KEY_VAR, "k-123");
+    let (s2, ep2) = server_with(ok, 200).await;
+    let got = drain(&provider(&ep2), &hi(), None).await;
+    std::env::remove_var(KEY_VAR);
+    assert_eq!(got.unwrap(), "ok");
+    let auth = |reqs: Vec<wiremock::Request>| {
+        reqs.iter()
+            .map(|r| {
+                r.headers
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap().to_string())
+            })
+            .collect::<Vec<_>>()
+    };
+    // unset: NO header at all (a keyless local vLLM); set: Bearer, read per call
+    assert_eq!(auth(s1.received_requests().await.unwrap()), vec![None]);
+    assert_eq!(
+        auth(s2.received_requests().await.unwrap()),
+        vec![Some("Bearer k-123".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_refused_key_names_the_variable() {
+    let (_s, ep) = server_with("unauthorized".to_string(), 401).await;
+    let err = drain(&provider(&ep), &hi(), None).await.unwrap_err();
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("HTTP 401") && text.contains("set VLLM_API_KEY"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_schema_names_the_key_var() {
+    assert_eq!(record_schema()["key_var"], json!("VLLM_API_KEY"));
 }

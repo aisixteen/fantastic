@@ -23,5 +23,16 @@ reflect `verbs`.
 
 `kernel` is a reserved address for the tree root: send any verb to `kernel`
 and it resolves to the root agent, whatever its id — reflect the whole tree
-without knowing the root's id. To operate a running daemon's live surface (find its
+without knowing the root's id.
+
+**Agents on another kernel** are addressed `<guid>|<agent id>` and called with an
+ordinary `send` — no special verb. The root reflect lists the kernels this one is
+connected to as `peers: [{guid, via}]`; send `reflect` to `<guid>|kernel` for that
+kernel's tree and verbs. Your `can_call` must name the target (`<guid>|<agent>`, or
+`<guid>|*` for every agent there); that kernel's own gate decides whether the target
+accepts you, as `<this guid>|<you>`. A guid not in `peers` is an unknown agent. A
+browser page becomes a peer when its kernel sends `{"type":"hello","guid":..}` on
+its ws; the host's calls then arrive as `{"type":"call","id":..,"target":..,
+"payload":..,"caller":..}` frames the page answers with `{"type":"reply"|"error",
+"id":..,"data":..}`. To operate a running daemon's live surface (find its
 port, POST/WS to it, stop it), `reflect kernel readme=daemon`.

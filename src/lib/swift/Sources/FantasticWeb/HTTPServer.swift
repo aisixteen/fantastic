@@ -654,17 +654,11 @@ public final class WebServer: @unchecked Sendable {
         // THE BODY DECODES LIKE `json.loads(bytes)` (A13.11): CPython detects the
         // encoding from the BOM / the null-byte pattern of the first four bytes,
         // so a UTF-8-BOM, UTF-16 or UTF-32 body is ordinary JSON to python.
-        // Bytes that will not decode raise `UnicodeDecodeError` OUT of the
-        // endpoint (`web_rest/tools.py:117` catches only `JSONDecodeError`), so
-        // starlette answers 500 text/plain — mirrored, not pinned.
-        let bodyText: String
-        switch Self.decodeJSONBody(request.body ?? Data()) {
-        case .some(let t): bodyText = t
-        case .none:
-            return HTTPResponse(
-                status: 500, contentType: "text/plain; charset=utf-8",
-                body: Data("Internal Server Error".utf8))
-        }
+        // Bytes that will not decode are the ENDPOINT's to answer — python's
+        // `web_rest` catches the `UnicodeDecodeError` with the `JSONDecodeError`
+        // and answers its own 400 — so the route gets `body: null`, meaning "not
+        // text", never a guessed string.
+        let bodyText = Self.decodeJSONBody(request.body ?? Data())
 
         var paramsObj: OrderedDictionary<String, JSON> = [:]
         for (k, v) in params.sorted(by: { $0.key < $1.key }) { paramsObj[k] = .string(v) }
@@ -678,7 +672,7 @@ public final class WebServer: @unchecked Sendable {
             "params": .object(paramsObj),
             "query": .object(queryObj),
             "headers": .object(headerObj),
-            "body": .string(bodyText),
+            "body": bodyText.map { JSON.string($0) } ?? .null,
         ])
         guard case .http(let endpoint) = spec.endpoint else {
             return jsonHTTP(

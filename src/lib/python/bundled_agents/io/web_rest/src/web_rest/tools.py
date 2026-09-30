@@ -42,6 +42,7 @@ from kernel import sender_context
 
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
+from io_bridge import loads as strict_loads
 from kernel._refusal import TRANSPORT_ERROR, UNHANDLED, refusal
 
 
@@ -133,7 +134,7 @@ def _make_post_endpoint(self_id: str, kernel):
             # envelope rides `X-Fantastic-Payload`, the field named by
             # `X-Fantastic-Bytes-Field` (default `bytes`).
             try:
-                payload = json.loads(request.headers.get(_PAYLOAD_HEADER) or "{}")
+                payload = strict_loads(request.headers.get(_PAYLOAD_HEADER) or "{}")
             except json.JSONDecodeError:
                 return JSONResponse(
                     {"error": "web_rest: X-Fantastic-Payload is not valid JSON"},
@@ -147,7 +148,7 @@ def _make_post_endpoint(self_id: str, kernel):
             payload[request.headers.get(_BYTES_FIELD_HEADER) or "bytes"] = body
         else:
             try:
-                payload = json.loads(body) if body else {}
+                payload = strict_loads(body) if body else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 # RFC 8259 §8.1 — a JSON body IS UTF-8. Bytes that do not decode
                 # are a MALFORMED BODY, the same client error as `{not json`:

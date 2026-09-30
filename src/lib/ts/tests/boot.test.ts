@@ -20,6 +20,7 @@ class HostSocket implements WebSocketLike {
   onmessage: ((ev: { data: unknown }) => void) | null = null;
   readonly url: string;
   readonly calls: Envelope[] = [];
+  readonly frames: Envelope[] = [];
   private readonly records: Payload[];
 
   constructor(url: string, records: Payload[]) {
@@ -29,6 +30,7 @@ class HostSocket implements WebSocketLike {
   }
   send(data: string | ArrayBuffer): void {
     const env = decodeFrame(data);
+    this.frames.push(env);
     if (env["type"] !== "call") return;
     this.calls.push(env);
     const p = env["payload"] as Payload;
@@ -114,4 +116,24 @@ test("boot: without a `seed`, an empty tree stays empty — the library seeds no
   assert.equal(seeded, false, "a non-empty tree is never seeded");
   await loader.stop();
   await b2.loader.stop();
+});
+
+
+test("boot: a HYDRATED root that already has a guid says hello — the page stays addressable after a restart", async () => {
+  // what a reopened canvas loads: its root WITH the guid minted on an earlier run
+  const h = host([
+    { id: "web_loader", handler_module: "kernel_state.tools" },
+    { id: "app", handler_module: "app_root.ts", parent_id: "web_loader", guid: "p9" },
+  ]);
+  const { kernel } = await boot({
+    origin: "ws://host",
+    loader: "web_loader",
+    makeSocket: h.make,
+    register: (k) => k.registerBundle("app_root.ts", () => null),
+  });
+  assert.equal(kernel.guid, "p9");
+  const deadline = Date.now() + 1000;
+  const said = () => h.sockets.flatMap((s) => s.frames).filter((f) => f["type"] === "hello");
+  while (said().length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(said()[0], { type: "hello", guid: "p9" });
 });

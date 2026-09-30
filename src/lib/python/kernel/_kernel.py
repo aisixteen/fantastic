@@ -41,7 +41,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from kernel._refusal import MISSING_ARG, UNAUTHORIZED, UNHANDLED, UNKNOWN_AGENT, refusal
+from kernel._refusal import (
+    BAD_ARG,
+    MISSING_ARG,
+    UNAUTHORIZED,
+    UNHANDLED,
+    UNKNOWN_AGENT,
+    refusal,
+)
 from kernel._state import CURRENT_VERSION, validate_records
 
 if TYPE_CHECKING:
@@ -365,6 +372,17 @@ INBOX_BOUND = 256
 BUNDLE_ENTRY_GROUP = "fantastic.bundles"
 
 
+@dataclass(eq=False)
+class PeerRoute:
+    """How a connected PEER KERNEL is reached: `via` names the transport agent
+    carrying it (reported by the root reflect), `call(agent_id, payload, caller)`
+    delivers ONE call to that kernel's `agent_id` as `caller` (`<this guid>|<sender>`)
+    and returns the peer's reply — or a refusal when the connection ends first."""
+
+    via: str
+    call: Callable[[str, dict, str], Any]
+
+
 @dataclass
 class Kernel:
     """Tree-wide shared state. Created implicitly by the first Agent
@@ -445,6 +463,15 @@ class Kernel:
     # abort. `_task` is the abort handle (a real asyncio.Task) and never
     # leaves the kernel — `ps` serves the five public fields only.
     tasks: dict[int, dict] = field(default_factory=dict)
+
+    # CONNECTED PEER KERNELS — guid → the route to it (owner, 2026-09-30). An agent
+    # on another kernel is addressed `<guid>|<agent id>`; when that guid is here,
+    # `send` hands the call to its route and the reply is the call's ordinary
+    # outcome. A TRANSPORT registers the peer it is connected to (the web ws leg
+    # when a page says `hello`) and unregisters it when the connection ends — the
+    # transport only carries frames; addressing is the kernel's. A guid that is not
+    # here is an unknown target like any other.
+    peers: dict[str, "PeerRoute"] = field(default_factory=dict)
 
     # THE ONE COUNTER. Every id in the kernel — a call (one per batch item), a
     # forked task, a settle, a conversation row an AI agent writes to its store —
@@ -1307,6 +1334,31 @@ class Kernel:
     # How many ids an unknown-agent reply carries before it just reports the count.
     # Big enough for any hand-composed kernel, small enough not to bury the error.
     UNKNOWN_AGENT_IDS_MAX = 40
+
+    def register_peer(self, guid: str, route: "PeerRoute") -> dict | None:
+        """Make `<guid>|<agent>` reachable through `route`. Refused (the refusal
+        returned) when that guid is already connected through ANOTHER route —
+        re-pointing a live address silently would hand one kernel's calls to
+        another; the second connection is told so instead."""
+        held = self.peers.get(guid)
+        if held is not None and held is not route:
+            return refusal(
+                BAD_ARG,
+                f"peer {guid} is already connected via {held.via} — one kernel, "
+                "one live route; close the other connection first",
+                arg="guid",
+            )
+        self.peers[guid] = route
+        return None
+
+    def unregister_peer(self, guid: str, route: "PeerRoute") -> None:
+        """Forget `guid` — only if `route` is still the one registered."""
+        if self.peers.get(guid) is route:
+            del self.peers[guid]
+
+    def peer_rows(self) -> list[dict]:
+        """The connected peer kernels, for the root reflect: `[{guid, via}]`."""
+        return [{"guid": g, "via": r.via} for g, r in sorted(self.peers.items())]
 
     def unknown_agent(self, agent_id: str, **extra) -> dict:
         """The reply for an id that names no agent — carrying the LIVE id index.

@@ -36,6 +36,9 @@ async def _make_ollama(kernel):
     can_call = {"cli": "*", store: "*"}
     meta = {
         "handler_module": "ollama_backend.tools",
+        # required at the write (the schema); the provider is faked, never dialled
+        "endpoint": "http://127.0.0.1:9/stub",
+        "model": "stub",
         "can_call": can_call,
         "memory_store_id": store,
     }

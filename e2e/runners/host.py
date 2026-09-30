@@ -23,7 +23,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
-from backends import THINK_BUDGET
+from backends import backend
 from helpers import memory
 from helpers import verdict
 from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime
@@ -96,10 +96,15 @@ def main(scenario_id: str) -> int:
     # here and a skip only ever means what it says.
     spec = ensure_runtime(REPO, rt)
 
-    endpoint, model = os.environ.get("ENDPOINT"), os.environ.get("FANTASTIC_AI_MODEL")
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not (endpoint and model and key):
-        print("  ENDPOINT / FANTASTIC_AI_MODEL / ANTHROPIC_API_KEY required")
+    # THE ONE PLUG every probe uses (`e2e/backends`): `BACKEND` names it, the plug
+    # names what it needs. This runner used to build an anthropic agent whatever
+    # BACKEND said, so a `BACKEND=vllm` run of a scenario either failed here or
+    # ran on a different provider than its header claimed.
+    bk = backend()
+    model = bk.model
+    if blockers := bk.blockers():
+        for b in blockers:
+            print(f"  {b}")
         verdict(False, "backend not named")
         return 1
 
@@ -179,24 +184,20 @@ def main(scenario_id: str) -> int:
         # agent names it and may call it; the store's ingress for `ai` was seeded
         # (every declared id may reach it).
         can_call[memory.MEMORY] = "*"
+        # The plug's record (handler, model, endpoint, the one token budget, its
+        # sampling knobs) under this scenario's wiring. NOTHING TO DELIVER for a
+        # key: every backend reads it from the ENVIRONMENT, and the kernel was
+        # spawned with this process's env.
         ai = k.create(
             parent_id=k.root_id,
             id="ai",
-            handler_module="anthropic_backend.tools",
-            # VERBATIM on every runtime — `endpoint` is the URL.
-            endpoint=endpoint,
-            model=model,
-            memory_store_id=memory.MEMORY,
-            # ONE BUDGET (backends.THINK_BUDGET), not a second default here.
-            max_tokens=int(os.environ.get("MAX_TOKENS") or THINK_BUDGET),
-            can_call=can_call,
-            callable_by={**BASE, "rest": "*"},
+            **bk.record(
+                memory_store_id=memory.MEMORY,
+                can_call=can_call,
+                callable_by={**BASE, "rest": "*"},
+            ),
         )
         assert ai.get("id"), ai
-        # NOTHING TO DELIVER. Every backend reads its key from the ENVIRONMENT,
-        # and the kernel was spawned with this process's env — so the key is
-        # already where it will be looked for.
-        assert key, "ANTHROPIC_API_KEY is unset — the backend will refuse"
 
         first = k.send("ai", {"type": "send", "text": sc["task"], "client_id": "probe"})
         # WHOLE, never a 300-char head: the fault in a failed pass is what the

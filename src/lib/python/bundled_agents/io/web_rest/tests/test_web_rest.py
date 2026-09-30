@@ -251,3 +251,24 @@ async def test_reflect_surfaces_rest_leg_posture(seeded_kernel):
     assert r["ingress_rule"] == "deny_ingress"
     assert True  # see removed from posture
     assert r["auth_header"] == "X-Fantastic-Auth"
+
+
+def test_post_endpoint_rejects_a_non_finite_number(seeded_kernel):
+    """A `NaN` body is not JSON — 400, as rust and swift answer it."""
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_nan", ingress_rule="allow_all_ingress"
+    )
+    app = FastAPI()
+    app.add_api_route(
+        "/rest_nan/{target_id}",
+        _make_post_endpoint("rest_nan", seeded_kernel),
+        methods=["POST"],
+    )
+    with TestClient(app) as c:
+        r = c.post(
+            "/rest_nan/kernel_state",
+            content=b'{"type": "reflect", "x": NaN}',
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 400, r.text
+        assert "not valid JSON" in r.json()["error"]

@@ -44,7 +44,13 @@ from io_bridge._engine import (
     validate_meta,
 )
 from io_bridge._transport import ConnectionClosed, MemoryTransport, _BaseTransport
-from io_bridge._codec import decode_frame, encode_frame, find_bytes_path, set_path
+from io_bridge._codec import (
+    decode_frame,
+    encode_frame,
+    find_bytes_path,
+    loads,
+    set_path,
+)
 
 __all__ = [
     # decision surface
@@ -93,4 +99,5 @@ __all__ = [
     "decode_frame",
     "find_bytes_path",
     "set_path",
+    "loads",
 ]

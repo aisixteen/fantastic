@@ -85,6 +85,14 @@ public protocol AgentBundle: Sendable {
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
     ) -> String?
 
+    /// WHAT THIS KIND'S RECORD TAKES, readable before any agent of it exists —
+    /// python's duck-typed module-level `RECORD_SCHEMA` (lib request #3,
+    /// 2026-09-30). `{fields:[{name, type, required, enum?, default?, hint}],
+    /// key_var}`, served on the kind's entry in `reflect bundles=all` (never
+    /// `bundles=ids`). The same schema is what `validateMeta` enforces at the
+    /// write, so the two cannot drift. Default `nil`: the bundle publishes none.
+    var recordSchema: JSON? { get }
+
     /// DUCK-TYPED ROOT EXTENSION — python `reflect_root_extra(agent, full=…)`.
     ///
     /// The ROOT's bundle (the `kernel_state` loader) contributes root-only
@@ -146,6 +154,8 @@ extension AgentBundle {
     public var readme: String? { nil }
 
     public var verbs: [String] { [] }
+
+    public var recordSchema: JSON? { nil }
 
     public func handleBinary(
         agentId: AgentId,

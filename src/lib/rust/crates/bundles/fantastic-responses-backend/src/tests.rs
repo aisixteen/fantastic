@@ -497,26 +497,27 @@ async fn send_streams_tokens_raw_on_both_channels() {
     assert_eq!(r["response"], "<think>pondering</think>hello", "{r}");
 }
 
-/// `endpoint` is REQUIRED on the record — a send without one raises python's
-/// `ValueError`, naming the field (audit 2026-09-28, c9).
+/// `endpoint` is REQUIRED on the record — refused AT THE WRITE (the kind's
+/// schema, lib request #3), naming the field and what it is; it used to surface
+/// only at the first turn (audit 2026-09-28, c9).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_record_without_an_endpoint_raises_naming_it() {
+async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (kernel, id) = mk_kernel(&tmp, "").await;
+    let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:9/stub").await;
     let r = kernel
         .send(vec![Item::new(
-            id,
-            json!({"type": "send", "text": "hi", "client_id": "t"}),
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": id.as_str(), "endpoint": ""}),
         )])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["raised"], json!(true), "{r}");
+    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
     assert_eq!(
         r["error"],
         json!(
-            "ValueError: responses_backend: `endpoint` is required on the agent record — \
-             nothing is guessed (update_agent <id> endpoint=…)"
+            "responses_backend: required on the record and missing: endpoint — nothing is \
+             guessed. endpoint = the full Responses API URL (…/v1/responses)"
         )
     );
 }

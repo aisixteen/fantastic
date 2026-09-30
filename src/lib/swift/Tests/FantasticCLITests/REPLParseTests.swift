@@ -264,9 +264,17 @@ struct REPLCancelTests {
     /// stop leg that wins. `withTaskGroup` does not return until the REPL leg
     /// does, so this test HANGS on the old code and passes on the new.
     @Test func groupHoldingTheReplLegCompletesWhenTheStopLegWins() async {
+        // A read that REALLY blocks, as a terminal's does. The runner's stdin is at
+        // EOF, so `readLine()` returned at once and the REPL leg sometimes finished
+        // BEFORE the stop leg (1 run in ~60): the group then never had a blocked
+        // leg to abandon, and `first` was the REPL's nil.
+        let stdin = DispatchSemaphore(value: 0)
         let done = await withTaskGroup(of: String?.self) { group -> String? in
             group.addTask {
-                _ = await REPLMode.readLineAsync()
+                _ = await REPLMode.readLineAsync {
+                    stdin.wait()
+                    return nil
+                }
                 return nil
             }
             group.addTask { "SIGTERM" }
@@ -274,6 +282,7 @@ struct REPLCancelTests {
             group.cancelAll()
             return first ?? nil
         }
+        stdin.signal()  // release the parked read thread the group abandoned
         #expect(done == "SIGTERM")
     }
 }

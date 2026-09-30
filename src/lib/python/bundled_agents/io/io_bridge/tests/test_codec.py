@@ -67,3 +67,20 @@ def test_non_object_text_frame_decodes_without_raising():
     # A list/int is well-formed JSON — the codec hands it back as-is and the
     # CALLER decides it is not an envelope (web_ws answers `bad_arg`).
     assert decode_frame("[1]") == [1]
+
+
+def test_non_finite_numbers_are_not_json():
+    """`NaN`/`Infinity`/`-Infinity` are not JSON; python's `json.loads` alone takes
+    them. Off the wire they are refused like any other malformed JSON (parity
+    2026-09-30: a `NaN` REST body python took and rust/swift refused)."""
+    from io_bridge import loads
+
+    for bad in ('{"x": NaN}', '{"x": Infinity}', '{"x": -Infinity}'):
+        with pytest.raises(json.JSONDecodeError):
+            loads(bad)
+        with pytest.raises(ValueError, match="bad text frame"):
+            decode_frame(bad)
+    assert loads('{"x": 1.5, "big": 123456789012345678901234567890}') == {
+        "x": 1.5,
+        "big": 123456789012345678901234567890,
+    }

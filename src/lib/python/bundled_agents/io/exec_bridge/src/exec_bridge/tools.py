@@ -58,6 +58,7 @@ from exec_bridge import proc
 from file_bridge import fs
 from io_bridge import decode_frame, describe as _describe, encode_frame
 from io_bridge import gate_inbound, resolve_ingress
+from io_bridge import loads as strict_loads
 from io_bridge._base import parse_spec
 from kernel._refusal import (
     MISSING_ARG,
@@ -201,7 +202,7 @@ def _unframe(body: bytes) -> dict:
     if kind == b"B":
         return decode_frame(body[1:])
     if kind == b"T":
-        return json.loads(body[1:].decode("utf-8"))
+        return strict_loads(body[1:].decode("utf-8"))
     raise ValueError(f"unknown frame kind {kind!r}")
 
 

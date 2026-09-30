@@ -348,6 +348,28 @@
                         && arr?.first?["handler_module"].asString != nil,
                     "\(label) bundles=all entry missing name/handler_module")
             }
+            // A backend KIND's record schema (lib request #3) is python's, field for
+            // field — names, order, types, enums, defaults, hints, key_var — for every
+            // kind BOTH catalogs carry. A kind one runtime publishes a schema for and
+            // the other does not is a difference too.
+            func schemas(_ r: JSON) -> [String: JSON] {
+                var out: [String: JSON] = [:]
+                for e in r["bundles"].asArray ?? [] {
+                    if let n = e["name"].asString { out[n] = e.asObject?["schema"] ?? .null }
+                }
+                return out
+            }
+            let (py, sw) = (schemas(pyB), schemas(swB))
+            let published = py.filter { $0.value != .null }.keys.sorted()
+            #expect(published.contains("vllm_backend"), "python publishes no vllm_backend schema")
+            // every kind python publishes a schema for, swift publishes the same one
+            for name in published {
+                #expect(py[name] == sw[name], "\(name) schema diverged from python")
+            }
+            // and swift publishes none python does not
+            for (name, sch) in sw where sch != .null && py[name] == nil {
+                Issue.record("\(name): swift publishes a schema python's catalog lacks")
+            }
         }
 
         /// `reflect readme=true` returns the canonical root readme on

@@ -27,6 +27,7 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
 };
+use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle::py_repr_value;
@@ -454,6 +455,25 @@ fn decode_delta_into(
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
+/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+/// with no agent existing (`reflect bundles=all`), from the constants the
+/// provider runs on. `validate_meta` enforces it at the write, so the page and
+/// the kernel cannot disagree about what a record needs. Python
+/// `RECORD_SCHEMA`, field for field.
+#[must_use]
+pub fn record_schema() -> &'static Value {
+    static SCHEMA: OnceLock<Value> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        schema::schema(
+            vec![
+                Field::new("endpoint", "str", "the NIM OpenAI-compatible URL").required(),
+                Field::new("model", "str", "the model name").required(),
+            ],
+            Some(KEY_VAR),
+        )
+    })
+}
+
 /// The NVIDIA NIM backend bundle.
 pub struct NvidiaNimBundle;
 
@@ -465,6 +485,20 @@ impl Bundle for NvidiaNimBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
+    /// value outside its set — every missing field named at once, from the schema.
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        record: &Map<String, Value>,
+    ) -> Option<String> {
+        schema::validate(record_schema(), "nvidia_nim_backend", meta, record)
+    }
+
+    fn record_schema(&self) -> Option<Value> {
+        Some(record_schema().clone())
     }
 
     async fn handle(
