@@ -287,10 +287,10 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             await page.mouse("mousePressed", x, y, c)
             await page.mouse("mouseReleased", x, y, c)
         # the double click opens the SPOT INPUT: pick `terminal` in it
-        if not await page.until("!!document.querySelector('.spot-input input')", 10):
-            bad.append("no spot input after the double click")
+        if not await page.until("!!document.querySelector('.action-popup input')", 10):
+            bad.append("no action popup after the double click")
         await page.cdp("Input.insertText", text="terminal")
-        await page.until("[...document.querySelectorAll('.spot-input li')].length === 1", 5)
+        await page.until("[...document.querySelectorAll('.action-popup .tile')].length === 1", 5)
         await page.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
         await page.cdp("Input.dispatchKeyEvent", type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13)
         if not await page.until(f"document.querySelectorAll('.xterm-helper-textarea').length > {before}", 10):

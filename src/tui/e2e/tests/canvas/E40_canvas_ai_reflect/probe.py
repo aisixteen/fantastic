@@ -67,7 +67,7 @@ async def spot(pg: Page, x: int, y: int, text: str) -> None:
     for c in (1, 2):
         await pg.mouse("mousePressed", x, y, c)
         await pg.mouse("mouseReleased", x, y, c)
-    await pg.until("!!document.querySelector('.spot-input input')", 10)
+    await pg.until("!!document.querySelector('.action-popup input')", 10)
     await pg.cdp("Input.insertText", text=text)
     await asyncio.sleep(0.3)
     await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)

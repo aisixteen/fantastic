@@ -7,7 +7,7 @@ import { aiView } from "../ai_view/ai_view.ts";
 import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
-import { openSpot } from "./spot_input.ts";
+import { openActionPopup } from "./action_popup.ts";
 import { CANVAS_VERBS, setGeometry } from "./canvas_agent.ts";
 import { BACKGROUND, BACKGROUND_ID } from "./background_agent.ts";
 
@@ -19,7 +19,7 @@ const BG_VERBS = ["set_bg", "clear_bg", "get_bg", "reflect"] as const;
 import type { Placed } from "./canvas_agent.ts";
 import { createSidebar } from "./sidebar.ts";
 import type { Dialog, Question, TreeNode } from "./sidebar.ts";
-import type { Pick, Presets } from "./spot_input.ts";
+import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { createGlHost } from "./gl_host.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
@@ -567,7 +567,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const presets = async (): Promise<Presets | null> => {
     const r = (await host.callHost(AI_CELLS, { type: "presets" } as unknown as Payload).catch(() => null)) as Rec | null;
     if (!r || typeof r["error"] === "string") return null;
-    return { templates: (r["templates"] as Presets["templates"]) ?? [], preferred: (r["preferred"] as string | null) ?? null };
+    const d = (await host.callHost(AI_CELLS, { type: "dialogs" } as unknown as Payload).catch(() => null)) as Rec | null;
+    return {
+      templates: (r["templates"] as Presets["templates"]) ?? [],
+      preferred: (r["preferred"] as string | null) ?? null,
+      dialogs: ((d?.["dialogs"] as Presets["dialogs"] | undefined) ?? []).map((x) => ({ id: x.id, name: x.name })),
+    };
   };
   // THE CANVAS AS A PEER: a cell's AI (on the host) reaches this canvas at
   // `<page guid>|<canvas id>` — `around` and `reflect`, nothing else.
@@ -1028,14 +1033,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     );
   };
 
-  // THE SPOT INPUT: a double click on empty canvas, or ⌘K / Ctrl-K at the pointer.
+  // THE ACTION POPUP: a double click on empty canvas, or ⌘K / Ctrl-K at the pointer.
   let pointer = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
   canvas.addEventListener("mousemove", (e) => {
     pointer = { x: e.clientX, y: e.clientY };
   });
   const spotAt = async (sx: number, sy: number): Promise<void> => {
     const w = screenToWorld(sx, sy);
-    openSpot({
+    openActionPopup({
       screenX: sx,
       screenY: sy,
       presets: await presets(),
@@ -1044,6 +1049,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "html") spawnHtmlAt(w);
         else if (p.kind === "setup") openSetupAt(w);
         else if (p.kind === "stream") spawnStreamAt(w);
+        else if (p.kind === "chat") void reopenAt(w, { id: p.id, name: p.name });
         else void spawnAiAt(w, p.template, p.text);
       },
     });

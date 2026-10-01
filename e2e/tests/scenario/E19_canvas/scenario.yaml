@@ -1,7 +1,7 @@
 # THE CANVAS, a thin web UI, end to end. No model. The runner builds the product
 # (whose build packs the canvas and embeds `canvas.zip`), runs
 # `fantastic --headless canvas --port N` over a fresh dir, and drives a REAL
-# headless Chrome over CDP against the page it announces: a double click opens the spot input, `terminal` there spawns one,
+# headless Chrome over CDP against the page it announces: a double click opens the action popup, `terminal` there spawns one,
 # keystrokes run in it, a drag moves it, a restart rehydrates it, the close
 # button removes it. Every step is checked ON DISK too: the canvas's thin agents
 # are folders under the canvas in the ws loader's store (`.fantastic/web`).

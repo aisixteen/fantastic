@@ -75,9 +75,9 @@ try {
     "(() => { const c = document.getElementById('canvas'); c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: 420, clientY: 300 })); return true; })()",
   );
   // the double click opens the SPOT INPUT: pick `terminal` in it
-  await b.waitFor("!!document.querySelector('.spot-input input')", 10000);
+  await b.waitFor("!!document.querySelector('.action-popup input')", 10000);
   await b.evaluate(
-    "(() => { const i = document.querySelector('.spot-input input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
+    "(() => { const i = document.querySelector('.action-popup input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
   );
   await b.waitFor("document.querySelectorAll('.agent-frame').length >= 1", 20000);
   const xtermRendered = await b

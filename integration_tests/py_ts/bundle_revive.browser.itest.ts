@@ -101,9 +101,9 @@ test("canvas.zip revives: stamped sha matches, inlined css + xterm render agains
       "(() => { const c = document.getElementById('canvas'); c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: 420, clientY: 300 })); return true; })()",
     );
     // the double click opens the SPOT INPUT: pick `terminal` in it
-    await browser.waitFor("!!document.querySelector('.spot-input input')", 10000);
+    await browser.waitFor("!!document.querySelector('.action-popup input')", 10000);
     await browser.evaluate(
-      "(() => { const i = document.querySelector('.spot-input input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
+      "(() => { const i = document.querySelector('.action-popup input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
     );
     await browser.waitFor("document.querySelectorAll('.agent-frame .xterm').length >= 1", 20000);
     assert.ok(
