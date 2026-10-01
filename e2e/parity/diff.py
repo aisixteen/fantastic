@@ -154,6 +154,13 @@ class Norm:
             # …and the cli intro banner, whose SHAPE is A9.5 and whose first
             # field is the runtime naming itself.
             (r"(\[fantastic\] )(python|rust|swift)( ·)", r"\1<RUNTIME>\3"),
+            # …and the same reflect field as JSON INSIDE TEXT — a cli stdout, a
+            # REST body recorded as a string — quoted once or more (2026-10-01:
+            # `"runtime": "python"` in `cli/call_reflect_kv.stdout`, 9 lines a port;
+            # `\"runtime\":\"python\"` in a `wire/rest` body). The key-based pass
+            # already gives the parsed field `<RUNTIME>`; this is the same value
+            # where nothing parsed it.
+            (r'(\\*"runtime\\*"\s*:\s*\\*")(python|rust|swift)(\\*")', r"\1<RUNTIME>\3"),
         ):
             new = re.sub(pat, rep, out)
             if new != out:
@@ -274,7 +281,11 @@ class Norm:
             self.fired.add("N10")
         out = new
         # N4 text anchors.
-        for pat in (r"\[reply to (\d+)", r"↑(\d+)", r"in batch (\d+)", r"<pid>(\d+)</pid>",
+        for pat in (r"\[reply to (\d+)", r"↑(\d+)",
+                    # the same arrow ESCAPED, as a frame's `text` carries it
+                    # (`\u2191118` — 2026-10-01, `wire/frames` 6 lines a port)
+                    r"\\+u2191(\d+)",
+                    r"in batch (\d+)", r"<pid>(\d+)</pid>",
                     r"· msg (\d+)\]",
                     r"<task_id>(\d+)</task_id>", r"<message_id>(\d+)</message_id>", r"\[fold (\d+) ·", r"\[recall (\d+) ·",
                     r"msg (\d+) · re (\d+)", r"joined execution (\d+)", r"(?m)^(\d+) · ",
@@ -373,6 +384,20 @@ class Norm:
     DIGEST_OF_MINTED = ("agent.yaml",)
     DIGEST_KEYS = {"sha256", "__sha256__"}
 
+    _ORIGIN_NUMS = re.compile(r"(bytes )\d+-\d+( of )\d+|((?:offset|length): )\d+")
+
+    @classmethod
+    def _rewrite_origin(cls, x):
+        if isinstance(x, dict):
+            return {k: (cls._ORIGIN_NUMS.sub(
+                        lambda m: (f"{m.group(1)}<REWRITTEN>-<REWRITTEN>{m.group(2)}<REWRITTEN>"
+                                   if m.group(1) else f"{m.group(3)}<REWRITTEN>"), v)
+                        if k == "origin" and isinstance(v, str) else cls._rewrite_origin(v))
+                    for k, v in x.items()}
+        if isinstance(x, list):
+            return [cls._rewrite_origin(e) for e in x]
+        return x
+
     @classmethod
     def _blank(cls, x, num, text, mark: str):
         if isinstance(x, dict):
@@ -466,6 +491,12 @@ class Norm:
                 # moving bytes and the bytes themselves.
                 self.fired.add("N12")
                 x = self._blank(x, self.REWRITTEN_NUM, self.REWRITTEN_TEXT, "<REWRITTEN>")
+                # …and the read's `origin` line, which REPEATS those numbers in
+                # words (`bytes 0-193 of 193 — read_stream {…, length: 193}`):
+                # measured 2026-10-01, `schedules.yaml` 193 vs 195 — its float
+                # `next_run` printed to a different digit count. The words, the
+                # path and the verb stay compared.
+                x = self._rewrite_origin(x)
             elif isinstance(name, str) and any(name.endswith(d) for d in self.DIGEST_OF_MINTED):
                 self.fired.add("N16")
                 x = {k: ("<DIGEST_OF_MINTED>" if k in self.DIGEST_KEYS else v)
@@ -558,13 +589,19 @@ class Norm:
                 self.fired.add("N10")
                 out["bytes"] = "<LEN:renamed-ids>"
                 out[HEAD_RAW_LEN] = len(x["head"])
-            texts = [out[t] for t in ("text", "utf8", "body") if isinstance(out.get(t), str)]
+            texts = [out[t] for t in ("text", "utf8", "body", "stdout")
+                     if isinstance(out.get(t), str)]
             body = out.get("body")
             if isinstance(body, dict):
                 texts += [body[t] for t in ("text", "utf8") if isinstance(body.get(t), str)]
+            # `<RUNTIME>` stands for a name of 4, 5 or 6 characters (N2), so a count
+            # over a text carrying it moves with the runtime — measured 2026-10-01:
+            # a REST reflect body 4645 vs 4643 (rust) / 4644 (swift) with its
+            # content-length, a cli `stdout_bytes` 2996 vs 2994. The text itself is
+            # compared beside the count, so a real difference still shows there.
             if texts and any(("<ID#" in t or "<TS:float>" in t or "<TS:int>" in t
-                              or "<OSPID>" in t) for t in texts):
-                for ck in ("len", "body_len", "bytes_len", "size", "length"):
+                              or "<OSPID>" in t or "<RUNTIME>" in t) for t in texts):
+                for ck in ("len", "body_len", "bytes_len", "size", "length", "stdout_bytes"):
                     if isinstance(out.get(ck), (int, float)) and not isinstance(out.get(ck), bool):
                         self.fired.add("N10")
                         out[ck] = "<LEN:renamed-ids>"
@@ -768,10 +805,59 @@ def join_output_runs(entries: list) -> list:
     return out
 
 
+def _frame_kind(e) -> str | None:
+    """`reply` (a call's answer: `reply`/`error`), `event`, or None (anything else)."""
+    if not isinstance(e, dict) or e.get("dir") != "in":
+        return None
+    j = e.get("json")
+    t = j.get("type") if isinstance(j, dict) else None
+    if t in ("reply", "error"):
+        return "reply"
+    if t == "event":
+        pl = j.get("payload")
+        # a terminal OUTPUT chunk is not one of these: its order against a reply
+        # stays a contract (N17's "a reply between two chunks ends the run")
+        if isinstance(pl, dict) and pl.get("type") == "output":
+            return None
+        return "event"
+    return None
+
+
+def replies_after_events(entries: list) -> list:
+    """N20 — on ONE socket, the order of a call's REPLY relative to the EVENTS a
+    watch pushes is not a contract: both are written by different tasks onto one
+    socket, and which reaches it first is scheduling (measured 2026-10-01: the
+    `ctrl` socket's `wirecap-N` reply one or two frames earlier or later among
+    `reflect`/`status` events, rust 8 places, swift 1, in a 367-frame stream).
+    Inside a RUN of consecutive incoming reply/event frames on one socket, the
+    events keep their order, the replies keep theirs, and the replies are put
+    after the events. Anything else — an outgoing frame, a mark, another socket,
+    a frame of another type — ends the run, so a reply never crosses the call
+    that caused it, and a missing, extra or reordered frame of one kind is still
+    a line."""
+    out, run = [], []
+
+    def flush():
+        out.extend([e for e in run if _frame_kind(e) == "event"])
+        out.extend([e for e in run if _frame_kind(e) == "reply"])
+        run.clear()
+
+    for e in entries:
+        k = _frame_kind(e)
+        if k is None or (run and run[-1].get("sock") != e.get("sock")):
+            flush()
+        if k is None:
+            out.append(e)
+        else:
+            run.append(e)
+    flush()
+    return out
+
+
 def frames_view(entries: list) -> list:
-    """The frame stream as every comparison sees it: N11 (`by_mark_and_sock`)
-    then N17 (`join_output_runs`)."""
-    return join_output_runs(by_mark_and_sock(entries))
+    """The frame stream as every comparison sees it: N11 (`by_mark_and_sock`),
+    N20 (`replies_after_events`), then N17 (`join_output_runs`)."""
+    return join_output_runs(replies_after_events(by_mark_and_sock(entries)))
 
 
 #: MEASURED, not assumed: two reads of the SAME python run disagree on these two
@@ -1288,6 +1374,58 @@ def drop_head_marks(x):
     return x
 
 
+#: N10 — a token BUDGET is `window − reserve − the system block's own tokens`,
+#: and the system block names the runtime (`runtime=<RUNTIME>`, 4–6 characters,
+#: ≤1 token at 4 chars a token). So the same budget is off by at most one token
+#: between runtimes. Compared PAIRWISE with that tolerance — never blanked — so a
+#: port computing it differently (off by more than one) is still a line.
+#: Measured 2026-10-01: `<budget>3158</budget>` vs 3159 in a recall reply's text,
+#: `"budget": 22301` vs 22302 in a view row, `$.budget` 3158 vs 3159.
+_BUDGET_TEXT = re.compile(r'(<budget>|\\*"budget\\*"\s*:\s*)(\d+)')
+BUDGET_TOLERANCE = 1
+
+
+def tolerate_budgets(sa: str, sb: str, fired: set) -> tuple:
+    """Pairwise: when both texts carry the same NUMBER of budgets and each pair is
+    within `BUDGET_TOLERANCE`, the second text takes the first's numbers."""
+    xa, xb = _BUDGET_TEXT.findall(sa), _BUDGET_TEXT.findall(sb)
+    if not xa or len(xa) != len(xb):
+        return sa, sb
+    if any(p[0] != q[0] or abs(int(p[1]) - int(q[1])) > BUDGET_TOLERANCE
+           for p, q in zip(xa, xb)):
+        return sa, sb
+    if all(p[1] == q[1] for p, q in zip(xa, xb)):
+        return sa, sb
+    it = iter(xa)
+    fired.add("N10")
+    return sa, _BUDGET_TEXT.sub(lambda m: m.group(1) + next(it)[1], sb)
+
+
+def _budget_close(key: str, va, vb) -> bool:
+    """A FIELD named `budget` (a recall reply's, a view row's), ±1 token."""
+    last = key.split("\x00")[0].rsplit(".", 1)[-1]
+    return (last == "budget" and isinstance(va, (list, tuple)) and isinstance(vb, (list, tuple))
+            and len(va) == 2 and len(vb) == 2 and va[0] == vb[0] == "int"
+            and abs(va[1] - vb[1]) <= BUDGET_TOLERANCE)
+
+
+def _name_length_delta(key: str, va, vb, na: "Norm", nb: "Norm") -> bool:
+    """N2 — a `stdout_bytes` whose stdout was recorded only as a HEAD (so N10
+    cannot see the text it counts) and that differs by EXACTLY the difference in
+    length of the two runtime names: the reflect it counts prints its runtime once
+    (measured 2026-10-01: `setup.reflect` 3120 python vs 3118 rust, 3119 swift).
+    Any other difference is still a line."""
+    last = key.split("\x00")[0].rsplit(".", 1)[-1]
+    if last != "stdout_bytes" or not (isinstance(va, (list, tuple))
+                                      and isinstance(vb, (list, tuple))):
+        return False
+    if len(va) != 2 or len(vb) != 2 or va[0] != "int" or vb[0] != "int":
+        return False
+    if na.runtime not in ("python", "rust", "swift") or nb.runtime not in ("python", "rust", "swift"):
+        return False
+    return va[1] - vb[1] == len(na.runtime) - len(nb.runtime) != 0
+
+
 def compare_json(path: str, a, b, na: Norm, nb: Norm) -> list:
     keys = unordered_keys(path)
     wa, wb = pair_row_ids(na.walk(a), nb.walk(b))
@@ -1300,6 +1438,17 @@ def compare_json(path: str, a, b, na: Norm, nb: Norm) -> list:
         va, vb = fa.get(key, "<absent>"), fb.get(key, "<absent>")
         if va == vb:
             continue
+        if _budget_close(key, va, vb):
+            na.fired.add("N10")
+            continue
+        if _name_length_delta(key, va, vb, na, nb):
+            na.fired.add("N2")
+            continue
+        if (isinstance(va, (list, tuple)) and isinstance(vb, (list, tuple))
+                and len(va) == len(vb) == 2 and va[0] == vb[0] == "str"):
+            ta, tb = tolerate_budgets(va[1], vb[1], na.fired)
+            if ta == tb:
+                continue
         lines.append({"file": path, "where": key.replace("\x00", " · "),
                       "base": _short(va), "other": _short(vb),
                       "rules_fired": sorted(na.fired | nb.fired)})
@@ -1369,9 +1518,64 @@ def joined_frame_total(p: Path):
     return len(frames_view(entries)) if kind == "jsonl" else None
 
 
+#: N21 — the files whose AI event lists carry the two-delivery race below.
+SELF_REFLECT_FILES = ("ai_paths/events.json", "ai_paths/cases/cycle.json")
+
+
+def canon_self_reflect(events: list) -> list:
+    """N21 — an agent busy with one turn is sent a PEER message (a `send` event
+    with no `client_id`) and, a moment later, the reply its own earlier call was
+    waiting for. The peer turn's self-`reflect` (the agent reflecting itself as
+    its prompt is assembled) and the reply's DELIVERY race: python records the
+    reflect right after the peer `send`; swift records the reply's `send` and its
+    `queued` status first (measured 2026-10-01, `ai_paths/events.json` 386-388 and
+    `cases/cycle.json`). Owner, 2026-10-01: that order is not a contract.
+
+    Canonical form: the first `reflect` after a peer `send` is moved to right
+    after it, but ONLY across `send` events and `queued` statuses. A `thinking`
+    status (a turn STARTED) or anything else in between ends the search — so the
+    case where the two turns themselves ran in the other order (rust: the reply's
+    turn thinks first) is NOT reordered and stays a diff line."""
+    out = list(events)
+    i = 0
+    while i < len(out):
+        e = out[i]
+        if isinstance(e, dict) and e.get("type") == "send" and e.get("client_id") is None:
+            j = i + 1
+            while j < len(out):
+                f = out[j]
+                if not isinstance(f, dict):
+                    j = None
+                    break
+                if f.get("type") == "reflect":
+                    break
+                if f.get("type") == "send" or (f.get("type") == "status"
+                                               and f.get("phase") == "queued"):
+                    j += 1
+                    continue
+                j = None
+                break
+            else:
+                j = None
+            if j is not None and j > i + 1:
+                out.insert(i + 1, out.pop(j))
+        i += 1
+    return out
+
+
+def _canon_ai_events(rel: str, doc):
+    if rel not in SELF_REFLECT_FILES or not isinstance(doc, dict):
+        return doc
+    return {k: (canon_self_reflect(v) if isinstance(v, list)
+                and (rel.endswith("events.json") or k == "events") else v)
+            for k, v in doc.items()}
+
+
 def file_lines(rel: str, pa: Path, pb: Path, ports_a, ports_b, root_alias, rt_b) -> list:
     ka, a = load(pa)
     kb, b = load(pb)
+    if ka == "json" and kb == "json" and rel in SELF_REFLECT_FILES:
+        a, b = _canon_ai_events(rel, a), _canon_ai_events(rel, b)
     if rel.endswith("/meta.json"):
         a = {k: v for k, v in (a or {}).items() if k in META_MEASURED}
         b = {k: v for k, v in (b or {}).items() if k in META_MEASURED}
@@ -1470,6 +1674,10 @@ def file_lines(rel: str, pa: Path, pb: Path, ports_a, ports_b, root_alias, rt_b)
         # rewritten while it is read) is compared as a bag of lines instead.
         la = [na.string(x) for x in a.splitlines()]
         lb = [nb.string(x) for x in b.splitlines()]
+        if len(la) == len(lb):
+            # N10 — the budget tolerance, line for line (a stub request body is
+            # one line carrying every recall reply the conversation holds)
+            lb = [tolerate_budgets(x, y, na.fired)[1] for x, y in zip(la, lb)]
         if unordered_keys(rel):
             la, lb = sorted(la), sorted(lb)
         lines = []
@@ -1526,10 +1734,14 @@ def classify(lines: list, residuals: list, landed: list, proofs: dict, runtime: 
         if r is not None:
             used.add(r["id"])
             r_items = r.get("items") or []
-            if r_items and all(i in landed for i in r_items):
-                verdict = "regression"
-            elif r.get("state") == "accepted":
+            # ACCEPTED wins over landed.yaml: the owner decided this difference IS
+            # the runtime's landed behaviour (residuals.yaml v6, 2026-10-01). A
+            # PENDING residual whose items have all landed is a regression — the
+            # undecided difference has outlived the claim.
+            if r.get("state") == "accepted":
                 verdict = "residual-accepted"
+            elif r_items and all(i in landed for i in r_items):
+                verdict = "regression"
             else:
                 verdict = "residual-pending-owner"
         elif items:
@@ -1598,11 +1810,54 @@ def harness_errors(root: Path) -> list:
 SKIP = ("http.json",)
 
 
+#: N22 — the stub request bodies whose NUMBERING interleaves across agents.
+STUB_REQ = re.compile(r"^ai_paths/stub/req_\d+\.bin$")
+_STUB_AGENT = re.compile(r"\bid=(\w+)\s+model=")
+
+
+def pair_stub_requests(fa: dict, fb: dict) -> dict:
+    """N22 — `ai_paths` runs TWO AI agents, and the stub numbers their requests in
+    ARRIVAL order across both: when `ai2`'s turn reaches the stub before `ai`'s,
+    every number after it shifts (measured 2026-10-01: swift `req_068` is `ai2`'s
+    request, python's is `req_069`, so both files read as wholly different). Each
+    AGENT's own request sequence is a contract and stays compared, in order: the
+    k-th request of agent X is paired with the other side's k-th request of X
+    (the agent is the `id=<agent>  model=` line of the system block). A request
+    one side made and the other did not is still a missing/extra file."""
+    def by_agent(files: dict) -> dict:
+        out: dict = {}
+        for rel in sorted(r for r in files if STUB_REQ.match(r)):
+            try:
+                m = _STUB_AGENT.search(Path(files[rel]).read_text(errors="replace"))
+            except OSError:
+                m = None
+            out.setdefault(m.group(1) if m else None, []).append(rel)
+        return out
+    ga, gb = by_agent(fa), by_agent(fb)
+    pairs = {}
+    for agent, rels in ga.items():
+        for ra, rb in zip(rels, gb.get(agent) or []):
+            pairs[ra] = rb
+    return pairs
+
+
 def run_diff(base: Path, other: Path, root_alias, rt_b: str) -> list:
     fa, fb = walk_capture(base), walk_capture(other)
     fa = {k: v for k, v in fa.items() if not k.endswith(SKIP)}
     fb = {k: v for k, v in fb.items() if not k.endswith(SKIP)}
     lines = []
+    # N22: re-point each python stub request at the port's request of the SAME
+    # agent and rank; the port's files so consumed are not compared twice.
+    stub_pairs = pair_stub_requests(fa, fb)
+    if stub_pairs and any(a != b for a, b in stub_pairs.items()):
+        port = {k: v for k, v in fb.items() if STUB_REQ.match(k)}
+        fb = {k: v for k, v in fb.items() if not STUB_REQ.match(k)}
+        fb.update({ra: port[rb] for ra, rb in stub_pairs.items()})
+        # a port request with no python partner keeps its own name — renamed if
+        # that name is now taken by a pair, so it is never compared against a
+        # request of another agent
+        for rb in sorted(set(port) - set(stub_pairs.values())):
+            fb[rb if rb not in fb else f"{rb}#unpaired"] = port[rb]
     for rel in sorted(set(fa) | set(fb)):
         fam = rel.split("/", 1)[0]
         if rel not in fa:
@@ -1717,6 +1972,10 @@ def cmd_status(diffdir: Path, proofs, landed, plan: Path) -> int:
             if not line.strip():
                 continue
             ln = json.loads(line)
+            # an ACCEPTED difference does not stop its items passing — that is
+            # what accepting it means (residuals.yaml v6)
+            if ln.get("verdict") == "residual-accepted":
+                continue
             touched |= set(ln.get("items") or [])
         landed_rt = set(L.get(rt) or [])
         passing = sorted(landed_rt - touched)
@@ -2112,6 +2371,135 @@ def cmd_rulecheck() -> int:
         total += 1
         print(f"  {'ok  ' if ok else 'FAIL'} N3 — {name}: {len(lines)} line(s), "
               f"expected {'>0' if want else '0'}")
+
+    # ── 2026-10-01 — the parity-leftover rules (owner: tmp/todo.md (a)/(c)). ──
+    # Each both ways: the measured difference is forgiven, the real one beside it
+    # is still a line.
+    def cjr(a, b, rel, rt="rust"):
+        return compare_json(rel, a, b, Norm({}, None, "python"), Norm({}, None, rt))
+
+    sched = "agents/sched/schedules.yaml"
+
+    def srec(n, verb="read_stream"):
+        return {"path": sched, "size": n, "chunk_replies": [{"reply": {
+            "origin": f"store {sched} bytes 0-{n} of {n} — {verb} {{path: {sched}, "
+                      f"offset: 0, length: {n}}}"}}]}
+
+    def ev(t, **kw):
+        return {"type": t, **kw}
+
+    PEER = ev("send", text="CASE=cycle_end#1")
+    REPLY = ev("send", text="[reply to 9 · ai2 send · ↑5] ok", client_id="probe")
+    QUEUED = ev("status", phase="queued", client_id="probe")
+    THINK = ev("status", phase="thinking", client_id="probe")
+    SELF = ev("reflect", tree="none")
+
+    def fr(sock, kind, ftype, **extra):
+        j = {"type": ftype, **extra}
+        return {"sock": sock, "dir": "in" if kind == "in" else kind,
+                "kind": "text", "json": j}
+
+    R1, E1, E2 = (fr("ctrl", "in", "reply", id="w-1", data={}),
+                  fr("ctrl", "in", "event", src="ai", payload={"type": "reflect"}),
+                  fr("ctrl", "in", "event", src="ai", payload={"type": "status"}))
+    OUT = fr("ctrl", "out", "call", id="w-2")
+    new_cases = [
+        ("N2 — the runtime field as JSON inside a stdout",
+         lambda: cjr({"stdout": '{\n  "runtime": "python",\n  "env": "host"\n}'},
+                     {"stdout": '{\n  "runtime": "rust",\n  "env": "host"\n}'}, "t/cli/x.json"), False),
+        ("N2 — a different field beside it is still a line",
+         lambda: cjr({"stdout": '{\n  "runtime": "python",\n  "env": "host"\n}'},
+                     {"stdout": '{\n  "runtime": "rust",\n  "env": "container"\n}'}, "t/cli/x.json"), True),
+        ("N2 — a head-only stdout's count off by EXACTLY the name length",
+         lambda: cjr({"stdout": "{ head", "stdout_bytes": 3120},
+                     {"stdout": "{ head", "stdout_bytes": 3118}, "t/cli/y.json"), False),
+        ("N2 — off by anything else is still a line",
+         lambda: cjr({"stdout": "{ head", "stdout_bytes": 3120},
+                     {"stdout": "{ head", "stdout_bytes": 3117}, "t/cli/y.json"), True),
+        ("N4 — the escaped ↑ arrow in a frame's text",
+         lambda: cjr({"text": "[reply to 7 \\u00b7 files reflect \\u00b7 \\u2191118]"},
+                     {"text": "[reply to 7 \\u00b7 files reflect \\u00b7 \\u2191115]"}, "t/wire/f.json"), False),
+        ("N4 — a different verb beside it is still a line",
+         lambda: cjr({"text": "[reply to 7 \\u00b7 files reflect \\u00b7 \\u2191118]"},
+                     {"text": "[reply to 7 \\u00b7 files read \\u00b7 \\u2191115]"}, "t/wire/f.json"), True),
+        ("N10 — a body count over text naming the runtime",
+         lambda: cjr({"body": {"text": '{"runtime":"python","a":1}', "len": 26}},
+                     {"body": {"text": '{"runtime":"rust","a":1}', "len": 24}}, "t/wire/r.json"), False),
+        ("N10 — a body that differs beside it is still a line",
+         lambda: cjr({"body": {"text": '{"runtime":"python","a":1}', "len": 26}},
+                     {"body": {"text": '{"runtime":"rust","a":2}', "len": 24}}, "t/wire/r.json"), True),
+        ("N10 — a budget FIELD within one token",
+         lambda: cjr({"budget": 3158, "why": "w"}, {"budget": 3159, "why": "w"}, "t/ctx/b.json"), False),
+        ("N10 — a budget FIELD two tokens off is still a line",
+         lambda: cjr({"budget": 3158, "why": "w"}, {"budget": 3160, "why": "w"}, "t/ctx/b.json"), True),
+        ("N10 — a <budget> in text within one token",
+         lambda: cjr({"c": "<dropped>29</dropped>\n<budget>3158</budget>"},
+                     {"c": "<dropped>29</dropped>\n<budget>3159</budget>"}, "t/ctx/c.json"), False),
+        ("N10 — a <budget> in text with another count changed is still a line",
+         lambda: cjr({"c": "<dropped>29</dropped>\n<budget>3158</budget>"},
+                     {"c": "<dropped>28</dropped>\n<budget>3159</budget>"}, "t/ctx/c.json"), True),
+        ("N12 — a rewritten file's read origin repeats its moving size",
+         lambda: cjr(srec(193), srec(195), "t/store/s.json"), False),
+        ("N12 — a different verb in the origin is still a line",
+         lambda: cjr(srec(193), srec(195, verb="read"), "t/store/s.json"), True),
+        ("N20 — a reply and an event swapped on one socket",
+         lambda: compare_json("t/frames.jsonl", frames_view([E1, R1, E2]),
+                              frames_view([R1, E1, E2]), Norm({}, None, "python"),
+                              Norm({}, None, "rust")), False),
+        ("N20 — a MISSING reply is still a line",
+         lambda: compare_json("t/frames.jsonl", frames_view([E1, R1, E2]),
+                              frames_view([E1, E2]), Norm({}, None, "python"),
+                              Norm({}, None, "rust")), True),
+        ("N20 — events among themselves are still ordered",
+         lambda: compare_json("t/frames.jsonl", frames_view([E1, E2, R1]),
+                              frames_view([E2, E1, R1]), Norm({}, None, "python"),
+                              Norm({}, None, "rust")), True),
+        ("N20 — a reply never crosses an outgoing call",
+         lambda: compare_json("t/frames.jsonl", frames_view([R1, OUT, E1]),
+                              frames_view([E1, OUT, R1]), Norm({}, None, "python"),
+                              Norm({}, None, "rust")), True),
+        ("N21 — the peer turn's self-reflect after the reply's delivery",
+         lambda: cjr({"ai": canon_self_reflect([PEER, SELF, REPLY, QUEUED, THINK])},
+                     {"ai": canon_self_reflect([PEER, REPLY, QUEUED, SELF, THINK])},
+                     "ai_paths/events.json", "swift"), False),
+        ("N21 — the two TURNS in the other order is still a line",
+         lambda: cjr({"ai": canon_self_reflect([PEER, SELF, REPLY, QUEUED, THINK])},
+                     {"ai": canon_self_reflect([PEER, REPLY, THINK, SELF])},
+                     "ai_paths/events.json"), True),
+    ]
+    for name, fn, want in new_cases:
+        lines = fn()
+        ok = bool(lines) == want
+        bad += 0 if ok else 1
+        total += 1
+        print(f"  {'ok  ' if ok else 'FAIL'} {name}: {len(lines)} line(s), "
+              f"expected {'>0' if want else '0'}")
+
+    # N22 — the stub's requests re-paired per agent, on real files.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+
+        def req(side, n, agent):
+            f = tdp / side / f"req_{n:03d}.bin"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(f'{{"system": "x  id={agent}  model=m"}}')
+            return f"ai_paths/stub/req_{n:03d}.bin", str(f)
+
+        fa = dict([req("a", 1, "ai"), req("a", 2, "ai2"), req("a", 3, "ai")])
+        fb = dict([req("b", 1, "ai"), req("b", 2, "ai"), req("b", 3, "ai2")])
+        pairs = pair_stub_requests(fa, fb)
+        for name, ok in (
+                ("N22 — each agent's k-th request pairs with the other side's k-th",
+                 pairs == {"ai_paths/stub/req_001.bin": "ai_paths/stub/req_001.bin",
+                           "ai_paths/stub/req_003.bin": "ai_paths/stub/req_002.bin",
+                           "ai_paths/stub/req_002.bin": "ai_paths/stub/req_003.bin"}),
+                ("N22 — a request with no partner of its agent stays unpaired",
+                 "ai_paths/stub/req_003.bin" not in pair_stub_requests(
+                     fa, dict([req("c", 1, "ai"), req("c", 2, "ai2")]))),
+        ):
+            bad += 0 if ok else 1
+            total += 1
+            print(f"  {'ok  ' if ok else 'FAIL'} {name}")
 
     # ── The diff is written INSIDE the run tree, never beside it. ───────────
     for name, given, want in (

@@ -80,7 +80,28 @@ def test_non_finite_numbers_are_not_json():
             loads(bad)
         with pytest.raises(ValueError, match="bad text frame"):
             decode_frame(bad)
-    assert loads('{"x": 1.5, "big": 123456789012345678901234567890}') == {
+    assert loads('{"x": 1.5, "n": -9223372036854775808}') == {
         "x": 1.5,
-        "big": 123456789012345678901234567890,
+        "n": -(2**63),
     }
+
+
+def test_only_values_every_runtime_can_hold():
+    """Owner D13 (2026-10-01): an integer outside int64, a number that overflows a
+    double and a lone surrogate are refused at the wire — rust and swift would
+    hold a different value, or none."""
+    from io_bridge import loads
+
+    for bad in (
+        '{"x": 9223372036854775808}',
+        '{"x": -9223372036854775809}',
+        '{"x": 1e400}',
+        '{"s": "\\udcff"}',
+        '{"\\ud800": 1}',
+        '[["deep", "\\udfff"]]',
+    ):
+        with pytest.raises(json.JSONDecodeError):
+            loads(bad)
+    # the int64 edges and a PAIRED surrogate (one real character) are fine
+    assert loads("[9223372036854775807, -9223372036854775808]") == [2**63 - 1, -(2**63)]
+    assert loads('{"s": "\\ud83d\\ude00"}') == {"s": "\U0001f600"}

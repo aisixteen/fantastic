@@ -287,3 +287,141 @@ async fn an_empty_batch_is_an_empty_answer() {
     let kernel = mk_kernel(Arc::clone(&sh));
     assert!(kernel.send(vec![]).await.is_empty());
 }
+
+// ─── parallel EXECUTION, observed (owner, 2026-10-01) ───────────────────────
+//
+// The wall-clock twin above proves concurrency by timing; this pair proves it
+// by OBSERVATION, independent of load: item A's handler holds until item B's
+// handler has STARTED. Run one after the other, A could never see that and
+// gives up after 3 s ("no overlap"). Run together, B's start releases A. The
+// arrival order — the order the items reach their targets (the `send` fanout)
+// — is the batch's input order, python's effective order.
+
+/// A releases on B's start. `notify_one` keeps a permit, so B starting BEFORE A
+/// waits still counts.
+struct Overlap {
+    b_started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for Overlap {
+    fn name(&self) -> &str {
+        "overlap"
+    }
+
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &serde_json::Value,
+        _kernel: &Arc<crate::kernel::Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        let verb = payload
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        Ok(Some(match verb {
+            "boot" | "shutdown" => serde_json::Value::Null,
+            "reflect" => json!({"id": agent_id.0, "sentence": "overlap probe", "verbs": {}}),
+            "wait_for_b" => {
+                let saw =
+                    tokio::time::timeout(Duration::from_secs(3), self.b_started.notified()).await;
+                json!({"overlapped": saw.is_ok()})
+            }
+            "b" => {
+                self.b_started.notify_one();
+                json!({"b": true})
+            }
+            other => json!({"error": format!("unknown verb {other}")}),
+        }))
+    }
+}
+
+/// A kernel with the overlap bundle and one agent per id; the arrival log is the
+/// `send` fanout's own record, in the order the items reached their targets.
+async fn overlap_kernel(
+    ids: &[&str],
+) -> (
+    Arc<crate::kernel::Kernel>,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let mut kernel = crate::kernel::Kernel::new();
+    kernel.bundles.register(
+        "overlap.tools",
+        Overlap {
+            b_started: Arc::new(tokio::sync::Notify::new()),
+        },
+    );
+    let kernel = Arc::new(kernel);
+    let root = crate::agent::Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        serde_json::Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(root);
+    for id in ids {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "overlap.tools", "id": id}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
+    }
+    let arrivals = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&arrivals);
+    kernel.add_state_subscriber(Arc::new(move |ev: &serde_json::Value, _| {
+        let verb = ev["payload"]["type"].as_str().unwrap_or("");
+        if ev["kind"] == "send" && (verb == "wait_for_b" || verb == "b") {
+            log.lock()
+                .expect("arrivals poisoned")
+                .push(format!("{}:{verb}", ev["agent_id"].as_str().unwrap_or("")));
+        }
+    }));
+    (kernel, arrivals)
+}
+
+async fn assert_overlap(kernel: &Arc<crate::kernel::Kernel>, a: &str, b: &str) -> Vec<String> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(10),
+        kernel.send(vec![
+            Item::new(AgentId::from(a), json!({"type": "wait_for_b"})),
+            Item::new(AgentId::from(b), json!({"type": "b"})),
+        ]),
+    )
+    .await
+    .expect("the batch must settle");
+    assert_eq!(out[1].result["b"], true, "{:?}", out[1].result);
+    assert_eq!(
+        out[0].result["overlapped"], true,
+        "A never saw B start — the batch EXECUTED one item after the other: {:?}",
+        out[0].result
+    );
+    vec![format!("{a}:wait_for_b"), format!("{b}:b")]
+}
+
+#[tokio::test]
+async fn two_items_to_one_agent_execute_at_the_same_time() {
+    let (kernel, arrivals) = overlap_kernel(&["ov_one"]).await;
+    let want = assert_overlap(&kernel, "ov_one", "ov_one").await;
+    assert_eq!(*arrivals.lock().unwrap(), want, "arrival = input order");
+}
+
+#[tokio::test]
+async fn two_items_to_two_agents_execute_at_the_same_time() {
+    let (kernel, arrivals) = overlap_kernel(&["ov_a", "ov_b"]).await;
+    let want = assert_overlap(&kernel, "ov_a", "ov_b").await;
+    assert_eq!(*arrivals.lock().unwrap(), want, "arrival = input order");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_overlap_holds_on_a_multi_threaded_runtime() {
+    let (kernel, arrivals) = overlap_kernel(&["ov_m1", "ov_m2"]).await;
+    let want = assert_overlap(&kernel, "ov_m1", "ov_m2").await;
+    assert_eq!(*arrivals.lock().unwrap(), want, "arrival = input order");
+}

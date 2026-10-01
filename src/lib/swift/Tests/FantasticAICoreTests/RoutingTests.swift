@@ -892,6 +892,12 @@ struct RoutingTests {
         // The parser behind it, on python's own fixture.
         #expect(incomingParent("[reply to 40 \u{b7} notes read \u{b7} \"read the spec\" \u{b7} \u{2191}17]\nok") == 17)
         #expect(incomingParent("please survey the corpus") == nil)
+        // A tag ENDING on its `↑` segment, with a later `]` in the body: the
+        // closing bracket is not part of the id (python `_TAG_LINKS`, 2026-10-01).
+        #expect(
+            incomingParent(
+                "[reply to - \u{b7} 5 reflect \u{b7} \u{2191}360]\n<error>no agent '5'</error> [ids: 1]")
+                == 360)
     }
 
     /// THE MODEL'S `<title>` RIDES THE REPLY TAG — `[reply to <pid> · <target> <verb>
