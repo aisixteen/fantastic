@@ -552,3 +552,215 @@ async fn sampling_may_not_override_what_the_provider_owns() {
         "{r}"
     );
 }
+
+// ─── STEP-4 PINS (2026-10-01): a raw HTTP/1.1 stub ──────────────────────────
+//
+// The mock-server crates always answer with a COMPLETE body; the behaviours
+// pinned below need a body CUT mid-stream, the raw request head (headers as
+// sent), and a count of TCP connections (the client must not pool).
+
+/// What the stub saw: every request head, in order, and how many connections.
+#[derive(Clone, Default)]
+struct RawLog {
+    heads: Arc<std::sync::Mutex<Vec<String>>>,
+    conns: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RawLog {
+    fn heads(&self) -> Vec<String> {
+        self.heads.lock().unwrap().clone()
+    }
+    fn conns(&self) -> usize {
+        self.conns.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Answer request `n` (counted across connections) with `script(n)`: the raw
+/// bytes to write and whether to close the connection after them. A connection
+/// left open serves its next request (HTTP/1.1 keep-alive).
+async fn raw_stub(script: fn(usize) -> (Vec<u8>, bool)) -> (u16, RawLog) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = RawLog::default();
+    let srv = log.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            srv.conns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let log = srv.clone();
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let head = loop {
+                        let end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                        if let Some(h) = end {
+                            let head = String::from_utf8_lossy(&buf[..h]).to_string();
+                            let len: usize = head
+                                .to_ascii_lowercase()
+                                .split("content-length:")
+                                .nth(1)
+                                .and_then(|t| t.split("\r\n").next())
+                                .and_then(|t| t.trim().parse().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= h + len {
+                                buf.drain(..h + len);
+                                break head;
+                            }
+                        }
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    };
+                    let n = {
+                        let mut heads = log.heads.lock().unwrap();
+                        heads.push(head);
+                        heads.len() - 1
+                    };
+                    let (out, close) = script(n);
+                    let _ = sock.write_all(&out).await;
+                    let _ = sock.flush().await;
+                    if close {
+                        let _ = sock.shutdown().await;
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, log)
+}
+
+/// A 200 whose `Content-Length` promises far more than `body` — the client reads
+/// `body`, then the connection closes: a transport error MID-STREAM.
+fn cut_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
+    (
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len() + 4096
+        )
+        .into_bytes(),
+        true,
+    )
+}
+
+/// A complete 200, connection kept alive.
+fn full_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
+    (
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes(),
+        false,
+    )
+}
+
+/// The value of header `name` (case-insensitive) in a raw request head, as sent.
+fn raw_header(head: &str, name: &str) -> Option<String> {
+    let want = format!("{}:", name.to_ascii_lowercase());
+    head.split("\r\n").find_map(|l| {
+        l.to_ascii_lowercase().starts_with(&want).then(|| {
+            l[want.len()..]
+                .strip_prefix(' ')
+                .unwrap_or(&l[want.len()..])
+                .to_string()
+        })
+    })
+}
+
+async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
+    kernel
+        .send(vec![Item::new(
+            id.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t", "reply_to": null}),
+        )])
+        .await
+        .remove(0)
+        .result
+}
+
+const DONE_OK: &str = "ok<call name=\"done\"></call>";
+
+fn ok_response(_: usize) -> (Vec<u8>, bool) {
+    full_response("text/event-stream", &text(&[DONE_OK], "completed", None))
+}
+
+/// A body cut mid-stream raises `stream: <reqwest's text ← every cause>`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_cut_mid_stream_raises_stream_and_the_cause_chain() {
+    let (port, _log) = raw_stub(|_| {
+        cut_response(
+            "text/event-stream",
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+        )
+    })
+    .await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, id) = mk_kernel(&tmp, &format!("http://127.0.0.1:{port}/v1/responses")).await;
+    let _key = KeyEnv::set(Some("sk")).await;
+    let r = send_once(&kernel, &id).await;
+    assert_eq!(r["raised"], json!(true), "{r}");
+    assert_eq!(
+        r["error"],
+        json!("RuntimeError: stream: error decoding response body ← error reading a body from connection ← end of file before message length reached"),
+        "{r}"
+    );
+}
+
+/// The key rides VERBATIM (never trimmed) as `Authorization: Bearer <key>`;
+/// the client is rebuilt when the environment's key CHANGES, and never pools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_key_rides_verbatim_a_changed_key_rebuilds_and_nothing_pools() {
+    let (port, log) = raw_stub(ok_response).await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, id) = mk_kernel(&tmp, &format!("http://127.0.0.1:{port}/v1/responses")).await;
+    let _key = KeyEnv::set(Some(" sk-pad ")).await;
+    assert_eq!(send_once(&kernel, &id).await["response"], json!(DONE_OK));
+    let first = log.heads().len();
+    std::env::set_var(KEY_VAR, "sk-next");
+    assert_eq!(send_once(&kernel, &id).await["response"], json!(DONE_OK));
+    let heads = log.heads();
+    assert!(first >= 1 && heads.len() > first, "{heads:#?}");
+    for h in &heads[..first] {
+        assert!(h.starts_with("POST /v1/responses HTTP/1.1\r\n"), "{h}");
+        assert_eq!(
+            raw_header(h, "authorization").as_deref(),
+            Some("Bearer  sk-pad "),
+            "{h}"
+        );
+        assert_eq!(
+            raw_header(h, "accept").as_deref(),
+            Some("text/event-stream")
+        );
+    }
+    for h in &heads[first..] {
+        assert_eq!(
+            raw_header(h, "authorization").as_deref(),
+            Some("Bearer sk-next"),
+            "a changed key rebuilds the client: {h}"
+        );
+    }
+    assert_eq!(
+        log.conns(),
+        heads.len(),
+        "pool_max_idle_per_host(0): one connection per request"
+    );
+}
+
+/// The unknown-type reply, as TEXT — a bare `{error}`; key order is wire.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
+    let r = kernel
+        .send(vec![Item::new(id, json!({"type": "frob"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"responses_backend: unknown type 'frob'"}"#
+    );
+}

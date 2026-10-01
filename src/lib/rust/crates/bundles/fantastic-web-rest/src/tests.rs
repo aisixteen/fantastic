@@ -97,3 +97,31 @@ async fn reflect_keys_match_python() {
     );
     assert_eq!(obj["sealed"], json!(true));
 }
+
+/// STEP-4 PIN (2026-10-01): the unknown-type refusal's KEY ORDER is part of the
+/// wire (`preserve_order`); `Value` equality ignores it, so the text is compared.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let kernel = Arc::new(Kernel::new());
+    for (payload, want) in [
+        (
+            json!({"type": "frob"}),
+            r#"{"error":"web_rest: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#,
+        ),
+        (
+            json!({}),
+            r#"{"error":"web_rest: unknown type None","reason":"unhandled","verb":null}"#,
+        ),
+        (
+            json!({"type": 5}),
+            r#"{"error":"web_rest: unknown type 5","reason":"unhandled","verb":5}"#,
+        ),
+    ] {
+        let reply = WebRestBundle
+            .handle(&AgentId::from("rest"), &payload, &kernel)
+            .await
+            .expect("handled")
+            .expect("reply");
+        assert_eq!(serde_json::to_string(&reply).unwrap(), want, "{payload}");
+    }
+}

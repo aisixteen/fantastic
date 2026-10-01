@@ -2246,3 +2246,321 @@ async fn forward_timeout_is_python_float() {
     let r = ask(&kernel, &leg, fwd(json!("5"))).await;
     assert_eq!(r["reason"], "not_connected", "{r}");
 }
+
+/// STEP-4 PIN (2026-10-01): both families' unknown type, as TEXT — `error` then
+/// `hint`, no code. Key order is part of the wire and `Value` equality ignores it.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact_on_both_families() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    let ws = id_for("s4_ws", &tmp);
+    create_leg(&kernel, WS_HANDLER_MODULE, &ws, json!({})).await;
+    let relay = id_for("s4_relay", &tmp);
+    create_leg(
+        &kernel,
+        RELAY_HANDLER_MODULE,
+        &relay,
+        json!({"transport": "relay", "relay_url": "ws://127.0.0.1:1"}),
+    )
+    .await;
+    let hint = "every bridge frame needs a \\\"type\\\"; to reach a remote agent use \
+                {\\\"type\\\":\\\"forward\\\",\\\"target\\\":\\\"<remote_id>\\\",\\\"payload\\\":\
+                {\\\"type\\\":\\\"<verb>\\\",...}} — the inner payload is itself a verb frame \
+                and needs its own \\\"type\\\".";
+    for id in [&ws, &relay] {
+        let r = ask(&kernel, id, json!({"type": "garbage"})).await;
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            format!(r#"{{"error":"bridge: unknown type 'garbage'","hint":"{hint}"}}"#),
+            "{id}"
+        );
+    }
+    let r = WsBridgeBundle
+        .handle(&AgentId::from(ws.as_str()), &json!({}), &kernel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        format!(r#"{{"error":"bridge: unknown type None","hint":"{hint}"}}"#)
+    );
+}
+
+/// STEP-4 PIN (2026-10-01): a relay leg's minted `guid` is python's
+/// `uuid.uuid4().hex` — 32 lowercase hex, version nibble 4, RFC-4122 variant.
+#[tokio::test]
+async fn a_minted_relay_guid_is_a_uuid4_hex() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    let mut seen = std::collections::HashSet::new();
+    for n in 0..4 {
+        let relay = id_for(&format!("s4_guid{n}"), &tmp);
+        // a bad role fails the boot AFTER the guid is minted
+        create_leg(
+            &kernel,
+            RELAY_HANDLER_MODULE,
+            &relay,
+            json!({"transport": "relay", "relay_url": "ws://127.0.0.1:1",
+                   "partner_guid": "B", "role": "boss"}),
+        )
+        .await;
+        let _ = ask(&kernel, &relay, json!({"type": "boot"})).await;
+        let g = ask(&kernel, &relay, json!({"type": "reflect"})).await["guid"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no guid minted on {relay}"))
+            .to_string();
+        assert_eq!(g.len(), 32, "{g}");
+        assert!(
+            g.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "{g}"
+        );
+        assert_eq!(&g[12..13], "4", "uuid4 version nibble: {g}");
+        assert!(matches!(&g[16..17], "8" | "9" | "a" | "b"), "variant: {g}");
+        seen.insert(g);
+    }
+    assert_eq!(seen.len(), 4);
+}
+
+// ─── STEP-4 PINS (2026-10-01): the bridge's BINARY dispatch ─────────────────
+
+/// A booted ws leg on an injected memory transport; returns the far end.
+async fn booted_leg(
+    tmp: &TempDir,
+    tag: &str,
+) -> (
+    Arc<Kernel>,
+    String,
+    Arc<dyn crate::transport::BridgeTransport>,
+) {
+    let kernel = mk_kernel_guid(tmp, "g-local").await;
+    let bid = id_for(tag, tmp);
+    create_bridge_with_auth(&kernel, &bid, "stand_in", "allow_all").await;
+    let peer = inject_one(&AgentId::from(bid.as_str()));
+    let booted = ask(&kernel, &bid, json!({"type": "boot"})).await;
+    assert!(booted.get("error").is_none(), "{booted}");
+    (kernel, bid, peer)
+}
+
+async fn send_bin(
+    kernel: &Arc<Kernel>,
+    id: &str,
+    header: Value,
+    blob: Vec<u8>,
+) -> fantastic_kernel::Outcome {
+    kernel
+        .send(vec![Item::new(AgentId::from(id), header).with_binary(blob)])
+        .await
+        .remove(0)
+}
+
+/// A NON-`forward` verb on the binary channel takes the TEXT dispatch: the same
+/// reply the text channel gives, and no body.
+#[tokio::test]
+async fn a_binary_non_forward_verb_is_answered_by_the_text_dispatch() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, bid, _peer) = booted_leg(&tmp, "s4_bin_text").await;
+    for header in [json!({"type": "garbage"}), json!({"type": "forward"})] {
+        let bin = send_bin(&kernel, &bid, header.clone(), vec![1, 2, 3]).await;
+        let txt = ask(&kernel, &bid, header.clone()).await;
+        if header["type"] == "forward" {
+            // `forward` IS the binary verb: it validates its own envelope
+            assert_eq!(
+                serde_json::to_string(&bin.result).unwrap(),
+                r#"{"error":"bridge.forward: target (str) + payload (dict) required"}"#
+            );
+        } else {
+            assert_eq!(bin.result, txt, "{header}");
+        }
+        assert_eq!(bin.body, None, "{header}");
+    }
+    let bin = send_bin(&kernel, &bid, json!({"type": "reflect"}), vec![1]).await;
+    assert_eq!(bin.result["id"], json!(bid));
+    assert_eq!(bin.result["transport"], json!("memory"));
+    assert_eq!(bin.body, None);
+}
+
+/// A binary `forward` ships ONE binary `call` frame — the blob raw beside the
+/// header, `_binary_path: payload.bytes`, the qualified caller — and a binary
+/// reply's body comes back as the reply body.
+#[tokio::test]
+async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, bid, peer) = booted_leg(&tmp, "s4_bin_fwd").await;
+    let k = Arc::clone(&kernel);
+    let b = bid.clone();
+    let join = tokio::spawn(async move {
+        send_bin(
+            &k,
+            &b,
+            json!({"type": "forward", "target": "far_fb",
+                   "payload": {"type": "write_stream", "path": "x.bin"}}),
+            vec![0x00, 0xFF, 0x10],
+        )
+        .await
+    });
+    let (header, body) = match peer.recv_frame().await.expect("a call frame") {
+        crate::transport::Frame::Binary(h, b) => (h, b),
+        crate::transport::Frame::Text(v) => panic!("expected a binary call, got text: {v}"),
+    };
+    assert_eq!(body, vec![0x00, 0xFF, 0x10], "the blob rides raw");
+    let corr = header["id"].as_str().expect("a correlator").to_string();
+    assert_eq!(
+        corr,
+        format!("{bid}-1"),
+        "dash, not colon: never a kernel pid"
+    );
+    assert_eq!(
+        header,
+        json!({"type": "call", "id": corr, "target": "far_fb",
+               "payload": {"type": "write_stream", "path": "x.bin"},
+               "caller": "g-local|kernel", "_binary_path": "payload.bytes"})
+    );
+    let keys: Vec<&str> = header
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["type", "id", "target", "payload", "caller", "_binary_path"]
+    );
+    peer.send_binary(
+        json!({"type": "reply", "id": corr, "data": {"eof": true}}),
+        vec![7, 7],
+    )
+    .await
+    .unwrap();
+    let out = join.await.unwrap();
+    assert_eq!(out.result, json!({"eof": true}));
+    assert_eq!(
+        out.body,
+        Some(vec![7, 7]),
+        "a binary reply's body is the reply body"
+    );
+
+    // a TEXT reply frame to a binary forward carries no chunk at all
+    let k = Arc::clone(&kernel);
+    let b = bid.clone();
+    let join = tokio::spawn(async move {
+        send_bin(
+            &k,
+            &b,
+            json!({"type": "forward", "target": "far_fb", "payload": {"type": "stat"}}),
+            vec![1],
+        )
+        .await
+    });
+    let header = peer.recv_frame().await.expect("a call frame").into_value();
+    assert_eq!(header["id"], json!(format!("{bid}-2")));
+    peer.send_frame(json!({"type": "reply", "id": header["id"], "data": {"ok": 1}}))
+        .await
+        .unwrap();
+    let out = join.await.unwrap();
+    assert_eq!(out.result, json!({"ok": 1}));
+    assert_eq!(out.body, None);
+}
+
+/// A binary `forward` on a leg that is not connected is the coded refusal.
+#[tokio::test]
+async fn a_binary_forward_before_boot_is_not_connected() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    let bid = id_for("s4_bin_nc", &tmp);
+    create_bridge_with_auth(&kernel, &bid, "stand_in", "allow_all").await;
+    let out = send_bin(
+        &kernel,
+        &bid,
+        json!({"type": "forward", "target": "far", "payload": {"type": "x"}}),
+        vec![1],
+    )
+    .await;
+    assert_eq!(
+        serde_json::to_string(&out.result).unwrap(),
+        r#"{"error":"bridge.forward: not connected","reason":"not_connected","hint":"call boot first"}"#
+    );
+    assert_eq!(out.body, None);
+}
+
+/// STEP-4 PIN (2026-10-01): the two bundle shells differ ONLY in family, name
+/// and readme — the same `peer_guid` write check, the same binary routing, the
+/// same delete teardown.
+#[tokio::test]
+async fn both_family_shells_share_one_behaviour() {
+    use fantastic_kernel::bundle::Bundle;
+    assert_eq!(WsBridgeBundle.name(), "ws_bridge");
+    assert_eq!(RelayConnectorBundle.name(), "relay_connector");
+    assert_eq!(WsBridgeBundle.readme(), Some(WS_README));
+    assert_eq!(RelayConnectorBundle.readme(), Some(RELAY_README));
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    for (hm, tag) in [
+        (WS_HANDLER_MODULE, "s4_fam_ws"),
+        (RELAY_HANDLER_MODULE, "s4_fam_rl"),
+    ] {
+        // a `peer_guid` with a `|` is refused at the write, naming the field
+        let bad = id_for(&format!("{tag}_bad"), &tmp);
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({"type": "create_agent", "parent_id": "kernel", "handler_module": hm,
+                       "id": bad, "transport": "memory", "peer_guid": "a|b"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], json!("invalid_meta"), "{hm}: {r}");
+        assert_eq!(
+            r["error"],
+            json!("bridge: peer_guid must be one kernel guid (a non-empty string without `|`); got 'a|b'"),
+            "{hm}"
+        );
+        // binary: a non-forward verb is the text dispatch; forward before boot
+        // is not connected
+        let id = id_for(tag, &tmp);
+        create_leg(&kernel, hm, &id, json!({"transport": "memory"})).await;
+        let out = kernel
+            .send(vec![Item::new(
+                AgentId::from(id.as_str()),
+                json!({"type": "garbage"}),
+            )
+            .with_binary(vec![1])])
+            .await
+            .remove(0);
+        assert_eq!(
+            out.result,
+            ask(&kernel, &id, json!({"type": "garbage"})).await,
+            "{hm}"
+        );
+        assert_eq!(out.body, None);
+        let out = kernel
+            .send(vec![Item::new(
+                AgentId::from(id.as_str()),
+                json!({"type": "forward", "target": "far", "payload": {"type": "x"}}),
+            )
+            .with_binary(vec![1])])
+            .await
+            .remove(0);
+        assert_eq!(
+            out.result["reason"],
+            json!("not_connected"),
+            "{hm}: {}",
+            out.result
+        );
+        // delete runs the family's teardown and the agent is gone
+        let gone = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({"type": "delete_agent", "id": id}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert!(gone.get("error").is_none(), "{hm}: {gone}");
+        assert!(
+            !kernel.agents.contains_key(&AgentId::from(id.as_str())),
+            "{hm}"
+        );
+    }
+}

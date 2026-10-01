@@ -258,3 +258,76 @@ async def test_an_id_less_entry_is_refused_before_the_valid_ones_hydrate(
     ]["result"]
     assert r["booted"] is False, r
     assert "memory" not in seeded_kernel.ctx.agents
+
+
+# ─── each boot answer, pinned (reduction candidate J: its single-item sends) ─
+
+
+async def _boot_with(kernel, aid: str, manifest_text: str | None, **meta) -> dict:
+    if manifest_text is not None:
+        Path(f"{aid}.yaml").write_text(manifest_text)
+        meta.setdefault("manifest", f"{aid}.yaml")
+    kernel.create("static_loader.tools", id=aid, **meta)
+    return (await kernel.send([{"target": aid, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
+
+
+async def test_each_manifest_fault_has_its_own_text(seeded_kernel):
+    k = seeded_kernel
+    assert await _boot_with(k, "sl_none", None) == {
+        "error": "static_loader: no 'manifest' path on the record",
+        "booted": False,
+    }
+    r = await _boot_with(k, "sl_yaml", "agents: [unclosed\n")
+    assert r["booted"] is False and r["error"].startswith(
+        "static_loader: manifest 'sl_yaml.yaml' is not valid YAML: "
+    ), r
+    assert await _boot_with(k, "sl_list", "- a\n- b\n") == {
+        "error": "static_loader: manifest 'sl_list.yaml' must be a mapping with `agents:`",
+        "booted": False,
+    }
+    assert await _boot_with(k, "sl_map", "agents: {a: 1}\n") == {
+        "error": "static_loader: `agents:` in 'sl_map.yaml' must be a list",
+        "booted": False,
+    }
+    assert await _boot_with(k, "sl_hm", "agents:\n  - id: x\n") == {
+        "error": "static_loader: each roster entry needs a handler_module: {'id': 'x'}",
+        "booted": False,
+    }
+    # an empty manifest hydrates nothing, successfully
+    assert await _boot_with(k, "sl_empty", "") == {
+        "booted": True,
+        "created": [],
+        "reapplied": [],
+    }
+
+
+async def test_a_refused_create_and_a_refused_reapply_are_named(seeded_kernel):
+    k = seeded_kernel
+    bad = "agents:\n  - id: 'a/b'\n    handler_module: file_bridge.tools\n"
+    r = await _boot_with(k, "sl_bad", bad)
+    assert r["booted"] is False
+    assert r["error"].startswith(
+        "static_loader: create failed for {'id': 'a/b', 'handler_module': "
+        "'file_bridge.tools'}: {'error': \"create_agent: id must be a single path "
+        "segment (no separators); got 'a/b'\""
+    ), r
+    ok = "agents:\n  - id: fb_r\n    handler_module: file_bridge.tools\n    allow: ['.']\n"
+    assert await _boot_with(k, "sl_ok", ok) == {
+        "booted": True,
+        "created": ["fb_r"],
+        "reapplied": [],
+    }
+    # the same id re-applied with a field its bundle refuses
+    Path("sl_ok.yaml").write_text(
+        "agents:\n  - id: fb_r\n    handler_module: file_bridge.tools\n"
+        "    allow: '../escape'\n"
+    )
+    r = (await k.send([{"target": "sl_ok", "payload": {"type": "boot"}}]))[0]["result"]
+    assert r["booted"] is False and r["error"].startswith(
+        "static_loader: re-applying 'fb_r': "
+    ), r
+    Path("sl_ok.yaml").write_text(ok)
+    r = (await k.send([{"target": "sl_ok", "payload": {"type": "boot"}}]))[0]["result"]
+    assert r == {"booted": True, "created": [], "reapplied": ["fb_r"]}

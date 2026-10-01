@@ -293,3 +293,130 @@ async def test_a_deliberate_answer_is_never_retried():
     with pytest.raises(RuntimeError, match="responses 404"):
         await _drain(p)
     assert len(sink) == 1
+
+
+# ─── the wire, pinned (reduction candidate A: a shared retry POST + SSE reader)
+
+
+async def test_an_error_event_raises_with_the_whole_event():
+    sse = _sse({"type": "error", "code": "rate_limit"})
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider([], sse))
+    assert (
+        str(e.value)
+        == "responses stream error: {'type': 'error', 'code': 'rate_limit'}"
+    )
+
+
+async def test_blank_and_non_json_data_lines_are_skipped():
+    body = "data: \n\ndata: not-json\n\n" + _text("ok")
+    assert await _drain(_provider([], body)) == "ok"
+
+
+async def test_a_refusal_delta_is_output_and_empty_deltas_yield_nothing():
+    sse = _sse(
+        {"type": "response.reasoning_text.delta", "delta": ""},
+        {"type": "response.output_text.delta", "delta": ""},
+        {"type": "response.refusal.delta", "delta": "I can't"},
+        _done(),
+    )
+    out = [c async for c in _provider([], sse).chat([{"role": "user", "content": "q"}])]
+    assert out == ["I can't"]
+
+
+async def test_the_cut_texts_are_exact():
+    p = _provider([], _text("half", status="incomplete", reason="max_output_tokens"))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert str(e.value) == (
+        "responses stream ended without completing: status='incomplete' "
+        "reason='max_output_tokens' items=['message']"
+    )
+    sse = _sse({"type": "response.output_text.delta", "delta": "x"})
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider([], sse))
+    assert str(e.value) == (
+        "responses stream ended without completing: status=None reason=None "
+        "items=[] (no terminal event — connection cut mid-stream)"
+    )
+
+
+async def test_an_incomplete_reason_other_than_the_budget_is_the_stop_reason():
+    p = _provider([], _text("x", status="incomplete", reason="content_filter"))
+    with pytest.raises(RuntimeError):
+        await _drain(p, max_tokens=10)
+    assert p.last_stop_reason == "content_filter"
+
+
+async def test_the_missing_config_texts_are_exact(monkeypatch):
+    with pytest.raises(RuntimeError) as e:
+        await _drain(ResponsesProvider(endpoint="", model="m"))
+    assert str(e.value) == (
+        "responses_backend: no `endpoint` set — this connector does not "
+        "guess a host. Name the full …/v1/responses URL on the agent "
+        "record (endpoint=...)."
+    )
+    with pytest.raises(RuntimeError) as e:
+        await _drain(ResponsesProvider(endpoint=EP, model=""))
+    assert str(e.value) == (
+        "responses_backend: no `model` set — this connector does not guess "
+        "one. Name a model on the agent record (model=...)."
+    )
+    monkeypatch.delenv(KEY_VAR)
+    with pytest.raises(RuntimeError) as e:
+        await _drain(ResponsesProvider(endpoint=EP, model="m"))
+    assert str(e.value) == "OPENAI_API_KEY not set in environment (.env)"
+
+
+def test_the_owned_key_refusal_text_is_exact():
+    with pytest.raises(ValueError) as e:
+        ResponsesProvider(EP, "m", sampling={"store": True, "model": "x"})
+    assert str(e.value) == (
+        "responses_backend: `sampling` may not set model, store — "
+        "those are the record's (`model`, `max_tokens`) or the provider's own"
+    )
+
+
+async def test_the_retry_backoff_and_its_log_line(monkeypatch, capsys):
+    import asyncio
+
+    delays: list = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(d, *a, **kw):
+        delays.append(d)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    sink: list = []
+    p = _seq_provider(
+        [
+            (503, "unavailable", "text/plain"),
+            (524, "<!DOCTYPE html>", "text/html"),
+            (200, _text("recovered"), "text/event-stream"),
+        ],
+        sink,
+    )
+    assert await _drain(p) == "recovered"
+    assert len(sink) == 3
+    assert delays == [1.5, 3.0]
+    out = capsys.readouterr().out
+    assert "[responses] 503 (text/plain) — transport error, retry 1/2" in out
+    assert "[responses] 524 (text/html) — transport error, retry 2/2" in out
+
+
+async def test_a_json_5xx_is_never_retried():
+    sink: list = []
+    p = _seq_provider([(502, '{"error": "x"}', "application/json")], sink)
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert str(e.value) == 'responses 502: {"error": "x"}'
+    assert len(sink) == 1
+
+
+async def test_the_wire_trace_prints_what_left_and_what_came_back(monkeypatch, capsys):
+    monkeypatch.setenv("FANTASTIC_AI_WIRE", "1")
+    await _drain(_provider([], _text("hi")))
+    out = capsys.readouterr().out
+    assert "[wire] -> max_output_tokens=8192 items=3" in out
+    assert "[wire] <- status='completed' reason=None items=['message']" in out

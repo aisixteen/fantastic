@@ -226,3 +226,56 @@ async def test_pump_refused_by_sealed_source(seeded_kernel, tmp_path, monkeypatc
         )
     )[0]["result"]
     assert "error" in res and "read from" in res["error"]
+
+
+async def test_pump_names_a_refused_write_and_the_sealed_read(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    """The two refusals the pump composes, exactly: the sink's write and the
+    source's read, each wrapped as a transport_error naming the end that failed."""
+    monkeypatch.chdir(tmp_path)
+    src = await _open(seeded_kernel, root="src")
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.bin").write_bytes(b"hello")
+    sealed = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "allow": ["."],
+                        "root": "dst",
+                        "id": "sealed_sink",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]["id"]
+    res = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": src,
+                    "payload": {
+                        "type": "pump",
+                        "source_path": "a.bin",
+                        "sink": sealed,
+                        "sink_path": "b.bin",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert res["reason"] == "transport_error", res
+    assert res["error"].startswith("pump: write to 'sealed_sink' failed: {"), res
+    assert "unauthorized" in res["error"]
+    missing = (
+        await seeded_kernel.send(
+            [{"target": src, "payload": {"type": "pump", "source_path": "nope.bin"}}]
+        )
+    )[0]["result"]
+    assert missing["reason"] == "transport_error", missing
+    assert missing["error"].startswith(f"pump: read from {src!r} failed: {{"), missing

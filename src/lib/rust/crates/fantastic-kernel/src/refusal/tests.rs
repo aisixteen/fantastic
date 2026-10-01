@@ -175,3 +175,48 @@ fn guard_refuses_all_digit_ids_and_accepts_colons() {
     );
     assert!(guard_agent_id("create_agent", "kernel_notes").is_none());
 }
+
+/// STEP-4 PIN (2026-10-01): every builder's KEY ORDER, as text —
+/// `preserve_order` makes it part of the wire, and `Value` equality ignores it.
+#[test]
+fn every_builder_serializes_in_pythons_key_order() {
+    let s = |v: Value| serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        s(refusal(BAD_ARG, "x: y")),
+        r#"{"error":"x: y","reason":"bad_arg"}"#
+    );
+    assert_eq!(
+        s(refusal_hint(NOT_FOUND, "x: y", "do z")),
+        r#"{"error":"x: y","reason":"not_found","hint":"do z"}"#
+    );
+    assert_eq!(
+        s(missing("create_agent", "parent_id")),
+        r#"{"error":"create_agent: parent_id required","reason":"missing_arg","arg":"parent_id"}"#
+    );
+    assert_eq!(
+        s(missing_hint("create_agent", "parent_id", "name it")),
+        r#"{"error":"create_agent: parent_id required","reason":"missing_arg","hint":"name it","arg":"parent_id"}"#
+    );
+    assert_eq!(
+        s(bad("send", "timeout", "a positive number")),
+        r#"{"error":"send: timeout must be a positive number","reason":"bad_arg","arg":"timeout"}"#
+    );
+    let mut v = refusal_hint(BAD_ARG, "e", "h");
+    with(&mut v, "arg", Value::String("a".into()));
+    assert_eq!(
+        s(v),
+        r#"{"error":"e","reason":"bad_arg","hint":"h","arg":"a"}"#
+    );
+    assert_eq!(
+        s(unknown_agent("ghost", vec!["b".into(), "a".into()])),
+        r#"{"error":"no agent 'ghost'","reason":"unknown_agent","agent_count":2,"agents":["a","b"]}"#
+    );
+    assert_eq!(
+        s(unknown_agent("<id>", vec![])),
+        r#"{"error":"no agent '<id>'","reason":"unknown_agent","agent_count":0,"agents":[],"hint":"'<id>' is a PLACEHOLDER from an example, not an id — substitute one of `agents`."}"#
+    );
+    assert_eq!(
+        s(guard_agent_id("create_agent", "a/b").unwrap()),
+        r#"{"error":"create_agent: id must be a single path segment (no separators); got 'a/b'","reason":"bad_arg","arg":"id"}"#
+    );
+}

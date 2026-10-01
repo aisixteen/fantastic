@@ -2381,3 +2381,95 @@ async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch(
         .expect("relay did not stop")
         .expect("relay");
 }
+
+/// STEP-4 PIN (2026-10-01): with no running job the unknown type is a BARE
+/// `{error}` carrying the "no running job" tail; with one it is mail, queued.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "frob"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"exec_bridge: unknown type 'frob' (no running job to receive it)"}"#
+    );
+    let r = fantastic_kernel::bundle::Bundle::handle(&ExecBridgeBundle, &a, &json!({}), &kernel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"exec_bridge: unknown type None (no running job to receive it)"}"#
+    );
+}
+
+/// STEP-4 PIN (2026-10-01): the three `arg` refusals carry `error, reason, hint,
+/// arg` IN THAT ORDER (key order is wire — `Value` equality ignores it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arg_refusals_are_byte_exact_in_key_order() {
+    let ask = |k: Arc<Kernel>, a: AgentId, p: Value| async move {
+        let r = k.send(vec![Item::new(a, p)]).await.remove(0).result;
+        serde_json::to_string(&r).unwrap()
+    };
+    let open = || {
+        let mut extra = Map::new();
+        extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+        extra.insert("allowed".to_string(), json!([".*"]));
+        extra
+    };
+    // no PATH in the child env for a bare command
+    let tmp = TempDir::new().unwrap();
+    let (k, a) = mk_kernel_with(&tmp, open()).await;
+    assert_eq!(
+        ask(
+            Arc::clone(&k),
+            a.clone(),
+            json!({"type": "start", "command": "echo"})
+        )
+        .await,
+        format!(
+            "{{\"error\":\"exec_bridge: 'echo' is a bare command and this leg gives the child \
+             no PATH to find it in — the kernel's own PATH is not the child's\",\
+             \"reason\":\"missing_arg\",\"hint\":\"update_agent {a} inherit_env=[\\\"PATH\\\"] \
+             (or env={{\\\"PATH\\\": …}}), or start an absolute path\",\"arg\":\"PATH\"}}"
+        )
+    );
+    // a PTY start with no command and no SHELL in the child env
+    assert_eq!(
+        ask(
+            Arc::clone(&k),
+            a.clone(),
+            json!({"type": "start", "pty": {"cols": 80, "rows": 24}})
+        )
+        .await,
+        format!(
+            "{{\"error\":\"exec_bridge: start named no command and the child's environment has \
+             no SHELL to run — a PTY start without `command` runs the shell the record passes \
+             down, never a guessed one\",\"reason\":\"missing_arg\",\"hint\":\"update_agent {a} \
+             inherit_env=[\\\"SHELL\\\"] (or env={{\\\"SHELL\\\": …}}), or name `command`\",\
+             \"arg\":\"SHELL\"}}"
+        )
+    );
+    // a leg with no cwd
+    let tmp2 = TempDir::new().unwrap();
+    let mut extra = open();
+    extra.insert("cwd".to_string(), Value::Null);
+    let (k2, b) = mk_kernel_with(&tmp2, extra).await;
+    assert_eq!(
+        ask(
+            k2,
+            b.clone(),
+            json!({"type": "start", "command": "/bin/sh", "args": ["-c", "true"]})
+        )
+        .await,
+        format!(
+            "{{\"error\":\"exec_bridge: this leg names no `cwd` — where a command runs is the \
+             operator's decision, never guessed\",\"reason\":\"missing_arg\",\
+             \"hint\":\"update_agent {b} cwd=<dir>\",\"arg\":\"cwd\"}}"
+        )
+    );
+}

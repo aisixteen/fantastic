@@ -146,3 +146,111 @@ async def test_temperature_defaults_low_and_num_predict_maps_to_max_tokens():
     assert seen[0]["max_tokens"] == 64
     assert seen[0]["stream"] is True
     await p.aclose()
+
+
+# ─── the wire, pinned (reduction candidate A: one OpenAI SSE loop) ──────────
+#
+# What THIS provider does today, line by line of the stream. A shared SSE helper
+# must keep every one for llamacpp: blank and non-JSON `data:` lines are SKIPPED
+# (vllm raises on non-JSON), `delta.reasoning` is NOT read (vllm reads it), and a
+# `length` finish is recorded, never raised (vllm raises on a main turn).
+
+
+def _raw(text: str, sink: list | None = None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if sink is not None:
+            sink.append(json.loads(request.content))
+        return httpx.Response(200, text=text)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_blank_and_non_json_data_lines_are_skipped_not_raised():
+    text = (
+        "data: \n\n"
+        "data: not-json\n\n"
+        ": keep-alive\n\n"
+        f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}}]})}\n\n"
+        "data: [DONE]\n\n"
+    )
+    p = LlamaCppProvider(endpoint="http://llama.test/v1", transport=_raw(text))
+    assert await _drain(p) == "ok"
+    await p.aclose()
+
+
+async def test_done_ends_the_stream_and_trailing_data_is_ignored():
+    text = (
+        f"data: {json.dumps({'choices': [{'delta': {'content': 'first'}}]})}\n\n"
+        "data: [DONE]\n\n"
+        f"data: {json.dumps({'choices': [{'delta': {'content': 'after'}}]})}\n\n"
+    )
+    p = LlamaCppProvider(endpoint="http://llama.test/v1", transport=_raw(text))
+    assert await _drain(p) == "first"
+    await p.aclose()
+
+
+async def test_usage_and_a_length_finish_are_recorded_never_raised():
+    text = (
+        "data: "
+        + json.dumps(
+            {"choices": [{"delta": {"content": "x"}, "finish_reason": "length"}]}
+        )
+        + "\n\n"
+        + "data: "
+        + json.dumps({"choices": [], "usage": {"prompt_tokens": 512}})
+        + "\n\ndata: [DONE]\n\n"
+    )
+    p = LlamaCppProvider(endpoint="http://llama.test/v1", transport=_raw(text))
+    assert await _drain(p) == "x"
+    assert p.last_stop_reason == "max_tokens"
+    assert p.last_prompt_tokens == 512
+    await p.aclose()
+
+
+async def test_a_stop_finish_passes_through_verbatim():
+    text = (
+        "data: "
+        + json.dumps(
+            {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}
+        )
+        + "\n\ndata: [DONE]\n\n"
+    )
+    p = LlamaCppProvider(endpoint="http://llama.test/v1", transport=_raw(text))
+    await _drain(p)
+    assert p.last_stop_reason == "stop"
+    await p.aclose()
+
+
+async def test_the_reasoning_alias_is_not_read_by_llamacpp():
+    seen: list = []
+    p = LlamaCppProvider(
+        endpoint="http://llama.test/v1",
+        transport=_capture(seen, _sse({"reasoning": "hidden"}, {"content": "ok"})),
+    )
+    assert await _drain(p) == "ok"
+    await p.aclose()
+
+
+async def test_a_named_model_rides_the_body_and_a_side_bound_beats_num_predict():
+    seen: list = []
+    p = LlamaCppProvider(
+        endpoint="http://llama.test/v1",
+        model="gemma-4-12b",
+        num_predict=64,
+        temperature=0.9,
+        transport=_capture(seen, _sse({"content": "x"})),
+    )
+    out = "".join(
+        [c async for c in p.chat([{"role": "user", "content": "hi"}], max_tokens=9)]
+    )
+    assert out == "x"
+    assert seen[0] == {
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "model": "gemma-4-12b",
+        "temperature": 0.9,
+        "max_tokens": 9,
+    }
+    assert p.model == "gemma-4-12b"
+    await p.aclose()

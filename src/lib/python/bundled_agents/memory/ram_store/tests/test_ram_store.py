@@ -341,3 +341,131 @@ async def test_a_superscript_digit_is_no_id_and_raises_nothing(kernel, store):
     out = await _call(kernel, "mem", {"type": "read", "ids": ["²", "101"]}, as_="alice")
     assert "error" not in out, out
     assert [r["id"] for r in out["rows"]] == [101], out
+
+
+# ─── grant scopes, pinned (reduction candidate K: one scope-coverage rule) ───
+#
+# ai_core decides row-event bodies with its own copy of these semantics; sharing
+# one function must keep what a grant READS here, per scope kind and mode.
+
+
+async def _alice_tree(kernel):
+    rows = [{"id": i, "content": f"r{i}"} for i in (1, 2, 3, 4, 5)]
+    rows += [
+        {"id": 6, "kind": "fold", "refs": [2, 3], "content": "f6"},
+        {"id": 7, "kind": "fold", "refs": [6, 4], "content": "f7"},
+    ]
+    assert (await _append(kernel, "alice", rows))["appended"] == 7
+
+
+async def _granted(kernel, scope, mode="frozen") -> list:
+    g = await _call(
+        kernel,
+        "mem",
+        {"type": "share", "with": "bob", "scope": scope, "mode": mode},
+        as_="alice",
+    )
+    assert "grant" in g, g
+    r = await _call(kernel, "mem", {"type": "read", "grant": g["grant"]}, as_="bob")
+    return g, [row["id"] for row in r["rows"]]
+
+
+async def test_each_scope_kind_reads_exactly_its_rows(kernel, store):
+    await _alice_tree(kernel)
+    assert (await _granted(kernel, {"row": 3}))[1] == [3]
+    assert (await _granted(kernel, {"range": {"from": 2, "to": 4}}))[1] == [2, 3, 4]
+    assert (await _granted(kernel, {"head_until": 3}))[1] == [1, 2, 3]
+    # a fold reaches its whole closure: itself, its members, a member fold's members
+    assert (await _granted(kernel, {"fold": 7}))[1] == [2, 3, 4, 6, 7]
+
+
+async def test_live_grants_follow_the_head_and_frozen_ones_do_not(kernel, store):
+    await _alice_tree(kernel)
+    frozen_range, _ = await _granted(kernel, {"range": {"from": 2, "to": 4}})
+    live_range, _ = await _granted(kernel, {"range": {"from": 2, "to": 4}}, "live")
+    frozen_head, _ = await _granted(kernel, {"head_until": 5})
+    live_head, _ = await _granted(kernel, {"head_until": 5}, "live")
+    assert frozen_head["as_of"] == 7 and live_head["as_of"] is None
+    await _append(kernel, "alice", [{"id": 8, "content": "r8"}])
+
+    async def read(g):
+        r = await _call(kernel, "mem", {"type": "read", "grant": g["grant"]}, as_="bob")
+        return [row["id"] for row in r["rows"]]
+
+    assert await read(frozen_range) == [2, 3, 4]
+    assert await read(live_range) == [2, 3, 4, 5, 6, 7, 8]  # live ignores `to`
+    assert await read(frozen_head) == [1, 2, 3, 4, 5]
+    assert await read(live_head) == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+@pytest.mark.parametrize(
+    "scope, reason, error",
+    [
+        (
+            [1, 2],
+            "bad_arg",
+            "share: `scope` must be ONE of {head_until: <row>}, {range: {from, to}}, "
+            "{fold: <id>}, {row: <id>} — a descriptor, never a list of messages",
+        ),
+        ({"range": [1, 2]}, "bad_arg", "share: range must be {from, to}"),
+        (
+            {"range": {"from": 4, "to": 2}},
+            "bad_arg",
+            "share: range needs from <= to (row ids)",
+        ),
+        (
+            {"range": {"from": 50, "to": 60}},
+            "not_found",
+            "share: none of YOUR rows lie in 50..60",
+        ),
+        ({"row": "x"}, "bad_arg", "share: row must be a row id"),
+        ({"head_until": 0}, "bad_arg", "share: head_until must be a row id"),
+        (
+            {"row": 99},
+            "not_found",
+            "share: row 99 is not one of YOUR rows — only rows you own can be shared",
+        ),
+        ({"fold": 3}, "bad_arg", "share: row 3 is not a fold"),
+    ],
+)
+async def test_scope_refusal_texts(kernel, store, scope, reason, error):
+    await _alice_tree(kernel)
+    r = await _call(
+        kernel, "mem", {"type": "share", "with": "bob", "scope": scope}, as_="alice"
+    )
+    assert r == {"error": error, "reason": reason, "arg": "scope"}
+
+
+async def test_share_argument_refusals(kernel, store):
+    await _alice_tree(kernel)
+
+    async def share(**kw):
+        return await _call(
+            kernel, "mem", {"type": "share", "scope": {"row": 1}, **kw}, as_="alice"
+        )
+
+    assert await share() == {
+        "error": "share: with required",
+        "reason": "missing_arg",
+        "arg": "with",
+    }
+    assert await share(**{"with": "alice"}) == {
+        "error": "share: you already read your own rows",
+        "reason": "bad_arg",
+        "arg": "with",
+    }
+    r = await share(**{"with": "bob", "mode": "forever"})
+    assert r["reason"] == "bad_arg" and r["arg"] == "mode", r
+    assert r["error"].startswith("share: mode must be one of ")
+    # carol has no rows up to 3
+    r = await _call(
+        kernel,
+        "mem",
+        {"type": "share", "with": "bob", "scope": {"head_until": 3}},
+        as_="carol",
+    )
+    assert r == {
+        "error": "share: you have no rows up to 3",
+        "reason": "not_found",
+        "arg": "scope",
+    }
