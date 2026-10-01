@@ -25,11 +25,15 @@ import json
 import re
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
+
+import yaml
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
@@ -307,6 +311,8 @@ def after(run: dict, cwd: Path, code: int, client: Client, state: dict) -> list[
         elif key == "stderr_contains":
             if want not in client.stderr:
                 bad.append(f"stderr lacks {want!r}: {client.stderr[-300:]}")
+        elif key == "lock_held_by_host":
+            pass  # checked while the host still runs
         elif key == "blueprint_never_names":
             bp = (TUI / "blueprint.yaml").read_text()
             if f"id: {want}" in bp:
@@ -336,6 +342,19 @@ def main(argv: list[str]) -> int:
 
         for run in sc["runs"]:
             print(f"\n── run: {run['name']}  argv={run.get('argv', [])}", flush=True)
+            # A HOST: a kernel already running in the directory (`fantastic
+            # <host_argv>`), which `fantastic mcp` must attach to.
+            host = None
+            if "host_argv" in run:
+                host = subprocess.Popen([str(binary), *run["host_argv"]], cwd=cwd,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                sock = cwd / ".fantastic" / "cli" / "mcp.sock"
+                for _ in range(300):
+                    if sock.exists() or host.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                if not sock.exists():
+                    failures.append(f"{run['name']}/host: no {sock.relative_to(cwd)} (host exit {host.poll()})")
             client = Client(binary, run.get("argv", []), cwd)
             for i, step in enumerate(run.get("steps", [])):
                 label = step.get("call") or step.get("notify") or f"tool {step.get('tool')}"
@@ -355,6 +374,19 @@ def main(argv: list[str]) -> int:
                 print(f"  {mark} {i:02d} {label}" + ("" if not bad else "  — " + " · ".join(bad)), flush=True)
                 failures += [f"{run['name']}/{i:02d} {label}: {b}" for b in bad]
             code = client.close()
+            if host is not None:
+                # the lock is still the host's: the client ran no kernel
+                lock = yaml.safe_load((cwd / ".fantastic" / "lock.yaml").read_text()) or {}
+                if run.get("after_exit", {}).get("lock_held_by_host") and lock.get("pid") != host.pid:
+                    failures.append(f"{run['name']}/after: lock pid {lock.get('pid')} != host {host.pid}")
+                host.send_signal(signal.SIGTERM)
+                try:
+                    hc = host.wait(30)
+                except subprocess.TimeoutExpired:
+                    host.kill()
+                    hc = -9
+                if hc != 0:
+                    failures.append(f"{run['name']}/host: exit {hc}")
             bad = after(run, cwd, code, client, state)
             print(f"  {'✓' if not bad else '✕'} after exit (code {code})" + ("" if not bad else "  — " + " · ".join(bad)), flush=True)
             failures += [f"{run['name']}/after: {b}" for b in bad]

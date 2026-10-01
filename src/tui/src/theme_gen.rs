@@ -108,15 +108,3 @@ pub const FRAME_MS: u64 = 16;
 
 /// presence, blink, poll cadence
 pub const TICK_MS: u64 = 250;
-
-/// the title builds top-down over this
-pub const REVEAL_SECS: f32 = 1.5;
-
-/// the ease-out that docks the title
-pub const MINIMIZE_SECS: f32 = 1.0;
-
-/// the attract prompt's square wave, toggles per 1/hz seconds
-pub const BLINK_HZ: f32 = 1.2;
-
-/// idle this long on attract and the intro movie plays
-pub const IDLE_INTRO_SECS: f32 = 10.0;

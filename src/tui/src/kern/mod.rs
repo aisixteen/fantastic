@@ -6,7 +6,7 @@
 //! spine as everything else, and `host` is how it reaches that spine.
 
 pub mod activity;
-pub mod canvas_reach;
+pub mod reach;
 pub mod ai_cells;
 pub mod host;
 pub mod keys;

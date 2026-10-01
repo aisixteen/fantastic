@@ -14,15 +14,12 @@ use crate::vm::{self, VmIn};
 
 pub async fn main_loop(opts: Opts) -> Result<()> {
     let paths = Paths::here()?;
-    // A recipe or `--headless` is an explicit command, so it INITS, like
-    // `fantastic mcp`; bare `fantastic` inits on the intro's key press.
-    if opts.inits_on_command() && paths.is_fresh() {
+    // Running here IS the command to init, like `fantastic mcp`: a fresh
+    // directory is seeded before anything else.
+    if paths.is_fresh() {
         crate::boot::seed::write_all(&paths).map_err(|e| anyhow::anyhow!("init failed: {e}"))?;
     }
     let mut app = App::new(paths.clone());
-    if opts.inits_on_command() {
-        app.phase = crate::boot::attract::Phase::Live;
-    }
     app.want = opts.shows();
 
     if opts.headless {
@@ -44,13 +41,7 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
         return Ok(());
     }
     // The TUI draws on /dev/tty and the kernel's own prints go to a log file.
-    // NOT inside an uninitialised directory: until the human presses a key
-    // there is no `.fantastic` to hold a log.
-    let log = if paths.is_fresh() {
-        std::path::PathBuf::from("/dev/null")
-    } else {
-        paths.cli.join("kernel.log")
-    };
+    let log = paths.cli.join("kernel.log");
     let screen = crate::tty::open(&log)?;
     let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, tui: true, announce: None };
     let (h, model) = vm::new();

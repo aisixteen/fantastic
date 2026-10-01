@@ -210,7 +210,7 @@ async fn run(
 
         // BOOT, once, as soon as the directory is seeded (see `run.rs` history:
         // the order is the kernel daemon's own).
-        if host.is_none() && !booting && app.phase != crate::boot::attract::Phase::Attract {
+        if host.is_none() && !booting {
             booting = true;
             if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
                 app.note(format!("{e}"));
@@ -246,6 +246,11 @@ async fn run(
                     if boot.announce.is_some() && !boot.tui {
                         spawn_stream(Arc::clone(&h), boot.clone());
                     }
+                    // THE MCP SOCKET: a coding CLI's `fantastic mcp` attaches here.
+                    if let Err(e) = crate::mcp::listen(crate::mcp::Served::new(Arc::clone(&h))) {
+                        boot.say(&format!("fantastic: {e}"));
+                        app.note(e);
+                    }
                     host = Some(h);
                     for c in [Cmd::RootReflect, Cmd::Tree, Cmd::Agents, Cmd::Ps] {
                         app.push(c);
@@ -272,6 +277,7 @@ async fn run(
     app.seen.flush();
     if let Some(h) = &host {
         h.shutdown(&paths).await;
+        crate::mcp::close_socket();
     }
     // Dropping the sender tells every View the ViewModel is gone.
     drop(frames);

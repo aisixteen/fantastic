@@ -49,7 +49,7 @@ impl ActivityBundle {
             // canvas_ws`): its rows are the human's own, never questions
             for w in crate::thread::waiting_for(&store, a, crate::env::HUMAN)
                 .into_iter()
-                .filter(|w| w.from != crate::kern::canvas_reach::LEG)
+                .filter(|w| w.from != crate::kern::reach::CANVAS_LEG)
             {
                 open.push(json!({"agent": a, "row": w.row, "from": w.from, "head": w.head, "ts": w.ts}));
             }

@@ -12,7 +12,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::{App, Focus, Link};
-use crate::boot::attract::{self, Phase};
 use crate::ev::Cmd;
 use crate::panel::{Handled, PanelKind};
 use crate::ui::composer::{Mode, Palette};
@@ -26,11 +25,6 @@ pub struct Binding {
 
 /// THE TABLE. `ui::help` renders it verbatim.
 pub const TABLE: &[Binding] = &[
-    Binding {
-        scope: "attract",
-        keys: "any key",
-        does: "seed this directory and go live",
-    },
     Binding {
         scope: "any",
         keys: "Tab / Shift-Tab",
@@ -247,44 +241,6 @@ pub fn handle(app: &mut App, e: Event) {
 
 fn key(app: &mut App, k: KeyEvent) {
     let now = std::time::Instant::now();
-    // Any key resets the idle clock, which is what keeps the intro from starting
-    // under someone who is using the shell.
-    app.last_key = now;
-
-    // A key during the intro is FULLY CONSUMED: it stops the movie and starts the
-    // shell. It never also does whatever that key does in the shell.
-    if app.intro_playing {
-        app.intro_playing = false;
-        app.intro_since = None;
-        app.dirty = true;
-        if app.phase != Phase::Attract {
-            return;
-        }
-    }
-
-    // ── the attract screen: any key seeds and goes live ──────────────────
-    if app.phase == Phase::Attract {
-        if quit_gesture(app, k, now) {
-            return;
-        }
-        // THE ONLY WRITE POINT. Until this press, the directory is untouched.
-        match crate::boot::seed::write_all(&app.paths) {
-            Ok(()) => {
-                app.phase = Phase::Minimizing;
-                app.minimize_since = Some(now);
-                app.note(format!("seeded {}", app.paths.store.display()));
-            }
-            Err(why) => {
-                app.note(format!(
-                    "{why} The partial .fantastic tree is left in place; remove it to retry."
-                ));
-                app.quit = true;
-            }
-        }
-        app.dirty = true;
-        return;
-    }
-
     // ── Ctrl-A, armed for one key ────────────────────────────────────────
     if app.prefix {
         app.prefix = false;
@@ -429,11 +385,36 @@ fn term_key(app: &mut App, k: KeyEvent) {
     app.dirty = true;
 }
 
+/// Two Ctrl-C inside this window exit. One is a cancel, two is a quit.
+pub const DOUBLE_PRESS_MS: u64 = 400;
+/// Key auto-repeat arrives faster than this; a slower `q` restarts the streak.
+pub const Q_REPEAT_MS: u64 = 220;
+/// Hold `q` this many repeats to quit.
+pub const Q_HOLD_STREAK: u8 = 12;
+
+/// True when this Ctrl-C should exit: the previous one landed inside the
+/// double-press window. Pure — the caller owns the clock and the last stamp.
+pub fn ctrl_c_exits(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(DOUBLE_PRESS_MS))
+}
+
+/// The next `q`-hold streak, given the previous streak and the last `q`. A press
+/// within `Q_REPEAT_MS` extends the run (auto-repeat means the key is held); a
+/// slower press restarts at 1. The caller exits once this reaches
+/// `Q_HOLD_STREAK`. Pure.
+pub fn q_hold_streak(prev: u8, last: Option<std::time::Instant>, now: std::time::Instant) -> u8 {
+    if last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(Q_REPEAT_MS)) {
+        prev.saturating_add(1)
+    } else {
+        1
+    }
+}
+
 /// Two presses of `Ctrl-C` inside a second, or `q` held. Returns true if the key
 /// was consumed.
 fn quit_gesture(app: &mut App, k: KeyEvent, now: std::time::Instant) -> bool {
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-        if attract::ctrl_c_exits(app.last_ctrl_c, now) {
+        if ctrl_c_exits(app.last_ctrl_c, now) {
             app.quit = true;
         } else {
             app.note("press Ctrl-C again to quit — the kernel keeps running.");
@@ -444,9 +425,9 @@ fn quit_gesture(app: &mut App, k: KeyEvent, now: std::time::Instant) -> bool {
     }
     // Never while typing: `q` is a letter in the composer and in the filter.
     if k.code == KeyCode::Char('q') && app.focus != Focus::Composer && !app.filtering {
-        app.q_streak = attract::q_hold_streak(app.q_streak, app.last_q, now);
+        app.q_streak = q_hold_streak(app.q_streak, app.last_q, now);
         app.last_q = Some(now);
-        if app.q_streak >= attract::Q_HOLD_STREAK {
+        if app.q_streak >= Q_HOLD_STREAK {
             app.quit = true;
             return true;
         }
@@ -744,7 +725,7 @@ impl App {
 /// keep their own input.
 pub fn wheel(app: &mut App, x: u16, y: u16, up: bool) {
     use crate::ui::frame::{areas, hit, Hit};
-    if app.phase != Phase::Live || app.help || app.screen.width == 0 {
+    if app.help || app.screen.width == 0 {
         return;
     }
     let k = KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, crossterm::event::KeyModifiers::NONE);
@@ -762,7 +743,7 @@ pub fn wheel(app: &mut App, x: u16, y: u16, up: bool) {
 /// keyboard) or the composer.
 pub fn click(app: &mut App, x: u16, y: u16) {
     use crate::ui::frame::{areas, hit, Hit};
-    if app.phase != Phase::Live || app.help || app.screen.width == 0 {
+    if app.help || app.screen.width == 0 {
         return;
     }
     let a = areas(app, app.screen);
@@ -819,11 +800,28 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_exits_only_inside_the_window() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(!ctrl_c_exits(None, now));
+        assert!(ctrl_c_exits(Some(now - Duration::from_millis(DOUBLE_PRESS_MS / 2)), now));
+        assert!(!ctrl_c_exits(Some(now - Duration::from_millis(DOUBLE_PRESS_MS + 50)), now));
+    }
+
+    #[test]
+    fn q_hold_streak_counts_fast_repeats() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert_eq!(q_hold_streak(0, None, now), 1);
+        assert_eq!(q_hold_streak(3, Some(now - Duration::from_millis(Q_REPEAT_MS / 2)), now), 4);
+        assert_eq!(q_hold_streak(9, Some(now - Duration::from_millis(Q_REPEAT_MS * 3)), now), 1);
+    }
+
+    #[test]
     fn the_wheel_moves_the_selection_under_the_pointer_and_never_the_focus() {
         use crate::kern::model::TreeNode;
         let leaf = |id: &str| TreeNode { id: id.into(), parent_id: None, handler_module: Some("x.tools".into()), display_name: None, description: None, children: vec![] };
         let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
-        app.phase = Phase::Live;
         app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
         app.tree = Some(TreeNode { children: vec![leaf("a"), leaf("b"), leaf("c")], ..leaf("root") });
         app.reflow();
