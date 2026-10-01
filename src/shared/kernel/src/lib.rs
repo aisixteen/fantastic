@@ -20,6 +20,14 @@ pub use gateway::{KernelHandle, Runtime, Workspace};
 /// terminal + AI backends), so it always registers the full set into its host.
 pub fn register_host_bundles() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
+    // THE ROOT LOADER. `kernel_state.tools` is the tree root's own
+    // handler_module (C12), and its `boot` is what rehydrates the ledger,
+    // starts the message pump and subscribes the record writer — without it
+    // the host's root has a bundle that is not installed and nothing persists.
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     reg.register("file_bridge.tools", fantastic_file::FileBundle);
     // Memory is plain FILES: `yaml_state` was deleted with `durable_memory` and
     // `text_file` replaced it. The product host registered the dead crate until
