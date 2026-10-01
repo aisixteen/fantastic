@@ -92,9 +92,9 @@ test("canvas dblclick spawns a paired terminal under the leg + close removes bot
       "(() => { const c = document.getElementById('canvas'); c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: 420, clientY: 300 })); return true; })()",
     );
     // the double click opens the SPOT INPUT: pick `terminal` in it
-    await browser.waitFor("!!document.querySelector('.spot-input input')", 10000);
+    await browser.waitFor("!!document.querySelector('.action-popup input')", 10000);
     await browser.evaluate(
-      "(() => { const i = document.querySelector('.spot-input input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
+      "(() => { const i = document.querySelector('.action-popup input'); i.value = 'terminal'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()",
     );
     await browser.waitFor("!!document.querySelector('.agent-frame .xterm')", 20000);
     assert.ok(await until(() => backends(host!.tmp).length === 1, 15000), "one exec_bridge terminal on the host");

@@ -558,7 +558,7 @@ export const aiView: ViewBundle = {
     }
 
     // A cell's turns are typed at a SPOT: its own position unless a first turn
-    // names one (the spot input's). Plain chat views (not cells) send plain text.
+    // names one (the action popup's). Plain chat views (not cells) send plain text.
     const isCell = tpl !== "";
     const cellSpot = (): [number, number] => {
       const x = typeof record?.["x"] === "number" ? (record["x"] as number) : 0;
@@ -625,7 +625,7 @@ export const aiView: ViewBundle = {
     };
 
     sendBtn.addEventListener("click", () => (inflight !== null ? interrupt() : submit()));
-    // The spot input's text is the cell's FIRST turn: sent once, then dropped
+    // The action popup's text is the cell's FIRST turn: sent once, then dropped
     // from the record so a reload does not send it again.
     const first = record?.["first_turn"] as Dict | undefined;
     if (first && typeof first["text"] === "string" && dialogEl.childElementCount === 0) {
