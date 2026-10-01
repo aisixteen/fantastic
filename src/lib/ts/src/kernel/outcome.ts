@@ -48,6 +48,13 @@ export interface Item {
   timeout?: number;
   /** Re-dispatch budget for a terminal failure under the SAME id. */
   retries?: number;
+  /**
+   * SECRET VALUES (`secret.ts`): dotted paths, each `payload.<field…>` or
+   * `result[.<field…>]`. The target gets the real payload and the caller the real
+   * reply; every record and mirror of the call shows `<secret>`. `payload.type`
+   * can never be hidden.
+   */
+  secret?: string[];
 }
 
 export interface Outcome {

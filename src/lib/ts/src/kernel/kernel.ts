@@ -581,8 +581,11 @@ export class Kernel {
    *
    * `reflect` is answered uniformly by the KERNEL for every local agent, never
    * by the handler, so it cannot drift bundle by bundle.
+   *
+   * `shown` is the payload as the mirrors may see it (an item's `secret` paths,
+   * `secret.ts`); the handler gets `payload`.
    */
-  async dispatch(targetId: string, payload: Payload, taskId: number): Promise<Json> {
+  async dispatch(targetId: string, payload: Payload, taskId: number, shown?: Payload): Promise<Json> {
     const id = this.resolve(targetId);
     const target = this.agents.get(id);
     const verb = str(payload, "type");
@@ -594,8 +597,9 @@ export class Kernel {
     }
     // EVERY DISPATCH IS MIRRORED (python `_fanout(kind="send")`): the payload
     // lands in the target's own inbox and in every watcher's — which is what a
-    // `watch` subscribes to, and why it is gated like a call.
-    this.fanout(id, payload);
+    // `watch` subscribes to, and why it is gated like a call. A mirror is a
+    // record: it carries the SHOWN payload.
+    this.fanout(id, shown ?? payload);
     if (verb === "reflect") {
       const identity = reflectIdentity(target, this.rootId);
       return applyReflectFlags(this, target, payload, identity);

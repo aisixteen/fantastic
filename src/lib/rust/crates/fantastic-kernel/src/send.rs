@@ -446,6 +446,10 @@ struct Dispatch {
     binary: Option<Vec<u8>>,
     /// The reply's chunk comes back raw (see [`Item::with_raw_reply`]).
     raw_reply: bool,
+    /// The payload AS SHOWN when the item marked `secret` paths
+    /// ([`crate::secret`]): what the fanout publishes on EVERY attempt, while the
+    /// handler gets `payload`. Python `_Dispatched.shown`.
+    shown: Option<crate::secret::Shown>,
     /// A caller-NAMED `kernel` reflect — python's flags-done fast path: the
     /// FIRST attempt is a bare identity read with the flags applied (no task
     /// row, no fanout, no `_in_flight`, and no enforced deadline: `cancel_task`
@@ -594,8 +598,8 @@ impl Kernel {
 
     /// One item's SYNCHRONOUS half: validate, resolve, gate. Python
     /// `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check order:
-    /// target → payload dict → timeout → payload.type → id → retries →
-    /// killed → draining → resolve → gate.
+    /// target → payload dict → timeout → payload.type → id → retries → secret
+    /// → killed → draining → resolve → gate.
     fn launch(self: &Arc<Self>, item: Item) -> Launched {
         // 1. target — must be a non-empty string.
         if item.target.as_str().is_empty() {
@@ -642,6 +646,16 @@ impl Kernel {
             Ok(v) => v,
             Err(r) => return Launched::Settled(Outcome::refused(r)),
         };
+        // 6b. SECRET paths (`crate::secret`): validated with the item's other own
+        // fields, before anything runs; `shown` is what every record and mirror
+        // of this call carries.
+        let secret = match crate::secret::check(&item) {
+            Ok(s) => s,
+            Err(r) => return Launched::Settled(Outcome::refused(r)),
+        };
+        let shown = secret
+            .as_ref()
+            .map(|s| crate::secret::shown_payload(&item.payload, item.binary.as_deref(), s));
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks
         // the whole subtree before it aborts anything, because `on_cancel`
         // hooks await — so a doomed handler gets scheduling passes on its way
@@ -733,11 +747,19 @@ impl Kernel {
         let exec_id = join_id.unwrap_or_else(|| self.mint_id());
         let task_id = TaskId(exec_id);
 
+        // SHOWN, never the secret values — the ledger entry is what a joiner is
+        // authorized against and what the row below records.
+        let recorded = shown.as_ref().map_or(&item.payload, |s| &s.payload);
+        // A body the secret marks is never recorded, not even as its length.
+        let recorded_body = match &shown {
+            Some(s) if s.body_hidden => None,
+            _ => item.binary.as_deref(),
+        };
         match self.ledger.open(
             exec_id,
             &caller_id,
             &target.id,
-            &item.payload,
+            recorded,
             retries,
             name.as_deref(),
             caller.clone(),
@@ -807,7 +829,7 @@ impl Kernel {
                 );
                 row.insert(
                     "payload".to_string(),
-                    taped_payload(&item.payload, item.binary.as_deref()),
+                    taped_payload(recorded, recorded_body),
                 );
                 row.insert("named".to_string(), Value::from(name.is_some()));
                 row.insert("retries".to_string(), Value::from(retries));
@@ -818,6 +840,16 @@ impl Kernel {
                 );
                 if let Some(n) = name.as_deref() {
                     row.insert("name".to_string(), Value::from(n));
+                }
+                if let Some(s) = secret {
+                    // the PATHS are not secret: they say this record cannot
+                    // answer a replay
+                    row.insert(
+                        "secret".to_string(),
+                        Value::Array(s.paths.iter().cloned().map(Value::String).collect()),
+                    );
+                    // RAM only: what the settle masks the outcome with.
+                    self.ledger.keep_secret(exec_id, s);
                 }
                 let _ = self.rows_put(&target.id, row);
             }
@@ -832,6 +864,7 @@ impl Kernel {
             task_id,
             binary: item.binary,
             raw_reply: item.raw_reply,
+            shown,
             // A JOIN never reaches here; a fresh NAMED `kernel` reflect does.
             named_fast_reflect: kernel_reflect,
         }))
@@ -894,6 +927,7 @@ impl Kernel {
             task_id,
             binary,
             raw_reply,
+            shown,
             named_fast_reflect,
         } = d;
 
@@ -942,6 +976,7 @@ impl Kernel {
                     next_pid,
                     binary.clone(),
                     raw_reply,
+                    shown.as_ref(),
                 )
                 .await;
             // Universal post-process, PER ATTEMPT (python applies it inside
@@ -1032,6 +1067,7 @@ impl Kernel {
                 TaskId(pid),
                 None,
                 false,
+                None,
             )
             .await;
         (reply, status)
@@ -1055,6 +1091,11 @@ impl Kernel {
     /// retries it on its own: someone has to look.
     async fn stamp_call(self: &Arc<Self>, pid: Option<TaskId>, out: &Outcome, target: &AgentId) {
         let Some(pid) = pid else { return };
+        // A call with `secret` paths is RECORDED as shown: its result fields and
+        // every secret value in its text → placeholder ([`crate::ledger::Ledger::
+        // settle`] masked it). The caller already holds the real outcome.
+        let shown = self.ledger.shown(pid.get());
+        let out = shown.as_ref().unwrap_or(out);
         let mut stamp = Map::new();
         stamp.insert("status".to_string(), Value::from(out.status.as_str()));
         if let Some(res) = out.result.as_object() {
@@ -1172,9 +1213,10 @@ impl Kernel {
     ///     lands — the flag (set for the WHOLE subtree before anything is
     ///     stopped) closes that window.
     // One attempt needs the target, the payload, the verb, the pid-out slot, the
-    // deadline, the task id and (since the binary channel joined the batch) the
-    // blob and whether the reply's chunk comes back raw. Bundling them into a
-    // struct would only move the same eight fields.
+    // deadline, the task id, (since the binary channel joined the batch) the
+    // blob and whether the reply's chunk comes back raw, and (since secret
+    // paths) the payload as the mirrors may see it. Bundling them into a struct
+    // would only move the same nine fields.
     #[allow(clippy::too_many_arguments)]
     async fn run_dispatch(
         self: &Arc<Self>,
@@ -1186,6 +1228,7 @@ impl Kernel {
         task_id: TaskId,
         binary: Option<Vec<u8>>,
         raw_reply: bool,
+        shown: Option<&crate::secret::Shown>,
     ) -> (Value, Status, Option<Vec<u8>>) {
         // The pid was minted in the SYNCHRONOUS launch phase and IS the ledger
         // key — minting a second one here would split the two apart, so the row
@@ -1220,20 +1263,28 @@ impl Kernel {
         // everything else — the task row above, the deadline, the settle.
         let _in_flight = (!target.is_remote()).then(|| InFlightGuard::enter(self, target));
         if !target.is_remote() {
-            let item = match binary.clone() {
+            // SECRET paths: the mirrors get the payload AS SHOWN — on every
+            // attempt — and a body the secret marks never leaves the handler's
+            // side (its slot holds the placeholder, a text frame).
+            let (mirrored, body) = match shown {
+                Some(s) if s.body_hidden => (&s.payload, None),
+                Some(s) => (&s.payload, binary.clone()),
+                None => (payload, binary.clone()),
+            };
+            let item = match body {
                 // A REQUEST BODY rides at `bytes` — the key python's own payload
                 // dict holds it under, in the caller's position when the payload
                 // names the slot — so a watcher receives the body, not a header
                 // with a hole where it was. A call that only READS a raw chunk
                 // carries none: its payload is a plain dict, a text frame.
                 Some(blob) => {
-                    let mut head = payload.clone();
+                    let mut head = mirrored.clone();
                     if let Some(m) = head.as_object_mut() {
                         m.insert("bytes".to_string(), Value::Null);
                     }
                     crate::inbox::InboxItem::binary(head, "bytes", blob)
                 }
-                None => crate::inbox::InboxItem::text(payload.clone()),
+                None => crate::inbox::InboxItem::text(mirrored.clone()),
             };
             self.fanout(target, "send", &item).await;
         }

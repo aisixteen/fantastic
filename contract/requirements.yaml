@@ -113,3 +113,15 @@ requirements:
   - id: EXS-5
     level: MUST
     title: "`shell` is refused at write time unless true, false or \"login\""
+  - id: SEC-1
+    level: MUST
+    title: "a payload field marked secret reaches the target with its real value"
+  - id: SEC-2
+    level: MUST
+    title: "no record of a secret call (ledger read-back included) carries the value; `<secret>` stands in"
+  - id: SEC-3
+    level: MUST
+    title: "a result marked secret reaches the caller for real and is recorded as `<secret>`"
+  - id: SEC-4
+    level: MUST
+    title: "a malformed secret mark is refused bad_arg before dispatch; payload.type can never be hidden"

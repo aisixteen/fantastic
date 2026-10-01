@@ -2,7 +2,7 @@
 
 A medium that unifies humans and AIs into a single workspace. Recursive
 `Agent` class + a `Kernel` shared-context object, one primitive — the ARRAY-ONLY
-batch send `send([{target, payload, timeout?}, ...]) -> [{pid, status, result}]`
+batch send `send([{target, payload, timeout?, id?, retries?, secret?}, ...]) -> [{pid, status, result}]`
 (single call = `(await send([{...}]))[0]`; statuses
 `completed|failed|cancelled|timed_out`; concurrent dispatch, input order
 preserved; timeout per item, NEVER defaulted by the kernel, enforced through
@@ -399,6 +399,15 @@ the next process start.
   model that never reflects the root never learns they exist). Bundles that fork work
   OUTLIVING a dispatch (an `exec_bridge` job) register it with
   `kernel.ctx.spawn_task(...)`, so `ps` sees it and `cancel` reaches it.
+- **Secret values on a call** (`kernel/_secret.py`, owner 2026-10-01): the
+  CALLER marks `secret: [path, …]` on a batch item (`payload.<field…>` or
+  `result[.<field…>]`). The target gets the real payload and the caller the real
+  reply; every record and mirror shows `<secret>` — call/settle rows (so the memory
+  store), `ledger` read-back, the state stream's `payload`+`summary`, inbox and
+  watcher mirrors, and error texts (secret values are scrubbed out of any string).
+  `payload.type` can never be hidden; a path naming nothing is refused; a named
+  secret call replays only from RAM — from the store it is refused, loud. Masking
+  is not isolation: secrets go to bundles that keep them, never to AI agents.
 - **A backend KIND's record schema** (`ai_core/schema.py`): each AI backend
   module publishes `RECORD_SCHEMA` — its own fields, then the ones every ai_core
   agent takes (`memory_store_id` required; `context_window`, `output_reserve`,

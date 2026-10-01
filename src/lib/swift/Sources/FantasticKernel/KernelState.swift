@@ -62,10 +62,15 @@ extension Kernel {
     /// by `save` (writes to disk) + tested by callers in-memory.
     public func saveJSON() throws -> String {
         let state = snapshotState()
-        let data = try JSONEncoder().encode(state)
-        // Re-parse + re-serialize via our order-preserving path so
-        // bytes are stable.
-        let json = try JSON.parse(data)
+        // BUILT IN PYTHON'S ORDER — `{version, records}`, each record in its own
+        // key order — never through JSONEncoder, whose key order is not stable
+        // from one process to the next (C15): re-parsing its output only froze
+        // whichever order that run happened to produce (measured: 2 of 6 runs
+        // wrote `{records, version}`).
+        let json: JSON = .object([
+            "version": .integer(Int64(state.version)),
+            "records": .array(state.records.map { $0.json }),
+        ])
         return json.serialize()
     }
 

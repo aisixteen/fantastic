@@ -49,6 +49,7 @@ from kernel._refusal import (
     UNKNOWN_AGENT,
     refusal,
 )
+from kernel import _secret
 from kernel._state import CURRENT_VERSION, validate_records
 
 if TYPE_CHECKING:
@@ -992,7 +993,8 @@ class Kernel:
             if x.get("name"):
                 e["name"] = x["name"]
             if x["fut"].done():
-                res = x["fut"].result()
+                # a call with `secret` paths reads back AS SHOWN (`_stamp_call`)
+                res = x.get("shown_out") or x["fut"].result()
                 e["status"] = res["status"]
                 # THE SAME SHAPE flushed or not: what the settle row keeps.
                 e["outcome"] = {
@@ -1049,6 +1051,32 @@ class Kernel:
             oc = st.get("outcome") or {}
             attempts = st.get("attempts") or call.get("attempts") or 1
             fut = loop.create_future()
+            if call.get("secret"):
+                # ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would
+                # hand back `<secret>` as if it were the value. Refused, loud.
+                fut.set_result(
+                    {
+                        "pid": call["id"],
+                        "status": FAILED,
+                        "result": _secret.replay_refused(key),
+                        "attempts": attempts,
+                    }
+                )
+                self.ledger_put(
+                    call["id"],
+                    {
+                        "target": call.get("agent"),
+                        "fut": fut,
+                        "payload": call.get("payload"),
+                        "timeout": None,
+                        "retries": call.get("retries", 0),
+                        "attempts": attempts,
+                        "named": bool(call.get("named")),
+                        "name": call.get("name"),
+                        "caller": call.get("caller"),
+                    },
+                )
+                continue
             # A NAMED call's settle kept its result; an unnamed one (joined by its
             # int id) kept only what `stored_outcome` keeps — and says so.
             result = (

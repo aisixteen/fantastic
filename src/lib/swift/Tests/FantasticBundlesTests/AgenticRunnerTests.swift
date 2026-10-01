@@ -242,6 +242,34 @@ private func operatorSend(_ k: Kernel, _ target: String, _ payload: JSON) async 
     await dispatchCorpus(k, sender: nil, target: target, payload: payload)
 }
 
+/// The `operator` STEP: an operator send whose batch item may carry its own
+/// fields beside the payload — `id` and `secret` (python `run_steps`: `for k in
+/// ("id", "secret"): item[k] = args[k]`). Returns the reply AND the outcome, the
+/// one a `status` matcher reads.
+private func operatorStep(_ k: Kernel, _ args: JSON) async -> (JSON, Outcome) {
+    var fields = ItemFields()
+    if let o = args.asObject {
+        fields.id = o["id"]
+        fields.secret = o["secret"]
+    }
+    return await dispatchCorpusOutcome(
+        k, sender: nil, target: args["to"].asString ?? "", payload: args["send"], fields: fields)
+}
+
+/// A batch item's own fields, beside `target`/`payload` — set only when the step
+/// names them (an absent key never reaches the item).
+private struct ItemFields {
+    var id: JSON? = nil
+    var secret: JSON? = nil
+
+    func apply(_ item: Item) -> Item {
+        var it = item
+        if let id { it.rawId = id }
+        if let secret { it.secret = secret }
+        return it
+    }
+}
+
 /// Dispatch one corpus send under `sender` (nil = operator, ungated). A
 /// `write_stream`/`read_stream` rides the BINARY channel — file_bridge's string
 /// verbs are gone. Mirrors python `_engine.py`: for a write, `bytes_utf8` becomes
@@ -252,6 +280,16 @@ private func operatorSend(_ k: Kernel, _ target: String, _ payload: JSON) async 
 private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, payload: JSON) async
     -> JSON
 {
+    let (reply, _) = await dispatchCorpusOutcome(
+        k, sender: sender, target: target, payload: payload, fields: ItemFields())
+    return reply
+}
+
+/// `dispatchCorpus`, keeping the OUTCOME beside the reply, with the item's own
+/// `fields` applied on every channel.
+private func dispatchCorpusOutcome(
+    _ k: Kernel, sender: AgentId?, target: String, payload: JSON, fields: ItemFields
+) async -> (JSON, Outcome) {
     await KernelTaskLocals.$currentSender.withValue(sender) {
         // Any payload carrying `bytes_utf8` rides the BINARY channel — the
         // file_bridge's text verbs (write/edit/append) alongside write_stream.
@@ -263,7 +301,8 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
                 header = .object(o)
             }
             let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
-            return await k.send([Item(AgentId(target), header, binary: blob)])[0].result
+            let out = await k.send([fields.apply(Item(AgentId(target), header, binary: blob))])[0]
+            return (out.result, out)
         }
         switch payload["type"].asString ?? "" {
         case "write_stream":
@@ -273,17 +312,20 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
                 header = .object(o)
             }
             let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
-            return await k.send([Item(AgentId(target), header, binary: blob)])[0].result
+            let out = await k.send([fields.apply(Item(AgentId(target), header, binary: blob))])[0]
+            return (out.result, out)
         case "read_stream":
-            let out = await k.send([Item(AgentId(target), payload, binary: Data())])[0]
+            let item = fields.apply(Item(AgentId(target), payload, binary: Data()))
+            let out = await k.send([item])[0]
             let (reply, body) = (out.result, out.body)
             if case .object(var o) = reply {
                 o["bytes"] = .string(String(data: body ?? Data(), encoding: .utf8) ?? "")
-                return .object(o)
+                return (.object(o), out)
             }
-            return reply
+            return (reply, out)
         default:
-            return await k.send([Item(AgentId(target), payload)])[0].result
+            let out = await k.send([fields.apply(Item(AgentId(target), payload))])[0]
+            return (out.result, out)
         }
     }
 }
@@ -330,7 +372,25 @@ private func resolve(_ v: JSON, _ bound: [String: JSON]) -> JSON {
     }
 }
 
-private func matchStep(_ label: String, _ expect: JSON, _ reply: JSON) {
+/// Python `_flat_text`: every string, number and byte string in `x`, joined —
+/// bytes read as utf-8 (a swift reply carries them already decoded, as the
+/// `read_stream` fold above does).
+private func flatText(_ x: JSON) -> String {
+    switch x {
+    case .null: return ""
+    case .string(let s): return s
+    case .array(let a): return a.map(flatText).joined(separator: "\n")
+    case .object(let o): return o.map { $0.key + "\n" + flatText($0.value) }.joined(separator: "\n")
+    default: return pyStr(x)
+    }
+}
+
+/// `outcome` — the step's batch OUTCOME when it has one (an `operator` step):
+/// python's `status` matcher reads the outcome, never the reply.
+private func matchStep(
+    _ label: String, _ expect: JSON, _ reply: JSON, outcome: Outcome? = nil,
+    outcomeStatus: String? = nil
+) {
     func fail(_ why: String) { Issue.record("\(label): \(why)\n  reply: \(reply.serialize())") }
 
     if let allow = expect["allow"].asBool {
@@ -350,8 +410,13 @@ private func matchStep(_ label: String, _ expect: JSON, _ reply: JSON) {
     if let want = expect["reason"].asString, reply["reason"].asString != want {
         fail("expected reason \"\(want)\"")
     }
-    if let want = expect["status"].asString, reply["status"].asString != want {
-        fail("expected status \"\(want)\"")
+    if let want = expect["status"].asString {
+        // python `_match`: the OUTCOME's status only — a step that carries no
+        // outcome (a `reach`) has none, so `status:` there fails, as in python
+        let got = outcome.map { $0.status.rawValue } ?? outcomeStatus
+        if got != want {
+            fail("expected status \"\(want)\", got \(got.map { "\"\($0)\"" } ?? "none")")
+        }
     }
     if let sub = expect["error_contains"].asString,
         !(reply["error"].asString ?? "").contains(sub)
@@ -361,6 +426,17 @@ private func matchStep(_ label: String, _ expect: JSON, _ reply: JSON) {
     if case .object(let m) = expect["contains"] {
         for (path, want) in m where !dig(reply, path).contains(where: { pyEq($0, want) }) {
             fail("\(path) does not contain \(want.serialize())")
+        }
+    }
+    // a string ANYWHERE / NOWHERE in the reply — what a secret mark is asserted
+    // with: the value is somewhere in a real answer, nowhere in a record
+    if expect.asObject?["mentions"] != nil || expect.asObject?["absent"] != nil {
+        let flat = flatText(reply)
+        if let want = expect["mentions"].asString, !flat.contains(want) {
+            fail("the reply never mentions \(pyRepr(want))")
+        }
+        if let unwanted = expect["absent"].asString, flat.contains(unwanted) {
+            fail("the reply carries \(pyRepr(unwanted)) and must not")
         }
     }
     if case .object(let m) = expect["not_contains"] {
@@ -676,13 +752,18 @@ private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: 
         let label = step["name"].asString ?? "<step>"
         let expect = resolve(step["expect"], bound)
         var reply: JSON = .null
+        var outcome: Outcome? = nil
+        // a `collect`'s outcome arrives as JSON (the started task's value)
+        var collected: String? = nil
 
         if case .object = step["reach"] {
             let a = resolve(step["reach"], bound)
             reply = await reach(h.kernel, a["from"].asString ?? "", a["to"].asString ?? "", a["send"])
         } else if case .object = step["operator"] {
             let a = resolve(step["operator"], bound)
-            reply = await operatorSend(h.kernel, a["to"].asString ?? "", a["send"])
+            let (r, o) = await operatorStep(h.kernel, a)
+            reply = r
+            outcome = o
         } else if case .object = step["grant"] {
             reply = await grantStep(h, resolve(step["grant"], bound), remove: false)
         } else if case .object = step["revoke"] {
@@ -827,14 +908,14 @@ private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: 
             var merged = bound[name]?.asObject ?? OrderedDictionary<String, JSON>()
             for (k, v) in outcome.asObject ?? [:] { merged[k] = v }
             bound[name] = .object(merged)
-            var r = outcome["result"].asObject ?? OrderedDictionary<String, JSON>()
-            r["status"] = outcome["status"]
-            reply = .object(r)
+            // the reply is the RESULT; its status is the outcome's (python `_match`)
+            reply = .object(outcome["result"].asObject ?? OrderedDictionary<String, JSON>())
+            collected = outcome["status"].asString
         } else {
             continue
         }
 
-        matchStep(label, expect, reply)
+        matchStep(label, expect, reply, outcome: outcome, outcomeStatus: collected)
         if let rid = step["because"].asString { pinned[rid, default: 0] += 1 }
     }
     for t in tasks.values { t.cancel() }
@@ -887,7 +968,7 @@ struct AgenticCorpusTests {
             // HTTP test's live fixture mid-test (measured:
             // webRestBinaryLegPatchAndReadStream, "file note.txt not found"
             // after a successful patch).
-            let owned = ownedRoots(of: sc.config)
+            let owned = ownedRoots(of: sc.config).union(writtenPaths(of: sc.spec))
             defer {
                 let after = Set(
                     (try? FileManager.default.contentsOfDirectory(atPath: cwd.path)) ?? [])
@@ -930,6 +1011,29 @@ struct AgenticCorpusTests {
             + pinned.sorted { $0.key < $1.key }.map { "\($0.key)x\($0.value)" }.joined(separator: ", "))
         #expect(ran > 0, "no scenario hydrated")
     }
+}
+
+/// The first path component of every file a spec's steps WRITE (a send carrying
+/// `bytes_utf8`, or a writing verb) — what an agent with no `root:` writes into
+/// the SHARED process cwd. Python's runner gets a temp cwd per scenario; this one
+/// reaps them by name (only when NEW, like every other owned entry).
+private func writtenPaths(of spec: JSON) -> Set<String> {
+    let writers: Set<String> = ["write", "append", "edit", "write_stream"]
+    var out: Set<String> = []
+    for step in spec["expect"]["steps"].asArray ?? [] {
+        for kind in ["reach", "operator", "start"] {
+            let send = step[kind]["send"]
+            let writes =
+                send.asObject?["bytes_utf8"] != nil || writers.contains(send["type"].asString ?? "")
+            guard writes, let path = send["path"].asString else { continue }
+            if let first = path.split(separator: "/").first.map(String.init), !first.isEmpty,
+                first != ".", first != ".."
+            {
+                out.insert(first)
+            }
+        }
+    }
+    return out
 }
 
 /// Every `root:`-declared first path component anywhere in a scenario config —

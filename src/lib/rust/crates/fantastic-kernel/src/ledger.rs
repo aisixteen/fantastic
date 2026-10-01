@@ -29,7 +29,7 @@ use crate::agent::AgentId;
 use crate::outcome::{Outcome, Status};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 /// Default ring size. Big enough that a normal session never evicts, bounded so
@@ -61,6 +61,13 @@ struct Row {
     /// execution does not settle its intermediate attempts, so a joiner never
     /// sees an answer that was later retried away.
     outcome: Option<Outcome>,
+    /// The item's SECRET paths (RAM only — [`crate::secret`]): what the settle
+    /// masks the recorded outcome with.
+    secret: Option<Arc<crate::secret::Secret>>,
+    /// The outcome AS SHOWN, for a call with `secret` paths — what the settle
+    /// row records and the `ledger` read-back answers. Joiners and re-senders in
+    /// RAM still get the real [`Row::outcome`]. Python `shown_out`.
+    shown: Option<Outcome>,
     /// How joiners wait. `watch` (not `Notify`) because it carries the value and
     /// cannot miss an edge: a joiner that subscribes after the settle still
     /// reads it immediately.
@@ -188,12 +195,40 @@ impl Ledger {
                 caller,
                 acked: false,
                 outcome: None,
+                secret: None,
+                shown: None,
                 tx,
             },
         );
         g.order.push(exec_id);
         Self::evict(&mut g);
         Opened::Fresh
+    }
+
+    /// Keep a FRESH execution's secret paths beside it — python `_ledger_open`'s
+    /// `"secret": secret`, RAM only. The settle masks the recorded outcome with
+    /// them ([`Self::settle`]).
+    pub(crate) fn keep_secret(&self, exec_id: i64, secret: crate::secret::Secret) {
+        if let Some(r) = self
+            .inner
+            .lock()
+            .expect("ledger poisoned")
+            .rows
+            .get_mut(&exec_id)
+        {
+            r.secret = Some(Arc::new(secret));
+        }
+    }
+
+    /// The outcome AS RECORDED for a call with secret paths, once settled — what
+    /// the settle row keeps. `None` for any other execution.
+    pub(crate) fn shown(&self, exec_id: i64) -> Option<Outcome> {
+        self.inner
+            .lock()
+            .expect("ledger poisoned")
+            .rows
+            .get(&exec_id)
+            .and_then(|r| r.shown.clone())
     }
 
     /// The execution a caller's NAME refers to, if it is still on the ring.
@@ -244,10 +279,17 @@ impl Ledger {
 
     /// Record the FINAL outcome and wake every joiner. Stamps `attempts`, so a
     /// caller can see what its work actually cost.
+    ///
+    /// A call with `secret` paths is masked HERE, under the same lock as the
+    /// settle (python `_stamp_call` runs in the same synchronous step as the
+    /// future's result): no `ledger` read can ever see the real outcome.
     pub fn settle(&self, exec_id: i64, mut outcome: Outcome) -> Outcome {
         let mut g = self.inner.lock().expect("ledger poisoned");
         if let Some(row) = g.rows.get_mut(&exec_id) {
             outcome.attempts = row.attempts.max(1);
+            if let Some(s) = &row.secret {
+                row.shown = Some(crate::secret::shown_outcome(&outcome, s));
+            }
             row.outcome = Some(outcome.clone());
             // Ignore the send error: no subscribers is the normal case.
             let _ = row.tx.send(Some(outcome.clone()));
@@ -350,7 +392,9 @@ impl Ledger {
                     e.insert("name".to_string(), json!(name));
                 }
                 match &r.outcome {
-                    Some(out) => {
+                    Some(real) => {
+                        // a call with `secret` paths reads back AS SHOWN
+                        let out = r.shown.as_ref().unwrap_or(real);
                         e.insert("status".to_string(), json!(out.status.as_str()));
                         // THE SAME SHAPE flushed or not: what the settle row keeps,
                         // made wire-safe (a raw body reads `<bytes:N>`).
@@ -392,9 +436,6 @@ impl Ledger {
         outcome: &Map<String, Value>,
         attempts: u32,
     ) -> bool {
-        let Some(target) = call.get("agent").and_then(Value::as_str) else {
-            return false;
-        };
         let status = match outcome.get("status").and_then(Value::as_str) {
             Some("completed") => Status::Completed,
             // A HANDLER THAT SAID NO IS A SETTLED EXECUTION TOO.
@@ -413,6 +454,36 @@ impl Ledger {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             ),
+        };
+        self.put_done(exec_id, call, status, result, attempts)
+    }
+
+    /// PUT BACK ONE FLUSHED execution that carried SECRET paths — python
+    /// `recall_executions`' `call.get("secret")` branch. Its record holds
+    /// placeholders, not values, so it cannot be answered from the record: it
+    /// comes back DONE holding the `failed` refusal `refusal`, and a re-send gets
+    /// that instead of `<secret>` passed off as the value.
+    pub(crate) fn put_refused(
+        &self,
+        exec_id: i64,
+        call: &crate::rows::Row,
+        refusal: Value,
+        attempts: u32,
+    ) -> bool {
+        self.put_done(exec_id, call, Status::Failed, refusal, attempts)
+    }
+
+    /// The one DONE insert both recalls share: `call` is the flushed `call` row.
+    fn put_done(
+        &self,
+        exec_id: i64,
+        call: &crate::rows::Row,
+        status: Status,
+        result: Value,
+        attempts: u32,
+    ) -> bool {
+        let Some(target) = call.get("agent").and_then(Value::as_str) else {
+            return false;
         };
         let mut g = self.inner.lock().expect("ledger poisoned");
         if g.rows.contains_key(&exec_id) {
@@ -448,6 +519,8 @@ impl Ledger {
                     .map(AgentId::from),
                 acked: false,
                 outcome: Some(out),
+                secret: None,
+                shown: None,
                 tx,
             },
         );

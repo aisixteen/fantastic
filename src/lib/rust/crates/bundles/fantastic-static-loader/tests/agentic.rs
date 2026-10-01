@@ -9,7 +9,7 @@
 //! equality.
 
 use fantastic_file::FileBundle;
-use fantastic_kernel::{with_operator, with_sender, Agent, AgentId, Item, Kernel};
+use fantastic_kernel::{with_operator, with_sender, Agent, AgentId, Item, Kernel, Outcome};
 use fantastic_static_loader::{StaticLoaderBundle, HANDLER_MODULE};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -251,6 +251,22 @@ async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     with_operator(async move { dispatch(&k, &t, payload).await }).await
 }
 
+/// The `operator` STEP: the batch item's own fields (`id`, `secret`) ride beside
+/// the payload, and the whole outcome comes back — `status` lives only there.
+/// Python `run_steps`' operator branch.
+async fn operator_item(kernel: &Arc<Kernel>, args: &Value) -> Outcome {
+    let k = Arc::clone(kernel);
+    let target = args["to"].as_str().unwrap().to_string();
+    let payload = args.get("send").cloned().unwrap_or(json!({}));
+    let mut fields = Map::new();
+    for key in ["id", "secret"] {
+        if let Some(v) = args.get(key) {
+            fields.insert(key.to_string(), v.clone());
+        }
+    }
+    with_operator(async move { dispatch_item(&k, &target, payload, &fields).await }).await
+}
+
 /// One dispatch, CHANNEL CHOSEN BY VERB. The stream verbs
 /// (`read_stream`/`write_stream`) carry RAW BYTES a JSON envelope cannot hold,
 /// so they ride the kernel's BINARY channel; everything else is a plain send.
@@ -259,7 +275,19 @@ async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 /// matcher sees streamed content — the mirror of python `_engine`'s
 /// `_decode_bytes_fields` + its bytes-path decode. Runs under whatever
 /// sender/operator context the caller set, so the send gate applies.
-async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
+async fn dispatch(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
+    dispatch_item(k, target, payload, &Map::new()).await.result
+}
+
+/// [`dispatch`] with the item's own fields (`id`, `secret` — what an `operator`
+/// step may set beside the payload), answering the whole outcome. A returned
+/// blob is folded into the result's `bytes` (utf-8).
+async fn dispatch_item(
+    k: &Arc<Kernel>,
+    target: &str,
+    mut payload: Value,
+    fields: &Map<String, Value>,
+) -> Outcome {
     // Binary channel when the payload carries content (`bytes_utf8` — the
     // file_bridge text verbs: write/edit/append) or is a stream verb; the
     // mirror of python, where real bytes ride the payload in-process.
@@ -267,33 +295,39 @@ async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
         payload.get("type").and_then(Value::as_str),
         Some("read_stream" | "write_stream")
     ) || payload.get("bytes_utf8").is_some();
-    if !is_stream {
-        return k
-            .send(vec![Item::new(AgentId::from(target), payload)])
-            .await
-            .remove(0)
-            .result;
-    }
-    let blob = payload
-        .as_object_mut()
-        .and_then(|o| o.remove("bytes_utf8"))
-        .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()));
-    let item = Item::new(AgentId::from(target), payload);
-    let item = match blob {
-        Some(b) => item.with_binary(b),
-        None => item.with_raw_reply(),
+    let blob = if is_stream {
+        payload
+            .as_object_mut()
+            .and_then(|o| o.remove("bytes_utf8"))
+            .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()))
+    } else {
+        None
     };
-    let out = k.send(vec![item]).await.remove(0);
-    let (mut reply, body) = (out.result, out.body);
-    if let Some(body) = body {
-        if let Some(o) = reply.as_object_mut() {
+    let mut item = Item::new(AgentId::from(target), payload);
+    if is_stream {
+        item = match blob {
+            Some(b) => item.with_binary(b),
+            None => item.with_raw_reply(),
+        };
+    }
+    // The batch item's own fields, beside the payload — forwarded RAW, so the
+    // kernel validates them exactly as it validates any caller's.
+    if let Some(id) = fields.get("id") {
+        item = item.with_raw_id(id.clone());
+    }
+    if let Some(secret) = fields.get("secret") {
+        item = item.with_secret(secret.clone());
+    }
+    let mut out = k.send(vec![item]).await.remove(0);
+    if let Some(body) = out.body.take() {
+        if let Some(o) = out.result.as_object_mut() {
             o.insert(
                 "bytes".into(),
                 Value::String(String::from_utf8_lossy(&body).into_owned()),
             );
         }
     }
-    reply
+    out
 }
 
 /// The ONE machine-readable question about a reply. Never `"error" in r`: a
@@ -375,9 +409,27 @@ fn py_eq(g: &Value, want: &Value) -> bool {
     }
 }
 
+/// Every string, number and bool in `x`, joined — keys too, as python's
+/// `_flat_text` (a body is already folded into `bytes` as utf-8 text).
+fn flat_text(x: &Value) -> String {
+    match x {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Object(o) => o
+            .iter()
+            .map(|(k, v)| format!("{k}\n{}", flat_text(v)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Array(a) => a.iter().map(flat_text).collect::<Vec<_>>().join("\n"),
+        other => fantastic_bundle::py_str(other),
+    }
+}
+
 /// Apply one step's matchers. Panics naming the step, the matcher and the reply
-/// — a spec failure has to be readable without opening the runner.
-fn match_step(name: &str, expect: &Value, reply: &Value) {
+/// — a spec failure has to be readable without opening the runner. `status`
+/// lives on the OUTCOME (python `_match`'s `outcome`), which only the steps that
+/// await one — `operator`, `collect` — carry.
+fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
     let fail = |why: String| -> ! {
         panic!("{name}: {why}\n  reply: {reply}");
     };
@@ -412,8 +464,8 @@ fn match_step(name: &str, expect: &Value, reply: &Value) {
         }
     }
     if let Some(want) = expect.get("status").and_then(Value::as_str) {
-        if reply.get("status").and_then(Value::as_str) != Some(want) {
-            fail(format!("expected status {want:?}"));
+        if status != Some(want) {
+            fail(format!("expected status {want:?}, got {status:?}"));
         }
     }
     if let Some(sub) = expect.get("error_contains").and_then(Value::as_str) {
@@ -426,6 +478,21 @@ fn match_step(name: &str, expect: &Value, reply: &Value) {
         for (path, want) in m {
             if !dig(reply, path).into_iter().any(|g| py_eq(g, want)) {
                 fail(format!("{path} does not contain {want}"));
+            }
+        }
+    }
+    // a string ANYWHERE / NOWHERE in the reply — what a secret mark is asserted
+    // with: the value is somewhere in a real answer, nowhere in a record
+    if expect.get("mentions").is_some() || expect.get("absent").is_some() {
+        let flat = flat_text(reply);
+        if let Some(want) = expect.get("mentions").and_then(Value::as_str) {
+            if !flat.contains(want) {
+                fail(format!("the reply never mentions {want:?}"));
+            }
+        }
+        if let Some(unwanted) = expect.get("absent").and_then(Value::as_str) {
+            if flat.contains(unwanted) {
+                fail(format!("the reply carries {unwanted:?} and must not"));
             }
         }
     }
@@ -567,6 +634,9 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             .unwrap_or("<step>")
             .to_string();
         let expect = resolve(&step.get("expect").cloned().unwrap_or(json!({})), &bound);
+        // The OUTCOME's status, for the steps that await one (python `_match`'s
+        // `outcome`).
+        let mut status: Option<String> = None;
         let reply: Value = if let Some(a) = step.get("reach") {
             reach(
                 &h.kernel,
@@ -577,12 +647,13 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             .await
         } else if let Some(a) = step.get("operator") {
             let a = resolve(a, &bound);
-            operator(
-                &h.kernel,
-                a["to"].as_str().unwrap(),
-                a.get("send").cloned().unwrap_or(json!({})),
-            )
-            .await
+            let out = operator_item(&h.kernel, &a).await;
+            status = Some(out.status.as_str().to_string());
+            if out.result.is_object() {
+                out.result
+            } else {
+                json!({})
+            }
         } else if let Some(a) = step.get("grant") {
             grant_step(h, a, false).await
         } else if let Some(a) = step.get("revoke") {
@@ -772,13 +843,15 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
                 }
             }
             bound.insert(name, merged);
-            let mut r = outcome.get("result").cloned().unwrap_or(json!({}));
-            if let Some(st) = outcome.get("status") {
-                if let Some(o) = r.as_object_mut() {
-                    o.insert("status".into(), st.clone());
-                }
-            }
-            r
+            status = outcome
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            outcome
+                .get("result")
+                .filter(|r| r.is_object())
+                .cloned()
+                .unwrap_or(json!({}))
         } else {
             // Verbs this runner does not implement yet are SKIPPED BY NAME with
             // the reason visible, never silently: a step that quietly did
@@ -799,7 +872,7 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             );
             continue;
         };
-        match_step(&label, &expect, &reply);
+        match_step(&label, &expect, &reply, status.as_deref());
         if let Some(rid) = step.get("because").and_then(Value::as_str) {
             *pinned.entry(rid.to_string()).or_insert(0) += 1;
         }

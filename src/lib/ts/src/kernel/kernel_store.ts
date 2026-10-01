@@ -22,6 +22,8 @@ import { DEAD_STATUSES } from "./outcome.ts";
 import type { Exec } from "./ledger.ts";
 import { storeSafe, storedOutcome } from "./ledger.ts";
 import { nowSeconds, timers } from "./timers.ts";
+import { pyTruthy } from "./pyjson.ts";
+import { replayRefused, shownOutcome } from "./secret.ts";
 
 /** One execution row, as RAM and the store hold it. */
 export type Row = Payload & { id: number; kind: string };
@@ -216,6 +218,13 @@ export class KernelStore {
   settle(e: Exec, out: Outcome): void {
     if (e.settled) return;
     this.k.ledger.settle(e, out);
+    // A call with `secret` paths is RECORDED as shown: its result fields and
+    // every secret value in its text → placeholder. The caller already holds
+    // the real outcome; the ledger reads back `shownOut`.
+    if (e.secret !== null) {
+      out = shownOutcome(out, e.secret);
+      e.shownOut = out;
+    }
     const call = this.rows.get(e.id);
     if (call !== undefined) {
       // the live call row, while it is still in RAM
@@ -525,11 +534,13 @@ export class KernelStore {
       };
       if (x.name !== null) e["name"] = x.name;
       if (x.settled && x.outcome !== null) {
-        e["status"] = x.outcome.status;
+        // a call with `secret` paths reads back AS SHOWN (`settle`)
+        const res = x.shownOut ?? x.outcome;
+        e["status"] = res.status;
         e["outcome"] = {
           pid: eid,
-          ...storedOutcome(x.outcome, x.named),
-          attempts: x.outcome.attempts ?? x.attempts,
+          ...storedOutcome(res, x.named),
+          attempts: res.attempts ?? x.attempts,
         };
       } else {
         e["status"] = "in_flight";
@@ -550,7 +561,8 @@ export class KernelStore {
    * NAME not held in RAM, or an int id not in the table. A settled one comes back
    * holding its recorded outcome (dedup survives the flush and a restart); one
    * with no settle row was in flight when the process stopped and rebuilds
-   * nothing — re-sending runs it.
+   * nothing — re-sending runs it. One whose call row carries `secret` comes back
+   * FAILED with `replayRefused`, never with its placeholders.
    */
   async recall(items: readonly unknown[], via: Kernel = this.k): Promise<void> {
     const wanted: ["name" | "id", string | number][] = [];
@@ -576,17 +588,24 @@ export class KernelStore {
       const oc = (st["outcome"] as Payload | undefined) ?? {};
       const attempts =
         (st["attempts"] as number | undefined) || (call["attempts"] as number | undefined) || 1;
-      // A NAMED call's settle kept its result; an unnamed one (joined by its int
-      // id) kept only what `storedOutcome` keeps — and says so.
-      const result: Json = "result" in oc
-        ? (oc["result"] as Json)
-        : Object.fromEntries(Object.entries(oc).filter(([k]) => k !== "status"));
-      const out: Outcome = {
-        pid: call.id,
-        status: oc["status"] as Outcome["status"],
-        result,
-        attempts,
-      };
+      let out: Outcome;
+      if (pyTruthy(call["secret"])) {
+        // ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would hand
+        // back `<secret>` as if it were the value. Refused, loud.
+        out = { pid: call.id, status: "failed", result: replayRefused(key), attempts };
+      } else {
+        // A NAMED call's settle kept its result; an unnamed one (joined by its
+        // int id) kept only what `storedOutcome` keeps — and says so.
+        const result: Json = "result" in oc
+          ? (oc["result"] as Json)
+          : Object.fromEntries(Object.entries(oc).filter(([k]) => k !== "status"));
+        out = {
+          pid: call.id,
+          status: oc["status"] as Outcome["status"],
+          result,
+          attempts,
+        };
+      }
       const payload = call["payload"];
       ledger.put({
         id: call.id,
@@ -602,6 +621,8 @@ export class KernelStore {
         settled: true,
         outcome: out,
         acked: false,
+        secret: null,
+        shownOut: null,
         promise: Promise.resolve(out),
         resolve: () => undefined,
       });

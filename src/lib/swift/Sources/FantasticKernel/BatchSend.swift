@@ -100,7 +100,7 @@ extension Kernel {
     /// One item's SYNCHRONOUS half: validate, resolve, gate, claim the row.
     /// Python `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check
     /// order: target → payload dict → timeout → payload.type → id → retries
-    /// → killed → draining → resolve → gate.
+    /// → secret → killed → draining → resolve → gate.
     func launch(_ item: Item) -> Launched {
         // 1. target — python: `if not isinstance(target_id, str) or not
         // target_id: missing("send", "target")`.
@@ -146,6 +146,15 @@ extension Kernel {
         case .ok(let r): retries = r
         case .refused(let r): return .settled(Outcome.refused(r))
         }
+        // 6b. SECRET paths (`Secret`): validated with the item's other own
+        // fields, before anything runs; `shown` is what every record and mirror
+        // of this call carries. Python `Agent._launch` → `_secret.check`.
+        let secret: Secret?
+        switch Secret.check(item.secret, payload: item.payload, blob: item.binary) {
+        case .ok(let s): secret = s
+        case .refused(let r): return .settled(Outcome.refused(r))
+        }
+        let shown = secret?.shownPayload(item.payload, blob: item.binary)
 
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks
         // the whole subtree before it aborts anything, because `onCancel`
@@ -234,9 +243,10 @@ extension Kernel {
         let taskId = TaskId(execId)
         let caller = KernelTaskLocals.currentSender
 
+        // The RAM entry holds the SHOWN payload, never the secret values.
         switch ledger.open(
-            execId, target: target.id, payload: item.payload, retries: retries, name: name,
-            caller: caller, callerId: callerId)
+            execId, target: target.id, payload: shown?.json ?? item.payload, retries: retries,
+            name: name, caller: caller, callerId: callerId, secret: secret)
         {
         case .refused(let r):
             return .settled(Outcome.refused(r))
@@ -268,14 +278,17 @@ extension Kernel {
             // deadline — and is what the kernel flushes into its memory store and
             // reads back for `ledger` and named-call dedup.
             // KEY ORDER IS PYTHON'S: id, kind, verb, parent, caller, payload,
-            // named, retries, attempts, timeout[, name]. (`origin` → `caller`:
-            // replies own `origin` now.)
+            // named, retries, attempts, timeout[, name][, secret]. (`origin` →
+            // `caller`: replies own `origin` now.)
             var callRow: Row = [
                 "id": .integer(execId), "kind": .string("call"), "verb": .string(verb),
             ]
             callRow["parent"] = KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null
             callRow["caller"] = caller.map { JSON.string($0.value) } ?? .null
-            callRow["payload"] = Kernel.storeValue(item.payload, bytes: item.binary?.count)
+            // SHOWN, never the secret values — the row is what the store keeps.
+            callRow["payload"] =
+                shown.map { Kernel.storeValue($0.json, bytes: $0.blob?.count) }
+                ?? Kernel.storeValue(item.payload, bytes: item.binary?.count)
             callRow["named"] = .bool(name != nil)
             callRow["retries"] = .integer(Int64(retries))
             callRow["attempts"] = .integer(1)
@@ -287,6 +300,8 @@ extension Kernel {
                 callRow["timeout"] = timeout.map { JSON.double($0.seconds) } ?? .null
             }
             if let name { callRow["name"] = .string(name) }
+            // the PATHS are not secret: they say this record cannot answer a replay
+            if let secret { callRow["secret"] = .array(secret.paths) }
             _ = try? rowsPut(target.id, callRow)
         }
 
@@ -302,7 +317,7 @@ extension Kernel {
             Dispatch(
                 target: target, payload: item.payload, verb: verb,
                 timeout: timeout, execId: execId, taskId: taskId,
-                binary: item.binary))
+                binary: item.binary, shown: shown))
     }
 
     /// `timeout` validation (C30/C38): `item.rawTimeout`, when forwarded by a
@@ -428,7 +443,8 @@ extension Kernel {
                 let box = TaskIdBox()
                 let (r, s, b) = await runDispatchOutcome(
                     target: d.target, payload: d.payload, verb: d.verb,
-                    taskOut: box, timeout: d.timeout, taskId: nextPid, binary: d.binary)
+                    taskOut: box, timeout: d.timeout, taskId: nextPid, binary: d.binary,
+                    shown: d.shown)
                 reply = r
                 status = s
                 body = b
@@ -493,21 +509,37 @@ extension Kernel {
     /// the outcome stamp on the live call row (while it is still in RAM), the
     /// `settle` row on the root, and — for a dead ending — the `on_deadletter`
     /// announcement. Python `Agent._record` + `_stamp_call`.
+    ///
+    /// A call with `secret` paths is RECORDED as shown: its result fields and
+    /// every secret value in its text → placeholder. The caller (and every
+    /// joiner) gets the real outcome; the `ledger` reads back the shown one.
     private func recordSettle(
         execId: Int64, target: AgentId, pid: TaskId?, status: Status, reply: JSON, body: Data?
     ) -> Outcome {
         let named = ledger.isNamed(execId)
+        // What is RECORDED: the outcome itself, or — for a secret call — as shown.
+        // Kept BEFORE the settle publishes the outcome: python sets the future and
+        // stamps in one synchronous step, and here a `ledger` read on another
+        // thread must never find the settled outcome without its shown form.
+        var shownStatus = status.rawValue
+        var shownReply = reply
+        var shownBody = body
+        if let secret = ledger.secret(execId) {
+            let s = secret.shownOutcome(status: status.rawValue, result: reply, body: body)
+            ledger.setShown(execId, s)
+            (shownStatus, shownReply, shownBody) = (s.status, s.result, s.body)
+        }
         let out = ledger.settle(
             execId, Outcome(pid: pid, status: status, result: reply, body: body))
         // The live call row learns how it ended — python's `{status, error?,
         // reason?}` stamp: an error's first 200 CODE POINTS, `reason` copied RAW.
         // The call row may already be flushed (and gone from RAM) by now.
-        var stamp: Row = ["status": .string(status.rawValue)]
-        let err = reply["error"]
+        var stamp: Row = ["status": .string(shownStatus)]
+        let err = shownReply["error"]
         if pyTruthy(err) {
             stamp["error"] = .string(
                 String(String.UnicodeScalarView(pyStr(err).unicodeScalars.prefix(200))))
-            let reason = reply["reason"]
+            let reason = shownReply["reason"]
             if pyTruthy(reason) { stamp["reason"] = reason }
         }
         rows.stamp(execId, ["outcome": .object(stamp)])
@@ -522,15 +554,17 @@ extension Kernel {
                 "settled": .string(target.value),
                 "outcome": .object(
                     storedOutcome(
-                        status: status.rawValue,
-                        result: Kernel.storeValue(reply, bytes: body?.count), named: named)),
+                        status: shownStatus,
+                        result: Kernel.storeValue(shownReply, bytes: shownBody?.count),
+                        named: named)),
                 "attempts": .integer(Int64(out.attempts)),
             ]
             _ = try? rowsPut(r.id, settleRow)
         }
         // A DEAD ENDING IS ANNOUNCED — nothing retries it on its own: someone has
         // to look.
-        if DEAD_STATUSES.contains(status.rawValue) {
+        // (python tests the RECORDED status — a scrubbed one is no dead status)
+        if DEAD_STATUSES.contains(shownStatus) {
             announceDeadletter(execId, status: status, attempts: out.attempts)
         }
         return out
@@ -611,6 +645,9 @@ struct Dispatch {
     let taskId: TaskId
     /// A RAW request body: present ⇒ dispatch through the BINARY channel.
     let binary: Data?
+    /// The payload AS SHOWN when the item marked `secret` paths: what the fanout
+    /// publishes on every attempt; the handler gets `payload` (and `binary`).
+    let shown: ShownPayload?
 }
 
 /// An item's own deadline: the seconds the kernel waits, and the value as the
