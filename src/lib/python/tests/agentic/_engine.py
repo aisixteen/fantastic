@@ -235,6 +235,11 @@ _EXPECT_MATCHERS = frozenset(
         "contains",
         "not_contains",
         "error_contains",
+        # a string ANYWHERE / NOWHERE in the reply (bytes read as utf-8) — what a
+        # secret mark is asserted with: the value is somewhere in a real answer,
+        # nowhere in a record
+        "mentions",
+        "absent",
     }
 )
 
@@ -938,6 +943,17 @@ def _resolve(value: Any, bound: dict[str, Any]) -> Any:
     return value
 
 
+def _flat_text(x: Any) -> str:
+    """Every string, number and byte string in `x`, joined — bytes read as utf-8."""
+    if isinstance(x, (bytes, bytearray)):
+        return x.decode("utf-8", "replace")
+    if isinstance(x, dict):
+        return "\n".join(_flat_text(k) + "\n" + _flat_text(v) for k, v in x.items())
+    if isinstance(x, list):
+        return "\n".join(_flat_text(v) for v in x)
+    return "" if x is None else str(x)
+
+
 def _match(step: Step, reply: dict, outcome: dict | None = None) -> None:
     """Apply a step's matchers to what it got back. Raises `StepFailure` naming
     the step, the matcher and the actual reply — a spec failure has to be
@@ -987,6 +1003,12 @@ def _match(step: Step, reply: dict, outcome: dict | None = None) -> None:
             continue
         if want not in _dig(reply, path):
             fail(f"{path} does not contain {want!r} (got {_dig(reply, path)!r})")
+    if "mentions" in exp or "absent" in exp:
+        flat = _flat_text(reply)
+        if "mentions" in exp and exp["mentions"] not in flat:
+            fail(f"the reply never mentions {exp['mentions']!r}")
+        if "absent" in exp and exp["absent"] in flat:
+            fail(f"the reply carries {exp['absent']!r} and must not")
     for path, unwanted in (exp.get("not_contains") or {}).items():
         got = _dig(reply, path)
         # A path that resolves to NOTHING is not proof of absence — it is proof
@@ -1057,16 +1079,15 @@ async def run_steps(h: "Hydration", steps: tuple[Step, ...]) -> "Hydration":
             # OPERATOR authority: no `sender_context`, so the gate is not
             # consulted. This is setup and side-effect READS — never evidence
             # about an agent's reach, which is what `reach` is for.
-            out = (
-                await h.kernel.ctx.send(
-                    [
-                        {
-                            "target": args["to"],
-                            "payload": _decode_bytes_fields(args.get("send") or {}),
-                        }
-                    ]
-                )
-            )[0]
+            item = {
+                "target": args["to"],
+                "payload": _decode_bytes_fields(args.get("send") or {}),
+            }
+            # the batch item's own fields, beside the payload
+            for k in ("id", "secret"):
+                if k in args:
+                    item[k] = args[k]
+            out = (await h.kernel.ctx.send([item]))[0]
             outcome = out
             reply = out["result"] if isinstance(out["result"], dict) else {}
 

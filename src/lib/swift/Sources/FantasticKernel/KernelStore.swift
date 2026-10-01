@@ -657,17 +657,21 @@ extension Kernel {
             ]
             if let n = x.name { e["name"] = .string(n) }
             if let res = x.outcome {
-                e["status"] = .string(res.status.rawValue)
+                // a call with `secret` paths reads back AS SHOWN (`recordSettle`)
+                let status = x.shown?.status ?? res.status.rawValue
+                let result = x.shown?.result ?? res.result
+                let body = x.shown.map { $0.body } ?? res.body
+                e["status"] = .string(status)
                 // THE SAME SHAPE flushed or not: what the settle row keeps —
                 // rendered `_json_safe`, as python's in-RAM branch is, so a
                 // NAMED result's chunk reads `<bytes:N>` until it flushes as
                 // `{len: N}` (an unnamed digest counts the `{len}` form either way).
                 var o: OrderedDictionary<String, JSON> = ["pid": .integer(x.id)]
                 for (k, v) in storedOutcome(
-                    status: res.status.rawValue,
+                    status: status,
                     result: x.named
-                        ? Kernel.jsonSafeValue(res.result, bytes: res.body?.count)
-                        : Kernel.storeValue(res.result, bytes: res.body?.count),
+                        ? Kernel.jsonSafeValue(result, bytes: body?.count)
+                        : Kernel.storeValue(result, bytes: body?.count),
                     named: x.named)
                 {
                     o[k] = v
@@ -724,6 +728,23 @@ extension Kernel {
             let attempts = UInt32(
                 clamping: (st["attempts"].flatMap { pyTruthy($0) ? $0.asInt : nil })
                     ?? (call["attempts"].flatMap { pyTruthy($0) ? $0.asInt : nil }) ?? 1)
+            if pyTruthy(call["secret"] ?? .null) {
+                // ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would
+                // hand back `<secret>` as if it were the value. Refused, loud.
+                ledger.putSettled(
+                    cid,
+                    target: AgentId(call["agent"]?.asString ?? ""),
+                    payload: call["payload"],
+                    retries: UInt32(clamping: call["retries"]?.asInt ?? 0),
+                    attempts: attempts,
+                    name: call["name"]?.asString,
+                    caller: call["caller"]?.asString.map { AgentId($0) },
+                    outcome: Outcome(
+                        pid: TaskId(cid), status: .failed,
+                        result: Secret.replayRefused(w.isName ? .string(w.name) : .integer(w.id)),
+                        attempts: attempts))
+                continue
+            }
             // A NAMED call's settle kept its result; an unnamed one (joined by its
             // int id) kept only what `storedOutcome` keeps — and says so.
             let result: JSON

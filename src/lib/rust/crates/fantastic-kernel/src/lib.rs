@@ -41,6 +41,7 @@ pub mod reflect;
 pub mod refusal;
 pub mod rows;
 pub mod scalar;
+pub mod secret;
 pub mod send;
 pub mod state;
 pub mod storage;

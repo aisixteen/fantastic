@@ -85,6 +85,9 @@ public struct LedgerEntry: Sendable {
     public let caller: AgentId?
     public let outcome: Outcome?
     public let acked: Bool
+    /// The outcome AS RECORDED when the item marked `secret` paths — what the
+    /// `ledger` read-back shows instead of `outcome` (python `shown_out`).
+    let shown: ShownOutcome?
 }
 
 /// One execution and what it became.
@@ -108,6 +111,13 @@ private struct LedgerRow {
     var box: OutcomeBox
     /// A dead letter someone acknowledged (`ack_deadletter`).
     var acked: Bool = false
+    /// RAM only: the item's `secret` paths and values — what the settle masks the
+    /// recorded outcome with. Never on a recalled row.
+    var secret: Secret? = nil
+    /// The outcome AS RECORDED (python `shown_out`), set at the settle of a call
+    /// with `secret`; the `ledger` read-back shows it, the caller and joiners got
+    /// the real one.
+    var shown: ShownOutcome? = nil
     var outcome: Outcome? { box.outcome }
 }
 
@@ -141,9 +151,12 @@ public final class ExecutionLedger: @unchecked Sendable {
     ///
     /// `callerId` is the CALLER's raw id AS GIVEN — a string name or an int
     /// (C38) — used ONLY to render the rebind refusal in python's exact words.
+    ///
+    /// `payload` is the payload AS SHOWN when the item marked `secret` paths —
+    /// the RAM entry never holds the values; `secret` is kept for the settle.
     public func open(
         _ execId: Int64, target: AgentId, payload: JSON, retries: UInt32, name: String?,
-        caller: AgentId?, callerId: JSON
+        caller: AgentId?, callerId: JSON, secret: Secret?
     ) -> Opened {
         lock.lock()
         defer { lock.unlock() }
@@ -171,7 +184,7 @@ public final class ExecutionLedger: @unchecked Sendable {
         if let n = name { names[n] = execId }
         rows[execId] = LedgerRow(
             target: target, payload: payload, retries: retries, attempts: 0, name: name,
-            caller: caller, box: OutcomeBox())
+            caller: caller, box: OutcomeBox(), secret: secret)
         order.append(execId)
         evict()
         return .fresh
@@ -224,6 +237,17 @@ public final class ExecutionLedger: @unchecked Sendable {
         return rows[execId]?.outcome
     }
 
+    /// The `secret` an execution's item marked, while it is held in RAM.
+    func secret(_ execId: Int64) -> Secret? {
+        lock.withLock { rows[execId]?.secret }
+    }
+
+    /// Keep the outcome AS RECORDED for the `ledger` read-back (python
+    /// `exe["shown_out"] = out`).
+    func setShown(_ execId: Int64, _ shown: ShownOutcome) {
+        lock.withLock { rows[execId]?.shown = shown }
+    }
+
     /// Is `execId` held and NAMED? (What the settle row keeps depends on it.)
     public func isNamed(_ execId: Int64) -> Bool {
         lock.withLock { rows[execId]?.named ?? false }
@@ -236,7 +260,7 @@ public final class ExecutionLedger: @unchecked Sendable {
         guard let r = rows[execId] else { return nil }
         return LedgerEntry(
             id: execId, target: r.target, retries: r.retries, attempts: r.attempts,
-            name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked)
+            name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked, shown: r.shown)
     }
 
     /// Every execution still in RAM, oldest first — the RAM half of the ledger
@@ -248,7 +272,7 @@ public final class ExecutionLedger: @unchecked Sendable {
             guard let r = rows[id] else { return nil }
             return LedgerEntry(
                 id: id, target: r.target, retries: r.retries, attempts: r.attempts,
-                name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked)
+                name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked, shown: r.shown)
         }
     }
 

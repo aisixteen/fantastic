@@ -584,12 +584,12 @@ extension Kernel {
     /// COMPLETES — `cancelTask` no-ops on a finished id.
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        timeout: Deadline?, taskId: TaskId, binary: Data?
+        timeout: Deadline?, taskId: TaskId, binary: Data?, shown: ShownPayload?
     ) async -> (JSON, Status, Data?) {
         guard let deadline = timeout else {
             let end = await runDispatch(
                 target: target, payload: payload, verb: verb, taskOut: taskOut,
-                taskId: taskId, binary: binary)
+                taskId: taskId, binary: binary, shown: shown)
             let (reply, status) = classify(end)
             return (reply, status, end.body)
         }
@@ -614,7 +614,7 @@ extension Kernel {
         // channel" for a call that was correct (e2e `E10_dialog:swift`).
         let end = await runDispatch(
             target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId,
-            binary: binary)
+            binary: binary, shown: shown)
         killer.cancel()
         if end.stopped && fired.isSet {
             // Python `_agent.py`: `f"send: {d.target.id} {d.payload['type']!r} "
@@ -657,7 +657,7 @@ extension Kernel {
         _ = try? rowsPut(target.id, row)
         let end = await runDispatch(
             target: target, payload: payload, verb: payload["type"].asString ?? "",
-            taskOut: nil, taskId: TaskId(pid), binary: nil)
+            taskOut: nil, taskId: TaskId(pid), binary: nil, shown: nil)
         return classify(end)
     }
 
@@ -695,9 +695,11 @@ extension Kernel {
     /// `binary` has NO DEFAULT, deliberately: it defaulted to `nil` until
     /// 2026-09-03 and the timed branch of `runDispatchOutcome` simply forgot to
     /// pass it, which the compiler accepted. Every caller now states the channel.
+    /// `shown` likewise: the payload as the mirrors may see it (an item's
+    /// `secret` paths), published by the fanout while the handler gets `payload`.
     private func runDispatch(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        taskId: TaskId?, binary: Data?
+        taskId: TaskId?, binary: Data?, shown: ShownPayload?
     ) async -> DispatchEnd {
         // (A killed sender never reaches here: `launch` settles it `cancelled`
         // before an id is minted.)
@@ -748,9 +750,12 @@ extension Kernel {
             }
         }
         if local {
+            // SHOWN when the item marked `secret` paths — every mirror, the state
+            // stream's payload and summary included, carries the placeholder.
             fanout(
                 target, "send",
-                binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
+                shown?.inboxItem
+                    ?? binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
         }
         // The prologue is done (a remote target has none): the next item of the
         // caller's batch may start.

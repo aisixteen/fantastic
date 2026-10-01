@@ -49,6 +49,7 @@ from typing import Any, Callable
 
 from dataclasses import dataclass
 
+from kernel import _secret
 from kernel._refusal import (
     BAD_ARG,
     DRAINING,
@@ -271,6 +272,9 @@ class _Dispatched:
     flags_done: bool = False
     # The caller's NAME for this execution (its item `id`), echoed on the outcome.
     name: str | None = None
+    # The payload AS SHOWN when the item marked `secret` paths (`kernel/_secret`):
+    # what the fanout publishes on every attempt; the handler gets `payload`.
+    shown: dict | None = None
 
 
 class RemoteTarget:
@@ -295,7 +299,9 @@ class RemoteTarget:
         self._meta: dict = {"callable_by": {}}
         self.handler_module = None
 
-    async def _dispatch_task(self, task_id, payload: dict, origin: str | None = None):
+    async def _dispatch_task(
+        self, task_id, payload: dict, origin: str | None = None, shown=None
+    ):
         _current_task.set(task_id)
         own = self._via._root()._meta.get("guid")
         if not own:
@@ -755,6 +761,12 @@ class Agent:
         bad_retries = self._check_retries(item)
         if bad_retries is not None:
             return bad_retries
+        # SECRET paths (`kernel/_secret`): validated with the item's other own
+        # fields; `shown` is what every record and mirror of this call carries.
+        secret, bad_secret = _secret.check(item, payload)
+        if bad_secret is not None:
+            return outcome(None, FAILED, bad_secret)
+        shown = _secret.shown_payload(payload, secret) if secret is not None else None
         # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
         # subtree before it aborts anything, because `on_cancel` hooks await —
         # so a doomed handler gets scheduling passes on its way out, and what it
@@ -871,7 +883,14 @@ class Agent:
             # is a field on it.
             exec_id = self.ctx.mint_id()
             fut, bad = self._ledger_open(
-                exec_id, target, payload, timeout, item, name=name
+                exec_id,
+                target,
+                payload,
+                timeout,
+                item,
+                name=name,
+                secret=secret,
+                shown=shown,
             )
             if bad is not None:
                 return bad
@@ -895,13 +914,25 @@ class Agent:
                         exec_fut=fut,
                         flags_done=True,
                         name=name,
+                        # its RETRY is a real dispatch: it fans out what is shown
+                        shown=shown,
                     )
                 )
                 return None
-            pid, task = self._spawn_dispatch(target, payload, task_id=exec_id)
+            pid, task = self._spawn_dispatch(
+                target, payload, task_id=exec_id, shown=shown
+            )
             dispatched.append(
                 _Dispatched(
-                    index, pid, task, timeout, target, payload, exec_fut=fut, name=name
+                    index,
+                    pid,
+                    task,
+                    timeout,
+                    target,
+                    payload,
+                    exec_fut=fut,
+                    name=name,
+                    shown=shown,
                 )
             )
             return None
@@ -917,12 +948,16 @@ class Agent:
         # The row opens BEFORE the spawn: `retries` was validated up front, so
         # nothing here can refuse after work has started.
         pid = self.ctx.mint_id()
-        fut, bad = self._ledger_open(pid, target, payload, timeout, item, name=None)
+        fut, bad = self._ledger_open(
+            pid, target, payload, timeout, item, name=None, secret=secret, shown=shown
+        )
         if bad is not None:
             return bad
-        pid, task = self._spawn_dispatch(target, payload, task_id=pid)
+        pid, task = self._spawn_dispatch(target, payload, task_id=pid, shown=shown)
         dispatched.append(
-            _Dispatched(index, pid, task, timeout, target, payload, exec_fut=fut)
+            _Dispatched(
+                index, pid, task, timeout, target, payload, exec_fut=fut, shown=shown
+            )
         )
         return None
 
@@ -943,7 +978,18 @@ class Agent:
             )
         return None
 
-    def _ledger_open(self, exec_id: int, target, payload, timeout, item, *, name):
+    def _ledger_open(
+        self,
+        exec_id: int,
+        target,
+        payload,
+        timeout,
+        item,
+        *,
+        name,
+        secret: "_secret.Secret | None" = None,
+        shown: dict | None = None,
+    ):
         """Open one execution under a pre-minted id: the CALL ROW in the message
         store (what outlives the process) and the process side (`executions`).
         `retries` already validated. Returns (fut, refusal?)."""
@@ -966,7 +1012,8 @@ class Agent:
             "verb": payload.get("type"),
             "parent": _current_task.get(),
             "caller": caller,
-            "payload": payload,
+            # SHOWN, never the secret values — the row is what the store keeps.
+            "payload": shown if shown is not None else payload,
             "named": name is not None,
             "retries": retries,
             "attempts": 1,
@@ -974,6 +1021,9 @@ class Agent:
         }
         if name is not None:
             row["name"] = name
+        if secret is not None:
+            # the PATHS are not secret: they say this record cannot answer a replay
+            row["secret"] = secret.paths
         self.ctx.rows_put(target.id, row)
         # The side entry is the WHOLE engine: dedup and join key on it, retry
         # re-issues against it, dead-letter is reading it. `attempts` counts real
@@ -983,19 +1033,21 @@ class Agent:
             {
                 "target": target.id,
                 "fut": fut,
-                "payload": payload,
+                "payload": shown if shown is not None else payload,
                 "timeout": timeout,
                 "retries": retries,
                 "attempts": 1,
                 "named": name is not None,
                 "name": name,
                 "caller": caller,
+                # RAM only: what `_stamp_call` masks the outcome with.
+                "secret": secret,
             },
         )
         return fut, None
 
     def _spawn_dispatch(
-        self, target: "Agent", payload: dict, *, task_id: int
+        self, target: "Agent", payload: dict, *, task_id: int, shown: dict | None = None
     ) -> tuple[int, "asyncio.Task"]:
         """Start ONE dispatch as a registered asyncio.Task — the unit of the task
         table — under the message id its call row was opened with. Tasks never
@@ -1006,7 +1058,7 @@ class Agent:
         # target's own id — this is the same value the gate just authorized.
         origin = _current_sender.get()
         task = asyncio.create_task(
-            target._dispatch_task(task_id, payload, origin),
+            target._dispatch_task(task_id, payload, origin, shown),
             name=f"fantastic:{task_id}",
         )
         ctx.register_task(
@@ -1043,7 +1095,9 @@ class Agent:
             # forget_task has already dropped the previous attempt's row, so the
             # SAME task id is free to register again — one id, one `cancel`
             # handle, attempt after attempt.
-            _pid, task = self._spawn_dispatch(d.target, d.payload, task_id=d.pid)
+            _pid, task = self._spawn_dispatch(
+                d.target, d.payload, task_id=d.pid, shown=d.shown
+            )
             d.task = task
 
     async def _settle_once(self, d: "_Dispatched") -> dict:
@@ -1204,6 +1258,13 @@ class Agent:
             return
         row = self.ctx.rows.get(pid)
         exe = self.ctx.executions.get(pid)
+        # A call with `secret` paths is RECORDED as shown: its result fields and
+        # every secret value in its text → placeholder. The caller already holds
+        # the real outcome; the ledger reads back `shown_out`.
+        secret = (exe or {}).get("secret")
+        if secret is not None:
+            out = _secret.shown_outcome(out, secret)
+            exe["shown_out"] = out
         res = out.get("result")
         stamp = {"status": out.get("status")}
         if isinstance(res, dict) and res.get("error"):
@@ -2214,7 +2275,11 @@ class Agent:
     # ─── dispatch (internal) ───────────────────────────────────
 
     async def _dispatch_task(
-        self, task_id: str, payload: dict, origin: str | None = None
+        self,
+        task_id: str,
+        payload: dict,
+        origin: str | None = None,
+        shown: dict | None = None,
     ) -> dict | None:
         """The body of a registered task: stamp `_current_task` so nested sends
         become CHILDREN of this task, then dispatch. The contextvar is set (not
@@ -2232,13 +2297,14 @@ class Agent:
         rc = _remote_caller.get()
         _remote_caller.set(None)
         _current_remote.set(rc[1] if rc is not None and rc[0] == origin else None)
-        return await self._dispatch(payload)
+        return await self._dispatch(payload, shown)
 
-    async def _dispatch(self, payload: dict) -> dict | None:
-        """Resolve verb → native or handler_module."""
+    async def _dispatch(self, payload: dict, shown: dict | None = None) -> dict | None:
+        """Resolve verb → native or handler_module. `shown` is the payload as the
+        mirrors may see it (an item's `secret` paths); the handler gets `payload`."""
         verb = payload.get("type")
         self._in_flight += 1
-        self._fanout(payload, kind="send")
+        self._fanout(shown if shown is not None else payload, kind="send")
         token = _current_sender.set(self.id)
         try:
             if verb in _SYSTEM_VERBS:

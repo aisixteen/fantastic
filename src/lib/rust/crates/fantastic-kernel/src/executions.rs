@@ -821,6 +821,17 @@ impl Kernel {
                 .or_else(|| call.get("attempts").filter(|a| py_truthy(a)))
                 .and_then(Value::as_u64)
                 .unwrap_or(1) as u32;
+            if call.get("secret").is_some_and(py_truthy) {
+                // ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would
+                // hand back `<secret>` as if it were the value. Refused, loud.
+                let key = match &w {
+                    Want::Name(n) => Value::from(n.as_str()),
+                    Want::Id(i) => Value::from(*i),
+                };
+                self.ledger
+                    .put_refused(cid, call, crate::secret::replay_refused(&key), attempts);
+                continue;
+            }
             self.ledger.put_settled(cid, call, &oc, attempts);
         }
         Ok(())

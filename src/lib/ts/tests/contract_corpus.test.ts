@@ -53,7 +53,8 @@ import { Kernel } from "../src/kernel/kernel.ts";
 import type { Bridge } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
-import type { Outcome } from "../src/kernel/outcome.ts";
+import type { Item, Outcome } from "../src/kernel/outcome.ts";
+import { pyRepr } from "../src/kernel/pyjson.ts";
 import { MISSING_ARG, NOT_FOUND, UNHANDLED, refusal } from "../src/kernel/refusal.ts";
 import { ProxyLoader } from "../src/bundles/loader/proxy_loader.ts";
 import { parseYaml } from "./contract_yaml.ts";
@@ -114,7 +115,9 @@ const STEP_VERBS = new Set([
   "start", "await_task", "collect", "reconcile_grants", "sweep_undeclared",
 ]);
 const STEP_META = new Set(["expect", "because", "name"]);
-const MATCHERS = new Set(["allow", "side", "reason", "status", "contains", "not_contains", "error_contains"]);
+// `mentions` / `absent`: a string ANYWHERE / NOWHERE in the reply (bytes read as
+// utf-8) — what a secret mark is asserted with (python `_engine._flat_text`).
+const MATCHERS = new Set(["allow", "side", "reason", "status", "contains", "not_contains", "error_contains", "mentions", "absent"]);
 const HYDRATIONS = new Set(["ok", "refused_at_write", "boot_error"]);
 const MINTED_ID = /^[A-Za-z0-9_.]+_[0-9a-f]{6}$/;
 
@@ -529,6 +532,18 @@ function label(s: Step): string {
   return `${s.kind} ${JSON.stringify(s.args)}`;
 }
 
+/** Every string, number and byte string in `x`, joined — bytes read as utf-8
+ *  (python `_engine._flat_text`: keys and values, `str()` of a scalar). */
+function flatText(x: unknown): string {
+  if (x instanceof Uint8Array) return dec.decode(x);
+  if (Array.isArray(x)) return x.map(flatText).join("\n");
+  if (isObj(x)) return Object.entries(x).map(([k, v]) => `${k}\n${flatText(v)}`).join("\n");
+  if (x === null || x === undefined) return "";
+  if (typeof x === "boolean") return x ? "True" : "False";
+  if (typeof x === "number") return pyRepr(x);
+  return String(x);
+}
+
 function match(s: Step, exp: Obj, reply: Obj, outcome: Outcome | null): void {
   const fail = (why: string): never => {
     throw new StepFailure(`#${s.n} ${label(s)}: ${why}\n  reply: ${JSON.stringify(reply, (_k, v) => (v instanceof Uint8Array ? `<bytes:${v.length}>` : v))}`);
@@ -556,6 +571,11 @@ function match(s: Step, exp: Obj, reply: Obj, outcome: Outcome | null): void {
     }
     if (!dig(reply, path).some((g) => isDeepStrictEqual(g, want))) fail(`${path} does not contain ${JSON.stringify(want)} (got ${JSON.stringify(dig(reply, path))})`);
   }
+  if ("mentions" in exp || "absent" in exp) {
+    const flat = flatText(reply);
+    if ("mentions" in exp && !flat.includes(String(exp["mentions"]))) fail(`the reply never mentions ${JSON.stringify(exp["mentions"])}`);
+    if ("absent" in exp && flat.includes(String(exp["absent"]))) fail(`the reply carries ${JSON.stringify(exp["absent"])} and must not`);
+  }
   for (const [path, unwanted] of Object.entries((exp["not_contains"] ?? {}) as Obj)) {
     const got = dig(reply, path);
     if (got.length === 0) fail(`not_contains ${path} resolved to nothing — absence here proves nothing`);
@@ -575,6 +595,7 @@ const SKIP_SPECS: { [spec: string]: string } = {
   engine_smoke_bad_entry: `${LOADER}: the boot_error verdict is static_loader's (a file_bridge rule refused at the child's write), so PC-5 is its whole contract`,
   engine_smoke_unreadable_manifest: `${LOADER}: the refused_at_write verdict is static_loader's validate_meta reading the manifest path, so PC-5 is its whole contract`,
   exec_shell: "(c) exec_bridge — the process edge is a host bundle; this kernel spawns no processes, so every EXS requirement is the hosts'",
+  secret: "agentic corpus is py/rs/sw — the spec proves SEC-1..4 through the host file_bridge's `read`/`write` (the bytes land, are read back, and the ledger shows `<secret>`), verbs the file_bridge stand-in does not answer; this kernel's batch-send side of SEC-1..4 is pinned by tests/secret.test.ts",
 };
 
 /** Steps skipped by spec + 1-based number. `name` pins WHICH step was meant: if
@@ -763,7 +784,11 @@ async function runSteps(h0: Hydration): Promise<void> {
         reply = await reach(h.k, String(args["from"]), String(args["to"]), args["send"] as Obj);
         break;
       case "operator": {
-        outcome = (await h.k.send([{ target: String(args["to"]), payload: decodeBytesFields((args["send"] ?? {}) as Obj) }]))[0]!;
+        const item: Item = { target: String(args["to"]), payload: decodeBytesFields((args["send"] ?? {}) as Obj) };
+        // the batch item's own fields, beside the payload
+        if ("id" in args) item.id = args["id"] as string | number;
+        if ("secret" in args) item.secret = args["secret"] as string[];
+        outcome = (await h.k.send([item]))[0]!;
         reply = isObj(outcome.result) ? outcome.result : {};
         break;
       }
@@ -964,7 +989,7 @@ const EXPECTED = {
   // C18: only its PRECONDITIONS run here (the roster is live, the neighbour's
   // edge works) — the cascade itself is `delete_agent`, which this kernel lacks.
   partial: ["PC-3", "PC-4", "C15", "C18", "C20", "TSG-6"],
-  notApplicable: ["PC-5", "C17", "C23", "SUB-1", "SUB-3", "SUB-4", "SUB-5", "SUB-6", "EXS-1", "EXS-2", "EXS-3", "EXS-4", "EXS-5"],
+  notApplicable: ["PC-5", "C17", "C23", "SUB-1", "SUB-3", "SUB-4", "SUB-5", "SUB-6", "EXS-1", "EXS-2", "EXS-3", "EXS-4", "EXS-5", "SEC-1", "SEC-2", "SEC-3", "SEC-4"],
   // Registry rows whose evidence is NOT in the data corpus: the registry itself
   // points at host test files (C1, C24) or at conformance/cases.json (C21, which
   // `c21_conformance.test.ts` replays against this kernel).

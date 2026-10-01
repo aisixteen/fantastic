@@ -81,6 +81,15 @@ flushed execution leaves RAM. A call carrying an `id` is NAMED: a second send of
 same id returns the recorded outcome instead of running again — across a flush and a
 restart, because the store is read before dispatch.
 
+A call may mark SECRET values on its item, beside `payload`: `secret: [path, …]`,
+each `payload.<field…>` or `result[.<field…>]`. The target gets the real payload and
+the caller the real reply; every record of the call — its rows, the memory store,
+`ledger`, the state stream, watcher mirrors, error texts — shows `<secret>`. The
+verb (`payload.type`) cannot be hidden, and a path naming nothing in the payload is
+refused. A named secret call answers a re-send only while it is in RAM: from the
+store its record holds placeholders, so a replay is refused. Masking is not
+isolation — never send a secret to an AI agent (it would enter its prompt and memory).
+
 `ledger` — no args
 : `{executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}` —
   a projection over the store plus what is not yet flushed, scoped to what YOU
