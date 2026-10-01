@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::boot::attract::Phase;
 use crate::env::{ClientCfg, Paths};
 use crate::ev::{Cmd, Ev, Got, LinkEv, What};
 use crate::kern::model::{AgentId, KernelErr, Record, RowId, Task, TreeNode};
@@ -55,20 +54,6 @@ const WARM: Duration = Duration::from_millis(3_000);
 const COLD: Duration = Duration::from_secs(30);
 
 pub struct App {
-    // ── boot ─────────────────────────────────────────────────────────────
-    pub phase: Phase,
-    pub boot: Instant,
-    pub attract_since: Instant,
-    pub minimize_since: Option<Instant>,
-    /// THE INTRO MOVIE. Left alone on the attract screen the shell explains
-    /// itself — that is what an attract mode is for, and it is the first thing a
-    /// new directory shows.
-    pub movie: crate::boot::movie::Movie,
-    pub intro_playing: bool,
-    pub intro_since: Option<Instant>,
-    /// Last keystroke, for the idle clock that starts the intro.
-    pub last_key: Instant,
-    pub paths: Paths,
     pub cfg: ClientCfg,
     pub link: Link,
 
@@ -154,21 +139,8 @@ pub struct App {
 
 impl App {
     pub fn new(paths: Paths) -> Self {
-        let now = Instant::now();
-        let seeded = !paths.is_fresh();
         Self {
-            // A directory used before never sees the attract screen again. That is
-            // the whole rule, and it is checked before anything is written.
-            phase: if seeded { Phase::Live } else { Phase::Attract },
-            boot: now,
-            attract_since: now,
-            minimize_since: None,
-            movie: crate::boot::movie::Movie::storyboard(),
-            intro_playing: false,
-            intro_since: None,
-            last_key: now,
             seen: Seen::load(&paths.cwd),
-            paths,
             cfg: ClientCfg::here(),
             link: Link::Down {
                 why: "probing".into(),
@@ -421,9 +393,7 @@ impl App {
     /// state. Everything here animates continuously, so the frame clock draws it
     /// unconditionally; the live shell stays event-driven and costs nothing idle.
     pub fn animating(&self) -> bool {
-        self.intro_playing
-            || self.phase != Phase::Live
-            || self.selected().and_then(|id| self.panels.get(id)).is_some_and(|p| p.animating())
+        self.selected().and_then(|id| self.panels.get(id)).is_some_and(|p| p.animating())
     }
 
     pub fn selected(&self) -> Option<&AgentId> {
@@ -813,39 +783,6 @@ impl App {
     // ── the clock ────────────────────────────────────────────────────────
 
     pub fn on_tick(&mut self) {
-        // The attract machine: idle long enough and the movie plays; one full pass
-        // and it drops back to the title, which loops.
-        if self.phase == Phase::Attract || self.intro_playing {
-            let now = Instant::now();
-            let idle = now.duration_since(self.last_key).as_secs_f32();
-            let elapsed = self.intro_since.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
-            match crate::boot::attract::attract_tick(
-                self.phase != Phase::Attract && !self.intro_playing,
-                self.intro_playing,
-                idle,
-                elapsed,
-                self.movie.total_secs(),
-            ) {
-                crate::boot::attract::AttractTick::StartIntro => {
-                    self.intro_playing = true;
-                    self.intro_since = Some(now);
-                }
-                crate::boot::attract::AttractTick::EndIntroToAttract => {
-                    self.intro_playing = false;
-                    self.intro_since = None;
-                    self.attract_since = now;
-                }
-                crate::boot::attract::AttractTick::Nothing => {}
-            }
-        }
-        if self.phase == Phase::Minimizing {
-            if let Some(since) = self.minimize_since {
-                if crate::boot::attract::minimize_t(since, Instant::now()) >= 1.0 {
-                    self.phase = Phase::Live;
-                }
-            }
-            self.dirty = true;
-        }
         // The composer's caret blinks and presence can change with nothing
         // arriving, so a tick is always a redraw.
         self.dirty = true;
@@ -858,7 +795,7 @@ impl App {
     /// because SETTLE ROWS LIVE THERE — an agent's own log never records that its
     /// call finished.
     fn due(&mut self) -> Vec<Cmd> {
-        if self.link != Link::Up || self.phase != Phase::Live {
+        if self.link != Link::Up {
             return Vec::new();
         }
         let now = Instant::now();

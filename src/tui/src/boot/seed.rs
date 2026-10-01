@@ -1,9 +1,9 @@
 //! THE ONLY WRITE POINT of a first run: it materialises `blueprint.yaml`.
 //!
 //! The base tree is DATA, embedded in the binary, applied once at init. Init is
-//! explicit, never a default: it runs only when the human presses a key on the
-//! attract screen, or on `fantastic mcp`. A directory left without either gets
-//! nothing written to it. Every later run rehydrates what is on disk and never
+//! explicit, never a default: it runs only when `fantastic` or `fantastic mcp`
+//! is run in the directory. A directory neither ran in gets nothing written to
+//! it. Every later run rehydrates what is on disk and never
 //! reads the blueprint again.
 //!
 //! DISK POSITION IS THE PARENT. The kernel takes a child's parent from the
@@ -186,7 +186,7 @@ mod tests {
 
         assert!(
             !p.is_fresh(),
-            "the directory is seeded, so the attract screen is spent"
+            "the directory is seeded, so the next run rehydrates"
         );
         assert!(p.cli.is_dir());
         let _ = std::fs::remove_dir_all(&p.cwd);

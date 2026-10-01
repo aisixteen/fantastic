@@ -25,7 +25,7 @@ fixture:
 runs:
   # ── 1 · a fresh directory: init from the blueprint, create the leg ─────────
   - name: create
-    argv: [--can-call, "files,exec,user", --settle-bound-ms, "20000"]
+    argv: []
     steps:
       - call: initialize
         params:
@@ -61,12 +61,12 @@ runs:
           is_error: false
           item0.status: completed
           text_contains: "hello from E15 $NONCE"
-      # the gate: the leg was never granted delete_agent on the root
+      # god mode: the leg holds every verb, privileged ones included
       - tool: send
-        args: {items: [{target: kernel, payload: {type: delete_agent, id: files}}]}
+        args: {items: [{target: kernel, payload: {type: ps}}]}
         expect:
-          is_error: true
-          text_contains: "may not call"
+          is_error: false
+          item0.status: completed
       # a shape error is the client's, and says how to fix it
       - tool: send
         args: {items: [{target: files, payload: {verb: read_stream}}]}
@@ -90,14 +90,13 @@ runs:
       record:
         .fantastic/agents/mcp/agent.yaml:
           handler_module: web_mcp.tools
-          settle_bound_ms: 20000
-          can_call_has: [files, exec, user]
+          can_call_has: [files, exec, user, kernel]
         .fantastic/agents/set_of_agents/agents/files/agent.yaml:
-          callable_by_has: [mcp, user, exec]
+          callable_by_has: ["$subtree:mcp", user, exec]
       rows_by: {agent: mcp, at_least: 3}
       blueprint_never_names: mcp
 
-  # ── 2 · same directory, no flags: bind to the leg, rehydrate ───────────────
+  # ── 2 · same directory: bind to the leg, rehydrate ─────────────────────────
   - name: rehydrate
     argv: []
     steps:
@@ -116,11 +115,33 @@ runs:
       rows_grew: true
       mcp_records: 1
 
-  # ── 3 · a flag on an existing leg is refused, not ignored ──────────────────
-  - name: refuse-flags
-    argv: [--can-call, files, --settle-bound-ms, "5"]
+  # ── 3 · any argument is refused, not ignored ──────────────────────────────
+  - name: refuse-args
+    argv: [--can-call, files]
     steps: []
     after_exit:
-      exit_code: 1
-      stderr_contains: "change them with update_agent"
+      exit_code: 2
+      stderr_contains: "takes no arguments"
       lock_released: true
+
+  # ── 4 · a kernel already runs here: `fantastic mcp` ATTACHES to its socket ─
+  - name: attach
+    host_argv: [--headless]
+    argv: []
+    steps:
+      - call: initialize
+        params: {protocolVersion: "2025-11-25", capabilities: {}, clientInfo: {name: e15, version: "1"}}
+        expect: {result.protocolVersion: "2025-11-25", result.serverInfo.name: fantastic}
+      - notify: notifications/initialized
+      - tool: send
+        args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
+        expect:
+          item0.status: completed
+          text_contains: "hello from E15 $NONCE"
+    after_exit:
+      exit_code: 0
+      lock_held_by_host: true
+      stderr_contains: "Register it ONCE"
+      lock_released: true
+      rows_grew: true
+      mcp_records: 1

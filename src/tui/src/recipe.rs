@@ -37,13 +37,6 @@ impl Opts {
     pub fn shows(&self) -> Option<Recipe> {
         self.recipes.last().copied()
     }
-
-    /// A recipe or `--headless` is the command the human typed, and like `mcp`
-    /// it is an explicit trigger for init. Bare `fantastic` inits on the intro's
-    /// key press.
-    pub fn inits_on_command(&self) -> bool {
-        self.headless || !self.recipes.is_empty()
-    }
 }
 
 pub fn parse(args: &[String]) -> Result<Opts, String> {
@@ -104,9 +97,8 @@ mod tests {
     #[test]
     fn the_terminal_is_the_default_and_tui_is_no_longer_a_word() {
         let o = p("").unwrap();
-        assert!(o.recipes.is_empty() && !o.headless && !o.inits_on_command());
+        assert!(o.recipes.is_empty() && !o.headless);
         assert!(p("tui").is_err());
-        assert!(p("--headless").unwrap().inits_on_command());
     }
 
     #[test]

@@ -30,12 +30,6 @@ pub fn fill_black(buf: &mut Buffer, area: Rect) {
     }
 }
 
-/// On/off square wave from a clock — the blinking attract prompt, and nothing
-/// else. Pure, so it is unit-testable without a terminal.
-pub fn blink(clock: f32, hz: f32) -> bool {
-    ((clock * hz) as i64) % 2 == 0
-}
-
 /// Write `s` centred on row `y` of `area`, straight into the buffer (over the
 /// sky). `y` is relative to `area`.
 pub fn text_center(buf: &mut Buffer, area: Rect, y: i32, s: &str, style: Style) {
@@ -176,13 +170,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn blink_alternates() {
-        assert!(blink(0.0, 1.0));
-        assert!(!blink(1.2, 1.0));
-        assert!(blink(2.1, 1.0));
-    }
 
     #[test]
     fn clip_str_is_width_correct() {

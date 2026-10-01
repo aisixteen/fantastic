@@ -22,15 +22,13 @@
 //! stateless envelope is the HTTP carrier's, later; the tool semantics below do
 //! not change between the two.
 //!
-//! THE BOUND. Every tool call runs as a kernel task owned by the leg
-//! (`Kernel::spawn_task`), so its id exists from the first instant: it shows in
-//! `ps`, and `cancel` on it kills the whole subtree. The leg waits on that task
-//! for at most `settle_bound_ms`. Past the bound the call keeps running and the
-//! reply is its task id. That is deliberately NOT the item `timeout`, which
-//! cancels the call when it expires.
+//! NO WAIT BOUND (owner, 2026-10-01: "do not add wait"). Every tool call runs as
+//! a kernel task owned by the leg (`Kernel::spawn_task`), so its id exists from
+//! the first instant: it shows in `ps`, and `cancel` on it (or the client's
+//! `notifications/cancelled`) kills the whole subtree. The reply is the call's
+//! outcome, whenever the task ends; an item `timeout` cancels that item.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use fantastic_kernel::{
@@ -44,10 +42,6 @@ pub const HANDLER_MODULE: &str = "web_mcp.tools";
 
 /// The one protocol version the stdio carrier speaks (see the module header).
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
-
-/// The record field that bounds a tool call's wait. REQUIRED: there is no
-/// default, and a record without it is refused at create and at update.
-pub const BOUND_FIELD: &str = "settle_bound_ms";
 
 // ── the agent ───────────────────────────────────────────────────────────────
 
@@ -84,37 +78,43 @@ impl Bundle for WebMcpBundle {
             }),
         }))
     }
-
-    /// The bound is the one field this bundle cannot run without, so a record
-    /// missing it — or naming one that is not a positive integer — is refused at
-    /// create AND at update, instead of being accepted and then failing on the
-    /// first call.
-    fn validate_meta(&self, meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
-        let bound = meta.get(BOUND_FIELD).or_else(|| record.get(BOUND_FIELD));
-        match bound.and_then(Value::as_u64) {
-            Some(n) if n > 0 => None,
-            _ => Some(format!(
-                "web_mcp: `{BOUND_FIELD}` is required and must be a positive integer (milliseconds a tool call waits before it answers with its task id)"
-            )),
-        }
-    }
 }
 
 // ── the protocol ────────────────────────────────────────────────────────────
 
 /// What a cold client is told in `initialize`. It is the whole onboarding: the
-/// client is never told what agents exist, only how to ask.
-pub const INSTRUCTIONS: &str = "This server is a live Fantastic kernel: a tree of agents that all answer one verb, send. Start with `reflect` and no arguments — it returns the kernel's own primer: the agent tree, the bundles it can run, and a readme index you drill into with `reflect` + readme=<key>. Then act with `send`. Every call goes out as this connection's own agent and is refused if that agent has no grant for it; a refusal is an ordinary result, not a failure of the tool.";
+/// client is never told what agents exist, only how to ask — and what the
+/// product is, what is optional, and what it must never touch.
+pub const INSTRUCTIONS: &str = "This server is a live Aisixteen Fantastic kernel running in this project directory: a tree of agents that all answer one verb, send. You are connected as the `mcp` agent, with god-mode grants on every agent (every verb, privileged ones included); the human can narrow them later with update_agent.\n\
+\n\
+Start with `reflect` and no arguments — it returns the kernel's own primer: the agent tree, the bundles it can run, and a readme index you drill into with `reflect` + readme=<key>. Reflect an agent before you send to it: verbs are discovered, never guessed. Then act with `send`. A refusal is an ordinary result, not a failure of the tool.\n\
+\n\
+AN AI IS OPTIONAL. Nothing is configured by default and the kernel works without one: you can be the brain yourself, driving agents, terminals and the canvas through send. The human works from the terminal UI (`fantastic`) or the browser canvas (`fantastic canvas`); the canvas and the terminal UI both open shell terminals, where a coding CLI like you can run too.\n\
+\n\
+SETTING UP AN AI is the human's: never pick a backend, model, host or port yourself — ASK the human which they want. Never ask for, read, print or store an API key: the human enters it in the set-up surface — the canvas's ⚙ AI set-up, or the terminal UI's set-up page — which keeps it in the user's key store.";
+
+/// What `fantastic mcp` prints to stderr on start, for a coding CLI that ran it
+/// in a shell to learn what it is: the onboarding above, and how to register
+/// it as an MCP server in each client's own configuration.
+pub const SHAPE: &str = "fantastic mcp — the MCP face of the Aisixteen Fantastic kernel in this directory (stdio, protocol 2025-11-25; tools: reflect, send).\n\
+\n\
+Register it ONCE as a stdio MCP server — command `fantastic`, args [\"mcp\"] — and it serves the project directory it is started in: it attaches to the kernel already running there (the terminal UI or the canvas), or runs it itself.\n\
+\x20\x20Claude Code: claude mcp add --scope user fantastic -- fantastic mcp\n\
+\x20\x20Codex:       ~/.codex/config.toml   [mcp_servers.fantastic] command = \"fantastic\", args = [\"mcp\"]\n\
+\x20\x20Cursor:      ~/.cursor/mcp.json     {\"mcpServers\": {\"fantastic\": {\"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
+\x20\x20Gemini CLI:  ~/.gemini/settings.json  {\"mcpServers\": {\"fantastic\": {\"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
+\x20\x20VS Code:     .vscode/mcp.json       {\"servers\": {\"fantastic\": {\"type\": \"stdio\", \"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
+The server must start in the project directory.\n\
+\n";
 
 const REFLECT_DESC: &str = "Ask the kernel what exists. With NO arguments: the kernel's own primer — `tree` (every agent id), `bundles` (what it can run) and `readme` (an index of docs). With `target`: that agent describes itself — its sentence, its verbs and their args. Extra arguments are passed through to the reflect, e.g. readme=\"agents\" to read one doc of the index. Reflect before you send: verbs are discovered here, never guessed.";
 
-const SEND_DESC: &str = "Dispatch to agents — the kernel's one verb, batch form: send([{target, payload:{type:<verb>, ...args}, timeout?}]) -> [{pid, status: completed|failed|cancelled|timed_out, result}]. The verb goes in payload.type. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. If the whole call outlasts this connection's wait bound, the reply is {status:\"running\", pid} and the work keeps going — poll it with send [{target:\"kernel\", payload:{type:\"ps\"}}], cancel it with send [{target:\"kernel\", payload:{type:\"cancel\", task_id:<pid>}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.";
+const SEND_DESC: &str = "Dispatch to agents — the kernel's one verb, batch form: send([{target, payload:{type:<verb>, ...args}, timeout?}]) -> [{pid, status: completed|failed|cancelled|timed_out, result}]. The verb goes in payload.type. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. The call answers when it ends; each call is a kernel task, listed by send [{target:\"kernel\", payload:{type:\"ps\"}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.";
 
 /// The carrier-agnostic MCP handler for one leg.
 pub struct McpCore {
     kernel: Arc<Kernel>,
     leg: AgentId,
-    bound: Duration,
     server_version: String,
 }
 
@@ -122,9 +122,8 @@ pub struct McpCore {
 pub type Answer = Option<Value>;
 
 impl McpCore {
-    /// `bound` is the leg's `settle_bound_ms`, read from its record by the carrier.
-    pub fn new(kernel: Arc<Kernel>, leg: AgentId, bound: Duration, server_version: &str) -> Self {
-        Self { kernel, leg, bound, server_version: server_version.to_string() }
+    pub fn new(kernel: Arc<Kernel>, leg: AgentId, server_version: &str) -> Self {
+        Self { kernel, leg, server_version: server_version.to_string() }
     }
 
     /// One message in. `on_task` receives the task id of a tool call the moment
@@ -196,8 +195,8 @@ impl McpCore {
         self.run(name, items, on_task).await
     }
 
-    /// Run a batch as one kernel task owned by the leg, and wait on it for at most
-    /// the bound. Past the bound the task keeps going and its id is the answer.
+    /// Run a batch as one kernel task owned by the leg, and answer its outcome
+    /// when it ends.
     async fn run<F>(&self, tool: &str, items: Vec<Item>, on_task: F) -> Value
     where
         F: FnOnce(TaskId) + Send,
@@ -211,21 +210,9 @@ impl McpCore {
         });
         on_task(task);
 
-        match tokio::time::timeout(self.bound, rx).await {
-            Ok(Ok(outs)) => settled(tool, &outs),
-            Ok(Err(_)) => tool_error(&format!(
-                "task {} ended without an answer (cancelled?) — check it with ps",
-                task.get()
-            )),
-            Err(_) => {
-                let v = json!({
-                    "status": "running",
-                    "pid": task.get(),
-                    "bound_ms": self.bound.as_millis() as u64,
-                    "next": "poll: send [{target:\"kernel\", payload:{type:\"ps\"}}] · cancel: send [{target:\"kernel\", payload:{type:\"cancel\", task_id:<pid>}}]",
-                });
-                text_result(&v, false)
-            }
+        match rx.await {
+            Ok(outs) => settled(tool, &outs),
+            Err(_) => tool_error(&format!("task {} ended without an answer (cancelled)", task.get())),
         }
     }
 }
@@ -406,16 +393,5 @@ mod tests {
             send_items(&json!({"items": [{"target": "exec", "payload": {"type": "start"}, "timeout": 5}]}))
                 .unwrap();
         assert_eq!(items[0].timeout, Some(5.0));
-    }
-
-    #[test]
-    fn a_record_without_a_bound_is_refused() {
-        let b = WebMcpBundle;
-        assert!(b.validate_meta(&Map::new(), &Map::new()).is_some());
-        let mut m = Map::new();
-        m.insert(BOUND_FIELD.into(), json!(0));
-        assert!(b.validate_meta(&m, &Map::new()).is_some(), "zero is not a bound");
-        m.insert(BOUND_FIELD.into(), json!(20000));
-        assert!(b.validate_meta(&m, &Map::new()).is_none());
     }
 }

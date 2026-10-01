@@ -1,23 +1,34 @@
-//! `fantastic mcp` — THE HEADLESS MODE: the full kernel, in this process, driven
-//! by an MCP client over stdio.
+//! `fantastic mcp` — THE MCP FACE: the kernel of this directory, driven by an
+//! MCP client (a coding CLI) over stdio. It takes no arguments.
 //!
-//! This file is only the stdio CARRIER. It reads JSON-RPC lines from stdin, hands
-//! each to the protocol core in the `fantastic-web-mcp` crate, and writes the
-//! replies. What MCP means lives in that crate; what the kernel is lives in the
-//! kernel. The carrier owns three things and nothing else:
+//! ONE COMMAND, TWO SHAPES, decided by the directory's lock (never a fallback):
 //!
-//! 1. STDIO HYGIENE. stdout is the protocol. Before anything boots, the real
-//!    stdout is duplicated into a private descriptor only the writer uses, and
-//!    fds 1 and 2 are pointed at the kernel log — so no `println!` anywhere in
-//!    the process can corrupt a frame.
-//! 2. THE LEG. `mcp` is a persisted, first-class agent. It is created once, by
-//!    code, the first time this command runs in a store (never by the
-//!    blueprint), and bound by id on every run after. Its grants and bound come
-//!    from flags ONLY when it is created; after that the record is the truth.
-//! 3. SHUTDOWN, in the kernel's order: `Kernel::shutdown` (drain, shutdown
-//!    verbs, cancel what remains, final ledger flush), then the lock release —
-//!    on stdin EOF, SIGTERM or SIGINT, and the process does not exit before both
-//!    finish.
+//! - A LIVE KERNEL HOLDS THE LOCK (the terminal UI, the canvas, `--headless`,
+//!   or another `fantastic mcp`): this process ATTACHES — it relays stdio to
+//!   that kernel's MCP socket, `.fantastic/cli/mcp.sock`, and runs no kernel.
+//! - NO LIVE KERNEL: this process RUNS IT — boots (a fresh directory is seeded
+//!   first, like every command), serves stdio, and opens the socket so other
+//!   clients can attach.
+//!
+//! Every process that owns a kernel serves the socket ([`listen`]); what MCP
+//! means lives in the `fantastic-web-mcp` crate. Each connection, stdio or
+//! socket, is served the same way ([`serve_conn`]).
+//!
+//! THE LEG. `mcp` is a persisted, first-class agent, created once by code on the
+//! first connection to a kernel that lacks it (never by the blueprint), with
+//! god-mode grants (`kern/reach`) — the human reshapes them with
+//! `update_agent`; the record is the truth after that.
+//!
+//! STDIO HYGIENE (running the kernel): stdout is the protocol. Before anything
+//! boots, the real stdout is duplicated into a private descriptor only the
+//! writer uses, and fds 1 and 2 are pointed at the kernel log — so no
+//! `println!` anywhere in the process can corrupt a frame. The SHAPE (what this
+//! is, how to register it) goes to the ORIGINAL stderr on start, so a coding
+//! CLI that runs `fantastic mcp` in a shell reads it.
+//!
+//! SHUTDOWN, in the kernel's order: `Kernel::shutdown` (drain, shutdown verbs,
+//! cancel what remains, final ledger flush), then the lock release — on stdin
+//! EOF, SIGTERM or SIGINT, and the process does not exit before both finish.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -26,10 +37,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fantastic_kernel::TaskId;
-use fantastic_web_mcp::{McpCore, BOUND_FIELD, HANDLER_MODULE};
-use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use fantastic_web_mcp::{McpCore, HANDLER_MODULE, INSTRUCTIONS, SHAPE};
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, OnceCell};
 
 use crate::env::Paths;
 use crate::kern::host::Host;
@@ -37,57 +48,17 @@ use crate::kern::host::Host;
 /// The leg's id. Its parent is the root; its handler is `web_mcp.tools`.
 pub const LEG: &str = "mcp";
 
-/// The flags `fantastic mcp` takes. Both apply ONLY when the leg is created.
-#[derive(Debug, Default, PartialEq)]
-pub struct Flags {
-    pub can_call: Option<Vec<String>>,
-    pub bound_ms: Option<u64>,
-}
-
-impl Flags {
-    pub fn parse(argv: &[String]) -> Result<Self, String> {
-        let mut f = Flags::default();
-        let mut it = argv.iter();
-        while let Some(a) = it.next() {
-            match a.as_str() {
-                "--can-call" => {
-                    let v = it.next().ok_or("--can-call needs a list: --can-call files,exec,user")?;
-                    let ids: Vec<String> =
-                        v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
-                    if ids.is_empty() {
-                        return Err("--can-call needs at least one agent id".into());
-                    }
-                    f.can_call = Some(ids);
-                }
-                "--settle-bound-ms" => {
-                    let v = it.next().ok_or("--settle-bound-ms needs a number of milliseconds")?;
-                    let n: u64 = v
-                        .parse()
-                        .ok()
-                        .filter(|n| *n > 0)
-                        .ok_or_else(|| format!("--settle-bound-ms must be a positive integer, got `{v}`"))?;
-                    f.bound_ms = Some(n);
-                }
-                other => {
-                    return Err(format!(
-                        "fantastic mcp: unknown argument `{other}` (takes --can-call a,b,c and --settle-bound-ms N)"
-                    ))
-                }
-            }
-        }
-        Ok(f)
-    }
-}
+/// The kernel's MCP socket, RELATIVE to the directory: every process runs in
+/// the directory it serves, and a relative path never meets the ~104-byte
+/// limit on a unix socket's address.
+pub const SOCKET: &str = ".fantastic/cli/mcp.sock";
 
 /// Entry point, called from `main` before any runtime exists.
 pub fn main(argv: &[String]) -> ! {
-    let flags = match Flags::parse(argv) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }
-    };
+    if let Some(a) = argv.first() {
+        eprintln!("fantastic mcp: takes no arguments (got `{a}`) — its grants live in the `{LEG}` record; change them with update_agent");
+        std::process::exit(2);
+    }
     let paths = match Paths::here() {
         Ok(p) => p,
         Err(e) => {
@@ -95,7 +66,52 @@ pub fn main(argv: &[String]) -> ! {
             std::process::exit(2);
         }
     };
+    match fantastic_kernel::lock::current_holder(&paths.cwd) {
+        Ok(Some(pid)) if pid != std::process::id() && fantastic_kernel::lock::pid_alive(pid) => attach(pid),
+        Ok(_) => own(paths),
+        Err(e) => {
+            eprintln!("fantastic mcp: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
+/// ATTACH: relay stdio to the running kernel's socket until it closes.
+fn attach(pid: u32) -> ! {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("fantastic mcp: no runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    let code = rt.block_on(async move {
+        let sock = match tokio::net::UnixStream::connect(SOCKET).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("fantastic mcp: a kernel (pid {pid}) runs in this directory, but its MCP socket `{SOCKET}` does not answer: {e}");
+                return 1;
+            }
+        };
+        let _ = std::io::stderr().write_all(shape().as_bytes());
+        let (mut r, mut w) = sock.into_split();
+        // up: the client's requests; when stdin ends, the socket's write half
+        // closes and the kernel finishes what is in flight, then closes.
+        let up = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut w).await;
+            let _ = w.shutdown().await;
+        });
+        let mut out = tokio::io::stdout();
+        let _ = tokio::io::copy(&mut r, &mut out).await;
+        let _ = out.flush().await;
+        up.abort();
+        0
+    });
+    std::process::exit(code);
+}
+
+/// RUN THE KERNEL: boot it here, serve stdio, and open the socket.
+fn own(paths: Paths) -> ! {
     // Whether this store needs INIT must be read BEFORE the log is opened: the
     // log lives inside `.fantastic`, so opening it first would make every store
     // look initialised.
@@ -110,6 +126,7 @@ pub fn main(argv: &[String]) -> ! {
     }
     // SAFETY: `err_fd` was just duplicated and is owned by this File from here on.
     let mut err_out = unsafe { std::fs::File::from_raw_fd(err_fd) };
+    let _ = err_out.write_all(shape().as_bytes());
     if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
         let _ = writeln!(err_out, "fantastic mcp: {e}");
         std::process::exit(1);
@@ -130,9 +147,15 @@ pub fn main(argv: &[String]) -> ! {
             std::process::exit(1);
         }
     };
-    let code = rt.block_on(serve(paths, fresh, flags, proto_fd, &mut err_out));
+    let code = rt.block_on(serve(paths, fresh, proto_fd, &mut err_out));
     drop(rt);
     std::process::exit(code);
+}
+
+/// What a coding CLI that runs `fantastic mcp` in a shell reads on stderr: how
+/// to register it, then what a connected client is told in `initialize`.
+fn shape() -> String {
+    format!("{SHAPE}{INSTRUCTIONS}\n\n")
 }
 
 /// Say a fatal reason where the MCP client logs it (the ORIGINAL stderr) and in
@@ -143,8 +166,7 @@ fn fatal(err_out: &mut std::fs::File, msg: &str) -> i32 {
     1
 }
 
-async fn serve(paths: Paths, fresh: bool, flags: Flags, proto_fd: i32, err_out: &mut std::fs::File) -> i32 {
-    // ── init: the second of the two explicit triggers ────────────────────────
+async fn serve(paths: Paths, fresh: bool, proto_fd: i32, err_out: &mut std::fs::File) -> i32 {
     if fresh {
         if let Err(e) = crate::boot::seed::write_all(&paths) {
             return fatal(err_out, &format!("init failed: {e}"));
@@ -153,229 +175,215 @@ async fn serve(paths: Paths, fresh: bool, flags: Flags, proto_fd: i32, err_out: 
 
     // ── boot / rehydrate ─────────────────────────────────────────────────────
     let host = match Host::boot(&paths, false).await {
-        Ok(h) => h,
-        // ONE INSTANCE PER DIRECTORY: the kernel's lock error names the owning
-        // pid and the remedy. Attaching to a running kernel is future work.
+        Ok(h) => Arc::new(h),
         Err(e) => return fatal(err_out, &format!("{e}")),
     };
+    let served = Served::new(Arc::clone(&host));
+    // The leg now, not on the first request: a refusal is said at start.
+    if let Err(e) = served.core().await {
+        let code = fatal(err_out, &e);
+        host.shutdown(&paths).await;
+        return code;
+    }
+    if let Err(e) = listen(Arc::clone(&served)) {
+        let code = fatal(err_out, &e);
+        host.shutdown(&paths).await;
+        return code;
+    }
 
-    // ── the leg ──────────────────────────────────────────────────────────────
-    let bound = match ensure_leg(&host, &flags).await {
-        Ok(b) => b,
-        Err(e) => {
-            let code = fatal(err_out, &e);
-            host.shutdown(&paths).await;
-            return code;
-        }
-    };
-    tracing::info!("mcp leg bound: {LEG}, settle_bound_ms={}", bound.as_millis());
-
-    let core = Arc::new(McpCore::new(
-        Arc::clone(&host.kernel),
-        fantastic_kernel::AgentId::from(LEG),
-        bound,
-        env!("CARGO_PKG_VERSION"),
-    ));
-
-    // ── the writer: the ONLY thing that touches the protocol descriptor ─────
-    let (tx, mut rx) = mpsc::channel::<Value>(256);
     // SAFETY: `proto_fd` is the duplicated original stdout, owned from here on.
     let std_out = unsafe { std::fs::File::from_raw_fd(proto_fd) };
-    let writer = tokio::spawn(async move {
-        let mut out = tokio::fs::File::from_std(std_out);
-        while let Some(v) = rx.recv().await {
-            let mut line = v.to_string();
-            line.push('\n');
-            if out.write_all(line.as_bytes()).await.is_err() || out.flush().await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // request id → the task running it, so a cancel from the client finds it.
-    let inflight: Arc<Mutex<HashMap<String, TaskId>>> = Arc::new(Mutex::new(HashMap::new()));
-
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
         Ok(s) => s,
         Err(e) => return fatal(err_out, &format!("no SIGTERM handler: {e}")),
     };
-
-    loop {
-        tokio::select! {
-            line = lines.next_line() => {
-                let line = match line {
-                    Ok(Some(l)) => l,
-                    Ok(None) => { tracing::info!("stdin closed — shutting down"); break; }
-                    Err(e) => { tracing::warn!("stdin: {e} — shutting down"); break; }
-                };
-                if line.trim().is_empty() { continue; }
-                let msg: Value = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = tx.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("Parse error: {e}")}})).await;
-                        continue;
-                    }
-                };
-                // On stdio, cancellation is a notification naming the request.
-                if msg.get("method").and_then(Value::as_str) == Some("notifications/cancelled") {
-                    let rid = msg.pointer("/params/requestId").map(|v| v.to_string()).unwrap_or_default();
-                    let task = inflight.lock().expect("inflight poisoned").remove(&rid);
-                    if let Some(t) = task {
-                        let r = core.cancel(&t).await;
-                        tracing::info!("cancelled request {rid} → task {}: {r}", t.get());
-                    }
-                    continue;
-                }
-                let core = Arc::clone(&core);
-                let tx = tx.clone();
-                let inflight = Arc::clone(&inflight);
-                tokio::spawn(async move {
-                    let rid = msg.get("id").map(|v| v.to_string());
-                    let map = Arc::clone(&inflight);
-                    let key = rid.clone();
-                    let reply = core
-                        .handle(&msg, move |t| {
-                            if let Some(k) = key {
-                                map.lock().expect("inflight poisoned").insert(k, t);
-                            }
-                        })
-                        .await;
-                    if let Some(k) = rid {
-                        inflight.lock().expect("inflight poisoned").remove(&k);
-                    }
-                    if let Some(r) = reply {
-                        let _ = tx.send(r).await;
-                    }
-                });
-            }
-            _ = term.recv() => { tracing::info!("SIGTERM — shutting down"); break; }
-            _ = tokio::signal::ctrl_c() => { tracing::info!("SIGINT — shutting down"); break; }
-        }
+    tokio::select! {
+        _ = serve_conn(served, tokio::io::stdin(), tokio::fs::File::from_std(std_out)) => tracing::info!("stdin closed — shutting down"),
+        _ = term.recv() => tracing::info!("SIGTERM — shutting down"),
+        _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT — shutting down"),
     }
 
     // ── shutdown, in the kernel's order ──────────────────────────────────────
     host.shutdown(&paths).await;
-    drop(tx);
-    let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+    close_socket();
     0
 }
 
-/// Bind the leg, creating it on the first run in this store. Returns its bound.
-async fn ensure_leg(host: &Host, flags: &Flags) -> Result<Duration, String> {
-    let existing = host.kernel.agents.get(&fantastic_kernel::AgentId::from(LEG)).map(|e| {
-        let a = e.value();
-        (a.handler_module.clone(), a.record().meta.clone())
-    });
-
-    if let Some((handler, meta)) = existing {
-        if handler.as_deref() != Some(HANDLER_MODULE) {
-            return Err(format!(
-                "an agent `{LEG}` exists but runs {handler:?}, not {HANDLER_MODULE} — rename or delete it"
-            ));
-        }
-        // The record is the truth now. A flag that would change it is refused
-        // rather than silently ignored.
-        if flags.can_call.is_some() || flags.bound_ms.is_some() {
-            return Err(format!(
-                "the `{LEG}` leg already exists; its grants and bound live in its record — change them with update_agent, not flags"
-            ));
-        }
-        let ms = meta.get(BOUND_FIELD).and_then(Value::as_u64).ok_or_else(|| {
-            format!("the `{LEG}` record has no `{BOUND_FIELD}` — set it with update_agent")
-        })?;
-        return Ok(Duration::from_millis(ms));
-    }
-
-    // First run in this store: create it. No defaults — both flags are required.
-    let can_call = flags
-        .can_call
-        .clone()
-        .ok_or("the mcp leg does not exist yet — create it with --can-call a,b,c (the agents it may call)")?;
-    let ms = flags
-        .bound_ms
-        .ok_or("the mcp leg does not exist yet — create it with --settle-bound-ms N (how long a call waits before it answers with its task id)")?;
-
-    // Every target must exist, and must be told to accept the leg. Read first,
-    // so a typo refuses before anything is written.
-    let mut merged: Vec<(String, Map<String, Value>)> = Vec::new();
-    for t in &can_call {
-        let agent = host
-            .kernel
-            .agents
-            .get(&fantastic_kernel::AgentId::from(t.as_str()))
-            .ok_or_else(|| format!("--can-call names `{t}`, which is not an agent in this kernel"))?;
-        let mut cb = agent
-            .value()
-            .record()
-            .meta
-            .get("callable_by")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        // MERGE, never replace: update_agent swaps a top-level field whole, so
-        // sending only {mcp} would wipe the target's existing grants.
-        cb.insert(LEG.into(), json!("*"));
-        merged.push((t.clone(), cb));
-    }
-
-    let grants: Map<String, Value> = can_call.iter().map(|t| (t.clone(), json!("*"))).collect();
-    let created = host
-        .operator(
-            "kernel",
-            json!({
-                "type": "create_agent",
-                "parent_id": host.root,
-                "id": LEG,
-                "handler_module": HANDLER_MODULE,
-                "can_call": grants,
-                BOUND_FIELD: ms,
-            }),
-        )
-        .await;
-    if let Some(err) = created.result.get("error").and_then(Value::as_str) {
-        return Err(format!("could not create the `{LEG}` leg: {err}"));
-    }
-
-    for (t, cb) in merged {
-        let out = host
-            .operator("kernel", json!({"type": "update_agent", "id": t, "callable_by": cb}))
-            .await;
-        if let Some(err) = out.result.get("error").and_then(Value::as_str) {
-            return Err(format!("could not grant `{LEG}` on `{t}`: {err}"));
-        }
-    }
-    let _ = host.operator(LEG, json!({"type": "boot"})).await;
-    // The leg and the grants it needs are durable BEFORE the first request: the
-    // record writer is debounced, and a client that connects and leaves inside
-    // that window must still leave the leg behind.
-    Ok(Duration::from_millis(ms))
+/// What every connection to one kernel shares: the host, and the MCP core —
+/// made on the first connection, which is when the leg is ensured.
+pub struct Served {
+    host: Arc<Host>,
+    core: OnceCell<Arc<McpCore>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn argv(s: &[&str]) -> Vec<String> {
-        s.iter().map(|x| x.to_string()).collect()
+impl Served {
+    pub fn new(host: Arc<Host>) -> Arc<Self> {
+        Arc::new(Self { host, core: OnceCell::new() })
     }
 
-    #[test]
-    fn no_flags_is_a_valid_bind_to_an_existing_leg() {
-        assert_eq!(Flags::parse(&[]).unwrap(), Flags::default());
+    async fn core(&self) -> Result<Arc<McpCore>, String> {
+        self.core
+            .get_or_try_init(|| async {
+                ensure_leg(&self.host).await?;
+                Ok::<_, String>(Arc::new(McpCore::new(
+                    Arc::clone(&self.host.kernel),
+                    fantastic_kernel::AgentId::from(LEG),
+                    env!("CARGO_PKG_VERSION"),
+                )))
+            })
+            .await
+            .cloned()
     }
+}
 
-    #[test]
-    fn both_flags_parse() {
-        let f = Flags::parse(&argv(&["--can-call", "files, exec ,user", "--settle-bound-ms", "20000"])).unwrap();
-        assert_eq!(f.can_call.unwrap(), vec!["files", "exec", "user"]);
-        assert_eq!(f.bound_ms, Some(20000));
-    }
+/// Serve the kernel's MCP socket: every process that owns a kernel calls this
+/// once it has booted. The caller holds the directory's lock, so a socket file
+/// already there is stale.
+pub fn listen(served: Arc<Served>) -> Result<(), String> {
+    let _ = std::fs::remove_file(SOCKET);
+    let l = tokio::net::UnixListener::bind(SOCKET).map_err(|e| format!("could not open the MCP socket `{SOCKET}`: {e}"))?;
+    std::fs::set_permissions(SOCKET, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .map_err(|e| format!("could not make `{SOCKET}` private: {e}"))?;
+    tokio::spawn(async move {
+        loop {
+            match l.accept().await {
+                Ok((s, _)) => {
+                    let (r, w) = s.into_split();
+                    tokio::spawn(serve_conn(Arc::clone(&served), r, w));
+                }
+                Err(e) => {
+                    tracing::warn!("mcp socket: {e}");
+                    break;
+                }
+            }
+        }
+    });
+    Ok(())
+}
 
-    #[test]
-    fn a_zero_bound_and_an_unknown_flag_are_refused() {
-        assert!(Flags::parse(&argv(&["--settle-bound-ms", "0"])).is_err());
-        assert!(Flags::parse(&argv(&["--port", "9"])).is_err());
-        assert!(Flags::parse(&argv(&["--can-call"])).is_err());
+/// Remove the socket file, after the kernel has shut down.
+pub fn close_socket() {
+    let _ = std::fs::remove_file(SOCKET);
+}
+
+/// One MCP connection: JSON-RPC lines in, replies out, until the reader ends —
+/// then what is in flight finishes and the writer closes.
+async fn serve_conn<R, W>(served: Arc<Served>, reader: R, writer: W)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    // the writer: the ONLY thing that touches this connection's output
+    let (tx, mut rx) = mpsc::channel::<Value>(256);
+    let out = tokio::spawn(async move {
+        let mut w = writer;
+        while let Some(v) = rx.recv().await {
+            let mut line = v.to_string();
+            line.push('\n');
+            if w.write_all(line.as_bytes()).await.is_err() || w.flush().await.is_err() {
+                break;
+            }
+        }
+        let _ = w.shutdown().await;
+    });
+
+    // request id → the task running it, so a cancel from the client finds it.
+    let inflight: Arc<Mutex<HashMap<String, TaskId>>> = Arc::new(Mutex::new(HashMap::new()));
+    let mut work = tokio::task::JoinSet::new();
+    let mut lines = BufReader::new(reader).lines();
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(l)) => l,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!("mcp: {e}");
+                break;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("Parse error: {e}")}})).await;
+                continue;
+            }
+        };
+        let core = match served.core().await {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(id) = msg.get("id") {
+                    let _ = tx.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":e}})).await;
+                }
+                continue;
+            }
+        };
+        // Cancellation is a notification naming the request.
+        if msg.get("method").and_then(Value::as_str) == Some("notifications/cancelled") {
+            let rid = msg.pointer("/params/requestId").map(|v| v.to_string()).unwrap_or_default();
+            let task = inflight.lock().expect("inflight poisoned").remove(&rid);
+            if let Some(t) = task {
+                let r = core.cancel(&t).await;
+                tracing::info!("cancelled request {rid} → task {}: {r}", t.get());
+            }
+            continue;
+        }
+        let tx = tx.clone();
+        let inflight = Arc::clone(&inflight);
+        work.spawn(async move {
+            let rid = msg.get("id").map(|v| v.to_string());
+            let map = Arc::clone(&inflight);
+            let key = rid.clone();
+            let reply = core
+                .handle(&msg, move |t| {
+                    if let Some(k) = key {
+                        map.lock().expect("inflight poisoned").insert(k, t);
+                    }
+                })
+                .await;
+            if let Some(k) = rid {
+                inflight.lock().expect("inflight poisoned").remove(&k);
+            }
+            if let Some(r) = reply {
+                let _ = tx.send(r).await;
+            }
+        });
     }
+    while work.join_next().await.is_some() {}
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), out).await;
+}
+
+/// Bind the leg, creating it the first time; then god mode (`kern/reach`).
+async fn ensure_leg(host: &Host) -> Result<(), String> {
+    let existing = host.kernel.agents.get(&fantastic_kernel::AgentId::from(LEG)).map(|e| e.value().handler_module.clone());
+    match existing {
+        Some(handler) => {
+            if handler.as_deref() != Some(HANDLER_MODULE) {
+                return Err(format!(
+                    "an agent `{LEG}` exists but runs {handler:?}, not {HANDLER_MODULE} — rename or delete it"
+                ));
+            }
+        }
+        None => {
+            let created = host
+                .operator(
+                    "kernel",
+                    json!({
+                        "type": "create_agent",
+                        "parent_id": host.root,
+                        "id": LEG,
+                        "handler_module": HANDLER_MODULE,
+                    }),
+                )
+                .await;
+            if let Some(err) = created.result.get("error").and_then(Value::as_str) {
+                return Err(format!("could not create the `{LEG}` leg: {err}"));
+            }
+            let _ = host.operator(LEG, json!({"type": "boot"})).await;
+        }
+    }
+    // Both edges on every agent BEFORE the first request is served.
+    crate::kern::reach::start(host).await
 }

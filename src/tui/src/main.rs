@@ -21,6 +21,7 @@ mod manifest;
 mod mcp;
 mod panel;
 mod presence;
+mod readme;
 mod recipe;
 mod run;
 mod seen;
@@ -42,6 +43,13 @@ use anyhow::Result;
 /// A PLAIN `fn main`, not `#[tokio::main]`: some modes must rearrange the
 /// process (stdio, env) before any runtime thread exists.
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // NOT ON A TERMINAL, NO ARGUMENTS: the readme, and nothing runs.
+    // SAFETY: isatty only inspects descriptor 1.
+    if args.is_empty() && unsafe { libc::isatty(1) } == 0 {
+        print!("{}", readme::text());
+        return Ok(());
+    }
     // CRITICAL TODO(dev-llm): the key comes from the keychain, BEFORE any
     // runtime thread exists — setting the environment later is a race.
     #[cfg(feature = "dev-llm")]
@@ -51,7 +59,6 @@ fn main() -> Result<()> {
     }
     // Provider keys stored from the set-up page, same rule: before any thread.
     kern::keys::load();
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("mcp") {
         mcp::main(&args[1..])
     }

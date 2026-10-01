@@ -46,8 +46,7 @@ pub struct Paths {
     /// The directory the user ran us in. The kernel's own file clamp is rooted
     /// here, so this is the boundary of the session, not a preference.
     pub cwd: PathBuf,
-    /// `<cwd>/.fantastic` — the store. Its ABSENCE is what triggers the attract
-    /// screen, and we must not create it before the human has pressed a key.
+    /// `<cwd>/.fantastic` — the store. Its ABSENCE is what makes a run seed it.
     pub store: PathBuf,
     /// `<cwd>/.fantastic/cli` — this client's own corner: the port file, the
     /// seen set, the log.
@@ -66,8 +65,7 @@ impl Paths {
             cwd: cwd.to_path_buf(),
         }
     }
-    /// TRUE when this directory has never been used. The attract screen shows
-    /// exactly once per directory, and this is the whole test.
+    /// TRUE when this directory has never been used: a run here seeds it.
     pub fn is_fresh(&self) -> bool {
         !self.store.exists()
     }
@@ -103,7 +101,7 @@ mod tests {
         let p = Paths::at(&d);
         assert!(
             p.is_fresh(),
-            "no .fantastic yet, so the attract screen is owed"
+            "no .fantastic yet, so a run seeds it"
         );
         std::fs::create_dir_all(&p.cli).unwrap();
         assert!(

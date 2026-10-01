@@ -15,7 +15,7 @@
 //! THE CANVAS (design 33) replaced the browser View of the terminal shell
 //! (owner, 2026-09-30): its page is served by `canvas_page` through `web`'s
 //! `/file/` route; the page speaks through `canvas_ws`, which reaches EVERY
-//! agent — god mode, by grants both sides (`kern/canvas_reach`).
+//! agent — god mode, by grants both sides (`kern/reach`).
 //!
 //! `port` is CREATION-ONLY, like the `mcp` leg's flags: the first `fantastic
 //! canvas` needs `--port N`, and later runs read it from `web`'s record.
@@ -142,8 +142,8 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
             return Err(format!("could not mount `{CANVAS_WS_ID}`: {e}"));
         }
     }
-    // GOD MODE, by grants: the canvas leg reaches every agent, both edges.
-    crate::kern::canvas_reach::start(h).await?;
+    // GOD MODE, by grants: the canvas leg reaches every agent, both edges (`kern/reach`).
+    crate::kern::reach::start(h).await?;
     Ok(Urls {
         canvas: format!("http://127.0.0.1:{port}/{CANVAS_PAGE_ID}/file/index.html"),
     })

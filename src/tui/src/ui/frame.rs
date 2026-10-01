@@ -16,7 +16,6 @@ use ratatui::Frame;
 use crate::app::{App, Focus, Link};
 use crate::kern::model::AgentId;
 use crate::kern::terminal::TERM_ID;
-use crate::boot::{attract, bg};
 use crate::keys;
 use crate::theme;
 use crate::ui::chrome;
@@ -147,7 +146,7 @@ fn frame_box<'a>(f: &mut Frame, area: Rect, focused: bool, title: Option<Line<'a
 /// screen of `area`, BEFORE anything is drawn. Only this takes the app
 /// mutably; `draw` then reads it.
 pub fn layout(app: &mut App, area: Rect) {
-    if app.intro_playing || app.phase != crate::boot::attract::Phase::Live || app.help {
+    if app.help {
         return;
     }
     app.screen = area;
@@ -179,41 +178,8 @@ pub fn layout(app: &mut App, area: Rect) {
 /// THE VIEW of a frame. Read-only over the app: it draws what `layout` left.
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    let now = std::time::Instant::now();
-    let clock = now.duration_since(app.boot).as_secs_f32();
-
     // An opaque canvas first, so the shell looks the same on a light terminal.
     chrome::fill_black(f.buffer_mut(), area);
-
-    // THE INTRO OWNS THE FRAME. It clears the area itself each frame, so no sky
-    // and no title underneath it.
-    if app.intro_playing {
-        let elapsed = app
-            .intro_since
-            .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
-        app.movie.render(f, area, elapsed);
-        return;
-    }
-
-    match app.phase {
-        // THE SKY IS THE ATTRACT SCREEN'S, not the shell's. Drifting stars behind
-        // a tree and a conversation made both unreadable (measured in the headful
-        // frames, 2026-09-13), so it stops when the shell goes live.
-        crate::boot::attract::Phase::Attract => {
-            bg::render_sky(f.buffer_mut(), area, clock);
-            attract::render_attract(f, area, clock, attract::reveal(app.attract_since, now));
-            return;
-        }
-        crate::boot::attract::Phase::Minimizing => {
-            bg::render_sky(f.buffer_mut(), area, clock);
-            let t = app
-                .minimize_since
-                .map_or(1.0, |s| attract::minimize_t(s, now));
-            attract::render_minimizing(f, area, t);
-            return;
-        }
-        crate::boot::attract::Phase::Live => {}
-    }
 
     // No docked title: the start screen owns the name, and the live shell gives
     // every row to the work (design decision, `title_h = 0`).
@@ -523,7 +489,6 @@ mod tests {
     fn the_focused_panels_border_wears_the_accent_and_the_rest_do_not() {
         use ratatui::backend::TestBackend;
         let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
-        app.phase = crate::boot::attract::Phase::Live;
         let area = Rect::new(0, 0, 100, 30);
         let mut t = ratatui::Terminal::new(TestBackend::new(100, 30)).unwrap();
         for (focus, want) in [(Focus::Tree, 0), (Focus::Panel, 1), (Focus::Composer, 2)] {
