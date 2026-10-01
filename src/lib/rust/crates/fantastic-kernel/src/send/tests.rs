@@ -1754,3 +1754,659 @@ fn full_kernel_verbs_keep_python_order() {
     want.extend(sorted);
     assert_eq!(keys, want);
 }
+
+// ─── STEP-4 PINS (2026-10-01): one dispatch per channel ──────────────────────
+//
+// The text and binary dispatch paths carry the same prologue (kernel-verb
+// root-only check, root reflect, bare-agent answers, not-installed refusal,
+// bundle error → raise). These pin what the BINARY leg answers at every branch,
+// against the TEXT leg's answer for the same payload, so merging the two
+// dispatches cannot change either.
+
+/// A root (`kernel_state`, bare) and one bare child under it.
+fn root_and_child() -> Arc<Kernel> {
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let child = Agent::new(
+        AgentId::from("kid"),
+        None,
+        Some(AgentId::from("kernel_state")),
+        Map::new(),
+        Path::new("/tmp/nowhere").join("kid"),
+        true,
+    );
+    kernel.register(child);
+    kernel
+}
+
+async fn send_text(kernel: &Arc<Kernel>, target: &str, payload: Value) -> crate::outcome::Outcome {
+    kernel
+        .send(vec![Item::new(AgentId::from(target), payload)])
+        .await
+        .remove(0)
+}
+
+async fn send_binary(
+    kernel: &Arc<Kernel>,
+    target: &str,
+    payload: Value,
+    blob: Vec<u8>,
+) -> crate::outcome::Outcome {
+    kernel
+        .send(vec![
+            Item::new(AgentId::from(target), payload).with_binary(blob)
+        ])
+        .await
+        .remove(0)
+}
+
+#[tokio::test]
+async fn a_binary_kernel_verb_to_a_child_is_not_here_exactly_as_text() {
+    let kernel = root_and_child();
+    for verb in ["create_agent", "list_agents", "ps", "ledger"] {
+        let bin = send_binary(&kernel, "kid", json!({"type": verb}), vec![1, 2]).await;
+        let txt = send_text(&kernel, "kid", json!({"type": verb})).await;
+        let want = format!(
+            "{{\"error\":\"{verb} is a kernel verb — kid does not answer it\",\
+             \"reason\":\"not_here\",\
+             \"hint\":\"address the kernel root ('kernel'); name the agent you mean in \
+             `parent_id` / `id`\",\"verb\":\"{verb}\"}}"
+        );
+        assert_eq!(serde_json::to_string(&bin.result).unwrap(), want, "{verb}");
+        assert_eq!(bin.result, txt.result, "{verb}: binary == text");
+        assert_eq!(bin.status, txt.status, "{verb}");
+        assert_eq!(bin.body, None, "{verb}: a refusal carries no body");
+    }
+}
+
+#[tokio::test]
+async fn a_binary_kernel_verb_on_the_root_is_answered_as_text() {
+    let kernel = root_and_child();
+    let bin = send_binary(
+        &kernel,
+        "kernel_state",
+        json!({"type": "list_agents"}),
+        vec![9],
+    )
+    .await;
+    let txt = send_text(&kernel, "kernel_state", json!({"type": "list_agents"})).await;
+    assert_eq!(
+        bin.status,
+        crate::outcome::Status::Completed,
+        "{}",
+        bin.result
+    );
+    assert_eq!(
+        bin.result, txt.result,
+        "the root answers the kernel verb on both legs"
+    );
+    let ids: Vec<&str> = bin.result["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["kernel_state", "kid"]);
+    assert_eq!(bin.body, None, "a kernel verb returns no chunk");
+    // the `kernel` alias resolves to the root on the binary leg too
+    let alias = send_binary(&kernel, "kernel", json!({"type": "list_agents"}), vec![9]).await;
+    assert_eq!(alias.result, txt.result);
+}
+
+#[tokio::test]
+async fn a_binary_reflect_or_lifecycle_verb_on_a_bare_agent_answers_as_text() {
+    let kernel = root_and_child();
+    let bin = send_binary(&kernel, "kid", json!({"type": "reflect"}), vec![1]).await;
+    let txt = send_text(&kernel, "kid", json!({"type": "reflect"})).await;
+    assert_eq!(bin.status, crate::outcome::Status::Completed);
+    assert_eq!(bin.result, txt.result, "bare-agent reflect: binary == text");
+    assert_eq!(bin.result["id"], "kid");
+    assert_eq!(bin.body, None);
+    for verb in ["boot", "shutdown"] {
+        let bin = send_binary(&kernel, "kid", json!({"type": verb}), vec![1]).await;
+        let txt = send_text(&kernel, "kid", json!({"type": verb})).await;
+        assert_eq!(bin.result, Value::Null, "{verb} on a bare agent is null");
+        assert_eq!(txt.result, Value::Null, "{verb}");
+        assert_eq!(bin.status, crate::outcome::Status::Completed, "{verb}");
+        assert_eq!(bin.body, None, "{verb}");
+    }
+}
+
+/// A bundle whose binary handler answers `Ok((None, body))` and whose text
+/// handler answers `Ok(None)` or raises, by verb.
+struct NoReply;
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for NoReply {
+    fn name(&self) -> &str {
+        "no_reply"
+    }
+    async fn handle(
+        &self,
+        _agent_id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        match verb_of(payload) {
+            "raise" => Err(crate::bundle::BundleError::from("text kaboom")),
+            _ => Ok(None),
+        }
+    }
+    async fn handle_binary(
+        &self,
+        _agent_id: &AgentId,
+        header: Value,
+        blob: Vec<u8>,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(crate::bundle::Reply, Option<Vec<u8>>), crate::bundle::BundleError> {
+        match verb_of(&header) {
+            "raise" => Err(crate::bundle::BundleError::from("binary kaboom")),
+            "empty" => Ok((None, None)),
+            _ => Ok((None, Some(blob))),
+        }
+    }
+}
+
+fn kernel_with_no_reply() -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    reg.register("no_reply.tools", NoReply);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    kernel.register(Agent::new(
+        AgentId::from("nr"),
+        Some("no_reply.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("nr"),
+        true,
+    ));
+    kernel
+}
+
+#[tokio::test]
+async fn a_binary_handler_with_no_reply_settles_null_and_keeps_its_body() {
+    let kernel = kernel_with_no_reply();
+    let out = send_binary(&kernel, "nr", json!({"type": "echo"}), vec![4, 5, 6]).await;
+    assert_eq!(out.status, crate::outcome::Status::Completed);
+    assert_eq!(out.result, Value::Null, "Ok(None) is a null reply");
+    assert_eq!(out.body, Some(vec![4, 5, 6]), "the body still rides back");
+    let out = send_binary(&kernel, "nr", json!({"type": "empty"}), vec![4]).await;
+    assert_eq!(out.result, Value::Null);
+    assert_eq!(out.body, None, "no chunk at all stays no chunk");
+    let txt = send_text(&kernel, "nr", json!({"type": "echo"})).await;
+    assert_eq!(
+        txt.result,
+        Value::Null,
+        "the text leg's Ok(None) is null too"
+    );
+    assert_eq!(txt.status, crate::outcome::Status::Completed);
+}
+
+#[tokio::test]
+async fn a_bundle_error_raises_the_same_shape_on_both_channels() {
+    let kernel = kernel_with_no_reply();
+    let bin = send_binary(&kernel, "nr", json!({"type": "raise"}), vec![1]).await;
+    assert_eq!(bin.status, crate::outcome::Status::Failed);
+    assert_eq!(
+        serde_json::to_string(&bin.result).unwrap(),
+        r#"{"error":"binary kaboom","raised":true}"#
+    );
+    assert_eq!(bin.body, None);
+    let txt = send_text(&kernel, "nr", json!({"type": "raise"})).await;
+    assert_eq!(txt.status, crate::outcome::Status::Failed);
+    assert_eq!(
+        serde_json::to_string(&txt.result).unwrap(),
+        r#"{"error":"text kaboom","raised":true}"#
+    );
+}
+
+#[tokio::test]
+async fn binary_refusals_for_bare_and_uninstalled_agents_are_byte_identical_to_text() {
+    let kernel = Arc::new(Kernel::new());
+    kernel.register(make_agent("bare2"));
+    kernel.register(Agent::new(
+        AgentId::from("orphan2"),
+        Some("nope_state.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("orphan2"),
+        true,
+    ));
+    for (id, want) in [
+        (
+            "bare2",
+            r#"{"error":"agent 'bare2' has no handler_module; cannot answer verb 'ingest'","reason":"unhandled","verb":"ingest"}"#,
+        ),
+        (
+            "orphan2",
+            r#"{"error":"agent 'orphan2': handler_module 'nope_state.tools' cannot be imported in this runtime: ModuleNotFoundError: No module named 'nope_state'","reason":"unhandled","verb":"ingest"}"#,
+        ),
+    ] {
+        let bin = send_binary(&kernel, id, json!({"type": "ingest"}), vec![1]).await;
+        let txt = send_text(&kernel, id, json!({"type": "ingest"})).await;
+        assert_eq!(serde_json::to_string(&bin.result).unwrap(), want, "{id}");
+        assert_eq!(bin.result, txt.result, "{id}");
+        assert_eq!(bin.status, txt.status, "{id}");
+    }
+}
+
+// ─── STEP-4 PINS: the call context at every hop (CallCtx) ───────────────────
+
+/// Records, per handler run, what the call context says, and forwards along
+/// `next` (optionally under operator authority for the FIRST forward only).
+#[derive(Default)]
+struct HopLog(std::sync::Mutex<Vec<Value>>);
+struct Hop(Arc<HopLog>);
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for Hop {
+    fn name(&self) -> &str {
+        "hop"
+    }
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        if verb_of(payload) != "hop" {
+            return Ok(None);
+        }
+        self.0 .0.lock().unwrap().push(json!({
+            "at": agent_id.0,
+            "sender": current_sender().map(|a| a.0),
+            "origin": current_origin().map(|a| a.0),
+            "remote": current_remote_caller(),
+            "in_task": current_task().is_some(),
+        }));
+        let mut rest: Vec<Value> = payload
+            .get("next")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if rest.is_empty() {
+            return Ok(Some(json!({"at": agent_id.0})));
+        }
+        let next = rest.remove(0);
+        let item = Item::new(
+            AgentId::from(next.as_str().unwrap()),
+            json!({"type": "hop", "next": rest}),
+        );
+        let out = if payload["operator"] == json!(true) {
+            with_operator(kernel.send(vec![item])).await
+        } else {
+            kernel.send(vec![item]).await
+        };
+        let o = out.into_iter().next().unwrap();
+        Ok(Some(
+            json!({"via": agent_id.0, "status": format!("{:?}", o.status), "got": o.result}),
+        ))
+    }
+}
+
+/// `ids` registered under `hop.tools`, each with the given explicit grants.
+fn hop_kernel(agents: &[(&str, Value, Value)]) -> (Arc<Kernel>, Arc<HopLog>) {
+    let log = Arc::new(HopLog::default());
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    reg.register("hop.tools", Hop(Arc::clone(&log)));
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(root);
+    for (id, can_call, callable_by) in agents {
+        let mut meta = Map::new();
+        meta.insert("can_call".into(), can_call.clone());
+        meta.insert("callable_by".into(), callable_by.clone());
+        kernel.register(Agent::new(
+            AgentId::from(*id),
+            Some("hop.tools".to_string()),
+            None,
+            meta,
+            Path::new("/tmp/nowhere").join(id),
+            true,
+        ));
+    }
+    (kernel, log)
+}
+
+fn hop_chain() -> (Arc<Kernel>, Arc<HopLog>) {
+    hop_kernel(&[
+        ("h_a", json!({"h_b": "*"}), json!({})),
+        ("h_b", json!({"h_c": "*"}), json!({"h_a": "*"})),
+        ("h_c", json!({}), json!({"h_b": "*"})),
+        ("h_d", json!({}), json!({})),
+    ])
+}
+
+#[tokio::test]
+async fn sender_is_the_callee_and_origin_the_caller_at_every_hop() {
+    let (kernel, log) = hop_chain();
+    let out = send_text(
+        &kernel,
+        "h_a",
+        json!({"type": "hop", "next": ["h_b", "h_c"]}),
+    )
+    .await;
+    assert_eq!(
+        out.status,
+        crate::outcome::Status::Completed,
+        "{}",
+        out.result
+    );
+    assert_eq!(
+        out.result,
+        json!({"via": "h_a", "status": "Completed", "got":
+               {"via": "h_b", "status": "Completed", "got": {"at": "h_c"}}})
+    );
+    let seen = log.0.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            json!({"at": "h_a", "sender": "h_a", "origin": null, "remote": null, "in_task": true}),
+            json!({"at": "h_b", "sender": "h_b", "origin": "h_a", "remote": null, "in_task": true}),
+            json!({"at": "h_c", "sender": "h_c", "origin": "h_b", "remote": null, "in_task": true}),
+        ]
+    );
+    // Outside every dispatch the context is empty again.
+    assert_eq!(current_sender(), None);
+    assert_eq!(current_origin(), None);
+    assert_eq!(current_task(), None);
+}
+
+#[tokio::test]
+async fn a_nested_send_under_operator_authority_is_ungated_and_has_no_origin() {
+    let (kernel, log) = hop_chain();
+    // h_a holds NO grant to h_d and h_d accepts nobody: as h_a, it is refused …
+    let out = send_text(&kernel, "h_a", json!({"type": "hop", "next": ["h_d"]})).await;
+    assert_eq!(out.result["status"], "Failed", "{}", out.result);
+    assert_eq!(
+        out.result["got"]["reason"], "unauthorized",
+        "{}",
+        out.result
+    );
+    // … under operator authority the same hop passes, and h_d sees no origin.
+    log.0.lock().unwrap().clear();
+    let out = send_text(
+        &kernel,
+        "h_a",
+        json!({"type": "hop", "next": ["h_d"], "operator": true}),
+    )
+    .await;
+    assert_eq!(out.result["status"], "Completed", "{}", out.result);
+    let seen = log.0.lock().unwrap().clone();
+    assert_eq!(
+        seen[1],
+        json!({"at": "h_d", "sender": "h_d", "origin": null, "remote": null, "in_task": true})
+    );
+}
+
+#[tokio::test]
+async fn the_remote_caller_belongs_to_the_dispatch_only_when_the_leg_is_its_sender() {
+    let (kernel, log) = hop_kernel(&[
+        ("leg", json!({"h_spy": "*"}), json!({})),
+        ("other", json!({"h_spy": "*"}), json!({})),
+        (
+            "h_spy",
+            json!({"h_two": "*"}),
+            json!({"g2|scout": "*", "other": "*"}),
+        ),
+        ("h_two", json!({}), json!({"h_spy": "*"})),
+    ]);
+    // 1. the leg relays g2|scout and IS the sender: the handler sees the
+    //    qualified caller; its own nested send does NOT inherit it.
+    let out = with_remote_caller(
+        AgentId::from("leg"),
+        "g2|scout".to_string(),
+        with_sender(
+            AgentId::from("leg"),
+            kernel.send(vec![Item::new(
+                AgentId::from("h_spy"),
+                json!({"type": "hop", "next": ["h_two"]}),
+            )]),
+        ),
+    )
+    .await
+    .remove(0);
+    assert_eq!(
+        out.status,
+        crate::outcome::Status::Completed,
+        "{}",
+        out.result
+    );
+    let seen = log.0.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            json!({"at": "h_spy", "sender": "h_spy", "origin": "leg", "remote": "g2|scout", "in_task": true}),
+            json!({"at": "h_two", "sender": "h_two", "origin": "h_spy", "remote": null, "in_task": true}),
+        ]
+    );
+    // 2. a remote caller set for a DIFFERENT leg than the sender: not this
+    //    dispatch's — and the gate judges the real sender, not the foreign id.
+    log.0.lock().unwrap().clear();
+    let out = with_remote_caller(
+        AgentId::from("leg"),
+        "g2|scout".to_string(),
+        with_sender(
+            AgentId::from("other"),
+            kernel.send(vec![Item::new(
+                AgentId::from("h_spy"),
+                json!({"type": "hop"}),
+            )]),
+        ),
+    )
+    .await
+    .remove(0);
+    assert_eq!(
+        out.status,
+        crate::outcome::Status::Completed,
+        "{}",
+        out.result
+    );
+    assert_eq!(
+        log.0.lock().unwrap().clone(),
+        vec![
+            json!({"at": "h_spy", "sender": "h_spy", "origin": "other", "remote": null, "in_task": true})
+        ]
+    );
+    // 3. no remote context at all outside a relayed send
+    assert_eq!(current_remote_caller(), None);
+}
+
+#[tokio::test]
+async fn a_relayed_call_is_gated_by_the_foreign_address_not_the_leg() {
+    // h_spy accepts `g2|scout` by name but NOT the leg itself; the leg's own
+    // grant to h_spy is not enough when it relays someone h_spy does not accept.
+    let (kernel, _log) = hop_kernel(&[
+        ("leg", json!({"h_spy": "*"}), json!({})),
+        ("h_spy", json!({}), json!({"g2|scout": "*"})),
+    ]);
+    let ok = with_remote_caller(
+        AgentId::from("leg"),
+        "g2|scout".to_string(),
+        with_sender(
+            AgentId::from("leg"),
+            kernel.send(vec![Item::new(
+                AgentId::from("h_spy"),
+                json!({"type": "hop"}),
+            )]),
+        ),
+    )
+    .await
+    .remove(0);
+    assert_eq!(
+        ok.status,
+        crate::outcome::Status::Completed,
+        "{}",
+        ok.result
+    );
+    let refused = with_remote_caller(
+        AgentId::from("leg"),
+        "g9|stranger".to_string(),
+        with_sender(
+            AgentId::from("leg"),
+            kernel.send(vec![Item::new(
+                AgentId::from("h_spy"),
+                json!({"type": "hop"}),
+            )]),
+        ),
+    )
+    .await
+    .remove(0);
+    assert_eq!(
+        refused.result["reason"], "unauthorized",
+        "{}",
+        refused.result
+    );
+    // and the leg alone, relaying nobody, is not accepted either
+    let refused = with_sender(
+        AgentId::from("leg"),
+        kernel.send(vec![Item::new(
+            AgentId::from("h_spy"),
+            json!({"type": "hop"}),
+        )]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(
+        refused.result["reason"], "unauthorized",
+        "{}",
+        refused.result
+    );
+}
+
+#[tokio::test]
+async fn while_draining_shutdown_traffic_and_live_work_pass_and_new_roots_do_not() {
+    let (kernel, log) = hop_chain();
+    let _ = kernel.shutdown_agents().await;
+    assert!(kernel.draining());
+    // a new root — operator or agent — is refused, coded, with python's text
+    for sender in [None, Some("h_a")] {
+        let fut = kernel.send(vec![Item::new(
+            AgentId::from("h_b"),
+            json!({"type": "hop"}),
+        )]);
+        let out = match sender {
+            None => fut.await,
+            Some(s) => with_sender(AgentId::from(s), fut).await,
+        }
+        .remove(0);
+        assert_eq!(out.status, crate::outcome::Status::Failed);
+        assert_eq!(
+            serde_json::to_string(&out.result).unwrap(),
+            r#"{"error":"send: the kernel is draining for shutdown — no new work is accepted; in-flight work may finish","reason":"draining"}"#,
+            "{sender:?}"
+        );
+        assert!(out.pid.is_none());
+    }
+    assert!(log.0.lock().unwrap().is_empty(), "no handler ran");
+    // the kernel's own shutdown traffic passes, AND a send from inside that
+    // live work (h_a → h_b → h_c) passes too
+    let out = with_shutdown(kernel.send(vec![Item::new(
+        AgentId::from("h_a"),
+        json!({"type": "hop", "next": ["h_b", "h_c"]}),
+    )]))
+    .await
+    .remove(0);
+    assert_eq!(
+        out.status,
+        crate::outcome::Status::Completed,
+        "{}",
+        out.result
+    );
+    assert_eq!(
+        out.result["got"]["got"],
+        json!({"at": "h_c"}),
+        "every nested hop ran: {}",
+        out.result
+    );
+    // the root's control surface stays open
+    let out = send_text(&kernel, "kernel", json!({"type": "list_agents"})).await;
+    assert_eq!(
+        out.status,
+        crate::outcome::Status::Completed,
+        "{}",
+        out.result
+    );
+    let out = send_text(&kernel, "kernel", json!({"type": "reflect"})).await;
+    assert_eq!(out.status, crate::outcome::Status::Completed);
+    // outside the scope the flag is clear again
+    assert!(!in_shutdown());
+}
+
+// ─── STEP-4 PINS: `ack_deadletter` (kernel_verbs' `as_id` / `raised` users) ──
+
+#[tokio::test]
+async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
+    let kernel = kernel_with_no_reply();
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(root);
+    let ack = |id: Value| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            let r = send_text(
+                &kernel,
+                "kernel",
+                json!({"type": "ack_deadletter", "id": id}),
+            )
+            .await;
+            serde_json::to_string(&r.result).unwrap()
+        }
+    };
+    // a FAILED execution (a raise) and a COMPLETED one, both named
+    let failed = kernel
+        .send(vec![Item::new(
+            AgentId::from("nr"),
+            json!({"type": "raise"}),
+        )
+        .with_id("dl_job")])
+        .await
+        .remove(0);
+    assert_eq!(failed.status, crate::outcome::Status::Failed);
+    let fid = failed.pid.expect("a failed execution has an id").0;
+    let done = kernel
+        .send(vec![Item::new(
+            AgentId::from("nr"),
+            json!({"type": "echo"}),
+        )
+        .with_id("ok_job")])
+        .await
+        .remove(0);
+    let did = done.pid.expect("an id").0;
+
+    assert_eq!(
+        ack(Value::Null).await,
+        r#"{"error":"ack_deadletter: id required","reason":"missing_arg","arg":"id"}"#
+    );
+    assert_eq!(
+        ack(json!("")).await,
+        r#"{"error":"ack_deadletter: id required","reason":"missing_arg","arg":"id"}"#
+    );
+    assert_eq!(
+        ack(json!("nobody")).await,
+        r#"{"error":"ack_deadletter: no execution 'nobody' of yours in the ledger","reason":"not_found","arg":"id"}"#
+    );
+    assert_eq!(
+        ack(json!(987_654_321)).await,
+        r#"{"error":"ack_deadletter: no execution 987654321 of yours in the ledger","reason":"not_found","arg":"id"}"#
+    );
+    assert_eq!(
+        ack(json!(did)).await,
+        format!(
+            r#"{{"error":"ack_deadletter: execution {did} is 'completed', not a dead letter — only failed / timed_out / cancelled work is acknowledged","reason":"bad_arg","arg":"id"}}"#
+        )
+    );
+    // by NAME, then again by its decimal-string id: acked, then already acked
+    assert_eq!(
+        ack(json!("dl_job")).await,
+        format!(r#"{{"acked":true,"id":{fid}}}"#)
+    );
+    assert_eq!(
+        ack(json!(fid.to_string())).await,
+        format!(r#"{{"acked":true,"id":{fid},"already":true}}"#)
+    );
+}

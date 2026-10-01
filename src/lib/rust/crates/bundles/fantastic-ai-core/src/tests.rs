@@ -5185,3 +5185,116 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
 /// The memory-store features (python `test_memory_features.py`), on this harness.
 #[path = "tests_memory.rs"]
 mod memory_features;
+
+/// STEP-4 PIN (2026-10-01): per-agent backend state. Two agents never share a
+/// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the
+/// next touch builds a fresh one; the INCARNATION count is NOT freed by it —
+/// it is a process-lifetime counter, exactly as python's module-level
+/// `_incarnation` dict outlives a delete.
+#[test]
+fn backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation() {
+    let a = AgentId::from("s4_state_a");
+    let b = AgentId::from("s4_state_b");
+    let sa = crate::state::state_for(&a);
+    let sb = crate::state::state_for(&b);
+    assert!(!Arc::ptr_eq(&sa, &sb), "two agents, two slots");
+    assert!(
+        Arc::ptr_eq(&sa, &crate::state::state_for(&a)),
+        "the same agent reads its own slot back"
+    );
+    crate::state::bump_incarnation(&a);
+    let born = crate::state::incarnation(&a);
+    assert_eq!(crate::state::incarnation(&b), 0, "b never booted");
+    crate::state::drop_state(&a);
+    assert!(
+        !Arc::ptr_eq(&sa, &crate::state::state_for(&a)),
+        "a dropped slot is rebuilt fresh"
+    );
+    assert!(
+        Arc::ptr_eq(&sb, &crate::state::state_for(&b)),
+        "b untouched"
+    );
+    assert_eq!(
+        crate::state::incarnation(&a),
+        born,
+        "drop keeps the incarnation"
+    );
+    assert!(!crate::state::is_generating(&a));
+    crate::state::drop_state(&a);
+    crate::state::drop_state(&b);
+}
+
+/// STEP-4 PIN (2026-10-01): `history fold=…` — the fold id parse (retrieval's
+/// `as_id`: an int, or a STRIPPED decimal string; never a float, a bool or a
+/// word), the head's key order, and the two refusals, byte for byte.
+#[tokio::test]
+async fn history_by_fold_parses_the_id_and_refuses_in_pythons_words() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "s4fold").await;
+    let r1 = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "alpha"}),
+    )
+    .await;
+    let r2 = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "assistant", "content": "beta"}),
+    )
+    .await;
+    let f = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "system", "kind": "fold", "title": "T", "body": "S", "refs": [r1, r2]}),
+    )
+    .await;
+    let hist = |fold: Value| {
+        let kernel = Arc::clone(&kernel);
+        let backend = backend.clone();
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    backend,
+                    json!({"type": "history", "fold": fold}),
+                )])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    for fold in [json!(f), json!(format!(" {f} ")), json!(f.to_string())] {
+        let h = hist(fold.clone()).await;
+        assert_eq!(
+            serde_json::to_string(&h["fold"]).unwrap(),
+            format!(r#"{{"id":{f},"kind":"fold","title":"T","summary":"S","members":2}}"#),
+            "{fold}: {h}"
+        );
+        let ids: Vec<i64> = h["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![r1, r2], "{fold}");
+    }
+    for fold in [
+        json!("abc"),
+        json!(f as f64 + 0.0),
+        json!(true),
+        json!("+1"),
+        json!(-1),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&hist(fold.clone()).await).unwrap(),
+            r#"{"error":"history: `fold` must be a fold id (int)","reason":"bad_arg","arg":"fold"}"#,
+            "{fold}"
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&hist(json!(r1)).await).unwrap(),
+        format!(
+            r#"{{"error":"history: {r1} is not a fold in your conversation","reason":"not_found","arg":"fold"}}"#
+        )
+    );
+}

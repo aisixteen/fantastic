@@ -755,3 +755,121 @@ async def test_stop_and_delete_kill_everything_a_job_launched(seeded_kernel):
                 break
             await asyncio.sleep(0.05)
         assert not alive, (end, alive)
+
+
+# ─── the relay's watch proxies, pinned (reduction candidate H: one mirror) ───
+#
+# `watch`/`unwatch` and `onmessage`/`offmessage` each register a PROXY inbox the
+# relay drains down the fd. A shared mirror helper must keep: the fd event frame
+# `{op:event, src, payload}` (the ws leg's is `{type:event, src, payload}`), the
+# inbox frame `{op:inbox, payload}` minus the job's own telemetry, a release that
+# drops the watcher, the inbox row AND the drain task, and an owner-inbox
+# supersede that never evicts its replacement.
+
+
+from kernel._authz import _FROM_ABOVE  # noqa: E402
+
+
+def _proxy_tasks(kernel, owner, verb):
+    return [
+        tid
+        for tid, e in kernel.ctx.tasks.items()
+        if e.get("agent") == owner and e.get("verb") == verb and not e["_task"].done()
+    ]
+
+
+async def test_a_granted_watch_frames_events_and_unwatch_releases_everything(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    await _mk(k, allowed=["x"], can_call={"src_a": ["watch"]})
+    await _mk(k, agent_id="src_a", allowed=["x"], callable_by={"runner": ["watch"]})
+    child, task = await _wire(k, job_id="jw")
+    await _wire_write(child, {"op": "watch", "src": "src_a"})
+    proxy = "_xbw_jw_src_a"
+    await _until(lambda: proxy in k.ctx.agents["src_a"]._watcher_ids, what="watch")
+    assert proxy in k.ctx.inboxes
+    assert len(_proxy_tasks(k, "runner", "watch_drain")) == 1
+    # a second watch of the same src registers nothing new
+    await _wire_write(child, {"op": "watch", "src": "src_a"})
+    await k.send([{"target": "src_a", "payload": {"type": "status"}}])
+    ev = await _wire_read(child)
+    assert ev == {"op": "event", "src": "src_a", "payload": {"type": "status"}}
+    assert list(ev) == ["op", "src", "payload"]
+    assert len(_proxy_tasks(k, "runner", "watch_drain")) == 1
+
+    await _wire_write(child, {"op": "unwatch", "src": "src_a"})
+    await _until(lambda: proxy not in k.ctx.inboxes, what="proxy released")
+    assert proxy not in k.ctx.agents["src_a"]._watcher_ids
+    await _until(lambda: not _proxy_tasks(k, "runner", "watch_drain"), what="drain")
+    child.close()
+    await asyncio.wait_for(task, 5)
+
+
+async def test_a_refused_watch_registers_no_drain_task(seeded_kernel):
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    await _mk(k, agent_id="closed", allowed=["x"])
+    child, task = await _wire(k, job_id="jr")
+    await _wire_write(child, {"op": "watch", "src": "closed"})
+    ev = await _wire_read(child)
+    assert ev["op"] == "event" and ev["src"] == "closed"
+    assert ev["payload"] == {
+        "error": "runner may not call 'watch' on closed",
+        "reason": "unauthorized",
+        "hint": _FROM_ABOVE,
+        "side": "egress",
+    }
+    assert not _proxy_tasks(k, "runner", "watch_drain")
+    assert "_xbw_jr_closed" not in k.ctx.inboxes
+    child.close()
+    await asyncio.wait_for(task, 5)
+
+
+async def test_onmessage_frames_the_owner_inbox_minus_job_telemetry(seeded_kernel):
+    import exec_bridge.tools as ebt
+
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    child, task = await _wire(k, job_id="jm")
+    await _wire_write(child, {"op": "onmessage"})
+    await _until(lambda: "_xbself_jm" in k.ctx.inboxes, what="owner proxy")
+    assert ebt._owner_inbox["runner"]["job_id"] == "jm"
+    await k.emit("runner", {"type": "progress", "n": 1})  # the job's own telemetry
+    await k.send([{"target": "runner", "payload": {"type": "mail", "n": 2}}])
+    ev = await _wire_read(child)
+    assert ev == {"op": "inbox", "payload": {"type": "mail", "n": 2}}
+    await _wire_write(child, {"op": "offmessage"})
+    await _until(lambda: "_xbself_jm" not in k.ctx.inboxes, what="released")
+    assert "runner" not in ebt._owner_inbox
+    assert "_xbself_jm" not in k.ctx.agents["runner"]._watcher_ids
+    child.close()
+    await asyncio.wait_for(task, 5)
+
+
+async def test_a_second_onmessage_supersedes_without_being_evicted(seeded_kernel):
+    import exec_bridge.tools as ebt
+
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    c1, t1 = await _wire(k, job_id="j1")
+    await _wire_write(c1, {"op": "onmessage"})
+    await _until(lambda: "_xbself_j1" in k.ctx.inboxes, what="first")
+    c2, t2 = await _wire(k, job_id="j2")
+    await _wire_write(c2, {"op": "onmessage"})
+    await _until(lambda: "_xbself_j2" in k.ctx.inboxes, what="second")
+    # the first is released, the second owns the inbox
+    await _until(lambda: "_xbself_j1" not in k.ctx.inboxes, what="superseded")
+    assert ebt._owner_inbox["runner"]["job_id"] == "j2"
+    # the superseded job exits — its teardown must not evict its replacement
+    c1.close()
+    await asyncio.wait_for(t1, 5)
+    assert ebt._owner_inbox["runner"]["job_id"] == "j2"
+    assert "_xbself_j2" in k.ctx.inboxes
+    assert "_xbself_j2" in k.ctx.agents["runner"]._watcher_ids
+    await k.send([{"target": "runner", "payload": {"type": "mail"}}])
+    assert await _wire_read(c2) == {"op": "inbox", "payload": {"type": "mail"}}
+    c2.close()
+    await asyncio.wait_for(t2, 5)
+    assert "runner" not in ebt._owner_inbox
+    assert "_xbself_j2" not in k.ctx.inboxes

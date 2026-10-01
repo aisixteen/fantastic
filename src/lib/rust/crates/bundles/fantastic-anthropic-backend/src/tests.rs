@@ -976,3 +976,337 @@ fn message_start_usage_and_a_bounded_cut_are_reported() {
     .expect("decodes");
     assert!(st.finish().is_some());
 }
+
+// ─── STEP-4 PINS (2026-10-01): a raw HTTP/1.1 stub ──────────────────────────
+//
+// The mock-server crates always answer with a COMPLETE body; the behaviours
+// pinned below need a body CUT mid-stream, the raw request head (headers as
+// sent), and a count of TCP connections (the client must not pool).
+
+/// What the stub saw: every request head, in order, and how many connections.
+#[derive(Clone, Default)]
+struct RawLog {
+    heads: Arc<std::sync::Mutex<Vec<String>>>,
+    conns: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RawLog {
+    fn heads(&self) -> Vec<String> {
+        self.heads.lock().unwrap().clone()
+    }
+    fn conns(&self) -> usize {
+        self.conns.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Answer request `n` (counted across connections) with `script(n)`: the raw
+/// bytes to write and whether to close the connection after them. A connection
+/// left open serves its next request (HTTP/1.1 keep-alive).
+async fn raw_stub(script: fn(usize) -> (Vec<u8>, bool)) -> (u16, RawLog) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = RawLog::default();
+    let srv = log.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            srv.conns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let log = srv.clone();
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let head = loop {
+                        let end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                        if let Some(h) = end {
+                            let head = String::from_utf8_lossy(&buf[..h]).to_string();
+                            let len: usize = head
+                                .to_ascii_lowercase()
+                                .split("content-length:")
+                                .nth(1)
+                                .and_then(|t| t.split("\r\n").next())
+                                .and_then(|t| t.trim().parse().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= h + len {
+                                buf.drain(..h + len);
+                                break head;
+                            }
+                        }
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    };
+                    let n = {
+                        let mut heads = log.heads.lock().unwrap();
+                        heads.push(head);
+                        heads.len() - 1
+                    };
+                    let (out, close) = script(n);
+                    let _ = sock.write_all(&out).await;
+                    let _ = sock.flush().await;
+                    if close {
+                        let _ = sock.shutdown().await;
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, log)
+}
+
+/// A 200 whose `Content-Length` promises far more than `body` — the client reads
+/// `body`, then the connection closes: a transport error MID-STREAM.
+fn cut_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
+    (
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len() + 4096
+        )
+        .into_bytes(),
+        true,
+    )
+}
+
+/// A complete 200, connection kept alive.
+fn full_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
+    (
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes(),
+        false,
+    )
+}
+
+/// The value of header `name` (case-insensitive) in a raw request head, as sent.
+fn raw_header(head: &str, name: &str) -> Option<String> {
+    let want = format!("{}:", name.to_ascii_lowercase());
+    head.split("\r\n").find_map(|l| {
+        l.to_ascii_lowercase().starts_with(&want).then(|| {
+            l[want.len()..]
+                .strip_prefix(' ')
+                .unwrap_or(&l[want.len()..])
+                .to_string()
+        })
+    })
+}
+
+async fn send_once(kernel: &Arc<Kernel>, ant: &AgentId) -> Value {
+    kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t", "reply_to": null}),
+        )])
+        .await
+        .remove(0)
+        .result
+}
+
+const DONE_OK: &str = "ok<call name=\"done\"></call>";
+
+fn ok_body() -> String {
+    sse(&[
+        json!({"type":"message_start","message":{"id":"m","role":"assistant","content":[]}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":DONE_OK}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+/// A body cut mid-stream raises `stream: <reqwest's text ← every cause>`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_cut_mid_stream_raises_stream_and_the_cause_chain() {
+    let (port, _log) = raw_stub(|_| {
+        cut_response(
+            "text/event-stream",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n\n",
+        )
+    })
+    .await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, ant, _fid) =
+        mk_kernel(&tmp, Some(format!("http://127.0.0.1:{port}/v1/messages"))).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+    let r = send_once(&kernel, &ant).await;
+    assert_eq!(r["raised"], json!(true), "{r}");
+    assert_eq!(
+        r["error"],
+        json!("RuntimeError: stream: error decoding response body ← error reading a body from connection ← end of file before message length reached"),
+        "{r}"
+    );
+}
+
+/// The key rides VERBATIM (python reads `os.environ` as is — never trimmed) as
+/// `x-api-key`, with `anthropic-version` and `Accept: text/event-stream`; the
+/// cached client never pools: every request dials anew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_key_rides_verbatim_and_no_connection_is_pooled() {
+    let (port, log) = raw_stub(|_| full_response("text/event-stream", &ok_body())).await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, ant, _fid) =
+        mk_kernel(&tmp, Some(format!("http://127.0.0.1:{port}/v1/messages"))).await;
+    let _key = KeyEnv::set(Some(" sk-ant-pad ")).await;
+    assert_eq!(send_once(&kernel, &ant).await["response"], json!(DONE_OK));
+    assert_eq!(send_once(&kernel, &ant).await["response"], json!(DONE_OK));
+    let heads = log.heads();
+    assert!(heads.len() >= 2, "{heads:#?}");
+    for h in &heads {
+        assert!(h.starts_with("POST /v1/messages HTTP/1.1\r\n"), "{h}");
+        assert_eq!(
+            raw_header(h, "x-api-key").as_deref(),
+            Some(" sk-ant-pad "),
+            "{h}"
+        );
+        assert_eq!(
+            raw_header(h, "anthropic-version").as_deref(),
+            Some(ANTHROPIC_VERSION)
+        );
+        assert_eq!(
+            raw_header(h, "accept").as_deref(),
+            Some("text/event-stream")
+        );
+    }
+    assert_eq!(
+        log.conns(),
+        heads.len(),
+        "pool_max_idle_per_host(0): one connection per request"
+    );
+}
+
+/// `on_delete` drops the agent's cached client: an agent re-created under the
+/// same id builds a new one with the key the environment holds NOW.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_drops_the_cached_client() {
+    let (port, log) = raw_stub(|_| full_response("text/event-stream", &ok_body())).await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}/v1/messages");
+    let _key = KeyEnv::set(Some("sk-first")).await;
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint.clone())).await;
+    assert_eq!(send_once(&kernel, &ant).await["response"], json!(DONE_OK));
+    let gone = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "delete_agent", "id": ant.as_str()}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(gone.get("error").is_none(), "{gone}");
+    std::env::set_var("ANTHROPIC_API_KEY", "sk-second");
+    let (kernel2, ant2, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    assert_eq!(ant2, ant, "the same id");
+    let before = log.heads().len();
+    assert_eq!(send_once(&kernel2, &ant2).await["response"], json!(DONE_OK));
+    assert_eq!(
+        raw_header(&log.heads()[before], "x-api-key").as_deref(),
+        Some("sk-second"),
+        "a deleted agent's client is gone"
+    );
+}
+
+/// A 5xx from a gateway (non-JSON body) is retried with python's stdout line;
+/// the SAME status with a JSON body is the API speaking and is raised at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_json_502_is_raised_verbatim_without_a_retry() {
+    let (port, log) = raw_stub(|_| {
+        (
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"error\":\"no\"}\n"
+                .to_vec(),
+            false,
+        )
+    })
+    .await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, ant, _fid) =
+        mk_kernel(&tmp, Some(format!("http://127.0.0.1:{port}/v1/messages"))).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+    let r = send_once(&kernel, &ant).await;
+    assert_eq!(r["raised"], json!(true), "{r}");
+    assert_eq!(
+        r["error"],
+        json!("RuntimeError: anthropic 502: {\"error\":\"no\"}\n"),
+        "{r}"
+    );
+    assert_eq!(log.heads().len(), 1, "never retried");
+}
+
+/// The unknown-type reply, as TEXT — a bare `{error}`; key order is wire.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
+    let r = kernel
+        .send(vec![Item::new(ant, json!({"type": "frob"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"anthropic_backend: unknown type 'frob'"}"#
+    );
+}
+
+/// STEP-4 PIN (2026-10-01): BOTH text channels are read — a `thinking_delta`
+/// opens the reasoning span once, the first `text_delta` closes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thinking_then_text_is_wrapped_once() {
+    use fantastic_ai_core::think::{THINK_CLOSE, THINK_OPEN};
+    let body = sse(&[
+        json!({"type":"message_start","message":{"id":"m","role":"assistant","content":[]}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" ok"}}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"text"}}),
+        json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":DONE_OK}}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+        json!({"type":"message_stop"}),
+    ]);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(format!("{}/v1/messages", server.uri()))).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+    let r = send_once(&kernel, &ant).await;
+    assert_eq!(
+        r["response"],
+        json!(format!("{THINK_OPEN}hm ok{THINK_CLOSE}{DONE_OK}")),
+        "{r}"
+    );
+}
+
+/// STEP-4 PIN (2026-10-01): an `error` event raises the WHOLE error object,
+/// python-rendered (`str(dict)`), under `anthropic stream error:`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_error_event_raises_the_whole_object_python_rendered() {
+    let body = sse(&[
+        json!({"type":"message_start","message":{"id":"m","role":"assistant","content":[]}}),
+        json!({"type":"error","error":{"type":"overloaded_error","message":"busy"}}),
+    ]);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(format!("{}/v1/messages", server.uri()))).await;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
+    let r = send_once(&kernel, &ant).await;
+    assert_eq!(r["raised"], json!(true), "{r}");
+    assert_eq!(
+        r["error"],
+        json!(
+            "RuntimeError: anthropic stream error: {'type': 'overloaded_error', 'message': 'busy'}"
+        ),
+        "{r}"
+    );
+}

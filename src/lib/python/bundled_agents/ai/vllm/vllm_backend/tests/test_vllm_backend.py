@@ -408,3 +408,111 @@ def test_the_schema_names_the_key_var():
     from vllm_backend.tools import RECORD_SCHEMA
 
     assert RECORD_SCHEMA["key_var"] == "VLLM_API_KEY"
+
+
+# ─── the wire, pinned (reduction candidate A: one OpenAI SSE loop) ──────────
+#
+# Where vllm DIFFERS from the nvidia/llamacpp loops today: a non-JSON `data:`
+# line RAISES (it is not skipped), and a stream may end inside the thought.
+
+
+async def test_a_non_json_data_line_raises_not_skipped():
+    sse = "data: not-json\n\n" + _sse(_delta(content="x"), _delta(finish="stop"))
+    p = _provider(_transport(sse))
+    with pytest.raises(json.JSONDecodeError):
+        await _drain(p)
+    await p.aclose()
+
+
+async def test_blank_data_lines_are_skipped_and_trailing_data_after_done_ignored():
+    sse = (
+        "data: \n\n"
+        + _sse(_delta(content="first"), _delta(finish="stop"))
+        + f"data: {json.dumps(_delta(content='after'))}\n\n"
+    )
+    p = _provider(_transport(sse))
+    assert await _drain(p) == "first"
+    await p.aclose()
+
+
+async def test_a_turn_that_finishes_inside_the_thought_closes_the_wrapper():
+    sse = _sse(_delta(reasoning_content="hm"), _delta(finish="stop"))
+    p = _provider(_transport(sse))
+    assert await _drain(p) == f"{THINK_OPEN}hm{THINK_CLOSE}"
+    await p.aclose()
+
+
+@pytest.mark.parametrize(
+    "exc, text",
+    [
+        (
+            httpx.ReadTimeout("slow"),
+            "vllm_backend: http://vllm.test/v1 sent nothing for read_timeout=900s",
+        ),
+        (
+            httpx.ReadError("gone"),
+            "vllm_backend: http://vllm.test/v1 dropped the stream mid-answer — "
+            "vLLM died or restarted; this turn is NOT complete",
+        ),
+        (
+            httpx.ConnectTimeout("syn"),
+            "vllm_backend: no answer from http://vllm.test/v1 within "
+            "connect_timeout=5s — the instance is STOPPED (its SYNs are dropped), "
+            "or the tunnel/port is wrong",
+        ),
+    ],
+)
+async def test_each_transport_failure_text_is_exact(exc, text):
+    def handler(request):
+        raise exc
+
+    p = _provider(httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert str(e.value) == text
+    await p.aclose()
+
+
+async def test_no_finish_reason_and_main_turn_cut_texts_are_exact():
+    p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert str(e.value) == (
+        "vllm_backend: the stream from http://vllm.test/v1 ended without a "
+        "finish_reason — vLLM died mid-answer; this turn is NOT complete"
+    )
+    p2 = _provider(_transport(_sse(_delta(content="half"), _delta(finish="length"))))
+    with pytest.raises(RuntimeError) as e2:
+        await _drain(p2)
+    assert str(e2.value) == (
+        "vllm_backend: the turn was cut at max_tokens=8000 "
+        "(finish_reason=length) — it did not finish; raise max_tokens on "
+        "the record, or lower thinking_token_budget / reasoning_effort"
+    )
+    for q in (p, p2):
+        await q.aclose()
+
+
+async def test_no_budget_in_sampling_sends_none():
+    sink: list = []
+    sampling = {k: v for k, v in vp.SAMPLING_DEFAULTS.items()}
+    sampling.pop("thinking_token_budget")
+    p = _provider(_transport(_sse(_delta(finish="stop")), sink), sampling=sampling)
+    await _drain(p)
+    assert "thinking_token_budget" not in sink[0]
+    assert p.last_thinking_budget is None
+    await p.aclose()
+
+
+async def test_an_evicted_conversation_is_logged_by_its_key(caplog):
+    ok = _transport(_sse(_delta(finish="stop")))
+    p = _provider(ok, kv_slots=1, kv_overflow="evict")
+    first = [{"role": "user", "content": "first"}]
+    await _drain(p, messages=first)
+    with caplog.at_level("INFO", logger="vllm_backend.provider"):
+        await _drain(p, messages=[{"role": "user", "content": "second"}])
+    assert (
+        f"vllm_backend: KV slot rotated — conversation {conversation_key(first)} out"
+        in caplog.text
+    )
+    await p.aclose()

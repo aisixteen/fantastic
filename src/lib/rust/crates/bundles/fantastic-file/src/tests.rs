@@ -1501,3 +1501,188 @@ async fn pump_ends_are_ordinary_executions_in_python_shape() {
     );
     assert_eq!(write["bytes"], json!({"len": 5}));
 }
+
+/// STEP-4 PIN (2026-10-01): the file leg's unknown type, as TEXT — key order is
+/// part of the wire (`preserve_order`) and `Value` equality ignores it.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    served(&tmp);
+    let kernel = mk_kernel_with(&tmp, json!({})).await;
+    let r = call(&kernel, json!({"type": "frobnicate"})).await;
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"file_bridge: unknown type 'frobnicate'","reason":"unhandled","verb":"frobnicate"}"#
+    );
+    let r = FileBundle::default()
+        .handle(&AgentId::from("fb"), &json!({}), &kernel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"file_bridge: unknown type None","reason":"unhandled","verb":null}"#
+    );
+    let r = FileBundle::default()
+        .handle(&AgentId::from("fb"), &json!({"type": 5}), &kernel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"file_bridge: unknown type 5","reason":"unhandled","verb":5}"#
+    );
+}
+
+// ─── STEP-4 PINS (2026-10-01): one prologue, two channels ───────────────────
+//
+// `handle` and `handle_binary` each run the agent lookup → meta snapshot → gate
+// → clamp → readonly/exposure prologue. These pin, per refusal, that the BINARY
+// channel answers byte-for-byte what the TEXT channel answers (and no body).
+
+async fn both(
+    kernel: &Arc<Kernel>,
+    header: Value,
+    blob: &[u8],
+) -> (String, String, Option<Vec<u8>>) {
+    let txt = call(kernel, header.clone()).await;
+    let bin = kernel
+        .send(vec![
+            Item::new(AgentId::from("fb"), header).with_binary(blob.to_vec())
+        ])
+        .await
+        .remove(0);
+    (
+        serde_json::to_string(&txt).unwrap(),
+        serde_json::to_string(&bin.result).unwrap(),
+        bin.body,
+    )
+}
+
+#[tokio::test]
+async fn a_sealed_leg_denies_both_channels_identically() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    served(&tmp);
+    let kernel = mk_kernel_with(&tmp, json!({"allow": ["."]})).await;
+    for header in [
+        json!({"type": "read_stream", "path": "a.txt"}),
+        json!({"type": "read", "path": "a.txt"}),
+        json!({"type": "list"}),
+    ] {
+        let (txt, bin, body) = both(&kernel, header.clone(), b"x").await;
+        assert_eq!(bin, txt, "{header}");
+        assert!(bin.contains(r#""reason":"unauthorized""#), "{bin}");
+        assert_eq!(body, None, "{header}");
+    }
+    // the exact denial, once
+    let (_, bin, _) = both(
+        &kernel,
+        json!({"type": "read_stream", "path": "a.txt"}),
+        b"",
+    )
+    .await;
+    assert_eq!(
+        bin,
+        call(&kernel, json!({"type": "read_stream", "path": "a.txt"}))
+            .await
+            .to_string()
+    );
+}
+
+#[tokio::test]
+async fn a_path_outside_the_allow_list_is_refused_identically_on_both_channels() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = served(&tmp);
+    std::fs::create_dir_all(dir.join("pub")).unwrap();
+    std::fs::write(dir.join("secret.txt"), b"s").unwrap();
+    let kernel = mk_kernel_with(
+        &tmp,
+        json!({"ingress_rule": "allow_all_ingress", "allow": ["pub"]}),
+    )
+    .await;
+    let (txt, bin, body) = both(
+        &kernel,
+        json!({"type": "read_stream", "path": "secret.txt"}),
+        b"",
+    )
+    .await;
+    assert_eq!(bin, txt);
+    assert_eq!(body, None);
+    let v: Value = serde_json::from_str(&bin).unwrap();
+    let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(&keys[..2], ["error", "reason"], "{bin}");
+    assert!(v.get("error").is_some() && v["reason"].is_string(), "{bin}");
+}
+
+#[tokio::test]
+async fn a_readonly_leg_refuses_writes_identically_on_both_channels() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    served(&tmp);
+    let kernel = mk_kernel_with(
+        &tmp,
+        json!({"ingress_rule": "allow_all_ingress", "allow": ["."], "readonly": true}),
+    )
+    .await;
+    let (txt, bin, body) = both(
+        &kernel,
+        json!({"type": "write_stream", "path": "a.txt"}),
+        b"data",
+    )
+    .await;
+    assert_eq!(bin, txt);
+    assert_eq!(
+        bin,
+        r#"{"error":"agent is readonly","reason":"unauthorized","hint":"this leg accepts reads only; an operator may clear `readonly`"}"#
+    );
+    assert_eq!(body, None);
+    // a TEXT verb on the binary channel (the `<bytes>` document) too
+    let (txt, bin, body) = both(
+        &kernel,
+        json!({"type": "write", "path": "a.txt", "content": "x"}),
+        b"x",
+    )
+    .await;
+    assert_eq!(bin, txt, "{bin}");
+    assert_eq!(body, None);
+}
+
+#[tokio::test]
+async fn a_binary_verb_the_leg_does_not_own_takes_the_text_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    served(&tmp);
+    let kernel = mk_kernel(&tmp).await;
+    let (txt, bin, body) = both(&kernel, json!({"type": "frob"}), b"x").await;
+    assert_eq!(bin, txt);
+    assert_eq!(
+        bin,
+        r#"{"error":"file_bridge: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
+    );
+    assert_eq!(body, None);
+    let (txt, bin, body) = both(&kernel, json!({"type": "boot"}), b"x").await;
+    assert_eq!((txt.as_str(), bin.as_str(), body), ("null", "null", None));
+}
+
+#[tokio::test]
+async fn a_leg_that_is_not_registered_says_no_agent_on_both_channels() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    served(&tmp);
+    let kernel = mk_kernel(&tmp).await;
+    let ghost = AgentId::from("ghost_fb");
+    let b = FileBundle::default();
+    for verb in ["read_stream", "write", "list"] {
+        let (bin, body) = b
+            .handle_binary(&ghost, json!({"type": verb, "path": "a"}), vec![1], &kernel)
+            .await
+            .unwrap();
+        let txt = b
+            .handle(&ghost, &json!({"type": verb, "path": "a"}), &kernel)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&bin).unwrap(),
+            serde_json::to_string(&txt).unwrap(),
+            "{verb}"
+        );
+        assert_eq!(body, None, "{verb}");
+    }
+}

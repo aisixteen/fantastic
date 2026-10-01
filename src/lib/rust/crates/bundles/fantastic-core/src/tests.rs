@@ -1027,3 +1027,28 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
         .result;
     assert_eq!(reflect["root"], "/srv/state");
 }
+
+/// STEP-4 PIN (2026-10-01): the loader's unknown type, as TEXT — key order is
+/// part of the wire (`preserve_order`) and `Value` equality ignores it.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    for (verb, want) in [
+        (
+            "wat",
+            r#"{"error":"kernel_state: unknown type 'wat'","reason":"unhandled","verb":"wat"}"#,
+        ),
+        (
+            "shutdown",
+            r#"{"error":"kernel_state: unknown type 'shutdown'","reason":"unhandled","verb":"shutdown"}"#,
+        ),
+        (
+            "it's",
+            r#"{"error":"kernel_state: unknown type \"it's\"","reason":"unhandled","verb":"it's"}"#,
+        ),
+    ] {
+        let v = root_reflect(&kernel, json!({"type": verb})).await;
+        assert_eq!(serde_json::to_string(&v).unwrap(), want, "{verb}");
+    }
+}

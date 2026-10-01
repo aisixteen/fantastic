@@ -635,3 +635,51 @@ async def test_a_non_numeric_tick_sec_is_refused_at_write_time(seeded_kernel):
     )[0]["result"]
     assert r.get("reason") == "invalid_meta" and "tick_sec" in r.get("error", ""), r
     assert "sch_ticks" not in seeded_kernel.ctx.agents
+
+
+# ─── verb answers, pinned (reduction candidate J: its single-item sends) ─────
+
+
+async def test_missing_and_unknown_schedule_ids(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+
+    async def call(payload):
+        return (await seeded_kernel.send([{"target": sid, "payload": payload}]))[0][
+            "result"
+        ]
+
+    assert await call({"type": "unschedule"}) == {
+        "error": "unschedule: schedule_id required"
+    }
+    assert await call({"type": "tick_now"}) == {
+        "error": "tick_now: schedule_id required"
+    }
+    assert await call({"type": "tick_now", "schedule_id": "nope"}) == {
+        "error": "schedule 'nope' not found"
+    }
+    assert await call({"type": "unschedule", "schedule_id": "nope"}) == {
+        "removed": False,
+        "schedule_id": "nope",
+    }
+    assert await call({"type": "pause", "schedule_id": "nope"}) == {
+        "paused": False,
+        "schedule_id": "nope",
+    }
+    assert await call({"type": "resume", "schedule_id": "nope"}) == {
+        "resumed": False,
+        "schedule_id": "nope",
+    }
+
+
+async def test_pause_and_resume_the_whole_scheduler(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+
+    async def call(payload):
+        return (await seeded_kernel.send([{"target": sid, "payload": payload}]))[0][
+            "result"
+        ]
+
+    assert await call({"type": "pause"}) == {"paused": True, "scheduler_id": sid}
+    assert seeded_kernel.ctx.get(sid)["paused"] is True
+    assert await call({"type": "resume"}) == {"resumed": True, "scheduler_id": sid}
+    assert seeded_kernel.ctx.get(sid)["paused"] is False

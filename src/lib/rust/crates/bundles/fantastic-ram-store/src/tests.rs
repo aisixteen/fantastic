@@ -727,3 +727,169 @@ async fn a_zero_limit_is_no_limit_like_python() {
         "width 0 falls back to 200"
     );
 }
+
+// ─── STEP-4 PINS (2026-10-01): refusal wire shapes + the id parser ──────────
+//
+// `preserve_order` makes a refusal's KEY ORDER part of the wire, and `Value`
+// equality ignores it — so these compare the serialized text.
+
+fn wire(v: &Value) -> String {
+    serde_json::to_string(v).unwrap()
+}
+
+#[tokio::test]
+async fn unknown_type_is_coded_unhandled_with_the_raw_verb_in_order() {
+    let k = store();
+    for (verb, want) in [
+        (
+            "frob",
+            r#"{"error":"ram_store: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#,
+        ),
+        (
+            "it's",
+            r#"{"error":"ram_store: unknown type \"it's\"","reason":"unhandled","verb":"it's"}"#,
+        ),
+        (
+            "shutdown",
+            r#"{"error":"ram_store: unknown type 'shutdown'","reason":"unhandled","verb":"shutdown"}"#,
+        ),
+    ] {
+        assert_eq!(
+            wire(&call(&k, json!({"type": verb}), Some("alice")).await),
+            want
+        );
+    }
+    // a typeless payload never reaches a bundle through `send`; the bundle's
+    // own rendering of it is python's `None`, the verb the raw null
+    let r = RamStoreBundle::default()
+        .handle(&AgentId::from("mem"), &json!({}), &k)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        wire(&r),
+        r#"{"error":"ram_store: unknown type None","reason":"unhandled","verb":null}"#
+    );
+}
+
+#[tokio::test]
+async fn arg_refusals_carry_error_reason_arg_in_that_order() {
+    let k = store();
+    append(&k, "alice", json!([{"id": 1, "content": "a"}])).await;
+    for (payload, want) in [
+        (
+            json!({"type": "append", "rows": []}),
+            r#"{"error":"append: `rows` must be a non-empty list of rows","reason":"bad_arg","arg":"rows"}"#,
+        ),
+        (
+            json!({"type": "append", "rows": [{"id": "5"}]}),
+            r#"{"error":"append: a row id is a kernel int, got '5'","reason":"bad_arg","arg":"rows"}"#,
+        ),
+        (
+            json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}),
+            r#"{"error":"append: row 7 refs must be row ids","reason":"bad_arg","arg":"rows"}"#,
+        ),
+        (
+            json!({"type": "share", "with": "alice"}),
+            r#"{"error":"share: you already read your own rows","reason":"bad_arg","arg":"with"}"#,
+        ),
+        (
+            json!({"type": "share", "with": "bob", "mode": "weird"}),
+            r#"{"error":"share: mode must be one of ('frozen', 'live')","reason":"bad_arg","arg":"mode"}"#,
+        ),
+        (
+            json!({"type": "unshare", "grant": 999}),
+            r#"{"error":"unshare: no grant 999","reason":"not_found","arg":"grant"}"#,
+        ),
+        (
+            json!({"type": "grants", "side": "sideways"}),
+            r#"{"error":"grants: side must be 'given' or 'received'","reason":"bad_arg","arg":"side"}"#,
+        ),
+    ] {
+        let got = call(&k, payload.clone(), Some("alice")).await;
+        assert_eq!(wire(&got), want, "{payload}");
+    }
+}
+
+#[tokio::test]
+async fn row_ids_and_limits_parse_as_python_ascii_digit_ids() {
+    // python `_as_id`: an int > 0, or a STRIPPED ASCII-digit string — never a
+    // Unicode digit, never a sign. `limit`/`width` fall back on a falsy id.
+    let k = store();
+    let rows: Vec<Value> = (1..=5)
+        .map(|i| json!({"id": i, "content": format!("needle {i}")}))
+        .collect();
+    append(&k, "alice", Value::Array(rows)).await;
+    let hits = |r: &Value| r["matches"].as_array().unwrap().len();
+    for (limit, want) in [
+        (json!(2), 2),
+        (json!(" 2 "), 2),
+        (json!("3"), 3),
+        (json!("٢"), 5),  // a Unicode digit is not an id → the default 100
+        (json!("+2"), 5), // a sign is not a digit → the default
+        (json!(0), 5),    // falsy → the default
+        (json!("0"), 5),  // `_as_id("0")` is 0 → `or 100`
+        (json!(-1), 5),   // not > 0 → the default
+        (json!(2.0), 5),  // a float is not an int
+        (json!(true), 5), // a bool is not an id
+    ] {
+        let r = call(
+            &k,
+            json!({"type": "search", "query": "needle", "limit": limit.clone()}),
+            Some("alice"),
+        )
+        .await;
+        assert_eq!(hits(&r), want, "limit={limit}: {r}");
+        assert_eq!(r["total"], json!(5), "limit={limit}");
+        assert_eq!(r["truncated"], json!(want < 5), "limit={limit}");
+    }
+    // `width` takes the same parse
+    let r = call(
+        &k,
+        json!({"type": "search", "query": "needle", "width": " 3 "}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(r["matches"][0]["text"], json!("nee"));
+}
+
+#[tokio::test]
+async fn two_stores_hold_separate_tables_and_delete_frees_one() {
+    // per-agent state: a second store of the same kind starts empty, and its
+    // own delete does not touch the first's rows.
+    let k = store();
+    k.register(agent(
+        "mem2",
+        Some(HANDLER_MODULE),
+        Some("kernel_state"),
+        json!({"operator": true, "admins": ["kernel"], "callable_by": {"alice": "*"}}),
+    ));
+    update(&k, "alice", json!({"can_call": {"mem": "*", "mem2": "*"}}));
+    append(&k, "alice", json!([{"id": 1, "content": "in mem"}])).await;
+    let read2 = with_sender(
+        AgentId::from("alice"),
+        k.send(vec![Item::new(
+            AgentId::from("mem2"),
+            json!({"type": "read"}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(
+        read2["rows"],
+        json!([]),
+        "mem2 shares nothing with mem: {read2}"
+    );
+    let gone = k
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "delete_agent", "id": "mem2"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(gone.get("error").is_none(), "{gone}");
+    let read1 = call(&k, json!({"type": "read"}), Some("alice")).await;
+    assert_eq!(ids(&read1), vec![1], "mem keeps its rows");
+}

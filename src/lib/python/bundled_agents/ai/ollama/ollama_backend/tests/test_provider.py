@@ -80,3 +80,97 @@ def test_stop_resets_client():
     p._client = "fake"
     p.stop()
     assert p._client is None
+
+
+# ─── the stream, pinned (reduction candidate A: a shared ThinkWrap) ─────────
+
+
+async def _run(p: OllamaProvider, chunks: list, **kw):
+    client = _patched_client(chunks)
+    with patch("ollama.AsyncClient", return_value=client):
+        out = [x async for x in p.chat([{"role": "user", "content": "hi"}], **kw)]
+    return out, client.chat.call_args.kwargs
+
+
+async def test_thinking_is_wrapped_once_and_closed_by_content():
+    from ai_core.core import THINK_CLOSE, THINK_OPEN
+
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    out, _ = await _run(
+        p,
+        [
+            {"message": {"thinking": "let me ", "content": None}},
+            {"message": {"thinking": "think"}},
+            {"message": {"content": "answer"}},
+        ],
+    )
+    assert out == [THINK_OPEN, "let me ", "think", THINK_CLOSE, "answer"]
+
+
+async def test_a_stream_that_ends_mid_thought_still_closes_the_wrapper():
+    from ai_core.core import THINK_CLOSE, THINK_OPEN
+
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    out, _ = await _run(p, [{"message": {"thinking": "hm"}}])
+    assert out == [THINK_OPEN, "hm", THINK_CLOSE]
+
+
+async def test_reported_usage_and_done_reason_land_on_the_provider():
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    await _run(
+        p,
+        [
+            {"message": {"content": "x"}},
+            {"message": {}, "prompt_eval_count": 777, "done_reason": "length"},
+        ],
+    )
+    assert p.last_prompt_tokens == 777
+    assert p.last_stop_reason == "max_tokens"
+    q = OllamaProvider(endpoint="http://ollama.test", model="m")
+    await _run(q, [{"message": {"content": "x"}, "done_reason": "stop"}])
+    assert q.last_stop_reason == "stop" and q.last_prompt_tokens is None
+
+
+async def test_the_request_options_from_the_knobs():
+    p = OllamaProvider(
+        endpoint="http://ollama.test",
+        model="m",
+        num_ctx=32768,
+        temperature=0.7,
+        num_predict=256,
+        think=False,
+    )
+    _, kw = await _run(p, [{"message": {"content": "x"}}])
+    assert kw == {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "options": {"temperature": 0.7, "num_ctx": 32768, "num_predict": 256},
+        "think": False,
+    }
+    # a side call's own bound beats the record's num_predict (a fresh provider:
+    # the first one holds the client it built)
+    q = OllamaProvider(endpoint="http://ollama.test", model="m", num_predict=256)
+    _, kw = await _run(q, [{"message": {"content": "x"}}], max_tokens=12)
+    assert kw["options"]["num_predict"] == 12
+
+
+async def test_the_defaults_send_only_the_low_temperature():
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    _, kw = await _run(p, [{"message": {"content": "x"}}])
+    assert kw["options"] == {"temperature": 0.3}
+    assert "think" not in kw
+
+
+async def test_no_model_fails_loud_before_any_request():
+    p = OllamaProvider(endpoint="http://ollama.test", model="")
+    client = _patched_client([])
+    with patch("ollama.AsyncClient", return_value=client):
+        with pytest.raises(RuntimeError) as e:
+            async for _ in p.chat([{"role": "user", "content": "hi"}]):
+                pass
+    assert str(e.value) == (
+        "ollama_backend: no `model` set — this connector does not guess one. "
+        "Name a model on the agent record (model=...)."
+    )
+    client.chat.assert_not_called()

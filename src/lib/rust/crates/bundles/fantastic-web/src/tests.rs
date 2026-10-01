@@ -3211,3 +3211,94 @@ fn reflect_query_is_parsed_like_starlette() {
         json!({"type": "reflect", "readme": true, "tree": "ids"})
     );
 }
+
+/// STEP-4 PIN (2026-10-01): `web`'s unknown type is a BARE `{error}` (no code,
+/// no verb) — unlike its legs' coded refusal. Compared as text: key order is
+/// part of the wire and `Value` equality ignores it.
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let kernel = Arc::new(Kernel::new());
+    for (payload, want) in [
+        (
+            json!({"type": "frob"}),
+            r#"{"error":"web: unknown type 'frob'"}"#,
+        ),
+        (
+            json!({"type": "it's"}),
+            r#"{"error":"web: unknown type \"it's\""}"#,
+        ),
+        (json!({}), r#"{"error":"web: unknown type None"}"#),
+    ] {
+        let reply = WebBundle
+            .handle(&AgentId::from("web_x"), &payload, &kernel)
+            .await
+            .expect("handled")
+            .expect("reply");
+        assert_eq!(serde_json::to_string(&reply).unwrap(), want, "{payload}");
+    }
+}
+
+/// STEP-4 PIN (2026-10-01): per-agent server state. Two `web` agents run two
+/// listeners; deleting one releases ITS port (the `on_delete` teardown) while
+/// the other keeps serving, and its reflect says it is no longer running.
+#[tokio::test]
+async fn deleting_one_web_agent_frees_only_its_own_listener() {
+    let tmp = TempDir::new().unwrap();
+    let (pa, pb) = (free_port(), free_port());
+    let kernel = stage_host(&tmp, pa, "web_s4a", "rest_s4a", "fb_s4a").await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": HANDLER_MODULE, "id": "web_s4b", "port": pb}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
+    wait_until_port_accepts(pb).await;
+    let reflect = |id: &'static str| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    AgentId::from(id),
+                    json!({"type": "reflect"}),
+                )])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    assert_eq!(reflect("web_s4a").await["running"], json!(true));
+    assert_eq!(reflect("web_s4b").await["running"], json!(true));
+    let gone = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "delete_agent", "id": "web_s4b"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(gone.get("error").is_none(), "{gone}");
+    let mut freed = false;
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", pb))
+            .await
+            .is_err()
+        {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(freed, "the deleted agent's port still accepts");
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", pa))
+            .await
+            .is_ok(),
+        "the other listener is untouched"
+    );
+    assert_eq!(reflect("web_s4a").await["running"], json!(true));
+    stop(&kernel, "web_s4a").await;
+}

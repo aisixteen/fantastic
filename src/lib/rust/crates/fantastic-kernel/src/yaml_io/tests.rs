@@ -152,3 +152,181 @@ fn scalar_styles_match_libyaml() {
         assert_eq!(load(want).unwrap(), v, "{want}");
     }
 }
+
+// ─── STEP-4 PINS (2026-10-01): the READ side, as it reads today ─────────────
+//
+// `load`/`load_all` resolve plain scalars by YAML 1.2 CORE (see the module doc),
+// where python's `yaml_io.load` (`CSafeLoader`) reads YAML 1.1. Machine-written
+// files never differ (the writer quotes against both), but a HAND-EDITED record
+// does — so every vector where 1.1 and 1.2 disagree is pinned here as rust reads
+// it today, with python's 1.1 reading noted beside it. A reader swap (the YAML
+// reduction candidate) changes these deliberately or not at all.
+
+/// `k: <plain>` → what `load` makes of `<plain>`.
+fn plain(s: &str) -> Result<Value, String> {
+    load(&format!("k: {s}\n")).map(|v| v["k"].clone())
+}
+
+#[test]
+fn plain_scalars_resolve_by_yaml_1_2_core_where_1_1_disagrees() {
+    let cases: Vec<(&str, Value)> = vec![
+        // (rust reads, python 1.1 reads)
+        ("yes", json!("yes")),               // True
+        ("no", json!("no")),                 // False
+        ("on", json!("on")),                 // True
+        ("off", json!("off")),               // False
+        ("Yes", json!("Yes")),               // True
+        ("OFF", json!("OFF")),               // False
+        ("1:30", json!("1:30")),             // 90 (sexagesimal)
+        ("0o17", json!(15)),                 // '0o17'
+        ("1e3", json!(1000.0)),              // '1e3'
+        ("1e-3", json!(0.001)),              // '1e-3'
+        ("<<", json!("<<")),                 // a merge key: ConstructorError as a value
+        ("1_000", json!("1_000")),           // 1000
+        ("0b101", json!("0b101")),           // 5
+        ("1:30.5", json!("1:30.5")),         // 90.5
+        ("2001-12-14", json!("2001-12-14")), // datetime.date
+    ];
+    for (s, want) in cases {
+        let got = plain(s).unwrap_or_else(|e| panic!("{s}: {e}"));
+        assert_eq!(got, want, "{s}");
+        if let (Value::Number(g), Value::Number(w)) = (&got, &want) {
+            assert_eq!(g.is_f64(), w.is_f64(), "{s}: int/float kind");
+        }
+    }
+}
+
+#[test]
+fn plain_scalars_where_both_schemas_agree() {
+    let cases: Vec<(&str, Value)> = vec![
+        ("~", json!(null)),
+        ("null", json!(null)),
+        ("Null", json!(null)),
+        ("NULL", json!(null)),
+        ("true", json!(true)),
+        ("TRUE", json!(true)),
+        ("False", json!(false)),
+        ("0x1F", json!(31)),
+        ("+1", json!(1)),
+        ("42", json!(42)),
+        ("-7", json!(-7)),
+        (".5", json!(0.5)),
+        ("5.", json!(5.0)),
+        ("1.0e+3", json!(1000.0)),
+        ("1.5", json!(1.5)),
+        ("0o", json!("0o")),
+        ("0x", json!("0x")),
+        ("inf", json!("inf")),
+        ("nan", json!("nan")),
+        ("hello world", json!("hello world")),
+    ];
+    for (s, want) in cases {
+        let got = plain(s).unwrap_or_else(|e| panic!("{s}: {e}"));
+        assert_eq!(got, want, "{s}");
+        if let (Value::Number(g), Value::Number(w)) = (&got, &want) {
+            assert_eq!(g.is_f64(), w.is_f64(), "{s}: int/float kind");
+        }
+    }
+    // an int wider than i64 keeps every digit (arbitrary precision, never f64)
+    let big = plain("123456789012345678901234567890").unwrap();
+    assert_eq!(big.to_string(), "123456789012345678901234567890");
+    // an empty value is null, as in both schemas
+    assert_eq!(load("k:\n").unwrap(), json!({"k": null}));
+}
+
+#[test]
+fn a_non_finite_float_has_no_json_form_and_fails_the_load_naming_it() {
+    for s in [".inf", ".Inf", "-.inf", "+.INF", ".nan", ".NaN"] {
+        assert_eq!(
+            plain(s).unwrap_err(),
+            format!("the float {s} has no JSON form — a record or row cannot hold it"),
+            "{s}"
+        );
+    }
+}
+
+#[test]
+fn shapes_outside_the_format_are_refused_with_their_names() {
+    for (doc, want) in [
+        (
+            "a: !!str 1\n",
+            "a tagged node — tags are not part of this format",
+        ),
+        (
+            "a: !foo 1\n",
+            "a tagged node — tags are not part of this format",
+        ),
+        (
+            "a: !!seq [1]\n",
+            "a tagged node — tags are not part of this format",
+        ),
+        (
+            "a: !!map {b: 1}\n",
+            "a tagged node — tags are not part of this format",
+        ),
+        (
+            "a: &x 1\nb: *x\n",
+            "an alias — aliases are not part of this format",
+        ),
+        ("? [a]\n: 1\n", "a non-scalar map key"),
+        ("? {a: 1}\n: 1\n", "a non-scalar map key"),
+        (
+            "---\na: 1\n---\nb: 2\n",
+            "expected a single document in the stream",
+        ),
+    ] {
+        assert_eq!(load(doc).unwrap_err(), want, "{doc:?}");
+    }
+}
+
+#[test]
+fn a_broken_document_names_where_it_broke() {
+    let e = load("a: [1, 2\n").unwrap_err();
+    assert!(
+        e.ends_with("at line 2 column 1"),
+        "a scan error carries its line/column: {e}"
+    );
+    let e = load("a: b\n  c: d\n").unwrap_err();
+    assert!(e.contains(" at line "), "{e}");
+}
+
+#[test]
+fn load_all_reads_every_document_of_a_stream_in_order() {
+    // the scheduler's `schedule_events.yaml` — one `---` document per event
+    let text = format!(
+        "{SEPARATOR}{}{SEPARATOR}{}{SEPARATOR}{}",
+        dump(&json!({"id": "e1", "n": 1})),
+        dump(&json!({"id": "e2", "tags": ["x", "y"]})),
+        dump(&json!({"id": "e3", "nested": {"k": null}})),
+    );
+    assert_eq!(
+        load_all(&text).unwrap(),
+        vec![
+            json!({"id": "e1", "n": 1}),
+            json!({"id": "e2", "tags": ["x", "y"]}),
+            json!({"id": "e3", "nested": {"k": null}}),
+        ]
+    );
+    assert_eq!(
+        load_all("").unwrap(),
+        Vec::<Value>::new(),
+        "an empty stream"
+    );
+    assert_eq!(load("").unwrap(), Value::Null, "load of nothing is null");
+    assert_eq!(
+        load_all("a: 1\n").unwrap(),
+        vec![json!({"a": 1})],
+        "no marker"
+    );
+    // one bad document fails the whole stream
+    let bad = format!("{SEPARATOR}a: 1\n{SEPARATOR}b: .inf\n");
+    assert_eq!(
+        load_all(&bad).unwrap_err(),
+        "the float .inf has no JSON form — a record or row cannot hold it"
+    );
+    // a root scalar document
+    assert_eq!(
+        load_all("--- 5\n--- x\n").unwrap(),
+        vec![json!(5), json!("x")]
+    );
+}

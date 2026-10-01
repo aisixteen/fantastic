@@ -251,3 +251,199 @@ async def test_client_errors_are_never_retried():
     with pytest.raises(RuntimeError, match="anthropic 401"):
         await _drain(p)
     assert len(sink) == 1
+
+
+# ─── the wire, pinned (reduction candidate A: a shared retry POST + SSE reader)
+
+
+async def _drain_msgs(p: AnthropicProvider, messages, **kw) -> str:
+    return "".join([c async for c in p.chat(messages, **kw)])
+
+
+async def test_reported_usage_sums_input_and_both_cache_counts():
+    sse = _sse(
+        {
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_read_input_tokens": 200,
+                    "cache_creation_input_tokens": 3000,
+                    "output_tokens": 1,
+                }
+            },
+        },
+        {"type": "content_block_start", "content_block": {"type": "text"}},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+    )
+    p = _provider([], sse)
+    assert await _drain(p) == "x"
+    assert p.last_prompt_tokens == 3210
+    assert p.last_stop_reason == "end_turn"
+
+
+async def test_a_zero_usage_reports_none():
+    sse = _sse(
+        {"type": "message_start", "message": {"usage": {"input_tokens": 0}}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+    )
+    p = _provider([], sse)
+    await _drain(p)
+    assert p.last_prompt_tokens is None
+
+
+async def test_an_error_event_raises_with_its_body():
+    sse = _sse({"type": "error", "error": {"type": "overloaded_error"}})
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider([], sse))
+    assert str(e.value) == "anthropic stream error: {'type': 'overloaded_error'}"
+
+
+async def test_blank_and_non_json_data_lines_are_skipped():
+    body = "data: \n\ndata: not-json\n\n" + _text("ok")
+    assert await _drain(_provider([], body)) == "ok"
+
+
+async def test_a_cut_connection_names_no_stop_reason():
+    sse = _sse(
+        {"type": "content_block_start", "content_block": {"type": "text"}},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x"}},
+    )
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider([], sse))
+    assert str(e.value) == (
+        "anthropic stream ended without end_turn: stop_reason=None "
+        "blocks=['text'] (none seen — connection cut mid-stream)"
+    )
+
+
+async def test_a_main_turn_cut_text_and_stop_sequence_is_terminal():
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider([], _text("half", stop="max_tokens")))
+    assert str(e.value) == (
+        "anthropic stream ended without end_turn: stop_reason='max_tokens' "
+        "blocks=['text']"
+    )
+    p = _provider([], _text("done", stop="stop_sequence"))
+    assert await _drain(p) == "done"
+    assert p.last_stop_reason == "stop_sequence"
+
+
+async def test_a_side_call_cut_is_an_answer_and_its_bound_rides_the_body():
+    sink: list = []
+    p = _provider(sink, _text("half", stop="max_tokens"), max_tokens=4096)
+    out = await _drain_msgs(p, [{"role": "user", "content": "hi"}], max_tokens=50)
+    assert out == "half"
+    assert p.last_stop_reason == "max_tokens"
+    assert sink[0]["max_tokens"] == 50
+
+
+async def test_the_request_body_shape_system_roles_and_sampling():
+    sink: list = []
+    p = _provider(
+        sink,
+        _text("ok"),
+        max_tokens=1234,
+        sampling={"top_k": 20, "temperature": None},
+    )
+    msgs = [
+        {"role": "system", "content": "first system"},
+        {"role": "user", "content": "q"},
+        {"role": "tool", "content": "dropped"},
+        {"role": "assistant", "content": ""},
+        {"role": "system", "content": "second system"},
+    ]
+    assert await _drain_msgs(p, msgs) == "ok"
+    # the LAST system message wins (not joined); other roles are dropped; an
+    # empty turn is sent as "(no content)"; a None sampling value is omitted
+    assert sink[0] == {
+        "model": "claude-test",
+        "max_tokens": 1234,
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "(no content)"},
+        ],
+        "stream": True,
+        "system": "second system",
+        "top_k": 20,
+    }
+
+
+async def test_no_system_message_sends_no_system_key():
+    sink: list = []
+    await _drain(_provider(sink, _text("ok")))
+    assert "system" not in sink[0]
+
+
+async def test_missing_key_and_missing_model_fail_loud(monkeypatch):
+    sink: list = []
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider(sink, _text("x")))
+    assert str(e.value) == "ANTHROPIC_API_KEY not set in environment (.env)"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-fixture")
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider(sink, _text("x"), model=""))
+    assert str(e.value) == (
+        "anthropic_backend: no `model` set — this connector does not guess "
+        "one. Name a model on the agent record (model=...)."
+    )
+    assert sink == []
+
+
+async def test_the_key_and_version_ride_the_headers():
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(dict(request.headers))
+        return httpx.Response(200, text=_text("ok"))
+
+    p = AnthropicProvider(
+        endpoint="https://anthropic.test/v1/messages",
+        model="claude-test",
+        transport=httpx.MockTransport(handler),
+    )
+    await _drain(p)
+    assert seen[0]["x-api-key"] == "sk-ant-test-fixture"
+    assert seen[0]["anthropic-version"] == "2023-06-01"
+
+
+async def test_the_retry_backoff_and_its_log_line(monkeypatch, capsys):
+    import asyncio
+
+    delays: list = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(d, *a, **kw):
+        delays.append(d)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    sink: list = []
+    p = AnthropicProvider(
+        endpoint="https://anthropic.test/v1/messages",
+        model="claude-test",
+        transport=_sequence(
+            [
+                (502, "bad gateway", "text/plain"),
+                (521, "<!DOCTYPE html>", ""),
+                (200, _text("recovered"), "text/event-stream"),
+            ],
+            sink,
+        ),
+    )
+    assert await _drain(p) == "recovered"
+    assert len(sink) == 3
+    assert delays == [1.5, 3.0]
+    out = capsys.readouterr().out
+    assert "[anthropic] 502 (text/plain) — transport error, retry 1/2" in out
+    assert "[anthropic] 521 (no content-type) — transport error, retry 2/2" in out
+
+
+async def test_the_wire_trace_prints_what_left_and_what_came_back(monkeypatch, capsys):
+    monkeypatch.setenv("FANTASTIC_AI_WIRE", "1")
+    await _drain(_provider([], _text("hi")))
+    out = capsys.readouterr().out
+    assert "[wire] -> max_tokens=8192 tools=0 msgs=1" in out
+    assert "[wire] <- stop_reason='end_turn' blocks=['text']" in out

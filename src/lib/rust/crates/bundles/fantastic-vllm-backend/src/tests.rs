@@ -649,3 +649,107 @@ async fn a_refused_key_names_the_variable() {
 fn the_schema_names_the_key_var() {
     assert_eq!(record_schema()["key_var"], json!("VLLM_API_KEY"));
 }
+
+// ─── STEP-4 PINS (2026-10-01) ────────────────────────────────────────────────
+
+/// The unknown-type reply, as TEXT — a bare `{error}`; key order is wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    let id = unique_id(&tmp);
+    let r = create(
+        &kernel,
+        json!({"id": id, "endpoint": format!("http://{id}.test/v1"), "model": "m",
+               "max_tokens": 8000, "kv_slots": 2, "kv_overflow": "evict",
+               "memory_store_id": "memory"}),
+    )
+    .await;
+    assert_eq!(r["id"], json!(id), "{r}");
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from(id.as_str()),
+            json!({"type": "frob"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"vllm_backend: unknown type 'frob'"}"#
+    );
+}
+
+/// The per-agent `last_thinking_budget` is THIS agent's (a sibling of the same
+/// kind reads null), and `on_delete` frees it: an agent re-created under the
+/// same id starts with none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_last_budget_is_per_agent_and_freed_on_delete() {
+    let (_server, endpoint) = server_with(
+        sse(&[delta(Some("stop"), json!({"content": "ok"}))], true),
+        200,
+    )
+    .await;
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    let id = unique_id(&tmp);
+    let sib = format!("{id}_sib");
+    let memory =
+        fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": "*"})).await;
+    let mut meta = json!({"id": id, "endpoint": endpoint, "model": "m", "max_tokens": 8000,
+                          "kv_slots": 4, "kv_overflow": "evict"});
+    for (k, v) in memory {
+        meta[k] = v;
+    }
+    let r = create(&kernel, meta.clone()).await;
+    assert_eq!(r["id"], json!(id), "{r}");
+    let r = create(
+        &kernel,
+        json!({"id": sib, "endpoint": endpoint, "model": "m", "max_tokens": 8000,
+               "kv_slots": 4, "kv_overflow": "evict", "memory_store_id": "memory"}),
+    )
+    .await;
+    assert_eq!(r["id"], json!(sib), "{r}");
+    let last = |who: String| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    AgentId::from(who.as_str()),
+                    json!({"type": "reflect"}),
+                )])
+                .await
+                .remove(0)
+                .result["last_thinking_budget"]
+                .clone()
+        }
+    };
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(id.as_str()),
+            json!({"type": "send", "text": "hi", "client_id": "t", "reply_to": null}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out["response"], json!("ok"), "{out}");
+    let mine = last(id.clone()).await;
+    assert!(mine.is_i64(), "the pass recorded what it sent: {mine}");
+    assert_eq!(
+        last(sib.clone()).await,
+        Value::Null,
+        "a sibling shares nothing"
+    );
+    let gone = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "delete_agent", "id": id}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(gone.get("error").is_none(), "{gone}");
+    let r = create(&kernel, meta).await;
+    assert_eq!(r["id"], json!(id), "{r}");
+    assert_eq!(last(id.clone()).await, Value::Null, "freed on delete");
+}

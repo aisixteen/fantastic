@@ -1307,3 +1307,148 @@ fn a_fire_carries_the_stored_timeout_raw() {
     let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "timeout": null}));
     assert!(item.raw_timeout.is_none());
 }
+
+/// STEP-4 PIN (2026-10-01): the scheduler's unknown type is a BARE `{error}`
+/// over python's repr of the RAW value. Compared as text (key order is wire).
+#[tokio::test]
+async fn unknown_type_wire_shape_is_byte_exact() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "frob"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"scheduler: unknown type 'frob'"}"#
+    );
+    let r = SchedulerBundle
+        .handle(&sch, &json!({}), &kernel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"error":"scheduler: unknown type None"}"#
+    );
+}
+
+/// STEP-4 PIN (2026-10-01): a schedule id is python's
+/// `f"sch_{secrets.token_hex(3)}"` — 6 LOWERCASE hex, random per schedule.
+#[tokio::test]
+async fn schedule_ids_are_sch_and_token_hex_3() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..8 {
+        let r = kernel
+            .send(vec![Item::new(
+                sch.clone(),
+                json!({"type": "schedule", "target": "kernel_state",
+                       "payload": {"type": "list_agents"}, "interval_seconds": 3600}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        let sid = r["schedule_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{r}"))
+            .to_string();
+        let tail = sid.strip_prefix("sch_").unwrap_or_else(|| panic!("{sid}"));
+        assert_eq!(tail.len(), 6, "{sid}");
+        assert!(
+            tail.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "{sid}"
+        );
+        seen.insert(sid);
+    }
+    assert_eq!(seen.len(), 8, "ids repeat: {seen:?}");
+}
+
+/// STEP-4 PIN (2026-10-01): per-agent state. Two schedulers of the same kind
+/// share nothing (schedules, tick loop); `delete_agent` stops the deleted one's
+/// tick loop and frees its slot, and the survivor keeps running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_schedulers_share_nothing_and_delete_frees_only_its_own() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let b = AgentId::from(format!("{}_b", a.as_str()).as_str());
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": HANDLER_MODULE, "id": b.as_str(), "tick_sec": 0.1}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
+    let ask = |who: AgentId, payload: Value| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            kernel
+                .send(vec![Item::new(who, payload)])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    let r = ask(
+        a.clone(),
+        json!({"type": "schedule", "target": "kernel_state",
+               "payload": {"type": "list_agents"}, "interval_seconds": 3600}),
+    )
+    .await;
+    assert!(r["schedule_id"].is_string(), "{r}");
+    assert_eq!(
+        ask(a.clone(), json!({"type": "list"})).await["schedules"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        ask(b.clone(), json!({"type": "list"})).await["schedules"],
+        json!([])
+    );
+    assert_eq!(
+        ask(a.clone(), json!({"type": "reflect"})).await["running"],
+        json!(true)
+    );
+    assert_eq!(
+        ask(b.clone(), json!({"type": "reflect"})).await["running"],
+        json!(true)
+    );
+    let loops = |who: &AgentId| {
+        kernel
+            .tasks
+            .rows()
+            .iter()
+            .filter(|r| r["verb"] == "tick_loop" && r["agent"] == who.as_str())
+            .count()
+    };
+    assert_eq!(loops(&a), 1);
+    assert_eq!(loops(&b), 1);
+    let gone = ask(
+        AgentId::from("kernel_state"),
+        json!({"type": "delete_agent", "id": a.as_str()}),
+    )
+    .await;
+    assert!(gone.get("error").is_none(), "{gone}");
+    assert_eq!(
+        loops(&a),
+        0,
+        "delete stopped the deleted scheduler's tick loop"
+    );
+    assert_eq!(loops(&b), 1, "the survivor keeps ticking");
+    assert_eq!(
+        ask(b.clone(), json!({"type": "reflect"})).await["running"],
+        json!(true)
+    );
+    assert!(
+        SCHEDULE_CACHE.lock().get(&a).is_none(),
+        "the deleted one's cache is gone"
+    );
+    stop_tick(&kernel, &b).await;
+}
