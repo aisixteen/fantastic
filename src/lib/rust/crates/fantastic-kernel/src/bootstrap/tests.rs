@@ -38,8 +38,11 @@ impl Bundle for Noop {
 #[test]
 fn bootstrap_creates_root_on_virgin_workdir() {
     let tmp = TempDir::new().unwrap();
-    let booted =
-        bootstrap(BundleRegistry::new(), BootstrapOptions::daemon(tmp.path())).expect("boot");
+    let booted = bootstrap(
+        with_loader(BundleRegistry::new()),
+        BootstrapOptions::daemon(tmp.path()),
+    )
+    .expect("boot");
     assert!(booted.kernel.root().is_some());
     assert_eq!(booted.kernel.root().unwrap().id.0, "kernel_state");
     assert!(tmp.path().join(".fantastic/agent.yaml").exists());
@@ -93,10 +96,14 @@ fn bootstrap_hydrates_persisted_children() {
 fn bootstrap_one_shot_does_not_acquire_lock() {
     let tmp = TempDir::new().unwrap();
     // First boot acquires.
-    let _b1 = bootstrap(BundleRegistry::new(), BootstrapOptions::daemon(tmp.path())).unwrap();
+    let _b1 = bootstrap(
+        with_loader(BundleRegistry::new()),
+        BootstrapOptions::daemon(tmp.path()),
+    )
+    .unwrap();
     // One-shot must NOT contend with the held lock.
     let opts = BootstrapOptions::one_shot(tmp.path());
-    let booted = bootstrap(BundleRegistry::new(), opts).expect("one-shot ok");
+    let booted = bootstrap(with_loader(BundleRegistry::new()), opts).expect("one-shot ok");
     assert!(booted.kernel.root().is_some());
     shutdown(tmp.path()).unwrap();
 }
@@ -112,8 +119,11 @@ fn bootstrap_weak_loads_unknown_handler_modules() {
         r#"{"id":"ghost_1","handler_module":"unknown.tools","parent_id":"kernel_state"}"#,
     )
     .unwrap();
-    let booted =
-        bootstrap(BundleRegistry::new(), BootstrapOptions::daemon(tmp.path())).expect("boot");
+    let booted = bootstrap(
+        with_loader(BundleRegistry::new()),
+        BootstrapOptions::daemon(tmp.path()),
+    )
+    .expect("boot");
     // Skipped — ghost_1 not registered.
     assert!(!booted.kernel.agents.contains_key(&AgentId::from("ghost_1")));
     // Record still on disk for the next runtime.
@@ -322,4 +332,102 @@ fn the_root_records_next_id_resumes_the_counter_and_the_load_writes_nothing() {
         "no tape is ever written"
     );
     shutdown(tmp.path()).unwrap();
+}
+
+/// python `_bootstrap` is `kernel.load(read_tree(…))`, and `load` VALIDATES
+/// before it builds: a record on disk with an id `create_agent` would refuse,
+/// a reserved key, or a duplicate refuses the boot instead of loading as-is.
+#[test]
+fn bootstrap_refuses_a_tree_that_fails_validation() {
+    for (dir, body, want) in [
+        (
+            "kernel",
+            "id: kernel\n",
+            "record 'kernel': load: id ",
+        ),
+        (
+            "rp",
+            "id: rp\nroot_path: /elsewhere\n",
+            "record 'rp' carries reserved key(s) ['root_path'] — these are Agent constructor parameters",
+        ),
+        ("seven", "id: 7\n", "record 7: load: id must be a non-empty string"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let at = tmp.path().join(".fantastic/agents").join(dir);
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join("agent.yaml"), body).unwrap();
+        let err = match bootstrap(
+            with_loader(BundleRegistry::new()),
+            BootstrapOptions::one_shot(tmp.path()),
+        ) {
+            Ok(_) => panic!("{dir}: a bad tree booted"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains(want), "{dir}: {err}");
+    }
+    // A duplicate id across two dirs.
+    let tmp = TempDir::new().unwrap();
+    for dir in ["one", "two"] {
+        let at = tmp.path().join(".fantastic/agents").join(dir);
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join("agent.yaml"), "id: twin\n").unwrap();
+    }
+    let err = bootstrap(
+        with_loader(BundleRegistry::new()),
+        BootstrapOptions::one_shot(tmp.path()),
+    )
+    .err()
+    .expect("a duplicate refuses the boot")
+    .to_string();
+    assert!(
+        err.contains("duplicate agent id 'twin' in snapshot"),
+        "{err}"
+    );
+}
+
+/// python `Kernel.load` reads `children_dir` off the ROOT record and every
+/// agent's address follows it: hydration walks `<root>/<children_dir>/`, and a
+/// child created later lands under it too.
+#[test]
+fn the_root_records_children_dir_places_the_whole_tree() {
+    let tmp = TempDir::new().unwrap();
+    let fantastic = tmp.path().join(".fantastic");
+    std::fs::create_dir_all(fantastic.join("host_agents/web")).unwrap();
+    std::fs::write(
+        fantastic.join("agent.yaml"),
+        "id: kernel_state\nhandler_module: kernel_state.tools\nchildren_dir: host_agents\n",
+    )
+    .unwrap();
+    std::fs::write(fantastic.join("host_agents/web/agent.yaml"), "id: web\n").unwrap();
+    let mut reg = with_loader(BundleRegistry::new());
+    reg.register("noop.tools", Noop);
+    let booted = bootstrap(reg, BootstrapOptions::one_shot(tmp.path())).expect("boot");
+    let kernel = Arc::clone(&booted.kernel);
+    let web = kernel
+        .agents
+        .get(&AgentId::from("web"))
+        .map(|e| Arc::clone(&e));
+    let web = web.expect("hydrated from host_agents/");
+    assert_eq!(web.root_path, fantastic.join("host_agents/web"));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "create_agent", "parent_id": "web", "id": "leaf",
+                       "handler_module": "noop.tools"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["id"], "leaf", "{r}");
+    });
+    let leaf = kernel
+        .agents
+        .get(&AgentId::from("leaf"))
+        .map(|e| e.root_path.clone());
+    assert_eq!(
+        leaf,
+        Some(fantastic.join("host_agents/web/host_agents/leaf"))
+    );
 }

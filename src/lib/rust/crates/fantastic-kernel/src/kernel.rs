@@ -15,7 +15,7 @@ use crate::storage::StorageMode;
 use crate::tasks::TaskTable;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -178,7 +178,15 @@ pub struct Kernel {
     /// ordinary outcome. A TRANSPORT registers the peer it is connected to and
     /// unregisters it when the connection ends. See [`crate::peers`].
     pub(crate) peers: crate::peers::PeerTable,
+    /// The on-disk children-container dir name — `<agent>/<children_dir>/<child>`
+    /// for EVERY agent of this tree. The root record declares it (a
+    /// self-describing layout sets e.g. `host_agents`); [`Self::load`] reads it,
+    /// default `agents`. Python `Kernel.children_dir`.
+    children_dir: RwLock<String>,
 }
+
+/// The children-container dir name when the root record declares none.
+pub const DEFAULT_CHILDREN_DIR: &str = "agents";
 
 /// One bound for every agent's `shutdown` dispatch. Python
 /// `Kernel.SHUTDOWN_VERB_TIMEOUT`.
@@ -242,7 +250,24 @@ impl Kernel {
             exec: crate::executions::ExecState::default(),
             extensions: DashMap::new(),
             peers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            children_dir: RwLock::new(DEFAULT_CHILDREN_DIR.to_string()),
         }
+    }
+
+    /// The children-container dir name of this tree (python `ctx.children_dir`).
+    #[must_use]
+    pub fn children_dir_name(&self) -> String {
+        self.children_dir
+            .read()
+            .expect("children_dir poisoned")
+            .clone()
+    }
+
+    /// Where `agent`'s children live — python `Agent._children_dir()`:
+    /// `<root_path>/<ctx.children_dir>`.
+    #[must_use]
+    pub fn children_dir_of(&self, agent: &Agent) -> PathBuf {
+        agent.root_path.join(self.children_dir_name())
     }
 
     /// The bundle state kept ON this kernel under `key`, created on first use.
@@ -500,8 +525,13 @@ impl Kernel {
                             .with_timeout(SHUTDOWN_VERB_TIMEOUT)
                     })
                     .collect();
-                // EXEMPT FROM THE DRAIN GATE: this IS the shutdown.
-                let outs = crate::send::with_shutdown(self.send(items)).await;
+                // EXEMPT FROM THE DRAIN GATE: this IS the shutdown. And UNGATED:
+                // python sends under `shutdown_context(), operator_context()`, so
+                // every advertising agent is told at any depth — reached through
+                // the kernel verb, the sender would otherwise be the ROOT, whose
+                // baseline grant does not reach a grandchild.
+                let outs =
+                    crate::send::with_shutdown(crate::send::with_operator(self.send(items))).await;
                 for (id, o) in targets.iter().zip(outs.iter()) {
                     if o.status == crate::outcome::Status::Completed {
                         shut.push(id.0.clone());
@@ -568,9 +598,9 @@ impl Kernel {
 
     /// Resolve a `send`-style operand end to end: `"kernel"` names the root;
     /// otherwise a literal id. `None` when it names no live agent. The ONE place
-    /// `send`'s target, `send_with_binary`'s target, `create_agent`'s
-    /// `parent_id` and the gate's operand resolution all go through, so the
-    /// four cannot drift on what "the same id" resolves to.
+    /// `send`'s target (text or binary item), `create_agent`'s `parent_id` and
+    /// the gate's operand resolution all go through, so they cannot drift on
+    /// what "the same id" resolves to.
     #[must_use]
     pub fn resolve_target(&self, raw_id: &str) -> Option<Arc<Agent>> {
         if raw_id == "kernel" {
@@ -712,10 +742,10 @@ impl Kernel {
     /// kernels produce equal output for equal in-memory state — the
     /// medium difference is irrelevant here.
     ///
-    /// Pure read; walks the registry in REGISTRATION ORDER (python's dict
-    /// order), so [`Self::save_json`] is byte-deterministic for equal kernel
-    /// state. Ephemeral agents are skipped (they're per-process composition,
-    /// never round-trip through a snapshot).
+    /// Pure read; the records are SORTED BY ID (python `save`'s
+    /// `records.sort(key=id)`), so [`Self::save_json`] is byte-deterministic for
+    /// equal kernel state. Ephemeral agents are skipped (they're per-process
+    /// composition, never round-trip through a snapshot).
     pub fn save(&self) -> KernelState {
         // TRANSITIVELY. Dropping only the ephemeral agent ITSELF left its
         // children behind as orphans — records whose `parent_id` names an agent
@@ -749,12 +779,14 @@ impl Kernel {
                 }
             }
         };
-        let agents: Vec<_> = self
+        let mut agents: Vec<_> = self
             .agent_ids()
             .into_iter()
             .filter(|id| !dropped.contains(id))
             .filter_map(|id| self.agents.get(&id).map(|e| e.value().record()))
             .collect();
+        // python `records.sort(key=lambda r: r["id"])`.
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
         KernelState {
             version: CURRENT_VERSION,
             agents,
@@ -773,7 +805,7 @@ impl Kernel {
     /// rebuilds from the snapshot.
     ///
     /// Does NOT fire `boot` hooks — matches the existing
-    /// `persistence::load_children` semantics. The bootstrap caller
+    /// bootstrap's own semantics. The bootstrap caller
     /// dispatches `{type:"boot"}` to whichever agents need it
     /// (typically the web agent, or a bundle that boots paired agents,
     /// etc.). For brain-kernel-style snapshot reload, the consumer
@@ -798,105 +830,41 @@ impl Kernel {
                 state.version, CURRENT_VERSION
             )));
         }
+        let records: Vec<Map<String, Value>> = state
+            .agents
+            .iter()
+            .filter_map(|r| crate::jsonsafe::record_value(r).as_object().cloned())
+            .collect();
+        self.load_records(records)
+    }
 
-        // Validate: every parent_id must point at a record in the
-        // snapshot, exactly one record must have parent_id == None
-        // (the root), every id must be unique.
-        let mut roots = 0;
-        let mut ids_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for rec in &state.agents {
-            // RESERVED KEYS ARE REFUSED HERE — before anything is torn down.
-            // These name substrate wiring, not agent meta, and a hand-authored
-            // `root_path:` once cleared the whole tree and THEN raised: the
-            // kernel was bricked by a field that looked like configuration.
-            // Validation before teardown is what makes a bad document a no-op.
-            for k in crate::agent::RESERVED_RECORD_KEYS {
-                if rec.meta.contains_key(k) {
-                    return Err(KernelError::InvalidSnapshot(format!(
-                        "record {:?} carries reserved key {k:?} — that names substrate \
-                         wiring, not agent meta",
-                        rec.id
-                    )));
-                }
-            }
-            // THE SAME ID RULE AS A CREATE: a record edited on disk to carry the
-            // reserved `kernel`, a foreign `guid|agent`, or a path-walking id is
-            // refused here, before the live tree is torn down.
-            if let Some(bad) = crate::refusal::guard_agent_id("load", rec.id.as_str()) {
-                return Err(KernelError::InvalidSnapshot(format!(
-                    "record {:?}: {}",
-                    rec.id,
-                    bad.get("error").and_then(Value::as_str).unwrap_or_default()
-                )));
-            }
-            if !ids_seen.insert(rec.id.as_str()) {
-                return Err(KernelError::InvalidSnapshot(format!(
-                    "duplicate agent id {:?} in snapshot",
-                    rec.id
-                )));
-            }
-            if rec.parent_id.is_none() {
-                roots += 1;
-            }
+    /// [`Self::load`] for the RAW records a document holds — python
+    /// `Kernel.load(records)`: [`validate_records`] FIRST (a bad document is a
+    /// no-op, the live tree untouched), then the children-dir name off the root
+    /// record, then the tree rebuilt.
+    pub fn load_records(&self, records: Vec<Map<String, Value>>) -> KernelResult<()> {
+        validate_records(&records)?;
+        let mut agents: Vec<crate::agent::AgentRecord> = Vec::with_capacity(records.len());
+        for r in records {
+            let rec: crate::agent::AgentRecord = serde_json::from_value(Value::Object(r))
+                .map_err(|e| KernelError::InvalidSnapshot(e.to_string()))?;
+            agents.push(rec);
         }
-        if roots == 0 {
-            return Err(KernelError::InvalidSnapshot(
-                "snapshot has no root (no record with parent_id == null)".to_string(),
-            ));
-        }
-        if roots > 1 {
-            return Err(KernelError::InvalidSnapshot(format!(
-                "snapshot has {roots} roots; expected exactly one"
-            )));
-        }
-        for rec in &state.agents {
-            if let Some(pid) = &rec.parent_id {
-                if !ids_seen.contains(pid.as_str()) {
-                    return Err(KernelError::InvalidSnapshot(format!(
-                        "agent {:?} parent {:?} not in snapshot",
-                        rec.id, pid
-                    )));
-                }
-            }
-        }
-        // REACHABILITY. Every parent resolving is not enough: a CYCLE
-        // (a -> b -> a) resolves on both ends and is unreachable from the root,
-        // so those records were dropped mid-hydration and reported afterwards —
-        // by which point the old tree was already gone. Caught HERE, with the
-        // other pre-teardown checks, so a bad snapshot is a no-op.
-        {
-            let mut kids: std::collections::HashMap<&str, Vec<&str>> =
-                std::collections::HashMap::new();
-            let mut root_id: &str = "";
-            for rec in &state.agents {
-                match &rec.parent_id {
-                    Some(p) => kids.entry(p.as_str()).or_default().push(rec.id.as_str()),
-                    None => root_id = rec.id.as_str(),
-                }
-            }
-            let mut reached: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            let mut stack = vec![root_id];
-            while let Some(node) = stack.pop() {
-                if !reached.insert(node) {
-                    continue;
-                }
-                if let Some(cs) = kids.get(node) {
-                    stack.extend(cs.iter().copied());
-                }
-            }
-            let mut orphans: Vec<&str> = ids_seen
-                .iter()
-                .copied()
-                .filter(|id| !reached.contains(id))
-                .collect();
-            if !orphans.is_empty() {
-                orphans.sort_unstable();
-                return Err(KernelError::InvalidSnapshot(format!(
-                    "snapshot has {} record(s) unreachable from the root {root_id:?} \
-                     (a cycle or an orphaned parent chain): {orphans:?}",
-                    orphans.len()
-                )));
-            }
+        let state = KernelState {
+            version: CURRENT_VERSION,
+            agents,
+        };
+        // The root record declares this tree's children-dir name (default
+        // "agents") — set BEFORE the build, since every agent derives its
+        // address from it.
+        if let Some(root) = state.agents.iter().find(|r| r.parent_id.is_none()) {
+            *self.children_dir.write().expect("children_dir poisoned") = root
+                .meta
+                .get("children_dir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_CHILDREN_DIR)
+                .to_string();
         }
 
         // Drop the current tree. Inboxes close as their senders are
@@ -978,10 +946,8 @@ impl Kernel {
                     (Some(disk), None) => disk.clone(),
                     // Disk child — reuse parent's already-composed
                     // root_path so we get `<disk>/agents/<id1>/agents/<id2>/...`.
-                    (Some(_), Some(pid)) => by_id
-                        .get(pid)
-                        .expect("parent processed before child")
-                        .children_dir()
+                    (Some(_), Some(pid)) => self
+                        .children_dir_of(by_id.get(pid).expect("parent processed before child"))
                         .join(&rec.id),
                     // InMemory — root_path is never read; empty sentinel.
                     (None, _) => PathBuf::new(),
@@ -1048,7 +1014,7 @@ impl Kernel {
             .into_iter()
             .filter_map(|id| self.agents.get(&id).map(|e| Arc::clone(&e)))
             .map(|a| {
-                let name = a.display_name().unwrap_or_else(|| a.id.0.clone());
+                let name = a.name_or_id();
                 json!({
                     "agent_id": a.id.0,
                     "name": name,
@@ -1061,3 +1027,115 @@ impl Kernel {
 
 #[cfg(test)]
 mod tests;
+
+/// Validate a flat record list before anything is torn down; `Ok` names the one
+/// root. Python `kernel/_state.py` `validate_records`, check for check and text
+/// for text: a falsy id, the id rule a create applies (`guard_agent_id`), the
+/// reserved keys (sorted), a duplicate, not exactly one root, a parent outside
+/// the set, and records unreachable from the root.
+///
+/// # Errors
+/// [`KernelError::InvalidSnapshot`] carrying python's `SnapshotError` text.
+pub fn validate_records(records: &[Map<String, Value>]) -> KernelResult<String> {
+    use fantastic_bundle::{py_repr, py_repr_value, py_truthy};
+    let bad = |m: String| Err(KernelError::InvalidSnapshot(m));
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut roots: Vec<String> = Vec::new();
+    for r in records {
+        let Some(rid) = r.get("id").filter(|v| py_truthy(v)) else {
+            return bad("snapshot record missing id".to_string());
+        };
+        // THE SAME ID RULE AS A CREATE: a record edited on disk to carry the
+        // reserved `kernel`, a foreign `guid|agent`, or a path-walking id is
+        // refused here, before the live tree is torn down.
+        if let Some(refused) = crate::refusal::guard_agent_id("load", rid.as_str().unwrap_or("")) {
+            return bad(format!(
+                "record {}: {}",
+                py_repr_value(rid),
+                refused
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            ));
+        }
+        let rid = rid
+            .as_str()
+            .expect("guard_agent_id passed a str")
+            .to_string();
+        // RESERVED KEYS: constructor parameters, not meta.
+        let mut reserved: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS
+            .iter()
+            .copied()
+            .filter(|k| r.contains_key(*k))
+            .collect();
+        if !reserved.is_empty() {
+            reserved.sort_unstable();
+            let listed: Vec<String> = reserved.iter().map(|k| py_repr(k)).collect();
+            return bad(format!(
+                "record {} carries reserved key(s) [{}] — these are Agent constructor \
+                 parameters, not meta; the tree lives where its document lives and is \
+                 never named in a record",
+                py_repr(&rid),
+                listed.join(", ")
+            ));
+        }
+        if !ids.insert(rid.clone()) {
+            return bad(format!("duplicate agent id {} in snapshot", py_repr(&rid)));
+        }
+        if r.get("parent_id").is_none_or(Value::is_null) {
+            roots.push(rid);
+        }
+    }
+    if roots.is_empty() {
+        return bad("snapshot has no root (no record with parent_id == null)".to_string());
+    }
+    if roots.len() > 1 {
+        return bad(format!(
+            "snapshot has {} roots; expected exactly one",
+            roots.len()
+        ));
+    }
+    for r in records {
+        if let Some(pid) = r.get("parent_id").filter(|p| !p.is_null()) {
+            if !pid.as_str().is_some_and(|p| ids.contains(p)) {
+                return bad(format!(
+                    "agent {} parent {} not in snapshot",
+                    py_repr_value(r.get("id").unwrap_or(&Value::Null)),
+                    py_repr_value(pid)
+                ));
+            }
+        }
+    }
+    // REACHABILITY. A CYCLE (a -> b -> a) resolves on both ends and is
+    // unreachable from the root; caught here, with the other pre-teardown checks.
+    let mut kids: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for r in records {
+        if let Some(p) = r.get("parent_id").and_then(Value::as_str) {
+            let id = r.get("id").and_then(Value::as_str).unwrap_or_default();
+            kids.entry(p.to_string()).or_default().push(id.to_string());
+        }
+    }
+    let mut reached: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stack = vec![roots[0].clone()];
+    while let Some(node) = stack.pop() {
+        if !reached.insert(node.clone()) {
+            continue;
+        }
+        if let Some(cs) = kids.get(&node) {
+            stack.extend(cs.iter().cloned());
+        }
+    }
+    let mut orphans: Vec<&String> = ids.iter().filter(|id| !reached.contains(*id)).collect();
+    if !orphans.is_empty() {
+        orphans.sort_unstable();
+        let listed: Vec<String> = orphans.iter().map(|o| py_repr(o)).collect();
+        return bad(format!(
+            "snapshot has {} record(s) unreachable from the root {} (a cycle or an \
+             orphaned parent chain): [{}]",
+            orphans.len(),
+            py_repr(&roots[0]),
+            listed.join(", ")
+        ));
+    }
+    Ok(roots[0].clone())
+}

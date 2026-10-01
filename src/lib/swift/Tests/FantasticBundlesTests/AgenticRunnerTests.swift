@@ -247,7 +247,7 @@ private func operatorSend(_ k: Kernel, _ target: String, _ payload: JSON) async 
 /// verbs are gone. Mirrors python `_engine.py`: for a write, `bytes_utf8` becomes
 /// the raw blob; for a read, the returned blob folds back into the reply's
 /// `bytes` field (utf-8) so a `contains: {bytes: ...}` matcher can see it. The
-/// gate still applies — `sendWithBinary` honours the two-sided call gate when a
+/// gate still applies — the batch send honours the two-sided call gate when a
 /// sender is set.
 private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, payload: JSON) async
     -> JSON
@@ -263,7 +263,7 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
                 header = .object(o)
             }
             let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
-            return await k.sendWithBinary(AgentId(target), header, blob).0
+            return await k.send([Item(AgentId(target), header, binary: blob)])[0].result
         }
         switch payload["type"].asString ?? "" {
         case "write_stream":
@@ -273,9 +273,10 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
                 header = .object(o)
             }
             let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
-            return await k.sendWithBinary(AgentId(target), header, blob).0
+            return await k.send([Item(AgentId(target), header, binary: blob)])[0].result
         case "read_stream":
-            let (reply, body) = await k.sendWithBinary(AgentId(target), payload, Data())
+            let out = await k.send([Item(AgentId(target), payload, binary: Data())])[0]
+            let (reply, body) = (out.result, out.body)
             if case .object(var o) = reply {
                 o["bytes"] = .string(String(data: body ?? Data(), encoding: .utf8) ?? "")
                 return .object(o)

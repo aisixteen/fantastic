@@ -155,6 +155,25 @@ struct BootstrapTests {
         }
     }
 
+    /// python reads the tree ONLY from the `agent.yaml` records: a
+    /// `.fantastic/state.json` left in the workdir is never loaded over it.
+    @Test func aStateJsonIsNeverLoadedOverTheTree() async throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dot = tmp.appendingPathComponent(".fantastic")
+        try FileManager.default.createDirectory(at: dot, withIntermediateDirectories: true)
+        let snapshot =
+            #"{"version":1,"records":[{"id":"kernel_state"},"#
+            + #"{"id":"ghost","parent_id":"kernel_state"}]}"#
+        try snapshot.write(
+            to: dot.appendingPathComponent("state.json"), atomically: true, encoding: .utf8)
+        let (kernel, lock) = try await Bootstrap.daemon(workdir: tmp.path)
+        defer { lock.release() }
+        #expect(kernel.agent(AgentId("ghost")) == nil, "state.json was loaded over the tree")
+        let probe = try await Bootstrap.oneShot(workdir: tmp.path)
+        #expect(probe.agent(AgentId("ghost")) == nil, "state.json was loaded over the tree")
+    }
+
     @Test func oneShotDoesNotAcquireLock() async throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -247,7 +266,7 @@ struct HydrationWalkTests {
 
         // `.disk` takes the WORKDIR; the kernel appends `.fantastic` itself.
         let kernel = Kernel(storage: .disk(tmp), bundles: BundleRegistry())
-        try kernel.load(KernelState(agents: recs))
+        try kernel.load(KernelState(records: recs))
         #expect(kernel.childrenDir == "host_agents")
         #expect(
             kernel.agent(AgentId("b"))?.rootPath.path
@@ -278,7 +297,7 @@ struct HydrationWalkTests {
     /// python's exact stderr line, and it takes its subtree with it.
     @Test func weakLoadSkipsUnknownBundleWithPythonLine() async throws {
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-        let state = KernelState(agents: [
+        let state = KernelState(records: [
             AgentRecord(id: "kernel_state", handlerModule: nil, parentId: nil),
             AgentRecord(id: "ts_thing", handlerModule: "browser.tools", parentId: "kernel_state"),
             AgentRecord(id: "under_it", handlerModule: nil, parentId: "ts_thing"),

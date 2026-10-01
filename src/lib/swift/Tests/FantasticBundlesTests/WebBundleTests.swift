@@ -291,6 +291,23 @@ struct WebBundleTests {
                 + "Set port on create_agent or via update_agent.", "\(r)")
     }
 
+    /// python binds `int(rec.port)` as named: a port outside 0-65535 fails the
+    /// bind (logged, the handle dropped) — never bound modulo 2^16.
+    @Test func webBootWithAnOutOfRangePortBindsNothing() async throws {
+        let kernel = try await startKernelInMemory(portHint: 0)
+        _ = await call(
+            kernel, "kernel_state",
+            .object([
+                "type": .string("update_agent"), "id": .string("web"), "port": .integer(70000),
+            ]))
+        let r = await call(kernel, "web", .object(["type": .string("boot")]))
+        #expect(r["running"].asBool == true, "python answers before the serve task fails: \(r)")
+        #expect(kernel.httpPort() == 0, "bound \(kernel.httpPort()) — 70000 truncated to 16 bits")
+        let refl = await call(kernel, "web", .object(["type": .string("reflect")]))
+        #expect(refl["running"].asBool == false, "\(refl)")
+        #expect(refl["port"].asInt == 70000, "\(refl)")
+    }
+
     /// A11.24 — the listener never writes `port`/`running` back into the
     /// record (swift's `list_agents` showed `running:true`).
     @Test func webBootDoesNotWriteRunningIntoRecord() async throws {

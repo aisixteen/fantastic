@@ -12,8 +12,12 @@
     /// (`[len | JSON header | raw body]`, the header's `_binary_path` naming where the
     /// body belongs) — how a `read_stream` chunk or a `write_stream` payload crosses
     /// the fd raw, never base64. A raw fd has no WS text/binary frame kind, hence the
-    /// byte. A kind-B `send` rides the kernel's binary channel (`sendWithBinary`), a
-    /// kind-T one the text channel — the same split a WS transport makes.
+    /// byte. A kind-B `send` rides the batch item's binary channel, a kind-T one the
+    /// text channel — the same split a WS transport makes.
+    ///
+    /// FRAMES ARE SERVED IN ORDER, one at a time, as python's read loop serves
+    /// them: a `send` settles (and its reply is pushed) before the next frame is
+    /// handled, and consecutive emits fan out in the order they were written.
     ///
     /// | child → parent | parent → child |
     /// |---|---|
@@ -40,10 +44,17 @@
         /// …)`). Every forwarded send/emit and every drain is parented to it, so a
         /// program's work is rowed under work that is still alive.
         private var taskId: TaskId?
-        /// Resumed once, when the socket closes — what keeps the relay's kernel task
-        /// alive for exactly as long as the child's wire is.
-        private var done: CheckedContinuation<Void, Never>?
         private var finished = false
+        /// The read source's cancel handler has run — only then may the fd close.
+        private var sourceDone = false
+        /// The frames read off the socket, in wire order, for the ONE consumer
+        /// that serves them (python's read loop). Finished at EOF or on `stop`;
+        /// a frame already read is still served.
+        private let frames: AsyncStream<(JSON, Data?)>
+        private let framesIn: AsyncStream<(JSON, Data?)>.Continuation
+        /// That consumer, so `stop` can cancel it mid-send the way python's
+        /// teardown cancels the relay task.
+        private var worker: Task<Void, Never>?
 
         /// ONE frame bound on this wire, both ends, every runtime. A corrupt length
         /// must never become a multi-GB allocation, and a program that means to move
@@ -82,6 +93,7 @@
             self.jobId = jobId
             self.kernel = kernel
             self.queue = DispatchQueue(label: "exec_bridge.relay.\(jobId)")
+            (frames, framesIn) = AsyncStream.makeStream(of: (JSON, Data?).self)
         }
 
         /// THE RELAY'S KERNEL TASK BODY (py `_serve_ctrl` under `spawn_task(id,
@@ -90,34 +102,65 @@
         /// program's `send` rows under the relay, not under the `start` dispatch that
         /// settled the instant `start` replied.
         func run(taskId: TaskId?) async {
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let started: Bool = await withCheckedContinuation { c in
                 queue.async { [weak self] in
-                    guard let self else {
-                        c.resume()
-                        return
-                    }
-                    if self.finished {
-                        c.resume()
+                    guard let self, !self.finished else {
+                        c.resume(returning: false)
                         return
                     }
                     self.taskId = taskId
-                    self.done = c
                     let src = DispatchSource.makeReadSource(fileDescriptor: self.fd, queue: self.queue)
                     src.setEventHandler { [weak self] in self?.readable() }
-                    src.setCancelHandler { [weak self] in self?.finish() }
+                    // EOF or `stop`: no more frames. The ones already read are
+                    // still served, then the consumer finishes the relay. The fd
+                    // outlives the source: it is closed once both are done.
+                    src.setCancelHandler { [weak self] in
+                        guard let self else { return }
+                        self.sourceDone = true
+                        self.framesIn.finish()
+                        if self.closed { close(self.fd) }
+                    }
                     self.source = src
                     src.resume()
+                    c.resume(returning: true)
                 }
             }
+            guard started else { return }
+            // THE ONE CONSUMER — python's read loop: each frame is served to the
+            // end before the next one starts.
+            let w = Task { [self] in
+                for await (m, blob) in frames { await serve(m, blob, relayTask: taskId) }
+            }
+            await onQueue { self.worker = w }
+            await withTaskCancellationHandler {
+                await w.value
+            } onCancel: {
+                w.cancel()
+            }
+            await onQueue { self.finish() }
         }
 
-        /// Close the socket. The child's reader then EOFs and it reaps itself.
+        /// Close the socket and stop serving — python's teardown cancels the
+        /// relay task, which ends an in-flight send with it. The child's reader
+        /// then EOFs and it reaps itself.
         func stop() {
             queue.async { [weak self] in
                 guard let self else { return }
+                self.worker?.cancel()
                 // A stop that beats `run` (a job torn down inside its own `start`)
                 // has no source to cancel, so it must finish the relay itself.
                 if let src = self.source { src.cancel() } else { self.finish() }
+            }
+        }
+
+        /// Run `body` on the relay's queue, which owns the socket and the
+        /// subscription tables, and wait for it.
+        private func onQueue(_ body: @escaping @Sendable () -> Void) async {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                queue.async {
+                    body()
+                    c.resume()
+                }
             }
         }
 
@@ -141,22 +184,22 @@
                 guard buf.count >= 4 + len else { return }
                 let body = buf.subdata(in: 4..<(4 + len))
                 buf.removeSubrange(0..<(4 + len))
-                if let f = Self.unframe(body) { handle(f.env, f.body) }
+                if let f = Self.unframe(body) { framesIn.yield((f.env, f.body)) }
                 // A malformed body skips the frame, never the connection.
             }
         }
 
-        /// Decode one child frame → (envelope, raw body). Kind `T`: JSON, empty body.
+        /// Decode one child frame → (envelope, raw body). Kind `T`: JSON, no body.
         /// Kind `B`: the io_bridge binary frame — the envelope keeps `_binary_path`
         /// (null there) and the body rides alongside, since `JSON` cannot hold bytes.
         /// `nil` for a malformed frame or an unknown kind.
-        private static func unframe(_ body: Data) -> (env: JSON, body: Data)? {
+        private static func unframe(_ body: Data) -> (env: JSON, body: Data?)? {
             guard let kind = body.first else { return nil }
             let rest = Data(body.dropFirst())
             switch kind {
             case UInt8(ascii: "T"):
-                guard let v = try? JSON.parse(rest) else { return nil }
-                return (v, Data())
+                guard let v = try? JSON.parseStrict(rest) else { return nil }
+                return (v, nil)
             case UInt8(ascii: "B"):
                 guard let f = try? Codec.decodeBinaryFrame(rest) else { return nil }
                 return (f.header, f.body)
@@ -197,6 +240,9 @@
 
         /// Write one frame: `[4-byte BE len | kind | rest]`.
         private func writeFrame(kind: UInt8, _ rest: Data) {
+            // A closed relay has no socket: its fd number may already name
+            // something else.
+            if closed { return }
             var frame = Data()
             let n = UInt32(rest.count + 1)
             frame.append(contentsOf: [
@@ -217,72 +263,76 @@
 
         // MARK: - ops
 
-        private func handle(_ m: JSON, _ blob: Data) {
+        /// Serve ONE frame to the end. `send` and `emit` run here, on the
+        /// consumer; the subscription ops touch the queue-owned tables, so they
+        /// run on the queue — and this waits for them too.
+        private func serve(_ m: JSON, _ blob: Data?, relayTask: TaskId?) async {
             guard let op = m["op"].asString, let kernel else { return }
+            // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS, UNDER THE RELAY'S TASK.
+            // The relay runs off a DispatchQueue, outside the handler's
+            // task-locals, so a forwarded send used to carry NO sender — the
+            // OPERATOR, ungated (measured live 2026-09-01: a spawned program
+            // reached any agent) — and no parent row. Python's relay is a
+            // registered task and inherits the owner's identity; re-enter both.
+            let owner = self.owner
             switch op {
             case "send":
                 let target = m["target"].asString ?? ""
                 // python `m.get("payload") or {}` — a falsy payload IS the empty
                 // object, so a program that sends nothing reaches a handler that can
                 // read `type` without raising.
-                let payload = pyTruthy(m["payload"]) ? m["payload"] : .object([:])
-                let rid = m["rid"]
+                var item = Item(
+                    AgentId(target), pyTruthy(m["payload"]) ? m["payload"] : .object([:]))
                 // A kind-B frame (bytes alongside, `_binary_path` = `payload.<field>`)
-                // is the BINARY channel — `sendWithBinary`, as a WS binary frame would
-                // be. Kind T is the text channel. `JSON` cannot carry bytes, so this
-                // split is the only way a program's `write_stream` payload reaches the
-                // bundle, or a `read_stream` chunk comes back.
-                let binary = m["_binary_path"] != .null
-                let relayTask = taskId
-                Task { [weak self] in
-                    // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS, UNDER THE RELAY'S
-                    // TASK. The relay runs off a DispatchQueue, outside the handler's
-                    // task-locals, so this forwarded send used to carry NO sender —
-                    // the OPERATOR, ungated (measured live 2026-09-01: a spawned
-                    // program reached any agent) — and no parent row. Python's relay
-                    // is a registered task and inherits the owner's identity; re-enter
-                    // both here.
-                    let owner = self?.owner
-                    let (data, body): (JSON, Data?) = await KernelTaskLocals.$currentTask
-                        .withValue(relayTask) {
-                            await KernelTaskLocals.$currentSender.withValue(owner) {
-                                if binary {
-                                    return await kernel.sendWithBinary(
-                                        AgentId(target), payload, blob)
-                                }
-                                return (
-                                    await kernel.send([Item(AgentId(target), payload)])[0].result,
-                                    nil
-                                )
-                            }
-                        }
-                    self?.queue.async {
-                        var env: JSON = .object(["op": .string("reply"), "rid": rid, "data": data])
-                        // THE CARRIER decides the frame kind, never the body's
-                        // length: a 0-byte chunk is still a chunk (C37).
-                        guard let body else {
-                            self?.push(env)
-                            return
-                        }
-                        // A `read_stream` chunk: the reply body rides raw at
-                        // `data.bytes` (python's reply dict holds it there natively).
-                        env["data"]["bytes"] = .null
-                        env["_binary_path"] = .string("data.bytes")
-                        self?.pushBinary(header: env, body: body)
+                // carries its body on the item's BINARY channel — `JSON` cannot hold
+                // bytes, so that is the only way a program's `write_stream` chunk
+                // reaches the bundle, or a `read_stream` chunk comes back.
+                // A kind-T frame is JSON and nothing more: a `_binary_path` in it
+                // is an inert key (python's `decode_frame` only `loads` a str).
+                if let blob {
+                    let (p, binary) = Codec.callPayload(m, body: blob)
+                    item.payload = pyTruthy(p) ? p : .object([:])
+                    item.binary = binary
+                }
+                let sent = item
+                let out = await KernelTaskLocals.$currentTask.withValue(relayTask) {
+                    await KernelTaskLocals.$currentSender.withValue(owner) {
+                        await kernel.send([sent])[0]
                     }
+                }
+                let rid = m["rid"]
+                await onQueue { [weak self] in
+                    var env: JSON = .object([
+                        "op": .string("reply"), "rid": rid, "data": out.result,
+                    ])
+                    // THE CARRIER decides the frame kind, never the body's
+                    // length: a 0-byte chunk is still a chunk (C37). The reply
+                    // already holds `bytes: null` where python's holds the chunk.
+                    guard let body = out.body else {
+                        self?.push(env)
+                        return
+                    }
+                    env["_binary_path"] = .string("data.bytes")
+                    self?.pushBinary(header: env, body: body)
                 }
             case "emit":
                 // A program emits on its OWNER agent — the one it runs as (python
                 // `kernel.emit(owner_id, m.get("payload") or {})`).
                 let payload = pyTruthy(m["payload"]) ? m["payload"] : .object([:])
-                let relayTask = taskId
-                Task {
-                    await KernelTaskLocals.$currentTask.withValue(relayTask) {
-                        await KernelTaskLocals.$currentSender.withValue(owner) {
-                            await kernel.emit(owner, payload)
-                        }
+                KernelTaskLocals.$currentTask.withValue(relayTask) {
+                    KernelTaskLocals.$currentSender.withValue(owner) {
+                        kernel.emitItem(owner, .text(payload))
                     }
                 }
+            default:
+                await onQueue { [weak self] in self?.subscription(op, m, kernel) }
+            }
+        }
+
+        /// The subscription ops — `watch`/`unwatch`/`onmessage`/`offmessage`.
+        /// Queue-confined: they own `subs` and `selfProxy`.
+        private func subscription(_ op: String, _ m: JSON, _ kernel: Kernel) {
+            switch op {
             case "watch":
                 guard let src = m["src"].asString, subs[src] == nil else { return }
                 // `_xb…`, not `_pyw…`: two spawner bundles in one kernel must not
@@ -415,12 +465,15 @@
             }
             subs.removeAll()
             selfProxy = nil
-            close(fd)
-            // The relay's kernel task ends with its socket — not before, not after.
+            framesIn.finish()
+            // A live read source must be cancelled before its fd closes; its
+            // cancel handler closes it then.
+            if let src = source, !sourceDone {
+                src.cancel()
+            } else {
+                close(fd)
+            }
             finished = true
-            let c = done
-            done = nil
-            c?.resume()
         }
     }
 #endif

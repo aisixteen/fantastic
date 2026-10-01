@@ -126,7 +126,7 @@ async fn empty_id_is_refused_bad_arg() {
 async fn empty_target_is_missing_arg() {
     // C30: an empty target is a coded `missing_arg`, checked FIRST — never an
     // `unknown_agent` (the empty string is not a candidate id to suggest
-    // corrections against). Also true on `send_with_binary`.
+    // corrections against). Also true for a binary item.
     let (_t, kernel) = mk();
     let out = kernel
         .send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))])
@@ -137,13 +137,16 @@ async fn empty_target_is_missing_arg() {
     assert_eq!(out.result["arg"], "target");
     assert_eq!(out.result["error"], "send: target required");
 
-    let (v, body) = kernel
-        .send_with_binary(&AgentId::from(""), json!({"type": "poke"}), vec![1, 2, 3])
-        .await;
-    assert_eq!(v["reason"], "missing_arg", "{v}");
-    assert_eq!(v["arg"], "target");
-    assert_eq!(v["error"], "send: target required");
-    assert_eq!(body, None);
+    let out = kernel
+        .send(vec![
+            Item::new(AgentId::from(""), json!({"type": "poke"})).with_binary(vec![1, 2, 3])
+        ])
+        .await
+        .remove(0);
+    assert_eq!(out.result["reason"], "missing_arg", "{}", out.result);
+    assert_eq!(out.result["arg"], "target");
+    assert_eq!(out.result["error"], "send: target required");
+    assert_eq!(out.body, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

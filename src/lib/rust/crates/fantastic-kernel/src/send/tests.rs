@@ -6,6 +6,21 @@ use crate::agent::Agent;
 use serde_json::Map;
 use std::path::Path;
 
+/// One BINARY item through the batch — the only send path; bytes ride beside
+/// the payload (`Item::with_binary`).
+async fn send_bin(
+    kernel: &Arc<Kernel>,
+    target: &AgentId,
+    payload: Value,
+    blob: Vec<u8>,
+) -> (Value, Option<Vec<u8>>) {
+    let out = kernel
+        .send(vec![Item::new(target.clone(), payload).with_binary(blob)])
+        .await
+        .remove(0);
+    (out.result, out.body)
+}
+
 fn make_agent(id: &str) -> Arc<Agent> {
     Agent::new(
         id.into(),
@@ -189,21 +204,21 @@ async fn emit_on_another_agent_needs_both_halves() {
 }
 
 #[tokio::test]
-async fn send_with_binary_missing_target_returns_error() {
+async fn a_binary_item_to_a_missing_target_is_refused() {
     let kernel = Arc::new(Kernel::new());
-    let (v, body) = kernel
-        .send_with_binary(
-            &AgentId::from("nope"),
-            json!({"type": "frob"}),
-            vec![1, 2, 3],
-        )
-        .await;
+    let (v, body) = send_bin(
+        &kernel,
+        &AgentId::from("nope"),
+        json!({"type": "frob"}),
+        vec![1, 2, 3],
+    )
+    .await;
     assert!(v["error"].as_str().unwrap_or("").contains("no agent"));
     assert_eq!(body, None);
 }
 
 #[tokio::test]
-async fn send_with_binary_routes_through_bundle_handle_binary() {
+async fn a_binary_item_routes_through_bundle_handle_binary() {
     use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
     struct EchoBytes;
     #[async_trait::async_trait]
@@ -245,13 +260,13 @@ async fn send_with_binary_routes_through_bundle_handle_binary() {
         true,
     );
     kernel.register(Arc::clone(&agent));
-    let (reply, body) = kernel
-        .send_with_binary(
-            &AgentId::from("eb"),
-            json!({"type": "ingest"}),
-            vec![0u8; 64],
-        )
-        .await;
+    let (reply, body) = send_bin(
+        &kernel,
+        &AgentId::from("eb"),
+        json!({"type": "ingest"}),
+        vec![0u8; 64],
+    )
+    .await;
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["len"], 64);
     // Symmetric channel: bytes flow back as the reply body too.
@@ -267,9 +282,13 @@ async fn binary_dispatch_refusals_match_the_text_channel() {
     let kernel = Arc::new(Kernel::new());
     let bare = make_agent("bare");
     kernel.register(Arc::clone(&bare));
-    let (v, body) = kernel
-        .send_with_binary(&AgentId::from("bare"), json!({"type": "ingest"}), vec![1])
-        .await;
+    let (v, body) = send_bin(
+        &kernel,
+        &AgentId::from("bare"),
+        json!({"type": "ingest"}),
+        vec![1],
+    )
+    .await;
     assert_eq!(v["reason"], "unhandled");
     assert_eq!(v["verb"], "ingest");
     assert_eq!(
@@ -287,13 +306,13 @@ async fn binary_dispatch_refusals_match_the_text_channel() {
         true,
     );
     kernel.register(Arc::clone(&orphan));
-    let (v, body) = kernel
-        .send_with_binary(
-            &AgentId::from("orphan_b"),
-            json!({"type": "ingest"}),
-            vec![1],
-        )
-        .await;
+    let (v, body) = send_bin(
+        &kernel,
+        &AgentId::from("orphan_b"),
+        json!({"type": "ingest"}),
+        vec![1],
+    )
+    .await;
     assert_eq!(v["reason"], "unhandled");
     assert_eq!(v["verb"], "ingest");
     assert_eq!(
@@ -348,9 +367,13 @@ async fn a_binary_bundle_error_settles_raised() {
         true,
     );
     kernel.register(Arc::clone(&agent));
-    let (v, body) = kernel
-        .send_with_binary(&AgentId::from("bm"), json!({"type": "ingest"}), vec![1])
-        .await;
+    let (v, body) = send_bin(
+        &kernel,
+        &AgentId::from("bm"),
+        json!({"type": "ingest"}),
+        vec![1],
+    )
+    .await;
     assert_eq!(v["raised"], true);
     assert!(v["error"].as_str().unwrap().contains("kaboom"));
     assert_eq!(body, None);
@@ -1559,13 +1582,13 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
         .await
         .is_none());
 
-    let (reply, _body) = kernel
-        .send_with_binary(
-            &store.id,
-            json!({"type": "write_stream", "path": "a.bin"}),
-            vec![1, 2, 3, 4, 5],
-        )
-        .await;
+    let (reply, _body) = send_bin(
+        &kernel,
+        &store.id,
+        json!({"type": "write_stream", "path": "a.bin"}),
+        vec![1, 2, 3, 4, 5],
+    )
+    .await;
     assert_eq!(reply["written"], 5);
 
     let got = rx.try_recv().expect("the watcher was mirrored");
@@ -1618,18 +1641,14 @@ async fn binary_dispatch_runs_the_same_pre_bundle_path_as_text() {
     );
     kernel.register(Arc::clone(&root));
 
-    let (reply, _) = kernel
-        .send_with_binary(&root.id, json!({"type": "reflect"}), vec![b'x'])
-        .await;
+    let (reply, _) = send_bin(&kernel, &root.id, json!({"type": "reflect"}), vec![b'x']).await;
     assert_eq!(
         reply["sentence"],
         "Fantastic kernel. Everything is reachable by sending messages to agents.",
         "the root's own identity, not the bundle's: {reply}"
     );
     // A bundle verb still routes to the bundle on this channel.
-    let (reply, _) = kernel
-        .send_with_binary(&root.id, json!({"type": "load_tree"}), vec![])
-        .await;
+    let (reply, _) = send_bin(&kernel, &root.id, json!({"type": "load_tree"}), vec![]).await;
     assert_eq!(reply["sentence"], "Disk persistence/hydration root.");
 }
 

@@ -61,6 +61,11 @@ public struct AIBackendConfig: Sendable {
     /// agent so it can read meta. Pure function — no side effects.
     public var reflectExtra: @Sendable (Agent) -> OrderedDictionary<String, JSON>
 
+    /// python `cfg.require_provider`: build the provider BEFORE the queue and
+    /// fail fast with its refusal (nvidia, no api_key). Every other backend
+    /// builds it inside the turn.
+    public var requireProvider: Bool
+
     /// Build the provider for one send. Returns `.refused(json)` to
     /// short-circuit `send` with that exact body (api_key missing), or
     /// `.provider(p)` to run. THROWS when the record lacks a connector field it
@@ -80,6 +85,7 @@ public struct AIBackendConfig: Sendable {
         reflectExtra: @escaping @Sendable (Agent) -> OrderedDictionary<String, JSON> = {
             _ in [:]
         },
+        requireProvider: Bool = false,
         makeProvider:
             @escaping @Sendable (Agent, String, Kernel) async throws -> ProviderResult
     ) {
@@ -89,6 +95,7 @@ public struct AIBackendConfig: Sendable {
         self.errorMapper = errorMapper
         self.streamWrapper = streamWrapper
         self.reflectExtra = reflectExtra
+        self.requireProvider = requireProvider
         self.makeProvider = makeProvider
     }
 }

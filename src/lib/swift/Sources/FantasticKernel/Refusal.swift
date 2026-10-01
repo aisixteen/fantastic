@@ -137,8 +137,9 @@ public enum Refusal {
             return bad(verb, "id", "a name that is not hidden; got \(pyRepr(agentId))")
         }
         // Message ids are plain integers; in prompt text an all-digit agent id
-        // would be indistinguishable from a row id. Python `guard_agent_id`.
-        if agentId.allSatisfy({ $0.isASCII && $0.isNumber }) {
+        // would be indistinguishable from a row id. Python `guard_agent_id`'s
+        // `str.isdigit()` — any Unicode digit (`²`, `١٢`), not ASCII only.
+        if pyIsDigitString(agentId) {
             return bad(
                 verb, "id",
                 "a name, not a number (message ids are ints); got \(pyRepr(agentId))")

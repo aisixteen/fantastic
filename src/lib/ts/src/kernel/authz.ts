@@ -16,6 +16,7 @@
 
 import type { Json, Payload } from "./json.ts";
 import { UNAUTHORIZED, refusal } from "./refusal.ts";
+import { pyRepr } from "./pyjson.ts";
 
 /** Verbs a WILDCARD never covers (python `_authz.PRIVILEGED_VERBS`) — only an
  *  explicit list entry names one, so a broad `$parent:"*"` can never silently
@@ -177,15 +178,30 @@ export function authorizeHeritable(
   return false;
 }
 
-/** The denial a refused edge answers with. `side` says WHICH end refused, so a
- *  caller can tell "I may not call" from "they do not accept me". */
-export function denial(side: "egress" | "ingress", senderId: string, targetId: string, verb: string): Payload {
-  const what =
-    side === "egress"
-      ? `${senderId} may not call ${targetId}`
-      : `${targetId} does not accept calls from ${senderId}`;
-  return refusal(UNAUTHORIZED, `${what} (verb '${verb}')`, {
-    hint: FROM_ABOVE,
-    extra: { side, verb },
+/** The denial a refused edge answers with (python `_gate`'s texts, verbatim).
+ *  `side` says WHICH end refused, so a caller can tell "I may not call" from
+ *  "they do not accept me". A FOREIGN caller (`<guid>|<agent>`, `foreign`) is
+ *  refused at ingress with the one remedy that applies to it — the baseline
+ *  tokens never match a foreign id, so only a NAMED entry can accept it. */
+export function denial(
+  side: "egress" | "ingress",
+  senderId: string,
+  targetId: string,
+  verb: string,
+  foreign = false,
+): Payload {
+  if (side === "egress") {
+    return refusal(UNAUTHORIZED, `${senderId} may not call ${pyRepr(verb)} on ${targetId}`, {
+      hint: FROM_ABOVE,
+      extra: { side },
+    });
+  }
+  const hint = foreign
+    ? `a foreign caller is accepted only by name: callable_by {${pyRepr(senderId)}: [...]} or ` +
+      `{'${senderId.split("|")[0] as string}|*': [...]} on ${targetId}`
+    : FROM_ABOVE;
+  return refusal(UNAUTHORIZED, `${targetId} does not accept ${pyRepr(verb)} from ${senderId}`, {
+    hint,
+    extra: { side },
   });
 }

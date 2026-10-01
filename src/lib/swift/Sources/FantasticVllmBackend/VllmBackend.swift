@@ -286,9 +286,18 @@ func vllmTransportError(
                     + "read_timeout=\(String(format: "%g", readTimeout))s")
         }
         if e == .cancelled { return CancellationError() }
+        // python `httpx.RemoteProtocolError`: the peer hung up without an
+        // answer — the stream sentence, whichever phase it hit.
+        if e != .remoteConnectionClosed, phase == .connect {
+            // A REQUEST the client refuses before any connection (no scheme, a
+            // bad URL, an empty host) is not a refused connection: python's
+            // httpx raises `UnsupportedProtocol`/`InvalidURL` with its own text
+            // and the turn fails on it, unmapped.
+            return error
+        }
     }
     switch phase {
-    case .connect:
+    case .connect where !(error is HTTPClientError):
         // No response head ever arrived: the connection itself failed —
         // python's `httpx.ConnectError` (a refused port, a tunnel with nothing
         // behind it).
@@ -297,8 +306,9 @@ func vllmTransportError(
             "vllm_backend: \(endpoint) refused the connection — the host is up but vLLM is "
                 + "not listening yet (it loads for ~75 s after boot), or the tunnel in front of "
                 + "it is down")
-    case .stream:
-        // The head arrived and the body broke off — python's
+    case .connect, .stream:
+        // The head arrived and the body broke off (or the peer closed with no
+        // head at all) — python's
         // `httpx.ReadError` / `RemoteProtocolError`.
         return PyError(
             "RuntimeError",

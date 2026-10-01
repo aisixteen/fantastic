@@ -6,9 +6,16 @@
 // `OrderedDictionary` reflects the source byte order, we walk the
 // bytes ourselves.
 //
-// Scope: RFC 8259 JSON. Matches what serde_json accepts at its
-// default settings. We do NOT support JSON5 / comments / trailing
-// commas — same as serde_json's strict mode.
+// Scope: RFC 8259 JSON, as python's `json.loads` reads it (strict=True):
+// a raw control character inside a string and a number off the RFC grammar
+// (`01`, `1.`, `.5`, `1.e5`) are refused. No JSON5 / comments / trailing
+// commas.
+//
+// `strict` adds what python's wire decoder (`io_bridge.loads`, owner D13)
+// refuses on top: an integer outside int64 and a number that overflows a
+// double — values another runtime would hold differently. (`NaN`/`Infinity`
+// and lone surrogates are refused in every mode: this scanner never parses
+// them.)
 
 import Foundation
 import OrderedCollections
@@ -16,10 +23,12 @@ import OrderedCollections
 struct JSONScanner {
     private let bytes: [UInt8]
     var offset: Int
+    private let strict: Bool
 
-    init(data: Data) {
+    init(data: Data, strict: Bool = false) {
         self.bytes = Array(data)
         self.offset = 0
+        self.strict = strict
     }
 
     var isAtEnd: Bool { offset >= bytes.count }
@@ -218,11 +227,15 @@ struct JSONScanner {
                         "unknown escape \\\(Character(UnicodeScalar(esc))) at offset \(offset)"
                     )
                 }
+            } else if b < 0x20 {
+                // python `json.loads` (strict=True): "Invalid control character".
+                throw JSON.SerializationError.parseFailure(
+                    "invalid control character at offset \(offset)")
             } else {
                 // Copy bytes until next significant char as UTF-8.
                 let start = offset
                 while offset < bytes.count, bytes[offset] != 0x22,
-                    bytes[offset] != 0x5C
+                    bytes[offset] != 0x5C, bytes[offset] >= 0x20
                 {
                     offset += 1
                 }
@@ -261,43 +274,57 @@ struct JSONScanner {
         return value
     }
 
+    /// RFC 8259 / python `NUMBER_RE`: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?`.
+    /// Anything that leaves the grammar — a leading zero before a digit, a
+    /// bare `.` or `e` — is refused: python's scanner stops there and the next
+    /// byte is never valid where it lands.
     private mutating func parseNumber() throws -> JSON {
         let start = offset
-        var hasFraction = false
-        var hasExponent = false
+        func isDigit(_ i: Int) -> Bool { i < bytes.count && bytes[i] >= 0x30 && bytes[i] <= 0x39 }
+        func bad() -> JSON.SerializationError {
+            .parseFailure("bad number at offset \(start)")
+        }
         if bytes[offset] == 0x2D { offset += 1 }
-        while offset < bytes.count {
-            let b = bytes[offset]
-            if b >= 0x30 && b <= 0x39 {
-                offset += 1
-            } else if b == 0x2E {
-                hasFraction = true
-                offset += 1
-            } else if b == 0x65 || b == 0x45 {
-                hasExponent = true
-                offset += 1
-                if offset < bytes.count, bytes[offset] == 0x2B || bytes[offset] == 0x2D {
-                    offset += 1
-                }
-            } else {
-                break
-            }
+        guard isDigit(offset) else { throw bad() }
+        if bytes[offset] == 0x30 {
+            offset += 1
+            if isDigit(offset) { throw bad() }
+        } else {
+            while isDigit(offset) { offset += 1 }
         }
-        let slice = bytes[start..<offset]
-        guard let str = String(bytes: slice, encoding: .ascii) else {
-            throw JSON.SerializationError.parseFailure(
-                "bad number bytes at offset \(start)")
+        var isFloat = false
+        if offset < bytes.count, bytes[offset] == 0x2E {
+            offset += 1
+            guard isDigit(offset) else { throw bad() }
+            while isDigit(offset) { offset += 1 }
+            isFloat = true
         }
-        if hasFraction || hasExponent {
+        if offset < bytes.count, bytes[offset] == 0x65 || bytes[offset] == 0x45 {
+            offset += 1
+            if offset < bytes.count, bytes[offset] == 0x2B || bytes[offset] == 0x2D { offset += 1 }
+            guard isDigit(offset) else { throw bad() }
+            while isDigit(offset) { offset += 1 }
+            isFloat = true
+        }
+        let str = String(decoding: bytes[start..<offset], as: UTF8.self)
+        if isFloat {
             guard let d = Double(str) else {
                 throw JSON.SerializationError.unsupportedNumber(str)
+            }
+            // io_bridge `_finite`: a number that overflows a double.
+            if strict && !d.isFinite {
+                throw JSON.SerializationError.parseFailure("number \(str) overflows a double")
             }
             return .double(d)
         }
         if let i = Int64(str) {
             return .integer(i)
         }
-        // Fallback to double for integers outside Int64 range.
+        // io_bridge `_int64`: an integer outside int64.
+        if strict {
+            throw JSON.SerializationError.parseFailure("integer \(str) is outside int64")
+        }
+        // Outside the wire, an integer past Int64 is held as a double.
         guard let d = Double(str) else {
             throw JSON.SerializationError.unsupportedNumber(str)
         }

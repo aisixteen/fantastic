@@ -2,8 +2,8 @@
 //
 // Mirrors Rust's `fantastic-kernel/src/bootstrap.rs`.
 //
-//   - `Bootstrap.daemon(workdir:)` — acquires lock, hydrates from
-//     state.json if present, returns a kernel ready to run forever
+//   - `Bootstrap.daemon(workdir:)` — acquires lock, hydrates the tree from
+//     its `agent.yaml` records, returns a kernel ready to run forever
 //   - `Bootstrap.oneShot(workdir:)` — no lock; for `fantastic <id>
 //     <verb>` style one-off RPC against an existing workdir
 //   - `Bootstrap.awaitStop(kernel:)` — blocks until SIGINT/SIGTERM/SIGHUP or
@@ -21,8 +21,9 @@ import Foundation
 
 public enum Bootstrap {
     /// Bootstrap a disk-backed kernel for daemon mode. Acquires the
-    /// workdir lock; throws if another process already owns it.
-    /// Hydrates from `<workdir>/.fantastic/state.json` if present.
+    /// workdir lock; throws if another process already owns it. The tree
+    /// comes ONLY from the `agent.yaml` records (`startKernel`) — python reads
+    /// no snapshot file at boot.
     public static func daemon(
         workdir: String,
         portHint: UInt16 = 0
@@ -46,42 +47,17 @@ public enum Bootstrap {
         // execution rows live in the root's memory store, which `kernel_start`
         // wires.
         let kernel = try await startKernel(workdir: workdir, portHint: portHint)
-
-        // Hydrate state from disk if present.
-        let stateFile = url.appendingPathComponent(".fantastic/state.json")
-        if let data = try? Data(contentsOf: stateFile),
-            let json = String(data: data, encoding: .utf8)
-        {
-            do {
-                try kernel.loadJSON(json)
-            } catch {
-                // Weak-load: log + continue. Don't abort daemon boot
-                // on a half-corrupted snapshot.
-                FileHandle.standardError.write(
-                    "fantastic: snapshot load failed (\(error)); booting empty\n"
-                        .data(using: .utf8) ?? Data())
-            }
-        }
-
         return (kernel, lock)
     }
 
     /// Boot a one-shot kernel against a workdir WITHOUT acquiring the
     /// lock. Used by `fantastic reflect [<id>]` and
     /// `fantastic <id> <verb>` so a running daemon can co-exist with
-    /// one-off probes. Hydrates from state.json (read-only).
+    /// one-off probes. Hydrates the tree from its `agent.yaml` records.
     public static func oneShot(
         workdir: String
     ) async throws -> Kernel {
-        let url = URL(fileURLWithPath: workdir, isDirectory: true)
-        let kernel = try await startKernel(workdir: workdir, portHint: 0)
-        let stateFile = url.appendingPathComponent(".fantastic/state.json")
-        if let data = try? Data(contentsOf: stateFile),
-            let json = String(data: data, encoding: .utf8)
-        {
-            try? kernel.loadJSON(json)
-        }
-        return kernel
+        try await startKernel(workdir: workdir, portHint: 0)
     }
 
     /// Block until an OS stop signal (SIGINT/SIGTERM/SIGHUP) arrives OR the

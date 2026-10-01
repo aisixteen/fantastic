@@ -18,12 +18,15 @@
 // handler.
 
 import type { Json, Payload } from "./json.ts";
+import type { Agent } from "./agent.ts";
 import type { Kernel } from "./kernel.ts";
 import type { Item, Outcome } from "./outcome.ts";
 import type { Exec } from "./ledger.ts";
 import { errorShaped, refused } from "./outcome.ts";
-import { BAD_ARG, DRAINING, bad, refusal, missing, unknown } from "./refusal.ts";
+import { BAD_ARG, DRAINING, TIMEOUT, refusal, missing, unknown } from "./refusal.ts";
 import { isKernelVerb } from "./kernel_verbs.ts";
+import { applyReflectFlags, reflectIdentity } from "./reflect.ts";
+import { pyRepr } from "./pyjson.ts";
 import { timers } from "./timers.ts";
 
 /** An item that reached the ledger and now needs settling. */
@@ -37,6 +40,10 @@ interface Launched {
   timeout?: number | undefined;
   /** True when this item JOINED an existing execution instead of starting one. */
   joined?: boolean;
+  /** The `kernel` reflect FAST PATH (python `_launch`): a pure identity read —
+   *  no dispatch, no task row. Unnamed it has no pid, no rows and no ledger
+   *  entry at all; named it is ledgered (dedup + join) but still has no task. */
+  identityRead?: boolean;
 }
 
 function isPlainObject(v: unknown): v is Payload {
@@ -50,7 +57,7 @@ function isPlainObject(v: unknown): v is Payload {
  */
 export function launch(k: Kernel, index: number, item: Item): Launched {
   if (!isPlainObject(item as unknown)) {
-    return { index, settled: refused(refusal(BAD_ARG, "send: item must be an object", { extra: { arg: "item" } })) };
+    return { index, settled: refused(refusal(BAD_ARG, "send: item must be a dict", { extra: { arg: "item" } })) };
   }
   const targetId = item.target;
   const payload = item.payload;
@@ -60,7 +67,9 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   if (!isPlainObject(payload)) {
     return { index, settled: refused(missing("send", "payload")) };
   }
-  const timeout = item.timeout;
+  // An explicit null is ABSENT, as python's `item.get(...)` reads it — for
+  // `timeout` and `id` alike (not for `retries`, below).
+  const timeout = item.timeout ?? undefined;
   if (
     timeout !== undefined &&
     (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0)
@@ -68,7 +77,7 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
     return {
       index,
       settled: refused(
-        refusal(BAD_ARG, `send: timeout must be a positive number of seconds, got ${JSON.stringify(timeout)}`, { extra: { arg: "timeout" } }),
+        refusal(BAD_ARG, `send: timeout must be a positive number of seconds, got ${pyRepr(timeout)}`, { extra: { arg: "timeout" } }),
       ),
     };
   }
@@ -81,47 +90,67 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   }
   const verb = payload["type"];
   if (typeof verb !== "string" || verb === "") {
-    return { index, settled: refused(bad("send", "payload.type", "a non-empty string")) };
+    return {
+      index,
+      settled: refused(
+        refusal(BAD_ARG, `send: payload.type must be a non-empty string, got ${pyRepr(verb)}`, { extra: { arg: "payload.type" } }),
+      ),
+    };
   }
 
   // The item's OWN fields are validated before anything is resolved, gated or
   // minted. A STRING id is the caller's NAME for the execution; an INT id is a
   // message id the kernel minted and can only JOIN — the kernel is the only
   // allocator.
-  const execId = item.id;
+  const execId = item.id ?? undefined;
   let joinId: number | undefined;
   let name: string | null = null;
   if (execId !== undefined) {
+    if (!(typeof execId === "string" || (typeof execId === "number" && Number.isInteger(execId)))) {
+      return {
+        index,
+        settled: refused(
+          refusal(BAD_ARG, `send: id must be a name (non-empty string) or a message id (int), got ${pyRepr(execId)}`, { extra: { arg: "id" } }),
+        ),
+      };
+    }
     if (typeof execId === "number") {
-      if (!Number.isInteger(execId) || !k.ledger.has(execId)) {
+      if (!k.ledger.has(execId)) {
         return {
           index,
           settled: refused(
-            refusal(BAD_ARG, `send: id ${JSON.stringify(execId)} names no known execution — ids are minted by the kernel and can be joined, never created`, { extra: { arg: "id" } }),
+            refusal(BAD_ARG, `send: id ${execId} names no known execution — ids are minted by the kernel and can be joined, never created`, { extra: { arg: "id" } }),
           ),
         };
       }
       joinId = execId;
-    } else if (typeof execId === "string" && execId !== "") {
+    } else {
+      if (execId === "") {
+        return { index, settled: refused(refusal(BAD_ARG, "send: id must be a non-empty name", { extra: { arg: "id" } })) };
+      }
       name = execId;
       joinId = k.ledger.resolveName(name);
-    } else {
-      return {
-        index,
-        settled: refused(
-          refusal(BAD_ARG, `send: id must be a name (non-empty string) or a message id (int), got ${JSON.stringify(execId)}`, { extra: { arg: "id" } }),
-        ),
-      };
     }
   }
-  const retries = item.retries ?? 0;
+  // `retries` absent is 0; an explicit null is NOT (python `item.get("retries", 0)`
+  // is None, and None is refused).
+  const retries: unknown = item.retries === undefined ? 0 : item.retries;
   if (typeof retries !== "number" || !Number.isInteger(retries) || retries < 0) {
     return {
       index,
       settled: refused(
-        refusal(BAD_ARG, `send: retries must be a non-negative integer, got ${JSON.stringify(retries)}`, { extra: { arg: "retries" } }),
+        refusal(BAD_ARG, `send: retries must be a non-negative int, got ${pyRepr(retries)}`, { extra: { arg: "retries" } }),
       ),
     };
+  }
+
+  // A DYING TASK REGISTERS NO NEW WORK. `cancel` marks the whole subtree before
+  // anything settles, and JS cannot abort a handler — so a killed handler runs
+  // on, and what it sends from then on would start fresh work that outlives the
+  // cancel. Its row (this attempt's, even after it left the table) says killed.
+  const own = k.currentTaskRow;
+  if (own !== null && own.killed) {
+    return { index, settled: { pid: null, status: "cancelled", result: { cancelled: true } } };
   }
 
   // WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent task in
@@ -131,7 +160,7 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // everything else is a new root and is refused before it costs an id.
   const resolvedId = k.resolveId(targetId);
   if (k.store.draining && !k.kernelTraffic) {
-    const toRoot = targetId === "kernel" || (k.rootId !== null && resolvedId === k.rootId);
+    const toRoot = targetId === "kernel" || (k.rootId !== null && targetId === k.rootId);
     const parentLive = k.currentTask !== null && k.tasks.has(k.currentTask);
     if (!(toRoot && (isKernelVerb(verb) || verb === "reflect")) && !parentLive) {
       return {
@@ -145,9 +174,11 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
 
   const target = k.get(resolvedId);
   // A target this kernel does not hold is FORWARDED over the bridge — that is
-  // federation, not an error. Only a missing target with no bridge is unknown.
-  if (target === undefined && k.bridge === null) {
-    return { index, settled: refused(unknown(resolvedId, [...k.agents.keys()])) };
+  // federation, not an error. A missing target with no bridge is unknown, and so
+  // is `<this kernel's guid>|x` for an `x` this kernel lacks: it names a LOCAL
+  // agent, never one on the host.
+  if (target === undefined && (k.bridge === null || k.ownQualified(targetId) !== null)) {
+    return { index, settled: refused(unknown(targetId, [...k.agents.keys()])) };
   }
 
   // ── CALL GATE — fully gated, two-sided, from above ───────────────
@@ -161,7 +192,7 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
     // A CALL FROM ANOTHER KERNEL reaches THIS kernel's agents only — never
     // through to the host again — and only the target's half is judged here.
     if (target === undefined) {
-      return { index, settled: refused(unknown(resolvedId, [...k.agents.keys()])) };
+      return { index, settled: refused(unknown(targetId, [...k.agents.keys()])) };
     }
     const d = k.ingressGate(origin, verb, resolvedId);
     if (d !== null) return { index, settled: refused(d) };
@@ -179,7 +210,7 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
         return {
           index,
           settled: refused(
-            refusal(BAD_ARG, `send: id ${JSON.stringify(execId)} already names an execution on '${existing.target}', not '${resolvedId}' — an id is bound to its first execution; a retry aimed elsewhere needs a new id`, { extra: { arg: "id" } }),
+            refusal(BAD_ARG, `send: id ${pyRepr(execId)} already names an execution on ${pyRepr(existing.target)}, not ${pyRepr(resolvedId)} — an id is bound to its first execution; a retry aimed elsewhere needs a new id`, { extra: { arg: "id" } }),
           ),
         };
       }
@@ -199,11 +230,19 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
     }
   }
 
+  // THE `kernel` REFLECT FAST PATH — a pure identity read, applied AFTER the
+  // gate so it is authorized like any other reflect. Nothing to cancel, so no
+  // task row; unnamed, not even an id.
+  const identityRead = targetId === "kernel" && verb === "reflect" && target !== undefined;
+  if (identityRead && name === null) {
+    return { index, target: resolvedId, payload, timeout, identityRead };
+  }
+
   // NEW: the message id is minted like any other; a name is a field on it.
   // UNNAMED work is ledgered too, under its minted id: one id space, one engine.
   const pid = k.mintId();
   const exec = openExecution(k, pid, resolvedId, verb, payload, timeout, retries, name);
-  return { index, exec, target: resolvedId, payload, timeout };
+  return { index, exec, target: resolvedId, payload, timeout, identityRead };
 }
 
 /**
@@ -245,6 +284,10 @@ function openExecution(
 /** Await one launched item to its final outcome, applying the retry budget. */
 export async function settle(k: Kernel, l: Launched): Promise<Outcome> {
   if (l.settled !== undefined) return l.settled;
+  if (l.identityRead === true && l.exec === undefined) {
+    // Unnamed `kernel` reflect: the read itself, nothing recorded.
+    return { pid: null, status: "completed", result: identityReflect(k, l) };
+  }
   const exec = l.exec as Exec;
   const named = (o: Outcome): Outcome => (exec.name !== null ? { ...o, name: exec.name } : o);
 
@@ -254,11 +297,27 @@ export async function settle(k: Kernel, l: Launched): Promise<Outcome> {
     if (l.timeout !== undefined) {
       const raced = await withTimeout(exec.promise, l.timeout);
       if (raced === TIMED_OUT) {
-        return named({ pid: exec.id, status: "timed_out", result: { error: `join timed out after ${l.timeout}s`, reason: "timeout" }, attempts: exec.attempts });
+        return named({
+          pid: exec.id,
+          status: "timed_out",
+          result: refusal(
+            TIMEOUT,
+            `send: joined execution ${exec.id} did not settle within this caller's ${l.timeout}s wait; the execution itself keeps running`,
+            { extra: { task_id: exec.id } },
+          ),
+        });
       }
       return named(raced);
     }
     return named(await exec.promise);
+  }
+
+  if (l.identityRead === true) {
+    // Named `kernel` reflect: ledgered (dedup, join, a settle row), no task.
+    const result = identityReflect(k, l);
+    const out: Outcome = { pid: exec.id, status: errorShaped(result) ? "errored" : "completed", result, attempts: 1 };
+    k.store.settle(exec, out);
+    return named(out);
   }
 
   let attempt = 0;
@@ -283,13 +342,23 @@ export async function settle(k: Kernel, l: Launched): Promise<Outcome> {
 const TIMED_OUT = Symbol("timed_out");
 const CANCELLED = Symbol("cancelled");
 
+/** The root's identity reflect, decorated for the CALLER (`k` — its roster is
+ *  gated on the caller's origin). */
+function identityReflect(k: Kernel, l: Launched): Json {
+  const root = k.get(l.target as string) as Agent;
+  return applyReflectFlags(k, root, l.payload as Payload, reflectIdentity(root, k.rootId));
+}
+
+/** `p`, or `TIMED_OUT` if it is still pending after `seconds`. Only the DEADLINE
+ *  is a timeout: a `p` that REJECTS rejects here too — a handler that raised
+ *  settles `failed`, whether or not its item carried a timeout. */
 function withTimeout<T>(p: Promise<T>, seconds: number): Promise<T | typeof TIMED_OUT> {
   const { setTimeout: set, clearTimeout: clear } = timers();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const t = set(() => resolve(TIMED_OUT), seconds * 1000);
     p.then(
       (v) => { clear(t); resolve(v); },
-      () => { clear(t); resolve(TIMED_OUT); },
+      (e: unknown) => { clear(t); reject(e); },
     );
   });
 }
@@ -318,7 +387,16 @@ async function runOnce(k: Kernel, l: Launched, pid: number, attempt: number): Pr
       // Expiry goes through the FRONT DOOR so every `on_cancel` hook runs
       // before the abort — an expiring call must unwind like any other cancel.
       k.tasks.cancel(pid);
-      return { pid, status: "timed_out", result: { error: `timed out after ${l.timeout}s`, reason: "timeout" }, attempts: attempt };
+      return {
+        pid,
+        status: "timed_out",
+        result: refusal(
+          TIMEOUT,
+          `send: ${target} ${pyRepr(verb)} exceeded its ${l.timeout}s timeout; task cancelled`,
+          { extra: { task_id: pid } },
+        ),
+        attempts: attempt,
+      };
     }
     if (result === CANCELLED || task.killed) {
       return { pid, status: "cancelled", result: { cancelled: true }, attempts: attempt };
@@ -329,8 +407,9 @@ async function runOnce(k: Kernel, l: Launched, pid: number, attempt: number): Pr
   } catch (err) {
     // A handler THROWING settles as a failed outcome — `send` itself raises
     // nothing. A thrown error that propagated would kill every sibling item in
-    // the batch for one bad handler.
-    const msg = err instanceof Error ? err.message : String(err);
+    // the batch for one bad handler. The text names the error's class first, as
+    // python's `f"{type(e).__name__}: {e}"` does.
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     return { pid, status: "failed", result: { error: msg, raised: true }, attempts: attempt };
   } finally {
     k.tasks.done(pid);
@@ -345,9 +424,9 @@ export async function runBatch(k: Kernel, items: Item[]): Promise<Outcome[]> {
   }
   if (
     k.store.storeId !== null &&
-    items.some((it) => isPlainObject(it as unknown) && it.id !== undefined)
+    items.some((it) => isPlainObject(it as unknown) && it.id !== undefined && it.id !== null)
   ) {
-    await k.store.recall(items);
+    await k.store.recall(items, k);
   }
   const launched = items.map((it, i) => launch(k, i, it));
   return Promise.all(launched.map((l) => settle(k, l)));

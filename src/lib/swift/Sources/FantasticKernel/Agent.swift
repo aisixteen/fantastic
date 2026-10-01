@@ -125,8 +125,10 @@ public final class Agent: @unchecked Sendable {
         metaValue(forKey: "description")?.asString
     }
 
+    /// python `if self._meta.get("delete_lock")` — TRUTHINESS: `1`, `"yes"`,
+    /// `"false"` (a non-empty string) and `[x]` all lock, not only JSON `true`.
     public var isDeleteLocked: Bool {
-        metaValue(forKey: "delete_lock")?.asBool ?? false
+        pyTruthy(metaValue(forKey: "delete_lock") ?? .null)
     }
 
     /// Merge keys from `patch` into `meta`. Returns the updated

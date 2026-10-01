@@ -180,16 +180,20 @@
             let jid = await start(k, "term_p", py)
             _ = await outputUntil(inbox) { $0.contains("SIZE") }
             // The mime is the caller's to state — never guessed.
-            let (missing, _) = await k.sendWithBinary(
-                AgentId("term_p"), .object(["type": "paste_image", "job_id": jid]),
-                Data([0x89, 0x50]))
+            let missing = await k.send([
+                Item(
+                    AgentId("term_p"), .object(["type": "paste_image", "job_id": jid]),
+                    binary: Data([0x89, 0x50]))
+            ])[0].result
             #expect(
                 missing["reason"] == "missing_arg" && missing["arg"] == "mime",
                 "\(missing.serialize())")
-            let (r, _) = await k.sendWithBinary(
-                AgentId("term_p"),
-                .object(["type": "paste_image", "job_id": jid, "mime": "image/png"]),
-                Data([0x89, 0x50, 0x4E, 0x47, 0x2E, 0x2E, 0x2E, 0x2E]))
+            let r = await k.send([
+                Item(
+                    AgentId("term_p"),
+                    .object(["type": "paste_image", "job_id": jid, "mime": "image/png"]),
+                    binary: Data([0x89, 0x50, 0x4E, 0x47, 0x2E, 0x2E, 0x2E, 0x2E]))
+            ])[0].result
             #expect(r["bytes"] == 8, "\(r.serialize())")
             let path = r["path"].asString ?? ""
             #expect(path.hasSuffix(".png"), "\(r.serialize())")

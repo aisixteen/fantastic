@@ -39,14 +39,6 @@ how agents are plumbed, not to find one.";
 /// `sentence` (python `_PURPOSE_KEYS`).
 const PURPOSE_KEYS: [&str; 1] = ["mode"];
 
-/// `display_name or id` — python's truthiness: an empty name is no name.
-fn display_name_or_id(target: &Agent) -> Value {
-    match target.display_name() {
-        Some(s) if !s.is_empty() => json!(s),
-        _ => json!(target.id.0),
-    }
-}
-
 // ─── keyed / tiered doc tree ───────────────────────────────────
 // The root manual is a SHORT `readme.md` orientation + a `docs/` tree of topic
 // files (nested dirs = tiers, `/` in the key). `reflect readme=index` lists the
@@ -295,7 +287,7 @@ pub fn reflect_identity(target: &Arc<Agent>) -> Value {
             .map(|s| json!(s))
             .unwrap_or(Value::Null),
     );
-    obj.insert("display_name".to_string(), display_name_or_id(target));
+    obj.insert("display_name".to_string(), json!(target.name_or_id()));
     if let Some(d) = target.description() {
         obj.insert("description".to_string(), json!(d));
     }
@@ -597,7 +589,7 @@ pub fn tree_node(target: &Agent) -> Value {
             None => Value::Null,
         },
     );
-    obj.insert("display_name".to_string(), display_name_or_id(target));
+    obj.insert("display_name".to_string(), json!(target.name_or_id()));
     if let Some(d) = target.description() {
         obj.insert("description".to_string(), json!(d));
     }

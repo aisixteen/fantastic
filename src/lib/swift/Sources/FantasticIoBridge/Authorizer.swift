@@ -174,9 +174,10 @@ public func ruleName(_ spec: JSON?, default def: String) -> String {
 ///
 /// Keyed by the field a caller WRITES (read-key == write-key). The per-direction
 /// field wins by key presence; `auth` carries a bare stem, reported as the scoped
-/// rule it resolves to — but a name that already carries its suffix
-/// (`auth: allow_all_ingress`) is kept, where scoping it again reported
-/// `allow_all_ingress_ingress`. `manifoldSpec` stays as it is: the gate uses it.
+/// rule it resolves to — python `_base._scoped` suffixes it whatever it already
+/// ends in. (The bridge engine's own reflect scopes differently: see
+/// `KernelBridgeBundle.engineRuleName`.) `manifoldSpec` stays as it is: the gate
+/// uses it.
 public func describe(_ meta: OrderedDictionary<String, JSON>) -> OrderedDictionary<String, JSON> {
     let auth = meta["auth"]
     let hasIngress = meta.keys.contains("ingress_rule")

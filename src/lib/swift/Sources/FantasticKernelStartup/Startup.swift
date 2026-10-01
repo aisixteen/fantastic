@@ -238,7 +238,7 @@ public func startKernel(
                 AgentRecord(id: rootId, handlerModule: rootHandler, parentId: nil, meta: [:]),
                 at: 0)
         }
-        let state = KernelState(agents: records)
+        let state = KernelState(records: records)
         do {
             try kernel.load(state)
         } catch {

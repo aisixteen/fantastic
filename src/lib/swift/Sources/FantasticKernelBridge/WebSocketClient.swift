@@ -66,8 +66,8 @@ public actor NIOWebSocketClient {
         }
         let isTLS = scheme == "wss"
         let port = url.port ?? (isTLS ? 443 : 80)
-        var uri = url.path.isEmpty ? "/" : url.path
-        if let q = url.query, !q.isEmpty { uri += "?\(q)" }
+        let path = url.path.isEmpty ? "/" : url.path
+        let uri = url.query.map { $0.isEmpty ? path : "\(path)?\($0)" } ?? path
 
         let inbox = WSClientInbox()
         // Exactly-once completion guard around the upgrade promise: it's
@@ -99,8 +99,8 @@ public actor NIOWebSocketClient {
                     completionHandler: { _ in signal.succeed() }
                 )
                 let requester = WSUpgradeRequester(
-                    host: host, uri: uri, subprotocols: subprotocols,
-                    authToken: authToken, signal: signal)
+                    host: Self.hostHeader(host, port: port, secure: isTLS), uri: uri,
+                    subprotocols: subprotocols, authToken: authToken, signal: signal)
                 do {
                     if isTLS {
                         let sslContext = try NIOSSLContext(
@@ -137,6 +137,14 @@ public actor NIOWebSocketClient {
             throw error
         }
         return NIOWebSocketClient(channel: channel, inbox: inbox)
+    }
+
+    /// The upgrade's `Host` — python `websockets`' `build_host` (RFC 6455 §4.1 /
+    /// RFC 3986 §3.2.2): the port rides along unless it is the scheme's
+    /// default, and an IPv6 literal is bracketed.
+    static func hostHeader(_ host: String, port: Int, secure: Bool) -> String {
+        let h = host.contains(":") ? "[\(host)]" : host
+        return port == (secure ? 443 : 80) ? h : "\(h):\(port)"
     }
 
     /// Send one text/binary message as a single masked frame.
@@ -239,7 +247,7 @@ final class WSClientInbox: @unchecked Sendable {
 /// `NIOWebSocketClientUpgrader` injects the `Upgrade`/`Connection`/
 /// `Sec-WebSocket-Key`/`-Version` headers; this only adds `Host`, a zero
 /// `Content-Length`, and any offered subprotocols.
-private final class WSUpgradeRequester: ChannelInboundHandler, RemovableChannelHandler,
+final class WSUpgradeRequester: ChannelInboundHandler, RemovableChannelHandler,
     @unchecked Sendable
 {
     typealias InboundIn = HTTPClientResponsePart
@@ -264,8 +272,8 @@ private final class WSUpgradeRequester: ChannelInboundHandler, RemovableChannelH
 
     func channelActive(context: ChannelHandlerContext) {
         var headers = HTTPHeaders()
+        // A bodiless GET: no framing header (python's `websockets` sends none).
         headers.add(name: "Host", value: host)
-        headers.add(name: "Content-Length", value: "0")
         if !subprotocols.isEmpty {
             headers.add(
                 name: "Sec-WebSocket-Protocol", value: subprotocols.joined(separator: ", "))
@@ -329,9 +337,52 @@ final class WSClientHandler: ChannelInboundHandler, @unchecked Sendable {
     private let inbox: WSClientInbox
     /// One echo per connection — a close we answered is never answered twice.
     private var closeEchoed = false
+    /// python `websockets.connect`'s keepalive (`ping_interval=20`,
+    /// `ping_timeout=20`): a ping every 20 s, and a connection whose pong does
+    /// not come back in time is failed 1011 `keepalive ping timeout` — which is
+    /// what lets a bridge see a half-open peer (`bridge_down`) before a send.
+    static let pingIntervalSeconds: Int64 = 20
+    static let pongTimeoutSeconds: Int64 = 20
+    private var keepalive: RepeatedTask?
+    private var awaitingPong = false
 
     init(inbox: WSClientInbox) {
         self.inbox = inbox
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+        keepalive = context.eventLoop.scheduleRepeatedTask(
+            initialDelay: .seconds(Self.pingIntervalSeconds),
+            delay: .seconds(Self.pongTimeoutSeconds)
+        ) { [weak self] _ in
+            guard let self else { return }
+            let ctx = bound.value
+            if self.awaitingPong {
+                self.keepalive?.cancel()
+                var reason = ctx.channel.allocator.buffer(capacity: 24)
+                reason.writeInteger(UInt16(1011))
+                reason.writeString("keepalive ping timeout")
+                let close = WebSocketFrame(
+                    fin: true, opcode: .connectionClose, maskKey: wsRandomMaskKey(), data: reason)
+                self.inbox.fail(
+                    NIOWebSocketClient.Closed(reason: "websocket: keepalive ping timeout"))
+                ctx.writeAndFlush(self.wrapOutboundOut(close)).whenComplete { _ in
+                    bound.value.close(promise: nil)
+                }
+                return
+            }
+            self.awaitingPong = true
+            let ping = WebSocketFrame(
+                fin: true, opcode: .ping, maskKey: wsRandomMaskKey(),
+                data: ctx.channel.allocator.buffer(capacity: 0))
+            ctx.writeAndFlush(self.wrapOutboundOut(ping), promise: nil)
+        }
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        keepalive?.cancel()
+        keepalive = nil
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -374,12 +425,16 @@ final class WSClientHandler: ChannelInboundHandler, @unchecked Sendable {
             context.writeAndFlush(wrapOutboundOut(echo)).whenComplete { _ in
                 bound.value.close(promise: nil)
             }
+        case .pong:
+            awaitingPong = false
         default:
-            break  // pong / continuation (aggregated away) — ignore.
+            break  // continuation (aggregated away) — ignore.
         }
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        keepalive?.cancel()
+        keepalive = nil
         inbox.fail(NIOWebSocketClient.Closed(reason: "websocket: connection closed"))
         context.fireChannelInactive()
     }

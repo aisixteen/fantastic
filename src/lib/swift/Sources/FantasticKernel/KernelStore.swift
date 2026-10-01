@@ -176,6 +176,16 @@ extension Kernel {
         return rid
     }
 
+    /// python `_json_safe` of a reply whose raw bytes ride beside it (the
+    /// outcome's body): the chunk reads `<bytes:N>`, the telemetry rule. What
+    /// the in-RAM `ledger` shows of a NAMED result before its settle row
+    /// flushes as `{len: N}`.
+    public static func jsonSafeValue(_ value: JSON, bytes: Int?) -> JSON {
+        guard let n = bytes, case .object(var map) = value else { return value }
+        map["bytes"] = .string("<bytes:\(n)>")
+        return .object(map)
+    }
+
     /// A row value with RAW BYTES reduced to their LENGTH — THE ONE REDUCTION.
     /// A store holds no raw bytes and base64 is banned, so a `write_stream` body
     /// in a call's payload and a `read_stream` chunk in a result are recorded as
@@ -251,7 +261,9 @@ extension Kernel {
                     + "`update_agent id=\(root.id.value) memory_store_id=memory`",
                 extra: [("arg", .string("memory_store_id"))])
         }
-        guard let store = resolveAgent(sid) else {
+        // A LITERAL id (python `self.agents.get(sid)`): `kernel` is the send
+        // address of the root, not an agent a store can be.
+        guard let store = agent(AgentId(sid)) else {
             var r = Refusal.unknown(sid, live: allAgents().map { $0.id.value })
             if case .object(var o) = r {
                 o["hint"] = .string("the root's `memory_store_id` names no agent in this tree")
@@ -646,11 +658,16 @@ extension Kernel {
             if let n = x.name { e["name"] = .string(n) }
             if let res = x.outcome {
                 e["status"] = .string(res.status.rawValue)
-                // THE SAME SHAPE flushed or not: what the settle row keeps.
+                // THE SAME SHAPE flushed or not: what the settle row keeps —
+                // rendered `_json_safe`, as python's in-RAM branch is, so a
+                // NAMED result's chunk reads `<bytes:N>` until it flushes as
+                // `{len: N}` (an unnamed digest counts the `{len}` form either way).
                 var o: OrderedDictionary<String, JSON> = ["pid": .integer(x.id)]
                 for (k, v) in storedOutcome(
                     status: res.status.rawValue,
-                    result: Kernel.storeValue(res.result, bytes: res.body?.count),
+                    result: x.named
+                        ? Kernel.jsonSafeValue(res.result, bytes: res.body?.count)
+                        : Kernel.storeValue(res.result, bytes: res.body?.count),
                     named: x.named)
                 {
                     o[k] = v

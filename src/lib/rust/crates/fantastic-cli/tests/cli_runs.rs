@@ -1143,8 +1143,15 @@ fn a_daemon_without_a_memory_store_does_not_start() {
         .output()
         .expect("run the daemon");
     assert!(!out.status.success(), "a root with no store must not start");
+    assert_eq!(out.status.code(), Some(1), "python's `sys.exit(1)`");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("memory_store_id"), "{stderr}");
+    // python `main_dispatch`: `print(f"[kernel] {e}")` for every RuntimeError.
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("memory_store_id"))
+        .expect("the fatal line");
+    assert!(line.starts_with("[kernel] "), "{line}");
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("[kernel] up"),
         "it never came up"

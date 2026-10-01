@@ -52,7 +52,12 @@ test("bare local agent answers reflect but errors on a domain verb", async () =>
   const refl = ((await k.send([{ target: "bare", payload: { type: "reflect" } }]))[0]!.result) as Payload;
   assert.equal(refl["id"], "bare");
   const err = ((await k.send([{ target: "bare", payload: { type: "frobnicate" } }]))[0]!.result) as Payload;
-  assert.match(String(err["error"]), /bare/);
+  // python `_dispatch`'s refusal, verbatim (no hint)
+  assert.deepEqual(err, {
+    error: "agent 'bare' has no handler_module; cannot answer verb 'frobnicate'",
+    reason: "unhandled",
+    verb: "frobnicate",
+  });
 });
 
 test("unknown target with no bridge errors; with a bridge it forwards", async () => {
@@ -119,4 +124,78 @@ test("watching a REMOTE src asks the bridge once; unwatch releases", async () =>
   assert.deepEqual(unwatched, []); // still one watcher left
   k.unwatch("remote_pty", "b");
   assert.deepEqual(unwatched, ["remote_pty"]);
+});
+
+// ── python parity (divergence fix 2026-10-01) ─────────────────────────────
+
+test("a SEND is mirrored to the target's own inbox and to its watchers", async () => {
+  // python `_dispatch` → `_fanout(kind="send")`: a watcher sees the raw inbound
+  // payloads, which is exactly why `watch` is gated like a call.
+  const k = withRoot();
+  k.registerBundle("echo.js", () => ({ ok: true }));
+  k.register(new Agent({ id: "src", parentId: "kernel_state", handlerModule: "echo.js" }));
+  const own: Payload[] = [];
+  const mirrored: Payload[] = [];
+  k.onInbox("src", (p) => own.push(p));
+  k.onInbox("w", (p) => mirrored.push(p));
+  k.watch("src", "w");
+  await k.send([{ target: "src", payload: { type: "say", text: "hi" } }]);
+  assert.deepEqual(own, [{ type: "say", text: "hi" }]);
+  assert.deepEqual(mirrored, [{ type: "say", text: "hi" }]);
+});
+
+test("watch is gated as the agent RUNNING the code, not the reader it names", () => {
+  // python `Agent.watch` gates `_current_sender` → src: naming a reader that holds
+  // a grant does not borrow it.
+  const k = withRoot();
+  k.register(new Agent({ id: "src", parentId: "kernel_state" }));
+  k.register(new Agent({ id: "trusted", parentId: "kernel_state", meta: { can_call: { src: ["watch"] } } }));
+  k.register(new Agent({ id: "nosy", parentId: "kernel_state" }));
+  k.get("src")!.meta["callable_by"] = { trusted: ["watch"], nosy: [] };
+  const asNosy = k.scopedFor("nosy", null);
+  const d = asNosy.watch("src", "trusted");
+  assert.equal((d as Payload | null)?.["error"], "nosy may not call 'watch' on src");
+  const asTrusted = k.scopedFor("trusted", null);
+  assert.equal(asTrusted.watch("src", "trusted"), null);
+});
+
+test("record(): parent_id comes LAST from the tree; meta cannot shadow it; the root has none", () => {
+  const k = withRoot();
+  k.register(new Agent({ id: "a", parentId: "kernel_state", handlerModule: "x.js", meta: { x: 1 } }));
+  assert.deepEqual(Object.keys(k.get("a")!.record()), ["id", "handler_module", "x", "can_call", "callable_by", "parent_id"]);
+  const rec = k.updateMeta("a", { parent_id: "elsewhere" });
+  assert.equal(rec!["parent_id"], "kernel_state");
+  k.updateMeta("kernel_state", { parent_id: "elsewhere" });
+  assert.equal("parent_id" in k.get("kernel_state")!.record(), false);
+});
+
+test("local state events stamp `ts` in SECONDS (python `time.time()`)", () => {
+  const k = withRoot();
+  const ts: number[] = [];
+  k.addStateSubscriber((e) => ts.push(e["ts"] as number));
+  k.register(new Agent({ id: "a", parentId: "kernel_state" }));
+  const now = Date.now() / 1000;
+  assert.equal(ts.length, 1);
+  assert.ok(Math.abs((ts[0] as number) - now) < 5, `not seconds: ${ts[0]}`);
+});
+
+test("the full tree carries python's posture keys: `allow`, not `file_bridge_id`", async () => {
+  const k = withRoot();
+  k.register(new Agent({ id: "fb", parentId: "kernel_state", meta: { allow: ["a.txt"], file_bridge_id: "x" } }));
+  const r = (await k.send([{ target: "kernel", payload: { type: "reflect", detail: "full" } }]))[0]!.result as Payload;
+  const node = ((r["tree"] as Payload)["children"] as Payload[])[0]!;
+  assert.deepEqual(node["allow"], ["a.txt"]);
+  assert.equal("file_bridge_id" in node, false);
+});
+
+test("execution rows keep python's key order: `ts` last", async () => {
+  const k = withRoot();
+  k.registerBundle("echo.js", () => null);
+  k.register(new Agent({ id: "e", parentId: "kernel_state", handlerModule: "echo.js" }));
+  await k.send([{ target: "e", payload: { type: "go" } }]);
+  // `{**row, id, agent}` then `setdefault("ts")`; a call row's `outcome` is
+  // stamped onto the live row at settle, after it — as in python.
+  const [call, settle] = [...k.store.rows.values()];
+  assert.deepEqual(Object.keys(call!).slice(-3), ["agent", "ts", "outcome"]);
+  assert.deepEqual(Object.keys(settle!), ["kind", "parent", "settled", "outcome", "attempts", "id", "agent", "ts"]);
 });

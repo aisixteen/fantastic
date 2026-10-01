@@ -89,6 +89,11 @@ export class KernelStore {
 
   private flushTimer: unknown = null;
   private flushChain: Promise<unknown> = Promise.resolve();
+  /** THE FLUSHER'S TASK (python `spawn_task(root, "flush_executions",
+   *  keepalive=True)`): a row in the task table from `kernel_start` on, so `ps`
+   *  shows it and `cancel` stops it; every write it makes parents to it. null =
+   *  not started, cancelled, or stopped. */
+  flusherTask: number | null = null;
   // The flush rows this kernel wrote (by id), and the calls that carried them:
   // those calls' own rows are ALREADY RECORDED — the flush row is their record.
   private readonly ownFlushes = new Set<number>();
@@ -146,7 +151,10 @@ export class KernelStore {
     ) {
       throw new Error(`rows_put: id must be absent or a pre-minted unused id, got ${String(rid)}`);
     }
-    const stored: Row = { ts: nowSeconds(), ...row, id: rid, agent: agentId };
+    // python `{**row, id, agent}` then `setdefault("ts", …)`: `ts` is the LAST key
+    // unless the row brought its own.
+    const stored: Row = { ...row, id: rid, agent: agentId };
+    if (!("ts" in stored)) stored["ts"] = nowSeconds();
     this.rows.set(rid, stored);
     if (!this.started && (row.kind === "settle" || row.kind === "ack")) {
       const parent = row["parent"];
@@ -167,12 +175,33 @@ export class KernelStore {
     this.unflushable.delete(id);
   }
 
-  /** Called by `kernel_start` once the store is proven: rows now leave by flush. */
-  markStarted(storeId: string): void {
+  /** Called by `kernel_start` once the store is proven: rows now leave by flush.
+   *  Spawns the flusher as a task under `parent` (the `kernel_start` task) — a
+   *  FORK IS A MESSAGE: its id is the id of the `task` row written for it. */
+  markStarted(storeId: string, parent: number | null): void {
     this.storeId = storeId;
     this.started = true;
     this.unflushable.clear();
+    const root = this.k.rootId as string;
+    const tid = this.put(root, { kind: "task", verb: "flush_executions", parent });
+    const row = this.k.tasks.register(tid, root, "flush_executions", parent, { keepalive: true, forked: true });
+    // A cancel ends the loop (python cancels the flusher's asyncio task): no
+    // further batch is written by it.
+    row.onCancel.push(() => this.endFlusher());
+    this.flusherTask = tid;
     this.wake();
+  }
+
+  /** Stop the flush loop and drop its row (a cancel, or the stop's last step). */
+  private endFlusher(): void {
+    if (this.flushTimer !== null) {
+      timers().clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.flusherTask !== null) {
+      this.k.tasks.done(this.flusherTask);
+      this.flusherTask = null;
+    }
   }
 
   // ── settle: the ending of a call is its own row ────────────────────────
@@ -204,7 +233,7 @@ export class KernelStore {
       parent: e.id,
       settled: e.target,
       outcome: storedOutcome(out, e.named),
-      attempts: out.attempts,
+      attempts: out.attempts ?? e.attempts,
     });
     if (DEAD_STATUSES.has(out.status)) this.announceDeadletter(e, out);
   }
@@ -222,7 +251,7 @@ export class KernelStore {
       target: e.target,
       caller: e.caller,
       status: out.status,
-      attempts: out.attempts,
+      attempts: out.attempts ?? e.attempts,
     };
     if (e.name !== null) entry["name"] = e.name;
     const src = e.caller !== null && this.k.get(e.caller) !== undefined ? e.caller : this.k.rootId;
@@ -231,22 +260,21 @@ export class KernelStore {
 
   // ── the flusher ────────────────────────────────────────────────────────
 
-  /** A row was appended: once started, write a batch after a short quiet. */
+  /** A row was appended: once started, the flusher writes a batch after a
+   *  short quiet — as its own task. */
   private wake(): void {
-    if (!this.started || this.stopped || this.flushTimer !== null) return;
+    if (this.flusherTask === null || this.stopped || this.flushTimer !== null) return;
+    const tid = this.flusherTask;
     this.flushTimer = timers().setTimeout(() => {
       this.flushTimer = null;
-      void this.flush();
+      if (this.flusherTask === tid) void this.flush(this.k.taskView(tid));
     }, FLUSH_DEBOUNCE_MS);
   }
 
-  /** Stop the debounce (the graceful stop's last step). */
+  /** Stop the flusher (the graceful stop's last step). */
   halt(): void {
     this.stopped = true;
-    if (this.flushTimer !== null) {
-      timers().clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
+    this.endFlusher();
   }
 
   /**
@@ -297,21 +325,23 @@ export class KernelStore {
    * only; the admin reconciles.
    *
    * One flush at a time (a promise chain is the lock); the retention prune runs
-   * after it, outside the chain, as in python.
+   * after it, outside the chain, as in python. `via` is the kernel view whose
+   * task the store calls parent to: the flusher's own task, or none for the
+   * stop's final flush.
    */
-  async flush(): Promise<Payload> {
-    const run = this.flushChain.then(() => this.flushOnce());
+  async flush(via: Kernel = this.k): Promise<Payload> {
+    const run = this.flushChain.then(() => this.flushOnce(via));
     this.flushChain = run.catch(() => undefined);
     const out = await run;
     // Only after a batch LANDED (python's early returns skip the prune too).
     const cap = this.k.ledger.cap;
     if (cap !== null && out["flush"] !== undefined && this.storedCalls > cap) {
-      out["pruned"] = await this.prune();
+      out["pruned"] = await this.prune(via);
     }
     return out;
   }
 
-  private async flushOnce(): Promise<Payload> {
+  private async flushOnce(via: Kernel): Promise<Payload> {
     if (this.storeId === null) return { flushed: 0 };
     const own = [...this.rows.values()].filter((r) => this.isOwnFlushRow(r));
     for (const r of own) {
@@ -334,7 +364,7 @@ export class KernelStore {
     const kinds = new Map(ids.map((i) => [i, this.rows.get(i)!.kind]));
     const batch: Json[] = ids.map((i) => storeSafe(this.rows.get(i)));
     batch.push({ id: fid, kind: "flush", covers: ids, status: "done", ts: nowSeconds() });
-    const out = (await this.k.kernelView().send([
+    const out = (await via.kernelView().send([
       { target: this.storeId, payload: { type: "append", rows: batch } },
     ]))[0]!;
     const res = out.result;
@@ -366,8 +396,8 @@ export class KernelStore {
    * never pruned. HYSTERESIS: down to 90% of the window, so a full store is not
    * re-read and re-pruned on every flush. Returns how many executions went.
    */
-  async prune(): Promise<number> {
-    const rows = await this.read({});
+  async prune(via: Kernel = this.k): Promise<number> {
+    const rows = await this.read({}, via);
     const calls = rows.filter((r) => r.kind === "call" && !r["internal"]);
     const settles = new Map<unknown, Row>();
     const acked = new Set<unknown>();
@@ -411,7 +441,7 @@ export class KernelStore {
         doomed.add(r.id);
       }
     }
-    const out = (await this.k.kernelView().send([
+    const out = (await via.kernelView().send([
       { target: this.storeId as string, payload: { type: "prune", ids: [...doomed].sort((a, b) => a - b) } },
     ]))[0]!.result;
     if (isErr(out)) {
@@ -423,14 +453,15 @@ export class KernelStore {
   }
 
   /** Every row of the kernel's own key matching `payload`, all pages. A store
-   *  that refuses or is unreachable fails fast. */
-  async read(payload: Payload): Promise<Row[]> {
+   *  that refuses or is unreachable fails fast. The reads are calls made inside
+   *  `via`'s task (a `ledger` verb's, a send's recall), parented to it. */
+  async read(payload: Payload, via: Kernel = this.k): Promise<Row[]> {
     const out: Row[] = [];
     let after: Json | undefined;
     for (;;) {
       const q: Payload = { type: "read", ...payload, limit: 1000 };
       if (after !== undefined && after !== null) q["after"] = after;
-      const res = (await this.k.kernelView().send([
+      const res = (await via.kernelView().send([
         { target: this.storeId as string, payload: q },
       ]))[0]!.result;
       if (res === null || typeof res !== "object" || Array.isArray(res) || isErr(res)) {
@@ -448,11 +479,11 @@ export class KernelStore {
    * entry carries its originator as `_caller` for the verb to scope by. The SAME
    * outcome shape flushed or not: what the settle row keeps.
    */
-  async ledgerEntries(): Promise<Entry[]> {
+  async ledgerEntries(via: Kernel = this.k): Promise<Entry[]> {
     const entries = new Map<number, Entry>();
     const acked = new Set<number>();
     let rows: Row[] = [];
-    if (this.storeId !== null) rows = await this.read({ kinds: ["call", "settle", "ack"] });
+    if (this.storeId !== null) rows = await this.read({ kinds: ["call", "settle", "ack"] }, via);
     rows = rows.concat(
       [...this.rows.values()].filter((r) => r.kind === "call" || r.kind === "settle" || r.kind === "ack"),
     );
@@ -498,7 +529,7 @@ export class KernelStore {
         e["outcome"] = {
           pid: eid,
           ...storedOutcome(x.outcome, x.named),
-          attempts: x.outcome.attempts,
+          attempts: x.outcome.attempts ?? x.attempts,
         };
       } else {
         e["status"] = "in_flight";
@@ -521,7 +552,7 @@ export class KernelStore {
    * with no settle row was in flight when the process stopped and rebuilds
    * nothing — re-sending runs it.
    */
-  async recall(items: readonly unknown[]): Promise<void> {
+  async recall(items: readonly unknown[], via: Kernel = this.k): Promise<void> {
     const wanted: ["name" | "id", string | number][] = [];
     const ledger = this.k.ledger;
     for (const it of items) {
@@ -535,10 +566,11 @@ export class KernelStore {
         kind === "name"
           ? { kinds: ["call"], match: { name: key } }
           : { kinds: ["call"], ids: [key] },
+        via,
       );
       const call = calls[calls.length - 1];
       if (call === undefined) continue;
-      const settles = await this.read({ kinds: ["settle"], match: { parent: call.id } });
+      const settles = await this.read({ kinds: ["settle"], match: { parent: call.id } }, via);
       const st = settles[settles.length - 1];
       if (st === undefined) continue;
       const oc = (st["outcome"] as Payload | undefined) ?? {};

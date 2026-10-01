@@ -133,6 +133,29 @@ extension JSON {
         return value
     }
 
+    /// Decode JSON that arrived OFF THE WIRE, strictly — python's
+    /// `io_bridge.loads` (owner D13): only values every runtime can hold. On
+    /// top of `parse`, an integer outside int64 and a number that overflows a
+    /// double are refused, each as a parse failure, so every caller's "not
+    /// valid JSON" path answers it.
+    public static func parseStrict(_ data: Data) throws -> JSON {
+        var scanner = JSONScanner(data: data, strict: true)
+        scanner.skipWhitespace()
+        let value = try scanner.parseValue()
+        scanner.skipWhitespace()
+        guard scanner.isAtEnd else {
+            throw SerializationError.parseFailure(
+                "trailing content at offset \(scanner.offset)"
+            )
+        }
+        return value
+    }
+
+    /// `parseStrict` over text.
+    public static func parseStrict(_ string: String) throws -> JSON {
+        try parseStrict(Data(string.utf8))
+    }
+
     /// Decode the JSON value at the START of `data`, ignoring whatever
     /// follows it, and report how far it read: `consumed` is the byte
     /// offset IMMEDIATELY AFTER the value.

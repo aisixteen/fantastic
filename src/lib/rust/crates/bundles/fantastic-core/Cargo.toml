@@ -9,11 +9,12 @@ description = "kernel_state.tools — the durable-state ROOT loader bundle (id=\
 [dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-bundle = { path = "../../fantastic-bundle" }
+# `fs` — THE one clamped disk surface (python `from file_bridge import fs`): the
+# loader's record verbs read and write through it, clamped to the running dir.
+fantastic-file = { path = "../fantastic-file" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"
-# the REAL store the loud-persistence tests persist through.
-fantastic-file = { path = "../fantastic-file" }

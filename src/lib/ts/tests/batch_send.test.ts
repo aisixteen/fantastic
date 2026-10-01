@@ -199,3 +199,172 @@ test("ps rows are {id, agent, parent, verb, started_at}; a nested send parents t
   release();
   await running;
 });
+
+// ── python parity (divergence fix 2026-10-01) ─────────────────────────────
+
+test("a handler that throws UNDER a timeout settles failed at once, not timed_out", async () => {
+  // python: only a task still pending at the deadline times out; a raise is a
+  // raise. The text names the error's class first (`<Type>: <msg>`).
+  const k = kernelWith({ boom: () => { throw new TypeError("bad input"); } });
+  const t0 = Date.now();
+  const [out] = await k.send([{ target: "boom", payload: { type: "go" }, timeout: 5 }]);
+  assert.ok(Date.now() - t0 < 1000, "waited out the deadline");
+  assert.equal(out!.status, "failed");
+  assert.deepEqual(out!.result, { error: "TypeError: bad input", raised: true });
+  // nothing was cancelled on its behalf: no task row survives, no kill recorded
+  assert.equal(k.tasks.size(), 0);
+});
+
+test("the `kernel` reflect is a pure identity read: no pid, no row, no ledger entry", async () => {
+  const k = kernelWith({});
+  const rowsBefore = k.store.rows.size;
+  const [out] = await k.send([{ target: "kernel", payload: { type: "reflect", tree: "none" } }]);
+  assert.equal(out!.pid, null);
+  assert.equal(out!.status, "completed");
+  assert.equal("attempts" in out!, false);
+  assert.equal((out!.result as Payload)["id"], "kernel_state");
+  assert.equal(k.store.rows.size, rowsBefore, "a call/settle row was written");
+  assert.equal(k.ledger.size(), 0);
+  // NAMED, it is ledgered (dedup + join) under a minted id, but still has no task
+  const [named] = await k.send([{ target: "kernel", payload: { type: "reflect", tree: "none" }, id: "who" }]);
+  assert.equal(typeof named!.pid, "number");
+  assert.equal(named!.name, "who");
+  assert.equal(named!.attempts, 1);
+  const kinds = [...k.store.rows.values()].map((r) => r.kind);
+  assert.deepEqual(kinds, ["call", "settle"]);
+  const [again] = await k.send([{ target: "kernel", payload: { type: "reflect" }, id: "who" }]);
+  assert.equal(again!.pid, named!.pid, "a re-send did not return the recorded outcome");
+  // by its own id it is reflect of the root like any send: a dispatch with a pid
+  const [byId] = await k.send([{ target: "kernel_state", payload: { type: "reflect", tree: "none" } }]);
+  assert.equal(typeof byId!.pid, "number");
+});
+
+test("outcomes that ran nothing carry no `attempts` (python `outcome()`)", async () => {
+  const k = kernelWith({ slow: async () => { await sleep(80); return { ok: true }; } });
+  const [ref] = await k.send([{ target: "nobody", payload: { type: "go" } }]);
+  assert.deepEqual(Object.keys(ref!), ["pid", "status", "result"]);
+  const owner = k.send([{ target: "slow", payload: { type: "go" }, id: "job" }]);
+  await sleep(5);
+  const [joined] = await k.send([{ target: "slow", payload: { type: "go" }, id: "job", timeout: 0.01 }]);
+  assert.equal(joined!.status, "timed_out");
+  assert.equal("attempts" in joined!, false);
+  const [own] = await owner;
+  assert.equal(own!.attempts, 1, "an owned execution's final outcome counts its runs");
+});
+
+test("timeout refusals carry python's text and the task id (owned and joined)", async () => {
+  const k = kernelWith({ slow: async () => { await sleep(200); return { ok: true }; } });
+  const owner = k.send([{ target: "slow", payload: { type: "go" }, id: "j", timeout: 0.05 }]);
+  await sleep(5);
+  const [joined] = await k.send([{ target: "slow", payload: { type: "go" }, id: "j", timeout: 0.01 }]);
+  const [own] = await owner;
+  assert.deepEqual(own!.result, {
+    error: "send: slow 'go' exceeded its 0.05s timeout; task cancelled",
+    reason: "timeout",
+    task_id: own!.pid,
+  });
+  assert.deepEqual(joined!.result, {
+    error: `send: joined execution ${own!.pid} did not settle within this caller's 0.01s wait; the execution itself keeps running`,
+    reason: "timeout",
+    task_id: own!.pid,
+  });
+});
+
+test("a killed task's later sends are refused cancelled and start no work", async () => {
+  // JS cannot abort the handler, so it runs on after the cancel; what it sends
+  // from then on belongs to dead work (python: a dying task registers no new work).
+  const later: { pid: number | null; status: string }[] = [];
+  let reached = 0;
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state" }));
+  k.registerBundle("worker.tools", async (_id, _p, view) => {
+    await sleep(30);
+    const [o] = await view.send([{ target: "sink", payload: { type: "go" } }]);
+    later.push({ pid: o!.pid, status: o!.status });
+    return { done: true };
+  });
+  k.registerBundle("sink.tools", () => { reached += 1; return null; });
+  k.register(new Agent({ id: "worker", parentId: "kernel_state", handlerModule: "worker.tools" }));
+  k.register(new Agent({ id: "sink", parentId: "worker", handlerModule: "sink.tools" }));
+  const run = k.send([{ target: "worker", payload: { type: "go" } }]);
+  await sleep(5);
+  const pid = k.tasks.ids()[0]!;
+  await k.send([{ target: "kernel", payload: { type: "cancel", task_id: pid } }]);
+  const [out] = await run;
+  assert.equal(out!.status, "cancelled");
+  await sleep(60);
+  assert.deepEqual(later, [{ pid: null, status: "cancelled" }]);
+  assert.equal(reached, 0, "the dead handler's send ran");
+});
+
+test("send validation: python's texts, and null read the way python reads None", async () => {
+  const k = kernelWith({ a: () => ({ ok: true }) });
+  const r = async (item: unknown): Promise<Payload> =>
+    (await k.send([item as never]))[0]!.result as Payload;
+  assert.equal((await r(7))["error"], "send: item must be a dict");
+  assert.equal(
+    (await r({ target: "a", payload: { type: 5 } }))["error"],
+    "send: payload.type must be a non-empty string, got 5",
+  );
+  assert.equal((await r({ target: "a", payload: { type: "go" }, id: "" }))["error"], "send: id must be a non-empty name");
+  assert.equal(
+    (await r({ target: "a", payload: { type: "go" }, id: 1.5 }))["error"],
+    "send: id must be a name (non-empty string) or a message id (int), got 1.5",
+  );
+  assert.equal(
+    (await r({ target: "a", payload: { type: "go" }, id: true }))["error"],
+    "send: id must be a name (non-empty string) or a message id (int), got True",
+  );
+  // `retries: null` is NOT absent (python `item.get("retries", 0)` is None)
+  assert.equal(
+    (await r({ target: "a", payload: { type: "go" }, retries: null }))["error"],
+    "send: retries must be a non-negative int, got None",
+  );
+  // `timeout: null` and `id: null` ARE absent — the item dispatches
+  const [t] = await k.send([{ target: "a", payload: { type: "go" }, timeout: null, id: null } as never]);
+  assert.equal(t!.status, "completed");
+  assert.equal(
+    (await r({ target: "a", payload: { type: "go" }, timeout: "1" }))["error"],
+    "send: timeout must be a positive number of seconds, got '1'",
+  );
+});
+
+test("unknown_agent is python's shape: agent_count, the first 40 ids, a placeholder hint", async () => {
+  const k = kernelWith({});
+  for (let i = 0; i < 45; i++) k.register(new Agent({ id: `a${String(i).padStart(2, "0")}`, parentId: "kernel_state" }));
+  const [out] = await k.send([{ target: "nobody", payload: { type: "go" } }]);
+  const res = out!.result as Payload;
+  assert.deepEqual(Object.keys(res), ["error", "reason", "agent_count", "agents"]);
+  assert.equal(res["error"], "no agent 'nobody'");
+  assert.equal(res["agent_count"], 46);
+  assert.equal((res["agents"] as string[]).length, 40);
+  const [slot] = await k.send([{ target: "<id>", payload: { type: "go" } }]);
+  assert.equal(
+    (slot!.result as Payload)["hint"],
+    "'<id>' is a PLACEHOLDER from an example, not an id — substitute one of `agents`.",
+  );
+});
+
+test("`<own guid>|<agent>` names the LOCAL agent; `<own guid>|kernel` the root", async () => {
+  const k = kernelWith({ a: () => ({ ok: "local" }) });
+  k.updateMeta("kernel_state", { guid: "g1" });
+  const forwarded: string[] = [];
+  k.bridge = {
+    forward: (t) => { forwarded.push(t); return Promise.resolve({ ok: "host" }); },
+    forwardBinary: () => Promise.resolve(null),
+    emitRemote: () => {},
+    watchRemote: () => {},
+    unwatchRemote: () => {},
+    onLifecycle: () => () => {},
+    subscribeState: () => () => {},
+  };
+  const [a] = await k.send([{ target: "g1|a", payload: { type: "go" } }]);
+  assert.deepEqual(a!.result, { ok: "local" });
+  const [root] = await k.send([{ target: "g1|kernel", payload: { type: "reflect", tree: "none" } }]);
+  assert.equal((root!.result as Payload)["id"], "kernel_state");
+  // a local name this kernel lacks is unknown HERE, never forwarded to the host
+  const [miss] = await k.send([{ target: "g1|nobody", payload: { type: "go" } }]);
+  assert.equal((miss!.result as Payload)["reason"], "unknown_agent");
+  assert.equal((miss!.result as Payload)["error"], "no agent 'g1|nobody'");
+  assert.deepEqual(forwarded, []);
+});

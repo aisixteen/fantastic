@@ -114,3 +114,76 @@ struct RootLoaderOwnTreeTests {
         }
     }
 }
+
+@Suite("record writes through the store")
+struct RecordWritesThroughStoreTests {
+    /// python `_persist_via_store` pages the merge read to EOF with `offset`, so
+    /// a record over one chunk (64 KiB) keeps its unknown keys on the next write.
+    @Test func aRecordOverOneChunkKeepsItsUnknownKeys() async throws {
+        let (k, dir) = diskKernel()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await createStore(k, ["allow": ["."]])
+        _ = await k.send([Item("kernel_state", ["type": "boot"])])
+        _ = await k.send([
+            Item(
+                "kernel_state",
+                [
+                    "type": "create_agent", "parent_id": "kernel_state", "id": "big",
+                    "handler_module": "file_bridge.tools", "allow": ["."],
+                ])
+        ])
+        await k.flushRecords()
+        let file = dir.appendingPathComponent(".fantastic/agents/big/agent.yaml")
+        // A sidecar key written beside the record, far past one chunk.
+        let pad = String(repeating: "z", count: 100_000)
+        var text = try String(contentsOf: file, encoding: .utf8)
+        text += "sidecar: \(pad)\n"
+        try text.write(to: file, atomically: true, encoding: .utf8)
+        k.update(AgentId("big"), ["x": 1])
+        await k.flushRecords()
+        let after = try String(contentsOf: file, encoding: .utf8)
+        #expect(after.contains("sidecar: \(pad)"), "the unknown key was dropped on the merge")
+        #expect(after.contains("x: 1"))
+        // Each page names its offset, as python's merge read does.
+        let offsets = k.rows.all().filter {
+            $0["agent"]?.asString == "store" && $0["verb"]?.asString == "read_stream"
+                && $0["payload"]?["path"].asString == "agents/big/agent.yaml"
+        }.compactMap { $0["payload"]?["offset"].asInt }
+        #expect(offsets.contains(0) && offsets.contains(65536), "\(offsets)")
+        await k.shutdown()
+    }
+
+    /// python seeds the sidecars ONLY after the write landed — and seeds the
+    /// bundle's `docs/` tree with its readme.
+    @Test func onlyALandedWriteSeedsTheReadmeAndDocs() async throws {
+        let fm = FileManager.default
+        for landed in [true, false] {
+            let (k, dir) = diskKernel()
+            defer { try? fm.removeItem(at: dir) }
+            // Refused: the record's own path is not exposed, its sidecars are.
+            let allow: JSON =
+                landed
+                ? ["."] : ["agent.yaml", "agents/probe/readme.md", "agents/probe/docs"]
+            await createStore(k, ["allow": allow])
+            _ = await k.send([Item("kernel_state", ["type": "boot"])])
+            _ = await k.send([
+                Item(
+                    "kernel_state",
+                    [
+                        "type": "create_agent", "parent_id": "kernel_state", "id": "probe",
+                        "handler_module": .string(ROOT_HANDLER_MODULE), "watch": false,
+                    ])
+            ])
+            _ = await RuntimeLog.capture { await k.flushRecords() }
+            let agentDir = dir.appendingPathComponent(".fantastic/agents/probe")
+            let firstDoc = try #require(RootDocs.all.first?.key)
+            #expect(
+                fm.fileExists(atPath: agentDir.appendingPathComponent("readme.md").path)
+                    == landed, "landed=\(landed)")
+            #expect(
+                fm.fileExists(atPath: agentDir.appendingPathComponent("docs/\(firstDoc).md").path)
+                    == landed, "landed=\(landed)")
+            await k.shutdown()
+        }
+    }
+}

@@ -89,7 +89,8 @@ impl WsTransport {
                     // false, leaving a bridge that reflects `connected:true` and
                     // answers every forward with a timeout that never names the
                     // dead reader.
-                    Ok(Message::Text(t)) => match serde_json::from_str::<Value>(&t) {
+                    // STRICT (D13): python `decode_frame` → `io_bridge.loads`.
+                    Ok(Message::Text(t)) => match fantastic_io_bridge::codec::loads(&t) {
                         Ok(v) if v.is_object() => Ok(Frame::Text(v)),
                         Ok(_) => {
                             skip_non_object();
@@ -149,7 +150,8 @@ impl BridgeTransport for WsTransport {
         let mut sink = self.sink.lock().await;
         sink.send(Message::Text(text))
             .await
-            .map_err(|e| TransportError::ConnectionClosed(format!("ws send: {e}")))
+            // python `ConnectionClosed(str(e))` — the library's text, no prefix.
+            .map_err(|e| TransportError::ConnectionClosed(e.to_string()))
     }
 
     async fn send_binary(&self, header: Value, body: Vec<u8>) -> Result<(), TransportError> {
@@ -157,7 +159,7 @@ impl BridgeTransport for WsTransport {
         let mut sink = self.sink.lock().await;
         sink.send(Message::Binary(wire))
             .await
-            .map_err(|e| TransportError::ConnectionClosed(format!("ws send binary: {e}")))
+            .map_err(|e| TransportError::ConnectionClosed(e.to_string()))
     }
 
     async fn recv_frame(&self) -> Result<Frame, TransportError> {

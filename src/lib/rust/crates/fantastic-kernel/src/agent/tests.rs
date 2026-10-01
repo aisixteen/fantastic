@@ -78,6 +78,42 @@ fn delete_lock_flag() {
 }
 
 #[test]
+fn delete_lock_is_python_truthiness() {
+    // `if self._meta.get("delete_lock")`: CLI `k=v` gives an int, a hand
+    // record may say "yes" — both lock; falsy values do not.
+    for (v, locked) in [
+        (json!(1), true),
+        (json!("yes"), true),
+        (json!(["x"]), true),
+        (json!({"a": 1}), true),
+        (json!(0), false),
+        (json!(""), false),
+        (json!([]), false),
+        (json!(false), false),
+        (Value::Null, false),
+    ] {
+        let a = make();
+        let mut p = Map::new();
+        p.insert("delete_lock".to_string(), v.clone());
+        a.update_meta(p);
+        assert_eq!(a.is_delete_locked(), locked, "delete_lock={v}");
+    }
+}
+
+#[test]
+fn name_or_id_treats_an_empty_display_name_as_none() {
+    // `self.display_name or self.id` — "" is falsy, a non-string is no name.
+    let a = make();
+    assert_eq!(a.name_or_id(), "Testy");
+    for v in [json!(""), json!(5), Value::Null] {
+        let mut p = Map::new();
+        p.insert("display_name".to_string(), v);
+        a.update_meta(p);
+        assert_eq!(a.name_or_id(), "test_1");
+    }
+}
+
+#[test]
 fn record_serializes_with_optional_fields_omitted_when_none() {
     // The persisted JSON shape: optional fields (handler_module,
     // parent_id) must NOT appear in the object when None.

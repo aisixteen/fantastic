@@ -36,11 +36,16 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 /// Mint a fresh id from `handler_module` (`<bundle>.tools` →
 /// `<bundle>_<hex6>`) — python `_agent.py`'s
-/// `f"{bundle}_{secrets.token_hex(3)}"`.
+/// `f"{bundle}_{secrets.token_hex(3)}"`, where `bundle` is the SECOND-LAST
+/// dotted segment (`handler_module.split(".")[-2]`), whatever the last one is:
+/// `a.b.tools` → `b_…`, `pkg.ts` → `pkg_…`. A dotless module is used whole.
 pub fn mint_id(handler_module: &str) -> String {
-    let bundle = handler_module
-        .strip_suffix(".tools")
-        .unwrap_or(handler_module);
+    let parts: Vec<&str> = handler_module.split('.').collect();
+    let bundle = if parts.len() > 1 {
+        parts[parts.len() - 2]
+    } else {
+        handler_module
+    };
     format!("{bundle}_{}", hex(&os_random(3)))
 }
 
@@ -274,7 +279,7 @@ pub(crate) async fn create_from_payload(
     // InMemory mode the path is composed but never read — bundles
     // that try to write a sidecar there will surface the fs error
     // themselves.
-    let root_path = parent.children_dir().join(&id);
+    let root_path = kernel.children_dir_of(parent).join(&id);
     let new_agent = Agent::new(
         AgentId::from(id.as_str()),
         Some(hm.to_string()),
@@ -303,7 +308,7 @@ pub(crate) async fn create_from_payload(
     let event = json!({
         "agent_id": new_agent.id.0,
         "kind": "added",
-        "name": new_agent.display_name().unwrap_or_else(|| new_agent.id.0.clone()),
+        "name": new_agent.name_or_id(),
         "parent_id": parent.id.0,
     });
     kernel.publish_state(&event);
@@ -496,7 +501,7 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     let event = json!({
         "agent_id": target.id.0,
         "kind": "removed",
-        "name": target.display_name().unwrap_or_else(|| target.id.0.clone()),
+        "name": target.name_or_id(),
     });
     kernel.publish_state(&event);
 }

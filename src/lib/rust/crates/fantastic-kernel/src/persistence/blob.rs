@@ -12,7 +12,7 @@
 //! provider, no persistence"; a sidecar verb that silently succeeded into
 //! nowhere would be the opposite of that — the caller believes it saved.
 
-use crate::agent::AgentId;
+use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -83,16 +83,22 @@ fn guard_owner(aid: &str) -> Result<(), String> {
 }
 
 /// Store-relative dir for an agent's sidecars — `agents/<id>`, or `""` for the
-/// root itself. Prefers the LIVE agent's own `root_path`; a record that is no
-/// longer (or not yet) live resolves by walking its parent chain, as python's
-/// `_blob_reldir` → `_resolve_path` does.
-fn blob_reldir(kernel: &Arc<Kernel>, aid: &str) -> Option<String> {
-    let root = kernel.root()?;
-    if let Some(agent) = kernel.agents.get(&AgentId::from(aid)) {
-        return Some(super::store_reldir(&root.root_path, &agent.root_path));
-    }
-    let abs = super::resolve_record_path(kernel, aid, None);
-    Some(super::store_reldir(&root.root_path, &abs))
+/// loader itself — relative to THE ADDRESSED LOADER's root (python
+/// `_blob_reldir(agent, aid)`). Prefers the LIVE agent's own `root_path`; a
+/// record that is no longer (or not yet) live resolves by walking its parent
+/// chain under that loader, as python's `_resolve_path` does.
+fn blob_reldir(kernel: &Arc<Kernel>, loader: &Agent, aid: &str) -> String {
+    let abs = match kernel.agents.get(&AgentId::from(aid)) {
+        Some(agent) => agent.root_path.clone(),
+        None => super::RecordPlaces::new(
+            kernel,
+            super::loader_dir(loader),
+            super::loader_children(loader),
+            loader.id.0.clone(),
+        )
+        .resolve(aid, None),
+    };
+    super::loader_reldir(kernel, loader, &abs)
 }
 
 /// A BARE `{error}`, python's shape. The blob verbs are the loader BUNDLE's, not
@@ -108,7 +114,12 @@ fn err(verb: &str, why: impl std::fmt::Display) -> Value {
 /// the store lookup, so a bad payload is named before "no store wired" — the
 /// caller is told what IT got wrong first. `content` is the caller's to pass, so
 /// the check rides in `persist_blob` and this returns before the store lookup.
-fn resolve(kernel: &Arc<Kernel>, verb: &str, payload: &Value) -> Result<(AgentId, String), Value> {
+fn resolve(
+    kernel: &Arc<Kernel>,
+    loader: &Agent,
+    verb: &str,
+    payload: &Value,
+) -> Result<(AgentId, String), Value> {
     guard_args(verb, payload)?;
     let aid = payload
         .get("agent_id")
@@ -121,9 +132,10 @@ fn resolve(kernel: &Arc<Kernel>, verb: &str, payload: &Value) -> Result<(AgentId
         out["reason"] = json!("unauthorized");
         return Err(out);
     }
-    let store = super::find_store(kernel)
+    // THE ADDRESSED LOADER's store (python `_find_store(agent)`), never another's.
+    let store = super::find_store_for(kernel, loader)
         .ok_or_else(|| err(verb, "no store wired — persistence not available"))?;
-    let reldir = blob_reldir(kernel, aid).ok_or_else(|| err(verb, "no store wired"))?;
+    let reldir = blob_reldir(kernel, loader, aid);
     let path = if reldir.is_empty() {
         name.to_string()
     } else {
@@ -148,8 +160,8 @@ fn guard_args(verb: &str, payload: &Value) -> Result<(), Value> {
     Ok(())
 }
 
-/// `persist_blob` — whole-file write of one sidecar.
-pub async fn persist_blob(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+/// `persist_blob` — whole-file write of one sidecar, through `loader`'s store.
+pub async fn persist_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value) -> Value {
     if let Err(e) = guard_args("persist_blob", payload) {
         return e;
     }
@@ -158,17 +170,17 @@ pub async fn persist_blob(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let Some(content) = payload.get("content").and_then(Value::as_str) else {
         return err("persist_blob", "content (str) required");
     };
-    let (store, path) = match resolve(kernel, "persist_blob", payload) {
+    let (store, path) = match resolve(kernel, loader, "persist_blob", payload) {
         Ok(v) => v,
         Err(e) => return e,
     };
     // The loader writing to its OWN discovered store is persistence bookkeeping —
     // a side effect of this already-authorized verb, not the loader reaching out
     // as an agent — so it runs with operator authority, like create_agent's boot.
-    let (reply, _) = super::store_send_binary(
+    let reply = super::store_write(
         kernel,
         &store,
-        json!({"type": "write_stream", "path": path, "truncate": true}),
+        json!({"type": "write_stream", "path": path, "bytes": null, "truncate": true}),
         content.as_bytes().to_vec(),
     )
     .await;
@@ -223,8 +235,8 @@ fn decoded_blob(name: &Value, raw: Vec<u8>) -> Value {
 /// PUMPED TO EOF. `read_stream` is a CHUNK verb, so a single call returns a
 /// PREFIX of any larger sidecar; returning that prefix is data loss dressed as a
 /// successful load. A store that reports no forward progress is said, not spun on.
-pub async fn load_blob(kernel: &Arc<Kernel>, payload: &Value) -> Value {
-    let (store, path) = match resolve(kernel, "load_blob", payload) {
+pub async fn load_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value) -> Value {
+    let (store, path) = match resolve(kernel, loader, "load_blob", payload) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -233,11 +245,10 @@ pub async fn load_blob(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let mut offset: u64 = 0;
     let mut last;
     loop {
-        let (reply, body) = super::store_send_binary(
+        let (reply, body) = super::store_read(
             kernel,
             &store,
             json!({"type": "read_stream", "path": path, "offset": offset}),
-            Vec::new(),
         )
         .await;
         last = reply.clone();

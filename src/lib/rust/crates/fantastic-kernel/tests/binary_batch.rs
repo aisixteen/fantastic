@@ -1,12 +1,11 @@
 //! A binary item rides the ORDINARY batch.
 //!
-//! `send_with_binary` bypassed `send` entirely, so a `write_stream` the model
-//! issued through `send_binary` had no task row (invisible to `ps`, unreachable
-//! by `cancel`), no ledger id (no dedup, no join) and no timeout — and the
-//! reply tag it produced read `[reply to - · …]` because there was no pid to
-//! name (measured 2026-09-02). An `Item` may now carry the blob, and the kernel
-//! dispatches it through `handle_binary` under the same row, id and deadline as
-//! any other item.
+//! There is ONE send. A second, bypassing path for bytes once left a
+//! `write_stream` with no task row (invisible to `ps`, unreachable by
+//! `cancel`), no ledger id (no dedup, no join) and no timeout (measured
+//! 2026-09-02); it is gone. An `Item` carries the blob (or asks for a raw reply
+//! chunk), and the kernel dispatches it through `handle_binary` under the same
+//! row, id and deadline as any other item — in python's payload shape.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status};
@@ -40,10 +39,19 @@ impl Bundle for Sink {
         blob: Vec<u8>,
         _kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
+        // A READ answers a chunk; it never received one.
+        if header.get("type").and_then(Value::as_str) == Some("read_stream") {
+            return Ok((
+                Some(json!({"path": header.get("path").cloned(), "bytes": null,
+                            "header_had_bytes": header.get("bytes").is_some()})),
+                Some(b"chunk".to_vec()),
+            ));
+        }
         let n = blob.len();
         *self.0.lock().unwrap() = blob;
         Ok((
-            Some(json!({"written": n, "path": header.get("path").cloned()})),
+            Some(json!({"written": n, "path": header.get("path").cloned(),
+                        "header_had_bytes": header.get("bytes").is_some()})),
             None,
         ))
     }
@@ -161,4 +169,86 @@ async fn a_timed_binary_item_still_reaches_the_binary_channel() {
         payload,
         "a deadline must not divert the blob"
     );
+}
+
+/// The call row's payload for the execution `pid`.
+fn row_payload(kernel: &Arc<Kernel>, pid: i64) -> Value {
+    Value::Object(
+        kernel.rows.get_one(pid).expect("the call row")["payload"]
+            .as_object()
+            .cloned()
+            .expect("a payload object"),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_raw_reply_read_is_a_plain_call_on_the_row_and_to_watchers() {
+    // python's `read_stream` payload carries no bytes: the call row is the plain
+    // dict and a watcher gets a text frame. Only the REPLY carries a raw chunk.
+    let (_t, kernel, _seen) = mk().await;
+    let tap = AgentId::from("tap_read");
+    let mut rx = kernel.ensure_inbox(&tap);
+    assert!(kernel
+        .watch(&AgentId::from("sink"), tap.clone())
+        .await
+        .is_none());
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("sink"),
+            json!({"type": "read_stream", "path": "a", "offset": 0}),
+        )
+        .with_raw_reply()])
+        .await
+        .remove(0);
+    assert_eq!(out.body.as_deref(), Some(&b"chunk"[..]), "{:?}", out.result);
+    assert_eq!(out.result["header_had_bytes"], false);
+    let pid = out.pid.expect("an execution").0;
+    let keys: Vec<String> = row_payload(&kernel, pid)
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        keys,
+        ["type", "path", "offset"],
+        "no bytes key on a read's row"
+    );
+    let got = rx.try_recv().expect("mirrored");
+    assert!(got.body.is_none(), "a read is a TEXT frame to a watcher");
+    assert!(got.payload.get("bytes").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_keeps_the_bytes_slot_where_python_holds_it() {
+    // python's write payload is `{type, path, bytes, truncate}`: the row reads
+    // `bytes: {len}` IN THAT POSITION, the watcher frame keeps it there, and the
+    // handler gets the body as the blob with no second `bytes` in its header.
+    let (_t, kernel, seen) = mk().await;
+    let tap = AgentId::from("tap_write");
+    let mut rx = kernel.ensure_inbox(&tap);
+    assert!(kernel
+        .watch(&AgentId::from("sink"), tap.clone())
+        .await
+        .is_none());
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("sink"),
+            json!({"type": "write_stream", "path": "a", "bytes": null, "truncate": true}),
+        )
+        .with_binary(vec![7, 8, 9])])
+        .await
+        .remove(0);
+    assert_eq!(out.result["written"], 3, "{}", out.result);
+    assert_eq!(out.result["header_had_bytes"], false);
+    assert_eq!(*seen.lock().unwrap(), vec![7, 8, 9]);
+    let pid = out.pid.expect("an execution").0;
+    let row = row_payload(&kernel, pid);
+    let keys: Vec<&String> = row.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["type", "path", "bytes", "truncate"]);
+    assert_eq!(row["bytes"], json!({"len": 3}));
+    let got = rx.try_recv().expect("mirrored");
+    let wkeys: Vec<&String> = got.payload.as_object().unwrap().keys().collect();
+    assert_eq!(wkeys, ["type", "path", "bytes", "truncate"]);
+    assert_eq!(got.body, Some(("bytes".to_string(), vec![7, 8, 9])));
 }

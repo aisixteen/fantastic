@@ -134,3 +134,43 @@ struct JSONCodableBridgeTests {
 }
 
 import Foundation
+
+/// python `json.loads` (strict=True) refuses a raw control character in a
+/// string and any number off the RFC grammar; `parseStrict` — the wire decode,
+/// python's `io_bridge.loads` (owner D13) — also refuses what another runtime
+/// would hold differently. Twin of `io_bridge/tests/test_codec.py`.
+@Suite("JSON strictness (json.loads + io_bridge.loads)")
+struct JSONStrictnessTests {
+    @Test func rawControlCharactersAndOffGrammarNumbersAreNeverJSON() {
+        for bad in [
+            "\"a\u{01}b\"", "\"tab\there\"", "\"nl\nhere\"", "01", "-01", "[00]", "1.", "-",
+            ".5", "1.e5", "1e", "1e+", "{\"x\": 012}",
+        ] {
+            #expect(throws: (any Error).self, "\(bad)") { try JSON.parse(bad) }
+            #expect(throws: (any Error).self, "\(bad)") { try JSON.parseStrict(bad) }
+        }
+        // …and the grammar's own edges still read.
+        #expect(try! JSON.parse("0") == .integer(0))
+        #expect(try! JSON.parse("-0.5e-3") == .double(-0.0005))
+        #expect(try! JSON.parse("10E2") == .double(1000))
+        #expect(try! JSON.parse("\"\u{7f}\"") == .string("\u{7f}"))
+    }
+
+    @Test func onlyValuesEveryRuntimeCanHoldCrossTheWire() throws {
+        for bad in [
+            "{\"x\": 9223372036854775808}", "{\"x\": -9223372036854775809}",
+            "{\"x\": 1e400}", "{\"x\": -1e400}", "{\"s\": \"\\udcff\"}", "{\"\\ud800\": 1}",
+            "[[\"deep\", \"\\udfff\"]]", "{\"x\": NaN}", "{\"x\": Infinity}",
+            "{\"x\": -Infinity}", "NaN",
+        ] {
+            #expect(throws: (any Error).self, "\(bad)") { try JSON.parseStrict(bad) }
+        }
+        // the int64 edges and a PAIRED surrogate (one real character) are fine
+        #expect(
+            try JSON.parseStrict("[9223372036854775807, -9223372036854775808]")
+                == .array([.integer(Int64.max), .integer(Int64.min)]))
+        #expect(try JSON.parseStrict("{\"s\": \"\\ud83d\\ude00\"}") == ["s": "\u{1F600}"])
+        // Off the wire an over-int64 integer is still held, as a double.
+        #expect(try JSON.parse("9223372036854775808") == .double(9223372036854775808))
+    }
+}

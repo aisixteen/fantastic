@@ -949,6 +949,44 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
         crate::transport::Frame::Text(v) => panic!("expected a binary reply, got text: {v}"),
     }
 
+    // A BINARY call is an ordinary execution: the frame id NAMES it, so the same
+    // id replayed (a reconnect re-sending its queue) joins the recorded outcome
+    // and writes nothing — python `_engine` sets `item["id"]` for every call.
+    peer.send_binary(
+        json!({"type":"call","id":"w1","target":"fb","caller":"peer-g|probe",
+               "payload":{"type":"write_stream","path":"blob.bin","truncate":true}}),
+        b"other".to_vec(),
+    )
+    .await
+    .unwrap();
+    let again = peer
+        .recv_frame()
+        .await
+        .expect("replayed reply")
+        .into_value();
+    assert_eq!(
+        again["data"]["written"],
+        payload.len(),
+        "the recorded outcome: {again}"
+    );
+    assert_eq!(std::fs::read(tmp.path().join("blob.bin")).unwrap(), payload);
+    let ledger = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ledger"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        ledger["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "w1" && e["target"] == "fb"),
+        "the binary call is a ledgered execution: {ledger}"
+    );
+
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from(bid.as_str()),
@@ -1751,7 +1789,14 @@ async fn relay_boot_missing_partner_mints_no_guid() {
         Value::Null,
         "a refused boot leaves no identity behind"
     );
-    // A bad `role` is python's ValueError text, ROLES repr and all.
+    // A bad `role` is python's ValueError text, ROLES repr and all. The guid is
+    // minted BEFORE that check, through `kernel.update` — so the `updated` state
+    // event the root loader persists from is published (python `_relay.py`).
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let _tap = kernel.add_state_subscriber(Arc::new(move |ev, _| {
+        sink.lock().unwrap().push(ev.clone());
+    }));
     let bad_role = id_for("a714_role", &tmp);
     create_leg(
         &kernel,
@@ -1766,6 +1811,15 @@ async fn relay_boot_missing_partner_mints_no_guid() {
         json!({
             "error": "bridge: relay boot failed: relay_connector role must be one of ('manager', 'kernel'), got 'boss'"
         })
+    );
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|e| e["agent_id"] == json!(bad_role)
+                && e["kind"] == "updated"
+                && e["changed"] == json!(["guid"])),
+        "the guid mint published no `updated` event"
     );
 }
 
@@ -2133,5 +2187,62 @@ async fn a_malformed_frame_is_skipped_and_the_reader_survives() {
         "the first DECODABLE frame is what recv hands back"
     );
     t.close().await;
+    // python `_ws.send` raises `ConnectionClosed(str(e))`: the library's text,
+    // with no `ws send:` prefix of the port's own.
+    match t.send_frame(json!({"type": "ping"})).await {
+        Err(transport::TransportError::ConnectionClosed(m)) => {
+            assert!(!m.starts_with("ws send"), "a rust-only prefix: {m}");
+            assert!(!m.is_empty());
+        }
+        other => panic!("a send on a closed socket must fail: {other:?}"),
+    }
     server.abort();
+}
+
+/// python `float(payload.get("timeout", 30))` in `_forward` / `_list_peers`:
+/// `null` raises TypeError and a non-numeric string ValueError — the handler
+/// fails (`raised`), before the not-connected check; a numeric string is a
+/// timeout like any number.
+#[tokio::test]
+async fn forward_timeout_is_python_float() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    let leg = id_for("a739_leg", &tmp);
+    create_leg(
+        &kernel,
+        WS_HANDLER_MODULE,
+        &leg,
+        json!({"transport": "memory"}),
+    )
+    .await;
+    let fwd = |timeout: Value| {
+        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"},
+               "timeout": timeout})
+    };
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(leg.as_str()),
+            fwd(Value::Null),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
+    assert_eq!(
+        out.result["error"],
+        "TypeError: float() argument must be a string or a real number, not 'NoneType'"
+    );
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(leg.as_str()),
+            fwd(json!("soon")),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(
+        out.result["error"],
+        "ValueError: could not convert string to float: 'soon'"
+    );
+    // A numeric string passes the coercion and reaches the connection check.
+    let r = ask(&kernel, &leg, fwd(json!("5"))).await;
+    assert_eq!(r["reason"], "not_connected", "{r}");
 }

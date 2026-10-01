@@ -49,12 +49,16 @@ private func setup() async -> Fixture {
     reg.register(ROOT_HANDLER_MODULE, KernelStateBundle())
     reg.register("leg.tools", Leg())
     let k = Kernel(storage: .inMemory, bundles: reg)
-    let rootAgent = Agent(id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil)
+    // A RUNNING DIR, as python's `seeded_kernel` has: every loader path is
+    // clamped to it, and the loader's relative `root` resolves under it.
+    let workdir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("nested-\(UUID().uuidString)")
+    let rootAgent = Agent(
+        id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil,
+        rootPath: workdir.appendingPathComponent(".fantastic"))
     k.register(rootAgent)
     k.setRoot(rootAgent)
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("nested-\(UUID().uuidString)")
-        .appendingPathComponent(".fantastic/web")
+    let root = workdir.appendingPathComponent(".fantastic/web")
     let recs: [OrderedDictionary<String, JSON>] = [
         // the loader's record verbs are privileged: the owning leg names them
         [
@@ -73,7 +77,7 @@ private func setup() async -> Fixture {
         ],
         [
             "id": .string("web_loader"), "handler_module": .string(ROOT_HANDLER_MODULE),
-            "parent_id": .string("wws"), "root": .string(root.path), "watch": .bool(false),
+            "parent_id": .string("wws"), "root": ".fantastic/web", "watch": .bool(false),
             "callable_by": .object(["rest_leg": .string("*")]),
         ],
     ]

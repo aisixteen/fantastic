@@ -350,6 +350,72 @@ struct RamStoreTests {
         #expect(RamStoreBundle().readme == (try String(contentsOf: url, encoding: .utf8)))
     }
 
+    /// python `_as_id`: an ASCII digit string only — `'²'` and `'٣'` name no
+    /// row, like any non-id. Twin of
+    /// `test_a_superscript_digit_is_no_id_and_raises_nothing`.
+    @Test func aNonAsciiDigitIsNoId() async {
+        let k = await store()
+        _ = await append(k, "alice", [row(101, ["role": "user", "content": "hi"])])
+        let out = await call(k, p("read", ["ids": ["²", "٣", "101"]]), as: "alice")
+        #expect(out["error"].isNull, "\(out.serialize())")
+        #expect(ids(out) == [101], "\(out.serialize())")
+        #expect(asId(.string("٣")) == nil && asId(.string(" 7 ")) == 7 && asId(.string("0")) == 0)
+    }
+
+    /// python `limit = _as_id('0')` is 0 — FALSY: `ids[:limit] if limit else
+    /// ids`, so every row and no cursor. Swift crashed the process here.
+    @Test func aZeroStringLimitReadsEveryRow() async {
+        let k = await store()
+        _ = await append(k, "alice", [row(1), row(2), row(3)])
+        let out = await call(k, p("read", ["limit": "0"]), as: "alice")
+        #expect(ids(out) == [1, 2, 3], "\(out.serialize())")
+        #expect(out["next"].isNull && out["total"] == 3, "\(out.serialize())")
+    }
+
+    /// python `_as_id(...) or 100` / `or 200`: a `'0'` limit or width is falsy
+    /// and takes the default.
+    @Test func searchZeroStringLimitAndWidthTakeTheDefaults() async {
+        let k = await store()
+        _ = await append(k, "alice", [row(1, ["role": "user", "content": "needle here"])])
+        let out = await call(
+            k, p("search", ["query": "needle", "limit": "0", "width": "0"]), as: "alice")
+        let m = out["matches"].asArray ?? []
+        #expect(m.count == 1 && out["truncated"] == false, "\(out.serialize())")
+        #expect(m.first?["text"].asString?.contains("needle here") == true, "\(out.serialize())")
+    }
+
+    /// python `row.get("kind") in keep`: a STRING keep is a substring test, a
+    /// row with no kind against it raises (nothing deleted), and a keep `in`
+    /// cannot search raises too.
+    @Test func pruneKeepIsPythonsIn() async {
+        let k = await store()
+        _ = await append(
+            k, "alice",
+            [row(1, ["kind": "fold"]), row(2, ["kind": "turn"]), row(3, ["kind": "fold"])])
+        let out = await call(k, p("prune", ["before_id": 10, "keep": "fold"]), as: "alice")
+        #expect(out["pruned"] == 1, "\(out.serialize())")
+        let left = await call(k, p("read"), as: "alice")
+        #expect(ids(left) == [1, 3], "\(left.serialize())")
+
+        _ = await append(k, "alice", [row(4)])  // no kind
+        let raised = await KernelTaskLocals.$currentSender.withValue(AgentId("alice")) {
+            await k.send([Item(AgentId("mem"), p("prune", ["before_id": 10, "keep": "fold"]))])[0]
+        }
+        #expect(raised.status == .failed, "\(raised.result.serialize())")
+        #expect(
+            raised.result["error"].asString
+                == "TypeError: 'in <string>' requires string as left operand, not NoneType",
+            "\(raised.result.serialize())")
+        #expect(ids(await call(k, p("read"), as: "alice")) == [1, 3, 4], "nothing was deleted")
+        let notIterable = await KernelTaskLocals.$currentSender.withValue(AgentId("alice")) {
+            await k.send([Item(AgentId("mem"), p("prune", ["before_id": 10, "keep": 5]))])[0]
+        }
+        #expect(
+            notIterable.result["error"].asString
+                == "TypeError: argument of type 'int' is not iterable",
+            "\(notIterable.result.serialize())")
+    }
+
     @Test func metaIsValidated() {
         let b = RamStoreBundle()
         #expect(b.validateMeta(["operator": .string("yes")], record: [:]) != nil)

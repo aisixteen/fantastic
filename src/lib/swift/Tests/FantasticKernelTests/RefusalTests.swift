@@ -136,5 +136,14 @@ struct RefusalTests {
                 + "got '123'")
         // `:` is a legal id character — python's guard never mentions it.
         #expect(Refusal.guardAgentId("create_agent", "ai:main") == nil)
+        // python `str.isdigit()` is Unicode: `²` and `١٢` are numbers too; a
+        // vulgar fraction is not a digit.
+        for id in ["²", "١٢"] {
+            #expect(
+                Refusal.guardAgentId("create_agent", id)?["error"].asString
+                    == "create_agent: id must be a name, not a number (message ids are ints); "
+                    + "got \(pyRepr(id))", "\(id)")
+        }
+        #expect(Refusal.guardAgentId("create_agent", "½") == nil)
     }
 }

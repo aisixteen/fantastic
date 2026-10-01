@@ -138,13 +138,15 @@ pub fn kernel_verbs_view(full: bool) -> Value {
     Value::Object(out)
 }
 
+/// `Err` is a python RAISE the verb emulates (a store read that failed, an
+/// `int()` that threw) — settled `failed`, out of band; `Ok` is the reply.
 pub(super) async fn handle_kernel_verb(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
     verb: &str,
     payload: &Value,
-) -> Value {
-    match verb {
+) -> Result<Value, Value> {
+    Ok(match verb {
         "list_agents" => {
             // REGISTRATION ORDER — python iterates `self.ctx.agents`, a plain
             // dict, and the root comes first because it registered first. The
@@ -184,7 +186,7 @@ pub(super) async fn handle_kernel_verb(
             let viewer = crate::send::current_origin();
             let entries = match kernel.ledger_entries().await {
                 Ok(e) => e,
-                Err(e) => return crate::executions::raised("RuntimeError", &e),
+                Err(e) => return Err(crate::executions::raised("RuntimeError", &e)),
             };
             let rows: Vec<Value> = entries
                 .into_iter()
@@ -203,7 +205,7 @@ pub(super) async fn handle_kernel_verb(
             });
             json!({ "executions": rows, "next": next })
         }
-        "ack_deadletter" => ack_deadletter(kernel, payload).await,
+        "ack_deadletter" => ack_deadletter(kernel, payload).await?,
         // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
         // one row per in-flight dispatch, `parent` chaining them into the send
         // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
@@ -237,17 +239,16 @@ pub(super) async fn handle_kernel_verb(
         // `str.isdigit()` gate refuses (they fall through to the name path
         // instead, exactly like any other non-digit string).
         "cancel" => {
+            // `not isinstance(raw, (int, str))`: a FLOAT (3.5, and 3.0 too) is
+            // neither, so it is refused, not answered {cancelled:false}.
             let raw = payload.get("task_id").filter(|v| !v.is_null());
-            let usable = matches!(raw, Some(Value::Number(_)))
+            let usable = matches!(raw, Some(n @ Value::Number(_)) if fantastic_bundle::py_type_name(n) == "int")
                 || matches!(raw, Some(Value::String(s)) if !s.is_empty());
             if !usable {
-                return crate::refusal::missing("cancel", "task_id");
+                return Ok(crate::refusal::missing("cancel", "task_id"));
             }
             let raw = raw.expect("checked usable above");
-            let task_id = match as_id(raw) {
-                Ok(v) => v,
-                Err(raise) => return raise,
-            };
+            let task_id = as_id(raw)?;
             let resolved = match task_id {
                 Some(n) => Some(n),
                 None => raw.as_str().and_then(|s| kernel.ledger.resolve_name(s)),
@@ -264,12 +265,12 @@ pub(super) async fn handle_kernel_verb(
             // `kernel_stop` so it holds whether the verb was addressed to
             // the literal root id or via the reserved `kernel` address.
             if target.parent_id.is_some() {
-                return json!({
+                return Ok(json!({
                     "error": "shutdown_agents: root control surface only; \
                               address the kernel root ('kernel')"
-                });
+                }));
             }
-            return kernel.shutdown_agents().await;
+            kernel.shutdown_agents().await
         }
         "kernel_stop" => {
             // Privileged: root control surface only. Gate on rootness
@@ -277,10 +278,10 @@ pub(super) async fn handle_kernel_verb(
             // addressed to the literal root id or via the reserved `kernel` address —
             // never an arbitrary child agent.
             if target.parent_id.is_some() {
-                return json!({
+                return Ok(json!({
                     "error": "kernel_stop: root control surface only; \
                               address the kernel root ('kernel')"
-                });
+                }));
             }
             // Order: (1) ack and let it flush; (2) AFTER the reply is on the wire,
             // trigger the daemon's graceful path — drain, every call settles
@@ -298,7 +299,7 @@ pub(super) async fn handle_kernel_verb(
             json!({ "type": "kernel_stop", "ok": true })
         }
         _ => unreachable!("is_kernel_verb gate"),
-    }
+    })
 }
 
 async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload: &Value) -> Value {
@@ -462,7 +463,7 @@ fn raised(class: &str, message: &str) -> Value {
 /// `ack_deadletter` — acknowledge a DEAD LETTER the caller originated (the
 /// operator: any). The ack is a row in the kernel's store (`kind: ack`); an acked
 /// dead letter may be pruned. Python `_verb_ack_deadletter`.
-async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Result<Value, Value> {
     let raw = payload.get("id").cloned().unwrap_or(Value::Null);
     let usable = match &raw {
         Value::Null | Value::Bool(_) => false,
@@ -470,17 +471,14 @@ async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         _ => true,
     };
     if !usable {
-        return crate::refusal::missing("ack_deadletter", "id");
+        return Ok(crate::refusal::missing("ack_deadletter", "id"));
     }
     let viewer = crate::send::current_origin();
-    let entries = match kernel.ledger_entries().await {
-        Ok(e) => e,
-        Err(e) => return crate::executions::raised("RuntimeError", &e),
-    };
-    let eid = match as_id(&raw) {
-        Ok(v) => v,
-        Err(raise) => return raise,
-    };
+    let entries = kernel
+        .ledger_entries()
+        .await
+        .map_err(|e| crate::executions::raised("RuntimeError", &e))?;
+    let eid = as_id(&raw)?;
     let hit = entries.into_iter().find(|e| match eid {
         Some(n) => e.get("id").and_then(Value::as_i64) == Some(n),
         None => e.get("name") == Some(&raw),
@@ -498,7 +496,7 @@ async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             ),
         );
         crate::refusal::with(&mut r, "arg", json!("id"));
-        return r;
+        return Ok(r);
     };
     let hid = hit.get("id").and_then(Value::as_i64).unwrap_or(0);
     let status = hit.get("status").cloned().unwrap_or(Value::Null);
@@ -512,10 +510,10 @@ async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             ),
         );
         crate::refusal::with(&mut r, "arg", json!("id"));
-        return r;
+        return Ok(r);
     }
     if hit.get("acked").is_some_and(fantastic_bundle::py_truthy) {
-        return json!({"acked": true, "id": hid, "already": true});
+        return Ok(json!({"acked": true, "id": hid, "already": true}));
     }
     if let Some(root) = kernel.root() {
         let mut row = Map::new();
@@ -530,5 +528,5 @@ async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         let _ = kernel.rows_put(&root.id, row);
     }
     kernel.ledger.mark_acked(hid);
-    json!({"acked": true, "id": hid})
+    Ok(json!({"acked": true, "id": hid}))
 }

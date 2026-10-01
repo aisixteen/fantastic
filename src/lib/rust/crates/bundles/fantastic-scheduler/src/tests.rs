@@ -441,6 +441,13 @@ async fn unschedule_removes() {
 async fn pause_resume_flips_meta() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
+    // python `kernel.update(id, paused=…)`: each flip publishes the `updated`
+    // state event the root loader persists from.
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let _tap = kernel.add_state_subscriber(Arc::new(move |ev, _| {
+        sink.lock().unwrap().push(ev.clone());
+    }));
     let _ = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "pause"}))])
         .await
@@ -463,6 +470,17 @@ async fn pause_resume_flips_meta() {
         .remove(0)
         .result;
     assert_eq!(r2["paused"], false);
+    let flips = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["agent_id"] == json!(sch.0)
+                && e["kind"] == "updated"
+                && e["changed"] == json!(["paused"])
+        })
+        .count();
+    assert_eq!(flips, 2, "pause and resume each publish `updated`");
 }
 
 #[tokio::test]
@@ -1276,4 +1294,16 @@ async fn a_failed_persist_prints_python_line() {
         .find(|l| l.starts_with(&format!("scheduler {sch}: history persist failed: ")))
         .unwrap_or_else(|| panic!("no history line in {lines:?}"));
     assert!(history.contains("no store"), "{history}");
+}
+
+/// python `item["timeout"] = sch["timeout"]`: a fire carries the timeout AS
+/// STORED (an int stays an int), so the kernel's prose and call row print the
+/// schedule's own number.
+#[test]
+fn a_fire_carries_the_stored_timeout_raw() {
+    let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "timeout": 5}));
+    assert_eq!(item.raw_timeout, Some(json!(5)));
+    assert!(item.timeout.is_none());
+    let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "timeout": null}));
+    assert!(item.raw_timeout.is_none());
 }

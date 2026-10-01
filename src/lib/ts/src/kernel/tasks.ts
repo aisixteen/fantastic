@@ -22,14 +22,26 @@ export interface TaskRow {
   /** seconds since the epoch, when the dispatch started */
   startedAt: number;
   onCancel: (() => void)[];
+  /** A service loop that outlives every dispatch (the flusher): a stop neither
+   *  waits for it nor cancels it — the stop ends it last (python `_keepalive`). */
+  keepalive: boolean;
+  /** Spawned work, not a dispatch: it never settles on its own, so a stop
+   *  cancels it rather than waiting for it (python `_forked`). */
+  forked: boolean;
+}
+
+export interface TaskOpts {
+  keepalive?: boolean;
+  forked?: boolean;
 }
 
 export class TaskTable {
   private readonly rows = new Map<number, TaskRow>();
 
-  register(id: number, agent: string, verb: string, parent: number | null): TaskRow {
+  register(id: number, agent: string, verb: string, parent: number | null, opts: TaskOpts = {}): TaskRow {
     const row: TaskRow = {
       id, agent, verb, killed: false, children: new Set(), parent, startedAt: nowSeconds(), onCancel: [],
+      keepalive: opts.keepalive === true, forked: opts.forked === true,
     };
     this.rows.set(id, row);
     if (parent !== null) this.rows.get(parent)?.children.add(id);
@@ -48,10 +60,20 @@ export class TaskTable {
     return [...this.rows.keys()];
   }
 
+  /** Drop one row. Surviving children are RE-PARENTED to its parent — init
+   *  adoption (python `forget_task`): work that outlives the dispatch that
+   *  spawned it stays in its caller's process group. */
   done(id: number): void {
     const row = this.rows.get(id);
     if (row === undefined) return;
-    if (row.parent !== null) this.rows.get(row.parent)?.children.delete(id);
+    const up = row.parent !== null ? this.rows.get(row.parent) : undefined;
+    up?.children.delete(id);
+    for (const cid of row.children) {
+      const c = this.rows.get(cid);
+      if (c === undefined) continue;
+      c.parent = row.parent;
+      up?.children.add(cid);
+    }
     this.rows.delete(id);
   }
 
@@ -76,15 +98,23 @@ export class TaskTable {
   cancel(id: number): number[] {
     const row = this.rows.get(id);
     if (row === undefined) return [];
-    const killed: number[] = [];
+    // POST-ORDER (python `task_subtree`): children before the parent that awaits
+    // them — the kill order of a process group. A row already killed is on its
+    // way out, and is not killed twice.
+    const order: TaskRow[] = [];
     const walk = (r: TaskRow): void => {
       if (r.killed) return;
-      r.killed = true;
-      killed.push(r.id);
       for (const cid of [...r.children]) {
         const c = this.rows.get(cid);
         if (c !== undefined) walk(c);
       }
+      order.push(r);
+    };
+    walk(row);
+    // MARK FIRST, abort second: a doomed handler's sends in between are refused
+    // (`cancelled`) instead of starting work that outlives the cancel.
+    for (const r of order) r.killed = true;
+    for (const r of order) {
       // Hooks run BEFORE the abort lands, so a bundle can release what it holds.
       for (const fn of r.onCancel) {
         try {
@@ -93,9 +123,8 @@ export class TaskTable {
           // one bundle's failing hook must not strand the rest of the subtree
         }
       }
-    };
-    walk(row);
-    return killed;
+    }
+    return order.map((r) => r.id);
   }
 
   size(): number {

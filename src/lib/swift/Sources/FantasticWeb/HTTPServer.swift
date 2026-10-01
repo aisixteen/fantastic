@@ -210,13 +210,19 @@ func stableByParams<T>(_ items: [T], path: (T) -> String) -> [T] {
         .map { $0.x }
 }
 
+/// A bind the socket layer refuses before it reaches the OS.
+struct BindError: Error, CustomStringConvertible {
+    let description: String
+}
+
 /// Server lifecycle owner. Started by `WebBundle.boot`, stopped by
 /// `WebBundle.stop`. One instance per `web.tools` agent.
 public final class WebServer: @unchecked Sendable {
     let kernel: Kernel
     private let agentId: AgentId
-    /// The port `rec.port` named — python binds exactly this, never a hint.
-    public let port: UInt16
+    /// The port `rec.port` named — python binds exactly this, never a hint, and
+    /// never a 16-bit truncation of it: a port outside 0-65535 fails the bind.
+    public let port: Int
     private let lock = NSLock()
     private var channel: Channel?
     /// The task the `boot` verb ran under. Every request runs as its CHILD, so
@@ -236,7 +242,7 @@ public final class WebServer: @unchecked Sendable {
     /// `orderRoutes` after every mount and unmount (python's `router.routes`).
     private var liveRoutes: [RouteSpec] = []
 
-    public init(kernel: Kernel, agentId: AgentId, port: UInt16) {
+    public init(kernel: Kernel, agentId: AgentId, port: Int) {
         self.kernel = kernel
         self.agentId = agentId
         self.port = port
@@ -342,14 +348,19 @@ public final class WebServer: @unchecked Sendable {
                 }
                 return self.configurePipeline(channel)
             }
+        // python's socket `bind` refuses a port outside 0-65535 (OverflowError);
+        // it is never bound modulo 2^16.
+        guard let port16 = UInt16(exactly: port) else {
+            throw BindError(description: "bind(): port must be 0-65535.")
+        }
         // `.wait()` blocks the calling thread (WebBundle.boot's task thread,
         // never an event-loop thread) until the bind resolves or throws.
         // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
-        let bound = try bootstrap.bind(host: webHost(record()), port: Int(port)).wait()
+        let bound = try bootstrap.bind(host: webHost(record()), port: port).wait()
         lock.lock()
         channel = bound
         lock.unlock()
-        kernel.setHttpPort(port)
+        kernel.setHttpPort(port16)
     }
 
     public func stop() {
@@ -568,7 +579,7 @@ public final class WebServer: @unchecked Sendable {
     private func serveFileProxy(agentId: String, path: String) async -> HTTPResponse {
         guard kernel.agent(AgentId(agentId)) != nil else { return Self.emptyNotFound }
         let web = self.agentId
-        func readChunk(_ offset: Int) async -> (JSON, Data?) {
+        @Sendable func readChunk(_ offset: Int) async -> (JSON, Data?) {
             let out = await KernelTaskLocals.$currentSender.withValue(web) {
                 await kernel.send([
                     Item(
@@ -581,7 +592,7 @@ public final class WebServer: @unchecked Sendable {
             }
             return (out.result, out.body)
         }
-        var (meta, body) = await readChunk(0)
+        let (meta, body) = await readChunk(0)
         // THE SOURCE TEST IS THE CARRIER, python's `isinstance(first["bytes"],
         // bytes)`: anything that did not answer with a CHUNK is a 404 — a denied
         // gate, a path escape, a missing file, a non-server. An EMPTY chunk is
@@ -591,7 +602,7 @@ public final class WebServer: @unchecked Sendable {
         // through denials, and this route used to be the one surface that threw
         // that away. A MISSING FILE stays a bare 404: no body, no existence
         // leak, no path probing.
-        guard var buf = body else {
+        guard let first = body else {
             if meta["reason"].asString == "unauthorized" {
                 // python `{k: detail.get(k) for k in (...)}` — all FOUR keys, a
                 // key the denial lacks present as JSON null.
@@ -607,18 +618,26 @@ public final class WebServer: @unchecked Sendable {
         // as `content-length`; a falsy size leaves the StreamingResponse
         // CHUNKED.
         let size = meta["size"].asInt ?? 0
-        while !(meta["eof"].asBool ?? true) {
-            let next = Int(meta["next_offset"].asInt ?? 0)
-            (meta, body) = await readChunk(next)
-            guard let chunk = body else { break }
-            buf.append(chunk)
-        }
+        // STREAMED, chunk by chunk, as python's `StreamingResponse` pulls its
+        // generator: the next `read_stream` runs only when the writer asks for
+        // it, nothing is held whole in RAM, and a chunk that fails mid-file ends
+        // the body SHORT of the declared length — never a shorter file dressed
+        // up as complete.
+        let cursor = ChunkCursor(meta)
+        let rest = AsyncStream<Data>(unfolding: {
+            guard let next = cursor.nextOffset() else { return nil }
+            let (m, b) = await readChunk(next)
+            guard let chunk = b else { return nil }
+            cursor.advance(m)
+            return chunk
+        })
         // python types the proxy with `mimetypes.guess_type(path)` and falls
         // back to octet-stream; starlette appends the charset to a `text/*`.
         var mime = Mimetypes.guessType(path) ?? "application/octet-stream"
         if mime.hasPrefix("text/") && !mime.contains("charset=") { mime += "; charset=utf-8" }
         return HTTPResponse(
-            status: 200, contentType: mime, body: buf, chunked: size == 0)
+            status: 200, contentType: mime, body: first, chunked: size == 0,
+            stream: rest, declaredLength: size == 0 ? nil : Int(size))
     }
 
     /// python `Response(status_code=404)` — no body, no content-type.
@@ -718,7 +737,7 @@ public final class WebServer: @unchecked Sendable {
         // python `json.loads(headers.get(...) or "{}")` — an EMPTY header value
         // is an empty envelope, not a parse error.
         let raw = headers[Self.payloadHeader] ?? ""
-        guard let parsed = try? JSON.parse(raw.isEmpty ? "{}" : raw) else {
+        guard let parsed = try? JSON.parseStrict(raw.isEmpty ? "{}" : raw) else {
             return jsonHTTP(
                 400, .object(["error": .string("web_rest: X-Fantastic-Payload is not valid JSON")])
             )
@@ -772,7 +791,14 @@ public final class WebServer: @unchecked Sendable {
         // THE SAME ONE DECISION as the JSON leg: octet iff the verb returned a
         // CHUNK. `!outBody.isEmpty` served an empty file as JSON.
         if let chunk = out.body {
-            return Self.octetReply(chunk, payloadHeader: pyJsonDumps(out.result))
+            // python sends the reply WITHOUT its bytes field as the header —
+            // that field's value is the body.
+            var rest = out.result
+            if case .object(var o) = rest {
+                o.removeValue(forKey: "bytes")
+                rest = .object(o)
+            }
+            return Self.octetReply(chunk, payloadHeader: pyJsonDumps(rest))
         }
         return jsonHTTP(200, out.result)
     }
@@ -780,10 +806,9 @@ public final class WebServer: @unchecked Sendable {
     /// CPython `json.detect_encoding` + `bytes.decode(enc, "surrogatepass")`
     /// (A13.11). `nil` = the bytes do not decode, which python raises on.
     ///
-    /// RESIDUAL (D13): `surrogatepass` admits lone surrogates and CPython's
-    /// scanner admits `NaN`/`Infinity`/`-Infinity`; `FantasticJSON` can
-    /// represent neither, so those bodies still answer 400 where python answers
-    /// 204. The ENCODING half below is exact.
+    /// `surrogatepass` admits a lone surrogate here, and python's
+    /// `strict_loads` then refuses it (D13), as it refuses `NaN`/`Infinity` —
+    /// so those bodies answer 400 on both. The ENCODING half below is exact.
     static func decodeJSONBody(_ b: Data) -> String? {
         if b.isEmpty { return "" }
         let n = b.count
@@ -908,12 +933,19 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
             // the boot task, not a root.
             let parent = server.requestParent
             Task {
-                let resp = await KernelTaskLocals.$currentTask.withValue(parent) {
-                    await server.handle(request: req)
-                }
-                eventLoop.execute {
-                    let (ctx, handler) = bound.value
-                    handler.writeResponse(context: ctx, response: resp, keepAlive: keepAlive)
+                await KernelTaskLocals.$currentTask.withValue(parent) {
+                    let resp = await server.handle(request: req)
+                    eventLoop.execute {
+                        let (ctx, handler) = bound.value
+                        handler.writeResponse(context: ctx, response: resp, keepAlive: keepAlive)
+                    }
+                    // A streamed body's later chunks are read here, under the
+                    // same request scope, as the writer pulls them.
+                    if let stream = resp.stream {
+                        await HTTPDispatchHandler.writeStreamed(
+                            stream, firstCount: resp.body.count, declared: resp.declaredLength,
+                            keepAlive: keepAlive, bound: bound, eventLoop: eventLoop)
+                    }
                 }
             }
         }
@@ -934,7 +966,9 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
             if response.chunked {
                 headers.add(name: "transfer-encoding", value: "chunked")
             } else {
-                headers.add(name: "content-length", value: String(response.body.count))
+                headers.add(
+                    name: "content-length",
+                    value: String(response.declaredLength ?? response.body.count))
             }
         }
         if let ct = response.contentType, !bodyless {
@@ -952,9 +986,46 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
         context.write(wrapOutboundOut(.head(respHead)), promise: nil)
         var buf = context.channel.allocator.buffer(capacity: response.body.count)
         buf.writeBytes(response.body)
+        if response.stream != nil {
+            // The rest follows chunk by chunk (`writeStreamed`); `end` waits.
+            context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+            return
+        }
         context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
             if !keepAlive { context.close(promise: nil) }
+        }
+    }
+
+    /// Pull a streamed body to its end, one chunk written (and flushed) before
+    /// the next is read. Ends the message — or, when the stream stopped short
+    /// of the length the head declared, CLOSES the connection: the client sees
+    /// the truncated transfer python's h11 produces, not a complete shorter one.
+    static func writeStreamed(
+        _ stream: AsyncStream<Data>, firstCount: Int, declared: Int?, keepAlive: Bool,
+        bound: NIOLoopBound<(ChannelHandlerContext, HTTPDispatchHandler)>, eventLoop: EventLoop
+    ) async {
+        var written = firstCount
+        for await chunk in stream {
+            written += chunk.count
+            let flushed: EventLoopFuture<Void> = eventLoop.flatSubmit {
+                let (ctx, handler) = bound.value
+                var buf = ctx.channel.allocator.buffer(capacity: chunk.count)
+                buf.writeBytes(chunk)
+                return ctx.writeAndFlush(handler.wrapOutboundOut(.body(.byteBuffer(buf))))
+            }
+            if (try? await flushed.get()) == nil { return }  // the peer is gone
+        }
+        let short = declared.map { written < $0 } ?? false
+        eventLoop.execute {
+            let (ctx, handler) = bound.value
+            if short {
+                ctx.close(promise: nil)
+                return
+            }
+            ctx.writeAndFlush(handler.wrapOutboundOut(.end(nil))).whenComplete { _ in
+                if !keepAlive { bound.value.0.close(promise: nil) }
+            }
         }
     }
 }
@@ -981,17 +1052,38 @@ public struct HTTPResponse: Sendable {
     /// length it learned from the first chunk, and a SIZE-0 file has none, so it
     /// streams chunked exactly as python does.
     let chunked: Bool
+    /// The REST of a streamed body, pulled one chunk at a time after `body`
+    /// (the first chunk) is written — starlette's `StreamingResponse`. `nil`
+    /// for an ordinary response.
+    let stream: AsyncStream<Data>?
+    /// The `content-length` a streamed body DECLARES up front (python: the
+    /// first chunk's `size`) — not the bytes it ends up carrying. A stream that
+    /// stops short of it is a truncated transfer, and the connection closes.
+    let declaredLength: Int?
 
     init(
         status: Int, contentType: String?, body: Data, extraHeaders: [(String, String)] = [],
-        chunked: Bool = false
+        chunked: Bool = false, stream: AsyncStream<Data>? = nil, declaredLength: Int? = nil
     ) {
         self.status = status
         self.contentType = contentType
         self.body = body
         self.extraHeaders = extraHeaders
         self.chunked = chunked
+        self.stream = stream
+        self.declaredLength = declaredLength
     }
+}
+
+/// Where a streamed `read_stream` file stands: the offset to read next, or
+/// `nil` once a chunk said `eof`. Touched only by the one pulling writer.
+final class ChunkCursor: @unchecked Sendable {
+    private var next: Int?
+    init(_ first: JSON) { advance(first) }
+    func advance(_ chunk: JSON) {
+        next = pyTruthy(chunk["eof"]) ? nil : Int(chunk["next_offset"].asInt ?? 0)
+    }
+    func nextOffset() -> Int? { next }
 }
 
 // MARK: - shared helpers

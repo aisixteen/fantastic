@@ -24,11 +24,12 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use fantastic_file::fs as fantastic_fs;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use fantastic_kernel::agent::Agent;
@@ -178,41 +179,201 @@ pub struct KernelStateBundle {
 }
 
 /// The loader's own disk dir: a `root` meta overrides the agent's address, so a
-/// SESSION loader can serve a sub-namespace. Python `_root`.
-fn loader_root(agent: &Arc<Agent>) -> std::path::PathBuf {
-    agent
-        .meta
-        .read()
+/// SESSION loader can serve a sub-namespace. Python `_root`. Unclamped — every
+/// disk touch goes through [`clamp`] first.
+fn loader_root(agent: &Arc<Agent>) -> PathBuf {
+    persistence::loader_dir(agent)
+}
+
+/// python `_root`'s override: the loader's `root` meta when it is a non-empty
+/// string (`isinstance(r, str) and r`).
+fn root_meta(agent: &Agent) -> Option<String> {
+    agent.meta.read().ok().and_then(|m| {
+        m.get("root")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+/// `str(_root(agent))` as the loader's reflect reports it. A `root` meta is
+/// reported AS GIVEN (`Path(r)`: an absolute meta stays absolute, a relative one
+/// stays relative). With no meta python reports `_root_path`, the agent's
+/// address RELATIVE to the running dir (`.fantastic/agents/…`); the port's
+/// address is absolute, so it is shown relative to [`Kernel::workdir`] — and a
+/// kernel with no running dir RAISES, as `clamp` does.
+fn reported_root(agent: &Arc<Agent>, kernel: &Kernel) -> Result<String, BundleError> {
+    let shown = match root_meta(agent) {
+        Some(r) => PathBuf::from(r),
+        None => {
+            let base = kernel
+                .workdir()
+                .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })?;
+            // Resolved the way `Kernel::workdir` resolves the root's address.
+            let at = if agent.root_path.is_absolute() {
+                agent.root_path.clone()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })?
+                    .join(&agent.root_path)
+            };
+            at.strip_prefix(&base)
+                .map_err(|_| -> BundleError {
+                    format!(
+                        "RuntimeError: loader address {} is outside the running dir {}",
+                        at.display(),
+                        base.display()
+                    )
+                    .into()
+                })?
+                .to_path_buf()
+        }
+    };
+    Ok(py_path_str(&shown))
+}
+
+/// `str(Path(p))`: no `.` segments, no trailing or doubled separator; empty ⇒ `.`.
+fn py_path_str(p: &Path) -> String {
+    let parts: PathBuf = p
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    let text = parts.to_string_lossy().into_owned();
+    if text.is_empty() {
+        ".".to_string()
+    } else {
+        text
+    }
+}
+
+/// A python exception out of a loader verb — `"<Class>: <message>"`, settled
+/// `failed`. The `fs` surface hands back python's own text: an `OSError` leads
+/// with `[Errno N]` (its class follows from the errno), a clamp refusal is the
+/// `ValueError` `fs: root … escapes the running dir`.
+fn raise_fs(msg: String) -> BundleError {
+    let class = msg
+        .strip_prefix("[Errno ")
+        .and_then(|r| r.split(']').next())
+        .and_then(|n| n.parse::<i32>().ok())
+        .map_or("ValueError", fantastic_bundle::os_error_class);
+    format!("{class}: {msg}").into()
+}
+
+/// python `fs.Root(agent.ctx.workdir, dir)`, resolved: `dir` clamped to the
+/// running dir (relative ⇒ under it; absolute ⇒ only inside it; `..`/symlink
+/// escapes refused with python's text, raised).
+fn clamp(kernel: &Kernel, dir: &Path) -> Result<PathBuf, BundleError> {
+    let base = kernel
+        .workdir()
+        .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })?;
+    fantastic_fs::resolve_root(&dir.to_string_lossy(), &base).map_err(raise_fs)
+}
+
+/// python `_read_record`: one `agent.yaml` → its mapping, or `None` when absent,
+/// unreadable or not a mapping. The existence probe is OUTSIDE python's `try`,
+/// so a path the clamp refuses raises.
+fn read_record(root: &Path, rel: &str) -> Result<Option<Map<String, Value>>, BundleError> {
+    if !fantastic_fs::exists(root, rel).map_err(raise_fs)? {
+        return Ok(None);
+    }
+    Ok(fantastic_fs::read_text(root, rel)
         .ok()
-        .and_then(|m| {
-            m.get("root")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
-        })
-        .unwrap_or_else(|| agent.root_path.clone())
+        .and_then(|raw| persistence::parse_record(&raw)))
+}
+
+/// python `read_tree`: a `.fantastic` tree → a FLAT list of records (root +
+/// descendants), `parent_id` from DISK POSITION. A MISSING OR CORRUPT ROOT RECORD
+/// DOES NOT HIDE THE TREE: the children are walked under the default layout and
+/// parented to [`ROOT_ID`](fantastic_kernel::bootstrap::DEFAULT_ROOT_ID).
+fn read_tree(root: &Path) -> Result<Vec<Value>, BundleError> {
+    let Some(root_rec) = read_record(root, persistence::RECORD_FILE)? else {
+        let mut records = Vec::new();
+        walk(
+            root,
+            "agents",
+            &Value::from(fantastic_kernel::bootstrap::DEFAULT_ROOT_ID),
+            &mut records,
+            "agents",
+        )?;
+        return Ok(records);
+    };
+    // The root record DECLARES the children-dir name (default "agents").
+    let cd = root_rec
+        .get("children_dir")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("agents")
+        .to_string();
+    let id = root_rec.get("id").cloned().unwrap_or(Value::Null);
+    let mut records = vec![Value::Object(root_rec)];
+    walk(root, &cd, &id, &mut records, &cd)?;
+    Ok(records)
+}
+
+/// python `_walk`: absent or corrupt siblings are skipped; disk position is
+/// authoritative for `parent_id`.
+fn walk(
+    root: &Path,
+    rel_dir: &str,
+    parent_id: &Value,
+    out: &mut Vec<Value>,
+    children_dir: &str,
+) -> Result<(), BundleError> {
+    if !(fantastic_fs::exists(root, rel_dir).map_err(raise_fs)?
+        && fantastic_fs::is_dir(root, rel_dir).map_err(raise_fs)?)
+    {
+        return Ok(());
+    }
+    let Ok(entries) = fantastic_fs::list_dir(root, rel_dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let name = fantastic_fs::file_name(&entry);
+        let rel = format!("{rel_dir}/{name}")
+            .trim_start_matches('/')
+            .to_string();
+        let Some(mut rec) = read_record(root, &format!("{rel}/{}", persistence::RECORD_FILE))?
+        else {
+            continue;
+        };
+        rec.insert("parent_id".to_string(), parent_id.clone());
+        let id = rec.get("id").cloned().unwrap_or(Value::Null);
+        out.push(Value::Object(rec));
+        walk(
+            root,
+            &format!("{rel}/{children_dir}"),
+            &id,
+            out,
+            children_dir,
+        )?;
+    }
+    Ok(())
 }
 
 impl KernelStateBundle {
-    async fn boot(&self, agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
+    async fn boot(&self, agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
+        // A SESSION loader (a `root` meta pointing at a sub-namespace like
+        // `.fantastic/web/<session>/`) seeds its namespace ANCHOR
+        // (`<root>/agent.yaml`) so `load_tree` has a root to walk from after a
+        // restart — python `_boot`, FIRST and on every boot, through the clamp: a
+        // root outside the running dir raises.
+        let root_dir = loader_root(agent);
+        if root_dir != agent.root_path {
+            let anchor = clamp(kernel, &root_dir)?;
+            if !fantastic_fs::exists(&anchor, persistence::RECORD_FILE).map_err(raise_fs)? {
+                if let Value::Object(rec) = persistence::record_map(&agent.record()) {
+                    write_record(&anchor, &rec, kernel)?;
+                }
+            }
+        }
         // IDEMPOTENT, as python's `_boot` is: a second boot installs nothing.
         {
             let mut st = self.state.lock().expect("kernel_state poisoned");
             let entry = st.entry(agent.id.0.clone()).or_default();
             if entry.booted {
-                return Value::Null;
+                return Ok(Value::Null);
             }
             entry.booted = true;
-        }
-        // A SESSION loader (a `root` meta pointing at a sub-namespace like
-        // `.fantastic/web/<session>/`) seeds its namespace ANCHOR
-        // (`<root>/agent.yaml`) so `load_tree` has a root to walk from after a
-        // restart — python `_boot`.
-        let root_dir = loader_root(agent);
-        if root_dir != agent.root_path && !root_dir.join(persistence::RECORD_FILE).exists() {
-            if let Value::Object(rec) = fantastic_kernel::persistence::record_map(&agent.record()) {
-                write_record(&root_dir, &rec);
-            }
         }
         let installed = persistence::boot_root_loader(kernel, agent).await;
         self.state
@@ -221,14 +382,20 @@ impl KernelStateBundle {
             .entry(agent.id.0.clone())
             .or_default()
             .installed = Some(installed);
-        Value::Null
+        Ok(Value::Null)
     }
 
-    async fn load_tree(&self, agent: &Arc<Agent>) -> Value {
-        json!({
-            "records": persistence::read_tree(&loader_root(agent)),
+    /// python `_load_tree`: `read_tree(fs.Root(workdir, _root(agent)))`.
+    async fn load_tree(
+        &self,
+        agent: &Arc<Agent>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Value, BundleError> {
+        let root = clamp(kernel, &loader_root(agent))?;
+        Ok(json!({
+            "records": read_tree(&root)?,
             "version": fantastic_kernel::CURRENT_VERSION,
-        })
+        }))
     }
 
     async fn persist_record(
@@ -236,36 +403,44 @@ impl KernelStateBundle {
         agent: &Arc<Agent>,
         payload: &Value,
         kernel: &Arc<Kernel>,
-    ) -> Value {
+    ) -> Result<Value, BundleError> {
         if let Some(denied) = guard_own_tree("persist_record", agent) {
-            return denied;
+            return Ok(denied);
         }
         let Some(record) = payload
             .get("record")
             .and_then(Value::as_object)
             .filter(|r| r.get("id").is_some_and(fantastic_bundle::py_truthy))
         else {
-            return fantastic_kernel::missing("persist_record", "record (dict with id)");
+            return Ok(fantastic_kernel::missing(
+                "persist_record",
+                "record (dict with id)",
+            ));
         };
+        if let Some(bad) = guard_id("persist_record", record.get("id")) {
+            return Ok(bad);
+        }
         let id = record.get("id").and_then(Value::as_str).unwrap_or("");
-        if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("persist_record", id) {
-            return bad;
+        let parent_id = record.get("parent_id");
+        let parent = parent_id.and_then(Value::as_str);
+        let mut at = Places::new(agent, kernel);
+        if let Some(denied) = guard_record_owner("persist_record", id, parent, &mut at)? {
+            return Ok(denied);
         }
-        let parent_id = record.get("parent_id").and_then(Value::as_str);
-        if let Some(denied) = guard_record_owner("persist_record", id, parent_id, agent, kernel) {
-            return denied;
-        }
-        if let Some(pid) = parent_id {
-            if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("persist_record", pid) {
-                return bad;
-            }
+        // python `_guard_parent_chain`: a parent_id that is not None must be a
+        // valid id — a non-string included.
+        if let Some(bad) = parent_id
+            .filter(|p| !p.is_null())
+            .and_then(|p| guard_id("persist_record", Some(p)))
+        {
+            return Ok(bad);
         }
         let path = match kernel.agents.get(&AgentId::from(id)) {
             Some(a) => a.root_path.clone(),
-            None => resolve_under(agent, kernel, id, parent_id),
+            None => at.resolve(id, parent)?,
         };
-        write_record(&path, record);
-        json!({ "ok": true })
+        write_record(&clamp(kernel, &path)?, record, kernel)?;
+        Ok(json!({ "ok": true }))
     }
 
     async fn forget_record(
@@ -273,96 +448,174 @@ impl KernelStateBundle {
         agent: &Arc<Agent>,
         payload: &Value,
         kernel: &Arc<Kernel>,
-    ) -> Value {
+    ) -> Result<Value, BundleError> {
         if let Some(denied) = guard_own_tree("forget_record", agent) {
-            return denied;
+            return Ok(denied);
         }
-        let Some(target) = payload
-            .get("id")
-            .filter(|v| fantastic_bundle::py_truthy(v))
-            .and_then(Value::as_str)
-        else {
-            return fantastic_kernel::missing("forget_record", "id");
+        // `if not target: missing` — TRUTHINESS; a truthy non-string is then the
+        // id guard's `bad_arg`, not `missing_arg`.
+        let Some(raw) = payload.get("id").filter(|v| fantastic_bundle::py_truthy(v)) else {
+            return Ok(fantastic_kernel::missing("forget_record", "id"));
         };
-        if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("forget_record", target) {
-            return bad;
+        if let Some(bad) = guard_id("forget_record", Some(raw)) {
+            return Ok(bad);
         }
-        let parent_id = payload.get("parent_id").and_then(Value::as_str);
-        if let Some(denied) = guard_record_owner("forget_record", target, parent_id, agent, kernel)
+        let target = raw.as_str().unwrap_or("");
+        let parent_id = payload.get("parent_id");
+        let parent = parent_id.and_then(Value::as_str);
+        let mut at = Places::new(agent, kernel);
+        if let Some(denied) = guard_record_owner("forget_record", target, parent, &mut at)? {
+            return Ok(denied);
+        }
+        if let Some(bad) = parent_id
+            .filter(|p| !p.is_null())
+            .and_then(|p| guard_id("forget_record", Some(p)))
         {
-            return denied;
-        }
-        if let Some(pid) = parent_id {
-            if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("forget_record", pid) {
-                return bad;
-            }
+            return Ok(bad);
         }
         let path = match kernel.agents.get(&AgentId::from(target)) {
             Some(a) => a.root_path.clone(),
-            None => resolve_under(agent, kernel, target, parent_id),
+            None => at.resolve(target, parent)?,
         };
-        let _ = fs::remove_dir_all(&path);
-        json!({ "ok": true })
+        // python `rmtree`: the existence probe raises on a clamp escape; a
+        // failed removal is swallowed.
+        let rp = clamp(kernel, &path)?;
+        if fantastic_fs::exists(&rp, "").map_err(raise_fs)? {
+            let _ = fantastic_fs::remove(&rp, "", true);
+        }
+        Ok(json!({ "ok": true }))
     }
 }
 
-/// Merge-write one record's `agent.yaml` at `root_path` (the agent's own dir) —
-/// python `write_record`. Reads any existing file and overlays only the
-/// kernel-managed keys, preserving unknown fields + sidecars.
-fn write_record(root_path: &Path, record: &Map<String, Value>) {
-    let file = root_path.join(persistence::RECORD_FILE);
-    let mut on_disk: Map<String, Value> = fs::read_to_string(&file)
-        .ok()
-        .and_then(|raw| persistence::parse_record(&raw))
-        .unwrap_or_default();
+/// `guard_agent_id` on the RAW value: python refuses a non-string id with the
+/// same `bad_arg` an empty one gets.
+fn guard_id(verb: &str, v: Option<&Value>) -> Option<Value> {
+    fantastic_kernel::refusal::guard_agent_id(verb, v.and_then(Value::as_str).unwrap_or(""))
+}
+
+/// Merge-write one record's `agent.yaml` in `root` (the agent's own dir, already
+/// clamped) — python `write_record`: read any existing file, overlay the
+/// record's keys (unknown fields + sidecars survive), write atomically through
+/// `fs` — a failed write RAISES — then seed the bundle's readme and docs.
+fn write_record(
+    root: &Path,
+    record: &Map<String, Value>,
+    kernel: &Kernel,
+) -> Result<(), BundleError> {
+    let mut on_disk = read_record(root, persistence::RECORD_FILE)?.unwrap_or_default();
     for (k, v) in record {
         on_disk.insert(k.clone(), v.clone());
     }
-    let _ = fs::create_dir_all(root_path);
     let body = fantastic_kernel::yaml_io::dump(&Value::Object(on_disk));
-    let _ = fs::write(&file, body);
+    fantastic_fs::write_bytes(root, persistence::RECORD_FILE, body.as_bytes(), true)
+        .map_err(raise_fs)?;
+    seed_readme(root, record.get("handler_module"), kernel);
+    Ok(())
+}
+
+/// python `_seed_readme`: the bundle's shipped `readme.md` AND its `docs/` tree
+/// into the agent's dir, copy-if-missing per file, THROUGH `fs`. A failure ends
+/// the seeding quietly (python swallows it).
+fn seed_readme(root: &Path, handler_module: Option<&Value>, kernel: &Kernel) {
+    let Some(bundle) = handler_module
+        .and_then(Value::as_str)
+        .filter(|h| !h.is_empty())
+        .and_then(|h| kernel.bundles.get(h))
+    else {
+        return;
+    };
+    let mut files: Vec<(String, &str)> = Vec::new();
+    if let Some(readme) = bundle.readme() {
+        files.push(("readme.md".to_string(), readme));
+    }
+    for (key, body) in bundle.docs() {
+        files.push((format!("docs/{key}.md"), body));
+    }
+    for (rel, body) in files {
+        match fantastic_fs::exists(root, &rel) {
+            Ok(true) => continue,
+            Ok(false) => {
+                if fantastic_fs::write_bytes(root, &rel, body.as_bytes(), true).is_err() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 /// The children-container dir name for this loader's namespace (declared config;
 /// default "agents"). Python `_children_name`.
 fn children_name(agent: &Arc<Agent>) -> String {
-    agent
-        .meta
-        .read()
-        .ok()
-        .and_then(|m| {
-            m.get("children_dir")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
+    persistence::loader_children(agent)
+}
+
+/// Where records REALLY are for this loader — python `_where`: the live tree
+/// first, then its own persisted records under its root (disk position), read
+/// once and only when a node is not live. That read goes through the clamp, so
+/// a root outside the running dir raises exactly where python's `_disk_parents`
+/// does.
+struct Places<'a> {
+    agent: &'a Arc<Agent>,
+    kernel: &'a Arc<Kernel>,
+    disk: Option<std::collections::HashMap<String, Option<String>>>,
+}
+
+impl<'a> Places<'a> {
+    fn new(agent: &'a Arc<Agent>, kernel: &'a Arc<Kernel>) -> Self {
+        Self {
+            agent,
+            kernel,
+            disk: None,
+        }
+    }
+
+    /// `(known, parent)` for one id.
+    fn locate(&mut self, node: &str) -> Result<(bool, Option<String>), BundleError> {
+        if let Some(live) = self.kernel.agents.get(&AgentId::from(node)) {
+            return Ok((true, live.parent_id.as_ref().map(|p| p.0.clone())));
+        }
+        if self.disk.is_none() {
+            let root = clamp(self.kernel, &loader_root(self.agent))?;
+            self.disk = Some(persistence::disk_parents(
+                &root,
+                &children_name(self.agent),
+                &self.agent.id.0,
+            ));
+        }
+        let disk = self.disk.as_ref().expect("filled above");
+        Ok(match disk.get(node) {
+            Some(parent) => (true, parent.clone()),
+            None => (false, None),
         })
-        .unwrap_or_else(|| "agents".to_string())
-}
+    }
 
-/// Where records REALLY are for this loader: the live tree, then its own
-/// persisted records under its root (disk position). Python `_where`.
-fn places<'a>(agent: &Arc<Agent>, kernel: &'a Kernel) -> persistence::RecordPlaces<'a> {
-    persistence::RecordPlaces::new(
-        kernel,
-        loader_root(agent),
-        children_name(agent),
-        agent.id.0.clone(),
-    )
-}
-
-/// An absolute dir for a record under THIS loader's root — python
-/// `_resolve_path`. The chain is walked where it really is (the live tree, then
-/// this loader's persisted records) and STOPS AT THE LOADER, so a session
-/// loader's records nest under its own `root` — 2+ levels under a federated
-/// record included. A record that already exists keeps its own position; the
-/// payload's `parent_id` places only a new one.
-fn resolve_under(
-    agent: &Arc<Agent>,
-    kernel: &Arc<Kernel>,
-    id: &str,
-    parent_id: Option<&str>,
-) -> std::path::PathBuf {
-    places(agent, kernel).resolve(id, parent_id)
+    /// A record's dir under THIS loader's root — python `_resolve_path`. The
+    /// chain is walked where it really is and STOPS AT THE LOADER, so a session
+    /// loader's records nest under its own `root` — 2+ levels under a federated
+    /// record included. A record that already exists keeps its own position; the
+    /// payload's `parent_id` places only a new one.
+    fn resolve(&mut self, id: &str, payload_parent: Option<&str>) -> Result<PathBuf, BundleError> {
+        let mut parts: Vec<String> = vec![id.to_string()];
+        let (known, mut pid) = self.locate(id)?;
+        if !known {
+            pid = payload_parent.map(str::to_string);
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(p) = pid {
+            if p.is_empty() || p == self.agent.id.0 || !seen.insert(p.clone()) {
+                break;
+            }
+            parts.push(p.clone());
+            pid = self.locate(&p)?.1;
+        }
+        let children_dir = children_name(self.agent);
+        let mut path = loader_root(self.agent);
+        for part in parts.iter().rev() {
+            path = path.join(&children_dir).join(part);
+        }
+        Ok(path)
+    }
 }
 
 /// Refuse a RECORD verb that names an agent outside the caller's own subtree —
@@ -401,29 +654,29 @@ fn guard_record_owner(
     verb: &str,
     record_id: &str,
     parent_id: Option<&str>,
-    agent: &Arc<Agent>,
-    kernel: &Arc<Kernel>,
-) -> Option<Value> {
-    let caller = fantastic_kernel::current_origin()?;
+    at: &mut Places<'_>,
+) -> Result<Option<Value>, BundleError> {
+    let Some(caller) = fantastic_kernel::current_origin() else {
+        return Ok(None);
+    };
     if caller.0 == record_id {
-        return None;
+        return Ok(None);
     }
-    let mut at = places(agent, kernel);
-    let (known, mut node) = at.locate(record_id);
+    let (known, mut node) = at.locate(record_id)?;
     if !known {
         node = parent_id.filter(|p| !p.is_empty()).map(str::to_string);
     }
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     while let Some(n) = node.filter(|n| !n.is_empty()) {
         if n == caller.0 {
-            return None;
+            return Ok(None);
         }
         if !seen.insert(n.clone()) {
             break;
         }
-        node = at.locate(&n).1;
+        node = at.locate(&n)?.1;
     }
-    Some(fantastic_kernel::refusal(
+    Ok(Some(fantastic_kernel::refusal(
         fantastic_kernel::refusal::UNAUTHORIZED,
         format!(
             "{} may not {verb} {} — a record verb is scoped to the caller's own \
@@ -431,7 +684,7 @@ fn guard_record_owner(
             fantastic_bundle::py_repr(&caller.0),
             fantastic_bundle::py_repr(record_id)
         ),
-    ))
+    )))
 }
 
 #[async_trait]
@@ -468,15 +721,15 @@ impl Bundle for KernelStateBundle {
                 "id": agent.id.0,
                 "sentence": "Disk persistence/hydration root — owns .fantastic; \
                              answers load_tree / persist_record / forget_record.",
-                "root": loader_root(&agent).to_string_lossy(),
+                "root": reported_root(&agent, kernel)?,
                 "verbs": verbs_view(),
             }),
-            "boot" => self.boot(&agent, kernel).await,
-            "load_tree" => self.load_tree(&agent).await,
-            "persist_record" => self.persist_record(&agent, payload, kernel).await,
-            "forget_record" => self.forget_record(&agent, payload, kernel).await,
-            "persist_blob" => persistence::persist_blob(kernel, payload).await,
-            "load_blob" => persistence::load_blob(kernel, payload).await,
+            "boot" => self.boot(&agent, kernel).await?,
+            "load_tree" => self.load_tree(&agent, kernel).await?,
+            "persist_record" => self.persist_record(&agent, payload, kernel).await?,
+            "forget_record" => self.forget_record(&agent, payload, kernel).await?,
+            "persist_blob" => persistence::persist_blob(kernel, &agent, payload).await,
+            "load_blob" => persistence::load_blob(kernel, &agent, payload).await,
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `apply_reflect_flags` into
             // something that reads like a healthy reflect (python 2026-09-02).

@@ -139,3 +139,53 @@ test("validateRecords rejects bad snapshots", () => {
   assert.throws(() => validateRecords([{ id: "a" }], 2), SnapshotError); // bad version
   assert.equal(validateRecords([{ id: "root" }], 1), "root");
 });
+
+// python `validate_records`, rule for rule and text for text — all of it BEFORE
+// `load` tears the live tree down.
+test("validateRecords: python's id guard, reserved keys, reachability and texts", () => {
+  const msg = (records: AgentRecord[], version = 1): string => {
+    try {
+      validateRecords(records, version);
+    } catch (e) {
+      assert.ok(e instanceof SnapshotError);
+      return (e as Error).message;
+    }
+    return "accepted";
+  };
+  const root: AgentRecord = { id: "root" };
+  assert.equal(msg([root], 2), "snapshot version 2 exceeds this kernel's max (1)");
+  assert.equal(msg([root], 0), "accepted", "an OLDER version is read");
+  assert.equal(msg([{ id: "" } as AgentRecord]), "snapshot record missing id");
+  assert.equal(
+    msg([root, { id: "g|a", parent_id: "root" }]),
+    "record 'g|a': load: id must be a local name without `|` (it marks a foreign `guid|agent`); got 'g|a'",
+  );
+  assert.equal(msg([root, { id: "kernel", parent_id: "root" }]), "record 'kernel': load: id must be a name other than the reserved 'kernel'");
+  assert.equal(
+    msg([root, { id: "123", parent_id: "root" }]),
+    "record '123': load: id must be a name, not a number (message ids are ints); got '123'",
+  );
+  assert.equal(
+    msg([root, { id: "../x", parent_id: "root" }]),
+    "record '../x': load: id must be a single path segment (no separators); got '../x'",
+  );
+  assert.equal(
+    msg([root, { id: "a", parent_id: "root", root_path: "/tmp" }]),
+    "record 'a' carries reserved key(s) ['root_path'] — these are Agent constructor parameters, not meta; the tree lives where its document lives and is never named in a record",
+  );
+  assert.equal(msg([root, { id: "a", parent_id: "root" }, { id: "a", parent_id: "root" }]), "duplicate agent id 'a' in snapshot");
+  assert.equal(msg([{ id: "a", parent_id: "b" }, { id: "b", parent_id: "a" }]), "snapshot has no root (no record with parent_id == null)");
+  assert.equal(msg([{ id: "a" }, { id: "b" }]), "snapshot has 2 roots; expected exactly one");
+  assert.equal(msg([root, { id: "a", parent_id: "nope" }]), "agent 'a' parent 'nope' not in snapshot");
+  assert.equal(
+    msg([root, { id: "a", parent_id: "b" }, { id: "b", parent_id: "a" }]),
+    "snapshot has 2 record(s) unreachable from the root 'root' (a cycle or an orphaned parent chain): ['a', 'b']",
+  );
+});
+
+test("a refused snapshot leaves the live tree untouched", () => {
+  const k = loaderKernel();
+  k.load(TREE);
+  assert.throws(() => k.load([{ id: "canvas", handler_module: "canvas.ts" }, { id: "x|y", parent_id: "canvas" }]), SnapshotError);
+  assert.deepEqual([...k.agents.keys()].sort(), ["canvas", "term1"]);
+});

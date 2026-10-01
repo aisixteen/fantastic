@@ -2,6 +2,7 @@ import type { Kernel } from "../../kernel/kernel.ts";
 import type { Agent } from "../../kernel/agent.ts";
 import type { Json, Payload } from "../../kernel/json.ts";
 import { storeSafe } from "../../kernel/ledger.ts";
+import { pyDumps, pyRepr, pySplitlines, pyTruthy } from "../../kernel/pyjson.ts";
 import {
   BAD_ARG,
   EXISTS,
@@ -17,10 +18,10 @@ import {
 //
 // A memory store keeps rows for MANY owners (multi-tenant). Every row is keyed
 // by `(owner, id)`; the owner is never a field a caller writes — it is WHO
-// CALLED: `<kernel guid>|<caller agent id>` for a local caller and
-// `<guid>|kernel` for the operator. So a caller writes ONLY under its own key, by
-// construction. (This kernel has no inbound bridge leg, so there is no remote
-// caller to key by its qualified address.)
+// CALLED: `<kernel guid>|<caller agent id>` for a local caller,
+// `<guid>|kernel` for the operator, and a caller on ANOTHER KERNEL (a host
+// calling in over the bridge as `<its guid>|<agent>`) by that qualified address,
+// verbatim. So a caller writes ONLY under its own key, by construction.
 //
 // THE TOPOLOGY IS SQLITE'S. The tables below are the ones a durable store
 // keeps, with the same keys, the same uniqueness, the same indexes and the same
@@ -74,11 +75,18 @@ interface Grant {
   ts: number;
 }
 
+/** python `str.strip()` — its whitespace set (`str.isspace`), not JS `trim()`'s:
+ *  the \x1c–\x1f separators and \x85 strip, \ufeff does not. */
+const PY_WS = "[\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]";
+const PY_STRIP = new RegExp(`^${PY_WS}+|${PY_WS}+$`, "gu");
+
+/** python `_as_id`: a positive int, or an ASCII-digit string after `strip()` —
+ *  `"0"` included (python checks `> 0` only for an int). */
 function asId(x: unknown): number | null {
   if (typeof x === "number") return Number.isInteger(x) && x > 0 ? x : null;
-  if (typeof x === "string" && /^\d+$/.test(x.trim())) {
-    const n = Number(x.trim());
-    return n > 0 ? n : null;
+  if (typeof x === "string") {
+    const t = x.replace(PY_STRIP, "");
+    return /^[0-9]+$/.test(t) ? Number(t) : null;
   }
   return null;
 }
@@ -96,9 +104,11 @@ function canonical(v: Json): string {
   return JSON.stringify(v);
 }
 
+/** What `search` reads of a row (python `_text_of`): a non-string `content` as
+ *  python's `json.dumps(c, ensure_ascii=False)` writes it. */
 function textOf(row: Payload): string {
   const c = row["content"];
-  let text = typeof c === "string" ? c : JSON.stringify(c ?? null);
+  let text = typeof c === "string" ? c : pyDumps(c, { ensureAscii: false });
   const title = row["title"];
   if (typeof title === "string" && title !== "") text = `${title}\n${text}`;
   return text;
@@ -314,7 +324,7 @@ export function loadTables(tables: unknown): Tables | Payload {
     const fold = asId(fr["fold"]);
     const members = Array.isArray(fr["members"]) ? fr["members"] : [];
     if (fold === null || !t.has(owner, fold)) {
-      return refusal(BAD_ARG, `inject: fold_refs names no row ${JSON.stringify(fr["fold"])}`, { extra: { arg: "tables" } });
+      return refusal(BAD_ARG, `inject: fold_refs names no row ${pyRepr(fold)}`, { extra: { arg: "tables" } });
     }
     if (!members.every((m) => t.has(owner, asId(m) ?? -1))) {
       return refusal(BAD_ARG, `inject: fold ${fold} refs a missing row`, { extra: { arg: "tables" } });
@@ -373,18 +383,21 @@ function display(c: Ctx, key: string): string {
   return c.guid !== null && key.startsWith(`${c.guid}|`) ? key.slice(c.guid.length + 1) : key;
 }
 
-/** [key, display] for whoever is calling, or a refusal. */
+/** [key, display] for whoever is calling, or a refusal. A caller on ANOTHER
+ *  KERNEL is keyed by its qualified address verbatim — first, so it needs no guid
+ *  of this kernel's (python `_caller`, `current_remote_caller`). */
 function callerOf(c: Ctx): [string, string] | Payload {
+  const origin = c.kernel.currentCaller;
+  if (origin !== null && c.kernel.isForeign(origin)) return [origin, origin];
   if (c.guid === null) {
     return refusal(NOT_FOUND, "ram_store: this kernel has no guid yet — the store keys every row by it", {
-      hint: "boot the kernel root first (kernel_start boots it; the root's boot mints the guid)",
+      hint: "boot the kernel root first (it mints the guid)",
     });
   }
-  const origin = c.kernel.currentCaller;
   if (origin === null) {
-    if (c.agent.meta["operator"] !== true) {
+    if (!pyTruthy(c.agent.meta["operator"])) {
       return refusal(UNAUTHORIZED, `${c.agent.id}: the operator is not served here`, {
-        hint: `set operator=true on ${c.agent.id} to serve the operator (as 'kernel')`,
+        hint: `update_agent id=${c.agent.id} operator=true to serve the operator (as 'kernel')`,
         extra: { side: "store" },
       });
     }
@@ -534,7 +547,7 @@ function readable(c: Ctx, t: Tables, payload: Payload, verb: string): [string, S
   const [me, disp] = who;
   const g = t.grants.get(asId(gid) ?? -1);
   if (g === undefined) {
-    return refusal(NOT_FOUND, `${verb}: grant ${JSON.stringify(gid)} does not exist — revoked (unshare) or its rows were pruned`, {
+    return refusal(NOT_FOUND, `${verb}: grant ${pyRepr(gid)} does not exist — revoked (unshare) or its rows were pruned`, {
       extra: { arg: "grant" },
     });
   }
@@ -566,7 +579,7 @@ const append: Verb = (c, payload) => {
     if (rid === undefined || rid === null) {
       rid = c.kernel.mintId();
     } else if (typeof rid !== "number" || asId(rid) === null) {
-      return refusal(BAD_ARG, `append: a row id is a kernel int, got ${JSON.stringify(rid)}`, { extra: { arg: "rows" } });
+      return refusal(BAD_ARG, `append: a row id is a kernel int, got ${pyRepr(rid)}`, { extra: { arg: "rows" } });
     }
     if (t.has(owner, rid) || batch.has(rid)) {
       return refusal(EXISTS, `append: row ${rid} already exists for this owner`, { extra: { id: rid } });
@@ -582,7 +595,7 @@ const append: Verb = (c, payload) => {
     }
     const missingRefs = refs.filter((m) => !(t.has(owner, m as number) || batch.has(m as number)));
     if (missingRefs.length > 0) {
-      return refusal(NOT_FOUND, `append: row ${r.id} refs rows that do not exist for this owner: ${JSON.stringify(missingRefs)}`, {
+      return refusal(NOT_FOUND, `append: row ${r.id} refs rows that do not exist for this owner: ${pyRepr(missingRefs)}`, {
         extra: { arg: "rows" },
       });
     }
@@ -658,7 +671,7 @@ const search: Verb = (c, payload) => {
   let total = 0;
   for (const i of ids) {
     if (!(t.text.get(Tables.k(owner, i)) ?? "").includes(q)) continue;
-    textOf(t.raw(owner, i) as Row).split(/\r?\n/).forEach((line, n) => {
+    pySplitlines(textOf(t.raw(owner, i) as Row)).forEach((line, n) => {
       if (line.toLowerCase().includes(q)) {
         total += 1;
         if (matches.length < limit) matches.push({ id: i, line: n + 1, text: line.trim().slice(0, width) });
@@ -675,9 +688,11 @@ const share: Verb = (c, payload) => {
   const reader = keyOf(c, payload["with"]);
   if (reader === null) return missing("share", "with");
   if (reader === me) return refusal(BAD_ARG, "share: you already read your own rows", { extra: { arg: "with" } });
-  const mode = payload["mode"] ?? "frozen";
-  if (!(MODES as readonly Json[]).includes(mode)) {
-    return refusal(BAD_ARG, `share: mode must be one of ${MODES.join(", ")}`, { extra: { arg: "mode" } });
+  // python `payload.get("mode") or "frozen"`: any falsy mode is the default.
+  const raw = payload["mode"];
+  const mode = pyTruthy(raw) ? raw : "frozen";
+  if (!(MODES as readonly Json[]).includes(mode as Json)) {
+    return refusal(BAD_ARG, `share: mode must be one of ${pyRepr([...MODES], { tuple: true })}`, { extra: { arg: "mode" } });
   }
   const t = tablesOf(c.agent);
   const parsed = parseScope(t, me, payload["scope"]);
@@ -826,7 +841,7 @@ export async function handler(id: string, payload: Payload, kernel: Kernel): Pro
   const verb = payload["type"];
   const fn = typeof verb === "string" ? VERBS[verb] : undefined;
   if (fn === undefined) {
-    return refusal(UNHANDLED, `ram_store: unknown type ${JSON.stringify(verb)}`, { extra: { verb: String(verb) } });
+    return refusal(UNHANDLED, `ram_store: unknown type ${pyRepr(verb)}`, { extra: { verb: verb ?? null } });
   }
   const agent = kernel.get(id);
   if (agent === undefined) throw new Error(`ram_store: no agent '${id}'`);

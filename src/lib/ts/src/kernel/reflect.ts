@@ -48,7 +48,7 @@ const POSTURE_KEYS = [
   "egress_rule",
   "auth",
   "root",
-  "file_bridge_id",
+  "allow",
   "can_call",
   "callable_by",
 ] as const;
@@ -135,9 +135,13 @@ export function applyReflectFlags(
 
   // Kernel runtime identity + deployment context, on the ROOT only. This kernel
   // runs in the BROWSER — no OS env, so env is always "host" and version null.
-  // Same field names + key order (runtime → env → version) as the others.
+  // Same field names + key order (runtime → peers → env → version) as the others.
+  // `peers` are the kernels reachable from here as `<guid>|<agent>`: this kernel
+  // registers none (the host it federates to is reached by bare id over the
+  // bridge), so the list is always empty — present, as everywhere.
   if (target.parentId === null) {
     obj["runtime"] = "ts";
+    obj["peers"] = [];
     obj["env"] = "host";
     obj["version"] = null;
     // The loader-owned root frame (python's `reflect_root_extra`): WHICH provider

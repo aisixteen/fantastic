@@ -408,7 +408,7 @@ struct WebSocketTests {
         // The connection auto-watches `core`.
         try await Task.sleep(nanoseconds: 100_000_000)
         let blob = Data([0xDE, 0xAD, 0xBE, 0xEF])
-        await kernel.emitItem(
+        kernel.emitItem(
             AgentId("kernel_state"),
             .binary(
                 .object([
@@ -644,9 +644,40 @@ struct WebSocketTests {
         #expect(e["payload"] == .object([:]), "\(e)")
     }
 
+    /// python's read loop awaits `kernel.emit` before it reads the next frame,
+    /// so consecutive emits reach a watcher IN THE ORDER SENT. A detached Task
+    /// per emit had no order at all.
+    @Test func emitsReachTheWatcherInTheOrderSent() async throws {
+        let kernel = try await startWebKernel()
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
+        await mountWebWS(kernel)
+        defer { Task { await stopWebHost(kernel) } }
+        let port = kernel.httpPort()
+        let task = URLSession(configuration: .ephemeral)
+            .webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/kernel_state/ws")!)
+        task.resume()
+        defer { task.cancel(with: .normalClosure, reason: nil) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        for i in 1...30 {
+            try await task.send(
+                .string(
+                    JSON.object([
+                        "type": .string("emit"), "target": .string("kernel_state"),
+                        "payload": .object(["n": .integer(Int64(i))]),
+                    ]).serialize()))
+        }
+        var seen: [Int64] = []
+        while seen.count < 30 {
+            guard let ev = await awaitFrame(task, tries: 60, { $0["type"].asString == "event" })
+            else { break }
+            if let n = ev["payload"]["n"].asInt { seen.append(n) }
+        }
+        #expect(seen == Array(1...30), "\(seen)")
+    }
+
     /// A13.15 — a BINARY frame routes by `type` exactly like a text one, and its
-    /// body reaches the target as the item's blob (never `sendWithBinary`, which
-    /// skips the ledger, the dedup and the reflect flags).
+    /// body reaches the target as the item's blob, through the batch with its
+    /// ledger, dedup and reflect flags.
     @Test func binaryFrameRoutesByTypeAndHonoursBinaryPath() async throws {
         let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
@@ -722,6 +753,16 @@ struct WebSocketTests {
         }
         let g = try #require(got, "read_stream did not answer a binary frame")
         #expect(g.header["_binary_path"].asString == "data.bytes", "\(g.header)")
+        // R-D16-3 — python's `encode_frame` nulls the bytes value IN PLACE, so
+        // the head keeps `bytes: null` where the chunk sat (after `offset`).
+        #expect(
+            g.header["data"].asObject.map { Array($0.keys) }
+                == ["path", "offset", "bytes", "next_offset", "eof", "size", "origin"],
+            "\(g.header)")
+        #expect(g.header["data"].asObject?["bytes"] == .null, "\(g.header)")
+        #expect(
+            g.header.asObject.map { Array($0.keys) } == ["type", "id", "data", "_binary_path"],
+            "\(g.header)")
         #expect(g.body == blob.prefix(g.body.count) && g.body.count > 0)
     }
 
@@ -967,6 +1008,38 @@ struct WebSocketTests {
             .object(["type": .string("write_stream"), "path": .string("e.txt")]), "ws2")
         #expect(empty["written"].asInt == 0, "\(empty)")
         #expect((try? Data(contentsOf: dir.appendingPathComponent("e.txt")))?.count == 0, "\(empty)")
+        // A `_binary_path` on a TEXT frame is an inert key: python's
+        // `decode_frame` only `loads` a str, so the `bytes` value stays typed
+        // (refused) and an unplaceable path is no frame error.
+        func rawCall(_ frame: JSON, _ id: String) async throws -> JSON {
+            try await task.send(.string(frame.serialize()))
+            let got = await awaitFrame(task) {
+                ($0["type"].asString == "reply" && $0["id"].asString == id)
+                    || $0["type"].asString == "error"
+            }
+            return try #require(got)
+        }
+        let typed = try await rawCall(
+            .object([
+                "type": .string("call"), "id": .string("ws3"), "target": .string("wsfiles"),
+                "payload": .object([
+                    "type": .string("write_stream"), "path": .string("t.txt"),
+                    "bytes": .string("abc"), "truncate": .bool(true),
+                ]),
+                "_binary_path": .string("payload.bytes"),
+            ]), "ws3")
+        #expect(typed["data"]["reason"].asString == "missing_arg", "\(typed)")
+        #expect(
+            !FileManager.default.fileExists(atPath: dir.appendingPathComponent("t.txt").path),
+            "a text frame's `_binary_path` wrote a 0-byte file")
+        let inert = try await rawCall(
+            .object([
+                "type": .string("call"), "id": .string("ws4"), "target": .string("wsfiles"),
+                "payload": .object(["type": .string("write_stream"), "path": .string("u.txt")]),
+                "_binary_path": .string("payload.nope.deep"),
+            ]), "ws4")
+        #expect(inert["type"].asString == "reply", "an inert key is not a frame error: \(inert)")
+        #expect(inert["data"]["written"].asInt == 0, "\(inert)")
     }
 }
 

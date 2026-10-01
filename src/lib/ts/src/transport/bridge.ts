@@ -162,10 +162,17 @@ class Conn {
   }
 
   private onMessage(data: unknown): void {
+    // A malformed frame is SKIPPED, loudly, and the socket kept (python
+    // `ws_bridge`: "skipping malformed frame") — never silently.
     let msg: Envelope;
     try {
       msg = decodeFrame(data as string | ArrayBuffer);
-    } catch {
+    } catch (e) {
+      warn(`ws_bridge: skipping malformed frame: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
+      warn("ws_bridge: skipping non-object frame");
       return;
     }
     const type = msg["type"];
@@ -291,6 +298,10 @@ class Conn {
       /* already closing */
     }
   }
+}
+
+function warn(msg: string): void {
+  (globalThis as { console?: { warn(m: string): void } }).console?.warn(msg);
 }
 
 /** A short unguessable per-connection prefix, so correlators from different

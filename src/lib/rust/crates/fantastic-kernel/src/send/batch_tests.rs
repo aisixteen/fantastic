@@ -425,3 +425,212 @@ async fn the_overlap_holds_on_a_multi_threaded_runtime() {
     let want = assert_overlap(&kernel, "ov_m1", "ov_m2").await;
     assert_eq!(*arrivals.lock().unwrap(), want, "arrival = input order");
 }
+
+#[tokio::test]
+async fn a_returned_raised_dict_settles_errored_not_failed() {
+    // python marks FAILED only when the handler RAISES; a returned dict — even
+    // `{error, raised: true}`, a relayed peer's answer — settles ERRORED: not
+    // retried, not a dead letter (`_agent.py` `_settle_once`).
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let a = mk_agent(&kernel, "b_raised").await;
+    let out = kernel
+        .send(vec![
+            Item::new(a.clone(), json!({"type": "raised_reply"})).with_retries(2)
+        ])
+        .await
+        .remove(0);
+    assert_eq!(out.status, Status::Errored, "{out:?}");
+    assert_eq!(out.result["raised"], true);
+    assert_eq!(sh.run_count(), 1, "an errored reply is never retried");
+    assert_eq!(out.attempts, 1);
+}
+
+#[tokio::test]
+async fn the_unnamed_kernel_reflect_honours_its_timeout() {
+    // python awaits even the pid-less identity read under `asyncio.wait(timeout)`:
+    // on expiry it is cancelled and settles `timed_out` with `task_id: "-"`.
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools",
+                   "id": "b_slow_reflect", "reflect_ms": 5_000}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "b_slow_reflect", "{r}");
+    let started = Instant::now();
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )
+        .with_timeout(0.1)])
+        .await
+        .remove(0);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the deadline was ignored"
+    );
+    assert_eq!(out.status, Status::TimedOut, "{out:?}");
+    assert!(out.pid.is_none());
+    assert_eq!(out.result["reason"], "timeout");
+    assert_eq!(out.result["task_id"], "-");
+    assert_eq!(
+        out.result["error"],
+        "send: kernel_state 'reflect' exceeded its 0.1s timeout; task cancelled"
+    );
+}
+
+#[tokio::test]
+async fn timeout_prose_and_row_keep_the_number_the_caller_gave() {
+    // `f"{d.timeout}s"` keeps python's number: an int prints `1s`, a float `0.1s`
+    // / `1e-07s`; the call row stores the value as given.
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let a = mk_agent(&kernel, "b_prose").await;
+    let out = kernel
+        .send(vec![
+            Item::new(a.clone(), json!({"type": "slow"})).with_raw_timeout(json!(1)),
+            Item::new(a.clone(), json!({"type": "slow"})).with_raw_timeout(json!(1e-7)),
+            Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.1),
+        ])
+        .await;
+    let text = |i: usize| out[i].result["error"].as_str().unwrap_or("").to_string();
+    assert_eq!(
+        text(0),
+        "send: b_prose 'slow' exceeded its 1s timeout; task cancelled"
+    );
+    assert_eq!(
+        text(1),
+        "send: b_prose 'slow' exceeded its 1e-07s timeout; task cancelled"
+    );
+    assert_eq!(
+        text(2),
+        "send: b_prose 'slow' exceeded its 0.1s timeout; task cancelled"
+    );
+    let pid = out[0].pid.expect("dispatched").0;
+    let row = kernel.rows.get_one(pid).expect("the call row");
+    assert_eq!(
+        row["timeout"].to_string(),
+        "1",
+        "the row keeps the int: {row:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_named_kernel_reflect_is_ledgered_but_not_dispatched() {
+    // python's caller-NAMED `kernel` reflect opens the ledger and then runs the
+    // flags-applied identity read as a bare task: no task row, no watcher
+    // fanout, no `send`/`drain` state events (`_launch`'s `flags_done` branch).
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let tap = AgentId::from("tap_named_reflect");
+    let mut rx = kernel.ensure_inbox(&tap);
+    assert!(kernel
+        .watch(&AgentId::from("kernel_state"), tap.clone())
+        .await
+        .is_none());
+    let seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let _t = kernel.add_state_subscriber(Arc::new(move |ev, _| {
+        sink.lock().unwrap().push(ev.clone());
+    }));
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )
+        .with_id("frame-7")])
+        .await
+        .remove(0);
+    assert_eq!(out.status, Status::Completed, "{out:?}");
+    let pid = out.pid.expect("a named execution carries its id").0;
+    assert_eq!(out.result["id"], "kernel_state");
+    assert!(rx.try_recv().is_none(), "the root's watcher was mirrored");
+    let traffic: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["agent_id"] == "kernel_state" && (e["kind"] == "send" || e["kind"] == "drain")
+        })
+        .cloned()
+        .collect();
+    assert!(
+        traffic.is_empty(),
+        "dispatch telemetry for a pure read: {traffic:?}"
+    );
+    // The ledger still applies: the call row exists and the name joins it.
+    assert_eq!(
+        kernel.rows.get_one(pid).expect("call row")["verb"],
+        "reflect"
+    );
+    let again = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )
+        .with_id("frame-7")])
+        .await
+        .remove(0);
+    assert_eq!(
+        again.pid.map(|p| p.0),
+        Some(pid),
+        "the name joins its execution"
+    );
+}
+
+#[tokio::test]
+async fn a_dead_letter_of_a_departed_caller_is_announced_on_the_root() {
+    // python `announce_deadletter` calls `src._fanout(entry, kind="emit")`
+    // directly — never gated. When the caller has left the tree the src falls
+    // back to the root; a GATED emit asked the departed caller's grant (none)
+    // and dropped the announcement.
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let a = mk_agent(&kernel, "dl_caller").await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": a.as_str(),
+                   "handler_module": "slow.tools", "id": "dl_child"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "dl_child", "{r}");
+    let tap = AgentId::from("tap_deadletter");
+    let mut rx = kernel.ensure_inbox(&tap);
+    assert!(kernel
+        .watch(&AgentId::from("kernel_state"), tap.clone())
+        .await
+        .is_none());
+    let k = Arc::clone(&kernel);
+    let call = tokio::spawn(crate::send::with_sender(a.clone(), async move {
+        k.send(vec![Item::new(
+            AgentId::from("dl_child"),
+            json!({"type": "slow"}),
+        )
+        .with_timeout(0.3)])
+            .await
+            .remove(0)
+    }));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The caller leaves the index while its call is in flight.
+    kernel.agents.remove(&a);
+    let out = call.await.expect("the batch settles");
+    assert_eq!(out.status, Status::TimedOut, "{out:?}");
+    let mut announced = None;
+    while let Some(item) = rx.try_recv() {
+        if item.payload["type"] == "on_deadletter" {
+            announced = Some(item.payload);
+        }
+    }
+    let ev = announced.expect("the dead letter was announced on the root");
+    assert_eq!(ev["caller"], "dl_caller");
+    assert_eq!(ev["status"], "timed_out");
+}

@@ -9,8 +9,8 @@
 //! (`[len | JSON header | raw body]`, the header's `_binary_path` naming where the
 //! body belongs) — how a `read_stream` chunk or a `write_stream` payload crosses the
 //! fd raw, never base64. A raw fd has no WS text/binary frame kind, hence the byte.
-//! A kind-B `send` rides the kernel's binary channel (`send_with_binary`), a kind-T
-//! one the text channel — the same split a WS transport makes.
+//! A kind-B `send` carries its body on the kernel's binary channel (`Item::with_binary`),
+//! a kind-T one rides the text channel — the same split a WS transport makes.
 //!
 //! | child → parent | parent → child |
 //! |---|---|
@@ -24,7 +24,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fantastic_bundle::py_truthy;
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame, set_path};
-use fantastic_kernel::call_guard::guard_call_stack;
 use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -91,7 +90,8 @@ async fn push_binary(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, header: &Valu
 /// malformed frame or an unknown kind.
 fn unframe(body: &[u8]) -> Option<(Value, Vec<u8>)> {
     match body.first()? {
-        b'T' => serde_json::from_slice::<Value>(&body[1..])
+        // STRICT (D13): python `_unframe` → `strict_loads`.
+        b'T' => fantastic_io_bridge::codec::loads_slice(&body[1..])
             .ok()
             .map(|v| (v, Vec::new())),
         b'B' => decode_binary_frame(&body[1..]).ok(),
@@ -192,36 +192,24 @@ pub async fn serve(
                 // py `m.get("payload") or {}` — TRUTHINESS, so an explicit null, `0`
                 // or `[]` is an empty payload rather than a value the kernel has to
                 // make sense of.
-                let mut payload = match m.get("payload").filter(|v| py_truthy(v)) {
+                let payload = match m.get("payload").filter(|v| py_truthy(v)) {
                     Some(p) => p.clone(),
                     None => json!({}),
                 };
-                // Python gets recursion guarding free inside `Agent.send`; rust's
-                // `Kernel::send` does not, so the guard is explicit here. Behavioural
-                // parity, not code parity. On refusal the reply still goes out, or the
-                // child's blocking `q.get()` would hang forever.
+                // RELAYED UNTOUCHED, as python's `_serve_ctrl` relays it: one
+                // `kernel.send([{target, payload}])`, no tag added, nothing
+                // refused here — the kernel's gate is the only judge.
                 // A kind-B frame (bytes alongside, `_binary_path` = `payload.<field>`)
-                // is the BINARY channel — `send_with_binary`, as a WS binary frame
-                // would be. Kind T is the text channel. Rust's `Value` cannot carry
-                // bytes, so this split is the only way a program's `write_stream`
-                // payload reaches the bundle, or a `read_stream` chunk comes back.
-                let binary = m.get("_binary_path").is_some();
-                let (data, body) = match guard_call_stack(owner.as_str(), &mut payload) {
-                    Err(e) => (json!({ "error": e }), None),
-                    Ok(()) if binary => {
-                        kernel
-                            .send_with_binary(&AgentId::from(target), payload, blob)
-                            .await
-                    }
-                    Ok(()) => (
-                        kernel
-                            .send(vec![Item::new(AgentId::from(target), payload)])
-                            .await
-                            .remove(0)
-                            .result,
-                        None,
-                    ),
-                };
+                // carries a request body: the SAME batch item on the binary
+                // channel, so it gets its pid, rows, `ps` row and deadline like any
+                // other call. Rust's `Value` cannot carry bytes, so the body rides
+                // beside the payload.
+                let mut item = Item::new(AgentId::from(target), payload);
+                if m.get("_binary_path").is_some() {
+                    item = item.with_binary(blob);
+                }
+                let out = kernel.send(vec![item]).await.remove(0);
+                let (data, body) = (out.result, out.body);
                 let mut env = json!({"op": "reply", "rid": m.get("rid"), "data": data});
                 match body {
                     // The verb returned NO chunk — a plain text frame. `Some(b)`

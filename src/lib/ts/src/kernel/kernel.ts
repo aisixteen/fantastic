@@ -2,16 +2,19 @@ import { Agent } from "./agent.ts";
 import type { Handler } from "./agent.ts";
 import type { Json, Payload } from "./json.ts";
 import { str } from "./json.ts";
+import { pyRepr, pyTruthy } from "./pyjson.ts";
 import { reflectIdentity, applyReflectFlags } from "./reflect.ts";
 import type { BundleInfo } from "./reflect.ts";
 import { CURRENT_VERSION, validateRecords } from "./state.ts";
 import type { AgentRecord, Snapshot, StateEvent } from "./state.ts";
 import { ExecutionLedger } from "./ledger.ts";
 import { TaskTable } from "./tasks.ts";
+import type { TaskRow } from "./tasks.ts";
 import { KernelStore } from "./kernel_store.ts";
 import { runBatch } from "./batch.ts";
+import { nowSeconds } from "./timers.ts";
 import type { Item, Outcome } from "./outcome.ts";
-import { LOCKED, UNHANDLED, UNKNOWN_AGENT, refusal } from "./refusal.ts";
+import { BAD_ARG, LOCKED, UNHANDLED, refusal, unknown } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
 import { authorizeCall, authorizeHeritable, denial } from "./authz.ts";
 
@@ -79,6 +82,14 @@ export class Kernel {
   readonly currentOrigin: string | null = null;
   /** The task id of the dispatch now running — a nested send parents to it. */
   readonly currentTask: number | null = null;
+  /**
+   * The task-table ROW of the dispatch now running — the row object of THIS
+   * attempt, not its id. JS cannot abort a handler, so a cancelled one keeps
+   * running after its row has left the table (and a retry may re-register the
+   * same id); the row it was handed still says `killed`, and every later send it
+   * makes is refused `cancelled` (python: a dying task registers no new work).
+   */
+  readonly currentTaskRow: TaskRow | null = null;
   /**
    * WHO CALLED the dispatch now running (null = the operator). A handler's own
    * sends are attributed to itself (`currentOrigin`), so without this it could
@@ -182,14 +193,22 @@ export class Kernel {
    *  OR any descendant carries a truthy `delete_lock`, NOTHING is removed (no
    *  partial cascade) and the answer is the `locked` refusal naming the lock;
    *  clear it with `updateMeta(id, {delete_lock: false})`. An unknown id is the
-   *  generic `unknown_agent`. Success is `{deleted: true, id}` — the host's
-   *  `delete_agent` reply. */
+   *  generic `unknown_agent` with `deleted: false`. THE ROOT IS NOT REMOVABLE
+   *  (python `Agent.delete`): it answers the kernel verbs and its loader owns
+   *  persistence, so cascading it would empty the kernel — and `forget` this
+   *  kernel's whole namespace on the host. Success is `{deleted: true, id}` — the
+   *  host's `delete_agent` reply. */
   remove(id: string): Payload {
     const a = this.agents.get(id);
     if (a === undefined) {
-      return refusal(UNKNOWN_AGENT, `remove: no agent '${id}'`, {
-        extra: { agents: [...this.agents.keys()].sort() },
-      });
+      return unknown(id, [...this.agents.keys()], { deleted: false });
+    }
+    if (a.parentId === null) {
+      return refusal(
+        BAD_ARG,
+        `remove: ${id} is the ROOT — it owns persistence and answers the kernel verbs; deleting it would leave no kernel`,
+        { extra: { arg: "id", id, deleted: false } },
+      );
     }
     const blockedBy = this.findLockedDescendant(a);
     if (blockedBy !== null) {
@@ -241,9 +260,10 @@ export class Kernel {
   }
 
   /** Replace the tree with a flat record list (mirror python `Kernel.load`).
-   *  Accepts a bare list or a `{version, records}` envelope. Validates (one
-   *  root / unique ids / resolvable parents), drops the current tree, then
-   *  DFS-rebuilds from the root.
+   *  Accepts a bare list or a `{version, records}` envelope. Validates FIRST
+   *  (`validateRecords`: safe ids, no reserved keys, one root, resolvable
+   *  parents, every record reachable — python `validate_records`), then drops
+   *  the current tree and DFS-rebuilds from the root.
    *
    *  Weak-load: a record whose `handler_module` names a bundle NOT registered
    *  in this runtime is logged + skipped along with its whole subtree, left
@@ -319,7 +339,7 @@ export class Kernel {
   scopedFor(agentId: string, taskId: number | null): Kernel {
     const view = Object.create(this) as Kernel;
     Object.defineProperty(view, "currentOrigin", { value: agentId, enumerable: true });
-    Object.defineProperty(view, "currentTask", { value: taskId, enumerable: true });
+    setTask(view, taskId, this.tasks);
     return view;
   }
 
@@ -346,9 +366,29 @@ export class Kernel {
     return this.scopedFor(caller, null);
   }
 
-  /** The kernel's own traffic: operator sends that pass the drain. */
-  kernelView(): Kernel {
+  /** An OPERATOR view (no origin) that stays inside the task now running
+   *  (python `operator_context()`: the sender goes, `_current_task` stays) — so
+   *  what the kernel sends on a verb's behalf (`kernel_start`'s boots) parents to
+   *  that verb's task. */
+  operatorView(): Kernel {
     const view = Object.create(this.base) as Kernel;
+    Object.defineProperty(view, "currentTask", { value: this.currentTask, enumerable: true });
+    Object.defineProperty(view, "currentTaskRow", { value: this.currentTaskRow, enumerable: true });
+    return view;
+  }
+
+  /** An operator view running AS task `taskId` (a spawned service loop's own
+   *  task — the flusher's). */
+  taskView(taskId: number): Kernel {
+    const view = Object.create(this.base) as Kernel;
+    setTask(view, taskId, this.tasks);
+    return view;
+  }
+
+  /** The kernel's own traffic: operator sends that pass the drain, parented to
+   *  the task now running (none for the base kernel). */
+  kernelView(): Kernel {
+    const view = this.operatorView();
     Object.defineProperty(view, "kernelTraffic", { value: true, enumerable: true });
     return view;
   }
@@ -432,7 +472,7 @@ export class Kernel {
           inSubtree: (otherId, x) => this.inSubtree(otherId, x),
         },
       );
-      if (!ok) return denial("ingress", senderId, targetId, verb);
+      if (!ok) return denial("ingress", senderId, targetId, verb, this.isForeign(senderId));
     }
     return null;
   }
@@ -500,9 +540,23 @@ export class Kernel {
     return false;
   }
 
-  /** Resolve the reserved `"kernel"` address for callers outside this module. */
+  /** Resolve a SEND target (python `_launch`): the reserved `"kernel"` address,
+   *  and `<this kernel's guid>|<agent>` — this kernel's own qualifier names the
+   *  LOCAL agent (`<guid>|kernel` the root). Any other id is returned as is. */
   resolveId(targetId: string): string {
-    return this.resolve(targetId);
+    const own = this.ownQualified(targetId);
+    return own !== null ? this.resolve(own) : this.resolve(targetId);
+  }
+
+  /** The local id `<this kernel's guid>|<agent>` names, or null when the id is
+   *  not qualified by this kernel's own guid (python `_qualified_target`). */
+  ownQualified(targetId: string): string | null {
+    const bar = targetId.indexOf("|");
+    if (bar <= 0) return null;
+    const guid = targetId.slice(0, bar);
+    const agentId = targetId.slice(bar + 1);
+    if (agentId === "" || agentId.includes("|") || guid !== this.guid) return null;
+    return agentId;
   }
 
   /**
@@ -538,6 +592,10 @@ export class Kernel {
       // refused the no-bridge case, so a bridge is present here.
       return (this.bridge as Bridge).forward(id, payload, this.qualifiedCaller());
     }
+    // EVERY DISPATCH IS MIRRORED (python `_fanout(kind="send")`): the payload
+    // lands in the target's own inbox and in every watcher's — which is what a
+    // `watch` subscribes to, and why it is gated like a call.
+    this.fanout(id, payload);
     if (verb === "reflect") {
       const identity = reflectIdentity(target, this.rootId);
       return applyReflectFlags(this, target, payload, identity);
@@ -558,8 +616,7 @@ export class Kernel {
     if (verb === "boot" || verb === "shutdown" || verb === "") {
       return null;
     }
-    return refusal(UNHANDLED, `agent '${id}' is bare (no handler); cannot answer verb '${verb}'`, {
-      hint: "give the agent a handler_module, or send a verb the kernel answers (reflect)",
+    return refusal(UNHANDLED, `agent ${pyRepr(id)} has no handler_module; cannot answer verb ${pyRepr(verb)}`, {
       extra: { verb },
     });
   }
@@ -647,11 +704,12 @@ export class Kernel {
     return () => this.stateSubscribers.delete(cb);
   }
 
-  /** Dispatch one event to every local state subscriber (adds `ts`). Never
-   *  routes through send/emit/inboxes — no recursion path. */
+  /** Dispatch one event to every local state subscriber (adds `ts`, seconds
+   *  since the epoch — python `time.time()`, like every other kernel stamp).
+   *  Never routes through send/emit/inboxes — no recursion path. */
   publishState(event: StateEvent): void {
     if (this.stateSubscribers.size === 0) return;
-    const stamped = { ...event, ts: Date.now() };
+    const stamped = { ...event, ts: nowSeconds() };
     for (const cb of [...this.stateSubscribers]) {
       try {
         cb(stamped);
@@ -671,9 +729,14 @@ export class Kernel {
     if (this.currentOrigin !== null && this.currentOrigin !== id) {
       if (this.gate(this.currentOrigin, "emit", id) !== null) return;
     }
+    this.fanout(id, payload);
+  }
+
+  /** `id`'s own inbox, then every watcher's (python `_fanout`). */
+  private fanout(id: string, payload: Payload): void {
     this.deliver(id, payload);
     const ws = this.watchers.get(id);
-    if (ws !== undefined) for (const w of ws) this.deliver(w, payload);
+    if (ws !== undefined) for (const w of [...ws]) this.deliver(w, payload);
   }
 
   /** Whether anything reads `id`'s inbox (a watcher with no reader receives
@@ -710,11 +773,12 @@ export class Kernel {
     // everything sent TO it. The `call` path went through the gate; this never
     // did, which is exactly why it was worth nothing to hold.
     //
-    // The WATCHER is the caller here, so the edge is gated as `watcher → src`
-    // under the verb `watch`. An operator watch (no origin) stays ungated, as
-    // with send.
+    // The edge is gated as `<whoever is running> → src` under the verb `watch`
+    // (python `_current_sender`): the agent whose code asks is judged by ITS
+    // grants, never by those of the id it names as the reader. An operator watch
+    // (no origin) stays ungated, as with send.
     if (this.currentOrigin !== null) {
-      const d = this.gate(watcherId, "watch", id);
+      const d = this.gate(this.currentOrigin, "watch", id);
       if (d !== null) return d;
     }
     const set = this.watchers.get(id) ?? new Set();
@@ -755,6 +819,15 @@ export class Kernel {
   }
 }
 
+/** Stamp a view's task: its id, and the row this attempt runs under. */
+function setTask(view: Kernel, taskId: number | null, tasks: TaskTable): void {
+  Object.defineProperty(view, "currentTask", { value: taskId, enumerable: true });
+  Object.defineProperty(view, "currentTaskRow", {
+    value: taskId !== null ? (tasks.get(taskId) ?? null) : null,
+    enumerable: true,
+  });
+}
+
 function bundleName(handlerModule: string): string {
   return handlerModule.replace(/\.(tools|js|ts)$/, "");
 }
@@ -771,13 +844,4 @@ function mintGuid(): string {
   const b = new Uint8Array(16);
   c.getRandomValues(b);
   return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
-}
-
-/** Python truthiness — how the host kernels read a flag like `delete_lock`:
- *  null, false, 0, "", [] and {} are false; everything else is true. */
-function pyTruthy(v: Json | undefined): boolean {
-  if (v === undefined || v === null || v === false || v === 0 || v === "") return false;
-  if (Array.isArray(v)) return v.length > 0;
-  if (typeof v === "object") return Object.keys(v).length > 0;
-  return true;
 }

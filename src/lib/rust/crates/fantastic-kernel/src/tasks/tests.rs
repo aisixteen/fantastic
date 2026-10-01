@@ -80,11 +80,28 @@ impl Bundle for SlowBundle {
             "boot" | "shutdown" => Value::Null,
             // ADVERTISES `shutdown`: that is what `shutdown_agents` selects on,
             // so the slow agent is one it tells.
-            "reflect" => json!({
-                "id": agent_id.0,
-                "sentence": "slow test agent",
-                "verbs": {"shutdown": "no-op"},
-            }),
+            // `reflect_ms` on the record holds the reflect — what a deadline on a
+            // whole-tree reflect has to cut short.
+            "reflect" => {
+                let ms = kernel
+                    .agents
+                    .get(agent_id)
+                    .and_then(|a| a.meta.read().ok()?.get("reflect_ms")?.as_u64());
+                if let Some(ms) = ms {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                }
+                json!({
+                    "id": agent_id.0,
+                    "sentence": "slow test agent",
+                    "verbs": {"shutdown": "no-op"},
+                })
+            }
+            // A RETURNED dict that merely carries `raised: true` — a relayed
+            // peer's answer. Counted, so a retry would show.
+            "raised_reply" => {
+                *self.sh.runs.lock().expect("runs poisoned") += 1;
+                json!({"error": "RuntimeError: on the peer", "raised": true})
+            }
             // Returns immediately — the peer a batch uses to prove the slow item
             // did not serialize the fast one.
             "fast" => json!({"fast": true}),
@@ -516,6 +533,21 @@ async fn cancel_unknown_or_finished_task_is_honest() {
         .result;
     assert!(bad["error"].is_string(), "expected an error: {bad}");
     assert!(bad.get("cancelled").is_none());
+
+    // `not isinstance(raw, (int, str))`: a float is neither — missing_arg, the
+    // same refusal as an absent id, never an honest {cancelled:false}.
+    for f in [json!(3.5), json!(3.0)] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "cancel", "task_id": f}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "missing_arg", "task_id={f}: {r}");
+        assert_eq!(r["arg"], "task_id");
+    }
 }
 
 // ─── the emergent one: an AGENT cancels another agent's work ───
@@ -849,6 +881,39 @@ async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {
         out.result
     );
     assert!(out.pid.is_none(), "and refused before it costs an id");
+}
+
+#[tokio::test]
+async fn the_shutdown_agents_verb_tells_a_grandchild() {
+    // python sends `shutdown` under `operator_context()`: ungated, so every
+    // advertising agent is told at ANY depth. Through the kernel verb the
+    // dispatch runs AS THE ROOT, whose baseline grant reaches only its own
+    // children — gated, a grandchild was refused and never told.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let p = mk_agent(&kernel, "sd_parent").await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": p.as_str(),
+                   "handler_module": "slow.tools", "id": "sd_grandchild"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "sd_grandchild", "{r}");
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "shutdown_agents"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let shut = out["shut"].as_array().expect("shut is a list");
+    assert!(
+        shut.iter().any(|s| s == "sd_grandchild"),
+        "the grandchild was not told: {out}"
+    );
 }
 
 #[tokio::test]

@@ -212,6 +212,17 @@ struct VllmBackendTests {
             text(HTTPClientError.readTimeout, .stream)
                 == "RuntimeError: vllm_backend: http://h/v1 sent nothing for read_timeout=900s")
         #expect(text(HTTPClientError.remoteConnectionClosed, .stream).contains("died or restarted"))
+        // python maps ONLY httpx's connect/read/protocol errors: a request the
+        // client refuses before connecting (no scheme, a bad URL) propagates
+        // with its own text — it is not a refused connection.
+        for e in [HTTPClientError.emptyScheme, .invalidURL, .unsupportedScheme("ftp")] {
+            let out = vllmTransportError(
+                e, endpoint: "h/v1", connectTimeout: 5, readTimeout: 900, phase: .connect)
+            #expect((out as? HTTPClientError) == e, "\(out)")
+        }
+        // a peer that hangs up before any head is python's RemoteProtocolError
+        #expect(
+            text(HTTPClientError.remoteConnectionClosed, .connect).contains("died or restarted"))
         #expect(
             vllmTransportError(
                 CancellationError(), endpoint: "e", connectTimeout: 5, readTimeout: 900,

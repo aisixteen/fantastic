@@ -234,6 +234,21 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
 
     // MARK: - reflect
 
+    /// python `_engine._scoped(_rule_name(spec, default), suffix, was_scoped)`:
+    /// a per-direction field is taken as written, and so is an `auth` name that
+    /// ALREADY carries this manifold's suffix — `auth: allow_all_ingress`
+    /// reports `allow_all_ingress` (unsealed), never `allow_all_ingress_ingress`.
+    static func engineRuleName(
+        _ meta: OrderedDictionary<String, JSON>, field: String, suffix: String,
+        default def: String
+    ) -> String {
+        let scoped = meta.keys.contains(field)
+        let name = ruleName(scoped ? meta[field] : meta["auth"], default: def)
+        if scoped || name.hasSuffix(suffix) { return name }
+        if suffix == "_egress" && (name == "allow_all" || name == "deny") { return "silent_egress" }
+        return name + suffix
+    }
+
     /// Python `_engine._reflect` + the family's `reflect_fields`, in python's key
     /// order. The relay's fields OVERWRITE `connected` in place (a leg
     /// mid-reconnect reads false), so the key keeps its position.
@@ -254,8 +269,16 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             "pending_count": .integer(Int64(st.pendingCount)),
         ]
         // The active per-leg rule TYPE names — keyed by the field you SET, so
-        // read-key == write-key and `reflect` → edit is a direct mirror.
-        for (k, v) in describe(meta) { out[k] = v }
+        // read-key == write-key and `reflect` → edit is a direct mirror. The
+        // ENGINE's names (python `_engine._ingress_name`/`_egress_name`), not
+        // `_base.describe`'s.
+        let ingress = Self.engineRuleName(
+            meta, field: "ingress_rule", suffix: "_ingress", default: "deny_ingress")
+        out["ingress_rule"] = .string(ingress)
+        out["egress_rule"] = .string(
+            Self.engineRuleName(
+                meta, field: "egress_rule", suffix: "_egress", default: "silent_egress"))
+        out["sealed"] = .bool(ingress != "allow_all_ingress")
         // The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
         // null = no pin, no inbound call.
         out["peer_guid"] = meta["peer_guid"] ?? .null

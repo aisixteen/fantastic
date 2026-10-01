@@ -24,6 +24,7 @@
 import type { Json, Payload } from "./json.ts";
 import type { Outcome } from "./outcome.ts";
 import { DEAD_STATUSES } from "./outcome.ts";
+import { pyDumps } from "./pyjson.ts";
 
 export interface Exec {
   id: number;
@@ -178,20 +179,7 @@ export function storeSafe(o: unknown): Json {
  * runtimes (rust measures the same way). A digest, not a codec.
  */
 export function pyJsonLen(o: Json): number {
-  return pyJson(o).length;
-}
-
-function pyJson(o: Json): string {
-  if (o === null) return "null";
-  if (typeof o === "string") {
-    return JSON.stringify(o).replace(
-      /[\u0080-￿]/g,
-      (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
-    );
-  }
-  if (typeof o !== "object") return JSON.stringify(o);
-  if (Array.isArray(o)) return `[${o.map(pyJson).join(", ")}]`;
-  return `{${Object.entries(o).map(([k, v]) => `${pyJson(k)}: ${pyJson(v)}`).join(", ")}}`;
+  return pyDumps(o).length;
 }
 
 /**

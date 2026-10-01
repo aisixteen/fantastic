@@ -616,3 +616,114 @@ async fn a_row_holding_a_non_json_number_reads_back_and_the_store_survives() {
     let other = append(&k, "bob", json!([{"id": 1, "content": "after"}])).await;
     assert_eq!(other["appended"], json!(1), "{other}");
 }
+
+#[tokio::test]
+async fn digit_string_refs_are_not_found_like_python() {
+    // `_as_id('3')` passes the type check, but `t.has(owner, '3')` asks a str of
+    // int-keyed tables: never found — NOT_FOUND naming the raw ref.
+    let k = store();
+    let first = append(&k, "alice", json!([{"kind": "msg", "content": "a"}])).await;
+    let rid = first["ids"][0].as_i64().unwrap();
+    let r = append(
+        &k,
+        "alice",
+        json!([{"kind": "fold", "content": "f", "refs": [rid.to_string()]}]),
+    )
+    .await;
+    assert_eq!(r["reason"], "not_found", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("this owner: ['{rid}']")),
+        "{r}"
+    );
+    // The int ref is found.
+    let r = append(
+        &k,
+        "alice",
+        json!([{"kind": "fold", "content": "f", "refs": [rid]}]),
+    )
+    .await;
+    assert_eq!(r["appended"], 1, "{r}");
+}
+
+#[tokio::test]
+async fn prune_keep_is_python_in() {
+    // `row.get("kind") in keep`: a STRING keep is a substring test; a row whose
+    // kind is not a str makes that `in` raise TypeError; an int keep is not
+    // iterable.
+    let k = store();
+    append(
+        &k,
+        "alice",
+        json!([{"kind": "fold", "content": "a"}, {"kind": "old", "content": "b"},
+               {"kind": "msg", "content": "c"}]),
+    )
+    .await;
+    let out = call(
+        &k,
+        json!({"type": "prune", "before_id": 1_000_000, "keep": "folder"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(
+        out["pruned"], 1,
+        "'fold' and 'old' are substrings of 'folder': {out}"
+    );
+    append(&k, "alice", json!([{"content": "kindless"}])).await;
+    let out = with_sender(
+        AgentId::from("alice"),
+        k.send(vec![Item::new(
+            AgentId::from("mem"),
+            json!({"type": "prune", "before_id": 1_000_000, "keep": "fold"}),
+        )]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
+    assert_eq!(
+        out.result["error"],
+        "TypeError: 'in <string>' requires string as left operand, not NoneType"
+    );
+    let out = with_sender(
+        AgentId::from("alice"),
+        k.send(vec![Item::new(
+            AgentId::from("mem"),
+            json!({"type": "prune", "before_id": 1_000_000, "keep": 5}),
+        )]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(
+        out.result["error"],
+        "TypeError: argument of type 'int' is not iterable"
+    );
+}
+
+#[tokio::test]
+async fn a_zero_limit_is_no_limit_like_python() {
+    // `ids[:limit] if limit else ids` and `_as_id(limit) or 100`: the string
+    // "0" passes `_as_id` as 0, which is falsy.
+    let k = store();
+    append(
+        &k,
+        "alice",
+        json!([{"kind": "msg", "content": "x one"}, {"kind": "msg", "content": "x two"}]),
+    )
+    .await;
+    let r = call(&k, json!({"type": "read", "limit": "0"}), Some("alice")).await;
+    assert_eq!(ids(&r).len(), 2, "{r}");
+    assert_eq!(r["next"], Value::Null);
+    let r = call(
+        &k,
+        json!({"type": "search", "query": "x", "limit": "0", "width": "0"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(r["matches"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(
+        r["matches"][0]["text"], "x one",
+        "width 0 falls back to 200"
+    );
+}

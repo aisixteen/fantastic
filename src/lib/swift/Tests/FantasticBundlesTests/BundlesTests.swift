@@ -140,17 +140,22 @@ struct BundleSmokeTests {
         // Non-UTF-8 bytes — proves the channel is raw, not text/base64.
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // SINK.
-        let (w, _) = await kernel.sendWithBinary(
-            "fs",
-            .object([
-                "type": .string("write_stream"), "path": .string("blob.bin"),
-                "truncate": .bool(true),
-            ]), payload)
+        let w = await kernel.send([
+            Item(
+                "fs",
+                .object([
+                    "type": .string("write_stream"), "path": .string("blob.bin"),
+                    "truncate": .bool(true),
+                ]), binary: payload)
+        ])[0].result
         #expect(w["written"].asInt == Int64(payload.count), "\(w)")
         // SOURCE.
-        let (m, body) = await kernel.sendWithBinary(
-            "fs",
-            .object(["type": .string("read_stream"), "path": .string("blob.bin")]), Data())
+        let read = await kernel.send([
+            Item(
+                "fs", .object(["type": .string("read_stream"), "path": .string("blob.bin")]),
+                binary: Data())
+        ])[0]
+        let (m, body) = (read.result, read.body)
         #expect(body == payload, "bytes must round-trip verbatim")
         #expect(m["eof"].asBool == true)
         #expect(m["size"].asInt == Int64(payload.count))
@@ -572,25 +577,29 @@ struct BundleSmokeTests {
             ])])[0].result
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // forward write_stream (binary) → kernel2.fs
-        let (w, _) = await kernel1.sendWithBinary(
-            "br",
-            .object([
-                "type": .string("forward"), "target": .string("fs"),
-                "payload": .object([
-                    "type": .string("write_stream"), "path": .string("blob.bin"),
-                    "truncate": .bool(true),
-                ]),
-            ]), payload)
+        let w = await kernel1.send([
+            Item(
+                "br",
+                .object([
+                    "type": .string("forward"), "target": .string("fs"),
+                    "payload": .object([
+                        "type": .string("write_stream"), "path": .string("blob.bin"),
+                        "truncate": .bool(true),
+                    ]),
+                ]), binary: payload)
+        ])[0].result
         #expect(w["written"].asInt == Int64(payload.count), "\(w)")
         // forward read_stream (binary) → bytes back over the bridge
-        let (_, body) = await kernel1.sendWithBinary(
-            "br",
-            .object([
-                "type": .string("forward"), "target": .string("fs"),
-                "payload": .object([
-                    "type": .string("read_stream"), "path": .string("blob.bin"),
-                ]),
-            ]), Data())
+        let body = await kernel1.send([
+            Item(
+                "br",
+                .object([
+                    "type": .string("forward"), "target": .string("fs"),
+                    "payload": .object([
+                        "type": .string("read_stream"), "path": .string("blob.bin"),
+                    ]),
+                ]), binary: Data())
+        ])[0].body
         #expect(body == payload, "raw bytes must round-trip cross-kernel over the bridge")
     }
 
@@ -598,7 +607,7 @@ struct BundleSmokeTests {
         // The WIRE half of cross-kernel streaming — a bridge's
         // `WebSocketTransport.binaryForward` ships a codec binary frame over a
         // real loopback WS to a remote `web_ws`, which decodes it, gates, and
-        // dispatches `sendWithBinary` to a `file_bridge`. Raw bytes both ways,
+        // sends one binary item to a `file_bridge`. Raw bytes both ways,
         // never base64. (The in-memory variant is
         // `kernelBridgeBinaryForwardStreamsRawBytes`.)
         let kernel = try await startWebKernel()
@@ -659,25 +668,29 @@ struct BundleSmokeTests {
 
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // write_stream (binary) over the wire → kernel.fs
-        let (w, _) = await kernel.sendWithBinary(
-            AgentId("wbr"),
-            .object([
-                "type": .string("forward"), "target": .string("fs"),
-                "payload": .object([
-                    "type": .string("write_stream"), "path": .string("blob.bin"),
-                    "truncate": .bool(true),
-                ]),
-            ]), payload)
+        let w = await kernel.send([
+            Item(
+                AgentId("wbr"),
+                .object([
+                    "type": .string("forward"), "target": .string("fs"),
+                    "payload": .object([
+                        "type": .string("write_stream"), "path": .string("blob.bin"),
+                        "truncate": .bool(true),
+                    ]),
+                ]), binary: payload)
+        ])[0].result
         #expect(w["written"].asInt == Int64(payload.count), "\(w.serialize())")
         // read_stream (binary) over the wire → raw bytes back
-        let (_, body) = await kernel.sendWithBinary(
-            AgentId("wbr"),
-            .object([
-                "type": .string("forward"), "target": .string("fs"),
-                "payload": .object([
-                    "type": .string("read_stream"), "path": .string("blob.bin"),
-                ]),
-            ]), Data())
+        let body = await kernel.send([
+            Item(
+                AgentId("wbr"),
+                .object([
+                    "type": .string("forward"), "target": .string("fs"),
+                    "payload": .object([
+                        "type": .string("read_stream"), "path": .string("blob.bin"),
+                    ]),
+                ]), binary: Data())
+        ])[0].body
         #expect(body == payload, "raw bytes must round-trip over the WS wire")
     }
 
@@ -747,6 +760,11 @@ struct BundleSmokeTests {
         #expect(routes.first?["kind"].asString == "websocket")
         #expect(routes.first?["path"].asString == "/{host_id}/ws")
         #expect(routes.first?["method"].isNull == true, "\(r)")
+        // reflect publishes python's FIRST docstring line, `No args.` included.
+        let refl = await kernel.send([Item("ws", ["type": "reflect"])])[0].result
+        #expect(
+            refl["verbs"]["get_routes"].asString
+                == "Declares this surface's HTTP/WS route mounts. No args. Returns", "\(refl)")
     }
 
     /// A11.5 — the REST paths capture `{target_id}`, python's parameter name.

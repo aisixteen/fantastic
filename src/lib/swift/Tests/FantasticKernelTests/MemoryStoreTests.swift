@@ -232,6 +232,18 @@ struct MemoryStoreTests {
         #expect(!k.started)
     }
 
+    /// python `self.agents.get(sid)` — a LITERAL id: `kernel` is the root's
+    /// send address, never a store, so it names no agent.
+    @Test func aMemoryStoreIdOfKernelNamesNoAgent() async {
+        let k = makeKernel(MemProbe())
+        k.update(AgentId("kernel_state"), ["memory_store_id": .string("kernel")])
+        let out = await k.start(bootAll: false)
+        #expect(out["reason"].asString == "unknown_agent", "\(out.serialize())")
+        #expect(
+            out["hint"].asString == "the root's `memory_store_id` names no agent in this tree",
+            "\(out.serialize())")
+    }
+
     @Test func kernelStartRefusesAStoreThatDoesNotServeTheOperator() async {
         let k = makeKernel(MemProbe())
         await withStore(k, operator: false, start: false)
@@ -533,7 +545,7 @@ struct MemoryStoreTests {
         // A reboot: the root record comes back through `load`, the counter with it.
         let k2 = makeKernel(MemProbe())
         try k2.load(
-            KernelState(agents: [
+            KernelState(records: [
                 AgentRecord(
                     id: "kernel_state", handlerModule: "kernel_state.tools",
                     meta: ["next_id": .integer(bound2)])
@@ -545,7 +557,7 @@ struct MemoryStoreTests {
         let k = makeKernel(MemProbe())
         let snap = KernelState(
             version: KernelState.currentVersion,
-            agents: [
+            records: [
                 AgentRecord(
                     id: "kernel_state", handlerModule: "kernel_state.tools", parentId: nil,
                     meta: ["next_id": .integer(5000)])

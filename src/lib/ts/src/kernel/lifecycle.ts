@@ -27,7 +27,9 @@ function isErr(res: Json | undefined): res is Payload {
 }
 
 /** THE START SEQUENCE — the `kernel_start` verb. Idempotent: a second call
- *  reports the store it is already writing to. `k` is the base kernel. */
+ *  reports the store it is already writing to. `k` is an OPERATOR view inside
+ *  the verb's task, so the boots and the probe parent to it, and so does the
+ *  flusher the start spawns. */
 export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
   const s = k.store;
   if (s.started) return { started: true, already: true, store: s.storeId };
@@ -53,9 +55,9 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
   }
   const store = k.get(sid);
   if (store === undefined) {
-    const r = unknown(sid, [...k.agents.keys()]);
-    r["hint"] = "the root's `memory_store_id` names no agent in this tree";
-    return r;
+    return unknown(sid, [...k.agents.keys()], {
+      hint: "the root's `memory_store_id` names no agent in this tree",
+    });
   }
   const booted: string[] = [];
   for (const a of [root, store]) {
@@ -87,7 +89,7 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
   // The reserved id bound goes into the root record now (the proxy_loader
   // persists it): a crash from here on skips ids, never reuses one.
   k.updateMeta(root.id, { next_id: s.idReserved });
-  s.markStarted(store.id);
+  s.markStarted(store.id, k.currentTask);
   if (bootAll) {
     for (const a of [...k.agents.values()]) {
       if (a.id === root.id || a.id === store.id) continue;
@@ -133,9 +135,14 @@ export async function shutdownAgents(k: Kernel, me: number | null): Promise<Json
     );
     shut = targets.filter((_a, i) => outs[i]?.status === "completed").map((a) => a.id);
   }
-  const pending = (): number[] => k.tasks.ids().filter((t) => t !== me);
+  // The verb's own task is not pending work, and a KEEPALIVE loop (the flusher)
+  // ends with the stop itself. A FORKED loop never settles on its own, so it is
+  // cancelled below rather than waited for.
+  const pending = (): number[] =>
+    k.tasks.ids().filter((t) => t !== me && k.tasks.get(t)?.keepalive !== true);
+  const settling = (): number[] => pending().filter((t) => k.tasks.get(t)?.forked !== true);
   let deadline = Date.now() + s.quietTimeoutMs;
-  while (Date.now() < deadline && pending().length > 0) await sleep(50);
+  while (Date.now() < deadline && settling().length > 0) await sleep(50);
   const cancelled: number[] = [];
   for (const tid of pending()) {
     const row = k.tasks.get(tid);

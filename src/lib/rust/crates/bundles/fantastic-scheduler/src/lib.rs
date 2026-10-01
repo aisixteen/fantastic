@@ -263,15 +263,13 @@ fn meta_truthy(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
     meta_value(agent_id, kernel, key).is_some_and(|v| py_truthy(&v))
 }
 
-async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
-    let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
-        return;
-    };
+/// python `kernel.update(id, **{key: value})`: the meta merges and the
+/// `updated` state event names the changed key — which is what the root
+/// loader's writer turns into the persist, as for every other update.
+fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
     let mut patch = Map::new();
     patch.insert(key.to_string(), value);
-    agent.update_meta(patch);
-    // Persist the meta change THROUGH the discovered provider (no-op if none).
-    let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
+    kernel.update(agent_id, patch);
 }
 
 // ── file-agent-routed persistence ───────────────────────────────────
@@ -509,8 +507,11 @@ fn fire_item(sch: &Value) -> Item {
         AgentId::from(sched_target(sch).as_str()),
         sched_payload(sch),
     );
-    if let Some(t) = sch.get("timeout").and_then(Value::as_f64) {
-        item = item.with_timeout(t);
+    // python `if sch.get("timeout") is not None: item["timeout"] = sch["timeout"]`
+    // — the value AS STORED, so the kernel validates it and its prose prints the
+    // number the schedule holds (`5` → `5s`, not `5.0s`).
+    if let Some(t) = sch.get("timeout").filter(|v| !v.is_null()) {
+        item = item.with_raw_timeout(t.clone());
     }
     item
 }
@@ -800,7 +801,7 @@ async fn set_paused(
         }
         return json!({flag_key: touched > 0, "schedule_id": sid});
     }
-    update_meta(agent_id, kernel, "paused", json!(paused)).await;
+    update_meta(agent_id, kernel, "paused", json!(paused));
     json!({flag_key: true, "scheduler_id": agent_id.as_str()})
 }
 

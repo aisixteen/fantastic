@@ -113,7 +113,10 @@ test("#39 — watch is GATED: an agent cannot mirror an inbox it may not call", 
   const denied = alice.watch("bob", "alice");
   assert.notEqual(denied, null, "watch was ungated — a read side-channel around callable_by");
   assert.equal((denied as Payload)["reason"], "unauthorized");
-  assert.equal((denied as Payload)["verb"], "watch");
+  // python `_gate`'s text, verbatim; the verb rides in the text, not a field
+  assert.equal((denied as Payload)["error"], "alice may not call 'watch' on bob");
+  assert.equal((denied as Payload)["side"], "egress");
+  assert.equal("verb" in (denied as Payload), false);
 
   // With the edge open both ways, the watch is allowed.
   k.get("alice")!.meta["can_call"] = { bob: ["watch"] };
@@ -398,4 +401,32 @@ test("`<guid>|*` names every agent of ONE other kernel — never a local id, nev
   assert.equal(authorizeCall(grant, "around", "h1|cell_7", ctx), false);
   assert.equal(authorizeCall(grant, "around", "cell_7", ctx), false);
   assert.equal(authorizeCall(grant, "clear", "h0|cell_7", ctx), false);
+});
+
+// python `_gate`'s denials, verbatim: the verb rides in the TEXT (repr-quoted),
+// the keys are {error, reason, hint, side}, and a FOREIGN caller refused at
+// ingress is told the one remedy that can admit it — a named entry.
+test("denial texts: egress, ingress, and a foreign caller at ingress", async () => {
+  const k = tree();
+  const [eg] = await k.scopedFor("alice", null).send([{ target: "bob", payload: { type: "poke" } }]);
+  const e = eg!.result as Payload;
+  assert.deepEqual(Object.keys(e), ["error", "reason", "hint", "side"]);
+  assert.equal(e["error"], "alice may not call 'poke' on bob");
+
+  k.get("alice")!.meta["can_call"] = { bob: ["poke"] };
+  const [ing] = await k.scopedFor("alice", null).send([{ target: "bob", payload: { type: "poke" } }]);
+  const i = ing!.result as Payload;
+  assert.deepEqual(Object.keys(i), ["error", "reason", "hint", "side"]);
+  assert.equal(i["error"], "bob does not accept 'poke' from alice");
+  assert.equal(i["side"], "ingress");
+  assert.match(String(i["hint"]), /granted from ABOVE/);
+
+  const [fo] = await k.foreignView("g9|scout").send([{ target: "bob", payload: { type: "poke" } }]);
+  const f = fo!.result as Payload;
+  assert.equal(f["error"], "bob does not accept 'poke' from g9|scout");
+  assert.equal(f["side"], "ingress");
+  assert.equal(
+    f["hint"],
+    "a foreign caller is accepted only by name: callable_by {'g9|scout': [...]} or {'g9|*': [...]} on bob",
+  );
 });

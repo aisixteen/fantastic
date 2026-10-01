@@ -52,7 +52,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fantastic_bundle::{
     py_json_dumps, py_repr, py_repr_value, py_split_whitespace, py_splitlines, py_str, py_strip,
-    py_truthy,
+    py_truthy, py_type_name,
 };
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{
@@ -111,6 +111,35 @@ fn as_id(x: &Value) -> Option<i64> {
             }
         }
         _ => None,
+    }
+}
+
+/// python `x in container` for the JSON value a payload carried. `Err` is the
+/// TypeError python raises (`'in <string>' requires string as left operand`,
+/// `argument of type 'int' is not iterable`, `unhashable type: 'list'`).
+fn py_in(x: &Value, container: &Value) -> Result<bool, BundleError> {
+    let type_error = |m: String| -> BundleError { format!("TypeError: {m}").into() };
+    match container {
+        Value::Array(items) => Ok(items.contains(x)),
+        Value::String(s) => match x {
+            Value::String(needle) => Ok(s.contains(needle.as_str())),
+            other => Err(type_error(format!(
+                "'in <string>' requires string as left operand, not {}",
+                py_type_name(other)
+            ))),
+        },
+        Value::Object(m) => match x {
+            Value::String(k) => Ok(m.contains_key(k)),
+            Value::Array(_) | Value::Object(_) => Err(type_error(format!(
+                "unhashable type: '{}'",
+                py_type_name(x)
+            ))),
+            _ => Ok(false),
+        },
+        other => Err(type_error(format!(
+            "argument of type '{}' is not iterable",
+            py_type_name(other)
+        ))),
     }
 }
 
@@ -957,17 +986,24 @@ impl RamStoreBundle {
                     with(&mut e, "arg", json!("rows"));
                     return e;
                 };
-                let missing_refs: Vec<i64> = list
+                // python `t.has(owner, m) or m in batch` on the RAW ref: the
+                // tables are keyed by int, so a digit STRING passes `_as_id`
+                // and is still never found.
+                let missing_refs: Vec<Value> = list
                     .iter()
-                    .filter_map(as_id)
-                    .filter(|m| !(t.has(&owner, *m) || batch.contains(m)))
+                    .filter(|m| {
+                        let held = m.is_number()
+                            && as_id(m).is_some_and(|i| t.has(&owner, i) || batch.contains(&i));
+                        !held
+                    })
+                    .cloned()
                     .collect();
                 if !missing_refs.is_empty() {
                     let mut e = refusal(
                         NOT_FOUND,
                         format!(
-                            "append: row {rid} refs rows that do not exist for this owner: {:?}",
-                            missing_refs
+                            "append: row {rid} refs rows that do not exist for this owner: {}",
+                            py_repr_value(&Value::Array(missing_refs))
                         ),
                     );
                     with(&mut e, "arg", json!("rows"));
@@ -1048,7 +1084,9 @@ impl RamStoreBundle {
                 ids.retain(|i| *i < b);
             }
             let total = ids.len();
-            let limit = payload.get("limit").and_then(as_id);
+            // `ids[:limit] if limit else ids` — a `0` (the string "0" included,
+            // which `_as_id` passes) is falsy: no limit.
+            let limit = payload.get("limit").and_then(as_id).filter(|l| *l != 0);
             let page: Vec<i64> = match limit {
                 Some(l) => ids
                     .iter()
@@ -1107,8 +1145,17 @@ impl RamStoreBundle {
                 }
                 ids.retain(|i| scope.contains(i));
             }
-            let limit = payload.get("limit").and_then(as_id).unwrap_or(100);
-            let width = payload.get("width").and_then(as_id).unwrap_or(200);
+            // `_as_id(limit) or 100` / `or 200`: a `0` falls back too.
+            let limit = payload
+                .get("limit")
+                .and_then(as_id)
+                .filter(|l| *l != 0)
+                .unwrap_or(100);
+            let width = payload
+                .get("width")
+                .and_then(as_id)
+                .filter(|w| *w != 0)
+                .unwrap_or(200);
             let limit = usize::try_from(limit).unwrap_or(usize::MAX);
             let width = usize::try_from(width).unwrap_or(usize::MAX);
             let mut matches: Vec<Value> = Vec::new();
@@ -1278,24 +1325,33 @@ impl RamStoreBundle {
         })
     }
 
-    fn prune(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    /// `Err` is python's TypeError out of `kind in keep` — a raise.
+    fn prune(
+        &self,
+        id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Value, BundleError> {
         let (owner, _, _) = match owner_for(kernel, id, payload, "prune") {
             Ok(o) => o,
-            Err(r) => return r,
+            Err(r) => return Ok(r),
         };
         let before = payload.get("before_id").and_then(as_id);
         let want = payload.get("ids").and_then(Value::as_array);
         if before.is_none() && want.is_none() {
-            return missing("prune", "before_id");
+            return Ok(missing("prune", "before_id"));
         }
         let wanted: HashSet<Option<i64>> = want
             .map(|w| w.iter().map(as_id).collect())
             .unwrap_or_default();
-        let keep: Vec<Value> = payload
+        // `keep = payload.get("keep") or []`, then `row.get("kind") in keep` —
+        // python's `in` on WHATEVER arrived: a list is membership, a string a
+        // SUBSTRING test, a dict its keys, and anything else raises.
+        let keep: Value = payload
             .get("keep")
-            .and_then(Value::as_array)
+            .filter(|v| py_truthy(v))
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| json!([]));
         self.with_tables(id, |t| {
             let mut doomed: HashSet<i64> = HashSet::new();
             for i in t.ids(&owner) {
@@ -1304,7 +1360,7 @@ impl RamStoreBundle {
                     .and_then(|r| r.get("kind"))
                     .cloned()
                     .unwrap_or(Value::Null);
-                if keep.contains(&kind) {
+                if py_in(&kind, &keep)? {
                     continue;
                 }
                 if before.is_some_and(|b| i < b) || (want.is_some() && wanted.contains(&Some(i))) {
@@ -1312,7 +1368,7 @@ impl RamStoreBundle {
                 }
             }
             let (n, g) = t.delete(&owner, &doomed);
-            json!({"pruned": n, "grants_removed": g})
+            Ok(json!({"pruned": n, "grants_removed": g}))
         })
     }
 
@@ -1413,7 +1469,7 @@ impl Bundle for RamStoreBundle {
             "share" => self.share(agent_id, payload, kernel),
             "unshare" => self.unshare(agent_id, payload, kernel),
             "grants" => self.grants(agent_id, payload, kernel),
-            "prune" => self.prune(agent_id, payload, kernel),
+            "prune" => self.prune(agent_id, payload, kernel)?,
             "inject" => self.inject(agent_id, payload, kernel),
             "dump" => self.dump(agent_id, kernel),
             _ => {

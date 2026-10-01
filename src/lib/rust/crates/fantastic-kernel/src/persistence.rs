@@ -13,7 +13,7 @@
 //! ```
 //!
 //! **Weak loading**: if a persisted child's `handler_module` isn't in
-//! the active runtime's [`BundleRegistry`], the kernel logs one line
+//! the active runtime's [`crate::bundle::BundleRegistry`], the kernel logs one line
 //! to stderr and skips the agent + its subtree. The record stays on
 //! disk untouched. Boot a build whose `register_default_bundles()`
 //! covers that handler_module and the agent rehydrates on next boot.
@@ -29,7 +29,6 @@
 //! ```
 
 use crate::agent::{Agent, AgentId, AgentRecord};
-use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::kernel::Kernel;
 use crate::outcome::Item;
@@ -61,13 +60,17 @@ pub fn record_map(rec: &AgentRecord) -> Value {
 /// ONE STORE IO, THROUGH THE BATCH (C47).
 ///
 /// Every persistence byte — the record merge read, the record write, the readme
-/// probe and seed, the blob verbs, the ledger flush, the message-log probe and
-/// append — crosses this function, and it is a `kernel.send` of ONE binary item
-/// under OPERATOR authority. So each is a ledger execution with a call row, a
-/// task row in `ps`, a settle row and a timeout, exactly like python's
-/// `kernel_state` which does all of this with `kernel.send([...])`.
-/// `send_with_binary` minted none of it, so the substrate's own writes were the
-/// one class of work the message log could not see.
+/// probe and seed, the blob verbs — crosses [`store_read`] or [`store_write`],
+/// each a `kernel.send` of ONE item under OPERATOR authority. So each is a
+/// ledger execution with a call row, a task row in `ps`, a settle row and a
+/// timeout, exactly like python's `kernel_state`, which does all of this with
+/// `kernel.send([...])`.
+///
+/// THE SHAPE IS PYTHON'S. A read sends no bytes — its row is the plain payload
+/// and a watcher gets a text frame; only its REPLY carries a raw chunk. A write
+/// names the `bytes` slot where python's payload dict holds it
+/// (`{type, path, bytes, truncate}`), so the row reads `bytes: {len: N}` in that
+/// position.
 ///
 /// Operator authority: the substrate reading and writing its OWN store is
 /// persistence bookkeeping, not an agent reaching out — it never runs against a
@@ -76,37 +79,96 @@ pub fn record_map(rec: &AgentRecord) -> Value {
 /// `Box::pin` breaks the async TYPE-recursion cycle: a persist (reached from
 /// `send`'s dispatch) sends to the provider, whose dispatch could re-enter
 /// `send`. Boxing erases the future type at this hop.
-pub(crate) async fn store_send_binary(
+pub(crate) async fn store_read(
     kernel: &Arc<Kernel>,
     store_id: &AgentId,
-    header: Value,
-    blob: Vec<u8>,
+    payload: Value,
 ) -> (Value, Option<Vec<u8>>) {
-    let out =
-        Box::pin(crate::send::with_operator(kernel.send(vec![
-            Item::new(store_id.clone(), header).with_binary(blob),
-        ])))
+    store_send(
+        kernel,
+        Item::new(store_id.clone(), payload).with_raw_reply(),
+    )
+    .await
+}
+
+/// The write half of [`store_read`]: `payload` names the `bytes` slot (null) in
+/// python's position; `body` is what fills it.
+pub(crate) async fn store_write(
+    kernel: &Arc<Kernel>,
+    store_id: &AgentId,
+    payload: Value,
+    body: Vec<u8>,
+) -> Value {
+    store_send(
+        kernel,
+        Item::new(store_id.clone(), payload).with_binary(body),
+    )
+    .await
+    .0
+}
+
+async fn store_send(kernel: &Arc<Kernel>, item: Item) -> (Value, Option<Vec<u8>>) {
+    let out = Box::pin(crate::send::with_operator(kernel.send(vec![item])))
         .await
         .remove(0);
     (out.result, out.body)
 }
 
-/// DISCOVER the persistence provider — mirrors Python `kernel_state._find_store`:
-/// the first `file_bridge.tools` CHILD of the root whose `root` resolves to the
-/// root loader's own store dir (its `.fantastic`). Bound by MATCH, not a fixed id
-/// and **not kernel-composed** — an operator/LLM creates it (the one allowed
-/// autoagent is the loader; the store is wired consciously). Returns its id, or
-/// `None` when none is wired — in which case the live tree stays in RAM. **No
-/// fallback** (the substrate never writes around a missing/sealed provider).
+/// DISCOVER the ROOT loader's persistence provider — [`find_store_for`] the
+/// tree's root.
 pub fn find_store(kernel: &Kernel) -> Option<AgentId> {
-    let root = kernel.root()?;
+    find_store_for(kernel, &*kernel.root()?)
+}
+
+/// The disk dir a loader owns — python `_root(agent)`: a `root` meta overrides
+/// the loader's own address, so a SESSION loader serves a sub-namespace.
+#[must_use]
+pub fn loader_dir(loader: &Agent) -> PathBuf {
+    loader
+        .meta
+        .read()
+        .ok()
+        .and_then(|m| {
+            m.get("root")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| loader.root_path.clone())
+}
+
+/// The children-container name a loader's records nest under — python
+/// `_children_name(agent)`: its own `children_dir` meta, default `agents`.
+#[must_use]
+pub fn loader_children(loader: &Agent) -> String {
+    loader
+        .meta
+        .read()
+        .ok()
+        .and_then(|m| {
+            m.get("children_dir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| crate::kernel::DEFAULT_CHILDREN_DIR.to_string())
+}
+
+/// DISCOVER a loader's persistence provider — python `_find_store(agent)`: a
+/// `file_bridge.tools` in THIS LOADER'S SUBTREE whose `root` resolves to the
+/// loader's own dir ([`loader_dir`]). Bound by MATCH, not a fixed id and **not
+/// kernel-composed** — an operator/LLM creates it. Returns its id, or `None`
+/// when none is wired — in which case that loader's records stay in RAM. **No
+/// fallback** (the substrate never writes around a missing/sealed provider),
+/// and never another loader's store: a session loader usually finds none.
+pub fn find_store_for(kernel: &Kernel, loader: &Agent) -> Option<AgentId> {
     // The running dir (`Kernel::workdir`) — the ONE clamp base; a root with no
     // disk address has no store to discover.
     let base = kernel.workdir().ok()?;
-    // The loader's own dir is the store root (`.fantastic`). Resolve LEXICALLY
-    // (absolutize + fold `.`/`..`) — no filesystem touch, so discovery works
-    // before the dir exists (and stays a single deterministic path, no fallback).
-    let want = normalize_lexical(&base, &root.root_path);
+    // Resolve LEXICALLY (absolutize + fold `.`/`..`) — no filesystem touch, so
+    // discovery works before the dir exists (and stays a single deterministic
+    // path, no fallback).
+    let want = normalize_lexical(&base, &loader_dir(loader));
 
     // SUBTREE, not direct children, BREADTH-FIRST.
     //
@@ -118,7 +180,7 @@ pub fn find_store(kernel: &Kernel) -> Option<AgentId> {
     //
     // Breadth-first so the shallowest match still wins, which keeps the previous
     // behaviour whenever a direct child matches.
-    let mut queue: std::collections::VecDeque<AgentId> = root.child_ids().into_iter().collect();
+    let mut queue: std::collections::VecDeque<AgentId> = loader.child_ids().into_iter().collect();
     let mut seen: std::collections::HashSet<AgentId> = std::collections::HashSet::new();
     while let Some(cid) = queue.pop_front() {
         if !seen.insert(cid.clone()) {
@@ -144,6 +206,20 @@ pub fn find_store(kernel: &Kernel) -> Option<AgentId> {
     None
 }
 
+/// An agent's dir RELATIVE to a loader's store root — python
+/// `_store_reldir(agent, abs_path)`. Both sides are absolutized against the
+/// running dir first, so a relative `root` meta and an absolute agent address
+/// compare.
+pub(crate) fn loader_reldir(kernel: &Kernel, loader: &Agent, abs: &Path) -> String {
+    match kernel.workdir() {
+        Ok(base) => store_reldir(
+            &normalize_lexical(&base, &loader_dir(loader)),
+            &normalize_lexical(&base, abs),
+        ),
+        Err(_) => store_reldir(&loader_dir(loader), abs),
+    }
+}
+
 // ─── loud persistence (audit 2026-09-28, d2) ─────────────────────
 // A store that cannot hold the records, and every refused persist write, show
 // up on stderr AND as `persistence.error` on the root reflect — and
@@ -153,50 +229,58 @@ pub fn find_store(kernel: &Kernel) -> Option<AgentId> {
 // silent RAM-only kernel. Python `kernel_state` `_persist_failed` /
 // `_persist_landed` / `_check_store_allow`.
 
-/// The last refused/failed persist write — `None` while writes land. Kept ON
-/// the kernel ([`Kernel::extension`]).
+/// The last refused/failed persist write PER LOADER — absent while its writes
+/// land. Kept ON the kernel ([`Kernel::extension`]); python keeps it on the
+/// loader agent (`agent._persist_error`).
 #[derive(Default)]
-pub struct PersistHealth(std::sync::Mutex<Option<Value>>);
+pub struct PersistHealth(std::sync::Mutex<std::collections::HashMap<AgentId, Value>>);
 
 fn health(kernel: &Kernel) -> Arc<PersistHealth> {
     kernel.extension::<PersistHealth>("persistence.health")
 }
 
-/// The failing write the root reflect names under `persistence.error`, if any.
+/// The failing write the ROOT loader's reflect names under
+/// `persistence.error`, if any.
 #[must_use]
 pub fn persist_error(kernel: &Kernel) -> Option<Value> {
+    let root = kernel.root()?;
     health(kernel)
         .0
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .get(&root.id)
+        .cloned()
 }
 
 /// A refused/failed persist write is LOUD: stderr, and `persistence.error` on
-/// the root reflect (which then reports no provider) until a write lands again.
-fn persist_failed(kernel: &Kernel, store: &AgentId, path: &str, why: &Value) {
+/// that loader (the root's reflect then reports no provider) until a write
+/// lands again.
+fn persist_failed(kernel: &Kernel, loader: &AgentId, store: &AgentId, path: &str, why: &Value) {
     let msg = match why {
         Value::Object(o) => o.get("error").cloned().unwrap_or_else(|| why.clone()),
         other => other.clone(),
     };
-    let loader = kernel.root().map(|r| r.id.0.clone()).unwrap_or_default();
     eprintln!(
         "  [{loader}] persist through {} failed: {path}: {}",
         fantastic_bundle::py_repr(&store.0),
         fantastic_bundle::py_str(&msg)
     );
-    *health(kernel)
+    health(kernel)
         .0
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some(serde_json::json!({"store": store.0, "path": path, "error": msg}));
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            loader.clone(),
+            serde_json::json!({"store": store.0, "path": path, "error": msg}),
+        );
 }
 
-fn persist_landed(kernel: &Kernel) {
-    *health(kernel)
+fn persist_landed(kernel: &Kernel, loader: &AgentId) {
+    health(kernel)
         .0
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(loader);
 }
 
 /// A reply that failed: not an object, or an object with a truthy `error`.
@@ -226,24 +310,29 @@ fn covers(allow: Option<&Value>, path: &str) -> bool {
     })
 }
 
-/// At root-loader boot: a discovered store whose `allow` does not expose the
-/// records (`agent.yaml` and the children dir) would refuse every write — say
-/// so now.
-pub fn check_store_allow(kernel: &Kernel) {
-    let Some(store_id) = find_store(kernel) else {
+/// At a watching loader's boot: a discovered store whose `allow` does not
+/// expose the records (`agent.yaml` and the children dir) would refuse every
+/// write — say so now. Python `_check_store_allow(agent)`, for EVERY watching
+/// loader against its own store.
+pub fn check_store_allow(kernel: &Kernel, loader: &Agent) {
+    let Some(store_id) = find_store_for(kernel, loader) else {
         return;
     };
     let allow = kernel
         .agents
         .get(&store_id)
         .and_then(|a| a.meta.read().ok().and_then(|m| m.get("allow").cloned()));
-    let missing: Vec<&str> = [RECORD_FILE, "agents"]
+    // python `(_RECORD_FILE, _children_name(agent))` — the loader's own
+    // children-dir name, not a literal.
+    let children = loader_children(loader);
+    let missing: Vec<&str> = [RECORD_FILE, children.as_str()]
         .into_iter()
         .filter(|p| !covers(allow.as_ref(), p))
         .collect();
     if !missing.is_empty() {
         persist_failed(
             kernel,
+            &loader.id,
             &store_id,
             &missing.join(", "),
             &Value::String(format!(
@@ -304,11 +393,10 @@ pub async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str
     let mut out: Vec<u8> = Vec::new();
     let mut offset: u64 = 0;
     loop {
-        let (meta, body) = store_send_binary(
+        let (meta, body) = store_read(
             kernel,
             store_id,
             serde_json::json!({"type": "read_stream", "path": path, "offset": offset}),
-            Vec::new(),
         )
         .await;
         if meta.get("error").is_some() {
@@ -339,11 +427,10 @@ pub async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str
 /// `Some(bytes)` on success — EMPTY bytes on success still counts as PRESENT
 /// (C45: `isinstance(got.get("bytes"), (bytes, bytearray))` is true for `b""`).
 async fn read_stream_once(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str) -> Option<Vec<u8>> {
-    let (meta, body) = store_send_binary(
+    let (meta, body) = store_read(
         kernel,
         store_id,
         serde_json::json!({"type": "read_stream", "path": path}),
-        Vec::new(),
     )
     .await;
     if meta.get("error").is_some() {
@@ -376,17 +463,18 @@ fn mint_tmp_suffix() -> String {
 ///   provider refuses (sealed, unexposed) the write doesn't land — NO fallback
 ///   — and the refusal is LOUD (`persist_failed`). `yaml_io.dump(record)`
 ///   bytes, python-exact.
-pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
+///
+/// `Ok(true)` only when the record LANDED (written and renamed) — python
+/// `_persist_via_store` returns after `_persist_failed`, so nothing that follows
+/// a landed write (the readme/docs seed) runs for a failed one.
+pub async fn persist(kernel: &Arc<Kernel>, loader: &Agent, agent: &Agent) -> KernelResult<bool> {
     if kernel.storage.is_in_memory() || agent.ephemeral {
-        return Ok(());
+        return Ok(false);
     }
-    let Some(store_id) = find_store(kernel) else {
-        return Ok(()); // RAM — nothing wired.
+    let Some(store_id) = find_store_for(kernel, loader) else {
+        return Ok(false); // RAM — nothing wired.
     };
-    let Some(root) = kernel.root() else {
-        return Ok(());
-    };
-    let reldir = store_reldir(&root.root_path, &agent.root_path);
+    let reldir = loader_reldir(kernel, loader, &agent.root_path);
     let af = if reldir.is_empty() {
         RECORD_FILE.to_string()
     } else {
@@ -412,17 +500,17 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     // (mirrors python's `kernel_state`, which no longer splits code).
     let body = crate::yaml_io::dump(&Value::Object(on_disk));
     let tmp = format!("{af}.tmp.{}", mint_tmp_suffix());
-    let (write_meta, _) = store_send_binary(
+    let write_meta = store_write(
         kernel,
         &store_id,
-        serde_json::json!({"type": "write_stream", "path": tmp, "truncate": true}),
+        serde_json::json!({"type": "write_stream", "path": tmp, "bytes": null, "truncate": true}),
         body.into_bytes(),
     )
     .await;
     if write_failed(&write_meta) {
         // Leave the previous record untouched; a debris tmp is visible in `list`.
-        persist_failed(kernel, &store_id, &af, &write_meta);
-        return Ok(());
+        persist_failed(kernel, &loader.id, &store_id, &af, &write_meta);
+        return Ok(false);
     }
     // `rename` is a TEXT-channel verb (`fantastic-file`'s stream verbs live on
     // the text channel; no blob rides this call) — the leg's one atomic op.
@@ -434,11 +522,11 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     .remove(0)
     .result;
     if write_failed(&moved) {
-        persist_failed(kernel, &store_id, &af, &moved);
-        return Ok(());
+        persist_failed(kernel, &loader.id, &store_id, &af, &moved);
+        return Ok(false);
     }
-    persist_landed(kernel);
-    Ok(())
+    persist_landed(kernel, &loader.id);
+    Ok(true)
 }
 
 /// Seed a `readme.md` (the bundle ships it via `Bundle::readme()`) AND its
@@ -449,6 +537,7 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
 /// ephemeral / no-provider-wired.
 pub async fn seed_readme(
     kernel: &Arc<Kernel>,
+    loader: &Agent,
     agent: &Agent,
     readme: Option<&str>,
     docs: &[(&str, &str)],
@@ -456,13 +545,10 @@ pub async fn seed_readme(
     if kernel.storage.is_in_memory() || agent.ephemeral {
         return Ok(());
     }
-    let Some(store_id) = find_store(kernel) else {
+    let Some(store_id) = find_store_for(kernel, loader) else {
         return Ok(());
     };
-    let Some(root) = kernel.root() else {
-        return Ok(());
-    };
-    let reldir = store_reldir(&root.root_path, &agent.root_path);
+    let reldir = loader_reldir(kernel, loader, &agent.root_path);
     let prefix = if reldir.is_empty() {
         String::new()
     } else {
@@ -485,10 +571,10 @@ async fn seed_doc(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str, body: &s
     if read_stream_once(kernel, store_id, path).await.is_some() {
         return;
     }
-    store_send_binary(
+    store_write(
         kernel,
         store_id,
-        serde_json::json!({"type": "write_stream", "path": path, "truncate": true}),
+        serde_json::json!({"type": "write_stream", "path": path, "bytes": null, "truncate": true}),
         body.as_bytes().to_vec(),
     )
     .await;
@@ -498,27 +584,24 @@ async fn seed_doc(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str, body: &s
 /// recursive). Never removes the root (`reldir == ""`). No-op without a provider
 /// (the dir, if any, was never the substrate's to remove). Mirrors Python's
 /// `_forget_via_store`.
-pub async fn forget(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
+pub async fn forget(kernel: &Arc<Kernel>, loader: &Agent, agent: &Agent) -> KernelResult<()> {
     if kernel.storage.is_in_memory() || agent.ephemeral {
         return Ok(());
     }
-    forget_path(kernel, &agent.root_path).await;
+    forget_path(kernel, loader, &agent.root_path).await;
     Ok(())
 }
 
 /// [`forget`] by PATH — what the record writer holds for an agent that has
 /// already left the index (python caches `_paths` for exactly this).
-pub async fn forget_path(kernel: &Arc<Kernel>, agent_root: &Path) {
+pub async fn forget_path(kernel: &Arc<Kernel>, loader: &Agent, agent_root: &Path) {
     if kernel.storage.is_in_memory() {
         return;
     }
-    let Some(store_id) = find_store(kernel) else {
+    let Some(store_id) = find_store_for(kernel, loader) else {
         return;
     };
-    let Some(root) = kernel.root() else {
-        return;
-    };
-    let reldir = store_reldir(&root.root_path, agent_root);
+    let reldir = loader_reldir(kernel, loader, agent_root);
     if reldir.is_empty() {
         return; // never remove the root
     }
@@ -536,140 +619,19 @@ pub async fn forget_path(kernel: &Arc<Kernel>, agent_root: &Path) {
         .as_object()
         .is_some_and(|o| o.get("error").is_some_and(fantastic_bundle::py_truthy))
     {
-        persist_failed(kernel, &store_id, &reldir, &out);
+        persist_failed(kernel, &loader.id, &store_id, &reldir, &out);
     }
 }
 
-/// Hydrate a parent's children from `<parent_root>/agents/`.
-///
-/// Weak-loads — children whose `handler_module` isn't registered in
-/// `bundles` are skipped with a stderr log line; their subtree is
-/// also skipped (the orphan can't have any registered descendants
-/// reachable via routing). The record stays on disk.
-///
-/// Returns the list of (id, root_path) pairs that registered
-/// successfully so callers can drive on-boot hooks (`boot` verb,
-/// state events, etc.). The Agents themselves are also inserted into
-/// `kernel.agents` + `parent.children`. NO INBOX: a queue exists only where a
-/// reader called [`Kernel::ensure_inbox`] for one.
-pub fn load_children(
-    kernel: &Kernel,
-    bundles: &BundleRegistry,
-    parent: Arc<Agent>,
-) -> KernelResult<Vec<AgentId>> {
-    let mut loaded: Vec<AgentId> = Vec::new();
-    let children_dir = parent.children_dir();
-    if !children_dir.exists() {
-        return Ok(loaded);
-    }
-    let entries = match fs::read_dir(&children_dir) {
-        Ok(e) => e,
-        Err(err) => {
-            return Err(KernelError::Persistence {
-                path: children_dir,
-                source: err,
-            });
-        }
-    };
-
-    // Sort by name for deterministic load order (Python uses
-    // `sorted(cdir.iterdir())`).
-    let mut paths: Vec<_> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    paths.sort();
-
-    for entry in paths {
-        let agent_file = entry.join(RECORD_FILE);
-        if !agent_file.exists() {
-            continue;
-        }
-        // An unreadable or corrupt `agent.yaml` is skipped SILENTLY — python
-        // swallows both in `kernel_state/tools.py:131-155` and prints nothing
-        // (A15.3). A rust-only WARN here landed on a one-shot's stdout and
-        // stopped the reply parsing as JSON.
-        let raw = match fs::read_to_string(&agent_file) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let Some(rec) = parse_record(&raw)
-            .and_then(|m| serde_json::from_value::<AgentRecord>(Value::Object(m)).ok())
-        else {
-            continue;
-        };
-
-        // Weak-load check: if handler_module is set AND isn't in this
-        // runtime's bundle registry, skip + log.
-        if let Some(ref hm) = rec.handler_module {
-            if bundles.get(hm).is_none() {
-                // Exact log line shape (grep-able from CI + selftest).
-                eprintln!(
-                    "[kernel] skipping agent {}: bundle {} not installed in this runtime",
-                    rec.id, hm
-                );
-                continue;
-            }
-        }
-
-        let agent = Agent::new(
-            AgentId(rec.id.clone()),
-            rec.handler_module.clone(),
-            // DISK POSITION IS AUTHORITATIVE, not the field. A record whose
-            // `parent_id` disagrees with the directory it sits in would resolve
-            // `$parent` differently on the two halves of the gate, and a reboot
-            // would silently "correct" it either way (python's `read_tree`
-            // overwrites the field from the walk; rust trusted the field).
-            Some(parent.id.clone()),
-            rec.meta.clone(),
-            entry.clone(),
-            false,
-        );
-        let id = agent.id.clone();
-        // Register in the kernel index. No inbox — nothing here reads one.
-        kernel.register(Arc::clone(&agent));
-        // Wire into parent's children map.
-        parent.add_child(Arc::clone(&agent));
-        loaded.push(id.clone());
-
-        // Recurse into grandchildren.
-        let mut sub = load_children(kernel, bundles, agent)?;
-        loaded.append(&mut sub);
-    }
-
-    Ok(loaded)
-}
-
-/// Walk a `.fantastic` tree → a FLAT list of records (root + descendants).
-///
-/// `parent_id` comes from DISK POSITION (authoritative), not from the field.
-/// Pure read, called BEFORE any agent exists — a missing or unparseable ROOT
-/// record returns `[]` (the caller reseeds), and a corrupt SIBLING is skipped.
-/// Port of python `kernel_state.tools.read_tree`.
-pub fn read_tree(root_dir: &Path) -> Vec<Value> {
-    let root_file = root_dir.join(RECORD_FILE);
-    let Ok(raw) = fs::read_to_string(&root_file) else {
-        return Vec::new();
-    };
-    let Some(root_rec) = parse_record(&raw) else {
-        return Vec::new();
-    };
-    // The root record DECLARES the children-dir name (default "agents"); a
-    // self-describing layout sets e.g. "web_agents".
-    let children_dir = root_rec
-        .get("children_dir")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("agents")
-        .to_string();
-    let root_id = root_rec.get("id").cloned().unwrap_or(Value::Null);
-    let mut out = vec![Value::Object(root_rec)];
-    walk_tree(root_dir, &children_dir, &root_id, &mut out, &children_dir);
-    out
-}
-
-fn walk_tree(root_dir: &Path, rel_dir: &str, parent_id: &Value, out: &mut Vec<Value>, cdir: &str) {
+/// python `_walk`: the records under `rel_dir`, depth-first in name order, each
+/// `parent_id` set from its DISK POSITION; corrupt siblings skip.
+pub(crate) fn walk_tree(
+    root_dir: &Path,
+    rel_dir: &str,
+    parent_id: &Value,
+    out: &mut Vec<Value>,
+    cdir: &str,
+) {
     let abs = root_dir.join(rel_dir);
     if !abs.is_dir() {
         return;
@@ -696,7 +658,7 @@ fn walk_tree(root_dir: &Path, rel_dir: &str, parent_id: &Value, out: &mut Vec<Va
 }
 
 /// A loader's PERSISTED records → `{id: parent_id}`, the parent taken from DISK
-/// POSITION under `root_dir` (authoritative, as [`read_tree`] does): a record
+/// POSITION under `root_dir` (authoritative, as the loader's `read_tree` does): a record
 /// directly under `<root_dir>/<children_dir>` is parented to the loader itself.
 /// A record the host never runs — a federated kernel's, sent through a bridge —
 /// exists only here, so a walk that stops at the live tree loses every record
@@ -800,34 +762,6 @@ impl<'a> RecordPlaces<'a> {
     }
 }
 
-/// An absolute dir for a record that is NOT (or no longer) live, under the ROOT
-/// loader: its parent chain walked where it really is — the live tree, then the
-/// root's persisted records — and joined under the root's children dir. Python
-/// `kernel_state.tools._resolve_path` for the root loader.
-pub fn resolve_record_path(kernel: &Arc<Kernel>, id: &str, parent_id: Option<&str>) -> PathBuf {
-    let Some(root) = kernel.root() else {
-        return PathBuf::new();
-    };
-    let children_dir = root
-        .meta
-        .read()
-        .ok()
-        .and_then(|m| {
-            m.get("children_dir")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "agents".to_string());
-    RecordPlaces::new(
-        kernel,
-        root.root_path.clone(),
-        children_dir,
-        root.id.0.clone(),
-    )
-    .resolve(id, parent_id)
-}
-
 /// Convenience: write a record to a specific path. Used by tests that
 /// stage `.fantastic/` layouts without going through `Agent::new`.
 pub fn write_record_at(path: &Path, rec: &AgentRecord) -> KernelResult<()> {
@@ -901,6 +835,7 @@ struct Dirty {
 /// `shutdown_agents` — it is what flushes what shutdown produced.
 #[derive(Clone)]
 pub struct PersistWriter {
+    loader: AgentId,
     dirty: Arc<std::sync::Mutex<Dirty>>,
     wake: Arc<tokio::sync::Notify>,
     token: crate::kernel::SubscriberToken,
@@ -911,7 +846,7 @@ impl PersistWriter {
     /// Drain the dirty queues once — the test seam AND the loop's body
     /// (python `aflush`).
     pub async fn flush(&self, kernel: &Arc<Kernel>) {
-        flush_records(kernel, &self.dirty).await;
+        flush_records(kernel, &self.loader, &self.dirty).await;
     }
 
     /// Unsubscribe and stop the task. NO FINAL FLUSH HERE: `stop` runs
@@ -920,7 +855,9 @@ impl PersistWriter {
     /// the provider gone and the update never landed. The last write happens in
     /// the root's `flush_pending`, before the walk.
     pub async fn stop(self, kernel: &Arc<Kernel>) {
-        kernel.clear_record_writer();
+        if kernel.root().is_some_and(|r| r.id == self.loader) {
+            kernel.clear_record_writer();
+        }
         kernel.remove_state_subscriber(self.token);
         self.wake.notify_waiters();
         kernel.tasks.forget(&self.task);
@@ -984,14 +921,16 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
     let k_run = Arc::clone(kernel);
     let d_run = Arc::clone(&dirty);
     let w_run = Arc::clone(&wake);
+    let l_run = loader_id.clone();
     let task = kernel.spawn_keepalive_task(loader_id, "persist_writer", async move {
         loop {
             w_run.notified().await;
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            flush_records(&k_run, &d_run).await;
+            flush_records(&k_run, &l_run, &d_run).await;
         }
     });
     let writer = PersistWriter {
+        loader: loader_id.clone(),
         dirty,
         wake,
         token,
@@ -999,15 +938,26 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
     };
     // A ONE-SHOT DRAINS SYNCHRONOUSLY. python's `call` mode boots the root and
     // then awaits `root._fs_flush_loop.aflush()` before the process exits — the
-    // debounce never ticks in that window. The kernel keeps the handle so a
-    // caller with no reference to the loader bundle can do the same.
-    kernel.set_record_writer(writer.clone());
+    // debounce never ticks in that window. The kernel keeps the ROOT loader's
+    // handle so a caller with no reference to the loader bundle can do the same;
+    // another watching loader's writer is its own.
+    if kernel.root().is_some_and(|r| r.id == *loader_id) {
+        kernel.set_record_writer(writer.clone());
+    }
     writer
 }
 
-async fn flush_records(kernel: &Arc<Kernel>, dirty: &Arc<std::sync::Mutex<Dirty>>) {
-    // NO PROVIDER ⇒ the queues stay queued (python returns before clearing).
-    if find_store(kernel).is_none() {
+async fn flush_records(
+    kernel: &Arc<Kernel>,
+    loader_id: &AgentId,
+    dirty: &Arc<std::sync::Mutex<Dirty>>,
+) {
+    // THE LOADER'S OWN STORE (python `_find_store(self.agent)`). NO PROVIDER ⇒
+    // the queues stay queued (python returns before clearing).
+    let Some(loader) = kernel.agents.get(loader_id).map(|e| Arc::clone(&e)) else {
+        return;
+    };
+    if find_store_for(kernel, &loader).is_none() {
         return;
     }
     let (persist_ids, forget) = {
@@ -1024,21 +974,23 @@ async fn flush_records(kernel: &Arc<Kernel>, dirty: &Arc<std::sync::Mutex<Dirty>
         if agent.ephemeral {
             continue;
         }
-        let _ = persist(kernel, &agent).await;
-        // EVERY DRAINED WRITE SEEDS THE SIDECARS (python `_persist_via_store` →
+        // EVERY LANDED WRITE SEEDS THE SIDECARS (python `_persist_via_store` →
         // `_seed_readme_via_store`), not only the create that first made the
         // record — a record written before a store was wired would otherwise
-        // never get its readme.
+        // never get its readme. A refused or failed write seeds nothing.
+        if !matches!(persist(kernel, &loader, &agent).await, Ok(true)) {
+            continue;
+        }
         if let Some(bundle) = agent
             .handler_module
             .as_deref()
             .and_then(|hm| kernel.bundles.get(hm))
         {
-            let _ = seed_readme(kernel, &agent, bundle.readme(), bundle.docs()).await;
+            let _ = seed_readme(kernel, &loader, &agent, bundle.readme(), bundle.docs()).await;
         }
     }
     for (_, path) in forget {
-        forget_path(kernel, &path).await;
+        forget_path(kernel, &loader, &path).await;
     }
 }
 
@@ -1077,9 +1029,8 @@ pub async fn boot_root_loader(kernel: &Arc<Kernel>, agent: &Arc<Agent>) -> RootL
     if !watching {
         return state;
     }
-    if is_root {
-        check_store_allow(kernel);
-    }
+    // python runs `_check_store_allow(agent)` for EVERY watching loader.
+    check_store_allow(kernel, agent);
     state.writer = Some(install_persist_writer(kernel, &agent.id));
     if is_root {
         let has_guid = agent.meta.read().ok().is_some_and(|m| {

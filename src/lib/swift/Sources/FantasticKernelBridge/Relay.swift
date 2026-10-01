@@ -260,7 +260,7 @@ public actor RelayTransport: BridgeTransport {
             let isBinary: Bool
             switch msg {
             case .text(let s):
-                guard let parsed = try? JSON.parse(s), case .object = parsed else { continue }
+                guard let parsed = try? JSON.parseStrict(s), case .object = parsed else { continue }
                 envelope = parsed
                 body = Data()
                 isBinary = false
@@ -293,7 +293,16 @@ public actor RelayTransport: BridgeTransport {
                         .object(["type": .string("event"), "payload": payload]), Data(), false
                     )
                 }
-                if source == partner { return (payload, body, isBinary) }
+                guard source == partner else { continue }
+                // The tunnelled frame's OWN `_binary_path`: `sendBinary` lifted
+                // it to `payload.<path>` on the envelope, so it comes back down —
+                // python's `decode_frame` places the body inside the inner frame
+                // at exactly that path.
+                var frame = payload
+                if isBinary, let p = envelope["_binary_path"].asString, p.hasPrefix("payload.") {
+                    frame["_binary_path"] = .string(String(p.dropFirst("payload.".count)))
+                }
+                return (frame, body, isBinary)
             default:
                 break
             }

@@ -80,6 +80,8 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                 // `has_api_key` ONLY — never the key, and no `host`: the record's
                 // `endpoint` is the base field that names where this goes.
                 reflectExtra: { _ in ["has_api_key": .bool(readApiKey() != nil)] },
+                // python `require_provider=True`: no key ⇒ refused before the queue.
+                requireProvider: true,
                 makeProvider: { agent, clientId, _ in
                     guard let apiKey = readApiKey() else {
                         return .refused(

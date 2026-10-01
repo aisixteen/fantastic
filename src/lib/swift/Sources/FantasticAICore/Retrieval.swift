@@ -21,7 +21,7 @@ private func badArg(_ msg: String, _ arg: String) -> JSON {
 /// kernel's `asMessageId`.
 ///
 /// Three differences, all model-visible: a string is STRIPPED first (`' 12 '` is
-/// 12), it must be all python DIGITS (so `'٣'` is 3 and `'+5'` is nothing), and a
+/// 12), it must be all ASCII digits (so `'٣'` and `'+5'` are nothing), and a
 /// digit string of `0` IS an id — `pull pid:'0'` therefore reaches the
 /// `not_found` refusal rather than the `bad_arg` one. The kernel's own reader is
 /// untouched; this is the AI core's.

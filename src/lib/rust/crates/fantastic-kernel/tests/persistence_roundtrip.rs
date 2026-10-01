@@ -298,10 +298,24 @@ async fn delete_removes_record_through_provider() {
     );
 }
 
+/// Boot a workdir whose `.fantastic/` was staged by hand — the real hydration
+/// path (python `kernel.load(read_tree(…))`), with `noop.tools` installed.
+fn boot_staged(workdir: &Path) -> Arc<Kernel> {
+    let mut reg = BundleRegistry::new();
+    reg.register("noop.tools", NoopBundle);
+    fantastic_kernel::test_support::register_root_loader(&mut reg);
+    fantastic_kernel::bootstrap::bootstrap(
+        reg,
+        fantastic_kernel::bootstrap::BootstrapOptions::one_shot(workdir),
+    )
+    .expect("boot")
+    .kernel
+}
+
 #[test]
-fn load_children_hydrates_registered_agents() {
+fn boot_hydrates_registered_agents() {
     let tmp = fresh_workdir();
-    let root = tmp.path();
+    let root = tmp.path().join(".fantastic");
     // Stage two children under root: agents/known + agents/known/agents/grandchild.
     let known_dir = root.join("agents/known");
     let grand_dir = known_dir.join("agents/grandchild");
@@ -316,22 +330,7 @@ fn load_children_hydrates_registered_agents() {
         r#"{"id":"grandchild","handler_module":"noop.tools","parent_id":"known"}"#,
     )
     .unwrap();
-    let kernel = Kernel::new();
-    let mut reg = BundleRegistry::new();
-    reg.register("noop.tools", NoopBundle);
-    // Synthetic parent that points at the workdir root.
-    let parent = Agent::new(
-        AgentId::from("kernel_state"),
-        None,
-        None,
-        Map::new(),
-        root.to_path_buf(),
-        false,
-    );
-    kernel.register(Arc::clone(&parent));
-    let loaded = fantastic_kernel::persistence::load_children(&kernel, &reg, Arc::clone(&parent))
-        .expect("hydrate");
-    assert_eq!(loaded.len(), 2);
+    let kernel = boot_staged(tmp.path());
     assert!(kernel.agents.contains_key(&AgentId::from("known")));
     assert!(kernel.agents.contains_key(&AgentId::from("grandchild")));
     // Grandchild also wired into known's children map:
@@ -340,12 +339,12 @@ fn load_children_hydrates_registered_agents() {
 }
 
 #[test]
-fn load_children_weak_load_skips_unknown_handler_module_and_subtree() {
+fn boot_weak_load_skips_unknown_handler_module_and_subtree() {
     // Plant a ghost agent whose handler_module isn't registered, AND
     // a real child underneath it. Both must be skipped; neither should
     // appear in kernel.agents. The on-disk records stay untouched.
     let tmp = fresh_workdir();
-    let root = tmp.path();
+    let root = tmp.path().join(".fantastic");
     let ghost_dir = root.join("agents/ghost_1");
     let ghost_child = ghost_dir.join("agents/ghost_child");
     std::fs::create_dir_all(&ghost_child).unwrap();
@@ -368,23 +367,8 @@ fn load_children_weak_load_skips_unknown_handler_module_and_subtree() {
     )
     .unwrap();
 
-    let kernel = Kernel::new();
-    let mut reg = BundleRegistry::new();
-    reg.register("noop.tools", NoopBundle);
-    let parent = Agent::new(
-        AgentId::from("kernel_state"),
-        None,
-        None,
-        Map::new(),
-        root.to_path_buf(),
-        false,
-    );
-    kernel.register(Arc::clone(&parent));
-    let loaded = fantastic_kernel::persistence::load_children(&kernel, &reg, Arc::clone(&parent))
-        .expect("hydrate");
-
+    let kernel = boot_staged(tmp.path());
     // Only `real_1` loaded; ghost branch skipped wholesale.
-    assert_eq!(loaded, vec![AgentId::from("real_1")]);
     assert!(kernel.agents.contains_key(&AgentId::from("real_1")));
     assert!(!kernel.agents.contains_key(&AgentId::from("ghost_1")));
     assert!(!kernel.agents.contains_key(&AgentId::from("ghost_child")));
@@ -396,28 +380,14 @@ fn load_children_weak_load_skips_unknown_handler_module_and_subtree() {
 }
 
 #[test]
-fn load_children_tolerates_corrupt_agent_json() {
+fn boot_tolerates_a_corrupt_child_record() {
     let tmp = fresh_workdir();
-    let root = tmp.path();
-    let bad = root.join("agents/broken");
+    let bad = tmp.path().join(".fantastic/agents/broken");
     std::fs::create_dir_all(&bad).unwrap();
     std::fs::write(bad.join("agent.yaml"), "{NOT_JSON").unwrap();
-
-    let kernel = Kernel::new();
-    let reg = BundleRegistry::new();
-    let parent = Agent::new(
-        AgentId::from("kernel_state"),
-        None,
-        None,
-        Map::new(),
-        root.to_path_buf(),
-        false,
-    );
-    kernel.register(Arc::clone(&parent));
-    let loaded = fantastic_kernel::persistence::load_children(&kernel, &reg, Arc::clone(&parent))
-        .expect("hydrate");
-    assert!(loaded.is_empty());
+    let kernel = boot_staged(tmp.path());
     assert!(!kernel.agents.contains_key(&AgentId::from("broken")));
+    assert_eq!(kernel.agents.len(), 1, "only the root");
 }
 
 /// C14 (RP-09): the record writer's DIRTY SET SURVIVES a no-store flush. Python
@@ -762,5 +732,128 @@ async fn an_emptied_readme_is_not_reseeded() {
         std::fs::read_to_string(&readme_path).expect("still there"),
         "",
         "an operator-emptied readme is NOT reseeded"
+    );
+}
+
+/// python's `kernel_state` store calls are TEXT-channel dicts: a read is
+/// `{type: read_stream, path, offset}` with no `bytes` key, a write
+/// `{type: write_stream, path, bytes, truncate}` — and the call row reduces the
+/// chunk to `{len: N}` IN PLACE. Rust used to send every store IO as a binary
+/// item: a read's row carried `bytes: {len: 0}` and a write's `bytes` moved last.
+#[tokio::test]
+async fn store_call_rows_have_python_shape() {
+    let tmp = fresh_workdir();
+    let store_root = tmp.path();
+    let kernel = kernel_at(store_root);
+    fantastic_kernel::test_support::boot_root(&kernel).await;
+    wire_store(&kernel, store_root).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": "noop.tools", "id": "shaped"}),
+        )])
+        .await;
+    fantastic_kernel::test_support::settle_records().await;
+    let store_calls: Vec<Value> =
+        fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from("store"))
+            .into_iter()
+            .filter(|r| r.get("kind") == Some(&json!("call")))
+            .map(|r| r["payload"].clone())
+            .collect();
+    let keys = |p: &Value| -> Vec<String> { p.as_object().unwrap().keys().cloned().collect() };
+    let read = store_calls
+        .iter()
+        .find(|p| p["type"] == "read_stream" && p["path"] == "agents/shaped/agent.yaml")
+        .expect("the merge read is a call");
+    assert_eq!(keys(read), ["type", "path", "offset"], "{read}");
+    let write = store_calls
+        .iter()
+        .find(|p| {
+            p["type"] == "write_stream"
+                && p["path"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("agents/shaped/agent.yaml.tmp."))
+        })
+        .expect("the record write is a call");
+    assert_eq!(
+        keys(write),
+        ["type", "path", "bytes", "truncate"],
+        "{write}"
+    );
+    assert!(
+        write["bytes"]["len"].as_u64().is_some_and(|n| n > 0),
+        "{write}"
+    );
+}
+
+/// A store that answers every stream verb with a refusal — a sealed or
+/// unexposed provider.
+struct RefusingStore;
+
+#[async_trait]
+impl Bundle for RefusingStore {
+    fn name(&self) -> &str {
+        "file_bridge"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Some(json!({"error": "sealed", "reason": "unauthorized"})))
+    }
+}
+
+/// python `_persist_via_store` RETURNS after `_persist_failed`: the readme/docs
+/// seed runs only after `_persist_landed`. A refused record write must not be
+/// followed by readme probes and writes.
+#[tokio::test]
+async fn a_failed_record_write_seeds_no_readme() {
+    let tmp = fresh_workdir();
+    let store_root = tmp.path();
+    let mut kernel = Kernel::with_storage(StorageMode::Disk(store_root.to_path_buf()));
+    let mut reg = BundleRegistry::new();
+    reg.register("readme_bundle.tools", ReadmeBundle);
+    reg.register("file_bridge.tools", RefusingStore);
+    fantastic_kernel::test_support::register_root_loader(&mut reg);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        Some("kernel_state.tools".to_string()),
+        None,
+        Map::new(),
+        store_root.to_path_buf(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    fantastic_kernel::test_support::boot_root(&kernel).await;
+    wire_store(&kernel, store_root).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": "readme_bundle.tools", "id": "doc"}),
+        )])
+        .await;
+    fantastic_kernel::test_support::settle_records().await;
+    let paths: Vec<String> =
+        fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from("store"))
+            .into_iter()
+            .filter(|r| r.get("kind") == Some(&json!("call")))
+            .filter_map(|r| r["payload"]["path"].as_str().map(str::to_string))
+            .collect();
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.starts_with("agents/doc/agent.yaml.tmp.")),
+        "the record write was attempted: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|p| p.ends_with("readme.md")),
+        "a failed write still seeded the readme: {paths:?}"
     );
 }

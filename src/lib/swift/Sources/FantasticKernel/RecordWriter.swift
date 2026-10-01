@@ -114,14 +114,11 @@ public final class RecordWriter: @unchecked Sendable {
         }
         for id in ids {
             guard let a = kernel.agent(id), !a.ephemeral else { continue }
-            await kernel.persistRecord(a)
-            // EVERY DRAINED WRITE SEEDS THE SIDECARS (python
+            // EVERY DRAINED WRITE THAT LANDS SEEDS THE SIDECARS (python
             // `_persist_via_store` → `_seed_readme_via_store`), not only the
             // create that first made the record — a record written before a
             // store was wired would otherwise never get its readme.
-            if let hm = a.handlerModule, let readme = kernel.bundles.get(hm)?.readme {
-                await kernel.seedReadmeViaStore(a, content: readme)
-            }
+            await kernel.persistRecord(a)
         }
         for (_, path) in gone {
             await kernel.forgetPath(path)

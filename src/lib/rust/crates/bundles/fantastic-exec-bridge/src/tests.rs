@@ -2322,3 +2322,62 @@ fn paste_names_are_pythons_token_hex_4_and_random() {
     sorted.sort();
     assert_ne!(sorted, ids, "job ids ascend like a counter: {ids:?}");
 }
+
+/// python `_serve_ctrl` relays a program's `send` UNTOUCHED — one
+/// `kernel.send([{target, payload}])`: no `_call_stack` tag, no cycle/depth
+/// refusal of its own. A kind-B frame is the SAME batch item carrying its body:
+/// a pid and a call row like any other execution.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch() {
+    use tokio::io::AsyncWriteExt;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let tap = AgentId::from("tap_relay");
+    let mut tap_rx = kernel.ensure_inbox(&tap);
+    assert!(kernel.watch(&a, tap.clone()).await.is_none());
+    let (mut child, stop, relay) = wire(&kernel, &a, 9006);
+
+    // A program calling its OWN runner — a "cycle" by the ai_core guard's
+    // measure — is relayed like any send.
+    wire_write(
+        &mut child,
+        &json!({"op": "send", "rid": 1, "target": a.as_str(), "payload": {"type": "status"}}),
+    )
+    .await;
+    let reply = wire_read(&mut child).await;
+    assert_eq!(reply["rid"], 1, "{reply}");
+    assert!(reply["data"].get("error").is_none(), "{reply}");
+    let mirrored = tap_rx.try_recv().expect("the send was mirrored");
+    assert_eq!(
+        mirrored.payload,
+        json!({"type": "status"}),
+        "relayed untouched"
+    );
+
+    // Kind B: `[len | 'B' | io_bridge binary frame]`.
+    let head = json!({"op": "send", "rid": 2, "target": a.as_str(),
+                      "payload": {"type": "status", "bytes": null},
+                      "_binary_path": "payload.bytes"});
+    let frame = fantastic_io_bridge::codec::encode_binary_frame(&head, b"xyz");
+    let body = [b"B".as_slice(), &frame].concat();
+    child
+        .write_all(&[&(body.len() as u32).to_be_bytes()[..], &body].concat())
+        .await
+        .expect("write");
+    let reply = wire_read(&mut child).await;
+    assert_eq!(reply["rid"], 2, "{reply}");
+    let row = kernel
+        .rows
+        .all()
+        .into_iter()
+        .rev()
+        .find(|r| r.get("kind") == Some(&json!("call")) && r.get("verb") == Some(&json!("status")))
+        .expect("the binary send is a ledgered call");
+    assert_eq!(row["payload"]["bytes"], json!({"len": 3}), "{row:?}");
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+}

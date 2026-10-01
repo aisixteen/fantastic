@@ -476,19 +476,22 @@ pub(crate) fn percent_decode(path: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// `urllib.parse.parse_qsl(qs, keep_blank_values=True)` — the FIRST value for a
-/// key, `+` as space, `%XX` decoded.
+/// starlette `request.query_params.get(key)` — `parse_qsl(qs,
+/// keep_blank_values=True)` splitting on `&` ONLY (`;` is part of a value), `+`
+/// as space, `%XX` decoded, and the LAST value for a repeated key (the multidict's
+/// `get`).
 pub(crate) fn query_get(query: &str, key: &str) -> Option<String> {
-    for pair in query.split('&').flat_map(|p| p.split(';')) {
+    let mut found = None;
+    for pair in query.split('&') {
         if pair.is_empty() {
             continue;
         }
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         if percent_decode(&k.replace('+', " ")) == key {
-            return Some(percent_decode(&v.replace('+', " ")));
+            found = Some(percent_decode(&v.replace('+', " ")));
         }
     }
-    None
+    found
 }
 
 /// Is this request an ASGI `websocket` scope? uvicorn hands h11 the upgrade
