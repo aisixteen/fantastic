@@ -1365,9 +1365,12 @@ public final class AIBackend: @unchecked Sendable {
 // EVERY ROW HAS AN ADDRESS — an int from the kernel's one counter. `parent` is
 // CAUSALITY (the row this one responds to); a thread is the parent chain, derived
 // when needed. `reply_to` on a send is DELIVERY and is left alone. Python
-// `_TAG_LINKS`: `^\[reply to \S+ · [^\]]*?↑(\S+)[^\]]*\]`.
+// `_TAG_LINKS`: `^\[reply to \S+ · [^\]]*?↑([^\s\]]+)[^\]]*\]`.
+// `↑<id>` stops at whitespace OR the tag's closing `]` — python's `_TAG_LINKS`
+// (2026-10-01): a tag ending on its `↑` segment with a later `]` in the body
+// captured `360]`, which is no id, so the reply row lost its parent.
 private let tagLinks = try! NSRegularExpression(
-    pattern: "^\\[reply to \\S+ \u{b7} [^\\]]*?\u{2191}(\\S+)[^\\]]*\\]")
+    pattern: "^\\[reply to \\S+ \u{b7} [^\\]]*?\u{2191}([^\\s\\]]+)[^\\]]*\\]")
 
 /// python `str.strip(".")` — dots off both ends, nothing else (the whitespace
 /// strip is a separate step, and the order matters: `'. x'` keeps its `x`).

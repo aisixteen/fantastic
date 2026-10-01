@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import struct
 from typing import Any
 
@@ -78,18 +79,60 @@ def encode_frame(envelope: dict) -> tuple[bytes, bool]:
     return struct.pack(">I", len(head_bytes)) + head_bytes + body, True
 
 
+_INT64 = (-(2**63), 2**63 - 1)
+
+
 def _no_constant(name: str):
     raise ValueError(f"{name} is not JSON")
 
 
+def _int64(digits: str) -> int:
+    v = int(digits)
+    if not _INT64[0] <= v <= _INT64[1]:
+        raise ValueError(f"integer {digits} is outside int64")
+    return v
+
+
+def _finite(digits: str) -> float:
+    v = float(digits)
+    if not math.isfinite(v):
+        raise ValueError(f"number {digits} overflows a double")
+    return v
+
+
+def _no_lone_surrogate(x) -> None:
+    """A `\\ud800`–`\\udfff` escape with no partner decodes to a code point that is
+    not a Unicode scalar: python holds it, UTF-8 cannot write it, rust and swift
+    strings cannot hold it at all."""
+    if isinstance(x, str):
+        if any(0xD800 <= ord(c) <= 0xDFFF for c in x):
+            raise ValueError("a lone surrogate (\\ud800–\\udfff) is not text")
+    elif isinstance(x, dict):
+        for k, v in x.items():
+            _no_lone_surrogate(k)
+            _no_lone_surrogate(v)
+    elif isinstance(x, list):
+        for v in x:
+            _no_lone_surrogate(v)
+
+
 def loads(text: str | bytes):
-    """JSON off the wire, STRICTLY: `NaN`, `Infinity` and `-Infinity` are not JSON
-    (RFC 8259), and python's `json.loads` alone accepts them — a peer could plant a
-    value no other runtime can even represent (parity 2026-09-30: python took a
-    `NaN` REST body that rust and swift refuse). Refused as a `JSONDecodeError`, so
-    every caller's existing "not valid JSON" path answers it."""
+    """JSON off the wire, STRICTLY — only values EVERY runtime can hold (owner
+    D13, 2026-10-01). Refused, each as a `JSONDecodeError` so every caller's
+    existing "not valid JSON" path answers it:
+      * `NaN`, `Infinity`, `-Infinity` — not JSON at all (RFC 8259), yet python's
+        `json.loads` alone accepts them;
+      * an integer outside int64, or a number that overflows a double — rust and
+        swift parse it into a different value;
+      * a lone surrogate in a string — not text; no runtime can write it as UTF-8.
+    (parity 2026-09-30: python took a `NaN` REST body, `12345678901234567890` and
+    `"\\udcff"` that rust and swift refuse or change.)"""
     try:
-        return json.loads(text, parse_constant=_no_constant)
+        out = json.loads(
+            text, parse_constant=_no_constant, parse_int=_int64, parse_float=_finite
+        )
+        _no_lone_surrogate(out)
+        return out
     except ValueError as e:
         if isinstance(e, json.JSONDecodeError):
             raise

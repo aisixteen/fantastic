@@ -18,7 +18,18 @@
 # status codes, exit codes, stdout vs stderr, close codes, and the FORMAT of
 # send_id / serial / corr / ws-client ids.
 
-version: 7
+version: 8
+#
+# v8 (2026-10-01) — the parity leftovers the owner decided (`tmp/todo.md` (a)/(c)).
+# Three NEW rules, each an order that is not a contract: N20 (reply vs event on
+# one socket), N21 (a peer turn's self-reflect vs the reply delivered to the
+# same agent), N22 (stub requests paired per agent). Four rules REACH FURTHER
+# into what they own: N2 (the runtime as JSON inside text; a head-only stdout's
+# count off by exactly the name length), N4 (the escaped ↑ arrow), N10
+# (`<RUNTIME>` is of no fixed width; a token budget compared within ONE token),
+# N12 (a rewritten file's read `origin` repeats its size). Header order and
+# presence are STILL never normalised: the library header differences went to
+# residuals.yaml v6 as owner-accepted residuals, not rules.
 #
 # v7 (2026-09-22) — NO NEW RULE. Two existing rules reach further into things
 # they already own, one of them by being NARROWED the same way N12 was in v6,
@@ -136,6 +147,16 @@ rules:
       # system prompt, so the token sat in all 453 files of the ctx family and in
       # every recorded request body (measured 2026-09-20).
       - 'runtime=(python|rust|swift) as a whole token'
+      # (2026-10-01) …and the same field as JSON INSIDE TEXT, quoted once or
+      # more: `"runtime": "python"` in a cli stdout, `\"runtime\":\"python\"`
+      # in a recorded REST body (9 + 2 lines a port, measured 2026-10-01).
+      - '"runtime": "(python|rust|swift)" inside text, any quoting depth'
+    # (2026-10-01) A `stdout_bytes` whose stdout is recorded only as a HEAD (so
+    # N10 cannot see the text it counts) is compared PAIRWISE and forgiven when it
+    # differs by EXACTLY len(python name) − len(port name): the reflect it counts
+    # prints its runtime once. Measured: `setup.reflect.stdout_bytes` 3120 python
+    # vs 3118 rust (−2) and 3119 swift (−1). Any other difference is a line.
+    name_length_delta: stdout_bytes, exact
     replacement: <RUNTIME>
     must_not_hide:
       - A9.5  # the SHAPE of the intro line, which keeps its other fields
@@ -175,6 +196,9 @@ rules:
     only_when: int or digit-string; never an agent-id string
     text_anchors:
       - '\[reply to (\d+)'
+      # the ↑ arrow ESCAPED, as a frame's raw `text` carries it (`\u2191118`;
+      # 6 lines a port, 2026-10-01)
+      - '\\+u2191(\d+)'
       - '↑(\d+)'
       - 'in batch (\d+)'
       - '<pid>(\d+)</pid>'
@@ -379,9 +403,24 @@ rules:
     #:      lands where the raw digit widths put it. Measured on the python
     #:      self-diff: `store/s4/history_final.json` 127 vs 126, `…</v` vs
     #:      `…</ve`.
+    #:   8. (2026-10-01) `<RUNTIME>` joins the placeholders of no fixed width
+    #:      (case 1): the name it stands for is 4, 5 or 6 characters. And
+    #:      `stdout` joins the texts, `stdout_bytes` the counts. Measured: a REST
+    #:      reflect body 4645 python vs 4643 rust / 4644 swift with its
+    #:      `content-length`, cli `stdout_bytes` 2996 vs 2994.
+    #:   9. (2026-10-01) A token BUDGET — `window − reserve − the system block's
+    #:      tokens`, and the system block names the runtime — is compared
+    #:      PAIRWISE with a tolerance of ONE token, never blanked: as a field
+    #:      (`budget` beside `why`, a recall reply or a view row) and as text
+    #:      (`<budget>N</budget>`, `"budget": N`, in a prompt or a row's content;
+    #:      both texts must carry the same number of budgets). Measured: 3158 vs
+    #:      3159 (rust), 3160 vs 3161 (swift), 22301 vs 22302 in a view row. A
+    #:      port two tokens off is a line.
     self_check: diff.py rulecheck — 6 cases (census both ways, recall header
       both ways), plus 7 for cases 6 and 7 (the size forgiven; status, a zero,
-      a differing prefix, a different raw width and an id-free head still lines)
+      a differing prefix, a different raw width and an id-free head still lines),
+      plus 6 for cases 8 and 9 (forgiven; a differing body, a budget two tokens
+      off, another count changed beside a budget — lines)
     must_not_hide:
       - A2.21  # a symlinked file's SIZE, where the text is not in the reply
       - C44    # the 64 KiB record read, which is about a LENGTH
@@ -424,6 +463,12 @@ rules:
       because `ledger.json` is rewritten DURING the snapshot that reads it (C47)
       and a byte compare of a moving file measures the clock.
     exact: [agent.yaml, readme.md, 'docs/**']
+    # (2026-10-01) A rewritten file's read REPEATS its moving size in words: the
+    # `origin` line `bytes 0-193 of 193 — read_stream {…, offset: 0, length: 193}`.
+    # Its numbers are blanked the way the record's own `size`/`length` are; the
+    # words, the path and the verb stay compared (measured: `schedules.yaml` 193
+    # vs 195 — a float `next_run` printed to a different digit count).
+    origin_numbers: blanked inside a REWRITTEN record only
     parsed_then_normalised: [schedules.yaml, lock.yaml, history lines]
     #: A record ABOUT one of the four keeps its path, its keys and its envelope,
     #: and loses every number over its moving bytes and the bytes themselves.
@@ -729,3 +774,71 @@ rules:
       - C63   # a missing or extra row — fewer ordinals, different array length
       - C12   # a WRONG PARENT — `parent` renders the parent's CANONICAL ordinal,
               # derived from the parent's own content, so a re-parent is a line
+
+  # ── v8 (2026-10-01) — ORDER that is not a contract, decided by the owner ──
+  # (`tmp/todo.md`, "parity leftovers (c)"): each rule names exactly the order it
+  # frees and keeps every other order compared.
+
+  - id: N20
+    name: reply_vs_event_on_one_socket
+    why: >
+      On ONE socket a call's REPLY and the EVENTS a watch pushes are written by
+      different tasks, and which reaches the socket first is scheduling.
+      Measured 2026-10-01 on `wire/frames.jsonl`: the `ctrl` socket's
+      `wirecap-N` reply one or two frames earlier or later among
+      `reflect`/`status` events — rust at 8 places (124 diff lines), swift at 1.
+      Inside a RUN of consecutive incoming reply/event frames on one socket, the
+      replies are put after the events; each kind keeps its own order.
+    scope: wire frame streams (`frames_view`) — after N11, before N17
+    runs_end_at: an outgoing frame, a mark, another socket, any other frame type,
+      and a terminal OUTPUT event (N17's chunk order against a reply stays a
+      contract)
+    self_check: diff.py rulecheck — swap → 0 lines; a missing reply, two events
+      reordered, a reply crossing an outgoing call → lines
+    must_not_hide:
+      - C76   # the order of events within one subscription
+      - B2.13 # a turn's token/status sequence
+      - A13.14
+
+  - id: N21
+    name: self_reflect_vs_reply_delivery
+    why: >
+      An agent busy with one turn is sent a PEER message and, a moment later, the
+      reply its own earlier call was waiting for. The peer turn's self-`reflect`
+      and the reply's DELIVERY race: python records the reflect right after the
+      peer `send`; swift records the reply's `send` and its `queued` status first
+      (measured 2026-10-01, `ai_paths/events.json` 386–388 and
+      `ai_paths/cases/cycle.json`, 28 + 31 swift lines). The first `reflect`
+      after a peer `send` (a `send` event with no `client_id`) is moved to right
+      after it — across `send` events and `queued` statuses ONLY.
+    scope: [ai_paths/events.json, ai_paths/cases/cycle.json]
+    not_reordered: >
+      A `thinking` status in between — the two TURNS ran in the other order. Rust
+      shows exactly that in the cycle case (the reply's turn takes the agent's
+      queue first, its `queue_depth`s and `queued` status follow), and it stays
+      a diff line: who waits changes the events' CONTENTS, not just their order.
+    self_check: diff.py rulecheck — reflect after the reply's delivery → 0
+      lines; the turns in the other order → lines
+    must_not_hide:
+      - B2.13
+      - B2.14
+      - B2.15
+
+  - id: N22
+    name: stub_requests_paired_per_agent
+    why: >
+      `ai_paths` runs TWO AI agents and the stub numbers their requests in
+      ARRIVAL order across both: when `ai2`'s turn reaches the stub before
+      `ai`'s, every number after it shifts (measured 2026-10-01: swift
+      `req_068` is `ai2`'s request, python's is `req_069`, so both files read as
+      wholly different). Each agent's OWN request sequence is a contract and stays
+      compared in order: the k-th request of agent X (the `id=<agent>  model=`
+      line of its system block) is paired with the other side's k-th request of X.
+    scope: 'ai_paths/stub/req_*.bin'
+    unpaired: a request one side made and the other did not is still a missing /
+      extra file
+    self_check: diff.py rulecheck — on real files, the per-agent pairing; an
+      agent's extra request stays unpaired
+    must_not_hide:
+      - B1.3
+      - B1.6

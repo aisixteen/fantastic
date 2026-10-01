@@ -396,3 +396,66 @@ async def test_kernel_facade_with_no_root_fails_per_item():
     )
     assert [o["status"] for o in outs] == ["failed", "failed"]
     assert all(o["pid"] is None and "no root" in o["result"]["error"] for o in outs)
+
+
+# ─── parallel EXECUTION holds; ARRIVAL is in input order (owner, 2026-10-01) ──
+
+_ov_started: dict[str, asyncio.Event] = {}
+_ov_arrivals: list[str] = []
+
+
+async def _overlap_handler(id, payload, kernel):
+    verb = payload.get("type")
+    if verb in ("boot", "shutdown", "reflect"):
+        return {"id": id, "sentence": "overlap probe", "verbs": {}}
+    me = payload["me"]
+    _ov_arrivals.append(me)
+    _ov_started.setdefault(me, asyncio.Event()).set()
+    if other := payload.get("wait_for"):
+        # holds until the OTHER item has STARTED: serialized execution never gets there
+        ev = _ov_started.setdefault(other, asyncio.Event())
+        try:
+            await asyncio.wait_for(ev.wait(), 3.0)
+        except asyncio.TimeoutError:
+            return {"overlapped": False}
+    return {"overlapped": True}
+
+
+_ov = types.ModuleType("overlap_agent.tools")
+_ov.handler = _overlap_handler
+_ov.VERBS = {}
+sys.modules["overlap_agent.tools"] = _ov
+
+
+async def test_a_batch_executes_its_items_in_parallel_and_delivers_them_in_order(
+    seeded_kernel,
+):
+    """Item A waits until item B has STARTED, so A completes only if both run AT
+    ONCE — to one agent and to two. A reaches its target before B (input order)."""
+    k = seeded_kernel
+    for aid in ("ov_one", "ov_two"):
+        await k.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": k.id,
+                        "handler_module": "overlap_agent.tools",
+                        "id": aid,
+                    },
+                }
+            ]
+        )
+    for ta, tb in (("ov_one", "ov_one"), ("ov_one", "ov_two")):
+        _ov_started.clear()
+        _ov_arrivals.clear()
+        outs = await k.send(
+            [
+                {"target": ta, "payload": {"type": "go", "me": "A", "wait_for": "B"}},
+                {"target": tb, "payload": {"type": "go", "me": "B"}},
+            ]
+        )
+        assert [o["status"] for o in outs] == ["completed", "completed"], outs
+        assert outs[0]["result"] == {"overlapped": True}, (ta, tb, outs)
+        assert _ov_arrivals == ["A", "B"], (ta, tb, _ov_arrivals)
