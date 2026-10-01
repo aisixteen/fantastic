@@ -53,6 +53,24 @@ fn mk_kernel_with_storage(
     Arc::new(kernel)
 }
 
+#[test]
+fn mint_id_takes_the_second_last_dotted_segment() {
+    // python `handler_module.split(".")[-2] if "." in handler_module`.
+    for (hm, bundle) in [
+        ("a.b.tools", "b"),
+        ("x.y", "x"),
+        ("pkg.ts", "pkg"),
+        ("web.tools", "web"),
+        ("plain", "plain"),
+        (".tools", ""),
+    ] {
+        let id = mint_id(hm);
+        let (head, tail) = id.rsplit_once('_').expect("bundle_hex6");
+        assert_eq!(head, bundle, "{hm} -> {id}");
+        assert_eq!(tail.len(), 6);
+    }
+}
+
 #[tokio::test]
 async fn mint_id_format_is_bundle_underscore_hex6() {
     let id = mint_id("file_bridge.tools");
@@ -771,4 +789,69 @@ async fn delete_lock_refusal_is_python_text_and_key_order() {
     assert_eq!(r["id"], "P");
     let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
     assert_eq!(keys, vec!["error", "reason", "hint", "blocked_by", "id"]);
+}
+
+#[tokio::test]
+async fn delete_lock_int_refuses_like_python() {
+    // python `_find_locked_descendant` reads truthiness: `delete_lock: 1` (the
+    // CLI's k=v coercion) locks a GRANDCHILD and the cascade is refused.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    for (id, parent, lock) in [("P", "kernel", json!(0)), ("C", "P", json!(1))] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type":"create_agent","parent_id":parent,"handler_module":"counting.tools","id":id,"delete_lock":lock}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":"P"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "locked", "{r}");
+    assert_eq!(r["blocked_by"], "C");
+    assert!(kernel.agents.contains_key(&AgentId::from("C")));
+}
+
+#[tokio::test]
+async fn lifecycle_events_name_an_empty_display_name_by_id() {
+    // `display_name or id`: "" is no name in added/removed and the snapshot.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let _tap = kernel.add_state_subscriber(Arc::new(move |ev, _body| {
+        sink.lock().unwrap().push(ev.clone());
+    }));
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools","id":"Q","display_name":""}),
+        )])
+        .await;
+    let snap = kernel.state_snapshot();
+    let row = snap.iter().find(|r| r["agent_id"] == "Q").expect("Q row");
+    assert_eq!(row["name"], "Q");
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":"Q"}),
+        )])
+        .await;
+    let mut kinds = Vec::new();
+    for ev in seen.lock().unwrap().iter() {
+        if ev["agent_id"] == "Q" && (ev["kind"] == "added" || ev["kind"] == "removed") {
+            assert_eq!(ev["name"], "Q", "{ev}");
+            kinds.push(ev["kind"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(kinds, vec!["added", "removed"]);
 }

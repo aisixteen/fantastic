@@ -32,9 +32,9 @@ struct KernelStateTests {
         ])[0].result
         let snap = kernel.snapshotState()
         #expect(snap.version == 1)
-        #expect(snap.agents.count == 3)  // core + alpha + beta
+        #expect(snap.records.count == 3)  // core + alpha + beta
         // Sorted by id.
-        let ids = snap.agents.map { $0.id }
+        let ids = snap.records.map { $0.id }
         #expect(ids == ids.sorted())
     }
 
@@ -62,9 +62,27 @@ struct KernelStateTests {
         #expect(ids.contains("x"))
     }
 
+    /// python `Kernel.save()` writes `{version, records}`, and `load` takes
+    /// that envelope or a bare record list.
+    @Test func theSnapshotIsPythonsShape() throws {
+        let kernel = makeKernel()
+        let saved = try JSON.parse(kernel.saveJSON())
+        #expect(saved.asObject.map { Array($0.keys) } == ["version", "records"], "\(saved)")
+        let registry = BundleRegistry()
+        registry.register("echo.tools", EchoBundle())
+        for doc in [
+            #"{"version":1,"records":[{"id":"kernel_state"},{"id":"y","parent_id":"kernel_state","handler_module":"echo.tools"}]}"#,
+            #"[{"id":"kernel_state"},{"id":"y","parent_id":"kernel_state","handler_module":"echo.tools"}]"#,
+        ] {
+            let k2 = Kernel(storage: .inMemory, bundles: registry)
+            try k2.loadJSON(doc)
+            #expect(k2.agent(AgentId("y")) != nil, "\(doc)")
+        }
+    }
+
     @Test func loadRejectsFutureVersion() throws {
         let kernel = makeKernel()
-        let badJSON = #"{"version":99,"agents":[{"id":"kernel_state"}]}"#
+        let badJSON = #"{"version":99,"records":[{"id":"kernel_state"}]}"#
         #expect(throws: KernelError.self) {
             try kernel.loadJSON(badJSON)
         }
@@ -73,7 +91,7 @@ struct KernelStateTests {
     @Test func loadRejectsDuplicates() throws {
         let kernel = makeKernel()
         let badJSON =
-            #"{"version":1,"agents":[{"id":"kernel_state"},{"id":"kernel_state","parent_id":"kernel_state"}]}"#
+            #"{"version":1,"records":[{"id":"kernel_state"},{"id":"kernel_state","parent_id":"kernel_state"}]}"#
         #expect(throws: KernelError.self) {
             try kernel.loadJSON(badJSON)
         }
@@ -82,7 +100,7 @@ struct KernelStateTests {
     @Test func loadRejectsDanglingParent() throws {
         let kernel = makeKernel()
         let badJSON =
-            #"{"version":1,"agents":[{"id":"kernel_state"},{"id":"child","parent_id":"nonexistent"}]}"#
+            #"{"version":1,"records":[{"id":"kernel_state"},{"id":"child","parent_id":"nonexistent"}]}"#
         #expect(throws: KernelError.self) {
             try kernel.loadJSON(badJSON)
         }
@@ -91,7 +109,7 @@ struct KernelStateTests {
     @Test func loadRejectsNoRoot() throws {
         let kernel = makeKernel()
         let badJSON =
-            #"{"version":1,"agents":[{"id":"a","parent_id":"b"},{"id":"b","parent_id":"a"}]}"#
+            #"{"version":1,"records":[{"id":"a","parent_id":"b"},{"id":"b","parent_id":"a"}]}"#
         #expect(throws: KernelError.self) {
             try kernel.loadJSON(badJSON)
         }

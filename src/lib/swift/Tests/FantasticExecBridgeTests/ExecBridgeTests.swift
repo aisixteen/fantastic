@@ -1550,6 +1550,56 @@
                 "\(seen.map { $0.serialize() })")
         }
 
+        /// The relay serves a program's frames IN ORDER, one at a time — python's
+        /// read loop awaits each `send` (and pushes its reply) and each `emit`
+        /// before it reads the next frame. A detached Task per frame let emits
+        /// and sends overtake one another.
+        @Test func relayServesFramesInOrder() async throws {
+            let kernel = echoKernel()
+            let a = await createPy(
+                kernel, id: "relay_order",
+                meta: ["can_call": .object(["echo1": .string("*")])])
+            _ = await kernel.send([
+                Item(
+                    AgentId("kernel_state"),
+                    .object([
+                        "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                        "id": .string("echo1"), "handler_module": .string("echo.tools"),
+                        "callable_by": .object([a.value: .string("*")]),
+                    ]))
+            ])[0].result
+            let owner = kernel.ensureInbox(a)
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9006))
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            for i in 1...10 {
+                wireWrite(
+                    fd,
+                    .object([
+                        "op": .string("send"), "rid": .integer(Int64(i)),
+                        "target": .string("echo1"), "payload": .object(["type": .string("ping")]),
+                    ]))
+                wireWrite(
+                    fd,
+                    .object([
+                        "op": .string("emit"),
+                        "payload": .object(["type": .string("seq"), "n": .integer(Int64(i))]),
+                    ]))
+            }
+            var rids: [Int64] = []
+            for _ in 1...10 {
+                let reply = try #require(await wireRead(fd), "no reply frame")
+                rids.append(reply["rid"].asInt ?? -1)
+            }
+            #expect(rids == Array(1...10), "replies out of order: \(rids)")
+            let seen = await drainUntil(owner, timeout: 5) { $0["n"].asInt == 10 }
+            #expect(
+                seen.filter { $0["type"].asString == "seq" }.compactMap { $0["n"].asInt }
+                    == Array(1...10), "\(seen.map { $0.serialize() })")
+        }
+
         /// A4.13 — a watching program's drains are kernel TASKS (`watch_drain` /
         /// `inbox_drain`), parented to the relay, so `ps` shows what it holds.
         /// A4.34 — and the relay itself is one, verb `relay`.

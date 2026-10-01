@@ -921,17 +921,17 @@ async fn reflect_root_is_resolved_absolute_path() {
 }
 
 #[test]
-fn reflect_posture_keeps_an_already_scoped_auth_stem() {
-    // A1.1 — python's `describe`: a name that already carries the suffix is
-    // reported as written, so what reflect prints can be written straight back.
+fn reflect_posture_scopes_an_auth_stem_like_the_gate() {
+    // python `test_describe_scopes_like_the_gate`: an already-suffixed `auth`
+    // stem is suffixed AGAIN — exactly what the gate resolves (an unknown rule,
+    // so the leg is sealed) — and reflect reports that, not a name it would
+    // not honour.
     let mut meta = Map::new();
     meta.insert("auth".into(), json!("allow_all_ingress"));
     let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
-    assert_eq!(r["ingress_rule"], "allow_all_ingress");
-    // …and the egress manifold still appends ITS suffix to the same stem —
-    // measured in python, which is the point of pinning `describe` verbatim.
+    assert_eq!(r["ingress_rule"], "allow_all_ingress_ingress");
     assert_eq!(r["egress_rule"], "allow_all_ingress_egress");
-    assert_eq!(r["sealed"], false);
+    assert_eq!(r["sealed"], true);
     // `allow_all` / `deny` are the two stems that mean "present nothing" outbound.
     let mut meta = Map::new();
     meta.insert("auth".into(), json!("allow_all"));
@@ -1458,4 +1458,46 @@ async fn a_readonly_leg_refuses_a_binary_write_before_judging_the_chunk() {
         assert_eq!(out["reason"], "unauthorized", "{header} → {out}");
     }
     assert!(!dir.join("a.txt").exists());
+}
+
+#[tokio::test]
+async fn pump_ends_are_ordinary_executions_in_python_shape() {
+    // python's `_pump` does two `kernel.send([...])` per chunk: each end is a
+    // ledgered call (pid, call row) — the read a plain `{type, path, offset,
+    // length}`, the write `{type, path, bytes, offset, truncate}` with the chunk
+    // counted at `bytes` in that position.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = served(&tmp);
+    let kernel = mk_kernel(&tmp).await;
+    std::fs::write(served.join("src.txt"), b"hello").unwrap();
+    let r = call(
+        &kernel,
+        json!({"type": "pump", "path": "src.txt", "sink_path": "copy.txt"}),
+    )
+    .await;
+    assert_eq!(r["chunks"], 1, "{r}");
+    let calls: Vec<Value> = kernel
+        .rows
+        .all()
+        .into_iter()
+        .filter(|row| row.get("kind") == Some(&json!("call")))
+        .map(|row| row["payload"].clone())
+        .collect();
+    let read = calls
+        .iter()
+        .find(|p| p["type"] == "read_stream")
+        .expect("the read is a call row");
+    let keys: Vec<&String> = read.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["type", "path", "offset", "length"], "{read}");
+    let write = calls
+        .iter()
+        .find(|p| p["type"] == "write_stream")
+        .expect("the write is a call row");
+    let keys: Vec<&String> = write.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        ["type", "path", "bytes", "offset", "truncate"],
+        "{write}"
+    );
+    assert_eq!(write["bytes"], json!({"len": 5}));
 }

@@ -420,8 +420,10 @@ struct WatcherFanoutTests {
         _ = kernel.subscribe(cap.handler())
 
         var it = watcher.makeAsyncIterator()
-        _ = await kernel.sendWithBinary(
-            "sink", ["type": "write_stream", "path": "a.bin"], Data([1, 2, 3, 4, 5]))
+        let blob = Data([1, 2, 3, 4, 5])
+        _ = await kernel.send([
+            Item("sink", ["type": "write_stream", "path": "a.bin"], binary: blob),
+        ])
         let got = await it.next()
         #expect(got?.payload["type"].asString == "write_stream")
         #expect(got?.payload["bytes"] == JSON.null)
@@ -707,6 +709,36 @@ struct SystemVerbTests {
         let keys = reply.asObject?.keys.map { $0 } ?? []
         #expect(
             (keys.firstIndex(of: "blocked_by") ?? -1) < (keys.firstIndex(of: "id") ?? -1), "\(keys)")
+    }
+
+    /// python `if self._meta.get("delete_lock")` — any TRUTHY value locks the
+    /// cascade, not only JSON `true`; a falsy one does not.
+    @Test func deleteLockIsPythonTruthiness() async {
+        let kernel = makeKernel()
+        func deleteLocked(_ id: String, _ lock: JSON) async -> JSON {
+            _ = await kernel.send([
+                Item(
+                    "kernel_state",
+                    [
+                        "type": "create_agent", "parent_id": "kernel_state",
+                        "handler_module": "echo.tools", "id": .string(id), "delete_lock": lock,
+                    ])
+            ])[0].result
+            return await kernel.send([
+                Item("kernel_state", ["type": "delete_agent", "id": .string(id)])
+            ])[0].result
+        }
+        let truthy: [JSON] = [1, "yes", "false", ["x"]]
+        for (i, lock) in truthy.enumerated() {
+            let reply = await deleteLocked("lk\(i)", lock)
+            #expect(reply["reason"].asString == "locked", "\(lock.serialize()): \(reply)")
+            #expect(kernel.agent(AgentId("lk\(i)")) != nil, "\(lock.serialize()) did not lock")
+        }
+        let falsy: [JSON] = [0, "", .array([]), false]
+        for (i, lock) in falsy.enumerated() {
+            let reply = await deleteLocked("ul\(i)", lock)
+            #expect(reply["deleted"].asBool == true, "\(lock.serialize()): \(reply)")
+        }
     }
 
     @Test func getIsNotAKernelVerb() async {

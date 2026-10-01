@@ -22,6 +22,7 @@
 // tape: the kernel holds no conversation, and its execution rows are flushed by
 // the kernel itself into the root's memory store.
 
+import FantasticFile
 import FantasticJSON
 import FantasticKernel
 import Foundation
@@ -51,6 +52,10 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// manual is the keyed doc tree — `reflect readme=index` / `=<key>`.
     public var readme: String? { RootReadme.text }
 
+    /// The keyed manual — python's `kernel_state/docs/` package tree — seeded
+    /// beside the readme on every record write that lands.
+    public var docs: [(key: String, body: String)] { RootDocs.all }
+
     private func withLock<T>(_ body: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
@@ -70,31 +75,31 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
                 "sentence": .string(
                     "Disk persistence/hydration root — owns .fantastic; "
                         + "answers load_tree / persist_record / forget_record."),
-                "root": .string(loaderRoot(agent).path),
+                "root": .string(rootDisplay(agent, kernel)),
                 "verbs": Self.verbsView,
             ])
         case "boot":
-            return await boot(agent, kernel)
+            return try await boot(agent, kernel)
         case "load_tree":
             return .object([
                 "records": .array(
-                    Persistence.readTree(rootDir: loaderRoot(agent)).map { $0.json }),
+                    Persistence.readTree(rootDir: try clampedRoot(agent, kernel)).map { $0.json }
+                ),
                 "version": .integer(Int64(KernelState.currentVersion)),
             ])
         case "persist_record":
-            return persistRecord(agent, payload, kernel)
+            return try persistRecord(agent, payload, kernel)
         case "forget_record":
-            return forgetRecord(agent, payload, kernel)
+            return try forgetRecord(agent, payload, kernel)
         case "persist_blob":
             return await kernel.persistBlob(payload)
         case "load_blob":
             return await kernel.loadBlob(payload)
-        case "shutdown":
-            return nil
         default:
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `applyReflectFlags` into something
-            // that reads like a healthy reflect (python 2026-09-02).
+            // that reads like a healthy reflect (python 2026-09-02). `shutdown`
+            // lands here too: python's VERBS has none.
             let t = payload["type"]
             return Refusal.make(
                 Refusal.unhandled, "kernel_state: unknown type \(pyRepr(t))",
@@ -103,7 +108,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     }
 
     /// IDEMPOTENT, as python's `_boot` is: a second boot installs nothing.
-    private func boot(_ agent: Agent, _ kernel: Kernel) async -> JSON? {
+    private func boot(_ agent: Agent, _ kernel: Kernel) async throws(PyError) -> JSON? {
         let first: Bool = withLock {
             var e = state[agent.id.value] ?? LoaderState()
             if e.booted { return false }
@@ -113,13 +118,18 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         }
         guard first else { return nil }
         // A SESSION loader (a `root` meta pointing at a sub-namespace) seeds its
-        // namespace anchor so `read_tree` has a root to walk from.
-        let rootDir = loaderRoot(agent)
-        if rootDir.path != agent.rootPath.path,
-            !FileManager.default.fileExists(
-                atPath: rootDir.appendingPathComponent(RECORD_FILE).path)
-        {
-            Self.writeRecord(at: rootDir, agent.record().ordered)
+        // namespace anchor so `read_tree` has a root to walk from — through the
+        // clamp, as python's `fs.Root(workdir, root)` does. A loader serving
+        // its own address touches no disk here (python compares the paths
+        // before it calls `fs`).
+        if let r = agent.metaValue(forKey: "root")?.asString, !r.isEmpty {
+            let rootDir = try clamped(r, kernel)
+            if Kernel.canonPath(rootDir.path) != Kernel.canonPath(agent.rootPath.path),
+                !FileManager.default.fileExists(
+                    atPath: rootDir.appendingPathComponent(RECORD_FILE).path)
+            {
+                try Self.writeRecord(at: rootDir, agent.record().ordered, kernel)
+            }
         }
         let installed = await kernel.bootRootLoader(agent)
         withLock {
@@ -133,51 +143,87 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// args: record:dict (req). Merge-write one agent.yaml. Location is the live
     /// agent's own dir if present, else computed under this loader's root from
     /// the record's parent chain.
-    private func persistRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) -> JSON {
+    ///
+    /// The ids are TYPED as python's `guard_agent_id` types them: a truthy id
+    /// that is not a string (`5`) is `id must be a non-empty string`, never
+    /// `record required`; a `parent_id` that is present and not a string is the
+    /// same refusal, never silently dropped.
+    private func persistRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) throws(PyError)
+        -> JSON
+    {
         if let denied = guardOwnTree("persist_record", agent) { return denied }
-        guard let record = payload["record"].asObject, pyTruthy(record["id"] ?? .null),
-            let id = record["id"]?.asString
-        else {
+        guard let record = payload["record"].asObject, pyTruthy(record["id"] ?? .null) else {
             return Refusal.missing("persist_record", "record (dict with id)")
         }
         // DEFENCE IN DEPTH. `create_agent` guards the id at the mint, but this
         // verb takes one straight from the PAYLOAD — and a foreign record
         // arrives here from a bridge/session loader, a lower-trust caller. An id
         // becomes a directory, so an unvalidated one writes wherever it points.
+        guard let id = record["id"]?.asString else {
+            return Refusal.bad("persist_record", "id", "a non-empty string")
+        }
         if let bad = Refusal.guardAgentId("persist_record", id) { return bad }
-        let parentId = record["parent_id"]?.asString
-        if let denied = guardRecordOwner("persist_record", id, parentId, agent, kernel) {
+        let rawParent = record["parent_id"] ?? .null
+        if let denied = try guardRecordOwner(
+            "persist_record", id, rawParent.asString, agent, kernel)
+        {
             return denied
         }
-        if let pid = parentId, let bad = Refusal.guardAgentId("persist_record", pid) {
-            return bad
+        if let bad = Self.guardParentChain("persist_record", rawParent) { return bad }
+        let dir: URL
+        if let live = kernel.agent(AgentId(id)) {
+            dir = live.rootPath
+        } else {
+            dir = try resolvePath(agent, kernel, id, rawParent.asString)
         }
-        let dir = kernel.agent(AgentId(id))?.rootPath ?? resolvePath(agent, kernel, id, parentId)
-        Self.writeRecord(at: dir, record)
+        try Self.writeRecord(at: try clamped(dir.path, kernel), record, kernel)
         return .object(["ok": .bool(true)])
     }
 
     /// args: id:str (req), parent_id:str (opt). Remove the agent's dir. This
     /// verb ends in a recursive delete: measured 2026-08-28, an agent with NO
     /// explicit grant sent `id="../../important_project_dir"`.
-    private func forgetRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) -> JSON {
+    private func forgetRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) throws(PyError)
+        -> JSON
+    {
         if let denied = guardOwnTree("forget_record", agent) { return denied }
-        guard pyTruthy(payload["id"]), let target = payload["id"].asString else {
+        guard pyTruthy(payload["id"]) else {
             return Refusal.missing("forget_record", "id")
         }
+        guard let target = payload["id"].asString else {
+            return Refusal.bad("forget_record", "id", "a non-empty string")
+        }
         if let bad = Refusal.guardAgentId("forget_record", target) { return bad }
-        let parentId = payload["parent_id"].asString
-        if let denied = guardRecordOwner("forget_record", target, parentId, agent, kernel) {
+        let rawParent = payload["parent_id"]
+        if let denied = try guardRecordOwner(
+            "forget_record", target, rawParent.asString, agent, kernel)
+        {
             return denied
         }
-        if let pid = parentId, let bad = Refusal.guardAgentId("forget_record", pid) {
-            return bad
+        if let bad = Self.guardParentChain("forget_record", rawParent) { return bad }
+        let dir: URL
+        if let live = kernel.agent(AgentId(target)) {
+            dir = live.rootPath
+        } else {
+            dir = try resolvePath(agent, kernel, target, rawParent.asString)
         }
-        let dir =
-            kernel.agent(AgentId(target))?.rootPath
-            ?? resolvePath(agent, kernel, target, parentId)
-        try? FileManager.default.removeItem(at: dir)
+        // python `rmtree(fs.Root(workdir, path))`: clamped, absent is a no-op,
+        // and a removal the OS refuses is swallowed there too.
+        let rp = try clamped(dir.path, kernel)
+        if FileManager.default.fileExists(atPath: rp.path) {
+            try? fsRemove(rp.path, "", recursive: true, base: try runningDir(kernel))
+        }
         return .object(["ok": .bool(true)])
+    }
+
+    /// python `_guard_parent_chain`: a `parent_id` that is present must be a
+    /// valid agent id — the path walk joins every link of the chain.
+    static func guardParentChain(_ verb: String, _ parentId: JSON) -> JSON? {
+        if parentId.isNull { return nil }
+        guard let pid = parentId.asString else {
+            return Refusal.bad(verb, "id", "a non-empty string")
+        }
+        return Refusal.guardAgentId(verb, pid)
     }
 
     // ── the root reflect frame ─────────────────────────────────
@@ -244,13 +290,72 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
 
     // ── helpers ────────────────────────────────────────────────
 
-    /// The loader's own disk dir: a `root` meta overrides the agent's address, so
-    /// a SESSION loader can serve a sub-namespace. Python `_root`.
-    private func loaderRoot(_ agent: Agent) -> URL {
-        if let r = agent.metaValue(forKey: "root")?.asString, !r.isEmpty {
-            return URL(fileURLWithPath: r, isDirectory: true)
+    /// The loader's own disk dir AS CONFIGURED: a `root` meta overrides the
+    /// agent's address, so a SESSION loader can serve a sub-namespace. Python
+    /// `_root` — not yet resolved; every use goes through `clamped`.
+    private func loaderRoot(_ agent: Agent) -> String {
+        if let r = agent.metaValue(forKey: "root")?.asString, !r.isEmpty { return r }
+        return agent.rootPath.path
+    }
+
+    /// The running dir every loader path is clamped to (python `Kernel.workdir`).
+    private func runningDir(_ kernel: Kernel) throws(PyError) -> String {
+        guard let w = kernel.workdir?.path else {
+            throw PyError("ValueError", "kernel has no root — no running dir to clamp disk to")
         }
-        return agent.rootPath
+        return w
+    }
+
+    /// python `fs.resolve_root(fs.Root(workdir, path))`: a relative path
+    /// resolves under the RUNNING DIR (never the process cwd), and one that
+    /// leaves it RAISES — `ValueError: fs: root '…' escapes the running dir`.
+    private func clamped(_ path: String, _ kernel: Kernel) throws(PyError) -> URL {
+        let base = try runningDir(kernel)
+        do {
+            return URL(fileURLWithPath: try fsResolveRoot(path, base: base), isDirectory: true)
+        } catch {
+            throw Self.raised(error)
+        }
+    }
+
+    /// The loader's own root, clamped.
+    private func clampedRoot(_ agent: Agent, _ kernel: Kernel) throws(PyError) -> URL {
+        try clamped(loaderRoot(agent), kernel)
+    }
+
+    /// python `str(_root(agent))` — the configured root as pathlib prints it,
+    /// or the loader's own address relative to the running dir (python's
+    /// addresses are relative: `main.py` roots the tree at `.fantastic`).
+    private func rootDisplay(_ agent: Agent, _ kernel: Kernel) -> String {
+        if let r = agent.metaValue(forKey: "root")?.asString, !r.isEmpty {
+            return Self.pyPurePath(r)
+        }
+        let p = agent.rootPath.path
+        if let w = kernel.workdir?.path, p.hasPrefix(w + "/") {
+            return String(p.dropFirst(w.count + 1))
+        }
+        return p
+    }
+
+    /// `str(PurePosixPath(s))`: empty and `.` segments dropped, `..` kept.
+    static func pyPurePath(_ s: String) -> String {
+        let parts = s.split(separator: "/", omittingEmptySubsequences: true).filter { $0 != "." }
+        let joined = parts.joined(separator: "/")
+        if s.hasPrefix("/") { return "/" + joined }
+        return joined.isEmpty ? "." : joined
+    }
+
+    /// python's raise for an `fs` failure, as the kernel settles it: the clamp's
+    /// refusals are `ValueError`s, an OS failure the matching `OSError`
+    /// subclass (`[Errno N] …`).
+    static func raised(_ e: FsError) -> PyError {
+        let m = e.message
+        if m.hasPrefix("[Errno "), let end = m.firstIndex(of: "]"),
+            let code = Int32(m[m.index(m.startIndex, offsetBy: 7)..<end])
+        {
+            return PyError(pyOSErrorName(code), m)
+        }
+        return PyError("ValueError", m)
     }
 
     /// The children-container dir name for this loader's namespace (declared
@@ -266,11 +371,13 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// record the host never runs — a federated kernel's, sent through a bridge —
     /// exists only here, so a walk that stops at the live tree loses every record
     /// nested under it. Python `_disk_parents`.
-    private func diskParents(_ agent: Agent) -> [String: String?] {
+    private func diskParents(_ agent: Agent, _ kernel: Kernel) throws(PyError)
+        -> [String: String?]
+    {
         let cd = childrenName(agent)
         var out: [String: String?] = [:]
         for rec in Persistence.walkRecords(
-            loaderRoot(agent).appendingPathComponent(cd), childrenDir: cd,
+            try clampedRoot(agent, kernel).appendingPathComponent(cd), childrenDir: cd,
             parentId: agent.id.value)
         {
             out[rec.id] = .some(rec.parentId)
@@ -283,9 +390,9 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// ⇒ (false, nil) — the caller decides; nothing is guessed. Python `_where`.
     private func whereIs(
         _ agent: Agent, _ kernel: Kernel, _ node: String, _ disk: inout [String: String?]?
-    ) -> (known: Bool, parent: String?) {
+    ) throws(PyError) -> (known: Bool, parent: String?) {
         if let live = kernel.agent(AgentId(node)) { return (true, live.parentId?.value) }
-        if disk == nil { disk = diskParents(agent) }
+        if disk == nil { disk = try diskParents(agent, kernel) }
         if let entry = disk?[node] { return (true, entry) }
         return (false, nil)
     }
@@ -297,19 +404,19 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// places only a NEW one. Used when the agent isn't (or is no longer) live.
     /// Python `_resolve_path`.
     private func resolvePath(_ agent: Agent, _ kernel: Kernel, _ id: String, _ parentId: String?)
-        -> URL
+        throws(PyError) -> URL
     {
         var parts = [id]
         var disk: [String: String?]? = nil
-        var (known, pid) = whereIs(agent, kernel, id, &disk)
+        var (known, pid) = try whereIs(agent, kernel, id, &disk)
         if !known { pid = parentId }
         var seen = Set<String>()
         while let p = pid, !p.isEmpty, p != agent.id.value, !seen.contains(p) {
             seen.insert(p)
             parts.append(p)
-            pid = whereIs(agent, kernel, p, &disk).parent
+            pid = try whereIs(agent, kernel, p, &disk).parent
         }
-        var path = loaderRoot(agent)
+        var path = try clampedRoot(agent, kernel)
         let children = childrenName(agent)
         for part in parts.reversed() {
             path = path.appendingPathComponent(children).appendingPathComponent(part)
@@ -317,15 +424,33 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         return path
     }
 
-    /// Merge-write one record's `agent.yaml` at `dir` (the agent's own dir).
-    /// Reads any existing file and overlays only the kernel-managed keys,
-    /// preserving unknown fields + sidecars. Python `write_record`.
-    static func writeRecord(at dir: URL, _ record: OrderedDictionary<String, JSON>) {
+    /// Merge-write one record's `agent.yaml` at `dir` (the agent's own dir,
+    /// already clamped). Reads any existing file and overlays only the
+    /// kernel-managed keys, preserving unknown fields + sidecars. A write the OS
+    /// refuses RAISES, as `fs.write_text` does. Then seeds the bundle's
+    /// `readme.md` and `docs/` tree, copy-if-missing — the loader owns ALL of an
+    /// agent's disk sidecars. Python `write_record` + `_seed_readme`.
+    static func writeRecord(
+        at dir: URL, _ record: OrderedDictionary<String, JSON>, _ kernel: Kernel
+    ) throws(PyError) {
         let file = dir.appendingPathComponent(RECORD_FILE)
         var onDisk = Persistence.readRecord(file) ?? [:]
         for (k, v) in record { onDisk[k] = v }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? Persistence.recordBytes(onDisk).write(to: file, options: .atomic)
+        do {
+            try fsWriteBytes(dir.path, RECORD_FILE, Persistence.recordBytes(onDisk), base: dir.path)
+        } catch {
+            throw raised(error)
+        }
+        guard let hm = record["handler_module"]?.asString, let bundle = kernel.bundles.get(hm)
+        else { return }
+        // Best effort, as python's `_seed_readme` (its broad `except` makes a
+        // seed that fails a no-op, never a failed write).
+        var docs: [(String, String)] = bundle.readme.map { [("readme.md", $0)] } ?? []
+        for (key, body) in bundle.docs { docs.append(("docs/\(key).md", body)) }
+        for (rel, body) in docs {
+            if (try? fsExists(dir.path, rel, base: dir.path)) != false { continue }
+            try? fsWriteBytes(dir.path, rel, Data(body.utf8), base: dir.path)
+        }
     }
 
     /// Refuse a RECORD verb that names an agent outside the caller's own subtree.
@@ -363,17 +488,17 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     private func guardRecordOwner(
         _ verb: String, _ recordId: String, _ parentId: String?, _ agent: Agent,
         _ kernel: Kernel
-    ) -> JSON? {
+    ) throws(PyError) -> JSON? {
         guard let caller = KernelTaskLocals.currentOrigin else { return nil }
         if caller.value == recordId { return nil }
         var disk: [String: String?]? = nil
-        var (known, node) = whereIs(agent, kernel, recordId, &disk)
+        var (known, node) = try whereIs(agent, kernel, recordId, &disk)
         if !known { node = (parentId?.isEmpty == false) ? parentId : nil }
         var seen = Set<String>()
         while let n = node, !n.isEmpty, !seen.contains(n) {
             if n == caller.value { return nil }
             seen.insert(n)
-            node = whereIs(agent, kernel, n, &disk).parent
+            node = try whereIs(agent, kernel, n, &disk).parent
         }
         return Refusal.make(
             Refusal.unauthorized,

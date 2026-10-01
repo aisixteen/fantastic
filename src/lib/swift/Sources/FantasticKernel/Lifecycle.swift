@@ -273,25 +273,28 @@ extension Kernel {
     ///
     /// C87 residual (not reproduced, by construction): python additionally
     /// catches around the RECURSIVE `await child.shutdown()`
-    /// (`  [shutdown] <cid> raised: <e>`) and around `importlib.import_module
-    /// (self.handler_module)` (`  [shutdown] <id> import '<hm>' raised:
-    /// <e>`). Neither has a swift counterpart to catch: this function is
-    /// non-throwing (its one fallible step, the hook call, already has its
-    /// own catch below, so nothing propagates OUT of the recursive call to
-    /// catch here), and bundles are resolved from the STATIC `BundleRegistry`
-    /// — a lookup, never an import that can fail at shutdown time. A record
-    /// naming an unregistered `handler_module` never reaches this walk at
-    /// all: C53's hydration-time weak-load skips its whole subtree before
-    /// the tree is ever built.
+    /// (`  [shutdown] <cid> raised: <e>`). This function is non-throwing (its
+    /// one fallible step, the hook call, has its own catch below), so nothing
+    /// propagates OUT of the recursive call to catch here.
     private func shutdownWalk(_ node: Agent) async {
         for cid in node.childIds() {
             if let child = agent(cid) {
                 await shutdownWalk(child)
             }
         }
-        // A record whose bundle belongs to another runtime has nothing to tear
-        // down here.
-        guard let hm = node.handlerModule, let bundle = bundles.get(hm) else { return }
+        guard let hm = node.handlerModule else { return }
+        // A record whose bundle this runtime does not have — `create_agent`
+        // accepts one at runtime — is python's failed import: SAID on stderr
+        // with python's `ModuleNotFoundError` text, and the walk goes on. A
+        // name that imports (a package) but has no hook is python's absent
+        // `on_shutdown`: nothing to free, nothing said.
+        guard let bundle = bundles.get(hm) else {
+            if let missing = bundles.moduleNotFound(hm) {
+                RuntimeLog.warn(
+                    "  [shutdown] \(node.id.value) import \(pyRepr(hm)) raised: \(missing)")
+            }
+            return
+        }
         do {
             try await bundle.onShutdown(agentId: node.id, kernel: self)
         } catch {

@@ -709,6 +709,64 @@ struct ReadmeDiskModeTests {
         #expect(unlisted["readme"]["error"].asString == "no doc 'frontend/nothing'", "\(unlisted)")
     }
 
+    /// Python `_readme_view` after the key check: `f.resolve().relative_to(
+    /// d.resolve())` — a LISTED key whose file (or a dir on its path) is a
+    /// symlink out of `docs/` is `bad key`, never the outside body. Measured
+    /// on python with this exact tree: keys `['esc', 'linked',
+    /// 'linked/secret', 'real']`, `esc` and `linked/secret` → `bad key`.
+    @Test func diskReadmeSymlinkOutOfDocsIsABadKey() async throws {
+        let (kernel, root) = makeDiskKernel(["linked.md": "> linked parent\n", "real.md": "> real\nbody\n"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        let outside = root.appendingPathComponent("outside")
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        try "> outside doc\nsecret\n".write(
+            to: outside.appendingPathComponent("secret.md"), atomically: true, encoding: .utf8)
+        let docs = root.appendingPathComponent("docs")
+        try fm.createSymbolicLink(
+            atPath: docs.appendingPathComponent("esc.md").path,
+            withDestinationPath: "../outside/secret.md")
+        try fm.createSymbolicLink(
+            atPath: docs.appendingPathComponent("linked").path, withDestinationPath: "../outside")
+        let keys: [JSON] = ["esc", "linked", "linked/secret", "real"]
+        for key in ["esc", "linked/secret"] {
+            let r = await kernel.send([
+                Item("kernel_state", ["type": "reflect", "readme": .string(key)])
+            ])[0].result
+            #expect(
+                r["readme"] == .object(["error": .string("bad key \(pyRepr(key))"), "keys": .array(keys)]),
+                "\(r)")
+        }
+        let real = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "real"])])[0]
+            .result
+        #expect(real["readme"]["body"].asString == "> real\nbody\n", "\(real)")
+    }
+
+    /// Python `Path.is_file()` gates both the index walk and the view: a
+    /// `<key>.md` that is a directory or a FIFO is not a doc — absent from
+    /// `keys`, and `readme=<key>` is `no doc`. Measured on python: `dir` and
+    /// `pipe` → `no doc`, keys `['real']`. A FIFO used to be read by the walk
+    /// and blocked the reflect forever.
+    @Test func diskReadmeKeyThatIsNotARegularFileIsNoDoc() async throws {
+        let (kernel, root) = makeDiskKernel(["real.md": "> real\nbody\n"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let docs = root.appendingPathComponent("docs")
+        try FileManager.default.createDirectory(
+            at: docs.appendingPathComponent("dir.md"), withIntermediateDirectories: true)
+        #expect(mkfifo(docs.appendingPathComponent("pipe.md").path, 0o644) == 0)
+        for key in ["dir", "pipe"] {
+            let r = await kernel.send([
+                Item("kernel_state", ["type": "reflect", "readme": .string(key)])
+            ])[0].result
+            #expect(
+                r["readme"] == .object(["error": .string("no doc \(pyRepr(key))"), "keys": ["real"]]),
+                "\(r)")
+        }
+        let idx = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "index"])])[0]
+            .result
+        #expect(idx["readme"]["index"].asArray?.map { $0["key"].asString ?? "" } == ["real"], "\(idx)")
+    }
+
     /// An empty/absent `docs/` is `{index: []}` — NOT the embedded canonical
     /// tree (C33: disk mode drops that fallback entirely).
     @Test func emptyDocsDirHasNoFallback() async throws {

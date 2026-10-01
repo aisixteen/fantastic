@@ -259,11 +259,14 @@ private func forward(_ kernel: Kernel, _ leg: String, target: String, payload: J
 private func binaryForward(
     _ kernel: Kernel, _ leg: String, target: String, payload: JSON, blob: Data
 ) async -> (JSON, Data?) {
-    await kernel.sendWithBinary(
-        AgentId(leg),
-        .object([
-            "type": .string("forward"), "target": .string(target), "payload": payload,
-        ]), blob)
+    let out = await kernel.send([
+        Item(
+            AgentId(leg),
+            .object([
+                "type": .string("forward"), "target": .string(target), "payload": payload,
+            ]), binary: blob)
+    ])[0]
+    return (out.result, out.body)
 }
 
 /// Tear both legs down (python `on_delete` → the engine's `_teardown`).
@@ -349,6 +352,18 @@ struct RelayTransportTests {
                 kernelA, "brA", target: "fs",
                 payload: ["type": "read_stream", "path": "blob.bin"], blob: Data())
             #expect(body == payload, "raw bytes must round-trip over the relay tunnel")
+            // EACH INBOUND BINARY CALL IS AN EXECUTION, named by its frame id —
+            // python sends it through `kernel.send` with `item["id"] = fid`, so a
+            // replayed frame joins the recorded outcome instead of running again.
+            let calls = kernelB.rows.all().filter {
+                $0["agent"]?.asString == "fs" && $0["kind"]?.asString == "call"
+            }
+            for verb in ["write_stream", "read_stream"] {
+                let row = calls.first { $0["verb"]?.asString == verb }
+                #expect(row != nil, "no call row for the inbound binary \(verb): \(calls)")
+                #expect(row?["named"] == .bool(true), "the frame id names it: \(row ?? [:])")
+                #expect(row?["outcome"]?["status"].asString == "completed")
+            }
 
             await dropLegs(kernelA, kernelB)
         }
@@ -401,6 +416,35 @@ struct RelayTransportTests {
         #expect(r["exposes"] == .array([]) && r["owner_guid"].isNull)
         #expect(r["verbs"].asObject?.count == 10)
         #expect(r["emits"].asObject?.keys.contains("bridge_up") == true)
+    }
+
+    /// python `_engine._scoped`: an `auth` name that already carries the
+    /// manifold's suffix is reported AS WRITTEN — `allow_all_ingress` is open,
+    /// never `allow_all_ingress_ingress` (sealed).
+    @Test func bridgeReflectKeepsAnAlreadySuffixedAuthName() async throws {
+        let (kernel, _) = await makeKernel(withEcho: false)
+        let cases: [(String, String, String, Bool)] = [
+            ("allow_all_ingress", "allow_all_ingress", "allow_all_ingress_egress", false),
+            ("deny_ingress", "deny_ingress", "deny_ingress_egress", true),
+            ("password_egress", "password_egress_ingress", "password_egress", true),
+        ]
+        for (i, (auth, ing, egr, sealed)) in cases.enumerated() {
+            let id = "rc\(i)"
+            _ = await kernel.send([
+                Item(
+                    "kernel_state",
+                    .object([
+                        "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                        "handler_module": .string("relay_connector.tools"), "id": .string(id),
+                        "transport": .string("relay"), "relay_url": .string("ws://localhost:9/"),
+                        "partner_guid": .string("peer"), "auth": .string(auth),
+                    ]))
+            ])[0].result
+            let r = await kernel.send([Item(AgentId(id), ["type": "reflect"])])[0].result
+            #expect(r["ingress_rule"].asString == ing, "\(auth): \(r.serialize())")
+            #expect(r["egress_rule"].asString == egr, "\(auth): \(r.serialize())")
+            #expect(r["sealed"].asBool == sealed, "\(auth): \(r.serialize())")
+        }
     }
 
     /// A7.20/A7.21 — the ws derivation's own field set and six verbs.

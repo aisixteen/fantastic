@@ -10,54 +10,12 @@ import Foundation
 import OrderedCollections
 
 extension Kernel {
-
-
-
-    /// Send a binary-framed verb — the symmetric binary channel (raw bytes BOTH
-    /// ways, never base64; mirrors py/rust). `header` carries the verb envelope,
-    /// `blob` the raw request body; returns `(reply, body)` where `body` is the
-    /// raw reply chunk (empty for a text-shaped reply, e.g. `write_stream`).
-    public func sendWithBinary(
-        _ targetId: AgentId, _ header: JSON, _ blob: Data
-    ) async -> (JSON, Data?) {
-        let target: Agent? = targetId.value == "kernel" ? root : agent(targetId)
-        guard let target = target else {
-            // The SAME refusal the text channel gives — coded, and carrying the
-            // live id index so the caller can see what it could have meant.
-            return (
-                Refusal.unknown(targetId.value, live: allAgents().map { $0.id.value }), nil
-            )
-        }
-        let verb = header["type"].asString ?? ""
-        // Call gate (see `send`) — the binary path carries the same agent-originated
-        // write_stream/read_stream sends, gated two-sided. Only an operator skips it.
-        if let orig = KernelTaskLocals.currentSender {
-            if let denial = gate(sender: orig, verb: verb, target: target, payload: header) {
-                return (denial, nil)
-            }
-        }
-        // BEFORE the handler, with the body: this is the frame python puts on a
-        // watcher's inbox for a `write_stream`, and the only reason a watcher can
-        // ever see the bytes at all. The `drain` event follows on every exit path.
-        target.inFlightEnter()
-        defer {
-            target.inFlightLeave()
-            publishState(Kernel.drainEvent(target.id, target.inFlight))
-        }
-        fanout(target, "send", Kernel.binaryItem(header, blob))
-
-        let (reply, body): (JSON?, Data?) = await KernelTaskLocals.$currentSender.withValue(
-            target.id
-        ) {
-            await dispatchBinary(target: target, header: header, blob: blob)
-        }
-        return (reply ?? .null, body)
-    }
-
     /// C34: the SAME refusal texts (+ `verb`) as the text channel — python has
     /// no separate binary dispatch at all, a binary frame runs through the
     /// same `_dispatch` resolution the text channel does.
-    func dispatchBinary(target: Agent, header: JSON, blob: Data) async -> (JSON?, Data?) {
+    func dispatchBinary(target: Agent, header: JSON, blob: Data) async -> (
+        JSON?, Data?, raised: Bool
+    ) {
         let verb = header["type"].asString ?? ""
         // THE BYTES DO NOT CHANGE WHO ANSWERS. In python a payload carrying
         // `bytes` is an ordinary payload: `_dispatch` answers the kernel verbs,
@@ -68,22 +26,23 @@ extension Kernel {
         if Kernel.isSystemVerb(verb) || target.handlerModule == nil
             || (verb == "reflect" && target.parentId == nil)
         {
-            return (await dispatch(target: target, payload: header), nil)
+            let (r, raised) = await dispatch(target: target, payload: header)
+            return (r, nil, raised)
         }
         guard let hm = target.handlerModule else {
-            return (noHandlerModuleRefusal(target.id.value, verb), nil)
+            return (noHandlerModuleRefusal(target.id.value, verb), nil, false)
         }
         guard let bundle = bundles.get(hm) else {
-            return (notInstalledRefusal(target.id.value, hm, verb), nil)
+            return (notInstalledRefusal(target.id.value, hm, verb), nil, false)
         }
         do {
-            return try await bundle.handleBinary(
+            let (r, b) = try await bundle.handleBinary(
                 agentId: target.id, header: header, blob: blob, kernel: self)
+            return (r, b, false)
         } catch {
             // An exception is a RESULT, exactly as the text channel's catch
-            // treats it — `raised: true` distinguishes a handler that BLEW UP
-            // from one that deliberately answered `{error}`.
-            return (.object(["error": .string("\(error)"), "raised": .bool(true)]), nil)
+            // treats it — reported as a raise beside the body.
+            return (Kernel.raisedReply("\(error)"), nil, true)
         }
     }
 
@@ -130,7 +89,7 @@ extension Kernel {
     /// (`_ws_<hex>`) produced telemetry for a sprite that does not exist —
     /// python drops it silently (`_proxy.py:196-200`).
     public func emit(_ targetId: AgentId, _ payload: JSON) async {
-        await emitItem(targetId, .text(payload))
+        emitItem(targetId, .text(payload))
     }
 
     /// `emit` for a payload carrying raw bytes — a `read_stream` chunk a bridge
@@ -141,7 +100,11 @@ extension Kernel {
     /// a16): the emitter's `can_call` and the target's `callable_by` must both
     /// allow verb `emit`. Not privileged — the baseline keeps emits to self,
     /// parent and children. A denied emit is dropped; an emit has no reply.
-    public func emitItem(_ targetId: AgentId, _ item: InboxItem) async {
+    ///
+    /// SYNCHRONOUS: an emit is a fanout and nothing else, so a leg can deliver
+    /// it in the order its frames arrived — python awaits `kernel.emit` inline
+    /// before it reads the next frame.
+    public func emitItem(_ targetId: AgentId, _ item: InboxItem) {
         guard let target = agent(targetId) else { return }
         if let orig = KernelTaskLocals.currentSender, orig != target.id,
             gate(sender: orig, verb: "emit", target: target, payload: item.payload) != nil
@@ -547,6 +510,17 @@ extension Kernel {
         }
         let fPath = docsDir.appendingPathComponent(safe + ".md").path
         let fm = FileManager.default
+        // CLAMPED INSIDE `docs/` once resolved (python `f.resolve().
+        // relative_to(d.resolve())`): a key that is a symlink out of the tree is
+        // a bad key, never the outside file's body. Then it must be a FILE.
+        let realDocs = (docsDir.path as NSString).resolvingSymlinksInPath
+        let realF = (fPath as NSString).resolvingSymlinksInPath
+        guard realF.hasPrefix(realDocs + "/") else {
+            return .object(["error": .string("bad key \(pyRepr(sel))"), "keys": try keys()])
+        }
+        guard RootDocs.pyIsFile(fPath) else {
+            return .object(["error": .string("no doc \(pyRepr(sel))"), "keys": try keys()])
+        }
         guard let data = fm.contents(atPath: fPath) else {
             return .object(["error": .string("unreadable \(pyRepr(sel))"), "keys": try keys()])
         }
@@ -601,24 +575,31 @@ extension Kernel {
     /// `onCancel` hook runs BEFORE the abort; dropping the task would strand the
     /// OS resources those hooks release (a subprocess, a PTY, a socket).
     ///
-    /// The race is reported honestly: a handler that finishes during the grace
-    /// window COMPLETES — `cancelTask` no-ops on a finished id.
+    /// `timed_out` ONLY WHEN THE DEADLINE FIRED AND STOPPED THE TASK — python
+    /// reports it only when `asyncio.wait` leaves the task pending and the kill
+    /// then ends it. A task stopped by anyone else's `cancel` settles
+    /// `cancelled`, and a REPLY that merely says `{cancelled: true}` (the
+    /// `cancel` verb's own answer) is a reply like any other. The race is
+    /// reported honestly: a handler that finishes during the grace window
+    /// COMPLETES — `cancelTask` no-ops on a finished id.
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        timeout: Double?, taskId: TaskId, binary: Data?
+        timeout: Deadline?, taskId: TaskId, binary: Data?
     ) async -> (JSON, Status, Data?) {
-        guard let secs = timeout else {
-            let (r, body) = await runDispatch(
+        guard let deadline = timeout else {
+            let end = await runDispatch(
                 target: target, payload: payload, verb: verb, taskOut: taskOut,
                 taskId: taskId, binary: binary)
-            let (reply, status) = classify(r)
-            return (reply, status, body)
+            let (reply, status) = classify(end)
+            return (reply, status, end.body)
         }
-        // Race the dispatch against the deadline. The loser is cancelled by the
-        // group, and the deadline branch kills through the front door first.
+        // Race the dispatch against the deadline. The deadline branch marks
+        // that IT fired, then kills through the front door.
+        let fired = FiredFlag()
         let killer = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(deadline.seconds * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
+            fired.set()
             // Operator authority: the kernel closing out work it was told to
             // kill, not the batch caller reaching out — so a gated caller never
             // makes an `onCancel` fail.
@@ -631,12 +612,11 @@ extension Kernel {
         // `send_binary` took this branch, lost its bytes, and landed on the TEXT
         // channel — `file_bridge` answered "bytes must be raw bytes on the binary
         // channel" for a call that was correct (e2e `E10_dialog:swift`).
-        let (r, body) = await runDispatch(
+        let end = await runDispatch(
             target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId,
             binary: binary)
-        let fired = killer.isCancelled == false && r["cancelled"].asBool == true
         killer.cancel()
-        if fired {
+        if end.stopped && fired.isSet {
             // Python `_agent.py`: `f"send: {d.target.id} {d.payload['type']!r} "
             // f"exceeded its {d.timeout}s timeout; task cancelled"`, carrying
             // `task_id=d.pid or "-"` — always the real pid here (a dispatch
@@ -645,14 +625,14 @@ extension Kernel {
                 Refusal.make(
                     Refusal.timeout,
                     "send: \(target.id.value) \(pyRepr(verb)) exceeded its "
-                        + "\(pyFloatRepr(secs))s timeout; task cancelled",
+                        + "\(deadline.text)s timeout; task cancelled",
                     extra: [("task_id", .integer(taskId.value))]),
                 .timedOut,
                 nil
             )
         }
-        let (reply, status) = classify(r)
-        return (reply, status, body)
+        let (reply, status) = classify(end)
+        return (reply, status, end.body)
     }
 
     /// The kernel's OWN dispatch of one payload — python `_run_dispatch`, kept
@@ -675,23 +655,29 @@ extension Kernel {
         row["payload"] = payload
         row["internal"] = .bool(true)
         _ = try? rowsPut(target.id, row)
-        let (reply, _) = await runDispatch(
+        let end = await runDispatch(
             target: target, payload: payload, verb: payload["type"].asString ?? "",
             taskOut: nil, taskId: TaskId(pid), binary: nil)
-        return classify(reply)
+        return classify(end)
     }
 
-    /// A reply's terminal state. FAILURE IS A STATUS: a handler that RAN and
+    /// A dispatch's terminal state. FAILURE IS A STATUS: a handler that RAN and
     /// said no — a missing path, a patch that did not match, a refusal it
-    /// composed itself — settles `errored`. A THROW (`raised`) is `failed`; a
-    /// kill is `cancelled`. The reply is kept verbatim either way; what changes
-    /// is that a reader learns the outcome from `status` instead of parsing
-    /// `result`.
-    private func classify(_ r: JSON) -> (JSON, Status) {
-        if r["cancelled"].asBool == true { return (r, .cancelled) }
-        if r["raised"].asBool == true { return (r, .failed) }
-        if errorShaped(r) { return (r, .errored) }
-        return (r, .completed)
+    /// composed itself — settles `errored`. A THROW is `failed`; a stopped task
+    /// is `cancelled`.
+    ///
+    /// DECIDED BY HOW THE DISPATCH ENDED, never by reading the reply. Python's
+    /// `_settle_once` sets FAILED only in its `except` branch and CANCELLED only
+    /// when the task itself was cancelled; a returned dict is ERRORED or
+    /// COMPLETED on its `error` alone. Reading `raised`/`cancelled` off the body
+    /// settled the `cancel` verb's own `{cancelled: true}` answer `cancelled`
+    /// (and dead-lettered it), and a peer's relayed `{error, raised: true}`
+    /// `failed`.
+    private func classify(_ end: DispatchEnd) -> (JSON, Status) {
+        if end.stopped { return (.object(["cancelled": .bool(true)]), .cancelled) }
+        if end.raised { return (end.reply, .failed) }
+        if errorShaped(end.reply) { return (end.reply, .errored) }
+        return (end.reply, .completed)
     }
 
     /// Whether a handler's reply is a REFUSAL — an object carrying a truthy
@@ -712,7 +698,7 @@ extension Kernel {
     private func runDispatch(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
         taskId: TaskId?, binary: Data?
-    ) async -> (JSON, Data?) {
+    ) async -> DispatchEnd {
         // (A killed sender never reaches here: `launch` settles it `cancelled`
         // before an id is minted.)
 
@@ -778,7 +764,7 @@ extension Kernel {
         let remote: String? = (rc != nil && rc!.leg == origin) ? rc!.address : nil
 
         let box = DispatchBox()
-        let bodyBox = BodyBox()
+        let extras = DispatchExtras()
         let work = Task {
             let reply = await KernelTaskLocals.$onBatchLaunched.withValue(nil) {
                 await KernelTaskLocals.$onFanout.withValue(nil) {
@@ -793,27 +779,29 @@ extension Kernel {
                             // row/ledger/timeout, and THE REPLY BODY COMES BACK
                             // WITH IT (C37): the batch is the carrier for the
                             // `bytes` value python's reply dict holds natively.
-                            // Dropping it here forced every byte-moving caller
-                            // onto `sendWithBinary`, which minted no task row,
-                            // no ledger id and no timeout.
                             await {
                                 // ANOTHER KERNEL'S AGENT: the call goes to its
                                 // peer's route, bytes and all; no handler runs
-                                // here.
+                                // here. Its reply is the peer's answer — a
+                                // relayed `raised` is data, not a raise here.
                                 if let r = target.remote {
                                     let (reply, b) = await self.callPeer(
                                         r, qualified: target.id, payload: payload,
                                         origin: origin, body: binary)
-                                    bodyBox.value = b
+                                    extras.body = b
                                     return reply
                                 }
                                 if let blob = binary {
-                                    let (r, b) = await self.dispatchBinary(
+                                    let (r, b, raised) = await self.dispatchBinary(
                                         target: target, header: payload, blob: blob)
-                                    bodyBox.value = b
+                                    extras.body = b
+                                    extras.raised = raised
                                     return r ?? .null
                                 }
-                                return await self.dispatch(target: target, payload: payload)
+                                let (r, raised) = await self.dispatch(
+                                    target: target, payload: payload)
+                                extras.raised = raised
+                                return r
                             }()
                         }
                     }
@@ -844,22 +832,27 @@ extension Kernel {
 
         // `nil` = the task was stopped. Cancellation is a REPLY, never a throw
         // — and a stopped dispatch carries no chunk.
-        guard let outcome else { return (.object(["cancelled": .bool(true)]), nil) }
-        return (outcome, bodyBox.value)
+        guard let outcome else { return DispatchEnd(reply: .null, stopped: true) }
+        return DispatchEnd(reply: outcome, body: extras.body, raised: extras.raised)
     }
 
-    private func dispatch(target: Agent, payload: JSON) async -> JSON {
+    /// One handler run: the reply, and whether the handler RAISED (python's
+    /// `except` branch — the one source of `failed`). The raise is reported
+    /// beside the reply, never read back out of it.
+    private func dispatch(target: Agent, payload: JSON) async -> (JSON, raised: Bool) {
         let verb = payload["type"].asString ?? ""
 
         if Kernel.isSystemVerb(verb) {
             do {
-                return try await handleSystemVerb(target: target, verb: verb, payload: payload)
+                return (
+                    try await handleSystemVerb(target: target, verb: verb, payload: payload), false
+                )
             } catch {
                 // A kernel verb that RAISED settles like any other raised
                 // handler: python's one `except` wraps these too, so a digest
                 // over an unsized `refs` fails the call instead of quietly
                 // answering a page python never produces.
-                return .object(["error": .string(error.description), "raised": .bool(true)])
+                return (Kernel.raisedReply(error.description), true)
             }
         }
 
@@ -870,7 +863,7 @@ extension Kernel {
         // tree, matching the `kernel` address. Python `_agent.py`: `if verb ==
         // "reflect" and self.parent is None`.
         if verb == "reflect", target.parentId == nil {
-            return reflectIdentity(target)
+            return (reflectIdentity(target), false)
         }
 
         // Bare agents (no handler_module): only the universal verbs
@@ -878,16 +871,16 @@ extension Kernel {
         guard let hm = target.handlerModule else {
             switch verb {
             case "boot", "shutdown":
-                return .null
+                return (.null, false)
             case "reflect":
-                return reflectIdentity(target)
+                return (reflectIdentity(target), false)
             default:
                 // CODED, not a bare error. A reason-less `{error}` is decorated
                 // by `applyReflectFlags` into something that reads like a
                 // healthy reflect (kernel_verbs, tree, more) with a stray error
                 // field — the caller cannot tell a refusal from an answer
                 // (measured 2026-09-02).
-                return noHandlerModuleRefusal(target.id.value, verb)
+                return (noHandlerModuleRefusal(target.id.value, verb), false)
             }
         }
 
@@ -896,13 +889,13 @@ extension Kernel {
             // whose bundle belongs to ANOTHER runtime (the browser's `*.ts`
             // agents persist here), or is installed later. The call simply
             // cannot be answered HERE, and says so with a code.
-            return notInstalledRefusal(target.id.value, hm, verb)
+            return (notInstalledRefusal(target.id.value, hm, verb), false)
         }
 
         do {
             let reply = try await bundle.handle(
                 agentId: target.id, payload: payload, kernel: self)
-            return reply ?? .null
+            return (reply ?? .null, false)
         } catch {
             // An exception is a RESULT. A handler that throws must not take its
             // caller down with it — the caller can act on `{"error": …}` and can
@@ -911,8 +904,14 @@ extension Kernel {
             // the difference between a bug in the target and a refusal by it. The
             // AI routing path relies on it (python builds the same three-key body
             // in `_route_reply`'s own `except`, adding the `target`).
-            return .object(["error": .string("\(error)"), "raised": .bool(true)])
+            return (Kernel.raisedReply("\(error)"), true)
         }
+    }
+
+    /// The body a RAISED handler settles with — python's `{"error": "<Type>:
+    /// <msg>", "raised": True}`.
+    static func raisedReply(_ text: String) -> JSON {
+        .object(["error": .string(text), "raised": .bool(true)])
     }
 
     /// Substrate verbs answered natively on every agent.

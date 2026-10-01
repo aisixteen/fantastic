@@ -466,3 +466,64 @@ test("an unstarted kernel keeps its rows bounded by the ledger's ring", async ()
   assert.ok(k.store.rows.size <= 2 * 5, `rows grew past the ring: ${k.store.rows.size}`);
 });
 
+
+// ── the flusher is a task; the kernel's own calls parent to their task ───
+// python `Kernel.start`: `spawn_task(root, "flush_executions", keepalive=True)`
+// — a `task` row, a live `ps` row from then on, its writes parented to it — and
+// the start's boots and probe run inside the `kernel_start` verb's task.
+
+test("kernel_start spawns the flusher as a task and parents its boots to the verb", async () => {
+  const { k } = kernel();
+  mk(k);
+  await withStore(k, { start: false });
+  const started = await call(k, "kernel", { type: "kernel_start" });
+  assert.equal((started.result as Payload)["started"], true);
+  const startPid = started.pid as number;
+  const ps = (((await res(k, "kernel", { type: "ps" }))["tasks"]) as Payload[]);
+  const flusher = ps.find((t) => t["verb"] === "flush_executions");
+  assert.ok(flusher !== undefined, JSON.stringify(ps));
+  assert.equal(flusher!["agent"], ROOT);
+  // adopted: its parent (the finished kernel_start) handed it up to the operator
+  assert.equal(flusher!["parent"], null);
+  await k.store.flush();
+  const rows = await kernelRows(k.kernelView());
+  const task = rows.find((r) => r["id"] === flusher!["id"])!;
+  assert.deepEqual([task["kind"], task["verb"], task["parent"]], ["task", "flush_executions", startPid]);
+  const boots = rows.filter((r) => r["kind"] === "call" && (r["payload"] as Payload)["type"] === "boot");
+  assert.ok(boots.length >= 3, JSON.stringify(boots));
+  assert.ok(boots.every((r) => r["parent"] === startPid), "a boot was not parented to kernel_start");
+});
+
+test("the flusher's writes parent to it; a `ledger` verb's store reads parent to the verb", async () => {
+  const { k } = kernel();
+  mk(k);
+  await withStore(k);
+  const fid = k.store.flusherTask as number;
+  await call(k, "probe", { type: "work" });
+  await sleep(250); // the debounce fires: the flusher writes, then reads nothing
+  const led = await call(k, "kernel", { type: "ledger" });
+  const reads = [...k.store.rows.values()].filter(
+    (r) => r.kind === "call" && r["agent"] === "memory" && (r["payload"] as Payload)["type"] === "read",
+  );
+  assert.ok(reads.length > 0);
+  assert.ok(reads.every((r) => r["parent"] === led.pid), JSON.stringify(reads.map((r) => r["parent"])));
+  // a stop neither waits for the flusher nor cancels it: it ends it last
+  const out = await res(k, "kernel", { type: "shutdown_agents" });
+  assert.deepEqual(out["cancelled"], []);
+  assert.equal(k.tasks.has(fid), true);
+  await stopKernel(k);
+  assert.equal(k.tasks.has(fid), false);
+});
+
+test("cancelling the flusher task stops the flushing", async () => {
+  const { k } = kernel();
+  mk(k);
+  await withStore(k);
+  const fid = k.store.flusherTask as number;
+  const out = await res(k, "kernel", { type: "cancel", task_id: fid });
+  assert.deepEqual(out, { cancelled: true, killed: [fid] });
+  assert.equal(k.tasks.has(fid), false);
+  const w = await call(k, "probe", { type: "work" });
+  await sleep(250);
+  assert.equal(k.store.rows.has(w.pid as number), true, "a cancelled flusher still flushed");
+});

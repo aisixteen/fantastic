@@ -27,13 +27,12 @@ public enum AIContext {
         messages.reduce(0) { $0 + estimateOne($1) }
     }
 
-    /// Every scalar of `s` is a python decimal digit and there is at least one —
-    /// `str.isdigit()` as `int()` can still read it (Arabic-Indic digits
-    /// included, so `'٣'` is 3).
+    /// python `s.isascii() and s.isdigit()`: at least one scalar, every one an
+    /// ASCII digit — `'٣'` and `'²'` are not ids (a row id is a counter value).
     static func pyDigits(_ s: String) -> Bool {
         let scalars = s.unicodeScalars
         if scalars.isEmpty { return false }
-        return scalars.allSatisfy { $0.properties.numericType == .decimal }
+        return scalars.allSatisfy { $0.isASCII && $0.properties.numericType == .decimal }
     }
 
     /// Python `_as_pos_int`: a bool is nothing; an int must be > 0; a float > 0

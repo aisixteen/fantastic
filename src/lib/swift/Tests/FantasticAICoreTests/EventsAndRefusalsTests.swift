@@ -93,6 +93,38 @@ struct EventsAndRefusalsTests {
                 == ["reason", "error", "send_id", "started_at", "queue_depth"])
     }
 
+    /// A backend that does not REQUIRE its provider up front builds it INSIDE
+    /// the turn (python `_run`): a build that raises (responses' sampling
+    /// naming an owned key, a missing `model`) is seen as `thinking` then
+    /// `done(reason:error)`, and the handler raises.
+    @Test func aProviderBuildFailureEndsTheTurnWithDoneError() async throws {
+        var cfg = baseConfig { .refused(.object(["error": .string("unreachable")])) }
+        cfg.makeProvider = { _, _, _ in
+            throw PyError("ValueError", "sampling sets an owned key: 'model'")
+        }
+        let (kernel, id) = try await freshMockKernel(config: cfg)
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
+        defer { pump.cancel() }
+        let out = await kernel.send([
+            Item(
+                id,
+                .object([
+                    "type": .string("send"), "text": .string("hi"), "client_id": .string("t"),
+                ]))
+        ])[0]
+        #expect(out.status == .failed, "\(out.result.serialize())")
+        #expect(out.result["error"].asString == "ValueError: sampling sets an owned key: 'model'")
+        try await waitUntil("status(done)") { sink.statusDone() != nil }
+        let phases = sink.snapshot().filter { $0["type"].asString == "status" }
+            .compactMap { $0["phase"].asString }
+        #expect(phases == ["thinking", "done"], "\(phases)")
+        #expect(sink.statusDone()?["detail"]["reason"].asString == "error")
+        #expect(
+            sink.statusDone()?["detail"]["error"].asString == "sampling sets an owned key: 'model'")
+    }
+
     /// MAPPED: nvidia's `_error_mapper` turns an HTTP status into a clean
     /// sentence, and that is a REFUSAL — `{error, client_id}`, not a raise.
     @Test func mappedProviderErrorIsACleanRefusal() async throws {

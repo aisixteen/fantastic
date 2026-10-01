@@ -5,15 +5,24 @@
 import FantasticJSON
 import Foundation
 
+/// python `Kernel.save()`'s shape: `{version, records}`.
 public struct KernelState: Sendable, Codable, Equatable {
     public static let currentVersion: UInt32 = 1
 
     public var version: UInt32
-    public var agents: [AgentRecord]
+    public var records: [AgentRecord]
 
-    public init(version: UInt32 = KernelState.currentVersion, agents: [AgentRecord]) {
+    public init(version: UInt32 = KernelState.currentVersion, records: [AgentRecord]) {
         self.version = version
-        self.agents = agents
+        self.records = records
+    }
+
+    /// python `snapshot.get("version", CURRENT_VERSION)` /
+    /// `snapshot.get("records", [])` — both keys default.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(UInt32.self, forKey: .version) ?? KernelState.currentVersion
+        records = try c.decodeIfPresent([AgentRecord].self, forKey: .records) ?? []
     }
 }
 
@@ -46,7 +55,7 @@ extension Kernel {
             .filter { !dropped.contains($0.id) }
             .map { $0.record() }
             .sorted { $0.id < $1.id }
-        return KernelState(agents: records)
+        return KernelState(records: records)
     }
 
     /// Serialize the state snapshot to a UTF-8 JSON string. Used
@@ -60,18 +69,6 @@ extension Kernel {
         return json.serialize()
     }
 
-    /// Write the snapshot to `<workdir>/.fantastic/state.json` in
-    /// Disk mode. In InMemory mode this is a no-op.
-    public func saveToDisk() throws {
-        guard let stateFile = storage.stateFile else { return }
-        let json = try saveJSON()
-        guard let data = json.data(using: .utf8) else { return }
-        try? FileManager.default.createDirectory(
-            at: stateFile.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        try data.write(to: stateFile, options: .atomic)
-    }
-
     /// Hydrate the kernel from a snapshot JSON string. Validates:
     ///   - version ≤ currentVersion
     ///   - no duplicate ids
@@ -79,7 +76,10 @@ extension Kernel {
     ///   - exactly one root (parent_id == nil)
     /// Bundles with unknown handler_modules are skipped (weak-load).
     public func loadJSON(_ string: String) throws {
-        let json = try JSON.parse(string)
+        var json = try JSON.parse(string)
+        // python `Kernel.load` takes a bare record list as well as the
+        // `{version, records}` envelope `save` writes.
+        if case .array = json { json = .object(["records": json]) }
         let data = try JSONEncoder().encode(json)
         let state = try JSONDecoder().decode(KernelState.self, from: data)
         try load(state)
@@ -94,7 +94,7 @@ extension Kernel {
 
         // Duplicate check.
         var seen: Set<String> = []
-        for rec in state.agents {
+        for rec in state.records {
             // RESERVED KEYS ARE REFUSED HERE — before anything is torn down.
             // These name substrate wiring, not agent meta, and a hand-authored
             // `root_path:` once cleared the whole tree and THEN raised: the
@@ -119,7 +119,7 @@ extension Kernel {
         }
         // Root + parent integrity check.
         var roots = 0
-        for rec in state.agents {
+        for rec in state.records {
             if rec.parentId == nil {
                 roots += 1
             } else if let p = rec.parentId, !seen.contains(p) {
@@ -142,7 +142,7 @@ extension Kernel {
         // a no-op rather than a half-destroyed tree.
         var kids: [String: [String]] = [:]
         var rootId = ""
-        for rec in state.agents {
+        for rec in state.records {
             if let p = rec.parentId {
                 kids[p, default: []].append(rec.id)
             } else {
@@ -155,7 +155,7 @@ extension Kernel {
             if !reached.insert(node).inserted { continue }
             stack.append(contentsOf: kids[node] ?? [])
         }
-        let orphans = state.agents.map(\.id).filter { !reached.contains($0) }.sorted()
+        let orphans = state.records.map(\.id).filter { !reached.contains($0) }.sorted()
         if !orphans.isEmpty {
             throw KernelError.invalidSnapshot(
                 "snapshot has \(orphans.count) record(s) unreachable from the root "
@@ -165,7 +165,7 @@ extension Kernel {
         // THE ROOT RECORD DECLARES THIS TREE'S CHILDREN-DIR NAME (declared
         // config, default `agents`). Set BEFORE the build, since every agent
         // derives its address from it. Python `_kernel.py` `load`.
-        let declared = state.agents.first { $0.parentId == nil }?
+        let declared = state.records.first { $0.parentId == nil }?
             .meta["children_dir"]?.asString
         childrenDir = (declared?.isEmpty == false) ? declared! : "agents"
 
@@ -224,14 +224,14 @@ extension Kernel {
             register(agent)
             // Recurse into this agent's children (records that name
             // it as their parent_id).
-            for child in state.agents where child.parentId == rec.id {
+            for child in state.records where child.parentId == rec.id {
                 construct(child, parentRootPath: rootPath)
             }
         }
 
         // Start from the root (parent_id == nil). Required to exist
         // by the validation pass above.
-        if let rootRec = state.agents.first(where: { $0.parentId == nil }) {
+        if let rootRec = state.records.first(where: { $0.parentId == nil }) {
             construct(rootRec, parentRootPath: nil)
             if let rootAgent = registry[AgentId(rootRec.id)] {
                 setRoot(rootAgent)
@@ -246,7 +246,7 @@ extension Kernel {
 
         // Wire parent-child relationships now that every agent has a
         // proper rootPath.
-        for rec in state.agents {
+        for rec in state.records {
             if let pid = rec.parentId, let parent = registry[AgentId(pid)],
                 let child = registry[AgentId(rec.id)]
             {

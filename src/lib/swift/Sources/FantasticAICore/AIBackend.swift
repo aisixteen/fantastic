@@ -551,17 +551,19 @@ public final class AIBackend: @unchecked Sendable {
             text = "[" + parts.joined(separator: " \u{b7} ") + "]\n" + text
         }
 
-        // Build the provider FIRST — backends that must refuse before
-        // touching history (NIM no-api_key, FM unavailable) return their
-        // exact refusal body here, preserving wire byte-identity.
-        let result = try await config.makeProvider(agent, clientId, kernel)
-        let provider: any AIProvider
-        switch result {
-        case .refused(let body):
-            return body
-        case .provider(let p):
-            provider = p
+        // A backend that REQUIRES its provider up front (python
+        // `cfg.require_provider`: nvidia, no api_key) builds it HERE and fails
+        // fast with its exact refusal body, before the queue. Every other
+        // backend builds it INSIDE the turn (python `_run`), after `queued` /
+        // `thinking` — so a failed build ends the turn with `done(error)`.
+        var early: (any AIProvider)? = nil
+        if config.requireProvider {
+            switch try await config.makeProvider(agent, clientId, kernel) {
+            case .refused(let body): return body
+            case .provider(let p): early = p
+            }
         }
+        let prebuilt = early
 
         // Enqueue this submission. Only ONE generation runs at a time per
         // agent (FIFO) — concurrent callers queue in arrival order, which
@@ -626,7 +628,27 @@ public final class AIBackend: @unchecked Sendable {
         let userText = text
         do {
             produced = try await withGenerationCeiling(sendTimeoutSeconds) { [self] in
-                try await runStream(
+                let provider: any AIProvider
+                if let prebuilt {
+                    provider = prebuilt
+                } else {
+                    // `runStream` owns the in-flight count it was bumped for;
+                    // a turn that never reaches it gives the count back here.
+                    let built: ProviderResult
+                    do {
+                        built = try await providerInTurn(agent, clientId, kernel)
+                    } catch {
+                        bumpInFlight(-1)
+                        throw error
+                    }
+                    switch built {
+                    case .refused(let body):
+                        bumpInFlight(-1)
+                        return .refused(body)
+                    case .provider(let p): provider = p
+                    }
+                }
+                return try await runStream(
                     provider: provider,
                     agent: agent,
                     clientId: clientId,
@@ -770,6 +792,30 @@ public final class AIBackend: @unchecked Sendable {
     /// The reason travels WITH the outcome because `send` returns it: python and
     /// rust both answer `{error, client_id}` when a pass does not finish, and a
     /// bare `nil` could not say which of four things happened.
+    /// python `_run`'s `_get_provider` for a backend that does not require it
+    /// up front: built inside the turn, and a raise is treated as python's
+    /// `_send` treats any raise of the turn — mapped to a clean refusal when the
+    /// backend's mapper knows it, else `done(reason:error)` and re-raised.
+    private func providerInTurn(_ agent: Agent, _ clientId: String, _ kernel: Kernel)
+        async throws -> ProviderResult
+    {
+        do {
+            return try await config.makeProvider(agent, clientId, kernel)
+        } catch {
+            if let mapped = config.errorMapper?(error) {
+                await emitStatus(
+                    kernel: kernel, agentId: agent.id, clientId: clientId, phase: "done",
+                    detail: [("reason", .string("error")), ("error", .string(mapped))])
+                return .refused(
+                    .object(["error": .string(mapped), "client_id": .string(clientId)]))
+            }
+            await emitStatus(
+                kernel: kernel, agentId: agent.id, clientId: clientId, phase: "done",
+                detail: [("reason", .string("error")), ("error", .string(pyErrorText(error)))])
+            throw error
+        }
+    }
+
     private func runStream(
         provider: any AIProvider,
         agent: Agent,

@@ -98,7 +98,7 @@ public final class WebWSBundle: AgentBundle, WebRouteEndpoints, @unchecked Senda
         "boot": .string(
             "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app."
         ),
-        "get_routes": .string("Declares this surface's HTTP/WS route mounts. Returns"),
+        "get_routes": .string("Declares this surface's HTTP/WS route mounts. No args. Returns"),
     ]
 
     /// python `PB/io/web_ws/src/web_ws/readme.md`, byte for byte.

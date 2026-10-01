@@ -340,23 +340,23 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// `_binary_path` and place the body there. `nil` is the ONE
     /// malformed-frame answer (A11.7/A13.15).
     private static func decodeInbound(_ raw: InboundRaw) -> Inbound? {
-        var envelope: JSON
-        var body: Data?
+        let b: Data
         switch raw {
         case .text(let t):
-            guard let parsed = try? JSON.parse(t) else { return nil }
-            envelope = parsed
-            body = nil
-        case .binary(let b):
-            guard let (h, blob) = try? Codec.decodeBinaryFrame(b) else { return nil }
-            envelope = h
-            body = blob
+            // A TEXT frame is `loads(text)` and nothing more (python
+            // `decode_frame` on a str): a `_binary_path` in it is an inert key,
+            // never a slot to null or a body to place.
+            guard let parsed = try? JSON.parseStrict(t), case .object = parsed else { return nil }
+            return Inbound(envelope: parsed, body: nil)
+        case .binary(let bytes):
+            b = bytes
         }
-        guard case .object(var members) = envelope else { return nil }
+        guard let (head, body) = try? Codec.decodeBinaryFrame(b) else { return nil }
+        guard case .object(var members) = head else { return nil }
         // `head.pop("_binary_path", None)`: a JSON null IS python's "absent".
         let rawPath = members["_binary_path"]
         members.removeValue(forKey: "_binary_path")
-        envelope = .object(members)
+        var envelope: JSON = .object(members)
         guard let rawPath, !rawPath.isNull else {
             // No path ⇒ a plain envelope; a body that came with one is dropped,
             // exactly as python drops it (nothing names where it would go).
@@ -378,8 +378,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // a reply to the host's own call. Any other placeable path keeps its
         // `null` and the body is dropped.
         return Inbound(
-            envelope: envelope, body: path == inboundBinaryPath ? (body ?? Data()) : nil,
-            replyBody: path == replyBinaryPath ? (body ?? Data()) : nil)
+            envelope: envelope, body: path == inboundBinaryPath ? body : nil,
+            replyBody: path == replyBinaryPath ? body : nil)
     }
 
     /// python `bad("frame", "frame", "a well-formed call/emit/watch envelope")`
@@ -512,8 +512,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
 
     /// The ONE inbound path — text and binary frames decode the same way and
     /// route by `type` the same way (A13.15). A binary `call` rides
-    /// `kernel.send` with the body as the item's binary, never `sendWithBinary`
-    /// (which skips the ledger, the dedup and the reflect flags).
+    /// `kernel.send` with the body as the item's binary — the one send, with
+    /// its ledger, dedup and reflect flags.
     private func handleFrame(_ raw: InboundRaw, channel: Channel) {
         guard let inbound = Self.decodeInbound(raw) else {
             outLock.sync {
@@ -622,12 +622,14 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             } else {
                 item = .text(payload)
             }
-            Task {
-                // Same identity discipline as `call` — an emit dispatched with a
-                // nil sender is an OPERATOR emit.
-                await KernelTaskLocals.$currentSender.withValue(legId) {
-                    await kernel.emitItem(AgentId(target), item)
-                }
+            // INLINE, before the next frame is read: python awaits
+            // `kernel.emit` in the read loop, so two emits — or an emit and the
+            // call after it — reach their watchers in the order they were sent.
+            // A detached Task per emit had no order at all. Same identity
+            // discipline as `call` — an emit with a nil sender is an OPERATOR
+            // emit.
+            KernelTaskLocals.$currentSender.withValue(legId) {
+                kernel.emitItem(AgentId(target), item)
             }
         case "watch":
             if gateWebLeg(

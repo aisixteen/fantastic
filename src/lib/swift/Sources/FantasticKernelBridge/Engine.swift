@@ -362,7 +362,7 @@ extension KernelBridgeBundle {
                     $0.hasPrefix("payload.") ? String($0.dropFirst("payload.".count)) : nil
                 }
                 if isBinary, let p = innerPath {
-                    await kernel.emitItem(agentId, .binary(inner, p, body))
+                    kernel.emitItem(agentId, .binary(inner, p, body))
                 } else {
                     await kernel.emit(agentId, inner)
                 }
@@ -420,17 +420,25 @@ extension KernelBridgeBundle {
             // with a nil sender would be an OPERATOR call and the two-sided gate
             // would bound nothing.
             let targetId = AgentId(target.asString ?? "")
-            let item = Item.fromFrame(targetId, inner, frameId: frame["id"].asString)
+            // ONE ITEM, text or binary: a binary frame's body rides the item's
+            // binary channel, and the frame id names the execution either way —
+            // a replayed binary call joins the recorded outcome instead of
+            // running again.
+            var built = Item.fromFrame(targetId, inner, frameId: frame["id"].asString)
+            if isBinary {
+                let (p, binary) = Codec.callPayload(frame, body: body)
+                built.payload = pyTruthy(p) ? p : .object([:])
+                built.binary = binary
+            }
+            let item = built
             // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
             // target's `callable_by` against `<peer guid>|<remote agent>` (never
             // the leg), and a memory store keys what it writes by it. Python
             // `remote_caller_context(kernel.id, caller)`.
             let caller: String? = pyTruthy(frame["caller"]) ? frame["caller"].asString : nil
             let run: @Sendable () async -> (JSON, Data?) = {
-                if !isBinary {
-                    return (await kernel.send([item])[0].result, nil)
-                }
-                return await kernel.sendWithBinary(targetId, inner, body)
+                let out = await kernel.send([item])[0]
+                return (out.result, out.body)
             }
             (reply, replyBody) = await KernelTaskLocals.$currentSender.withValue(agentId) {
                 if let caller {

@@ -6,11 +6,13 @@
 //!
 //! - **Disk mode** ([`StorageMode::Disk`]):
 //!   1. Acquire `.fantastic/lock.yaml` (PID-keyed; stale → overwritten).
-//!   2. Read `.fantastic/agent.yaml` (the root record); auto-create
-//!      on a virgin workdir.
-//!   3. Hydrate `<workdir>/.fantastic/agents/**` via
-//!      [`crate::persistence::load_children`] (weak-load: unknown
-//!      `handler_module` is logged + skipped).
+//!   2. Read the tree — `.fantastic/agent.yaml` (the root record) and every
+//!      record under its children dir — into a flat record list; seed a root
+//!      on a virgin workdir (or over a missing/corrupt root record).
+//!   3. [`Kernel::load_records`] it, python's `kernel.load(read_tree(…))`:
+//!      VALIDATED first (a bad id, a reserved key, a duplicate, an orphan
+//!      refuses the boot), then built (weak-load: an unknown `handler_module`
+//!      is logged + skipped with its subtree).
 //! - **InMemory mode** ([`StorageMode::InMemory`]):
 //!   1. No lock, no fs I/O.
 //!   2. Create the root agent in process memory only.
@@ -32,13 +34,13 @@
 //! drift from disk; bundles reconcile their own slices on next
 //! touch.
 
-use crate::agent::{Agent, AgentId, AgentRecord};
+use crate::agent::{Agent, AgentId};
 use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::kernel::Kernel;
 use crate::storage::StorageMode;
 use crate::{lock, persistence};
-use serde_json::Map;
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -130,35 +132,41 @@ fn boot_disk(
         lock::acquire(workdir)?;
     }
 
-    // THE ROOT RECORD, or a fresh seed. A missing or unparseable `agent.yaml`
-    // reseeds the root like a virgin dir; the children under `agents/` are
-    // walked either way (python `read_tree`, 2026-09-20).
-    let root_record_path = fantastic_dir.join(persistence::RECORD_FILE);
-    let (root_rec, seeded) = match read_record_at(&root_record_path) {
-        Some(rec) => (rec, false),
-        None => (
-            AgentRecord {
-                id: opts.root_id.clone(),
-                handler_module: Some(ROOT_HANDLER_MODULE.to_string()),
-                parent_id: None,
-                meta: Map::new(),
-            },
-            true,
-        ),
+    // THE TREE, python `_bootstrap`: `records = read_tree(.fantastic)`. A
+    // missing or unparseable root `agent.yaml` does not hide the children under
+    // `agents/` (python `read_tree`, 2026-09-20) — they are parented to the root
+    // id the seed below mints.
+    let mut records = read_tree(&fantastic_dir, &opts.root_id);
+    let seeded = !records
+        .iter()
+        .any(|r| r.get("parent_id").is_none_or(Value::is_null));
+    if seeded {
+        let mut seed = Map::new();
+        seed.insert("id".to_string(), Value::from(opts.root_id.clone()));
+        seed.insert(
+            "handler_module".to_string(),
+            Value::from(ROOT_HANDLER_MODULE),
+        );
+        records.insert(0, seed);
+    }
+    // `kernel.load(records)`: VALIDATED before anything is built — a record with
+    // a bad id or a reserved key, a duplicate, an orphan refuses the boot. The
+    // kernel keeps no conversation and hydrates no rows: the load restores the
+    // tree and the id counter (the root record's reserved bound, `next_id`).
+    let root_hm = records
+        .iter()
+        .find(|r| r.get("parent_id").is_none_or(Value::is_null))
+        .and_then(|r| r.get("handler_module"))
+        .map(fantastic_bundle::py_str)
+        .unwrap_or_default();
+    kernel.load_records(records)?;
+    // The root weak-loads like any record: a runtime without its loader bundle
+    // has no tree to run. Said, not papered over with a root it cannot serve.
+    let Some(root) = kernel.root() else {
+        return Err(KernelError::InvalidSnapshot(format!(
+            "the root's bundle {root_hm} is not installed in this runtime"
+        )));
     };
-
-    // Construct the root agent — its on-disk dir is `.fantastic/`
-    // (children live under `.fantastic/agents/<id>/`).
-    let root = Agent::new(
-        AgentId(root_rec.id.clone()),
-        root_rec.handler_module.clone(),
-        None,
-        root_rec.meta.clone(),
-        fantastic_dir.clone(),
-        false,
-    );
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
 
     // THE VIRGIN SEED IS THE CONSTRUCTED ROOT, not the bare literal: the record
     // on disk then carries the structural grant baseline `Agent::new` stamps, in
@@ -166,22 +174,56 @@ fn boot_disk(
     // `guid` after them. COLD primitive — this runs before any agent (and thus
     // any `file_bridge` store provider) exists, so it cannot route through one.
     if seeded && opts.storage.is_disk() {
-        persistence::write_record_at(&root_record_path, &root.record())?;
+        persistence::write_record_at(
+            &fantastic_dir.join(persistence::RECORD_FILE),
+            &root.record(),
+        )?;
     }
-
-    // THE KERNEL KEEPS NO CONVERSATION and hydrates no rows: the load restores
-    // the tree and the id counter (the root record's reserved bound, `next_id`);
-    // execution rows live in the root's memory store, which `kernel_start` wires.
-    kernel.restore_counter(&root_rec.meta);
-
-    // A RESEEDED ROOT STILL HYDRATES ITS CHILDREN: python's `read_tree` walks
-    // `agents/` under the default layout when the root record is missing or
-    // corrupt (2026-09-20); the reseed only replaces the root's own record.
-    let loaded = persistence::load_children(kernel, &kernel.bundles, Arc::clone(&root))?;
+    let loaded: Vec<AgentId> = kernel
+        .agent_ids()
+        .into_iter()
+        .filter(|id| *id != root.id)
+        .collect();
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
         loaded,
     })
+}
+
+/// python `kernel_state.read_tree` for the bootstrap's own `.fantastic`: the root
+/// record (absent / unreadable / not a mapping ⇒ none) and every record under its
+/// children dir, flat, `parent_id` from DISK POSITION. Corrupt siblings skip.
+fn read_tree(fantastic_dir: &Path, root_id: &str) -> Vec<Map<String, Value>> {
+    let root_rec = std::fs::read_to_string(fantastic_dir.join(persistence::RECORD_FILE))
+        .ok()
+        .and_then(|raw| persistence::parse_record(&raw));
+    let mut out: Vec<Value> = Vec::new();
+    match root_rec {
+        None => persistence::walk_tree(
+            fantastic_dir,
+            crate::kernel::DEFAULT_CHILDREN_DIR,
+            &Value::from(root_id),
+            &mut out,
+            crate::kernel::DEFAULT_CHILDREN_DIR,
+        ),
+        Some(rec) => {
+            let cd = rec
+                .get("children_dir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(crate::kernel::DEFAULT_CHILDREN_DIR)
+                .to_string();
+            let id = rec.get("id").cloned().unwrap_or(Value::Null);
+            out.push(Value::Object(rec));
+            persistence::walk_tree(fantastic_dir, &cd, &id, &mut out, &cd);
+        }
+    }
+    out.into_iter()
+        .filter_map(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .collect()
 }
 
 fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKernel> {
@@ -207,17 +249,6 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
         kernel: Arc::clone(kernel),
         loaded: Vec::new(),
     })
-}
-
-/// Read the ROOT [`AgentRecord`] from `path`, or `None` when there is nothing
-/// usable there — absent, unreadable, or not a YAML mapping. python's `read_tree`
-/// swallows all three the same way (`json.JSONDecodeError, OSError,
-/// ValueError` → `[]`) and the caller reseeds; a corrupt root is NOT a fatal
-/// error, and nothing is migrated or repaired.
-fn read_record_at(path: &Path) -> Option<AgentRecord> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let map = persistence::parse_record(&raw)?;
-    serde_json::from_value(serde_json::Value::Object(map)).ok()
 }
 
 /// Release the lock the bootstrap call acquired. Idempotent.

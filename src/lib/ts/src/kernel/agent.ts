@@ -84,8 +84,13 @@ export class Agent {
   record(): AgentRecord {
     const rec: AgentRecord = { id: this.id };
     if (this.handlerModule !== null) rec.handler_module = this.handlerModule;
-    if (this.parentId !== null) rec.parent_id = this.parentId;
     Object.assign(rec, this.meta);
+    // STRUCTURE WINS (python `Agent.record`). `parent_id` is where this agent
+    // actually sits, so it is written LAST from the tree — a `parent_id` that
+    // leaked into meta (an `updateMeta` patch) cannot shadow it — and the root
+    // has none, whatever meta says.
+    if (this.parentId !== null) rec.parent_id = this.parentId;
+    else delete rec.parent_id;
     return rec;
   }
 }

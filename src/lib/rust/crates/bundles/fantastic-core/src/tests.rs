@@ -656,3 +656,374 @@ async fn a_refused_write_is_loud_and_clears_when_writes_land() {
         .join(".fantastic/agents/store/agent.yaml")
         .exists());
 }
+
+/// python `fs.Root(workdir, _root(agent))` on every loader record verb: a
+/// session loader whose `root` lies OUTSIDE the running dir raises the clamp's
+/// ValueError — boot (the anchor write), `load_tree`, a `persist_record` of a
+/// record that is not live and `forget_record` alike — and nothing is written or
+/// removed out there. A relative `root` resolves under the running dir, never
+/// the process cwd.
+#[tokio::test]
+async fn loader_record_verbs_are_clamped_to_the_running_dir() {
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    let out_root = outside.path().to_string_lossy().into_owned();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "far",
+                   "handler_module": HANDLER_MODULE, "watch": false, "root": out_root}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "far", "{r}");
+    let escape = format!(
+        "ValueError: fs: root {} escapes the running dir",
+        fantastic_bundle::py_repr(&out_root)
+    );
+    for payload in [
+        json!({"type": "boot"}),
+        json!({"type": "load_tree"}),
+        json!({"type": "persist_record", "record": {"id": "ghost", "parent_id": "far"}}),
+        json!({"type": "forget_record", "id": "ghost"}),
+    ] {
+        let out = kernel
+            .send(vec![Item::new(AgentId::from("far"), payload.clone())])
+            .await
+            .remove(0);
+        assert_eq!(
+            out.status,
+            fantastic_kernel::Status::Failed,
+            "{payload}: {out:?}"
+        );
+        assert_eq!(out.result["error"], json!(escape), "{payload}");
+    }
+    assert!(
+        std::fs::read_dir(outside.path()).unwrap().next().is_none(),
+        "nothing may land outside the running dir"
+    );
+
+    // A RELATIVE root resolves under the running dir.
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "near",
+                   "handler_module": HANDLER_MODULE, "watch": false, "root": ".fantastic/near"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "near", "{r}");
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("near"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0);
+    assert_ne!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
+    assert!(tmp.path().join(".fantastic/near/agent.yaml").is_file());
+    // python's reflect reports `str(_root(agent))` — the root as written.
+    let reflect = kernel
+        .send(vec![Item::new(
+            AgentId::from("near"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(reflect["root"], ".fantastic/near");
+}
+
+/// python `write_record` seeds the bundle's `readme.md` and `docs/` tree beside
+/// the record (copy-if-missing), and a write that fails RAISES.
+#[tokio::test]
+async fn persist_record_seeds_readme_and_docs_and_raises_on_a_failed_write() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "persist_record", "record": {
+                "id": "seeded", "handler_module": HANDLER_MODULE, "parent_id": "kernel_state"
+            }}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let dir = tmp.path().join(".fantastic/agents/seeded");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("readme.md")).unwrap(),
+        README
+    );
+    assert!(dir.join("docs/self-extension.md").is_file());
+
+    // `agent.yaml` is a DIRECTORY: the atomic rename onto it fails — raised.
+    std::fs::create_dir_all(tmp.path().join(".fantastic/agents/blocked/agent.yaml/x")).unwrap();
+    let out = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "persist_record", "record": {"id": "blocked", "parent_id": "kernel_state"}}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
+    assert!(
+        out.result["error"].as_str().unwrap().contains("Errno"),
+        "{out:?}"
+    );
+}
+
+/// python `read_tree`: A MISSING OR CORRUPT ROOT RECORD DOES NOT HIDE THE TREE —
+/// the children under `agents/` come back parented to `kernel_state`.
+#[tokio::test]
+async fn load_tree_without_an_anchor_still_returns_the_children() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    let sess = tmp.path().join(".fantastic/web/s9");
+    std::fs::create_dir_all(sess.join("agents/canvas")).unwrap();
+    std::fs::write(sess.join("agents/canvas/agent.yaml"), "id: canvas\n").unwrap();
+    std::fs::write(sess.join("agent.yaml"), "just a scalar\n").unwrap();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "s9",
+                   "handler_module": HANDLER_MODULE, "watch": false,
+                   "root": sess.to_string_lossy()}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "s9", "{r}");
+    let tree = kernel
+        .send(vec![Item::new(
+            AgentId::from("s9"),
+            json!({"type": "load_tree"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        tree["records"],
+        json!([{"id": "canvas", "parent_id": "kernel_state"}]),
+        "{tree}"
+    );
+}
+
+/// python: `persist_record` runs `_guard_parent_chain` on a non-None
+/// `parent_id` (a non-string is `bad_arg`), and `forget_record` with a truthy
+/// non-string id is the id guard's `bad_arg`, not `missing_arg`.
+#[tokio::test]
+async fn loader_verbs_refuse_non_string_ids_like_python() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    for payload in [
+        json!({"type": "persist_record", "record": {"id": "x1", "parent_id": 5}}),
+        json!({"type": "forget_record", "id": 5}),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(root.clone(), payload.clone())])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{payload}: {r}");
+        assert_eq!(r["arg"], "id");
+    }
+    assert!(!tmp.path().join(".fantastic/agents/x1").exists());
+}
+
+/// python `_find_store(agent)` searches THE ADDRESSED LOADER's subtree for a
+/// store rooted at ITS `_root(agent)`: a session loader with no store of its
+/// own answers the blob verbs "no store wired", and a watching session loader
+/// persists nothing through the ROOT's store — every record is written once.
+#[tokio::test]
+async fn a_session_loader_never_writes_through_the_roots_store() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = with_file(&tmp);
+    boot_root(&kernel).await;
+    make_store(&kernel, json!({})).await;
+    let root = kernel.root().expect("root").id.clone();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "sess",
+                   "handler_module": HANDLER_MODULE, "root": ".fantastic/web/s1"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "sess", "{r}");
+    kernel
+        .send(vec![Item::new(
+            AgentId::from("sess"),
+            json!({"type": "boot"}),
+        )])
+        .await;
+    // The blob verbs: the session loader has no store; the root has one.
+    let blob =
+        json!({"type": "persist_blob", "agent_id": "sess", "name": "n.yaml", "content": "x"});
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("sess"), blob.clone())])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"], "persist_blob: no store wired — persistence not available",
+        "{r}"
+    );
+    let r = kernel
+        .send(vec![Item::new(root.clone(), blob)])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["ok"], true, "{r}");
+    // One record write per created agent — the session loader's writer found
+    // no store of its own and wrote nothing.
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "plain",
+                   "handler_module": "file_bridge.tools"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "plain", "{r}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let writes = fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from("store"))
+        .into_iter()
+        .filter(|row| {
+            row.get("kind") == Some(&json!("call"))
+                && row["payload"]["type"] == "write_stream"
+                && row["payload"]["path"]
+                    .as_str()
+                    .is_some_and(|p| p.starts_with("agents/plain/agent.yaml.tmp."))
+        })
+        .count();
+    assert_eq!(writes, 1, "the record was written by more than one loader");
+}
+
+/// python's loader reflect is `str(_root(agent))`: with no `root` meta that is
+/// the agent's own address RELATIVE to the running dir.
+#[tokio::test]
+async fn a_loader_without_a_root_reflects_its_relative_address() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "inner",
+                   "handler_module": HANDLER_MODULE, "watch": false}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "inner", "{r}");
+    let reflect = kernel
+        .send(vec![Item::new(
+            AgentId::from("inner"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(reflect["root"], ".fantastic/agents/inner");
+}
+
+/// python `str(_root(agent))` = `str(Path(r))` for a `root` meta: an ABSOLUTE
+/// meta is reported absolute — even one inside the running dir — normalized the
+/// way `Path` prints it (no `.` segment, no doubled or trailing separator).
+#[tokio::test]
+async fn a_loader_with_an_absolute_root_meta_reflects_it_as_given() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    let base = tmp.path().to_string_lossy().into_owned();
+    let given = format!("{base}/./.fantastic//abs/");
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "abs",
+                   "handler_module": HANDLER_MODULE, "watch": false, "root": given}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "abs", "{r}");
+    let reflect = kernel
+        .send(vec![Item::new(
+            AgentId::from("abs"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(reflect["root"], json!(format!("{base}/.fantastic/abs")));
+}
+
+/// With no `root` meta the reflect shows the agent's address relative to the
+/// running dir; a kernel WITHOUT a running dir has none to show, and the
+/// reflect RAISES (python's `RuntimeError` text) instead of leaking a raw path.
+#[tokio::test]
+async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
+    let mut reg = BundleRegistry::new();
+    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    let kernel = bootstrap(reg, BootstrapOptions::in_memory())
+        .expect("boot")
+        .kernel;
+    let root = kernel.root().expect("root").id.clone();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "inner",
+                   "handler_module": HANDLER_MODULE, "watch": false}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "inner", "{r}");
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("inner"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
+    assert_eq!(
+        out.result["error"],
+        json!(
+            "RuntimeError: the kernel root has no disk address — no running dir to clamp disk to"
+        ),
+        "{out:?}"
+    );
+
+    // A `root` meta needs no running dir: it is reported as given.
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "absmem",
+                   "handler_module": HANDLER_MODULE, "watch": false, "root": "/srv/state"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "absmem", "{r}");
+    let reflect = kernel
+        .send(vec![Item::new(
+            AgentId::from("absmem"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(reflect["root"], "/srv/state");
+}

@@ -44,8 +44,55 @@ pub fn encode_binary_frame(header: &Value, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// JSON off the wire, STRICTLY — python `io_bridge.loads` (owner D13,
+/// 2026-10-01): only values EVERY runtime can hold. Refused, each as the caller's
+/// one "not valid JSON" answer:
+///   * `NaN`, `Infinity`, `-Infinity` — not JSON (serde never parses them);
+///   * an integer outside int64, or a number that overflows a double — this
+///     crate's `arbitrary_precision` would otherwise carry `12345678901234567890`
+///     and `1e400` through as text, a value python refuses;
+///   * a lone surrogate in a string — not text (serde refuses the escape).
+///
+/// # Errors
+/// The parse error, or the reason the value is not one every runtime holds.
+pub fn loads(text: &str) -> Result<Value, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    strict_numbers(&v)?;
+    Ok(v)
+}
+
+/// [`loads`] for bytes — a UTF-8 decode first, then the strict parse.
+///
+/// # Errors
+/// A non-UTF-8 body, or anything [`loads`] refuses.
+pub fn loads_slice(data: &[u8]) -> Result<Value, String> {
+    let text = std::str::from_utf8(data).map_err(|e| e.to_string())?;
+    loads(text)
+}
+
+/// python's `parse_int=_int64, parse_float=_finite`, over a parsed tree.
+fn strict_numbers(v: &Value) -> Result<(), String> {
+    match v {
+        Value::Number(n) => {
+            let digits = n.as_str();
+            if digits.contains(['.', 'e', 'E']) {
+                if !digits.parse::<f64>().is_ok_and(f64::is_finite) {
+                    return Err(format!("number {digits} overflows a double"));
+                }
+            } else if n.as_i64().is_none() {
+                return Err(format!("integer {digits} is outside int64"));
+            }
+            Ok(())
+        }
+        Value::Array(items) => items.iter().try_for_each(strict_numbers),
+        Value::Object(m) => m.values().try_for_each(strict_numbers),
+        _ => Ok(()),
+    }
+}
+
 /// Decode a binary frame → `(header, body)`. The header carries `_binary_path`; the body
-/// is the raw trailing bytes. Errors on a short / malformed frame.
+/// is the raw trailing bytes. Errors on a short / malformed frame. The header is
+/// parsed STRICTLY ([`loads`]).
 pub fn decode_binary_frame(data: &[u8]) -> Result<(Value, Vec<u8>), String> {
     if data.len() < 4 {
         return Err("binary frame: shorter than the 4-byte length prefix".into());
@@ -54,7 +101,7 @@ pub fn decode_binary_frame(data: &[u8]) -> Result<(Value, Vec<u8>), String> {
     if data.len() < 4 + h {
         return Err("binary frame: header length exceeds the frame".into());
     }
-    let header: Value = serde_json::from_slice(&data[4..4 + h]).map_err(|e| e.to_string())?;
+    let header: Value = loads_slice(&data[4..4 + h])?;
     let body = data[4 + h..].to_vec();
     Ok((header, body))
 }
@@ -118,6 +165,37 @@ pub fn set_path(obj: &mut Value, path: &str, value: Value) -> Result<(), String>
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// D13: python's `io_bridge.loads` refuses what not every runtime can hold.
+    #[test]
+    fn loads_refuses_what_python_refuses() {
+        assert_eq!(
+            loads(r#"{"a": 9223372036854775807}"#).unwrap()["a"],
+            json!(i64::MAX)
+        );
+        assert_eq!(loads("[-9223372036854775808]").unwrap()[0], json!(i64::MIN));
+        for bad in [
+            r#"{"a": 9223372036854775808}"#,
+            "[12345678901234567890]",
+            "[-9223372036854775809]",
+            r#"{"x": 1e400}"#,
+            "[-1E400]",
+            "[NaN]",
+            "[Infinity]",
+            "[-Infinity]",
+            r#"["\udcff"]"#,
+            r#"{"\ud800": 1}"#,
+        ] {
+            assert!(loads(bad).is_err(), "accepted {bad}");
+        }
+        // A tiny float underflows to 0.0 — finite, accepted (python agrees).
+        assert!(loads("[1e-400, 2.5, 1E3]").is_ok());
+        // A strict header refuses the whole frame.
+        let head = br#"{"type":"call","n":99999999999999999999}"#;
+        let mut wire = (head.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(head);
+        assert!(decode_binary_frame(&wire).is_err());
+    }
 
     #[test]
     fn binary_frame_round_trips_raw_bytes() {

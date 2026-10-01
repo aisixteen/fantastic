@@ -251,8 +251,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                         + "Set port on create_agent or via update_agent.")
             }
             let port = try pyInt(portVal)
-            let built = WebServer(
-                kernel: kernel, agentId: agent.id, port: UInt16(truncatingIfNeeded: port))
+            let built = WebServer(kernel: kernel, agentId: agent.id, port: port)
             setServer(built, for: agent.id)
             server = built
         }

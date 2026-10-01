@@ -145,7 +145,7 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
     }
     let sender = state.web_agent_id.clone();
     let kernel = Arc::clone(&state.kernel);
-    let (meta, first) = read_chunk(&kernel, &sender, &target, &path, 0).await;
+    let (meta, first) = read_chunk(&kernel, &sender, &target, &path, json!(0)).await;
     // PYTHON'S TEST IS THE CHUNK, not the absence of an error:
     // `isinstance(first.get("bytes"), (bytes, bytearray))`. Anything that did
     // not answer with a chunk — a denial, a missing file, an agent that is not
@@ -172,61 +172,72 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
         return routes::respond(StatusCode::NOT_FOUND, &[], None, Vec::new());
     };
     let ct = mimetypes::content_type(&path);
-    let eof = meta.get("eof").and_then(Value::as_bool).unwrap_or(true);
     // python: `headers={"content-length": str(size)} if size else None` — a
     // zero size sends NO content-length and the body is chunked.
     let size = meta.get("size").and_then(Value::as_u64).filter(|n| *n != 0);
-    let next = meta
-        .get("next_offset")
-        .and_then(Value::as_u64)
-        .unwrap_or(first.len() as u64);
     let kernel = Arc::clone(&state.kernel);
+    // python's generator: yield the chunk; stop on a TRUTHY `eof`; else read on
+    // at `chunk["next_offset"]` — a chunk without one raises KeyError, which
+    // aborts the body mid-stream.
     let stream = futures_util::stream::unfold(
-        (Some(first), kernel, target, path, next, eof, sender),
-        move |(pending, kernel, target, path, offset, done, sender)| async move {
-            if let Some(buf) = pending {
-                return Some((
+        (Some(Step::Yield(meta, first)), kernel, target, path, sender),
+        move |(step, kernel, target, path, sender)| async move {
+            match step? {
+                Step::Yield(m, buf) => Some((
                     Ok::<Vec<u8>, std::io::Error>(buf),
-                    (None, kernel, target, path, offset, done, sender),
-                ));
+                    (Some(Step::Next(m)), kernel, target, path, sender),
+                )),
+                Step::Next(m) => {
+                    if fantastic_bundle::py_truthy(m.get("eof").unwrap_or(&Value::Null)) {
+                        return None;
+                    }
+                    let Some(n) = m.get("next_offset").cloned() else {
+                        return Some((
+                            Err(std::io::Error::other("KeyError: 'next_offset'")),
+                            (None, kernel, target, path, sender),
+                        ));
+                    };
+                    // The generator is iterated AFTER the handler returned, so it
+                    // re-enters the sender context per chunk (python does the
+                    // same). python breaks on anything that is not a chunk.
+                    let (m2, body) = read_chunk(&kernel, &sender, &target, &path, n).await;
+                    let body = body?;
+                    Some((
+                        Ok(body),
+                        (Some(Step::Next(m2)), kernel, target, path, sender),
+                    ))
+                }
             }
-            if done {
-                return None;
-            }
-            // The generator is iterated AFTER the handler returned, so it
-            // re-enters the sender context per chunk (python does the same).
-            let (m, body) = read_chunk(&kernel, &sender, &target, &path, offset).await;
-            // python breaks on anything that is not a chunk.
-            let body = body?;
-            let eof = m.get("eof").and_then(Value::as_bool).unwrap_or(true);
-            let next = m
-                .get("next_offset")
-                .and_then(Value::as_u64)
-                .unwrap_or(offset + body.len() as u64);
-            Some((Ok(body), (None, kernel, target, path, next, eof, sender)))
         },
     );
     routes::respond_stream(&ct, size, Body::from_stream(stream))
 }
 
+/// Where the file proxy's generator stands: a chunk to hand over, or the reply
+/// it came in (whose `eof`/`next_offset` decide what follows).
+enum Step {
+    Yield(Value, Vec<u8>),
+    Next(Value),
+}
+
 /// ONE file-proxy chunk, THROUGH THE BATCH and as the web agent (C37/C40):
 /// python dispatches `kernel.send([{target, payload}])` under
 /// `sender_context(web_agent_id)`, so the served agent's `callable_by` AND its
-/// io leg both decide. `send_with_binary` skipped the ledger, so a browser fetch
-/// left no execution behind and ran outside the two-sided gate.
+/// io leg both decide — an ordinary execution of the batch, taking its chunk back
+/// raw.
 async fn read_chunk(
     kernel: &Arc<fantastic_kernel::Kernel>,
     sender: &AgentId,
     target: &AgentId,
     path: &str,
-    offset: u64,
+    offset: Value,
 ) -> (Value, Option<Vec<u8>>) {
     let kernel2 = Arc::clone(kernel);
     let item = Item::new(
         target.clone(),
         json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
     )
-    .with_binary(Vec::new());
+    .with_raw_reply();
     let out = fantastic_kernel::send::with_sender(sender.clone(), async move {
         kernel2.send(vec![item]).await.remove(0)
     })
@@ -256,7 +267,9 @@ async fn rest_post(
         // is an empty envelope, not a parse error.
         let raw = header_str(PAYLOAD_HEADER).filter(|v| !v.is_empty());
         let payload: Value = match raw {
-            Some(s) => match serde_json::from_str(&s) {
+            // STRICT (D13): python `strict_loads` — what not every runtime can
+            // hold is "not valid JSON".
+            Some(s) => match fantastic_io_bridge::codec::loads(&s) {
                 Ok(v) => v,
                 Err(_) => {
                     return json_error(
@@ -278,16 +291,18 @@ async fn rest_post(
         // as `bytes`, so the leg can only honour the default name: the body
         // rides the blob when the field IS `bytes` (overwriting any header
         // `bytes` key, as python's assignment does), and any other name sends
-        // an EMPTY blob with the header untouched — so the target sees the
+        // NO request body with the header untouched — so the target sees the
         // header's own `bytes` (any value ⇒ missing_arg) or none (empty chunk).
         let field = header_str(BYTES_FIELD_HEADER)
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "bytes".to_string());
         let blob = if field == "bytes" {
-            obj.shift_remove("bytes");
-            body
+            // `payload[field] = body`: the slot keeps its place (or is appended),
+            // so the call row lists `bytes` where python's dict holds it.
+            obj.insert("bytes".to_string(), Value::Null);
+            Some(body)
         } else {
-            Vec::new()
+            None
         };
         let payload = Value::Object(obj);
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
@@ -300,7 +315,11 @@ async fn rest_post(
         // repeated id on the same target REPLAYS instead of re-running.
         let kernel = Arc::clone(&state.kernel);
         let out = fantastic_kernel::send::with_sender(owner.clone(), async move {
-            let mut item = Item::new(target, payload).with_binary(blob);
+            let mut item = Item::new(target, payload);
+            item = match blob {
+                Some(b) => item.with_binary(b),
+                None => item.with_raw_reply(),
+            };
             if let Some(id) = exec_id {
                 item = item.with_id(id);
             }
@@ -326,7 +345,8 @@ async fn rest_post(
                 "web_rest: request body is not valid JSON",
             );
         };
-        match serde_json::from_str(&text) {
+        // STRICT (D13): python `strict_loads(body)`.
+        match fantastic_io_bridge::codec::loads(&text) {
             Ok(v) => v,
             // Don't echo the parser exception back — generic message only
             // (CodeQL: information exposure through an exception).
@@ -364,7 +384,7 @@ async fn rest_post(
             .and_then(Value::as_str)
             .is_some_and(|v| ws::BINARY_EDGE_VERBS.contains(&v));
         if binary_edge {
-            item = item.with_binary(Vec::new());
+            item = item.with_raw_reply();
         }
         kernel.send(vec![item]).await.remove(0)
     })

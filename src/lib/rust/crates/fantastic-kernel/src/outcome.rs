@@ -98,11 +98,19 @@ pub struct Item {
     pub timeout: Option<f64>,
     /// Optional retry budget for terminal failed/timed_out attempts.
     pub retries: Option<u32>,
-    /// Optional RAW request body. Present ⇒ the item rides the BINARY channel
-    /// (`Bundle::handle_binary`) instead of the text one, under the same task
-    /// row, ledger id, timeout and retries as any other item. Never base64:
-    /// the bytes travel beside the JSON header, not inside it.
+    /// Optional RAW request body — python's `payload["bytes"]` holding bytes.
+    /// Present ⇒ the item rides the BINARY channel (`Bundle::handle_binary`)
+    /// instead of the text one, under the same task row, ledger id, timeout and
+    /// retries as any other item. Never base64: the bytes travel beside the JSON
+    /// header, not inside it. A payload may name the slot (`"bytes": null`) to
+    /// keep python's key order on the call row and the watcher frame; the
+    /// handler gets the header without it.
     pub binary: Option<Vec<u8>>,
+    /// The caller reads the reply's chunk RAW ([`Outcome::body`]) — the item
+    /// rides the binary channel with no request body. Python's reply dict holds
+    /// `bytes` natively; a request that sends none (`read_stream`) is a plain
+    /// dict on the call row and a text frame to a watcher.
+    pub raw_reply: bool,
     /// The RAW (tag-typed) `exec_id`, when a caller is forwarding a value it
     /// did not itself parse — a model's `<exec_id>` argument, or a wire
     /// frame's `id` field (C38). An untyped [`Value`] the KERNEL validates
@@ -136,6 +144,7 @@ impl Item {
             timeout: None,
             retries: None,
             binary: None,
+            raw_reply: false,
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
@@ -143,11 +152,20 @@ impl Item {
     }
 
     /// Carry a RAW request body — the item dispatches through the binary
-    /// channel. `send_with_binary` bypassed the batch entirely, so such a call
-    /// had no task row, no ledger id and no timeout (measured 2026-09-02).
+    /// channel, as an ordinary execution of the batch (pid, call/settle rows,
+    /// `ps` row, timeout, dedup, `<guid>|agent` routing). There is no second
+    /// send path for bytes.
     #[must_use]
     pub fn with_binary(mut self, blob: Vec<u8>) -> Self {
         self.binary = Some(blob);
+        self
+    }
+
+    /// Take the reply's chunk RAW ([`Outcome::body`]) without sending one — a
+    /// `read_stream`. See [`Item::raw_reply`].
+    #[must_use]
+    pub fn with_raw_reply(mut self) -> Self {
+        self.raw_reply = true;
         self
     }
 
@@ -232,8 +250,8 @@ pub struct Outcome {
     /// distinction, exactly as python's `isinstance(reply["bytes"], bytes)`
     /// does; testing `is_empty()` instead served an empty file as JSON.
     ///
-    /// Only a binary item can set it (`Item::with_binary`), and only the
-    /// bundle's `handle_binary` fills it in.
+    /// Only a binary item can set it (`Item::with_binary` /
+    /// `Item::with_raw_reply`), and only the bundle's `handle_binary` fills it.
     pub body: Option<Vec<u8>>,
 }
 

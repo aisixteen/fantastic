@@ -259,16 +259,10 @@ public struct FileBundle: AgentBundle {
         case "read_stream":
             let (reply, body) = readStream(agent: agent, payload: payload, base: base)
             guard case .object(var o) = reply, o["error"] == nil else { return reply }
-            // python's key order: path, offset, bytes, next_offset, eof, size, origin.
-            var out: OrderedDictionary<String, JSON> = [:]
-            out["path"] = o["path"]
-            out["offset"] = o["offset"]
-            out["bytes"] = .string(String(decoding: body, as: UTF8.self))
-            out["next_offset"] = o["next_offset"]
-            out["eof"] = o["eof"]
-            out["size"] = o["size"]
-            out["origin"] = o["origin"]
-            return .object(out)
+            // The chunk fills its own slot (python's key order: path, offset,
+            // bytes, next_offset, eof, size, origin).
+            o["bytes"] = .string(String(decoding: body, as: UTF8.self))
+            return .object(o)
         case "write_stream":
             if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) { return readonlyRefusal() }
             // `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK (A13.19). Python
@@ -601,6 +595,10 @@ public struct FileBundle: AgentBundle {
             .object([
                 "path": .string(path),
                 "offset": .integer(offset),
+                // python's reply holds the chunk HERE. The chunk rides beside
+                // the reply (the outcome's body), so its slot holds `null` —
+                // the head python's `encode_frame` writes (R-D16-3).
+                "bytes": .null,
                 "next_offset": .integer(nextOffset),
                 "eof": .bool(nextOffset >= size),
                 "size": .integer(size),
@@ -665,26 +663,34 @@ public struct FileBundle: AgentBundle {
         var first = true
         var chunks: Int64 = 0
         while true {
-            let (rmeta, body) = await kernel.sendWithBinary(
-                AgentId(pyStr(src)),
-                .object([
-                    "type": .string("read_stream"), "path": spath,
-                    "offset": .integer(offset), "length": .integer(length),
-                ]), Data())
-            // python: the reply must be a dict carrying a `bytes` chunk. On this
-            // channel the chunk rides beside the header, so a reply that carries
-            // an `error` (or is not an object at all) is the same refusal.
-            guard case .object(let ro) = rmeta, ro["error"] == nil else {
+            // EACH CHUNK IS AN EXECUTION — python sends every read and write
+            // through `kernel.send`, so each one has its call row, settle row,
+            // `ps` row and ledger id. The binary item is the carrier for the raw
+            // chunk python's dicts hold natively.
+            let read = await kernel.send([
+                Item(
+                    AgentId(pyStr(src)),
+                    .object([
+                        "type": .string("read_stream"), "path": spath,
+                        "offset": .integer(offset), "length": .integer(length),
+                    ]), binary: Data())
+            ])[0]
+            let rmeta = read.result
+            // python: the reply must be a dict carrying a `bytes` chunk. The
+            // chunk is the outcome's BODY, so no body is the same refusal.
+            guard case .object = rmeta, let body = read.body else {
                 return Refusal.make(
                     Refusal.transportError,
                     "pump: read from \(pyRepr(src)) failed: \(pyStr(rmeta))")
             }
-            let (wmeta, _) = await kernel.sendWithBinary(
-                AgentId(pyStr(sink)),
-                .object([
-                    "type": .string("write_stream"), "path": dpath,
-                    "offset": .integer(offset), "truncate": .bool(first),
-                ]), body ?? Data())
+            let wmeta = await kernel.send([
+                Item(
+                    AgentId(pyStr(sink)),
+                    .object([
+                        "type": .string("write_stream"), "path": dpath,
+                        "offset": .integer(offset), "truncate": .bool(first),
+                    ]), binary: body)
+            ])[0].result
             guard case .object(let wo) = wmeta, !pyTruthy(wo["error"] ?? .null) else {
                 return Refusal.make(
                     Refusal.transportError,

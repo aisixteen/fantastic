@@ -169,16 +169,11 @@ async fn main() -> ExitCode {
     match dispatch(args, cap).await {
         Ok(code) => code,
         Err(e) => {
-            // C81 — a daemon lock conflict prints python's own `[kernel] {e}`
-            // line (its 3-line text lives on `KernelError::LockHeld`'s
-            // Display), never the generic wrapper every other error takes.
-            if e.downcast_ref::<fantastic_kernel::KernelError>()
-                .is_some_and(|k| matches!(k, fantastic_kernel::KernelError::LockHeld { .. }))
-            {
-                eprintln!("[kernel] {e}");
-            } else {
-                eprintln!("fantastic_kernel: {e}");
-            }
+            // python `main_dispatch`: `except RuntimeError as e: print(f"[kernel]
+            // {e}", file=sys.stderr); sys.exit(1)` — a lock conflict (C81, its
+            // 3-line text on `KernelError::LockHeld`'s Display) and a failed
+            // `kernel_start` alike.
+            eprintln!("[kernel] {e}");
             ExitCode::FAILURE
         }
     }

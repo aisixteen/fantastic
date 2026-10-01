@@ -111,7 +111,7 @@ struct SaveLoadTests {
         let json = try kernel.saveJSON()
         let parsed = try JSON.parse(json)
         #expect(parsed["version"].asInt == 1)
-        #expect(!parsed["agents"].asArray.isNilOrEmpty)
+        #expect(!parsed["records"].asArray.isNilOrEmpty)
     }
 
     @Test func loadRoundTrip() async throws {

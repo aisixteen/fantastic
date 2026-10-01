@@ -46,7 +46,7 @@ use async_trait::async_trait;
 use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal as rf;
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -695,13 +695,18 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     let sink_id = AgentId::from(target_id(&sink));
     let (mut offset, mut first, mut chunks) = (0u64, true, 0u64);
     loop {
-        let (rmeta, body) = kernel
-            .send_with_binary(
-                &src_id,
+        // TWO ORDINARY SENDS, python's: each end is a batch item (pid, rows,
+        // `ps` row), the read taking its chunk back raw, the write carrying it at
+        // `bytes` in python's key order.
+        let read = kernel
+            .send(vec![Item::new(
+                src_id.clone(),
                 json!({"type": "read_stream", "path": spath, "offset": offset, "length": chunk}),
-                Vec::new(),
             )
-            .await;
+            .with_raw_reply()])
+            .await
+            .remove(0);
+        let (rmeta, body) = (read.result, read.body);
         // python tests the reply for a `bytes` chunk (`isinstance(r["bytes"],
         // bytes)`); on this channel the chunk rides the body, so the carrier
         // answers the same question — `None` is "no chunk came back" (C37).
@@ -715,13 +720,15 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 ),
             );
         };
-        let (wmeta, _) = kernel
-            .send_with_binary(
-                &sink_id,
-                json!({"type": "write_stream", "path": dpath, "offset": offset, "truncate": first}),
-                body,
+        let wmeta = kernel
+            .send(vec![Item::new(
+                sink_id.clone(),
+                json!({"type": "write_stream", "path": dpath, "bytes": null, "offset": offset, "truncate": first}),
             )
-            .await;
+            .with_binary(body)])
+            .await
+            .remove(0)
+            .result;
         if !wmeta.is_object() || py_truthy(wmeta.get("error").unwrap_or(&Value::Null)) {
             return rf::refusal(
                 rf::TRANSPORT_ERROR,

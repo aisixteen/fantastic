@@ -37,6 +37,117 @@ test("frame codec round-trips a binary frame (4-byte BE head + body)", () => {
   assert.deepEqual([...decoded.payload.image], [0, 1, 2, 250, 255]);
 });
 
+// python `io_bridge/_codec.py`: the bytes `encode_frame` writes (captured from
+// the python codec) — `json.dumps` separators and ASCII escaping, so a text frame
+// and a binary head (and its length prefix) match across runtimes.
+test("frame codec writes python's bytes: text frame and binary head", () => {
+  const text = encodeFrame({
+    type: "call", target: "a",
+    payload: { type: "x", n: [1, 2.5, "é", "\u2028"], ok: true, none: null }, id: "p-1",
+  });
+  assert.equal(
+    text.data,
+    '{"type": "call", "target": "a", "payload": {"type": "x", "n": [1, 2.5, "\\u00e9", "\\u2028"], "ok": true, "none": null}, "id": "p-1"}',
+  );
+  const bin = encodeFrame({
+    type: "call", target: "a", payload: { type: "paste", bytes: new Uint8Array([0, 1, 2]), name: "ü" }, id: "p-2",
+  });
+  const buf = bin.data as ArrayBuffer;
+  assert.equal(buf.byteLength, 147);
+  assert.equal(new DataView(buf).getUint32(0, false), 0x8c);
+  assert.equal(
+    new TextDecoder().decode(new Uint8Array(buf, 4, 0x8c)),
+    '{"type": "call", "target": "a", "payload": {"type": "paste", "bytes": null, "name": "\\u00fc"}, "id": "p-2", "_binary_path": "payload.bytes"}',
+  );
+  assert.deepEqual([...new Uint8Array(buf, 4 + 0x8c)], [0, 1, 2]);
+});
+
+// python `decode_frame` + the strict `loads` (D13): a value no runtime can hold
+// is refused, a header that lies about its length is refused, each as one Error.
+test("frame codec decodes STRICTLY and checks every length", () => {
+  assert.throws(() => decodeFrame('{"a": NaN}'), /^Error: bad text frame: /);
+  assert.throws(() => decodeFrame('{"a": 12345678901234567890}'), /bad text frame: integer 12345678901234567890 is outside int64/);
+  assert.throws(() => decodeFrame('{"a": "\\udcff"}'), /bad text frame: a lone surrogate/);
+  assert.throws(() => decodeFrame('{"a": 1e400}'), /bad text frame: number 1e400 overflows a double/);
+  // the int64 bounds are read off the token's DIGITS, so both ends are exact
+  // where a double cannot hold the value (what an int past 2^53 decodes TO is an
+  // open owner decision, so no decoded value is pinned here)
+  assert.doesNotThrow(() => decodeFrame('{"a": 9223372036854775807}'));
+  assert.doesNotThrow(() => decodeFrame('{"a": -9223372036854775808}'));
+  assert.throws(() => decodeFrame('{"a": 9223372036854775808}'), /^Error: bad text frame: integer 9223372036854775808 is outside int64/);
+  assert.throws(() => decodeFrame('{"a": -9223372036854775809}'), /^Error: bad text frame: integer -9223372036854775809 is outside int64/);
+  // a surrogate PAIR is one character, not a lone surrogate
+  assert.deepEqual(decodeFrame('{"b": "\\ud83d\\ude00"}'), { b: "\u{1f600}" });
+  assert.throws(() => decodeFrame(new Uint8Array([0, 1]).buffer), /binary frame shorter than its 4-byte header \(2B\)/);
+  assert.throws(
+    () => decodeFrame(new Uint8Array([0, 0, 0, 9, 123, 125]).buffer),
+    /binary frame header claims 9B but only 2B follow the length prefix/,
+  );
+});
+
+/** A binary frame as a peer would send it: `[BE uint32 | head JSON | body]`. */
+function binaryFrame(head: object, body: number[] = [1, 2]): ArrayBuffer {
+  const h = new TextEncoder().encode(JSON.stringify(head));
+  const buf = new Uint8Array(4 + h.length + body.length);
+  new DataView(buf.buffer).setUint32(0, h.length, false);
+  buf.set(h, 4);
+  buf.set(body, 4 + h.length);
+  return buf.buffer;
+}
+
+// python `set_path` reads a list step as `obj[int(part)]`: a part that is no int,
+// an int no index can hold, or an index past either end is refused with python's
+// text — never a stray property or a hole. Each message printed by python's
+// `decode_frame` (3.11).
+test("a bad _binary_path list index is refused with python's text", () => {
+  const refused: [object, string, string][] = [
+    [{ a: [0] }, "a.5", "'a.5': list assignment index out of range"],
+    [{ a: [0] }, "a.-2", "'a.-2': list assignment index out of range"],
+    [{ a: [0, [1]] }, "a.5.0", "'a.5.0': list index out of range"],
+    [{ a: [0] }, "a.1.5", "'a.1.5': list index out of range"],
+    [{ a: [0] }, "a.x", "'a.x': invalid literal for int() with base 10: 'x'"],
+    [{ a: [0] }, "a.", "'a.': invalid literal for int() with base 10: ''"],
+    [{ a: [0] }, "a.0x1", "'a.0x1': invalid literal for int() with base 10: '0x1'"],
+    [{ a: [0] }, "a.1e0", "'a.1e0': invalid literal for int() with base 10: '1e0'"],
+    [{ a: [0] }, "a.\x1c0", "'a.\\x1c0': invalid literal for int() with base 10: '\\x1c0'"],
+    [{ a: [0] }, "a.\u{feff}0", "'a.\\ufeff0': invalid literal for int() with base 10: '\\ufeff0'"],
+    [{ a: [0] }, "a.\u{661}", "'a.\u{661}': list assignment index out of range"],
+    [{ a: [0] }, "a.99999999999999999999", "'a.99999999999999999999': cannot fit 'int' into an index-sized integer"],
+    [{ a: [[0]] }, "a.99999999999999999999.0", "'a.99999999999999999999.0': cannot fit 'int' into an index-sized integer"],
+    [{ a: [0] }, "a.9223372036854775807", "'a.9223372036854775807': list assignment index out of range"],
+    [{ a: [0] }, "a.9223372036854775808", "'a.9223372036854775808': cannot fit 'int' into an index-sized integer"],
+    [{ a: [0] }, "a.-9223372036854775808", "'a.-9223372036854775808': list assignment index out of range"],
+    [{ a: [0] }, "a.-9223372036854775809", "'a.-9223372036854775809': cannot fit 'int' into an index-sized integer"],
+  ];
+  for (const [head, path, tail] of refused) {
+    assert.throws(() => decodeFrame(binaryFrame({ ...head, _binary_path: path })), {
+      message: `bad _binary_path ${tail}`,
+    });
+  }
+  // what python's `int()` reads, a list step reads: a sign, spaces, `_`, a
+  // negative index from the end
+  const placed: [object, string, number][] = [
+    [{ a: [0] }, "a.-1", 0],
+    [{ a: [0] }, "a. 0 ", 0],
+    [{ a: [0] }, "a.+0", 0],
+    [{ a: [0] }, "a.\u{a0}0", 0],
+    [{ a: Array(11).fill(0) }, "a.1_0", 10],
+  ];
+  for (const [head, path, at] of placed) {
+    const out = decodeFrame(binaryFrame({ ...head, _binary_path: path })) as { a: unknown[] };
+    assert.ok(out.a[at] instanceof Uint8Array, path);
+    assert.deepEqual([...(out.a[at] as Uint8Array)], [1, 2]);
+    assert.equal(out.a.length, (head as { a: unknown[] }).a.length, `${path}: no hole, no stray property`);
+    assert.deepEqual(Object.keys(out.a).length, out.a.length);
+  }
+});
+
+// python `encode_frame` writes floats and DEL as `json.dumps` does:
+// `json.dumps({"n": 1e-05, "s": "\x7f"})` == '{"n": 1e-05, "s": "\u007f"}'.
+test("frame codec writes python's float repr and escapes DEL", () => {
+  assert.equal(encodeFrame({ n: 0.00001, s: "\x7f" }).data, '{"n": 1e-05, "s": "\\u007f"}');
+});
+
 // ─── fake socket harness ────────────────────────────────────────────────────
 
 class FakeSocket implements WebSocketLike {
@@ -455,4 +566,18 @@ test("a host call is answered by the page kernel, gated by the target's callable
   await until(() => repliesTo(sock, "h5") !== undefined);
   assert.equal((repliesTo(sock, "h5")!["data"] as Payload)["reason"], "bad_arg");
   bridge.close();
+});
+
+test("a binary path through an own key named constructor / __proto__ round-trips, as in python", () => {
+  for (const key of ["constructor", "__proto__", "prototype"]) {
+    const payload: Record<string, unknown> = {};
+    Object.defineProperty(payload, key, { value: new Uint8Array([1, 2]), enumerable: true, writable: true, configurable: true });
+    const enc = encodeFrame({ type: "x", payload } as unknown as Envelope);
+    assert.equal(enc.binary, true, key);
+    const dec = decodeFrame(enc.data) as Record<string, Record<string, unknown>>;
+    assert.ok(Object.hasOwn(dec["payload"]!, key), key);
+    assert.deepEqual([...new Uint8Array(dec["payload"]![key] as ArrayBuffer)], [1, 2], key);
+    // the prototype of the decoded object is untouched
+    assert.equal(Object.getPrototypeOf(dec["payload"]), Object.prototype, key);
+  }
 });

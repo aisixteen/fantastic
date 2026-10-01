@@ -223,15 +223,37 @@ public final class TaskIdBox: @unchecked Sendable {
     public init() {}
 }
 
-/// The BINARY REPLY BODY of one dispatch, handed back out of the spawned task
-/// (C37). Written inside the task before it resolves its `DispatchBox` and read
-/// only after that box has been awaited, so the box's own lock orders the two.
+/// What one dispatch's spawned task hands back beside its reply (C37): the
+/// BINARY REPLY BODY, and whether the handler RAISED. Written inside the task
+/// before it resolves its `DispatchBox` and read only after that box has been
+/// awaited, so the box's own lock orders the two.
 ///
-/// `nil` after a dispatch means the verb returned NO chunk; `.some(d)` means it
-/// returned one, `d` possibly empty.
-final class BodyBox: @unchecked Sendable {
-    var value: Data?
+/// `body == nil` after a dispatch means the verb returned NO chunk; `.some(d)`
+/// means it returned one, `d` possibly empty.
+final class DispatchExtras: @unchecked Sendable {
+    var body: Data?
+    var raised = false
     init() {}
+}
+
+/// How ONE dispatch ended — python's three exits from `await d.task`: a reply,
+/// a raise (the `except Exception` branch) or a cancelled task. The status is
+/// read from HERE, never from the reply's own keys.
+struct DispatchEnd {
+    var reply: JSON
+    var body: Data? = nil
+    var raised = false
+    var stopped = false
+}
+
+/// Set once, by the deadline branch of a timed dispatch, BEFORE it kills: the
+/// one fact that makes a stopped task `timed_out` rather than `cancelled`.
+final class FiredFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    init() {}
+    func set() { lock.withLock { fired = true } }
+    var isSet: Bool { lock.withLock { fired } }
 }
 
 public final class TaskTable: @unchecked Sendable {

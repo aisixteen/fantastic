@@ -32,7 +32,7 @@ private func state(_ agents: [(String, String?)]) throws -> KernelState {
             "meta": .object([:]),
         ])
     }
-    let doc = JSON.object(["version": .integer(1), "agents": .array(recs)])
+    let doc = JSON.object(["version": .integer(1), "records": .array(recs)])
     return try JSONDecoder().decode(
         KernelState.self, from: Data(doc.serialize().utf8))
 }

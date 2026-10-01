@@ -57,15 +57,44 @@ let SCOPE_KINDS = ["head_until", "range", "fold", "row"]
 /// Kinds whose `refs` name members (the fold_refs table): a fold, a clear-fold.
 let REF_KINDS = ["fold", "clear"]
 
-/// Python `_as_id`: a positive int, or a digit string; never a bool.
+/// Python `_as_id`: a positive int, or an ASCII digit string (`'٣'` and
+/// `'²'` are not ids — a row id is a counter value); never a bool. A digit
+/// string is NOT checked for > 0, so `'0'` is 0 — falsy where python tests it.
 func asId(_ x: JSON?) -> Int64? {
     switch x {
     case .integer(let n)?: return n > 0 ? n : nil
     case .string(let s)?:
         let t = pyStrip(s)
-        guard pyIsDigitString(t), let n = try? pyInt(.string(t)) else { return nil }
+        guard t.unicodeScalars.allSatisfy(\.isASCII), pyIsDigitString(t),
+            let n = try? pyInt(.string(t))
+        else { return nil }
         return Int64(n)
     default: return nil
+    }
+}
+
+/// python `x in container` for JSON values: a list's members (`==`), a str's
+/// SUBSTRINGS (a str operand only), a dict's KEYS. Anything else — or a str
+/// test with a non-str operand, a dict test with an unhashable one — raises
+/// python's `TypeError`.
+func pyIn(_ x: JSON, _ container: JSON) throws(PyError) -> Bool {
+    switch container {
+    case .array(let items):
+        return items.contains { pyEq($0, x) }
+    case .string(let s):
+        guard case .string(let needle) = x else {
+            throw PyError(
+                "TypeError", "'in <string>' requires string as left operand, not \(pyTypeName(x))")
+        }
+        return scalarsContain(Array(s.unicodeScalars), Array(needle.unicodeScalars))
+    case .object(let o):
+        switch x {
+        case .string(let k): return o[k] != nil
+        case .array, .object: throw PyError("TypeError", "unhashable type: '\(pyTypeName(x))'")
+        default: return false  // JSON keys are strings: no number or None matches
+        }
+    default:
+        throw PyError("TypeError", "argument of type '\(pyTypeName(container))' is not iterable")
     }
 }
 
@@ -671,11 +700,13 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
             return Refusal.unknown(agentId.value, live: kernel.allAgents().map { $0.id.value })
         }
         // ONE VERB AT A TIME on this bundle's tables — see the header.
-        return lock.withLock { dispatch(agent, kernel, payload) }
+        return try lock.withLock { try dispatch(agent, kernel, payload) }
     }
 
     /// The verb body, with `lock` held.
-    private func dispatch(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> JSON? {
+    private func dispatch(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) throws(PyError)
+        -> JSON?
+    {
         let t = payload["type"]
         switch t.asString ?? "" {
         case "reflect": return reflect(agent)
@@ -686,7 +717,7 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         case "share": return unwrap(share(agent, kernel, payload))
         case "unshare": return unwrap(unshare(agent, kernel, payload))
         case "grants": return unwrap(grantsVerb(agent, kernel, payload))
-        case "prune": return unwrap(prune(agent, kernel, payload))
+        case "prune": return unwrap(try prune(agent, kernel, payload))
         case "inject": return unwrap(inject(agent, kernel, payload))
         case "dump": return unwrap(dump(agent, kernel))
         default:
@@ -839,9 +870,11 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         }
         if let before { ids = ids.filter { $0 < before } }
         let total = ids.count
-        let limit = asId(payload["limit"])
-        let page = limit.map { Array(ids.prefix(Int(clamping: $0))) } ?? ids
-        let next: JSON = (limit != nil && total > page.count) ? .integer(page.last!) : .null
+        // python `ids[:limit] if limit else ids` — a `'0'` limit is falsy: every
+        // row, no cursor.
+        let limit = asId(payload["limit"]) ?? 0
+        let page = limit != 0 ? Array(ids.prefix(Int(clamping: limit))) : ids
+        let next: JSON = (limit != 0 && total > page.count) ? .integer(page.last!) : .null
         return .success(
             .object([
                 "rows": .array(page.compactMap { t.get(owner, $0).map { JSON.object($0) } }),
@@ -870,8 +903,11 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
             }
             ids = ids.filter { scope.contains($0) }
         }
-        let limit = Int(clamping: asId(payload["limit"]) ?? 100)
-        let width = Int(clamping: asId(payload["width"]) ?? 200)
+        // python `_as_id(...) or 100` — a `'0'` is falsy and takes the default.
+        let rawLimit = asId(payload["limit"]) ?? 0
+        let rawWidth = asId(payload["width"]) ?? 0
+        let limit = Int(clamping: rawLimit != 0 ? rawLimit : 100)
+        let width = Int(clamping: rawWidth != 0 ? rawWidth : 200)
         var matches: [JSON] = []
         var total = 0
         // A SUBSTRING OF CODE POINTS, as python's `in` is: a `String.contains`
@@ -1013,7 +1049,9 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         return .success(.object(["grants": .array(out)]))
     }
 
-    private func prune(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> Result<JSON, RefusalBody> {
+    private func prune(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) throws(PyError)
+        -> Result<JSON, RefusalBody>
+    {
         let owner: String
         switch ownerFor(agent, kernel, payload, "prune") {
         case .failure(let r): return .failure(r)
@@ -1025,13 +1063,16 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         if before == nil && want == nil {
             return .failure(RefusalBody(Refusal.missing("prune", "before_id")))
         }
+        // python `payload.get("keep") or []`, then `row.get("kind") in keep`:
+        // whatever `keep` is, python's `in` decides — a string is a SUBSTRING
+        // test, a dict a key test, and a value `in` cannot search raises.
         let keepRaw = payload["keep"]
-        let keep = pyTruthy(keepRaw) ? (keepRaw.asArray ?? []) : []
+        let keep: JSON = pyTruthy(keepRaw) ? keepRaw : .array([])
         let wantIds = Set((want ?? []).compactMap { asId($0) })
         var doomed: Set<Int64> = []
         for i in t.ids(owner) {
             let kind = t.rows[owner]?[i]?["kind"] ?? .null
-            if keep.contains(where: { pyEq($0, kind) }) { continue }
+            if try pyIn(kind, keep) { continue }
             if let before, i < before {
                 doomed.insert(i)
             } else if want != nil && wantIds.contains(i) {

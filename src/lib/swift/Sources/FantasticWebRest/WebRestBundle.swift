@@ -159,23 +159,10 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             // python `json.loads(body) if body else {}`.
             payload = .object([:])
         } else {
-            guard let parsed = try? JSON.parse(body) else {
-                // PYTHON PARSES THE THREE NON-FINITE CONSTANTS (`allow_nan`), so
-                // a bare `NaN` / `Infinity` / `-Infinity` body is a FLOAT there
-                // — valid input, just not a dict, which is the object refusal
-                // below and not a parse error. Swift's codec refuses them (it
-                // mirrors serde_json), so the distinction is spelled here rather
-                // than by widening the codec for every reader.
-                if ["NaN", "Infinity", "-Infinity"].contains(
-                    body.trimmingCharacters(in: .whitespacesAndNewlines))
-                {
-                    return (
-                        Self.jsonResponse(
-                            400,
-                            .object(["error": .string("web_rest: body must be a JSON object")])),
-                        nil
-                    )
-                }
+            // STRICT, as python's `strict_loads` (io_bridge.loads, owner D13):
+            // `NaN`/`Infinity`, an integer outside int64 and an overflowing
+            // number are not valid JSON on the wire.
+            guard let parsed = try? JSON.parseStrict(body) else {
                 // Don't echo the parser exception back — generic message only
                 // (CodeQL: information exposure through an exception).
                 return (
@@ -238,12 +225,21 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         if let chunk = out.body {
             var route = Self.jsonResponse(200, out.result)
             if case .object(var o) = route {
-                o["payload_header"] = .string(pyJsonDumps(out.result))
+                o["payload_header"] = .string(pyJsonDumps(Self.withoutBytesField(out.result)))
                 route = .object(o)
             }
             return (route, chunk)
         }
         return (Self.jsonResponse(200, out.result), nil)
+    }
+
+    /// python `{k: v for k, v in reply.items() if k != field}` — the octet
+    /// reply's header is the reply WITHOUT the bytes field, whose value is the
+    /// body itself.
+    static func withoutBytesField(_ reply: JSON) -> JSON {
+        guard case .object(var o) = reply else { return reply }
+        o.removeValue(forKey: "bytes")
+        return .object(o)
     }
 
     /// The verbs a JSON-leg POST must route down the BINARY channel, chosen

@@ -858,11 +858,20 @@ impl Kernel {
         if let Some(n) = name {
             entry.insert("name".to_string(), Value::from(n));
         }
+        // STRAIGHT TO THE FANOUT, ungated — python `src._fanout(entry,
+        // kind="emit")`. Through `emit` it was gated as the current sender, so
+        // a departed caller (the src falls back to the root) had no grant left
+        // and the announcement was dropped.
         let src = caller
-            .filter(|c| self.agents.contains_key(c))
-            .or_else(|| self.root().map(|r| r.id.clone()));
+            .and_then(|c| self.agents.get(&c).map(|e| Arc::clone(&e)))
+            .or_else(|| self.root());
         if let Some(src) = src {
-            self.emit(&src, Value::Object(entry)).await;
+            self.fanout(
+                &src,
+                "emit",
+                &crate::inbox::InboxItem::text(Value::Object(entry)),
+            )
+            .await;
         }
     }
 

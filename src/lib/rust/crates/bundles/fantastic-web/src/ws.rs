@@ -197,7 +197,8 @@ struct Inbound {
 /// place the body there. `Err` is the ONE malformed-frame answer.
 fn decode_inbound(msg: InboundRaw) -> Result<Inbound, ()> {
     let (mut envelope, body) = match msg {
-        InboundRaw::Text(t) => (serde_json::from_str::<Value>(&t).map_err(|_| ())?, None),
+        // STRICT (D13): python `decode_frame` → `io_bridge.loads`.
+        InboundRaw::Text(t) => (fantastic_io_bridge::codec::loads(&t).map_err(|_| ())?, None),
         InboundRaw::Binary(b) => {
             let (h, body) = decode_binary_frame(&b).map_err(|_| ())?;
             (h, Some(body))
@@ -573,13 +574,11 @@ pub(crate) async fn ws_loop(
                         // chunk). Stripping it unconditionally wrote 0 bytes and
                         // reported success where python refused.
                         match body {
-                            Some(b) => {
-                                if let Some(m) = item.payload.as_object_mut() {
-                                    m.shift_remove("bytes");
-                                }
-                                item = item.with_binary(b);
-                            }
-                            None => item = item.with_binary(Vec::new()),
+                            // The decode left `bytes: null` in the slot python's
+                            // `set_path` fills — kept, so the call row and the
+                            // watcher frame keep python's key order.
+                            Some(b) => item = item.with_binary(b),
+                            None => item = item.with_raw_reply(),
                         }
                     }
                     let out_item = fantastic_kernel::send::with_sender(leg, async {
@@ -707,15 +706,24 @@ pub(crate) async fn ws_loop(
                         // Lazy `name` fill — python derives it from the agent
                         // record when the event lacks one, so the browser always
                         // renders one shape. An agent already gone falls back to
-                        // its id rather than dropping the key.
+                        // its id rather than dropping the key. Python's
+                        // `rec.get("display_name") or agent_id`: the RAW value,
+                        // by truthiness.
                         if !frame.contains_key("name") {
                             if let Some(aid) = frame.get("agent_id").and_then(Value::as_str) {
                                 let name = kernel_for_cb
                                     .agents
                                     .get(&AgentId::from(aid))
-                                    .and_then(|a| a.display_name())
-                                    .unwrap_or_else(|| aid.to_string());
-                                frame.insert("name".into(), Value::String(name));
+                                    .and_then(|a| {
+                                        a.meta
+                                            .read()
+                                            .expect("meta lock poisoned")
+                                            .get("display_name")
+                                            .filter(|v| fantastic_bundle::py_truthy(v))
+                                            .cloned()
+                                    })
+                                    .unwrap_or_else(|| Value::String(aid.to_string()));
+                                frame.insert("name".into(), name);
                             }
                         }
                         let mut frame = Value::Object(frame);

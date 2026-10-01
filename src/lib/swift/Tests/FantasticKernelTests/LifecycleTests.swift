@@ -678,20 +678,10 @@ struct GracefulShutdownTests {
     /// swift's own broader "every agent is offered it" design keeps the
     /// text id-less all the same, matching python's literal spelling).
     ///
-    /// C87 residual (documented, not reproduced): python's OTHER two
-    /// `Agent.shutdown` lines — the recursive `await child.shutdown()`
-    /// catch (`  [shutdown] <cid> raised: <e>`) and the
-    /// `importlib.import_module` catch (`  [shutdown] <id> import '<hm>'
-    /// raised: <e>`) — have no swift counterpart: `shutdownWalk` is
-    /// non-throwing (its one fallible step already has its own catch, so
-    /// nothing escapes the recursive call to catch further up), and swift
-    /// resolves a bundle from the static `BundleRegistry`, never an import
-    /// that can fail at shutdown time — an unregistered `handler_module`
-    /// never even reaches this walk (C53 skips its whole subtree at
-    /// hydration). `LifecycleTests.shutdownChildFailurePrintsPythonLine`
-    /// is therefore not written: there is no swift code path that could
-    /// make it pass without fabricating a throw site python does not have
-    /// an analogue for either (see `shutdownWalk`'s doc comment).
+    /// C87 residual (documented, not reproduced): python's recursive
+    /// `await child.shutdown()` catch (`  [shutdown] <cid> raised: <e>`) has
+    /// no swift counterpart — `shutdownWalk` is non-throwing, so nothing
+    /// escapes the recursive call to catch further up.
     @Test func flushPendingFailurePrintsPythonLine() async throws {
         struct Boom: Error, CustomStringConvertible {
             var description: String { "disk full" }
@@ -711,6 +701,77 @@ struct GracefulShutdownTests {
         #expect(
             lines.contains { $0.contains("[shutdown] flush_pending raised: disk full") }, "\(lines)"
         )
+    }
+}
+
+/// The cascade and the shutdown walk SAY what failed and go on, as python's
+/// `Agent.on_delete` (stdout) and `Agent.shutdown` (stderr) print it.
+@Suite("Lifecycle: hook failures are said")
+struct HookFailureLineTests {
+    @Test func aRaisingOnDeletePrintsTheCascadeLine() async throws {
+        struct Boom: Error, CustomStringConvertible { var description: String { "socket gone" } }
+        struct RaisingDelete: AgentBundle {
+            let name = "raisingdelete"
+            func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+                .null
+            }
+            func onDelete(agentId: AgentId, kernel: Kernel) async throws { throw Boom() }
+        }
+        let kernel = makeKernel([("raisingdelete.tools", RaisingDelete())])
+        _ = await kernel.send([
+            Item(
+                "kernel_state",
+                [
+                    "type": "create_agent", "parent_id": "kernel_state",
+                    "handler_module": "raisingdelete.tools", "id": "rd",
+                ])
+        ])[0]
+        let lines = await RuntimeLog.captureOut {
+            let r = await kernel.send([
+                Item("kernel_state", ["type": "delete_agent", "id": "rd"])
+            ])[0]
+            #expect(r.result["deleted"].asBool == true, "\(r.result)")
+        }
+        #expect(
+            lines.contains { $0.contains("  [cascade] rd bundle on_delete raised: socket gone") },
+            "\(lines)")
+    }
+
+    /// An agent created at runtime with a module this runtime does not have is
+    /// python's failed import at shutdown: one stderr line, and the walk goes on.
+    @Test func anUnimportableModulePrintsTheShutdownImportLine() async throws {
+        let kernel = makeKernel()
+        let made = await kernel.send([
+            Item(
+                "kernel_state",
+                [
+                    "type": "create_agent", "parent_id": "kernel_state",
+                    "handler_module": "absent_bundle.tools", "id": "absent",
+                ])
+        ])[0]
+        #expect(made.result["id"].asString == "absent", "\(made.result)")
+        let lines = await RuntimeLog.capture { await kernel.shutdown() }
+        #expect(
+            lines.contains(
+                "  [shutdown] absent import 'absent_bundle.tools' raised: "
+                    + "No module named 'absent_bundle'\n"), "\(lines)")
+    }
+
+    /// Python's `ModuleNotFoundError` text, measured with `importlib`: the
+    /// first dotted prefix that does not resolve; a child of a plain module
+    /// adds `; '<parent>' is not a package`; a package imports (`nil`).
+    @Test func moduleNotFoundIsPythonsImportText() {
+        let registry = BundleRegistry()
+        registry.register("file_bridge.tools", EchoBundle())
+        #expect(registry.moduleNotFound("absent_bundle.tools") == "No module named 'absent_bundle'")
+        #expect(registry.moduleNotFound("absent_bundle") == "No module named 'absent_bundle'")
+        #expect(
+            registry.moduleNotFound("file_bridge.nope") == "No module named 'file_bridge.nope'")
+        #expect(
+            registry.moduleNotFound("file_bridge.tools.sub")
+                == "No module named 'file_bridge.tools.sub'; 'file_bridge.tools' is not a package")
+        #expect(registry.moduleNotFound("file_bridge.tools") == nil)
+        #expect(registry.moduleNotFound("file_bridge") == nil)
     }
 }
 

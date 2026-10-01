@@ -161,6 +161,44 @@ test("the retention ring evicts settled rows, unnamed before named, in-flight ne
 test("kernel verbs are root-only: a non-root agent refuses with not_here", async () => {
   const k = kernelWith({ a: () => ({ ok: true }) });
   const [out] = await k.send([{ target: "a", payload: { type: "ps" } }]);
-  assert.equal((out!.result as Payload)["reason"], "not_here");
-  assert.match(String((out!.result as Payload)["hint"]), /send \{type:'ps'\} to 'kernel'/);
+  // python `_dispatch`'s NOT_HERE, verbatim
+  assert.deepEqual(out!.result, {
+    error: "ps is a kernel verb — a does not answer it",
+    reason: "not_here",
+    hint: "address the kernel root ('kernel'); name the agent you mean in `parent_id` / `id`",
+    verb: "ps",
+  });
+});
+
+// python `_verb_cancel`: absent, "", a bool, or anything not an int / str (a
+// float, a list, a dict) is a MISSING task id.
+test("cancel: a task_id that is not an int or a string is missing_arg", async () => {
+  const k = kernelWith({});
+  for (const bad of [null, "", true, 3.5, [1], { id: 1 }]) {
+    const [out] = await k.send([{ target: "kernel", payload: { type: "cancel", task_id: bad } }]);
+    assert.deepEqual(out!.result, { error: "cancel: task_id required", reason: "missing_arg", arg: "task_id" }, JSON.stringify(bad));
+  }
+  const [stale] = await k.send([{ target: "kernel", payload: { type: "cancel", task_id: 999 } }]);
+  assert.deepEqual(stale!.result, { cancelled: false, killed: [] });
+});
+
+// python `task_subtree`: POST-ORDER — children die before the parent awaiting them.
+test("cancel kills the subtree leaves first", async () => {
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state" }));
+  const hold = new Promise<never>(() => undefined);
+  k.registerBundle("chain.tools", async (id, _p, view) => {
+    if (id === "c3") return hold;
+    const next = id === "c1" ? "c2" : "c3";
+    return (await view.send([{ target: next, payload: { type: "go" } }]))[0]!.result;
+  });
+  k.register(new Agent({ id: "c1", parentId: "kernel_state", handlerModule: "chain.tools" }));
+  k.register(new Agent({ id: "c2", parentId: "c1", handlerModule: "chain.tools" }));
+  k.register(new Agent({ id: "c3", parentId: "c2", handlerModule: "chain.tools" }));
+  const run = k.send([{ target: "c1", payload: { type: "go" } }]);
+  while (k.tasks.size() < 3) await sleep(2);
+  const [top, mid, leaf] = k.tasks.ids();
+  const [out] = await k.send([{ target: "kernel", payload: { type: "cancel", task_id: top } }]);
+  assert.deepEqual(out!.result, { cancelled: true, killed: [leaf, mid, top] });
+  assert.equal((await run)[0]!.status, "cancelled");
 });

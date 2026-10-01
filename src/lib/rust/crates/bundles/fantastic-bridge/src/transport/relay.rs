@@ -81,7 +81,6 @@ const SEND_TIMEOUT: Duration = Duration::from_millis(300);
 async fn send_bounded<S>(
     sink: &SharedSinkOf<S>,
     connected: &AtomicBool,
-    what: &str,
     msg: Message,
 ) -> Result<(), SendFail>
 where
@@ -94,12 +93,13 @@ where
     };
     match tokio::time::timeout(SEND_TIMEOUT, s.send(msg)).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(SendFail::Failed(format!("{what}: {e}"))),
+        // python's `str(e)` — the library's text, with no prefix of ours.
+        Ok(Err(e)) => Err(SendFail::Failed(e.to_string())),
         Err(_elapsed) => {
             guard.take();
             connected.store(false, Ordering::SeqCst);
             Err(SendFail::Failed(format!(
-                "{what}: timed out after {SEND_TIMEOUT:?} (peer not reading)"
+                "timed out after {SEND_TIMEOUT:?} (peer not reading)"
             )))
         }
     }
@@ -118,7 +118,10 @@ enum SendFail {
 impl From<SendFail> for TransportError {
     fn from(f: SendFail) -> Self {
         match f {
-            SendFail::NotConnected => Self::ConnectionClosed("relay not connected".into()),
+            // python `ConnectionClosed("relay_connector: not connected")`.
+            SendFail::NotConnected => {
+                Self::ConnectionClosed("relay_connector: not connected".into())
+            }
             SendFail::Failed(m) => Self::ConnectionClosed(m),
         }
     }
@@ -280,7 +283,15 @@ impl RelayTransport {
     /// and await the correlated `{type:"reply", id, data}`. Bypasses the partner
     /// tunnel. Returns an error object if disconnected / timed out.
     async fn relay_request(&self, mut frame: Value, timeout_s: f64) -> Value {
-        let id = format!("dir_{}", self.relay_next_id.fetch_add(1, Ordering::SeqCst));
+        // python: no socket ⇒ `not_connected` BEFORE an id is spent; then
+        // `self._relay_next_id += 1; rid = f"dir_{n}"` — the first id is `dir_1`.
+        if self.sink.lock().await.is_none() {
+            return json!({"error":"relay_connector: not connected","reason":"not_connected"});
+        }
+        let id = format!(
+            "dir_{}",
+            self.relay_next_id.fetch_add(1, Ordering::SeqCst) + 1
+        );
         frame["id"] = json!(id);
         frame["target"] = json!("relay");
         let (tx, rx) = oneshot::channel::<Value>();
@@ -291,7 +302,6 @@ impl RelayTransport {
         if let Err(fail) = send_bounded(
             &self.sink,
             &self.connected,
-            "relay directory send",
             Message::Text(fantastic_io_bridge::codec::encode_frame(&frame)),
         )
         .await
@@ -340,7 +350,8 @@ async fn pump(
 ) {
     while let Some(msg) = source.next().await {
         let frame = match msg {
-            Ok(Message::Text(t)) => match serde_json::from_str::<Value>(&t) {
+            // STRICT (D13): python `decode_frame` → `io_bridge.loads`.
+            Ok(Message::Text(t)) => match fantastic_io_bridge::codec::loads(&t) {
                 Ok(env) => classify_text(env, partner, relay_pending),
                 Err(_) => None,
             },
@@ -422,6 +433,10 @@ async fn supervise(
     heartbeat_secs: f64,
 ) {
     let backoff = Duration::from_secs_f64(reconnect_secs.max(0.0));
+    // A FAILED EAGER DIAL re-dials AT ONCE: python's `recv()` finds `_ws` None
+    // and `_reconnect_ws` dials before any sleep — the backoff only follows a
+    // failure or a drop.
+    let mut dial_now = initial.is_none();
     loop {
         if closed.load(Ordering::SeqCst) {
             break;
@@ -429,7 +444,9 @@ async fn supervise(
         let source = if let Some(s) = initial.take() {
             s // first iteration: the eager connection (announced in connect())
         } else {
-            tokio::time::sleep(backoff).await;
+            if !std::mem::take(&mut dial_now) {
+                tokio::time::sleep(backoff).await;
+            }
             if closed.load(Ordering::SeqCst) {
                 break;
             }
@@ -481,7 +498,7 @@ async fn send_announce(sink: &SharedSink, connected: &AtomicBool, identity: &Sha
     let text = fantastic_io_bridge::codec::encode_frame(
         &json!({"type": "announce", "attrs": attrs, "target": "relay"}),
     );
-    let _ = send_bounded(sink, connected, "relay announce", Message::Text(text)).await;
+    let _ = send_bounded(sink, connected, Message::Text(text)).await;
 }
 
 /// Send the relay's no-reply `keepalive` verb every `HEARTBEAT_SECS` while
@@ -537,13 +554,7 @@ async fn heartbeat_loop(
         if !connected.load(Ordering::SeqCst) {
             continue;
         }
-        let _ = send_bounded(
-            &sink,
-            &connected,
-            "relay keepalive",
-            Message::Text(beat.clone()),
-        )
-        .await;
+        let _ = send_bounded(&sink, &connected, Message::Text(beat.clone())).await;
     }
 }
 
@@ -578,14 +589,9 @@ impl BridgeTransport for RelayTransport {
         let env = json!({"type":"send","target":self.partner,"payload":frame});
         // python's `encode_frame` text half (A13.14).
         let text = fantastic_io_bridge::codec::encode_frame(&env);
-        send_bounded(
-            &self.sink,
-            &self.connected,
-            "relay send",
-            Message::Text(text),
-        )
-        .await
-        .map_err(TransportError::from)
+        send_bounded(&self.sink, &self.connected, Message::Text(text))
+            .await
+            .map_err(TransportError::from)
     }
 
     async fn send_binary(&self, header: Value, body: Vec<u8>) -> Result<(), TransportError> {
@@ -603,14 +609,9 @@ impl BridgeTransport for RelayTransport {
             env["_binary_path"] = json!(format!("payload.{inner_path}"));
         }
         let wire = encode_binary_frame(&env, &body);
-        send_bounded(
-            &self.sink,
-            &self.connected,
-            "relay send binary",
-            Message::Binary(wire),
-        )
-        .await
-        .map_err(TransportError::from)
+        send_bounded(&self.sink, &self.connected, Message::Binary(wire))
+            .await
+            .map_err(TransportError::from)
     }
 
     async fn recv_frame(&self) -> Result<Frame, TransportError> {
@@ -676,7 +677,6 @@ impl BridgeTransport for RelayTransport {
         let _ = send_bounded(
             &self.sink,
             &self.connected,
-            "relay unwatch",
             Message::Text(fantastic_io_bridge::codec::encode_frame(
                 &json!({"type":"unwatch","target":"relay"}),
             )),
@@ -721,6 +721,92 @@ mod tests {
             "a beat was spawned with no socket: {rows:?}"
         );
         assert!(!t.is_live());
+    }
+
+    /// python: a failed EAGER dial is retried AT ONCE (`recv()` → `_reconnect_ws`
+    /// dials before any sleep), and the first directory request id is `dir_1`
+    /// (`self._relay_next_id += 1`). The fake relay refuses the first TCP
+    /// connection and serves the second; with a 60 s backoff only an immediate
+    /// re-dial can come up within the test's window.
+    #[tokio::test]
+    async fn a_failed_eager_dial_redials_at_once_and_directory_ids_start_at_one() {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = oneshot::channel::<Value>();
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            drop(first); // the eager dial fails
+            let (stream, _) = listener.accept().await.unwrap();
+            #[allow(clippy::result_large_err)]
+            let cb = |_req: &Request, mut resp: Response| {
+                resp.headers_mut().insert(
+                    "Sec-WebSocket-Protocol",
+                    HeaderValue::from_static(SUBPROTOCOL),
+                );
+                Ok(resp)
+            };
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, cb)
+                .await
+                .unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(t) = msg {
+                    let v: Value = serde_json::from_str(&t).unwrap();
+                    if v["target"] == "relay" && v["type"] == "call" {
+                        let reply = json!({"type":"reply","id":v["id"],"data":{"peers":[]}});
+                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                        let _ = seen_tx.send(v);
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let kernel = Arc::new(Kernel::new());
+        let t = RelayTransport::connect(
+            &format!("ws://127.0.0.1:{port}"),
+            "A",
+            "",
+            "B",
+            60.0,
+            0.0,
+            json!({}),
+            RelaySpawn::new(&kernel, &AgentId::from("relay")),
+        )
+        .await
+        .expect("reconnect > 0 swallows the first dial failure");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !t.is_live() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            t.is_live(),
+            "the leg waited out its backoff before re-dialling"
+        );
+        let peers = t.list_peers(5.0).await;
+        assert_eq!(peers, json!({"peers": []}), "{peers}");
+        let req = seen_rx.await.expect("the directory call reached the relay");
+        assert_eq!(req["id"], "dir_1");
+        t.close().await;
+        server.abort();
+    }
+
+    /// python `send()`: no socket raises `ConnectionClosed("relay_connector: not
+    /// connected")`; a failed write raises `ConnectionClosed(str(e))` — the
+    /// library's text with no prefix.
+    #[tokio::test]
+    async fn send_failure_texts_are_pythons() {
+        let sink: SharedSinkOf<StalledSink> = Arc::new(Mutex::new(None));
+        let connected = AtomicBool::new(false);
+        let err = send_bounded(&sink, &connected, Message::Text("x".into()))
+            .await
+            .expect_err("no socket");
+        match TransportError::from(err) {
+            TransportError::ConnectionClosed(m) => {
+                assert_eq!(m, "relay_connector: not connected");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -817,7 +903,7 @@ mod tests {
         let sink: SharedSinkOf<StalledSink> = Arc::new(Mutex::new(Some(StalledSink)));
         let connected = AtomicBool::new(true);
         let started = std::time::Instant::now();
-        let err = send_bounded(&sink, &connected, "relay send", Message::Text("x".into()))
+        let err = send_bounded(&sink, &connected, Message::Text("x".into()))
             .await
             .expect_err("a stalled peer must not park the writer forever");
         assert!(
@@ -839,7 +925,7 @@ mod tests {
         );
         // And the lock really is free: the next writer gets it immediately.
         assert!(matches!(
-            send_bounded(&sink, &connected, "relay send", Message::Text("y".into())).await,
+            send_bounded(&sink, &connected, Message::Text("y".into())).await,
             Err(SendFail::NotConnected)
         ));
     }

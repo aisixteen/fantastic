@@ -49,7 +49,8 @@ struct FileBundleTests {
     private func bin(_ k: Kernel, _ header: OrderedDictionary<String, JSON>, _ blob: Data = Data())
         async -> (JSON, Data?)
     {
-        await k.sendWithBinary(AgentId("fs"), .object(header), blob)
+        let out = await k.send([Item(AgentId("fs"), .object(header), binary: blob)])[0]
+        return (out.result, out.body)
     }
 
     private func write(_ dir: URL, _ path: String, _ text: String) {
@@ -514,6 +515,28 @@ struct FileBundleTests {
         #expect(
             bad["error"].asString?.hasPrefix("pump: read from 'kernel_state' failed: ") == true,
             "\(bad)")
+    }
+
+    /// Every chunk the pump moves is an EXECUTION — python sends each read and
+    /// write through `kernel.send`, so each has a call row (parented to the
+    /// pump's own execution) and a settle. Swift used a bypass that wrote none.
+    @Test func pumpChunksAreExecutionsParentedToThePump() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.txt", "abcdef")
+        let out = await k.send([
+            Item(AgentId("fs"), ["type": "pump", "source_path": "a.txt", "sink_path": "b.txt"])
+        ])[0]
+        #expect(out.result["chunks"].asInt == 1, "\(out.result)")
+        let pumpId = out.pid?.value
+        let calls = k.rows.all().filter {
+            $0["agent"]?.asString == "fs" && $0["kind"]?.asString == "call"
+                && $0["parent"]?.asInt == pumpId
+        }
+        #expect(
+            calls.map { $0["verb"]?.asString ?? "" } == ["read_stream", "write_stream"],
+            "\(calls)")
+        #expect(calls.allSatisfy { $0["outcome"]?["status"].asString == "completed" }, "\(calls)")
     }
 
     /// A2.11 — a `list` entry's `path` is relative to the RESOLVED root, and a

@@ -167,9 +167,11 @@ impl Bundle for RootLoader {
                 Ok(None)
             }
             "persist_blob" => Ok(Some(
-                crate::persistence::persist_blob(kernel, payload).await,
+                crate::persistence::persist_blob(kernel, &agent, payload).await,
             )),
-            "load_blob" => Ok(Some(crate::persistence::load_blob(kernel, payload).await)),
+            "load_blob" => Ok(Some(
+                crate::persistence::load_blob(kernel, &agent, payload).await,
+            )),
             other => Ok(Some(json!({
                 "error": format!("kernel_state: unknown type '{other}'"),
                 "reason": "unhandled",

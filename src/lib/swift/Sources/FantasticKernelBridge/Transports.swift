@@ -88,7 +88,7 @@ public actor WSTransport: BridgeTransport {
             case .text(let s):
                 let frame: JSON
                 do {
-                    frame = try JSON.parse(s)
+                    frame = try JSON.parseStrict(s)
                 } catch {
                     RuntimeLog.warn("ws_bridge: skipping malformed frame: bad text frame: \(error)")
                     continue
@@ -178,13 +178,18 @@ public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
         if await isClosed() { throw ConnectionClosed("memory transport closed") }
         guard let remote, header["type"].asString == "call" else { return }
         let target = AgentId(header["target"].asString ?? "")
-        let (reply, replyBody) = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await remote.sendWithBinary(target, header["payload"], body)
+        // THROUGH THE BATCH, like the text call above: the body rides the
+        // item's binary channel, so the call is an execution with its rows.
+        let (payload, binary) = Codec.callPayload(header, body: body)
+        let out1 = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await remote.send([Item(target, payload, binary: binary)])[0]
         }
-        var out: JSON = .object(["type": .string("reply"), "id": header["id"], "data": reply])
+        var out: JSON = .object([
+            "type": .string("reply"), "id": header["id"], "data": out1.result,
+        ])
         // THE CARRIER, not the length: a 0-byte chunk is still a chunk (C37).
-        if replyBody != nil { out["_binary_path"] = .string("data.bytes") }
-        push((out, replyBody ?? Data(), true))
+        if out1.body != nil { out["_binary_path"] = .string("data.bytes") }
+        push((out, out1.body ?? Data(), true))
     }
 
     public func recv() async throws -> (frame: JSON, body: Data, isBinary: Bool) {

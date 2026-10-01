@@ -2405,11 +2405,11 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
 
     let blob: Vec<u8> = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x01];
     let _ = kernel
-        .send_with_binary(
-            &AgentId::from(web_id),
+        .send(vec![Item::new(
+            AgentId::from(web_id),
             json!({"type": "write_stream", "path": "x.bin"}),
-            blob.clone(),
         )
+        .with_binary(blob.clone())])
         .await;
 
     let mut binary: Option<Vec<u8>> = None;
@@ -2525,8 +2525,7 @@ async fn json_leg_write_stream_string_bytes_is_missing_arg() {
 /// A13.3 + A11.20 — the octet leg dispatches THROUGH THE BATCH, so
 /// `X-Fantastic-Execution-Id` NAMES the execution (a repeat REPLAYS instead of
 /// re-running, and rebinding the id to another target is refused) and the call
-/// leaves a row like any other send. `send_with_binary` named nothing and minted
-/// no row, so an HTTP caller could not express a safe repeat at all.
+/// leaves a row like any other send — an HTTP caller can express a safe repeat.
 #[tokio::test]
 async fn octet_leg_names_executions_and_validates_type() {
     let tmp = TempDir::new().unwrap();
@@ -2749,8 +2748,8 @@ async fn file_proxy_404_for_missing_agent() {
 /// UTF-8 only and answered 400 for every one of them. A body that will not
 /// decode at all raises out of python's handler as a 500.
 ///
-/// The `NaN`/`Infinity` constants and lone-surrogate escapes are NOT covered:
-/// both need a number/string carrier that cannot represent them yet (C74, D13).
+/// STRICT (D13): what python's `io_bridge.loads` refuses — `NaN`/`Infinity`,
+/// lone surrogates, ints outside int64, overflowing floats — is the same 400.
 #[tokio::test]
 async fn json_body_decodes_like_cpython_json_loads() {
     let tmp = TempDir::new().unwrap();
@@ -2812,6 +2811,38 @@ async fn json_body_decodes_like_cpython_json_loads() {
     assert_eq!(
         r.json::<Value>().await.unwrap()["error"],
         "web_rest: request body is not valid JSON"
+    );
+
+    // STRICT (D13): `io_bridge.loads` refuses what not every runtime can hold
+    // — an int outside int64, a number that overflows a double — as the same
+    // "not valid JSON" 400.
+    for bad in [
+        r#"{"type":"list","path":"","n":12345678901234567890}"#,
+        r#"{"type":"list","path":"","x":1e400}"#,
+    ] {
+        let r = post(bad.as_bytes().to_vec()).await.expect("post");
+        assert_eq!(r.status().as_u16(), 400, "{bad}");
+        assert_eq!(
+            r.json::<Value>().await.unwrap()["error"],
+            "web_rest: request body is not valid JSON"
+        );
+    }
+    // …and the octet leg's payload header the same.
+    let r = client
+        .post(&url)
+        .header("content-type", "application/octet-stream")
+        .header(
+            "x-fantastic-payload",
+            r#"{"type":"list","n":99999999999999999999}"#,
+        )
+        .body(b"x".to_vec())
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(r.status().as_u16(), 400);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"],
+        "web_rest: X-Fantastic-Payload is not valid JSON"
     );
 
     stop(&kernel, "web_jsonenc").await;
@@ -3044,3 +3075,139 @@ mod route_order;
 /// `web_ws/tests/test_peer_calls.py`).
 #[path = "tests_peer_calls.rs"]
 mod peer_calls;
+
+/// A read_stream SOURCE that is not file_bridge: `chunked` answers two chunks
+/// whose first carries NO `eof` key; `broken` answers one chunk with neither
+/// `eof` nor `next_offset`.
+struct OddSource;
+
+#[async_trait::async_trait]
+impl fantastic_kernel::bundle::Bundle for OddSource {
+    fn name(&self) -> &str {
+        "odd_source"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
+        Ok(Some(json!({"error": "text channel"})))
+    }
+    async fn handle_binary(
+        &self,
+        id: &AgentId,
+        header: Value,
+        _blob: Vec<u8>,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<
+        (fantastic_kernel::bundle::Reply, Option<Vec<u8>>),
+        fantastic_kernel::bundle::BundleError,
+    > {
+        let offset = header["offset"].as_u64().unwrap_or(0);
+        Ok(match (id.as_str(), offset) {
+            ("chunked", 0) => (
+                Some(json!({"bytes": null, "next_offset": 3, "size": 6})),
+                Some(b"abc".to_vec()),
+            ),
+            ("chunked", _) => (
+                Some(json!({"bytes": null, "eof": true, "size": 6})),
+                Some(b"def".to_vec()),
+            ),
+            _ => (
+                Some(json!({"bytes": null, "size": 6})),
+                Some(b"abc".to_vec()),
+            ),
+        })
+    }
+}
+
+/// python's file proxy loops until a chunk's `eof` is TRUTHY: a chunk with no
+/// `eof` key reads on at its `next_offset`; one with no `next_offset` either
+/// raises KeyError mid-stream, so the body is cut short rather than served as
+/// whole.
+#[tokio::test]
+async fn the_file_proxy_reads_on_until_a_truthy_eof() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, WebBundle);
+    kernel.bundles.register("odd_source.tools", OddSource);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    for item in [
+        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
+               "id": "web_odd", "port": port,
+               "can_call": {"$self": "*", "$parent": "*", "$children": "*",
+                            "chunked": "*", "broken": "*"}}),
+        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "odd_source.tools",
+               "id": "chunked", "callable_by": {"web_odd": "*"}}),
+        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "odd_source.tools",
+               "id": "broken", "callable_by": {"web_odd": "*"}}),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "stage: {r}");
+    }
+    let boot = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_odd"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(boot["running"], true, "boot: {boot}");
+    wait_until_port_accepts(port).await;
+
+    let ok = reqwest::get(format!("http://127.0.0.1:{port}/chunked/file/x.bin"))
+        .await
+        .expect("get");
+    assert_eq!(ok.status().as_u16(), 200);
+    assert_eq!(
+        ok.bytes().await.unwrap().as_ref(),
+        b"abcdef",
+        "the second chunk was never read"
+    );
+
+    // Aborted mid-stream: the response never completes (the request or the
+    // body read fails, depending on when the abort lands).
+    let cut = reqwest::get(format!("http://127.0.0.1:{port}/broken/file/x.bin")).await;
+    if let Ok(resp) = cut {
+        assert!(
+            resp.bytes().await.is_err(),
+            "a chunk with no next_offset must abort the body"
+        );
+    }
+    stop(&kernel, "web_odd").await;
+}
+
+/// starlette's `query_params.get`: `&` is the ONLY separator and a repeated key
+/// answers its LAST value (checked against the project venv, python 3.11).
+#[test]
+fn reflect_query_is_parsed_like_starlette() {
+    assert_eq!(
+        crate::routes::reflect_payload("readme=1&readme=index"),
+        json!({"type": "reflect", "readme": "index"})
+    );
+    assert_eq!(
+        crate::routes::reflect_payload("readme=1;tree=ids"),
+        json!({"type": "reflect", "readme": "1;tree=ids"})
+    );
+    assert_eq!(
+        crate::routes::reflect_payload("tree=none&tree=ids&readme=yes"),
+        json!({"type": "reflect", "readme": true, "tree": "ids"})
+    );
+}

@@ -179,6 +179,88 @@ struct HTTPServerTests {
         #expect(Mimetypes.guessType("x.nope") == nil)
     }
 
+    /// python's `StreamingResponse`: a file over one 262144-byte chunk is
+    /// STREAMED — every chunk its own lazy `read_stream`, the head declaring
+    /// the first chunk's `size` — and arrives whole.
+    @Test func aFileOverOneChunkStreamsWithTheDeclaredLength() async throws {
+        let kernel = try await startWebKernel()
+        let rel = "fantastic-stream-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(rel)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let blob = Data((0..<600_000).map { UInt8($0 % 251) })
+        try blob.write(to: dir.appendingPathComponent("big.bin"))
+        _ = await kernel.send([
+            Item(
+                AgentId("kernel_state"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                    "handler_module": .string("file_bridge.tools"), "allow": ["."],
+                    "id": .string("files"), "root": .string(rel),
+                    "ingress_rule": .string("allow_all_ingress"),
+                    "callable_by": .object(["$parent": .string("*"), "web": .string("*")]),
+                ]))
+        ])[0].result
+        _ = await kernel.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("update_agent"), "id": .string("web"),
+                    "can_call": .object(["files": .string("*")]),
+                ]))
+        ])[0].result
+        let port = await bootWeb(kernel)
+        defer { Task { await stopWeb(kernel) } }
+        let (data, response) = try await URLSession(configuration: .ephemeral).data(
+            from: URL(string: "http://127.0.0.1:\(port)/files/file/big.bin")!)
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 200)
+        #expect(http.value(forHTTPHeaderField: "Content-Length") == "600000")
+        #expect(data == blob)
+        let reads = kernel.rows.all().filter {
+            $0["agent"]?.asString == "files" && $0["verb"]?.asString == "read_stream"
+        }
+        #expect(reads.count == 3, "one read per 262144-byte chunk: \(reads.count)")
+    }
+
+    /// A chunk that fails MID-FILE ends the body short of the length the head
+    /// declared — a truncated transfer, never a shorter file that looks
+    /// complete.
+    @Test func aChunkThatFailsMidFileTruncatesTheTransfer() async throws {
+        let kernel = try await startWebKernel()
+        kernel.bundles.register("short_source.tools", ShortSource())
+        _ = await kernel.send([
+            Item(
+                AgentId("kernel_state"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                    "handler_module": .string("short_source.tools"), "id": .string("short"),
+                    "callable_by": .object(["$parent": .string("*"), "web": .string("*")]),
+                ]))
+        ])[0].result
+        _ = await kernel.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("update_agent"), "id": .string("web"),
+                    "can_call": .object(["short": .string("*")]),
+                ]))
+        ])[0].result
+        let port = await bootWeb(kernel)
+        defer { Task { await stopWeb(kernel) } }
+        do {
+            let (data, response) = try await URLSession(configuration: .ephemeral).data(
+                from: URL(string: "http://127.0.0.1:\(port)/short/file/x.bin")!)
+            let http = try #require(response as? HTTPURLResponse)
+            #expect(http.value(forHTTPHeaderField: "Content-Length") == "10")
+            #expect(data.count < 10, "a short body read as a complete file")
+        } catch {
+            // The client saw the connection end mid-body — the truncated
+            // transfer itself.
+        }
+    }
+
     /// A11.31 — a REST-originated dispatch is a CHILD of the web boot task
     /// (python serves under `CURRENT_TASK.scope`); swift rooted every request,
     /// so the task row's `parent` was null.
@@ -647,10 +729,6 @@ struct HTTPServerTests {
     /// Bytes that will not decode are web_rest's own 400 — python catches the
     /// `UnicodeDecodeError` with the `JSONDecodeError` (it answered starlette's
     /// 500 text/plain until the leg caught it; parity 2026-10-01).
-    ///
-    /// RESIDUAL (D13): `NaN`/`Infinity` and lone-surrogate escapes still answer
-    /// 400 — `FantasticJSON` can represent neither, so python's 204 for those
-    /// two bodies is not reachable without a second number/string model.
     @Test func jsonBodyDecodesLikeCPythonJsonLoads() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -883,19 +961,23 @@ struct HTTPServerTests {
         }
     }
 
-    /// PYTHON'S `json.loads` ACCEPTS THE THREE NON-FINITE CONSTANTS JSON does
-    /// not (`allow_nan`), so a bare `NaN` / `Infinity` / `-Infinity` body PARSES
-    /// there — to a float, which is not a dict: `body must be a JSON object`,
-    /// 400. Swift's codec refuses them outright, which answered the parse-error
-    /// text instead; the answer is spelled in the leg rather than by widening
-    /// the codec.
-    @Test func webRestNonFiniteBodyIsNotAJSONObject() async throws {
+    /// D13 — python reads a REST body with `strict_loads` (`io_bridge.loads`):
+    /// `NaN`/`Infinity`, an integer outside int64, an overflowing number, a raw
+    /// control character and a leading-zero number are NOT VALID JSON — the
+    /// parse 400, never a dispatch and never `body must be a JSON object`. Twin
+    /// of python `test_post_endpoint_rejects_a_non_finite_number`.
+    @Test func webRestStrictBodiesAreNotValidJSON() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
         let restId = await mountRest(kernel)
         defer { Task { await stopWeb(kernel) } }
         let session = URLSession(configuration: .ephemeral)
-        for body in ["NaN", "Infinity", "-Infinity"] {
+        for body in [
+            "NaN", "Infinity", "-Infinity", #"{"type": "reflect", "x": NaN}"#,
+            #"{"type": "reflect", "x": 12345678901234567890}"#,
+            #"{"type": "reflect", "x": 1e400}"#, #"{"type": "reflect", "x": 01}"#,
+            "{\"type\": \"reflect\", \"x\": \"a\u{01}b\"}",
+        ] {
             var req = URLRequest(
                 url: URL(string: "http://127.0.0.1:\(port)/\(restId)/kernel_state")!)
             req.httpMethod = "POST"
@@ -903,7 +985,8 @@ struct HTTPServerTests {
             let (data, response) = try await session.data(for: req)
             #expect((response as? HTTPURLResponse)?.statusCode == 400, "\(body)")
             #expect(
-                try JSON.parse(data)["error"].asString == "web_rest: body must be a JSON object",
+                try JSON.parse(data)["error"].asString
+                    == "web_rest: request body is not valid JSON",
                 "\(body): \(String(data: data, encoding: .utf8) ?? "")")
         }
     }
@@ -1025,5 +1108,29 @@ struct ParentProbe: AgentBundle {
             "parent": row?["parent"] ?? .null,
             "ps_parent": ps?["parent"] ?? .null,
         ])
+    }
+}
+
+/// A `read_stream` SOURCE whose second chunk fails: the first declares a
+/// 10-byte file and carries 4 bytes, the next read is refused.
+struct ShortSource: AgentBundle {
+    let name = "short_source"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { nil }
+    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
+        async throws -> (JSON?, Data?)
+    {
+        if header["offset"].asInt == 0 {
+            return (
+                .object([
+                    "path": header["path"], "offset": .integer(0), "bytes": .null,
+                    "next_offset": .integer(4), "eof": .bool(false), "size": .integer(10),
+                ]), Data([1, 2, 3, 4])
+            )
+        }
+        return (
+            .object([
+                "error": .string("disk went away"), "reason": .string("transport_error"),
+            ]), nil
+        )
     }
 }

@@ -38,8 +38,17 @@ public enum RootDocs {
         return suf.isEmpty ? name : String(name.dropLast(suf.count))
     }
 
+    /// Python `Path.is_file()`: `stat` (following symlinks) says a REGULAR
+    /// file. A directory, FIFO, socket or device named `<key>.md` is not one —
+    /// `fileExists && !isDirectory` said a FIFO was, and reading it blocked
+    /// the reflect forever.
+    static func pyIsFile(_ path: String) -> Bool {
+        var st = stat()
+        return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG
+    }
+
     /// Walk a `docs/` directory the way python's `_readme_index` does: every
-    /// file whose [`pySuffix`] is `.md`, in sorted name order, each extended by
+    /// regular file ([`pyIsFile`]) whose [`pySuffix`] is `.md`, in sorted name order, each extended by
     /// the children of a sibling dir of the same [`pyStem`]. Absent or empty dir
     /// → `[]`.
     ///
@@ -56,10 +65,7 @@ public enum RootDocs {
         for name in names.sorted() {
             guard pySuffix(name) == ".md" else { continue }
             let file = dir.appendingPathComponent(name)
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: file.path, isDirectory: &isDir), !isDir.boolValue,
-                let data = try? Data(contentsOf: file)
-            else { continue }
+            guard pyIsFile(file.path), let data = try? Data(contentsOf: file) else { continue }
             if let decodeError = pyUtf8DecodeError(data) {
                 throw PyError("UnicodeDecodeError", decodeError)
             }
@@ -67,6 +73,7 @@ public enum RootDocs {
             let stem = pyStem(name)
             let key = prefix + stem
             let sub = dir.appendingPathComponent(stem)
+            var isDir: ObjCBool = false
             let children: [Node] =
                 fm.fileExists(atPath: sub.path, isDirectory: &isDir) && isDir.boolValue
                 ? try walk(sub, prefix: key + "/") : []

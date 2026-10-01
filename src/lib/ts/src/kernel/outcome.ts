@@ -8,6 +8,7 @@
 //     const r = (await kernel.send([{ target, payload }]))[0].result;
 
 import type { Json, Payload } from "./json.ts";
+import { pyTruthy } from "./pyjson.ts";
 
 /**
  * The terminal states of ONE batch item (python's outcome vocabulary):
@@ -53,24 +54,24 @@ export interface Outcome {
   pid: number | null;
   status: Status;
   result: Json;
-  attempts: number;
+  /** How many times the execution RAN — on an owned execution's final outcome
+   *  only. An outcome that ran nothing (a refusal, a dying task's send, a
+   *  joiner's own expired wait, the `kernel` reflect fast path) has none —
+   *  python `outcome()` is exactly `{pid, status, result}`. */
+  attempts?: number;
   /** The caller's NAME for this execution, echoed when the item named one. */
   name?: string;
 }
 
 /** A refusal never reached the task table, so it carries no pid. */
 export function refused(result: Json): Outcome {
-  return { pid: null, status: "failed", result, attempts: 1 };
+  return { pid: null, status: "failed", result };
 }
 
 /** A reply that SAYS no: a dict carrying a truthy `error` (python truthiness). */
 export function errorShaped(result: Json): boolean {
   if (result === null || typeof result !== "object" || Array.isArray(result)) return false;
-  const e = (result as Payload)["error"];
-  if (e === undefined || e === null || e === false || e === 0 || e === "") return false;
-  if (Array.isArray(e)) return e.length > 0;
-  if (typeof e === "object") return Object.keys(e).length > 0;
-  return true;
+  return pyTruthy((result as Payload)["error"]);
 }
 
 /** A message id as an int: a positive integer, or its decimal string (a model

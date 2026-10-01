@@ -338,4 +338,50 @@ extension LedgerTests {
         #expect(said.status == .errored)
         #expect(said.attempts == 1, "a semantic no is never re-sent: \(said.attempts)")
     }
+
+    /// python's in-RAM `ledger` renders a NAMED outcome `_json_safe`: a raw
+    /// chunk in its result reads `<bytes:N>` until the row flushes as
+    /// `{len: N}`.
+    @Test func aNamedChunkReadsAsBytesNInTheInRamLedger() async {
+        struct Chunker: AgentBundle {
+            let name = "chunker"
+            func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+                nil
+            }
+            func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
+                async throws -> (JSON?, Data?)
+            {
+                let head: JSON = .object([
+                    "path": .string("x"), "bytes": .null, "eof": .bool(true),
+                ])
+                return (head, Data([1, 2, 3]))
+            }
+        }
+        let reg = BundleRegistry()
+        reg.register("chunker.tools", Chunker())
+        let k = Kernel(storage: .inMemory, bundles: reg)
+        let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
+        k.register(root)
+        k.setRoot(root)
+        _ = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("kernel"),
+                    "handler_module": .string("chunker.tools"), "id": .string("ch"),
+                ]))
+        ])
+        let out = await k.send([
+            Item(AgentId("ch"), .object(["type": .string("read_stream")]), id: "rd", binary: Data())
+        ])[0]
+        #expect(out.body == Data([1, 2, 3]))
+        let ledger = await k.send([
+            Item(AgentId("kernel"), .object(["type": .string("ledger")]))
+        ])[0].result
+        let row = (ledger["executions"].asArray ?? []).first { $0["name"].asString == "rd" }
+        let want: JSON = .object([
+            "path": .string("x"), "bytes": .string("<bytes:3>"), "eof": .bool(true),
+        ])
+        #expect(row?["outcome"]["result"] == want, "\(String(describing: row))")
+    }
 }

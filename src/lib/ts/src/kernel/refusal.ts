@@ -14,6 +14,7 @@
 // stated a fact and withheld every fact that would have repaired it.
 
 import type { Json, Payload } from "./json.ts";
+import { pyRepr } from "./pyjson.ts";
 
 // The closed set. Each names a KIND of refusal, not a call site — two verbs
 // failing for the same reason share a code.
@@ -79,11 +80,55 @@ export function bad(verb: string, arg: string, want: string, hint = ""): Payload
   return refusal(BAD_ARG, `${verb}: ${arg} must be ${want}`, { hint, extra: { arg } });
 }
 
+/** How many live ids an `unknown_agent` refusal lists (python
+ *  `UNKNOWN_AGENT_IDS_MAX`); `agent_count` says how many there are. */
+export const UNKNOWN_AGENT_IDS_MAX = 40;
+
 /** No agent by that id — NAMES the live ids, because a bare "no agent 'x'"
- *  teaches the caller nothing it can act on. */
-export function unknown(id: string, live: string[]): Payload {
-  return refusal(UNKNOWN_AGENT, `no agent '${id}'`, {
-    hint: "name one of the live ids, or create it first",
-    extra: { agents: live.slice().sort() as Json },
+ *  teaches the caller nothing it can act on (python `Kernel.unknown_agent`).
+ *  An id wrapped in angle brackets is a SLOT copied out of an example, never an
+ *  id this kernel holds — so that, and only that, gets a hint. `extra` is merged
+ *  last. */
+export function unknown(id: string, live: string[], extra: Payload = {}): Payload {
+  const ids = live.slice().sort();
+  const out = refusal(UNKNOWN_AGENT, `no agent ${pyRepr(id)}`, {
+    extra: { agent_count: ids.length, agents: ids.slice(0, UNKNOWN_AGENT_IDS_MAX) as Json },
   });
+  if (id.startsWith("<") && id.endsWith(">")) {
+    out["hint"] = `${pyRepr(id)} is a PLACEHOLDER from an example, not an id — substitute one of \`agents\`.`;
+  }
+  Object.assign(out, extra);
+  return out;
+}
+
+/** The one reserved agent id — the operator's name (send target, store identity). */
+export const RESERVED_ID = "kernel";
+
+/**
+ * Refuse an agent id that is not ONE SAFE NAME (python `guard_agent_id`).
+ * Returns a refusal, or null when the id is fine.
+ *
+ * An id becomes a directory on the host (the loader persists each record under
+ * it), a `|` marks a FOREIGN `<guid>|<agent>` (a local id never carries one, so
+ * the gate tells local from foreign by the id alone), an all-digit id reads as a
+ * message id, and `kernel` is the operator.
+ */
+export function guardAgentId(verb: string, agentId: unknown): Payload | null {
+  if (typeof agentId !== "string" || agentId === "") return bad(verb, "id", "a non-empty string");
+  const r = pyRepr(agentId);
+  if (agentId.includes("/") || agentId.includes("\\")) {
+    return bad(verb, "id", `a single path segment (no separators); got ${r}`);
+  }
+  if (agentId === "." || agentId === ".." || agentId.includes("..")) {
+    return bad(verb, "id", `a name that is not a path traversal; got ${r}`);
+  }
+  if (agentId.startsWith(".")) return bad(verb, "id", `a name that is not hidden; got ${r}`);
+  if (/^\p{Nd}+$/u.test(agentId)) {
+    return bad(verb, "id", `a name, not a number (message ids are ints); got ${r}`);
+  }
+  if (agentId.includes("|")) {
+    return bad(verb, "id", `a local name without \`|\` (it marks a foreign \`guid|agent\`); got ${r}`);
+  }
+  if (agentId === RESERVED_ID) return bad(verb, "id", `a name other than the reserved ${pyRepr(RESERVED_ID)}`);
+  return null;
 }

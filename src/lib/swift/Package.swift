@@ -133,7 +133,9 @@ let package = Package(
         // the kernel (`RecordWriter.swift`), which the kernel's own tests drive.
         .target(
             name: "FantasticKernelState",
-            dependencies: ["FantasticKernel", "FantasticJSON",
+            // `FantasticFile` for the running-dir clamp (`fs`) every loader path
+            // goes through — python's `kernel_state` imports `file_bridge.fs`.
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticFile",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         // The MEMORY STORE in RAM (python `memory/ram_store`): rows per owner,

@@ -189,68 +189,39 @@ extension Kernel {
         }
     }
 
-    /// Read a store-relative path through the provider, PUMPED TO EOF over the
-    /// `read_stream` SOURCE.
-    ///
-    /// To EOF, not one chunk: a single read caps at the chunk size, so a large
-    /// record's JSON parse would fail on the fragment, the merge fall back to an
-    /// empty map, and every non-kernel key already on disk be quietly dropped on
-    /// the next write. A partial read that looks like a successful one is the
-    /// worst shape available.
-    /// Outcome of a pumped store read: the whole file, or the leg's own refusal.
-    /// Callers must distinguish "absent" (`reason: not_found`) from "denied" or
-    /// "the transport broke" — collapsing them to nil made a sealed store look
-    /// like an empty file (measured 2026-09-02).
-    enum StoreRead {
-        case bytes(Data)
-        case refused(JSON)
-    }
-
-    /// Read a store file WHOLE, pumping `read_stream` to EOF. A single
-    /// unpumped read returns only the first chunk (64 KiB by default), which
-    /// silently truncated every larger sidecar and ledger.
-    func readWholeViaStore(_ storeId: AgentId, _ path: String) async -> StoreRead {
-        var data = Data()
-        var offset = 0
+    /// The WHOLE existing record, paged to EOF — python `_persist_via_store`'s
+    /// merge read: `read_stream {path, offset}` until `eof` (or no int
+    /// `next_offset`). One page caps at the store's chunk (64 KiB by default),
+    /// so a larger record failed to parse and silently lost its unknown keys on
+    /// the next write. A page that is not a chunk — a refusal, absent or not —
+    /// empties the read: the merge starts from `{}`, as python's does.
+    private func readRecordViaStore(_ storeId: AgentId, _ path: String) async -> Data {
+        var buf = Data()
+        var offset: Int64 = 0
         while true {
             let (got, body) = await storeSendBinary(
                 storeId,
                 .object([
                     "type": .string("read_stream"), "path": .string(path),
-                    "offset": .integer(Int64(offset)),
+                    "offset": .integer(offset),
                 ]), Data())
-            if got["error"].asString != nil {
-                // A refusal on the FIRST chunk is the file's status; one
-                // mid-stream is a partial read and must never look like a
-                // shorter file.
-                return .refused(got)
-            }
-            data.append(body ?? Data())
-            if got["eof"].asBool == true { break }
-            guard let next = got["next_offset"].asInt, Int(next) > offset else { break }
-            offset = Int(next)
+            guard case .object(let o) = got, let chunk = body else { return Data() }
+            buf.append(chunk)
+            // python `got.get("eof", True) or not isinstance(next_offset, int)`.
+            if pyTruthy(o["eof"] ?? .bool(true)) { break }
+            guard case .integer(let n)? = o["next_offset"] else { break }
+            offset = n
         }
-        return .bytes(data)
+        return buf
     }
 
-    /// ONE `read_stream` call, no pumping (C44, D6): python's merge read and
-    /// readme/doc presence check are each a SINGLE
-    /// `kernel.send([{read_stream...}])` at the store's default 64 KiB chunk
-    /// (`file_bridge._read_stream`'s `length` default) — a record or doc over
-    /// that size fails its `json.loads`/never round-trips its tail, and
-    /// python accepts exactly that (`existing = {}`, unknown keys silently
-    /// drop on the next write) rather than pumping to EOF. Mirrored, not
-    /// patched over: pumping here would make a swift store more forgiving of
-    /// a large record than python's own loader ever is.
-    ///
-    /// `nil` only for a refused reply; an error-free reply with zero bytes
-    /// (an empty file) answers `""` — "present, empty" is a real answer, not
-    /// an absence.
-    private func readViaStore(_ storeId: AgentId, _ path: String) async -> String? {
+    /// Is a store path present? python `_seed_doc_via_store`'s probe: ONE
+    /// `read_stream {path}` whose answer carries a chunk.
+    private func presentViaStore(_ storeId: AgentId, _ path: String) async -> Bool {
         let (got, body) = await storeSendBinary(
             storeId, .object(["type": .string("read_stream"), "path": .string(path)]), Data())
-        if got["error"].asString != nil { return nil }
-        return String(data: body ?? Data(), encoding: .utf8) ?? ""
+        if case .object = got, body != nil { return true }
+        return false
     }
 
     /// Persist an agent's record onto its per-agent `agent.yaml` THROUGH the
@@ -258,6 +229,10 @@ extension Kernel {
     /// the kernel-managed keys, write back — sidecar fields survive). No-op in
     /// InMemory / ephemeral / no-provider-wired (RAM). If the provider is sealed
     /// it refuses and the write doesn't land — NO fallback.
+    ///
+    /// ONLY A WRITE THAT LANDED SEEDS THE SIDECARS (python `_persist_via_store`
+    /// returns before `_seed_readme_via_store` on a failed write or rename):
+    /// the bundle's `readme.md` and its `docs/` tree, copy-if-missing.
     public func persistRecord(_ agent: Agent) async {
         if storage.isInMemory || agent.ephemeral { return }
         guard let storeId = findStore(), let rootAgent = root else { return }
@@ -265,7 +240,8 @@ extension Kernel {
         let af = reldir.isEmpty ? RECORD_FILE : "\(reldir)/\(RECORD_FILE)"
         // Merge: read existing through the provider, overlay kernel-managed keys.
         var existing: OrderedDictionary<String, JSON> = [:]
-        if let content = await readViaStore(storeId, af),
+        let buf = await readRecordViaStore(storeId, af)
+        if !buf.isEmpty, let content = String(data: buf, encoding: .utf8),
             case .object(let d)? = try? YamlIO.load(content)
         {
             existing = d
@@ -304,21 +280,32 @@ extension Kernel {
             .object([
                 "type": .string("rename"), "old_path": .string(tmp), "new_path": .string(af),
             ]))
-        if case .object = moved, !pyTruthy(moved["error"]) {
-            persistLanded()
-        } else {
+        guard case .object = moved, !pyTruthy(moved["error"]) else {
             persistFailed(storeId, af, moved)
+            return
+        }
+        persistLanded()
+        await seedSidecarsViaStore(storeId, reldir: reldir, agent.handlerModule)
+    }
+
+    /// Copy-if-missing the bundle's shipped `readme.md` AND its `docs/` topic
+    /// tree into the agent's dir THROUGH the provider — never clobber operator
+    /// edits. Python `_seed_readme_via_store`: the source is the installed
+    /// bundle, the sink the stream provider.
+    private func seedSidecarsViaStore(_ storeId: AgentId, reldir: String, _ hm: String?) async {
+        guard let hm, let bundle = bundles.get(hm) else { return }
+        let prefix = reldir.isEmpty ? "" : "\(reldir)/"
+        if let readme = bundle.readme {
+            await seedDocViaStore(storeId, "\(prefix)readme.md", readme)
+        }
+        for (key, body) in bundle.docs {
+            await seedDocViaStore(storeId, "\(prefix)docs/\(key).md", body)
         }
     }
 
-    /// Seed a `readme.md` (copy-if-missing) into the agent's dir THROUGH the
-    /// provider — never clobber operator edits. No-op without a wired provider.
-    public func seedReadmeViaStore(_ agent: Agent, content: String) async {
-        if storage.isInMemory || agent.ephemeral { return }
-        guard let storeId = findStore(), let rootAgent = root else { return }
-        let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: agent.rootPath)
-        let path = reldir.isEmpty ? "readme.md" : "\(reldir)/readme.md"
-        if await readViaStore(storeId, path) != nil { return }  // already present
+    /// One `.md` file through the provider, copy-if-missing.
+    private func seedDocViaStore(_ storeId: AgentId, _ path: String, _ content: String) async {
+        if await presentViaStore(storeId, path) { return }
         _ = await storeSendBinary(
             storeId,
             .object([

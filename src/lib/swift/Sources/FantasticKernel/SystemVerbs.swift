@@ -573,9 +573,16 @@ extension Kernel {
                 await cascadeDelete(target: child)
             }
         }
-        // Fire bundle.on_delete hook (best-effort).
+        // Fire bundle.on_delete hook (best-effort) — a hook that raises is
+        // SAID, as python's `Agent.on_delete` prints it (stdout), and the
+        // cascade goes on.
         if let hm = target.handlerModule, let bundle = bundles.get(hm) {
-            try? await bundle.onDelete(agentId: target.id, kernel: self)
+            do {
+                try await bundle.onDelete(agentId: target.id, kernel: self)
+            } catch {
+                RuntimeLog.out(
+                    "  [cascade] \(target.id.value) bundle on_delete raised: \(pyErrorText(error))")
+            }
         }
         // Detach from parent's children map.
         if let parentId = target.parentId, let parent = agent(parentId) {

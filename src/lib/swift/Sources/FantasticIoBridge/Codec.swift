@@ -101,6 +101,27 @@ public enum Codec {
         }
     }
 
+    /// The path an inbound binary CALL must name for its body to reach the
+    /// target: the payload's own `bytes` field.
+    public static let callBinaryPath = "payload.bytes"
+
+    /// python `decode_frame`'s placement of a binary call's body, in swift's
+    /// carrier. Python sets the body at `_binary_path` and hands the payload
+    /// to `kernel.send`; swift's `JSON` holds no bytes, so when the path is the
+    /// payload's own `bytes` field that key leaves the payload and the body
+    /// becomes the item's binary (`Item.binary`), the slot a handler reads raw
+    /// bytes from. Any other path leaves the payload as sent and the body has
+    /// nowhere to go (`binary` nil).
+    public static func callPayload(_ envelope: JSON, body: Data) -> (
+        payload: JSON, binary: Data?
+    ) {
+        let payload = envelope.asObject?["payload"] ?? .object([:])
+        guard envelope["_binary_path"].asString == callBinaryPath, case .object(var p) = payload
+        else { return (payload, nil) }
+        p.removeValue(forKey: "bytes")
+        return (.object(p), body)
+    }
+
     /// Decode a binary frame → `(header, body)`.
     ///
     /// A frame arrives from a PEER, so every length in it is hostile until
@@ -130,7 +151,7 @@ public enum Codec {
             throw FrameError("bad binary frame header: 'utf-8' codec can't decode bytes")
         }
         do {
-            return (try JSON.parse(headerStr), body)
+            return (try JSON.parseStrict(headerStr), body)
         } catch {
             throw FrameError("bad binary frame header: \(error)")
         }

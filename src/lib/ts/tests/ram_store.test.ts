@@ -3,8 +3,8 @@
 //
 // Callers act through `scopedFor` (a real agent send, gated both ways); the
 // operator is a bare `kernel.send`. The root's guid is set by hand — the root is
-// not booted here, and the store keys every row by it. (The python file's
-// remote-caller case has no counterpart: this kernel has no inbound bridge leg.)
+// not booted here, and the store keys every row by it. A caller on ANOTHER
+// kernel arrives the way the bridge delivers a host's call: `foreignView`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -96,7 +96,7 @@ test("a store refuses when the kernel has no guid", async () => {
   k.updateMeta(ROOT, { guid: null });
   const out = await call(k, { type: "read" }, "alice");
   assert.equal(out["reason"], "not_found");
-  assert.match(String(out["hint"]), /kernel_start/);
+  assert.equal(out["hint"], "boot the kernel root first (it mints the guid)");
 });
 
 test("refs must name the owner's own rows", async () => {
@@ -215,4 +215,121 @@ test("the store's verbs reach a reader through the bundle readme", async () => {
   assert.match(String(r["readme"]), /append: args: rows/);
   assert.equal(r["operator"], true);
   assert.deepEqual(r["admins"], ["kernel"]);
+});
+
+// python `test_remote_caller_is_keyed_by_its_qualified_address`: a host's call
+// relayed in over the bridge is keyed by ITS qualified address, verbatim — never
+// under this kernel's guid — and the local callers' rows stay theirs.
+test("a caller on another kernel is keyed by its qualified address", async () => {
+  const k = store();
+  const mem = k.get("mem")!;
+  mem.meta["callable_by"] = { ...(mem.meta["callable_by"] as Payload), "g2|scout": "*" };
+  const scout = k.foreignView("g2|scout");
+  const out = (await scout.send([{ target: "mem", payload: { type: "append", rows: [{ id: 1 }] } }]))[0]!;
+  assert.deepEqual((out.result as Payload)["ids"], [1]);
+  const owners = async (): Promise<Json[]> =>
+    ((((await call(k, { type: "dump" }))["tables"] as Payload)["rows"]) as Payload[]).map((r) => r["owner"]!).sort();
+  assert.deepEqual(await owners(), ["g2|scout"]);
+  await append(k, "alice", [{ id: 2 }]);
+  assert.deepEqual(await owners(), ["g1|alice", "g2|scout"]);
+  // a share NAMING the foreign reader is the key it reads under
+  const g = await call(k, { type: "share", with: "g2|scout", scope: { row: 2 } }, "alice");
+  const got = (await scout.send([{ target: "mem", payload: { type: "read", grant: g["grant"]! } }]))[0]!;
+  assert.deepEqual(ids(got.result as Payload), [2]);
+  // and it needs no guid of THIS kernel's: the qualified address is the key
+  k.updateMeta(ROOT, { guid: null });
+  const read = (await scout.send([{ target: "mem", payload: { type: "read" } }]))[0]!;
+  assert.deepEqual(ids(read.result as Payload), [1]);
+});
+
+// python `_text_of` / `str.splitlines()`: structured content is indexed as
+// `json.dumps` writes it (`", "` / `": "`), and every python line boundary splits.
+test("search reads structured content and lines the way python does", async () => {
+  const k = store();
+  await append(k, "alice", [
+    { id: 1, content: { a: 1, b: "é" } },
+    { id: 2, content: "one\rtwo\u2028three\x0bfour" },
+  ]);
+  const s1 = await call(k, { type: "search", query: '"a": 1' }, "alice");
+  assert.deepEqual(s1["matches"], [{ id: 1, line: 1, text: '{"a": 1, "b": "é"}' }]);
+  const s2 = await call(k, { type: "search", query: "three" }, "alice");
+  assert.deepEqual(s2["matches"], [{ id: 2, line: 3, text: "three" }]);
+  const s3 = await call(k, { type: "search", query: "four" }, "alice");
+  assert.deepEqual(s3["matches"], [{ id: 2, line: 4, text: "four" }]);
+});
+
+test("share: a falsy mode is the default; refusals quote as python does", async () => {
+  const k = store();
+  await append(k, "alice", [{ id: 1 }]);
+  const g = await call(k, { type: "share", with: "bob", scope: { row: 1 }, mode: "" }, "alice");
+  assert.equal(g["created"], true);
+  const listed = (await call(k, { type: "grants", side: "given" }, "alice"))["grants"] as Payload[];
+  assert.equal(listed[0]!["mode"], "frozen");
+  const bad = await call(k, { type: "share", with: "bob", scope: { row: 1 }, mode: "x" }, "alice");
+  assert.equal(bad["error"], "share: mode must be one of ('frozen', 'live')");
+  const unk = await call(k, { type: "nope" }, "alice");
+  assert.deepEqual(unk, { error: "ram_store: unknown type 'nope'", reason: "unhandled", verb: "nope" });
+});
+
+// python `_caller`: `not agent.record.get("operator")` — truthiness, not `=== true`;
+// the hint is python's text verbatim (python ram_store/tools.py `_caller`).
+test("the operator flag reads as python truthiness; the hint is python's", async () => {
+  const k = store();
+  for (const off of [false, 0, "", null, [], {}]) {
+    k.updateMeta("mem", { operator: off as Json });
+    assert.deepEqual(await call(k, { type: "read" }), {
+      error: "mem: the operator is not served here",
+      reason: "unauthorized",
+      hint: "update_agent id=mem operator=true to serve the operator (as 'kernel')",
+      side: "store",
+    });
+  }
+  for (const on of [true, 1, "yes", [0], { a: 1 }]) {
+    k.updateMeta("mem", { operator: on as Json });
+    assert.deepEqual((await call(k, { type: "read" }))["rows"], [], `operator=${JSON.stringify(on)} serves`);
+  }
+});
+
+// Measured from python's ram_store (a probe over the python kernel fixture,
+// 2026-10-01): each refusal quotes the caller's value as `repr` does.
+test("refusals quote a caller's value as python repr does", async () => {
+  const k = store();
+  const rid = async (id: Json) => (await append(k, "alice", [{ id }]))["error"];
+  assert.equal(await rid("7"), "append: a row id is a kernel int, got '7'");
+  assert.equal(await rid(1.5), "append: a row id is a kernel int, got 1.5");
+  assert.equal(await rid(true), "append: a row id is a kernel int, got True");
+  assert.equal(await rid(0.00001), "append: a row id is a kernel int, got 1e-05");
+  assert.equal(await rid(-3), "append: a row id is a kernel int, got -3");
+  assert.equal(await rid([1]), "append: a row id is a kernel int, got [1]");
+  assert.equal(await rid({ a: 1 }), "append: a row id is a kernel int, got {'a': 1}");
+  assert.equal(await rid(0), "append: a row id is a kernel int, got 0");
+  assert.equal(
+    (await append(k, "alice", [{ id: 20, refs: [10, 11] }]))["error"],
+    "append: row 20 refs rows that do not exist for this owner: [10, 11]",
+  );
+  assert.equal(
+    (await append(k, "alice", [{ id: 21, refs: ["10"] }]))["error"],
+    "append: row 21 refs rows that do not exist for this owner: ['10']",
+  );
+  const grant = async (g: Json) => (await call(k, { type: "read", grant: g }, "alice"))["error"];
+  assert.equal(await grant("abc"), "read: grant 'abc' does not exist — revoked (unshare) or its rows were pruned");
+  assert.equal(await grant(99), "read: grant 99 does not exist — revoked (unshare) or its rows were pruned");
+  assert.equal(await grant(1.5), "read: grant 1.5 does not exist — revoked (unshare) or its rows were pruned");
+  // python quotes the fold AFTER `_as_id`: a value that is no id reads `None`
+  const fold = async (f: Json) =>
+    (await call(k, { type: "inject", tables: { rows: [], fold_refs: [{ owner: "g1|alice", fold: f, members: [] }], grants: [] } }))["error"];
+  assert.equal(await fold("x"), "inject: fold_refs names no row None");
+  assert.equal(await fold(9), "inject: fold_refs names no row 9");
+  assert.equal(await fold(null), "inject: fold_refs names no row None");
+});
+
+test("a ref of '0' is an id python reads (0), not a non-id — the refusal names it as python does", async () => {
+  const k = store();
+  const r = await append(k, "alice", [{ id: 30, kind: "fold", refs: ["0"] }]);
+  // measured on python's ram_store (2026-10-01)
+  assert.deepEqual(r, {
+    error: "append: row 30 refs rows that do not exist for this owner: ['0']",
+    reason: "not_found",
+    arg: "rows",
+  });
 });

@@ -258,7 +258,7 @@ async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 /// its returned blob back into `bytes` (utf-8) so the `contains:{bytes:…}`
 /// matcher sees streamed content — the mirror of python `_engine`'s
 /// `_decode_bytes_fields` + its bytes-path decode. Runs under whatever
-/// sender/operator context the caller set, so `send_with_binary`'s gate applies.
+/// sender/operator context the caller set, so the send gate applies.
 async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
     // Binary channel when the payload carries content (`bytes_utf8` — the
     // file_bridge text verbs: write/edit/append) or is a stream verb; the
@@ -277,11 +277,14 @@ async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
     let blob = payload
         .as_object_mut()
         .and_then(|o| o.remove("bytes_utf8"))
-        .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()))
-        .unwrap_or_default();
-    let (mut reply, body) = k
-        .send_with_binary(&AgentId::from(target), payload, blob)
-        .await;
+        .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()));
+    let item = Item::new(AgentId::from(target), payload);
+    let item = match blob {
+        Some(b) => item.with_binary(b),
+        None => item.with_raw_reply(),
+    };
+    let out = k.send(vec![item]).await.remove(0);
+    let (mut reply, body) = (out.result, out.body);
     if let Some(body) = body {
         if let Some(o) = reply.as_object_mut() {
             o.insert(

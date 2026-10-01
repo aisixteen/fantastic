@@ -24,6 +24,12 @@ public protocol AgentBundle: Sendable {
     /// return `nil` (the default).
     var readme: String? { get }
 
+    /// The bundle's shipped `docs/` topic tree, flattened pre-order as
+    /// `(key, body)` (`<key>.md`, nested keys in nested dirs) — python's
+    /// package `docs/` resource. The loader seeds it beside the readme,
+    /// copy-if-missing, on every persist that lands. Default: none.
+    var docs: [(key: String, body: String)] { get }
+
     /// WHICH VERBS THIS BUNDLE DECLARES — python's module-level `VERBS` table,
     /// read STATICALLY (`Agent.advertises(verb)`): no send, no call row, no task
     /// row, no ledger execution, no watcher echo. `shutdownAgents` picks its
@@ -152,6 +158,8 @@ extension AgentBundle {
     ) -> String? { nil }
 
     public var readme: String? { nil }
+
+    public var docs: [(key: String, body: String)] { [] }
 
     public var verbs: [String] { [] }
 

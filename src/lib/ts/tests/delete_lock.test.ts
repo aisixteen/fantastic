@@ -58,3 +58,36 @@ test("an unknown id is the generic unknown_agent", () => {
   const k = tree();
   assert.equal(k.remove("nobody")["reason"], "unknown_agent");
 });
+
+// python `Agent.delete`: THE ROOT IS NOT DELETABLE — cascading it would empty the
+// kernel and (through the proxy_loader's `removed` events) forget this kernel's
+// whole namespace on the host. An unknown id says `deleted: false`.
+test("the root is refused, and nothing is removed or forgotten", () => {
+  const k = tree();
+  const events: string[] = [];
+  k.addStateSubscriber((e) => events.push(`${e.kind}:${e.agent_id}`));
+  // even with every lock cleared, the root stays
+  k.updateMeta("background", { delete_lock: false });
+  k.updateMeta("leaf", { delete_lock: false });
+  events.length = 0;
+  assert.deepEqual(k.remove("canvas"), {
+    error: "remove: canvas is the ROOT — it owns persistence and answers the kernel verbs; deleting it would leave no kernel",
+    reason: "bad_arg",
+    arg: "id",
+    id: "canvas",
+    deleted: false,
+  });
+  assert.equal(k.agents.size, 5);
+  assert.deepEqual(events, []);
+});
+
+test("an unknown id carries python's unknown_agent shape, with deleted: false", () => {
+  const k = tree();
+  assert.deepEqual(k.remove("nobody"), {
+    error: "no agent 'nobody'",
+    reason: "unknown_agent",
+    agent_count: 5,
+    agents: ["background", "canvas", "free", "group", "leaf"],
+    deleted: false,
+  });
+});

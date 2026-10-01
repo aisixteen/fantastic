@@ -114,7 +114,7 @@ extension Kernel {
         // 3. timeout — `item.rawTimeout` (C38) supersedes the typed `item.
         // timeout` when a caller is forwarding a value it did not itself
         // parse.
-        let timeout: Double?
+        let timeout: Deadline?
         switch resolveTimeout(item) {
         case .ok(let t): timeout = t
         case .refused(let r): return .settled(Outcome.refused(r))
@@ -284,7 +284,7 @@ extension Kernel {
             if let raw = item.rawTimeout, raw != .null {
                 callRow["timeout"] = raw
             } else {
-                callRow["timeout"] = timeout.map { JSON.double($0) } ?? .null
+                callRow["timeout"] = timeout.map { JSON.double($0.seconds) } ?? .null
             }
             if let name { callRow["name"] = .string(name) }
             _ = try? rowsPut(target.id, callRow)
@@ -309,19 +309,29 @@ extension Kernel {
     /// caller relaying an untyped value, SUPERSEDES the typed `item.timeout`.
     /// Python: `if timeout is not None and (isinstance(timeout, bool) or not
     /// isinstance(timeout, (int, float)) or timeout <= 0): refuse`.
-    private func resolveTimeout(_ item: Item) -> LaunchField<Double?> {
+    ///
+    /// The deadline keeps the value AS GIVEN for the refusal texts: python
+    /// formats the raw `d.timeout`, so an int `5` reads `5s`, never `5.0s`.
+    private func resolveTimeout(_ item: Item) -> LaunchField<Deadline?> {
         if let raw = item.rawTimeout, raw != .null {
             let value: Double?
+            let text: String
             switch raw {
-            case .integer(let n): value = Double(n)
-            case .double(let d): value = d
-            default: value = nil
+            case .integer(let n):
+                value = Double(n)
+                text = String(n)
+            case .double(let d):
+                value = d
+                text = pyFloatRepr(d)
+            default:
+                value = nil
+                text = ""
             }
             guard let v = value, v.isFinite, v > 0 else {
                 return .refused(
                     Refusal.badGot("send", "timeout", "a positive number of seconds", got: raw))
             }
-            return .ok(v)
+            return .ok(Deadline(seconds: v, text: text))
         }
         if let t = item.timeout {
             guard t.isFinite, t > 0 else {
@@ -329,7 +339,7 @@ extension Kernel {
                     Refusal.badGot(
                         "send", "timeout", "a positive number of seconds", got: .double(t)))
             }
-            return .ok(t)
+            return .ok(Deadline(seconds: t, text: pyFloatRepr(t)))
         }
         return .ok(nil)
     }
@@ -531,8 +541,8 @@ extension Kernel {
     /// The joiner's `timeout` bounds only its OWN wait — on expiry it settles
     /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not own
     /// it and killing another caller's work would be a surprise.
-    func joinExecution(_ execId: Int64, timeout: Double?, box: OutcomeBox) async -> Outcome {
-        let deadline = timeout.map { Date().addingTimeInterval($0) }
+    func joinExecution(_ execId: Int64, timeout: Deadline?, box: OutcomeBox) async -> Outcome {
+        let deadline = timeout.map { Date().addingTimeInterval($0.seconds) }
         while true {
             // THE FUTURE THE OWNER SETTLES, held since launch: the execution may
             // already have been flushed and forgotten by the time we look.
@@ -548,7 +558,7 @@ extension Kernel {
                     result: Refusal.make(
                         Refusal.timeout,
                         "send: joined execution \(execId) did not settle within this "
-                            + "caller's \(pyFloatRepr(timeout!))s wait; the execution itself "
+                            + "caller's \(timeout!.text)s wait; the execution itself "
                             + "keeps running",
                         extra: [("task_id", .integer(execId))]))
             }
@@ -574,7 +584,7 @@ enum Launched {
     /// the task table (python `_Dispatched(pid=None)`).
     case reflectFast(ReflectFast)
     /// Already in flight under this id: wait for ITS outcome, run nothing.
-    case joining(Int64, Double?, OutcomeBox)
+    case joining(Int64, Deadline?, OutcomeBox)
     /// Passed the gate and claimed its row.
     case dispatch(Dispatch)
 }
@@ -594,13 +604,21 @@ struct Dispatch {
     let target: Agent
     let payload: JSON
     let verb: String
-    let timeout: Double?
+    let timeout: Deadline?
     /// The ledger key AND the task-table handle: one int from the one counter.
     /// A caller's name resolves to it; a retry re-registers under the same id.
     let execId: Int64
     let taskId: TaskId
     /// A RAW request body: present ⇒ dispatch through the BINARY channel.
     let binary: Data?
+}
+
+/// An item's own deadline: the seconds the kernel waits, and the value as the
+/// caller gave it — python formats the RAW `timeout` (`f"{d.timeout}s"`), so an
+/// int `5` reads `5s` and a float `5.0` reads `5.0s`.
+struct Deadline: Sendable {
+    let seconds: Double
+    let text: String
 }
 
 /// One-shot "this item has started": the batch turnstile's signal. `fire` is

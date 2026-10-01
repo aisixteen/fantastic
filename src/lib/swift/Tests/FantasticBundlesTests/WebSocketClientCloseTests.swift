@@ -9,6 +9,7 @@
 
 import NIOCore
 import NIOEmbedded
+import NIOHTTP1
 import NIOWebSocket
 import Testing
 
@@ -67,5 +68,65 @@ struct WebSocketClientCloseTests {
         } catch let e as NIOWebSocketClient.Closed {
             #expect(e.reason == "websocket: peer closed")
         }
+    }
+}
+
+/// The upgrade REQUEST the kernel itself writes: python `websockets` sends
+/// `Host: <host>:<port>` for a non-default port (`build_host`) and no body
+/// framing header on the bodiless GET.
+@Suite("WS client: the upgrade request")
+struct WebSocketClientUpgradeRequestTests {
+    @Test func theHostCarriesANonDefaultPortAndNoBodyFraming() throws {
+        let host = NIOWebSocketClient.hostHeader
+        #expect(host("127.0.0.1", 57967, false) == "127.0.0.1:57967")
+        #expect(host("example.com", 80, false) == "example.com")
+        #expect(host("example.com", 443, true) == "example.com")
+        #expect(host("::1", 9, false) == "[::1]:9")
+
+        let ch = EmbeddedChannel()
+        let signal = WSUpgradeSignal(ch.eventLoop.makePromise(of: Void.self))
+        defer { signal.succeed() }
+        try ch.pipeline.syncOperations.addHandler(
+            WSUpgradeRequester(
+                host: "127.0.0.1:57967", uri: "/x", subprotocols: [], authToken: nil,
+                signal: signal))
+        ch.pipeline.fireChannelActive()
+        let part = try #require(try ch.readOutbound(as: HTTPClientRequestPart.self))
+        guard case .head(let head) = part else {
+            Issue.record("the first part written is not the request head")
+            return
+        }
+        #expect(head.headers["Host"] == ["127.0.0.1:57967"], "\(head.headers)")
+        #expect(head.headers["Content-Length"].isEmpty, "\(head.headers)")
+    }
+}
+
+/// python `websockets.connect`'s keepalive: a ping every 20 s; a pong keeps the
+/// connection, and a missing one fails it 1011 `keepalive ping timeout` — the
+/// reader sees the close (a bridge's `bridge_down`) without any send.
+@Suite("WS client: keepalive")
+struct WebSocketClientKeepaliveTests {
+    @Test func aMissingPongFailsTheConnection1011() throws {
+        let inbox = WSClientInbox()
+        let ch = EmbeddedChannel(handler: WSClientHandler(inbox: inbox))
+        let loop = ch.embeddedEventLoop
+        loop.advanceTime(by: .seconds(WSClientHandler.pingIntervalSeconds))
+        let ping = try #require(try ch.readOutbound(as: WebSocketFrame.self))
+        #expect(ping.opcode == .ping && ping.maskKey != nil)
+        // a pong answers it — the next tick pings again instead of failing
+        try ch.writeInbound(
+            WebSocketFrame(fin: true, opcode: .pong, data: ch.allocator.buffer(capacity: 0)))
+        loop.advanceTime(by: .seconds(WSClientHandler.pongTimeoutSeconds))
+        let again = try #require(try ch.readOutbound(as: WebSocketFrame.self))
+        #expect(again.opcode == .ping)
+        // no pong this time: the connection fails 1011
+        loop.advanceTime(by: .seconds(WSClientHandler.pongTimeoutSeconds))
+        let close = try #require(try ch.readOutbound(as: WebSocketFrame.self))
+        #expect(close.opcode == .connectionClose)
+        var body = close.data
+        #expect(body.readWebSocketErrorCode() == .unexpectedServerError)
+        #expect(body.readString(length: body.readableBytes) == "keepalive ping timeout")
+        loop.run()
+        #expect(!ch.isActive, "the connection was not closed")
     }
 }

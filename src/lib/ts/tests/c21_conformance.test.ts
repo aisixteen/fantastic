@@ -56,10 +56,6 @@ const SKIP: { [name: string]: string } = {
     "same — create_agent belongs to the host root, so an id this kernel never mints " +
     "has no shape to grade. The RULE it pins (a supplied id is validated, never " +
     "replaced by a mint) lives where ids are minted, which is not here.",
-  "kernel-verb-on-child":
-    "`not_here` is the refusal a runtime that OWNS kernel verbs gives when one is " +
-    "addressed to a non-root agent. This kernel owns none, so `ps` at c21_probe is " +
-    "honestly `unhandled` — there is no root here that would have answered it.",
   "list-agents-limited":
     "same — list_agents belongs to the host root; `reflect tree=all` is how this " +
     "kernel's own tree is read, and it is paged by the shared `page()` primitive.",

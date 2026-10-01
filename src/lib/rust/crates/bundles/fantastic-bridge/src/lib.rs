@@ -237,11 +237,11 @@ async fn dispatch(
         "reflect" => reflect_reply(family, agent_id, kernel),
         "boot" => boot_reply(family, agent_id, kernel).await,
         "reconnect" => reconnect_reply(family, agent_id, kernel).await,
-        "forward" => forward_reply(agent_id, payload, kernel).await,
+        "forward" => forward_reply(agent_id, payload, kernel).await?,
         "watch_remote" => watch_remote_reply(agent_id, payload, "watch").await,
         "unwatch_remote" => watch_remote_reply(agent_id, payload, "unwatch").await,
         "list_peers" | "watch_directory" | "unwatch_directory" if directory => {
-            directory_reply(agent_id, payload, verb).await
+            directory_reply(agent_id, payload, verb).await?
         }
         "set_identity" if directory => set_identity_reply(agent_id, payload, kernel).await,
         // python's `dispatch`: a verb the table does not carry (`shutdown`
@@ -266,29 +266,27 @@ fn unknown_type(verb: &Value) -> Value {
 /// own `relay` agent (`target:"relay"`), not the partner. `list_peers` is a
 /// one-shot snapshot; `watch_directory` subscribes so `peer_*` events re-emit on
 /// this connector's inbox; `unwatch_directory` stops it.
-async fn directory_reply(agent_id: &AgentId, payload: &Value, op: &str) -> Value {
+async fn directory_reply(
+    agent_id: &AgentId,
+    payload: &Value,
+    op: &str,
+) -> Result<Value, BundleError> {
     let state = BRIDGES.lock().get(agent_id).cloned();
     let live = state.as_ref().filter(|s| !s.transport.closed());
     let Some(state) = live else {
         // python: `unwatch_directory` on a leg with no transport is simply `ok`.
         if op == "unwatch_directory" {
-            return json!({"ok": true});
+            return Ok(json!({"ok": true}));
         }
-        return refusal_hint(
+        return Ok(refusal_hint(
             NOT_CONNECTED,
             format!("relay_connector.{op}: not connected"),
             "call boot first",
-        );
+        ));
     };
-    match op {
+    Ok(match op {
         "list_peers" => {
-            let timeout = match payload.get("timeout") {
-                Some(v) => match py_float(v) {
-                    Ok(t) => t,
-                    Err(_) => DEFAULT_FORWARD_TIMEOUT_SECS,
-                },
-                None => DEFAULT_FORWARD_TIMEOUT_SECS,
-            };
+            let timeout = py_timeout(payload)?;
             state.transport.list_peers(timeout).await
         }
         // python passes NO timeout here — the transport's own 10 s stands.
@@ -299,6 +297,16 @@ async fn directory_reply(agent_id: &AgentId, payload: &Value, op: &str) -> Value
                 .await
         }
         _ => state.transport.unwatch_directory().await,
+    })
+}
+
+/// python `float(payload.get("timeout", 30))`: a number or a numeric string is
+/// the timeout, a bool is 0/1, and `null` or a non-numeric string RAISES — the
+/// handler dies with python's `TypeError`/`ValueError`, settled `failed`.
+fn py_timeout(payload: &Value) -> Result<f64, BundleError> {
+    match payload.get("timeout") {
+        None => Ok(DEFAULT_FORWARD_TIMEOUT_SECS),
+        Some(v) => py_float(v).map_err(|e| format!("{}: {}", e.class_name(), e.message()).into()),
     }
 }
 
@@ -332,25 +340,24 @@ async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Ke
     }
     // Merge only the provided well-known keys into the record + persist (explicit
     // null retracts a field, e.g. owner_guid:null = become standalone).
-    if let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
-        let mut patch = serde_json::Map::new();
-        for k in ["role", "owner_guid", "exposes"] {
-            if let Some(v) = payload.get(k) {
-                patch.insert(k.to_string(), v.clone());
-            }
+    // python `kernel.update(id, **patch)` — the `updated` state event is what
+    // the root loader's writer persists.
+    let mut patch = serde_json::Map::new();
+    for k in ["role", "owner_guid", "exposes"] {
+        if let Some(v) = payload.get(k) {
+            patch.insert(k.to_string(), v.clone());
         }
-        if !patch.is_empty() {
-            agent.update_meta(patch);
-            let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
-        }
+    }
+    if !patch.is_empty() {
+        kernel.update(agent_id, patch);
     }
     let attrs = identity_from_meta(agent_id, kernel);
     state.transport.set_identity(attrs).await
 }
 
 /// Shared BINARY dispatch — `forward` carrying a raw request chunk
-/// (`write_stream` over the wire). The local caller does
-/// `send_with_binary(<bridge>, {type:forward, target, payload, timeout?}, blob)`;
+/// (`write_stream` over the wire). The local caller sends
+/// `{type:forward, target, payload, timeout?}` with the blob (`Item::with_binary`);
 /// the bridge ships a binary `call` frame and returns `(reply, reply_body)` (the
 /// reply body is the raw chunk for a `read_stream` forward). Any non-`forward`
 /// binary verb routes through the text dispatch (its blob is unused).
@@ -378,10 +385,7 @@ async fn dispatch_binary(
             None,
         ));
     }
-    let timeout_secs = header
-        .get("timeout")
-        .and_then(Value::as_f64)
-        .unwrap_or(DEFAULT_FORWARD_TIMEOUT_SECS);
+    let timeout_secs = py_timeout(&header)?;
     let (v, body) = forward_core(kernel, agent_id, &target, inner, blob, true, timeout_secs).await;
     Ok((Some(v), body))
 }
@@ -796,12 +800,11 @@ async fn build_relay_transport(
         Some(v) if py_truthy(&v) => py_str(&v),
         _ => {
             let g = mint_guid();
-            if let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
-                let mut patch = serde_json::Map::new();
-                patch.insert("guid".to_string(), Value::String(g.clone()));
-                agent.update_meta(patch);
-                let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
-            }
+            // python `kernel.update(rec["id"], guid=guid)` — persisted by the
+            // root loader's writer off the `updated` event.
+            let mut patch = serde_json::Map::new();
+            patch.insert("guid".to_string(), Value::String(g.clone()));
+            kernel.update(agent_id, patch);
             g
         }
     };
@@ -894,23 +897,24 @@ async fn reconnect_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel
     boot_reply(family, agent_id, kernel).await
 }
 
-async fn forward_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+async fn forward_reply(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Result<Value, BundleError> {
     let target = payload.get("target").and_then(Value::as_str).unwrap_or("");
     let inner = payload.get("payload");
     if target.is_empty() || !inner.map(Value::is_object).unwrap_or(false) {
-        return json!({
+        return Ok(json!({
             "error": "bridge.forward: target (str) + payload (dict) required"
-        });
+        }));
     }
     let inner = inner.cloned().unwrap_or(Value::Null);
-    let timeout_secs = payload
-        .get("timeout")
-        .and_then(Value::as_f64)
-        .unwrap_or(DEFAULT_FORWARD_TIMEOUT_SECS);
+    let timeout_secs = py_timeout(payload)?;
     // TEXT forward — no request body; the reply body (if any) is dropped here
     // because the text channel can't carry it (a binary forward uses
     // `handle_binary`, which preserves the reply body).
-    forward_core(
+    Ok(forward_core(
         kernel,
         agent_id,
         target,
@@ -920,7 +924,7 @@ async fn forward_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
         timeout_secs,
     )
     .await
-    .0
+    .0)
 }
 
 /// The shared forward engine — ships a raw `call` frame (text or binary) to the
@@ -1163,45 +1167,19 @@ async fn serve_inbound_call(
             .transport
             .send_frame(json!({"type":"reply","id":corr_id,"data":bad}))
             .await;
-    } else if is_binary {
-        // Binary call — the body is the request chunk. Dispatch on the binary
-        // channel; the reply may carry a body (read_stream).
-        let target_id = AgentId::from(target.as_str());
-        let send = kernel.send_with_binary(&target_id, inner, body);
-        let (data, reply_body) = match caller.as_ref().and_then(Value::as_str) {
-            // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
-            // target's `callable_by` against `<peer guid>|<remote agent>` (never
-            // the leg), and a memory store keys what it writes by it.
-            Some(c) if !c.is_empty() => {
-                fantastic_kernel::with_remote_caller(leg.clone(), c.to_string(), send).await
-            }
-            _ => send.await,
-        };
-        match reply_body {
-            None => {
-                let _ = state
-                    .transport
-                    .send_frame(json!({"type":"reply","id":corr_id,"data":data}))
-                    .await;
-            }
-            Some(reply_body) => {
-                // Binary reply frame — body rides raw at `data.bytes`.
-                let mut env = json!({"type":"reply","id":corr_id,"data":data});
-                env["_binary_path"] = json!("data.bytes");
-                let _ = state.transport.send_binary(env, reply_body).await;
-            }
-        }
     } else {
         // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already sends
         // NAMES the execution, so a reconnect that replays its queue joins the
         // original instead of running the side effect twice. No second `exec_id`
-        // field exists.
-        let send = kernel.send(vec![Item::from_frame(
-            AgentId::from(target.as_str()),
-            inner,
-            corr_id.as_str(),
-        )]);
-        let reply = match caller.as_ref().and_then(Value::as_str) {
+        // field exists. A BINARY frame is the same call: its body is the
+        // request chunk (`payload.bytes`) and rides the SAME batch item — pid,
+        // call/settle rows, `ps` row, dedup — on the binary channel.
+        let mut item = Item::from_frame(AgentId::from(target.as_str()), inner, corr_id.as_str());
+        if is_binary {
+            item = item.with_binary(body);
+        }
+        let send = kernel.send(vec![item]);
+        let out = match caller.as_ref().and_then(Value::as_str) {
             // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
             // target's `callable_by` against `<peer guid>|<remote agent>` (never
             // the leg), and a memory store keys what it writes by it.
@@ -1210,12 +1188,21 @@ async fn serve_inbound_call(
             }
             _ => send.await,
         }
-        .remove(0)
-        .result;
-        let _ = state
-            .transport
-            .send_frame(json!({"type":"reply","id":corr_id,"data":reply}))
-            .await;
+        .remove(0);
+        match out.body {
+            None => {
+                let _ = state
+                    .transport
+                    .send_frame(json!({"type":"reply","id":corr_id,"data":out.result}))
+                    .await;
+            }
+            Some(reply_body) => {
+                // Binary reply frame — body rides raw at `data.bytes`.
+                let mut env = json!({"type":"reply","id":corr_id,"data":out.result});
+                env["_binary_path"] = json!("data.bytes");
+                let _ = state.transport.send_binary(env, reply_body).await;
+            }
+        }
     }
 }
 

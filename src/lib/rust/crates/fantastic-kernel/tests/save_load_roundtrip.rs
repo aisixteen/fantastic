@@ -3,7 +3,7 @@
 //!
 //! [`KernelState`] is a Rust value — never a file on disk. Disk mode
 //! mirrors agent records to per-agent `agent.yaml` files via
-//! [`persistence::persist`] / [`persistence::load_children`]; the
+//! [`persistence::persist`] and hydrates them at boot; the
 //! `save()` / `load()` API is for IN-RAM export (e.g. an embedding
 //! brain kernel persisting state externally to an external
 //! store (key-value, cloud sync, or a file).
@@ -105,12 +105,11 @@ async fn save_json_is_byte_deterministic() {
     let first = kernel.save_json();
     let second = kernel.save_json();
     assert_eq!(first, second, "save_json must be deterministic");
-    // C6: the snapshot walks the registry in REGISTRATION order — python's
-    // dict order, root first — not sorted by id. Still byte-deterministic for
-    // equal kernel state, which is all `save_json` ever promised.
+    // python `save`: `records.sort(key=lambda r: r["id"])` — sorted by id,
+    // whatever the registration order.
     let snap: KernelState = serde_json::from_str(&first).unwrap();
     let ids: Vec<&str> = snap.agents.iter().map(|a| a.id.as_str()).collect();
-    assert_eq!(ids, vec!["kernel_state", "b", "a", "c"]);
+    assert_eq!(ids, vec!["a", "b", "c", "kernel_state"]);
 }
 
 #[tokio::test]

@@ -306,29 +306,48 @@ fn bad_got(verb: &str, arg: &str, want: &str, got: &Value) -> Value {
     r
 }
 
+/// An item's validated deadline: the seconds the kernel waits, and the number
+/// the caller GAVE. Python keeps `timeout` as whatever arrived — the call row
+/// stores it and the timeout prose prints it (`f"{d.timeout}s"`: `5` → `5s`,
+/// `5.0` → `5.0s`, `1e-07` → `1e-07s`). A typed rust `f64` is a python float.
+#[derive(Clone)]
+struct Deadline {
+    secs: f64,
+    given: Value,
+}
+
+impl Deadline {
+    /// `{d.timeout}` — python's `str()` of the number the caller gave.
+    fn shown(&self) -> String {
+        py_str(&self.given)
+    }
+}
+
 /// `timeout` validation (C30/C38): `item.raw_timeout`, when forwarded by a
 /// caller relaying an untyped value, SUPERSEDES the typed `item.timeout`.
 /// Python: `if timeout is not None and (isinstance(timeout, bool) or not
 /// isinstance(timeout, (int, float)) or timeout <= 0): refuse`.
-fn validate_timeout(item: &Item) -> Result<Option<f64>, Value> {
+fn validate_timeout(item: &Item) -> Result<Option<Deadline>, Value> {
     if let Some(raw) = &item.raw_timeout {
         if raw.is_null() {
             return Ok(None);
         }
-        let ok = match raw {
-            Value::Bool(_) => false,
-            Value::Number(n) => n.as_f64().is_some_and(|f| f > 0.0),
-            _ => false,
+        let secs = match raw {
+            Value::Number(n) => n.as_f64().filter(|f| *f > 0.0),
+            _ => None,
         };
-        if !ok {
+        let Some(secs) = secs else {
             return Err(bad_got(
                 "send",
                 "timeout",
                 "a positive number of seconds",
                 raw,
             ));
-        }
-        return Ok(raw.as_f64());
+        };
+        return Ok(Some(Deadline {
+            secs,
+            given: raw.clone(),
+        }));
     }
     if let Some(t) = item.timeout {
         if !(t.is_finite() && t > 0.0) {
@@ -339,9 +358,28 @@ fn validate_timeout(item: &Item) -> Result<Option<f64>, Value> {
                 &json!(t),
             ));
         }
-        return Ok(Some(t));
+        return Ok(Some(Deadline {
+            secs: t,
+            given: Value::from(t),
+        }));
     }
     Ok(None)
+}
+
+/// python's `refusal(TIMEOUT, f"send: {d.target.id} {d.payload.get('type')!r}
+/// exceeded its {d.timeout}s timeout; task cancelled", task_id=d.pid or "-")`.
+fn own_deadline_refusal(target: &AgentId, verb: &str, d: &Deadline, task_id: Value) -> Value {
+    let mut r = crate::refusal::refusal(
+        crate::refusal::TIMEOUT,
+        format!(
+            "send: {} {} exceeded its {}s timeout; task cancelled",
+            target,
+            fantastic_bundle::py_repr(verb),
+            d.shown(),
+        ),
+    );
+    crate::refusal::with(&mut r, "task_id", task_id);
+    r
 }
 
 /// `retries` validation (C30/C38): `item.raw_retries` SUPERSEDES the typed
@@ -384,10 +422,12 @@ enum Launched {
 }
 
 /// The unnamed `kernel` reflect fast path's payload — see [`Launched::
-/// KernelReflectFast`].
+/// KernelReflectFast`]. It keeps the item's deadline: python awaits even this
+/// pid-less read under `asyncio.wait(timeout)`.
 struct FastReflect {
     target: Arc<Agent>,
     payload: Value,
+    timeout: Option<Deadline>,
 }
 
 /// One item that passed the gate and is on its way to a handler.
@@ -395,22 +435,31 @@ struct Dispatch {
     target: Arc<Agent>,
     payload: Value,
     verb: String,
-    timeout: Option<f64>,
+    timeout: Option<Deadline>,
     /// The execution's id — the kernel counter's number, and the ledger key.
     exec_id: i64,
     /// The task-table handle. It IS `exec_id`: one number names the execution in
     /// `ps`, in `cancel`, in the ledger and in the reply. A retry re-registers
     /// under the same handle.
     task_id: TaskId,
-    /// A RAW request body: present ⇒ dispatch through the BINARY channel.
+    /// A RAW request body (python's `payload["bytes"]` holding bytes).
     binary: Option<Vec<u8>>,
+    /// The reply's chunk comes back raw (see [`Item::with_raw_reply`]).
+    raw_reply: bool,
+    /// A caller-NAMED `kernel` reflect — python's flags-done fast path: the
+    /// FIRST attempt is a bare identity read with the flags applied (no task
+    /// row, no fanout, no `_in_flight`, and no enforced deadline: `cancel_task`
+    /// finds no task under the pid, so the read runs to completion). The ledger
+    /// still applies. A retry is a real dispatch whose reply is not decorated
+    /// again (`flags_done` stays set).
+    named_fast_reflect: bool,
 }
 
 /// An item that is JOINING an execution someone else is running, or that is
 /// reading one already settled. Neither runs a handler.
 struct Joiner {
     rx: tokio::sync::watch::Receiver<Option<Outcome>>,
-    timeout: Option<f64>,
+    timeout: Option<Deadline>,
     /// The id of the execution being JOINED (python `d.pid`) — not this
     /// joiner's own dispatch, which never gets one. Needed only to render
     /// the joiner-timeout refusal's `task_id` + pid-in-prose (C31).
@@ -664,14 +713,12 @@ impl Kernel {
         // reflect (`_agent.py:846`). A NAMED or JOINING send (an `id` in the
         // payload) still opens the ledger (`_agent.py:816`) — this fast path
         // is unnamed-only: no caller-supplied id at all.
-        if join_id.is_none()
-            && name.is_none()
-            && item.target.as_str() == "kernel"
-            && verb == "reflect"
-        {
+        let kernel_reflect = item.target.as_str() == "kernel" && verb == "reflect";
+        if join_id.is_none() && name.is_none() && kernel_reflect {
             return Launched::KernelReflectFast(Box::new(FastReflect {
                 target,
                 payload: item.payload,
+                timeout,
             }));
         }
 
@@ -767,7 +814,7 @@ impl Kernel {
                 row.insert("attempts".to_string(), Value::from(1));
                 row.insert(
                     "timeout".to_string(),
-                    timeout.map_or(Value::Null, Value::from),
+                    timeout.as_ref().map_or(Value::Null, |d| d.given.clone()),
                 );
                 if let Some(n) = name.as_deref() {
                     row.insert("name".to_string(), Value::from(n));
@@ -784,6 +831,9 @@ impl Kernel {
             exec_id,
             task_id,
             binary: item.binary,
+            raw_reply: item.raw_reply,
+            // A JOIN never reaches here; a fresh NAMED `kernel` reflect does.
+            named_fast_reflect: kernel_reflect,
         }))
     }
 
@@ -799,17 +849,38 @@ impl Kernel {
             Launched::Settled(o) => return o,
             Launched::Joining(j) => return self.join_execution(*j).await,
             Launched::KernelReflectFast(fr) => {
-                let FastReflect { target, payload } = *fr;
-                let mut reply = crate::reflect::reflect_identity(&target);
-                let mut status = Status::Completed;
-                if let Err(raised) =
-                    crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply).await
-                {
-                    reply = raised;
-                    status = Status::Failed;
-                }
+                let FastReflect {
+                    target,
+                    payload,
+                    timeout,
+                } = *fr;
+                let read = async {
+                    let mut reply = crate::reflect::reflect_identity(&target);
+                    match crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply)
+                        .await
+                    {
+                        Ok(()) => (reply, Status::Completed),
+                        Err(raised) => (raised, Status::Failed),
+                    }
+                };
                 // pid stays None — no task table, no ledger, no fanout ever
-                // touched this item (C88).
+                // touched this item (C88). Still awaited under the item's own
+                // deadline, as python awaits it: on expiry the read is dropped
+                // and the item settles `timed_out` with `task_id: "-"`.
+                let (reply, status) = match timeout {
+                    None => read.await,
+                    Some(d) => {
+                        match tokio::time::timeout(std::time::Duration::from_secs_f64(d.secs), read)
+                            .await
+                        {
+                            Ok(v) => v,
+                            Err(_) => (
+                                own_deadline_refusal(&target.id, "reflect", &d, json!("-")),
+                                Status::TimedOut,
+                            ),
+                        }
+                    }
+                };
                 return Outcome::new(None, status, reply);
             }
             Launched::Dispatched(d) => *d,
@@ -822,9 +893,12 @@ impl Kernel {
             exec_id,
             task_id,
             binary,
+            raw_reply,
+            named_fast_reflect,
         } = d;
 
         let mut next_pid = task_id;
+        let mut fast_first = named_fast_reflect;
         // The pid of the attempt that actually SETTLED — a retry re-dispatches
         // under a fresh row, so the last one is what the outcome names.
         let (pid, reply, status, body) = loop {
@@ -837,6 +911,26 @@ impl Kernel {
                 bump.insert("attempts".to_string(), Value::from(attempts));
                 self.rows.stamp(exec_id, &bump);
             }
+            if std::mem::take(&mut fast_first) {
+                // The caller-NAMED `kernel` reflect's first attempt: a bare
+                // identity read with the flags applied, under the ledger's id
+                // but with no task row, no fanout and no deadline (python
+                // `_launch`'s `flags_done` branch).
+                let mut reply = crate::reflect::reflect_identity(&target);
+                let (reply, status) =
+                    match crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply)
+                        .await
+                    {
+                        Ok(()) if error_shaped(&reply) => (reply, Status::Errored),
+                        Ok(()) => (reply, Status::Completed),
+                        Err(raised) => (raised, Status::Failed),
+                    };
+                if !self.ledger.should_retry(exec_id, status) {
+                    break (Some(task_id), reply, status, None);
+                }
+                next_pid = TaskId(exec_id);
+                continue;
+            }
             let mut this_pid: Option<TaskId> = None;
             let (mut reply, mut status, body) = self
                 .run_dispatch(
@@ -844,9 +938,10 @@ impl Kernel {
                     &payload,
                     &verb,
                     Some(&mut this_pid),
-                    timeout,
+                    timeout.clone(),
                     next_pid,
                     binary.clone(),
+                    raw_reply,
                 )
                 .await;
             // Universal post-process, PER ATTEMPT (python applies it inside
@@ -857,7 +952,13 @@ impl Kernel {
             //
             // NOT for a remote target: its kernel already composed the reflect
             // with ITS flags over ITS tree; this kernel has nothing to add to it.
-            if verb == "reflect" && status == Status::Completed && !target.is_remote() {
+            // NOT after a named `kernel` reflect's first attempt either: python's
+            // `flags_done` stays set for the retries.
+            if verb == "reflect"
+                && status == Status::Completed
+                && !target.is_remote()
+                && !named_fast_reflect
+            {
                 if let Err(raised) =
                     crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply).await
                 {
@@ -930,6 +1031,7 @@ impl Kernel {
                 None,
                 TaskId(pid),
                 None,
+                false,
             )
             .await;
         (reply, status)
@@ -1016,8 +1118,8 @@ impl Kernel {
         };
         match j.timeout {
             None => wait.await,
-            Some(secs) => {
-                let dur = std::time::Duration::from_secs_f64(secs);
+            Some(d) => {
+                let dur = std::time::Duration::from_secs_f64(d.secs);
                 match tokio::time::timeout(dur, wait).await {
                     Ok(o) => o,
                     Err(_) => {
@@ -1030,9 +1132,10 @@ impl Kernel {
                             crate::refusal::TIMEOUT,
                             format!(
                                 "send: joined execution {} did not settle \
-                                 within this caller's {secs}s wait; the \
+                                 within this caller's {}s wait; the \
                                  execution itself keeps running",
                                 j.exec_id,
+                                d.shown(),
                             ),
                         );
                         crate::refusal::with(&mut r, "task_id", json!(j.exec_id));
@@ -1070,7 +1173,8 @@ impl Kernel {
     ///     stopped) closes that window.
     // One attempt needs the target, the payload, the verb, the pid-out slot, the
     // deadline, the task id and (since the binary channel joined the batch) the
-    // blob. Bundling them into a struct would only move the same seven fields.
+    // blob and whether the reply's chunk comes back raw. Bundling them into a
+    // struct would only move the same eight fields.
     #[allow(clippy::too_many_arguments)]
     async fn run_dispatch(
         self: &Arc<Self>,
@@ -1078,9 +1182,10 @@ impl Kernel {
         payload: &Value,
         verb: &str,
         task_out: Option<&mut Option<TaskId>>,
-        timeout: Option<f64>,
+        timeout: Option<Deadline>,
         task_id: TaskId,
         binary: Option<Vec<u8>>,
+        raw_reply: bool,
     ) -> (Value, Status, Option<Vec<u8>>) {
         // The pid was minted in the SYNCHRONOUS launch phase and IS the ledger
         // key — minting a second one here would split the two apart, so the row
@@ -1116,9 +1221,11 @@ impl Kernel {
         let _in_flight = (!target.is_remote()).then(|| InFlightGuard::enter(self, target));
         if !target.is_remote() {
             let item = match binary.clone() {
-                // The BINARY channel carries the payload's bytes at `bytes` — the
-                // key python's own payload dict holds them under — so a watcher
-                // receives the body, not a header with a hole where it was.
+                // A REQUEST BODY rides at `bytes` — the key python's own payload
+                // dict holds it under, in the caller's position when the payload
+                // names the slot — so a watcher receives the body, not a header
+                // with a hole where it was. A call that only READS a raw chunk
+                // carries none: its payload is a plain dict, a text frame.
                 Some(blob) => {
                     let mut head = payload.clone();
                     if let Some(m) = head.as_object_mut() {
@@ -1130,11 +1237,28 @@ impl Kernel {
             };
             self.fanout(target, "send", &item).await;
         }
+        // The BINARY channel whenever bytes travel either way: a request body
+        // goes in, or the reply's chunk comes back raw. A request body IS
+        // `payload["bytes"]` (python's `payload[field] = body` overwrites the
+        // slot), so the header the handler gets carries no second `bytes` — a
+        // caller names the slot only to keep python's key order on the row and
+        // the watcher frame.
+        let (payload_for_handler, channel_blob) = match binary {
+            Some(b) => {
+                let mut head = payload.clone();
+                if let Some(m) = head.as_object_mut() {
+                    m.shift_remove("bytes");
+                }
+                (head, Some(b))
+            }
+            None if raw_reply => (payload.clone(), Some(Vec::new())),
+            None => (payload.clone(), None),
+        };
 
         let join = {
             let kernel = Arc::clone(self);
             let tgt = Arc::clone(target);
-            let payload = payload.clone();
+            let payload = payload_for_handler;
             let sender = target.id.clone();
             // The CALLER, read here in the caller's own context — inside the
             // spawn `CURRENT_SENDER` becomes the target, so this is the last
@@ -1176,19 +1300,21 @@ impl Kernel {
                                             // ANOTHER KERNEL'S AGENT: the call
                                             // goes to its peer's route, bytes
                                             // and all; no handler runs here.
+                                            // Its reply is that kernel's answer,
+                                            // relayed verbatim: never a raise here.
                                             if let Some(remote) = tgt.remote.as_ref() {
-                                                return crate::peers::call_peer(
-                                                    &kernel, remote, &tgt.id, payload, binary,
+                                                return Ok(crate::peers::call_peer(
+                                                    &kernel, remote, &tgt.id, payload, channel_blob,
                                                 )
-                                                .await;
+                                                .await);
                                             }
-                                            match binary {
+                                            match channel_blob {
                                                 Some(b) => {
                                                     dispatch_binary(Arc::clone(&kernel), tgt, payload, b).await
                                                 }
-                                                None => {
-                                                    (dispatch(kernel, tgt, payload).await, None)
-                                                }
+                                                None => dispatch(kernel, tgt, payload)
+                                                    .await
+                                                    .map(|v| (v, None)),
                                             }
                                         } => Some(v),
                                     }
@@ -1223,8 +1349,8 @@ impl Kernel {
         // the join below yields its real reply.
         let outcome = match timeout {
             None => join.await,
-            Some(secs) => {
-                let dur = std::time::Duration::from_secs_f64(secs);
+            Some(d) => {
+                let dur = std::time::Duration::from_secs_f64(d.secs);
                 match tokio::time::timeout(dur, &mut Box::pin(&mut { join })).await {
                     Ok(j) => j,
                     Err(_) => {
@@ -1232,16 +1358,8 @@ impl Kernel {
                         let tid = task_id;
                         with_operator(async move { k.cancel_task(&tid).await }).await;
                         // PYTHON'S PROSE, verbatim (C31): target id RAW, verb
-                        // `py_repr`-quoted, plus `task_id`.
-                        let mut r = crate::refusal::refusal(
-                            crate::refusal::TIMEOUT,
-                            format!(
-                                "send: {} {} exceeded its {secs}s timeout; task cancelled",
-                                target.id,
-                                fantastic_bundle::py_repr(verb),
-                            ),
-                        );
-                        crate::refusal::with(&mut r, "task_id", json!(task_id.0));
+                        // `py_repr`-quoted, the timeout as given, plus `task_id`.
+                        let r = own_deadline_refusal(&target.id, verb, &d, json!(task_id.0));
                         return (r, Status::TimedOut, None);
                     }
                 }
@@ -1249,12 +1367,13 @@ impl Kernel {
         };
 
         match outcome {
-            // `raised` marks a terminal handler failure (a bundle `Err`, or a
-            // panic below) — retryable, and a dead-letter row when the budget
-            // runs out.
-            Ok(Some((v, _))) if v.get("raised").and_then(Value::as_bool) == Some(true) => {
-                (v, Status::Failed, None)
-            }
+            // A RAISE — a bundle `Err`, a python exception a kernel verb
+            // emulates, or a panic below — is the ONE terminal handler failure:
+            // retryable, and a dead-letter row when the budget runs out. Known
+            // out of band, never read off the reply: a REPLY that merely carries
+            // `raised: true` (a peer's or a relay's answer, passed on verbatim)
+            // is a returned dict, and python settles it errored.
+            Ok(Some(Err(raised))) => (raised, Status::Failed, None),
             // FAILURE IS A STATUS. A handler that RAN and said no — a missing
             // path, a patch that did not match, a refusal it composed itself —
             // settles `errored`, not `completed`. The reply is kept verbatim
@@ -1262,8 +1381,8 @@ impl Kernel {
             // `status` instead of parsing `result`. Retries are unchanged:
             // `is_retryable` covers the transport classes only, so a semantic
             // no is never re-sent.
-            Ok(Some((v, body))) if error_shaped(&v) => (v, Status::Errored, body),
-            Ok(Some((v, body))) => (v, Status::Completed, body),
+            Ok(Some(Ok((v, body)))) if error_shaped(&v) => (v, Status::Errored, body),
+            Ok(Some(Ok((v, body)))) => (v, Status::Completed, body),
             Ok(None) => {
                 if current_killed() {
                     // We are in the killed subtree — park; our own stop signal
@@ -1286,80 +1405,6 @@ impl Kernel {
             }
             Err(_) => (json!({ "cancelled": true }), Status::Cancelled, None),
         }
-    }
-
-    /// Send a binary-framed verb. Mirrors [`Self::send`] except the
-    /// payload travels as `(header, blob)` instead of a single JSON
-    /// `Value`. Dispatches through the target bundle's
-    /// [`crate::bundle::Bundle::handle_binary`] (whose default impl
-    /// dispatches the JSON header through `handle` and drops the raw
-    /// blob — never base64; a bundle that wants the bytes overrides it).
-    ///
-    /// ONE DISPATCH PATH, text or binary: the fanout below is the same
-    /// `kind:"send"` event and the same inbox put the text channel makes, run
-    /// BEFORE the handler and carrying the raw body — there is no `send_binary`
-    /// event kind, and a watcher is not told which channel a payload rode.
-    pub async fn send_with_binary(
-        self: &Arc<Self>,
-        target_id: &AgentId,
-        header: Value,
-        blob: Vec<u8>,
-    ) -> (Value, Option<Vec<u8>>) {
-        // Empty target → `missing_arg` (C30's "also on send_with_binary"),
-        // BEFORE resolution.
-        if target_id.as_str().is_empty() {
-            return (crate::refusal::missing("send", "target"), None);
-        }
-        // Resolve target: `"kernel"` names the root, else a literal id.
-        let Some(target) = self.resolve_target(target_id.as_str()) else {
-            // The SAME refusal the text channel gives — coded, and carrying the
-            // live id index so the caller can see what it could have meant.
-            return (
-                crate::refusal::unknown_agent(
-                    target_id.as_str(),
-                    self.agents.iter().map(|e| e.key().0.clone()).collect(),
-                ),
-                None,
-            );
-        };
-
-        let verb = verb_of(&header).to_string();
-
-        // Call gate (see `Kernel::send`) — the binary path carries the same
-        // agent-originated write_stream/read_stream sends, gated two-sided.
-        // Only an operator (`current_sender()` is None) skips it.
-        if let Some(orig) = current_sender() {
-            if let Some(denial) = self.gate(&orig, &verb, &target, &header) {
-                return (denial, None);
-            }
-        }
-
-        // BEFORE the handler, with the body: this is the frame python puts on a
-        // watcher's inbox for a `write_stream`, and the only reason a watcher can
-        // ever see the bytes at all.
-        let _in_flight = InFlightGuard::enter(self, &target);
-        let mut head = header.clone();
-        if let Some(m) = head.as_object_mut() {
-            m.insert("bytes".to_string(), Value::Null);
-        }
-        self.fanout(
-            &target,
-            "send",
-            &crate::inbox::InboxItem::binary(head, "bytes", blob.clone()),
-        )
-        .await;
-
-        // Run dispatch under a fresh CURRENT_SENDER scope so nested
-        // sends attribute to this target (matches Python contextvars).
-        let kernel = Arc::clone(self);
-        let target_for_dispatch = Arc::clone(&target);
-        let header_clone = header.clone();
-        let (reply, body) = with_sender(target.id.clone(), async move {
-            dispatch_binary(kernel, target_for_dispatch, header_clone, blob).await
-        })
-        .await;
-
-        (reply, body)
     }
 
     /// Emit a payload to a target's inbox without dispatching. Returns
@@ -1630,11 +1675,14 @@ impl Drop for DispatchGuard {
 /// `Send`-ness of a future in terms of itself — auto-trait inference gives up
 /// and reports "not Send". Declaring one concrete `dyn Future + Send` at the
 /// recursion point cuts the cycle.
+///
+/// `Err` is a RAISE (python's handler exception, settled `failed`); `Ok` is a
+/// reply, whatever it carries.
 fn dispatch(
     kernel: Arc<Kernel>,
     target: Arc<Agent>,
     payload: Value,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Value>> + Send>> {
     Box::pin(async move {
         let verb = verb_of(&payload);
         if is_kernel_verb(verb) {
@@ -1648,7 +1696,7 @@ fn dispatch(
             // Refused HERE, in the handler — not at the call gate — so probes
             // asserting a denial `side` for a non-root privileged send stay valid.
             if target.parent_id.is_some() {
-                return crate::refusal::not_here(verb, target.id.as_str());
+                return Ok(crate::refusal::not_here(verb, target.id.as_str()));
             }
             return handle_kernel_verb(&kernel, &target, verb, &payload).await;
         }
@@ -1659,12 +1707,12 @@ fn dispatch(
         // `kernel` address. Python `_agent.py`: `if verb == "reflect" and
         // self.parent is None`.
         if verb == "reflect" && target.parent_id.is_none() {
-            return crate::reflect::reflect_identity(&target);
+            return Ok(crate::reflect::reflect_identity(&target));
         }
         // No handler_module → only system verbs answerable.
         let Some(hm) = target.handler_module.as_deref() else {
             // Universal answers for bare agents.
-            return match verb {
+            return Ok(match verb {
                 "boot" | "shutdown" => Value::Null,
                 "reflect" => crate::reflect::reflect_identity(&target),
                 // CODED, not a bare error. A reason-less `{error}` is decorated
@@ -1673,18 +1721,18 @@ fn dispatch(
                 // field — the caller cannot tell a refusal from an answer
                 // (measured 2026-09-02).
                 _ => no_handler_module_refusal(&target.id.0, verb),
-            };
+            });
         };
         let Some(bundle) = kernel.bundles.get(hm) else {
             // NOT a create-time refusal: this kernel legitimately holds records
             // whose bundle belongs to ANOTHER runtime (the browser's `*.ts`
             // agents persist here), or is installed later. The call simply
             // cannot be answered HERE, and says so with a code.
-            return not_installed_refusal(&target.id.0, hm, verb);
+            return Ok(not_installed_refusal(&target.id.0, hm, verb));
         };
         match bundle.handle(&target.id, &payload, &kernel).await {
-            Ok(Some(v)) => v,
-            Ok(None) => Value::Null,
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => Ok(Value::Null),
             // A BUNDLE ERROR IS A TERMINAL FAILURE, marked `raised` exactly as
             // a panic is — python settles a handler raise as `failed`
             // (`_agent.py`: "a handler raise settles as `failed`"). Without the
@@ -1696,7 +1744,7 @@ fn dispatch(
             // An `Ok(Some({"error": ...}))` — an unknown verb, a bad argument —
             // is NOT this: it stays `Completed`, because the handler chose to
             // answer rather than fail.
-            Err(e) => json!({ "error": e.to_string(), "raised": true }),
+            Err(e) => Err(json!({ "error": e.to_string(), "raised": true })),
         }
     })
 }
@@ -1739,7 +1787,9 @@ fn dispatch_binary(
     target: Arc<Agent>,
     header: Value,
     blob: Vec<u8>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = (Value, Option<Vec<u8>>)> + Send>> {
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(Value, Option<Vec<u8>>), Value>> + Send>,
+> {
     Box::pin(async move {
         let verb = verb_of(&header);
         // PYTHON HAS NO SECOND HANDLER for a payload that carries bytes: the
@@ -1750,37 +1800,36 @@ fn dispatch_binary(
         // kernel on the text leg.
         if is_kernel_verb(verb) {
             if target.parent_id.is_some() {
-                return (crate::refusal::not_here(verb, target.id.as_str()), None);
+                return Ok((crate::refusal::not_here(verb, target.id.as_str()), None));
             }
-            return (
-                handle_kernel_verb(&kernel, &target, verb, &header).await,
-                None,
-            );
+            return handle_kernel_verb(&kernel, &target, verb, &header)
+                .await
+                .map(|v| (v, None));
         }
         if verb == "reflect" && target.parent_id.is_none() {
-            return (crate::reflect::reflect_identity(&target), None);
+            return Ok((crate::reflect::reflect_identity(&target), None));
         }
         let Some(hm) = target.handler_module.as_deref() else {
-            return (
+            return Ok((
                 match verb {
                     "boot" | "shutdown" => Value::Null,
                     "reflect" => crate::reflect::reflect_identity(&target),
                     _ => no_handler_module_refusal(&target.id.0, verb),
                 },
                 None,
-            );
+            ));
         };
         let Some(bundle) = kernel.bundles.get(hm) else {
-            return (not_installed_refusal(&target.id.0, hm, verb), None);
+            return Ok((not_installed_refusal(&target.id.0, hm, verb), None));
         };
         match bundle
             .handle_binary(&target.id, header, blob, &kernel)
             .await
         {
-            Ok((Some(v), body)) => (v, body),
-            Ok((None, body)) => (Value::Null, body),
-            // Settle `raised:true`, same shape as the text channel's bundle error.
-            Err(e) => (json!({ "error": e.to_string(), "raised": true }), None),
+            Ok((Some(v), body)) => Ok((v, body)),
+            Ok((None, body)) => Ok((Value::Null, body)),
+            // A RAISE, same shape as the text channel's bundle error.
+            Err(e) => Err(json!({ "error": e.to_string(), "raised": true })),
         }
     })
 }

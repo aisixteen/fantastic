@@ -204,10 +204,11 @@ pub fn rule_name(spec: Option<&Value>, default: &str) -> String {
 /// Keyed by the field you SET (read-key == write-key), so a readme-only LLM reads
 /// `ingress_rule: deny_ingress` and opens the leg with
 /// `ingress_rule: allow_all_ingress` — a direct mirror, no translation. The name
-/// is reported SCOPED whichever field it came from, EXCEPT that a name which
-/// already carries the suffix is left alone: `auth: allow_all_ingress` used to
-/// reflect as `allow_all_ingress_ingress` here, a name that resolves to nothing
-/// if written back.
+/// is reported SCOPED whichever field it came from, the GATE's exact rule
+/// ([`manifold_spec`]): an `auth` stem always gets the suffix, so
+/// `auth: allow_all_ingress` reflects `allow_all_ingress_ingress` and `sealed`
+/// — the rule the gate resolves (unknown ⇒ deny). An ABSENT spec is the
+/// manifold's default, which already carries its suffix.
 #[must_use]
 pub fn describe(meta: &serde_json::Map<String, Value>) -> Value {
     let ingress_scoped = meta.contains_key("ingress_rule");
@@ -222,16 +223,18 @@ pub fn describe(meta: &serde_json::Map<String, Value>) -> Value {
     } else {
         meta.get("auth")
     };
-    let ingress = scoped(
-        &rule_name(ing_spec, "deny_ingress"),
-        "_ingress",
-        ingress_scoped,
-    );
-    let egress = scoped(
-        &rule_name(egr_spec, "silent_egress"),
-        "_egress",
-        egress_scoped,
-    );
+    let ing_name = rule_name(ing_spec, "");
+    let egr_name = rule_name(egr_spec, "");
+    let ingress = if ing_name.is_empty() {
+        "deny_ingress".to_string()
+    } else {
+        scoped(&ing_name, "_ingress", ingress_scoped)
+    };
+    let egress = if egr_name.is_empty() {
+        "silent_egress".to_string()
+    } else {
+        scoped(&egr_name, "_egress", egress_scoped)
+    };
     json!({
         "ingress_rule": ingress,
         "egress_rule": egress,
@@ -239,12 +242,12 @@ pub fn describe(meta: &serde_json::Map<String, Value>) -> Value {
     })
 }
 
-/// python `_scoped`: report the SCOPED rule name whichever field it came from —
-/// `auth` carries a bare stem and each manifold appends its own suffix, while a
-/// name that already ends in the suffix (or was written into the scoped field) is
-/// reported as written.
+/// python `_base._scoped`: report the SCOPED rule name whichever field it came
+/// from — a per-direction field as written, an `auth` stem with this manifold's
+/// suffix (the gate's exact rule, so `reflect` never shows a name that resolves
+/// differently when written back into `ingress_rule`).
 fn scoped(name: &str, suffix: &str, was_scoped: bool) -> String {
-    if was_scoped || name.ends_with(suffix) {
+    if was_scoped {
         return name.to_string();
     }
     if suffix == "_egress" && (name == "allow_all" || name == "deny") {
@@ -265,4 +268,38 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use super::*;
+
+    fn posture(meta: Value) -> Value {
+        describe(meta.as_object().expect("a record"))
+    }
+
+    /// python `_base.describe`: an `auth` stem ALWAYS gets the manifold suffix —
+    /// the gate's exact rule — so `auth: allow_all_ingress` reflects the rule the
+    /// gate resolves (`allow_all_ingress_ingress`, unknown ⇒ sealed). Absent specs
+    /// are the manifold defaults, suffixed once.
+    #[test]
+    fn describe_scopes_an_auth_stem_like_the_gate() {
+        assert_eq!(
+            posture(json!({})),
+            json!({"ingress_rule": "deny_ingress", "egress_rule": "silent_egress", "sealed": true})
+        );
+        assert_eq!(
+            posture(json!({"auth": "allow_all"})),
+            json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
+        );
+        assert_eq!(
+            posture(json!({"auth": "allow_all_ingress"})),
+            json!({"ingress_rule": "allow_all_ingress_ingress",
+                   "egress_rule": "allow_all_ingress_egress", "sealed": true})
+        );
+        assert_eq!(
+            posture(json!({"ingress_rule": "allow_all_ingress"})),
+            json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
+        );
+    }
 }

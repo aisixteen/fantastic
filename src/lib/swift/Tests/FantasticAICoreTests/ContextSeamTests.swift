@@ -342,3 +342,17 @@ struct ContextSeamTests {
         }
     }
 }
+
+/// python `_as_id` / `_as_pos_int`: a digit string counts only when it is
+/// ASCII (`s.isascii() and s.isdigit()`) — `'٣'` and `'²'` are not ids.
+@Suite("ai_core ids are ASCII digit strings")
+struct AIAsIdTests {
+    @Test func onlyAsciiDigitStringsAreIds() {
+        #expect(aiAsId(.string(" 12 ")) == 12)
+        #expect(aiAsId(.string("0")) == 0)
+        #expect(aiAsId(.string("٣")) == nil)
+        #expect(aiAsId(.string("²")) == nil)
+        #expect(aiAsId(.string("+5")) == nil)
+        #expect(!AIContext.pyDigits("١٢") && AIContext.pyDigits("12"))
+    }
+}

@@ -237,6 +237,14 @@ impl Agent {
             .map(str::to_string)
     }
 
+    /// `display_name or id` — python's truthiness: an EMPTY name is no name.
+    /// The `name` of every added/removed state event and snapshot row.
+    pub fn name_or_id(&self) -> String {
+        self.display_name()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| self.id.0.clone())
+    }
+
     /// Optional short `description` (best-effort, from meta) — a one-line
     /// "what this agent does", surfaced in every reflect. Set via
     /// create_agent / update_agent.
@@ -260,25 +268,21 @@ impl Agent {
         self.record()
     }
 
-    /// Whether the record carries `delete_lock: true`. Substrate
-    /// refuses cascade-delete on locked agents.
+    /// Whether the record's `delete_lock` is TRUTHY. Substrate refuses
+    /// cascade-delete on locked agents. Python truthiness
+    /// (`P/kernel/_agent.py` `_find_locked_descendant`): `1`, `"yes"` or a
+    /// non-empty list lock too — CLI `k=v` coercion hands over an int.
     pub fn is_delete_locked(&self) -> bool {
         self.meta
             .read()
             .expect("meta lock poisoned")
             .get("delete_lock")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+            .is_some_and(fantastic_bundle::py_truthy)
     }
 
     /// Path of `agent.yaml` under `root_path`.
     pub fn agent_file(&self) -> PathBuf {
         self.root_path.join(crate::persistence::RECORD_FILE)
-    }
-
-    /// Path of the `agents/` subdir under `root_path` (children live here).
-    pub fn children_dir(&self) -> PathBuf {
-        self.root_path.join("agents")
     }
 
     /// Path of `readme.md` under `root_path` (seeded from the bundle).
