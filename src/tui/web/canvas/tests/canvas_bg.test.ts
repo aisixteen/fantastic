@@ -93,10 +93,17 @@ test("the background cannot be deleted — nor the canvas above it — until its
   const r = k.remove("background") as unknown as Payload;
   assert.equal(r["reason"], "locked");
   assert.ok(k.get("background"), "still there");
-  const up = k.remove("canvas") as unknown as Payload;
+  // the canvas is the page kernel's ROOT: the kernel refuses a root first
+  assert.notEqual((k.remove("canvas") as unknown as Payload)["deleted"], true, "the root stays");
+  assert.ok(k.get("canvas"));
+  // the cascade rule, on an ancestor that is not the root: a locked
+  // descendant blocks it whole
+  k.register(new Agent({ id: "group", parentId: "canvas", handlerModule: "html_agent.ts" }));
+  k.register(new Agent({ id: "kept", parentId: "group", handlerModule: "html_agent.ts", meta: { delete_lock: true } as unknown as Payload }));
+  const up = k.remove("group") as unknown as Payload;
   assert.equal(up["reason"], "locked", "a locked descendant blocks the whole cascade");
-  assert.equal(up["blocked_by"], "background");
-  assert.ok(k.get("panel"), "nothing removed — no partial cascade");
+  assert.equal(up["blocked_by"], "kept");
+  assert.ok(k.get("group") && k.get("panel"), "nothing removed — no partial cascade");
   assert.equal((k.remove("panel") as unknown as Payload)["deleted"], true, "an unlocked sibling goes");
 });
 

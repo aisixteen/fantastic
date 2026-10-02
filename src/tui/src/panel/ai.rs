@@ -40,6 +40,15 @@ use crate::thread::{self, LineKind, Outline, OutlineState, Waiting, Zoom};
 /// (row, width) → (the text's hash, its wrapped lines).
 type WrapMemo = std::collections::HashMap<(RowId, usize), (u64, std::rc::Rc<Vec<String>>)>;
 
+/// What one View derives for this panel: its window into the thread and the
+/// wrap memo for its width (`Panel::take_view`).
+#[derive(Default)]
+struct AiView {
+    top: usize,
+    wraps: WrapMemo,
+    wraps_w: u16,
+}
+
 pub struct AiPanel {
     agent: AgentId,
     pub st: OutlineState,
@@ -574,6 +583,22 @@ impl Panel for AiPanel {
 
     fn animating(&self) -> bool {
         self.live
+    }
+
+    fn take_view(&mut self) -> Option<Box<dyn std::any::Any>> {
+        Some(Box::new(AiView {
+            top: std::mem::take(&mut self.top),
+            wraps: std::mem::take(&mut *self.wraps.borrow_mut()),
+            wraps_w: std::mem::take(&mut self.wraps_w),
+        }))
+    }
+
+    fn put_view(&mut self, view: Box<dyn std::any::Any>) {
+        if let Ok(v) = view.downcast::<AiView>() {
+            self.top = v.top;
+            *self.wraps.borrow_mut() = v.wraps;
+            self.wraps_w = v.wraps_w;
+        }
     }
 
     fn layout(&mut self, area: Rect, cx: &Cx<'_>) {

@@ -64,7 +64,7 @@ impl SetupBundle {
         match verb {
             "backends" => json!({"backends": crate::kern::setup::backends(host).iter().map(|b| json!({
                 "module": b.module,
-                "key_var": b.key_var,
+                "key": b.key,
                 "fields": b.fields.iter().map(|f| json!({
                     "name": f.name, "type": f.ty, "required": f.required, "enum": f.one_of,
                     "default": f.default, "hint": f.hint,
@@ -96,19 +96,22 @@ impl SetupBundle {
                 Err(e) => fail(e),
             },
             "set_key_mode" => match fantastic_user_home_store::secrets::Mode::parse(&s(p, "mode")) {
-                Some(m) => match crate::kern::keys::set_mode(m) {
+                Some(m) => match crate::kern::keys::set_mode(host, m).await {
                     Ok(w) => json!({"mode": m.name(), "where": w}),
                     Err(e) => fail(e),
                 },
                 None => fail(format!("set_key_mode: mode {:?} — plain or secure", s(p, "mode"))),
             },
+            // The page sends this call with `secret: ["payload.secret"]`: the
+            // value reaches this code and no row, ledger or stream on either side.
             "store_key" => {
-                let (module, secret) = (s(p, "module"), p.get("secret").and_then(Value::as_str).unwrap_or(""));
-                if module.is_empty() || secret.is_empty() {
-                    return fail("store_key: module and secret are required");
+                let (module, endpoint) = (s(p, "module"), s(p, "endpoint"));
+                let secret = p.get("secret").and_then(Value::as_str).unwrap_or("");
+                if module.is_empty() || endpoint.is_empty() || secret.is_empty() {
+                    return fail("store_key: module, endpoint and secret are required (a key is bound to its endpoint's host)");
                 }
-                match crate::kern::keys::store(&module, secret) {
-                    Ok(at) => json!({"stored": at, "note": "loaded on the next start"}),
+                match crate::kern::keys::store(host, &module, &endpoint, secret).await {
+                    Ok(r) => json!({"stored": r, "note": "live on the next call — no restart"}),
                     Err(e) => fail(e),
                 }
             }

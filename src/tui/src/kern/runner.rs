@@ -111,7 +111,7 @@ impl Runner {
             }
             Cmd::SetKeyMode { mode } => {
                 let r = match fantastic_user_home_store::secrets::Mode::parse(mode) {
-                    Some(m) => crate::kern::keys::set_mode(m).map(|w| format!("keys are kept {w}")),
+                    Some(m) => crate::kern::keys::set_mode(&self.host, m).await.map(|w| format!("keys are kept {w}")),
                     None => Err(format!("no key mode {mode:?} — plain or secure")),
                 };
                 self.got(Got::Setup(r)).await;
@@ -150,9 +150,10 @@ impl Runner {
                 }
                 self.got(Got::Setup(r.map(|p| format!("written to  {p}")))).await;
             }
-            Cmd::StoreKey { module, secret } => {
-                let r = crate::kern::keys::store(module, secret)
-                    .map(|at| format!("key stored in {at} — loaded on the next start"));
+            Cmd::StoreKey { module, endpoint, secret } => {
+                let r = crate::kern::keys::store(&self.host, module, endpoint, secret)
+                    .await
+                    .map(|r| format!("key stored as `{r}` — live on the next call, no restart"));
                 self.got(Got::Setup(r)).await;
             }
             Cmd::CloseTerminal => {
@@ -467,7 +468,7 @@ pub async fn watch_rows(host: &Host, ai: &str) -> Result<(), String> {
 pub fn subscribe_state(host: &Arc<Host>, tx: mpsc::Sender<Ev>) {
     // The second argument is a traffic event's raw body. The shell shows no bytes,
     // so it is ignored here.
-    let sub: fantastic_kernel::StateSubscriber = Arc::new(move |v: &Value, _body: Option<&(String, Vec<u8>)>| {
+    let sub: fantastic_kernel::StateSubscriber = Arc::new(move |v: &Value, _body: Option<&fantastic_kernel::Blob>| {
         if let Ok(ev) = serde_json::from_value::<crate::kern::model::StateEvent>(v.clone()) {
             let _ = tx.try_send(Ev::Link(crate::ev::LinkEv::State(ev)));
         }

@@ -25,7 +25,8 @@ interface SchemaField {
 }
 interface BackendInfo {
   module: string;
-  key_var: string | null;
+  /** Whether its record takes a key (`true` = required); null = none. */
+  key: boolean | null;
   fields: SchemaField[];
 }
 /** A value as an input shows it. */
@@ -37,6 +38,8 @@ interface Template {
 }
 
 /** Every verb the cell calls on its set-up agent. */
+// `store_key` goes out with `secret: ["payload.secret"]`: the mark rides the
+// page→host frame, so neither kernel records the value (lib, 2026-10-02).
 const VERBS = ["backends", "write_ai", "key_mode", "set_key_mode", "store_key", "templates", "save_template", "forget_template", "prefer", "reflect"] as const;
 
 const CSS = `
@@ -129,8 +132,8 @@ export const setupView: ViewBundle = {
     const keyMode = el("select");
     keyMode.append(
       el("option", { value: "", textContent: "— choose —" }),
-      el("option", { value: "secure", textContent: "secure — one sealed file, its master key in the keychain" }),
-      el("option", { value: "plain", textContent: "plain — one 0600 text file per key" }),
+      el("option", { value: "secure", textContent: "secure — the keychain, one item per key" }),
+      el("option", { value: "plain", textContent: "plain — one 0600 text file" }),
     );
     const applyMode = el("button", { textContent: "apply" });
     const keyWhere = el("div", { className: "note indent" });
@@ -161,7 +164,7 @@ export const setupView: ViewBundle = {
         field("keys kept", el("div", { className: "row" }, keyMode, applyMode)),
         keyWhere,
         keyWarn,
-        field("key", secret, "stored where keys are kept; loaded on the next start"),
+        field("key", secret, "for the endpoint above — bound to its host; live on the next call, no restart"),
         el("div", { className: "row" }, storeKey),
         el("h2", {}, "TEMPLATES — REUSE IT IN ANY PROJECT"),
         field("name", tplName, "saves the backend + every field set — never the key, the id or grants"),
@@ -277,6 +280,19 @@ export const setupView: ViewBundle = {
       if (e) return showMode(null, e);
       showMode((r["mode"] as string | null) ?? null, String(r["where"] ?? ""));
     }
+    storeKey.onclick = async (): Promise<void> => {
+      if (chosenMode === null) return say(false, "choose where keys are kept first");
+      if (!handler.value) return say(false, "pick the handler whose key this is");
+      const endpoint = inputs.get("endpoint")?.value.trim() ?? "";
+      if (!endpoint) return say(false, "fill the endpoint first — a key is bound to its host");
+      if (!secret.value) return say(false, "missing: key");
+      // MARKED SECRET: the value is in no row, ledger or stream, here or on the host
+      const r = await host.call(ctx.backend, { type: "store_key", module: handler.value, endpoint, secret: secret.value } as Payload, ["payload.secret"]);
+      secret.value = ""; // never kept on the page
+      const e = errOf(r);
+      say(!e, e ?? `key stored as \`${String((r as Rec)["stored"])}\` — live on the next call, no restart`);
+    };
+
     applyMode.onclick = async (): Promise<void> => {
       if (!keyMode.value) return say(false, "choose plain or secure");
       const r = (await call("set_key_mode", { mode: keyMode.value })) as Rec;
@@ -285,15 +301,6 @@ export const setupView: ViewBundle = {
       await refreshMode();
     };
 
-    storeKey.onclick = async (): Promise<void> => {
-      if (chosenMode === null) return say(false, "choose where keys are kept first");
-      if (!handler.value) return say(false, "pick the handler whose key this is");
-      if (!secret.value) return say(false, "missing: key");
-      const r = await call("store_key", { module: handler.value, secret: secret.value });
-      secret.value = ""; // never kept on the page
-      const e = errOf(r);
-      say(!e, e ?? `key stored in ${String((r as Rec)["stored"])} — loaded on the next start`);
-    };
 
     saveTpl.onclick = async (): Promise<void> => {
       const miss: string[] = [];

@@ -162,7 +162,7 @@ pub async fn start(h: &Host) -> Result<(), String> {
         return Ok(());
     }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let sub: fantastic_kernel::StateSubscriber = Arc::new(move |v: &Value, _body: Option<&(String, Vec<u8>)>| {
+    let sub: fantastic_kernel::StateSubscriber = Arc::new(move |v: &Value, _body: Option<&fantastic_kernel::Blob>| {
         if v.get("kind").and_then(Value::as_str) == Some("added") {
             if let Some(id) = v.get("agent_id").and_then(Value::as_str) {
                 let _ = tx.send(id.to_string());

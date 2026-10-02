@@ -106,11 +106,13 @@ fn registry() -> BundleRegistry {
     // THE CANVAS'S ACTIVITY: open questions to the human, read as the operator
     // (`kern/activity`) — the page never reads a memory store.
     reg.register(crate::kern::activity::HANDLER_MODULE, crate::kern::activity::ActivityBundle);
-    // The anthropic backend: linked by `--features anthropic` (and by dev-llm).
-    #[cfg(feature = "anthropic")]
+    // KEYS: the credential store (`kern/keys`) — every provider key, by ref.
+    reg.register(fantastic_credential_store::HANDLER_MODULE, fantastic_credential_store::CredentialStoreBundle::default());
+    // Apple's on-device model: linked by `--features foundation-models`.
+    #[cfg(feature = "foundation-models")]
     reg.register(
-        fantastic_anthropic_backend::HANDLER_MODULE,
-        fantastic_anthropic_backend::AnthropicBundle,
+        fantastic_foundation_models_backend::HANDLER_MODULE,
+        fantastic_foundation_models_backend::FoundationModelsBackendBundle::system(),
     );
     // The vLLM backend: linked by `--features vllm`.
     #[cfg(feature = "vllm")]
@@ -211,9 +213,10 @@ impl Host {
         for n in notes {
             tracing::warn!("{n}");
         }
-        // CRITICAL TODO(dev-llm): a dev build gives the store its `ai` agent once.
-        #[cfg(feature = "dev-llm")]
-        crate::kern::dev_llm::ensure_ai(&host).await.map_err(KernelErr::Boot)?;
+        // The credential store, as the user's key mode says (none until chosen).
+        if let Err(e) = crate::kern::keys::ensure_store(&host).await {
+            tracing::warn!("{e}");
+        }
         Ok(host)
     }
 

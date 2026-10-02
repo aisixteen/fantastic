@@ -25,6 +25,7 @@ mod readme;
 mod recipe;
 mod run;
 mod seen;
+mod share;
 mod store;
 mod tags;
 mod theme;
@@ -50,15 +51,6 @@ fn main() -> Result<()> {
         print!("{}", readme::text());
         return Ok(());
     }
-    // CRITICAL TODO(dev-llm): the key comes from the keychain, BEFORE any
-    // runtime thread exists — setting the environment later is a race.
-    #[cfg(feature = "dev-llm")]
-    if let Err(e) = kern::dev_llm::load_key() {
-        eprintln!("{e}");
-        std::process::exit(2);
-    }
-    // Provider keys stored from the set-up page, same rule: before any thread.
-    kern::keys::load();
     if args.first().map(String::as_str) == Some("mcp") {
         mcp::main(&args[1..])
     }

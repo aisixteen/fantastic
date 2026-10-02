@@ -14,6 +14,18 @@ use crate::vm::{self, VmIn};
 
 pub async fn main_loop(opts: Opts) -> Result<()> {
     let paths = Paths::here()?;
+    // A KERNEL ALREADY RUNS HERE: this is a THIN CLIENT of its shell (`share`)
+    // — the owner drives recipes, so a thin client takes none.
+    if let Ok(Some(pid)) = fantastic_kernel::lock::current_holder(&paths.cwd) {
+        if pid != std::process::id() && fantastic_kernel::lock::pid_alive(pid) {
+            if opts.headless || !opts.recipes.is_empty() || opts.port.is_some() {
+                anyhow::bail!(
+                    "a kernel runs in this directory (pid {pid}); recipes and flags belong to the process that owns it — run bare `fantastic` to attach as a thin client"
+                );
+            }
+            return crate::share::attach(&paths, pid).await;
+        }
+    }
     // Running here IS the command to init, like `fantastic mcp`: a fresh
     // directory is seeded before anything else.
     if paths.is_fresh() {
@@ -64,7 +76,7 @@ async fn paint(
     mut h: vm::Handle,
 ) -> Result<()> {
     let size = term.size()?;
-    let _ = h.input.send(VmIn::Resize(size.width, size.height)).await;
+    let _ = h.input.send(VmIn::Resize(vm::LOCAL, size.width, size.height)).await;
     let mut keys = crossterm::event::EventStream::new();
     let mut captured = false;
     loop {
@@ -73,7 +85,8 @@ async fn paint(
                 if changed.is_err() {
                     break; // the ViewModel is gone: the human quit
                 }
-                let Some(frame) = h.frames.borrow_and_update().clone() else { continue };
+                // THIS View's frame (`vm::Frames`): laid out for it alone
+                let Some(frame) = h.frames.borrow_and_update().as_ref().and_then(|fs| fs.for_view(vm::LOCAL)) else { continue };
                 if frame.mouse != captured {
                     captured = frame.mouse;
                     if captured {
@@ -99,10 +112,10 @@ async fn paint(
             }
             maybe = keys.next() => match maybe {
                 Some(Ok(crossterm::event::Event::Resize(w, hgt))) => {
-                    let _ = h.input.send(VmIn::Resize(w, hgt)).await;
+                    let _ = h.input.send(VmIn::Resize(vm::LOCAL, w, hgt)).await;
                 }
                 Some(Ok(e)) => {
-                    let _ = h.input.send(VmIn::Event(e)).await;
+                    let _ = h.input.send(VmIn::Event(vm::LOCAL, e)).await;
                 }
                 Some(Err(_)) | None => break,
             },

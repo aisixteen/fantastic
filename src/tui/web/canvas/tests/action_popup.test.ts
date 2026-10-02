@@ -6,7 +6,7 @@ import type { Presets } from "../src/bundles/canvas/action_popup.ts";
 const P: Presets = {
   templates: [
     { name: "gpt5", handler_module: "responses_backend.tools", model: "gpt-5" },
-    { name: "opus", handler_module: "anthropic_backend.tools", model: "claude-opus" },
+    { name: "box", handler_module: "vllm_backend.tools", model: "qwen" },
   ],
   preferred: "gpt5",
   dialogs: [{ id: "ai_1", name: "release notes" }],
@@ -14,7 +14,7 @@ const P: Presets = {
 
 test("empty: every section — do, AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "html", "stream", "agent", "@gpt5 ★", "@opus", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "html", "stream", "canvas", "agent", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["do", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
 });
@@ -31,9 +31,9 @@ test("free text: the first tile asks the default; the rest filter", () => {
 });
 
 test("@name picks a template, the rest is the first turn", () => {
-  const t = tiles("@op hi there", P);
+  const t = tiles("@bo hi there", P);
   assert.equal(t.length, 1);
-  assert.deepEqual(t[0]!.pick, { kind: "ai", template: "opus", text: "hi there" });
+  assert.deepEqual(t[0]!.pick, { kind: "ai", template: "box", text: "hi there" });
 });
 
 test("no default template → the first tile opens set-up; nothing guessed", () => {

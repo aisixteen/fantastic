@@ -305,7 +305,7 @@ mod tests {
                     "roster",
                     Some("static_loader.tools"),
                     vec![
-                        node("ai", Some("llamacpp_backend.tools"), vec![]),
+                        node("ai", Some("vllm_backend.tools"), vec![]),
                     ],
                 ),
                 node(

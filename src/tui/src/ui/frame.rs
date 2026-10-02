@@ -145,7 +145,12 @@ fn frame_box<'a>(f: &mut Frame, area: Rect, focused: bool, title: Option<Line<'a
 /// THE VIEWMODEL STEP of a frame: every derived field brought up to date for a
 /// screen of `area`, BEFORE anything is drawn. Only this takes the app
 /// mutably; `draw` then reads it.
-pub fn layout(app: &mut App, area: Rect) {
+///
+/// The ONE state is laid out once per View size (`vm`). `authoritative` is the
+/// latest View's pass: only it lays out a [`sized`](crate::panel::Panel::sized)
+/// panel (a terminal: one PTY, one size) and only it sends what layout
+/// produced; the other Views draw such a panel as it is.
+pub fn layout(app: &mut App, area: Rect, authoritative: bool) {
     if app.help {
         return;
     }
@@ -162,11 +167,15 @@ pub fn layout(app: &mut App, area: Rect) {
         // Taken out of the map for the call only, so the panel can borrow the
         // app for its context while it updates itself.
         if let Some(mut p) = app.panels.remove(&agent) {
+            if p.sized() && !authoritative {
+                app.panels.insert(agent, p);
+                continue;
+            }
             {
                 let cx = app.cx(&agent);
                 p.layout(rect, &cx);
             }
-            let cmds = p.take_cmds();
+            let cmds = if authoritative { p.take_cmds() } else { Vec::new() };
             app.panels.insert(agent, p);
             for c in cmds {
                 app.push(c);
@@ -493,7 +502,7 @@ mod tests {
         let mut t = ratatui::Terminal::new(TestBackend::new(100, 30)).unwrap();
         for (focus, want) in [(Focus::Tree, 0), (Focus::Panel, 1), (Focus::Composer, 2)] {
             app.focus = focus;
-            layout(&mut app, area);
+            layout(&mut app, area, true);
             let buf = t.draw(|f| draw(f, &app)).unwrap().buffer.clone();
             let a = areas(&app, area);
             let corner = |r: Rect| buf.cell((r.x, r.y)).unwrap().fg;

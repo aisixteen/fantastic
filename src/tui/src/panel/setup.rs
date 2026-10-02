@@ -263,8 +263,10 @@ impl SetupPanel {
         }
     }
 
-    fn takes_key(&self) -> Option<&'static str> {
-        self.handler_name().and_then(crate::kern::keys::account_of)
+    /// The picked backend, when its record takes a key: `k` stores one.
+    fn takes_key(&self) -> Option<&str> {
+        let b = self.backends.as_ref()?;
+        self.handler.and_then(|i| b.get(i)).filter(|b| b.key.is_some()).map(|b| b.module.as_str())
     }
 }
 
@@ -294,8 +296,10 @@ impl Panel for SetupPanel {
                 KeyCode::Char(c) => buf.push(c),
                 KeyCode::Enter => {
                     let secret = self.key.take().unwrap_or_default();
+                    // a key is bound to its endpoint's host: the record's endpoint
+                    let endpoint = self.values.get("endpoint").map(|s| s.trim().to_string()).unwrap_or_default();
                     if let (false, Some(module)) = (secret.is_empty(), self.handler_name()) {
-                        out.push(Cmd::StoreKey { module: module.to_string(), secret });
+                        out.push(Cmd::StoreKey { module: module.to_string(), endpoint, secret });
                     }
                 }
                 _ => {}
@@ -716,7 +720,7 @@ mod tests {
     fn be(module: &str) -> Backend {
         Backend::from_schema(
             module,
-            &serde_json::json!({"key_var": null, "fields": [
+            &serde_json::json!({"fields": [
                 {"name": "endpoint", "type": "str", "required": true, "hint": "its URL"},
                 {"name": "model", "type": "str", "required": true, "hint": "the model"},
                 {"name": "max_tokens", "type": "int", "required": false, "default": 4096, "hint": "a turn's budget"},
@@ -729,7 +733,7 @@ mod tests {
     #[test]
     fn nothing_is_written_until_every_required_field_is_set() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec![be("anthropic_backend.tools")]);
+        p.set_backends(vec![be("responses_backend.tools")]);
         assert_eq!(p.handler_name(), None, "one backend is still not a default");
         // id, handler, may call, WRITE — no backend picked, so no fields yet
         let out = drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
@@ -747,9 +751,9 @@ mod tests {
     #[test]
     fn the_schema_fields_make_the_record_typed_and_enter_writes_it() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec![be("anthropic_backend.tools"), be("llamacpp_backend.tools")]);
+        p.set_backends(vec![be("responses_backend.tools"), be("vllm_backend.tools")]);
         let mut keys = typed("docreader");
-        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Right, KeyCode::Down]); // llamacpp → endpoint
+        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Right, KeyCode::Down]); // vllm → endpoint
         keys.extend(typed("http://127.0.0.1:9/v1"));
         keys.push(KeyCode::Down);
         keys.extend(typed("m-1"));
@@ -764,7 +768,7 @@ mod tests {
         let out = drive(&mut p, &keys);
         match &out[..] {
             [Cmd::WriteAi(r)] => {
-                assert_eq!((r.id.as_str(), r.handler.as_str()), ("docreader", "llamacpp_backend.tools"));
+                assert_eq!((r.id.as_str(), r.handler.as_str()), ("docreader", "vllm_backend.tools"));
                 assert_eq!(
                     serde_json::Value::Object(r.fields.clone()),
                     serde_json::json!({"endpoint": "http://127.0.0.1:9/v1", "model": "m-1", "max_tokens": 512, "kv_overflow": "reject"}),
@@ -776,7 +780,7 @@ mod tests {
         }
         p.set_result(Ok("written to  x".into()));
         assert!(p.id.is_empty(), "a written record clears the id for the next one");
-        assert_eq!(p.handler_name(), Some("llamacpp_backend.tools"), "the backend stays, to save as a template");
+        assert_eq!(p.handler_name(), Some("vllm_backend.tools"), "the backend stays, to save as a template");
         assert_eq!(p.values["model"], "m-1", "and so do its fields");
     }
 
@@ -800,7 +804,7 @@ mod tests {
     #[test]
     fn esc_drops_an_edit_and_a_build_with_no_keyed_backend_offers_no_k() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec![be("llamacpp_backend.tools")]);
+        p.set_backends(vec![be("vllm_backend.tools")]);
         drive(&mut p, &[KeyCode::Enter, KeyCode::Char('x'), KeyCode::Esc]);
         assert!(p.id.is_empty());
         drive(&mut p, &[KeyCode::Down, KeyCode::Right]);
@@ -830,7 +834,7 @@ mod tests {
     #[test]
     fn a_template_is_saved_under_a_typed_name_without_id_or_grants() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec![be("anthropic_backend.tools")]);
+        p.set_backends(vec![be("responses_backend.tools")]);
         let mut keys = typed("docreader");
         keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Down]);
         keys.extend(typed("http://e"));
@@ -852,7 +856,7 @@ mod tests {
                 assert_eq!(name, "opus");
                 assert_eq!(
                     record,
-                    &serde_json::json!({"handler_module": "anthropic_backend.tools", "endpoint": "http://e", "model": "m-1"}),
+                    &serde_json::json!({"handler_module": "responses_backend.tools", "endpoint": "http://e", "model": "m-1"}),
                     "the backend + every field set (an untouched default is the backend's); never the id or grants"
                 );
             }
@@ -863,8 +867,8 @@ mod tests {
     #[test]
     fn a_saved_template_loads_into_the_page_and_d_toggles_the_default() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec![be("anthropic_backend.tools"), be("responses_backend.tools")]);
-        p.set_shelf(Ok(shelf(&[("opus", "anthropic_backend.tools"), ("gpt", "responses_backend.tools")], Some("gpt"))));
+        p.set_backends(vec![be("vllm_backend.tools"), be("responses_backend.tools")]);
+        p.set_shelf(Ok(shelf(&[("box", "vllm_backend.tools"), ("gpt", "responses_backend.tools")], Some("gpt"))));
         // no backend picked yet: id, handler, may call, WRITE, keys, name, save, LOAD
         let mut keys = vec![KeyCode::Down; 7];
         keys.extend([KeyCode::Right, KeyCode::Enter]); // ‹ gpt › — loads it
@@ -879,7 +883,7 @@ mod tests {
         }
         drive(&mut p, &[KeyCode::Left]);
         match &drive(&mut p, &[KeyCode::Char('d')])[..] {
-            [Cmd::PreferTemplate { name: Some(n) }] => assert_eq!(n, "opus"),
+            [Cmd::PreferTemplate { name: Some(n) }] => assert_eq!(n, "box"),
             other => panic!("{other:?}"),
         }
     }
@@ -887,7 +891,7 @@ mod tests {
     #[test]
     fn a_template_for_a_backend_this_build_lacks_is_said_not_half_loaded() {
         let mut p = SetupPanel::new();
-        p.set_backends(vec![be("anthropic_backend.tools")]);
+        p.set_backends(vec![be("responses_backend.tools")]);
         p.set_shelf(Ok(shelf(&[("q", "vllm_backend.tools")], None)));
         let mut keys = vec![KeyCode::Down; 7];
         keys.push(KeyCode::Enter);

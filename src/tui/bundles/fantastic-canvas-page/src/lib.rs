@@ -116,12 +116,13 @@ impl Bundle for CanvasPageBundle {
         &self,
         agent_id: &AgentId,
         header: Value,
-        _blob: Vec<u8>,
+        _body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
         if header.get("type").and_then(Value::as_str) == Some("read_stream") {
+            // the chunk rides at the reply's `bytes` key, as the file bridge's does
             let (head, body) = read_stream(&header);
-            return Ok((Some(head), body));
+            return Ok((Some(head), body.map(|b| fantastic_kernel::Blob::key("bytes", b))));
         }
         Ok((self.handle(agent_id, &header, kernel).await?, None))
     }

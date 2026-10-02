@@ -48,7 +48,7 @@ pub enum PanelKind {
 
 impl PanelKind {
     /// The classification. Suffix matching on the module is deliberate: a kernel
-    /// may ship `anthropic_backend.tools` or `llamacpp_backend.tools` and both are
+    /// may ship `vllm_backend.tools` or `responses_backend.tools` and both are
     /// the same UI, so the rule is "ends with `_backend.tools`", not a list of
     /// provider names this shell would have to be taught.
     ///
@@ -140,6 +140,24 @@ pub trait Panel {
     /// changes, so what a key acts on is what this step computed, never whatever
     /// a draw happened to leave behind.
     fn layout(&mut self, _area: ratatui::layout::Rect, _cx: &Cx<'_>) {}
+    /// THIS VIEW's derived state (a scroll window, a wrap memo): every View —
+    /// a terminal, a thin client, anything that shows the shell — keeps its
+    /// own, because each has its own size. The ViewModel TAKES it after a
+    /// View's pass and PUTS it back before that View's next one (`App::enter`
+    /// / `App::leave`); between passes the panel holds its defaults, so a View
+    /// it has never shown starts fresh. Shared state (the cursor, the fold,
+    /// the rows) never moves. Default: nothing per View.
+    fn take_view(&mut self) -> Option<Box<dyn std::any::Any>> {
+        None
+    }
+    fn put_view(&mut self, _view: Box<dyn std::any::Any>) {}
+    /// Whether this panel's state HAS a size of its own (a terminal: its PTY and
+    /// its screen are one size). Such a panel is laid out only for the
+    /// AUTHORITATIVE View (the latest, `vm::effective`); every other View draws
+    /// it as it is. Default: no — the panel reflows to any size.
+    fn sized(&self) -> bool {
+        false
+    }
     /// Commands the `layout` step produced (a terminal telling its PTY a new
     /// size). The runtime drains them right after `layout`.
     fn take_cmds(&mut self) -> Vec<Cmd> {
@@ -178,10 +196,10 @@ mod tests {
     #[test]
     fn every_backend_is_an_ai_panel_without_being_named() {
         for m in [
-            "anthropic_backend.tools",
-            "llamacpp_backend.tools",
+            "vllm_backend.tools",
+            "responses_backend.tools",
             "ollama_backend.tools",
-            "nvidia_nim_backend.tools",
+            "foundation_models_backend.tools",
             // A provider this shell has never heard of still gets the AI panel.
             "some_future_backend.tools",
             "ai_core.tools",

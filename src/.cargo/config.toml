@@ -1,0 +1,5 @@
+# The product workspace's build environment. The Apple Foundation Models
+# backend links a Swift static library that needs macOS 14 (libswift_Concurrency):
+# below that the binary aborts in dyld, so the build refuses loud.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "14.0"

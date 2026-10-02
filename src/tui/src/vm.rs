@@ -5,9 +5,19 @@
 //! was last given; the terminal View draws only from it. (The browser View that
 //! drew the same frames is gone: the canvas replaced it, owner 2026-09-30.)
 //!
-//! Inputs are INTENTS (`VmIn`): a key or paste event, and a resize. Nothing
-//! else reaches the App. Outputs are `Frame`s on a `watch` channel: the newest
-//! frame only; a slow View skips to the newest instead of queueing.
+//! Inputs are INTENTS (`VmIn`) from any number of Views — the owner's own
+//! terminal and every thin client (`share`): a key or paste event, a resize, a
+//! View gone. Nothing else reaches the App. Outputs are [`Frames`] on a
+//! `watch` channel: the newest only; a slow View skips to the newest.
+//!
+//! ONE STATE, A FRAME PER VIEW (owner, 2026-10-02: "show we know MVVM"; "the
+//! view is arbitrary"). The shared state is laid out and drawn once per View —
+//! a terminal of any size, a thin client, anything that shows the shell — each
+//! with ITS OWN derived state (`App::ViewSlots`: its screen, each panel's scroll
+//! window and wrap memo), entered before its pass and left after. Every View
+//! fits exactly and they all move together. The one thing that cannot have two
+//! sizes — a terminal panel's PTY — follows the AUTHORITATIVE View, the latest
+//! to resize or type (`effective`, tmux's `latest`); the others draw it as is.
 //!
 //! There is no default size: nothing is drawn until a View says how big it is.
 
@@ -34,11 +44,37 @@ const TICK: Duration = Duration::from_millis(250);
 /// The safety net under anything live.
 const RECONCILE: Duration = Duration::from_secs(60);
 
+/// Which View an intent came from: the owner's own terminal is [`LOCAL`];
+/// every thin client (`share`) gets its own id.
+pub type ViewId = u64;
+pub const LOCAL: ViewId = 0;
+
 /// An intent from a View.
 #[derive(Debug)]
 pub enum VmIn {
-    Event(crossterm::event::Event),
-    Resize(u16, u16),
+    Event(ViewId, crossterm::event::Event),
+    Resize(ViewId, u16, u16),
+    /// A thin client went away.
+    Gone(ViewId),
+}
+
+/// THE SIZE POLICY, tmux's `latest`: the screen is the size of the View that
+/// most recently resized or typed; with that one gone, any remaining View
+/// (the owner's own first). None until some View has said how big it is.
+pub fn effective(sizes: &std::collections::BTreeMap<ViewId, (u16, u16)>, latest: Option<ViewId>) -> Option<(u16, u16)> {
+    latest.and_then(|v| sizes.get(&v).copied()).or_else(|| sizes.values().next().copied())
+}
+
+/// Every View's frame: the same state, laid out for each View.
+#[derive(Debug, Clone, Default)]
+pub struct Frames {
+    pub by_view: std::collections::BTreeMap<ViewId, Arc<Frame>>,
+}
+
+impl Frames {
+    pub fn for_view(&self, v: ViewId) -> Option<Arc<Frame>> {
+        self.by_view.get(&v).cloned()
+    }
 }
 
 /// One rendered screen: the universal view data.
@@ -55,7 +91,7 @@ pub struct Frame {
 #[derive(Clone)]
 pub struct Handle {
     pub input: mpsc::Sender<VmIn>,
-    pub frames: watch::Receiver<Option<Arc<Frame>>>,
+    pub frames: watch::Receiver<Option<Arc<Frames>>>,
 }
 
 /// What the ViewModel does once the kernel is up.
@@ -93,15 +129,17 @@ impl Boot {
 /// The ViewModel, created but not yet running.
 pub struct Vm {
     input: mpsc::Receiver<VmIn>,
-    frames: watch::Sender<Option<Arc<Frame>>>,
+    /// The same input, for the thin clients' Views (`share`).
+    input_tx: mpsc::Sender<VmIn>,
+    frames: watch::Sender<Option<Arc<Frames>>>,
 }
 
 /// Create the ViewModel and the handle every View uses.
 pub fn new() -> (Handle, Vm) {
     let (in_tx, input) = mpsc::channel(1024);
     let (frames, f_rx) = watch::channel(None);
-    let h = Handle { input: in_tx, frames: f_rx };
-    (h, Vm { input, frames })
+    let h = Handle { input: in_tx.clone(), frames: f_rx };
+    (h, Vm { input, input_tx: in_tx, frames })
 }
 
 impl Vm {
@@ -110,7 +148,7 @@ impl Vm {
     /// Views (which are) are the ones spawned. Returns the final `App`, whose
     /// notes the caller says after restoring its screen.
     pub async fn run(self, app: App, paths: Paths, boot: Boot) -> App {
-        run(app, paths, boot, self.input, self.frames).await
+        run(app, paths, boot, self.input, self.input_tx, self.frames).await
     }
 }
 
@@ -119,7 +157,8 @@ async fn run(
     paths: Paths,
     boot: Boot,
     mut input: mpsc::Receiver<VmIn>,
-    frames: watch::Sender<Option<Arc<Frame>>>,
+    input_tx: mpsc::Sender<VmIn>,
+    frames: watch::Sender<Option<Arc<Frames>>>,
 ) -> App {
     let (tx, mut rx) = mpsc::channel::<Ev>(1024);
     let mut frame = tokio::time::interval(FRAME);
@@ -128,8 +167,14 @@ async fn run(
     for i in [&mut frame, &mut tick, &mut recon] {
         i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     }
-    let mut term: Option<Terminal<TestBackend>> = None;
+    // One off-screen terminal per View, and each View's own derived state.
+    let mut terms: std::collections::BTreeMap<ViewId, Terminal<TestBackend>> = Default::default();
+    let mut slots: std::collections::BTreeMap<ViewId, crate::app::ViewSlots> = Default::default();
     let mut last_drawn = std::time::Instant::now();
+    // Every View's size, and the one the screen follows (`effective`).
+    let mut sizes: std::collections::BTreeMap<ViewId, (u16, u16)> = Default::default();
+    let mut latest: Option<ViewId> = None;
+    let mut share: Option<Arc<crate::share::Share>> = None;
 
     let mut host: Option<Arc<Host>> = None;
     let mut cmds: Option<mpsc::Sender<Cmd>> = None;
@@ -150,42 +195,78 @@ async fn run(
             _ = int_sig.recv() => app.quit = true,
 
             _ = frame.tick() => {
-                if let Some(t) = term.as_mut() {
-                    let anim_due = app.animating() && last_drawn.elapsed() >= ANIM_FRAME;
-                    if app.dirty || anim_due {
-                        last_drawn = std::time::Instant::now();
-                        let size = t.size().expect("the off-screen backend has a size");
-                        crate::ui::layout(&mut app, ratatui::layout::Rect::new(0, 0, size.width, size.height));
+                let anim_due = app.animating() && last_drawn.elapsed() >= ANIM_FRAME;
+                if !sizes.is_empty() && (app.dirty || anim_due) {
+                    last_drawn = std::time::Instant::now();
+                    terms.retain(|v, _| sizes.contains_key(v));
+                    slots.retain(|v, _| sizes.contains_key(v));
+                    // the authoritative View LAST, so what a key acts on between
+                    // passes is the latest View's
+                    let mut order: Vec<ViewId> = sizes.keys().copied().filter(|v| Some(*v) != latest).collect();
+                    order.extend(latest.filter(|v| sizes.contains_key(v)));
+                    let mut by_view = std::collections::BTreeMap::new();
+                    for view in order {
+                        let (w, h) = sizes[&view];
+                        let t = terms
+                            .entry(view)
+                            .or_insert_with(|| Terminal::new(TestBackend::new(w, h)).expect("off-screen terminal"));
+                        if t.size().map(|s| (s.width, s.height)).ok() != Some((w, h)) {
+                            t.backend_mut().resize(w, h);
+                            let _ = t.clear();
+                        }
+                        app.enter(slots.remove(&view).unwrap_or_default());
+                        crate::ui::layout(&mut app, ratatui::layout::Rect::new(0, 0, w, h), latest == Some(view));
                         let buf = t
                             .draw(|f| crate::ui::draw(f, &app))
                             .expect("the off-screen backend cannot fail")
                             .buffer
                             .clone();
+                        slots.insert(view, app.leave());
                         let b = t.backend();
                         let cursor = b.cursor_visible().then(|| {
                             let p = b.cursor_position();
                             (p.x, p.y)
                         });
-                        frames.send_replace(Some(Arc::new(Frame { buf, cursor, mouse: app.mouse })));
-                        app.dirty = false;
-                        dispatch(&mut app, &cmds);
+                        by_view.insert(view, Arc::new(Frame { buf, cursor, mouse: app.mouse }));
                     }
+                    frames.send_replace(Some(Arc::new(Frames { by_view })));
+                    app.dirty = false;
+                    dispatch(&mut app, &cmds);
                 }
             }
 
             maybe = input.recv() => match maybe {
-                Some(VmIn::Event(e)) => {
+                Some(VmIn::Event(view, e)) => {
+                    if !matches!(e, crossterm::event::Event::FocusLost | crossterm::event::Event::FocusGained) && latest != Some(view) {
+                        latest = Some(view);
+                        app.dirty = true;
+                    }
+                    // a key acts on what THIS View shows: its own derived state
+                    // and layout first, kept again after
+                    app.enter(slots.remove(&view).unwrap_or_default());
+                    if let Some(&(w, h)) = sizes.get(&view) {
+                        crate::ui::layout(&mut app, ratatui::layout::Rect::new(0, 0, w, h), latest == Some(view));
+                    }
+                    app.remote = view != LOCAL;
                     app.apply(Ev::Term(e));
+                    app.remote = false;
+                    slots.insert(view, app.leave());
+                    if std::mem::take(&mut app.detach) {
+                        if let Some(s) = &share {
+                            s.detach(view, "detached; the kernel keeps running");
+                        }
+                    }
                     dispatch(&mut app, &cmds);
                 }
-                Some(VmIn::Resize(w, h)) => {
-                    match term.as_mut() {
-                        Some(t) => t.backend_mut().resize(w, h),
-                        None => term = Some(Terminal::new(TestBackend::new(w, h)).expect("off-screen terminal")),
-                    }
-                    // A resize redraws everything: the old frame's cells are stale.
-                    if let Some(t) = term.as_mut() {
-                        let _ = t.clear();
+                Some(VmIn::Resize(view, w, h)) => {
+                    sizes.insert(view, (w, h));
+                    latest = Some(view);
+                    app.dirty = true;
+                }
+                Some(VmIn::Gone(view)) => {
+                    sizes.remove(&view);
+                    if latest == Some(view) {
+                        latest = sizes.contains_key(&LOCAL).then_some(LOCAL);
                     }
                     app.dirty = true;
                 }
@@ -246,6 +327,15 @@ async fn run(
                     if boot.announce.is_some() && !boot.tui {
                         spawn_stream(Arc::clone(&h), boot.clone());
                     }
+                    // THE TUI SOCKET: a second `fantastic` here is a thin client
+                    // of THIS ViewModel.
+                    match crate::share::listen(input_tx.clone(), frames.subscribe()) {
+                        Ok(s) => share = Some(s),
+                        Err(e) => {
+                            boot.say(&format!("fantastic: {e}"));
+                            app.note(e);
+                        }
+                    }
                     // THE MCP SOCKET: a coding CLI's `fantastic mcp` attaches here.
                     if let Err(e) = crate::mcp::listen(crate::mcp::Served::new(Arc::clone(&h))) {
                         boot.say(&format!("fantastic: {e}"));
@@ -278,6 +368,7 @@ async fn run(
     if let Some(h) = &host {
         h.shutdown(&paths).await;
         crate::mcp::close_socket();
+        crate::share::close();
     }
     // Dropping the sender tells every View the ViewModel is gone.
     drop(frames);

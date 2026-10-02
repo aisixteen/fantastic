@@ -1,0 +1,11 @@
+{
+  "name": "fantastic-demo-web",
+  "private": true,
+  "type": "module",
+  "description": "The demo: animated diagrams of how Aisixteen Fantastic works, for a phone and a desktop. No dependencies: node --test runs the tests with no build step, and scripts/pack.sh builds dist/index.html (one self-contained file) with the library's vendored esbuild.",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "typecheck": "node ../../../lib/ts/node_modules/typescript/bin/tsc -p tsconfig.json",
+    "pack": "sh scripts/pack.sh"
+  }
+}

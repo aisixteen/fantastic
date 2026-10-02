@@ -3,7 +3,7 @@ import { Host } from "../../lib.ts";
 
 // ai_view — inline, MULTI-MODE AI view (chat mode = provider-agnostic chat UI). Ported from
 // ai_chat_webapp/index.html, rendered INLINE into a canvas frame, fronting any
-// backend that answers send/history/status (ollama_backend, nvidia_nim_backend,
+// backend that answers send/history/status (ollama_backend, vllm_backend,
 // the browser-resident ai_backend). Preserves the full queue/inflight state
 // machine, tool blocks, status phases, history+snapshot rebuild, lifecycle reset,
 // ESC-to-cancel (there is no `interrupt` verb: an in-flight `send` IS a kernel
@@ -161,7 +161,7 @@ function mountStub(
 
 export const aiView: ViewBundle = {
   // The frontend member is an `ai_view.ts` agent (a `backend_id` peer ref to any
-  // host AI/chat backend — anthropic / ollama / nvidia). A `mode` field on the
+  // host AI/chat backend — vllm / responses / ollama). A `mode` field on the
   // record selects the renderer: `chat` is fully wired; `agent-prompt` and
   // `dynamic-buttons` are scaffolded seams (mountStub) for later.
   handles: ["ai_view.ts"],

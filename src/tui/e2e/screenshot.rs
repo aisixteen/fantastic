@@ -4,7 +4,7 @@
 //! frames every N ms (`stream`, ideal for animations). Colors don't survive the
 //! text dump, but the LAYOUT + block glyphs (the `█` FANTASTIC title) do.
 //!
-//!   cargo run -q --example screenshot -p fantastic-term -- <binary> <script> <out_dir>
+//!   cargo run -q --example screenshot -p fantastic-tui -- <binary> <script> <out_dir>
 //!
 //! Script lines (`#` = comment):
 //!   wait <ms>              sleep

@@ -13,10 +13,6 @@ fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
 async-trait = "0.1"
 serde_json = "1"
 sha2 = "0.10"
-# The SECURE key mode: the key file is sealed with one master key (kept by the
-# platform keychain, reached through `secrets::Vault`).
-chacha20poly1305 = "0.10"
-getrandom = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }

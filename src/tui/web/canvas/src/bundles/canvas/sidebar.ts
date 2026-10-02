@@ -8,10 +8,15 @@
 //           `list_agents` shows) and the page's own kernel (the canvas and its
 //           views).
 //
-// A click on a chat or an agent MOVES TO the cell showing it (centred, flashed;
-// again → the next such cell). A kept chat with no cell open, or ⌥-click on
-// it, opens it in a new cell. An agent no cell shows OPENS in a new cell: an
-// AI as a chat, anything else as its reflect card.
+// A click on a PAGE agent VIEWS it (`viewer.ts`: a canvas → that canvas, any
+// other → it full); ⌘-click (Ctrl-click off macOS) FOCUSES it instead — its
+// canvas viewed, the cell centred and flashed. A host agent a cell shows: click
+// views that cell, ⌘-click moves to it (again → the next such cell). A kept
+// chat with no cell open, or ⌥-click on it, opens it in a new cell. An agent
+// no cell shows OPENS in a new cell: an AI as a chat, anything else as its
+// reflect card.
+
+import { isFocusClick } from "./viewer.ts";
 
 type Rec = Record<string, unknown>;
 export interface Dialog {
@@ -45,6 +50,12 @@ export interface SidebarDeps {
   /** the cells showing agent `id` (the cell itself, or cells fronting it) */
   cellsFor(id: string): string[];
   moveTo(viewId: string): void;
+  /** VIEW a page agent (`focus`: ⌘-click — focus it on its canvas instead) */
+  view(id: string, focus: boolean): void;
+  /** the page agent viewed now */
+  viewed(): string;
+  /** macOS: ⌘ is the focus modifier (Ctrl-click is the Mac's right click) */
+  mac: boolean;
   /** open agent `id` in a new cell (`isAi`: a chat, else its reflect card) */
   open(id: string, isAi: boolean): void;
   /** the open questions to the human */
@@ -54,6 +65,11 @@ export interface SidebarDeps {
 }
 
 const str = (r: Rec, k: string): string | undefined => (typeof r[k] === "string" ? (r[k] as string) : undefined);
+
+/** Whether `n`'s subtree (below it) holds agent `id`. */
+export function holds(n: TreeNode, id: string): boolean {
+  return n.children.some((c) => c.id === id || holds(c, id));
+}
 
 /** Build the host's forest from flat records (parent_id). Pure, testable. */
 export function forest(recs: Rec[]): TreeNode[] {
@@ -154,9 +170,10 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
   const node = (n: TreeNode, depth: number, out: HTMLElement[]): void => {
     const cells = d.cellsFor(n.id);
     const kids = n.children.length > 0;
-    const isOpen = open.get(n.id) ?? depth < 1;
+    // the path to the VIEWED agent is always unfolded: you see where you are
+    const isOpen = open.get(n.id) ?? (depth < 1 || n.id === d.viewed() || holds(n, d.viewed()));
     const li = document.createElement("li");
-    li.className = "agent" + (cells.length > 0 ? " has-cell" : "");
+    li.className = "agent" + (cells.length > 0 ? " has-cell" : "") + (n.id === d.viewed() ? " viewed" : "");
     li.style.paddingLeft = `${10 + depth * 12}px`;
     li.innerHTML = `<span class="tw"></span><span class="gl"></span><span class="nm"></span><span class="ct"></span>`;
     const tw = li.children[0] as HTMLElement;
@@ -169,11 +186,18 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
     (li.children[1] as HTMLElement).textContent = glyph(n);
     (li.children[2] as HTMLElement).textContent = n.id;
     (li.children[3] as HTMLElement).textContent = cells.length > 1 ? String(cells.length) : "";
-    li.title = `${n.id} · ${n.handler}${cells.length > 0 ? " · move to it" : " · open it in a cell"}`;
-    li.addEventListener("click", () => {
+    const fkey = d.mac ? "⌘" : "Ctrl";
+    li.title = n.handler.endsWith(".ts")
+      ? `${n.id} · ${n.handler} · click: view it · ${fkey}-click: focus it on its canvas`
+      : `${n.id} · ${n.handler}${cells.length > 0 ? ` · click: view its cell · ${fkey}-click: move to it` : " · open it in a cell"}`;
+    li.addEventListener("click", (e) => {
+      const focus = isFocusClick(e, d.mac);
+      if (n.handler.endsWith(".ts")) return d.view(n.id, focus); // a page agent
       const now = d.cellsFor(n.id);
-      if (now.length > 0) moveNext(n.id, now);
-      else if (n.handler !== "" && !n.handler.endsWith(".ts")) d.open(n.id, glyph(n) === "✦");
+      if (now.length > 0) {
+        if (focus) moveNext(n.id, now);
+        else d.view(now[0]!, false);
+      } else if (n.handler !== "") d.open(n.id, glyph(n) === "✦");
     });
     out.push(li);
     if (kids && isOpen) for (const c of n.children) node(c, depth + 1, out);
